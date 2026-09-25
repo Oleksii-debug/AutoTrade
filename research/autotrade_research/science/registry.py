@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from hashlib import sha256
 import json
+import re
 from pathlib import Path
 import sqlite3
 from typing import Any
@@ -109,6 +110,51 @@ def _validate_causal_periods(payload: dict[str, Any]) -> None:
             )
 
 
+_HOLDOUT_IDENTITY_FIELDS = {
+    "dataset_digest",
+    "segment_start",
+    "segment_end",
+    "role",
+}
+_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _holdout_identity(payload: Any) -> tuple[str, str]:
+    """Return immutable holdout identity hash and canonical identity bytes.
+
+    Display aliases are deliberately excluded.  Contamination follows the
+    physical/versioned evidence segment: dataset digest + exact causal window +
+    protocol role.
+    """
+
+    if not isinstance(payload, dict) or set(payload) != _HOLDOUT_IDENTITY_FIELDS:
+        raise ProtocolViolation(
+            "holdout_identity must contain exactly dataset_digest, "
+            "segment_start, segment_end and role"
+        )
+    dataset_digest = _text(payload.get("dataset_digest"), "holdout_identity.dataset_digest")
+    if _SHA256_RE.fullmatch(dataset_digest) is None:
+        raise ProtocolViolation("holdout_identity.dataset_digest must be canonical sha256")
+    role = _text(payload.get("role"), "holdout_identity.role").upper()
+    start_raw = _text(payload.get("segment_start"), "holdout_identity.segment_start")
+    end_raw = _text(payload.get("segment_end"), "holdout_identity.segment_end")
+    try:
+        start = date.fromisoformat(start_raw)
+        end = date.fromisoformat(end_raw)
+    except ValueError as exc:
+        raise ProtocolViolation("holdout_identity segment bounds must use ISO calendar dates") from exc
+    if start > end:
+        raise ProtocolViolation("holdout_identity segment_start cannot follow segment_end")
+    normalized = {
+        "dataset_digest": dataset_digest,
+        "segment_start": start.isoformat(),
+        "segment_end": end.isoformat(),
+        "role": role,
+    }
+    canonical = _canonical(normalized)
+    return _hash(normalized), canonical
+
+
 @dataclass(frozen=True)
 class ProtocolRegistration:
     protocol_id: str
@@ -173,6 +219,16 @@ class ScientificRegistry:
                     untouched INTEGER NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS holdouts(
+                    holdout_identity_hash TEXT PRIMARY KEY,
+                    identity_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS holdout_aliases(
+                    holdout_id TEXT PRIMARY KEY,
+                    holdout_identity_hash TEXT NOT NULL REFERENCES holdouts(holdout_identity_hash),
+                    created_at TEXT NOT NULL
+                );
 
                 CREATE TRIGGER IF NOT EXISTS protocols_no_update
                 BEFORE UPDATE ON protocols BEGIN
@@ -206,8 +262,38 @@ class ScientificRegistry:
                 BEFORE DELETE ON evaluations BEGIN
                     SELECT RAISE(ABORT, 'evaluations are append-only');
                 END;
+                CREATE TRIGGER IF NOT EXISTS holdouts_no_update
+                BEFORE UPDATE ON holdouts BEGIN
+                    SELECT RAISE(ABORT, 'holdout identities are append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS holdouts_no_delete
+                BEFORE DELETE ON holdouts BEGIN
+                    SELECT RAISE(ABORT, 'holdout identities are append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS holdout_aliases_no_update
+                BEFORE UPDATE ON holdout_aliases BEGIN
+                    SELECT RAISE(ABORT, 'holdout aliases are append-only');
+                END;
+                CREATE TRIGGER IF NOT EXISTS holdout_aliases_no_delete
+                BEFORE DELETE ON holdout_aliases BEGIN
+                    SELECT RAISE(ABORT, 'holdout aliases are append-only');
+                END;
                 """
             )
+            access_columns = {
+                row["name"] for row in con.execute("PRAGMA table_info(holdout_access)")
+            }
+            if "holdout_identity_hash" not in access_columns:
+                con.execute(
+                    "ALTER TABLE holdout_access ADD COLUMN holdout_identity_hash TEXT"
+                )
+            evaluation_columns = {
+                row["name"] for row in con.execute("PRAGMA table_info(evaluations)")
+            }
+            if "holdout_identity_hash" not in evaluation_columns:
+                con.execute(
+                    "ALTER TABLE evaluations ADD COLUMN holdout_identity_hash TEXT"
+                )
 
     def register_protocol(self, payload: dict[str, Any], *, protocol_id: str | None = None) -> ProtocolRegistration:
         if not isinstance(payload, dict):
@@ -283,7 +369,49 @@ class ScientificRegistry:
             con.commit()
         return identifier
 
-    def record_holdout_access(self, protocol_id: str, *, holdout_id: str, purpose: str) -> str:
+    @staticmethod
+    def _bind_holdout_identity(
+        con: sqlite3.Connection,
+        *,
+        holdout_id: str,
+        holdout_identity: dict[str, Any],
+    ) -> str:
+        identity_hash, identity_json = _holdout_identity(holdout_identity)
+        row = con.execute(
+            "SELECT identity_json FROM holdouts WHERE holdout_identity_hash=?",
+            (identity_hash,),
+        ).fetchone()
+        if row is None:
+            con.execute(
+                "INSERT INTO holdouts(holdout_identity_hash,identity_json,created_at) "
+                "VALUES(?,?,?)",
+                (identity_hash, identity_json, _now()),
+            )
+        elif row["identity_json"] != identity_json:
+            raise ProtocolConflict("holdout identity hash was reused inconsistently")
+
+        alias = con.execute(
+            "SELECT holdout_identity_hash FROM holdout_aliases WHERE holdout_id=?",
+            (holdout_id,),
+        ).fetchone()
+        if alias is None:
+            con.execute(
+                "INSERT INTO holdout_aliases(holdout_id,holdout_identity_hash,created_at) "
+                "VALUES(?,?,?)",
+                (holdout_id, identity_hash, _now()),
+            )
+        elif alias["holdout_identity_hash"] != identity_hash:
+            raise ProtocolConflict("holdout alias cannot be rebound to different evidence")
+        return identity_hash
+
+    def record_holdout_access(
+        self,
+        protocol_id: str,
+        *,
+        holdout_id: str,
+        holdout_identity: dict[str, Any],
+        purpose: str,
+    ) -> str:
         protocol = _id(protocol_id)
         holdout = _text(holdout_id, "holdout_id")
         why = _text(purpose, "purpose")
@@ -292,9 +420,16 @@ class ScientificRegistry:
             con.execute("BEGIN IMMEDIATE")
             if con.execute("SELECT 1 FROM protocols WHERE protocol_id=?", (protocol,)).fetchone() is None:
                 raise KeyError(protocol)
+            identity_hash = self._bind_holdout_identity(
+                con,
+                holdout_id=holdout,
+                holdout_identity=holdout_identity,
+            )
             con.execute(
-                "INSERT INTO holdout_access(access_id,protocol_id,holdout_id,purpose,accessed_at) VALUES(?,?,?,?,?)",
-                (access_id, protocol, holdout, why, _now()),
+                "INSERT INTO holdout_access("
+                "access_id,protocol_id,holdout_id,purpose,accessed_at,holdout_identity_hash"
+                ") VALUES(?,?,?,?,?,?)",
+                (access_id, protocol, holdout, why, _now(), identity_hash),
             )
             con.commit()
         return access_id
@@ -315,6 +450,7 @@ class ScientificRegistry:
         protocol_id: str,
         *,
         holdout_id: str,
+        holdout_identity: dict[str, Any],
         result: dict[str, Any],
         evaluation_id: str | None = None,
     ) -> dict[str, Any]:
@@ -330,28 +466,56 @@ class ScientificRegistry:
             p = con.execute("SELECT * FROM protocols WHERE protocol_id=?", (protocol,)).fetchone()
             if p is None:
                 raise KeyError(protocol)
+            identity_hash = self._bind_holdout_identity(
+                con,
+                holdout_id=holdout,
+                holdout_identity=holdout_identity,
+            )
             existing = con.execute("SELECT * FROM evaluations WHERE evaluation_id=?", (identifier,)).fetchone()
             if existing is not None:
-                if existing["protocol_id"] != protocol or existing["holdout_id"] != holdout or existing["result_hash"] != result_hash:
+                if (
+                    existing["protocol_id"] != protocol
+                    or existing["holdout_id"] != holdout
+                    or existing["holdout_identity_hash"] != identity_hash
+                    or existing["result_hash"] != result_hash
+                ):
                     raise ProtocolConflict("evaluation identity was reused inconsistently")
                 return dict(existing)
-            # A locked holdout is a data/evidence segment, not a protocol-local
-            # resource. Access by any registered protocol contaminates that same
-            # holdout for later candidate protocols as well.
+            # Contamination follows immutable evidence identity globally, not
+            # a protocol-local or caller-chosen display alias. Legacy alias-only
+            # rows under the same label are conservatively included.
             prior_access = int(
                 con.execute(
-                    "SELECT COUNT(*) FROM holdout_access WHERE holdout_id=?",
-                    (holdout,),
+                    "SELECT COUNT(*) FROM holdout_access "
+                    "WHERE holdout_identity_hash=? "
+                    "OR (holdout_identity_hash IS NULL AND holdout_id=?)",
+                    (identity_hash, holdout),
                 ).fetchone()[0]
             )
             untouched = 1 if prior_access == 0 else 0
             con.execute(
-                "INSERT INTO evaluations(evaluation_id,protocol_id,holdout_id,protocol_hash,result_hash,result_json,prior_access_count,untouched,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                (identifier, protocol, holdout, p["protocol_hash"], result_hash, canonical, prior_access, untouched, _now()),
+                "INSERT INTO evaluations("
+                "evaluation_id,protocol_id,holdout_id,protocol_hash,result_hash,result_json,"
+                "prior_access_count,untouched,created_at,holdout_identity_hash"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    identifier,
+                    protocol,
+                    holdout,
+                    p["protocol_hash"],
+                    result_hash,
+                    canonical,
+                    prior_access,
+                    untouched,
+                    _now(),
+                    identity_hash,
+                ),
             )
             con.execute(
-                "INSERT INTO holdout_access(access_id,protocol_id,holdout_id,purpose,accessed_at) VALUES(?,?,?,?,?)",
-                (_id(), protocol, holdout, "LOCKED_EVALUATION", _now()),
+                "INSERT INTO holdout_access("
+                "access_id,protocol_id,holdout_id,purpose,accessed_at,holdout_identity_hash"
+                ") VALUES(?,?,?,?,?,?)",
+                (_id(), protocol, holdout, "LOCKED_EVALUATION", _now(), identity_hash),
             )
             con.commit()
             row = con.execute("SELECT * FROM evaluations WHERE evaluation_id=?", (identifier,)).fetchone()

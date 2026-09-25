@@ -258,7 +258,6 @@ def _submission_evidence(
         "sha256": f"sha256:{digest}",
         "source_uri": source,
         "observed_at": _iso_utc_text(observed_at, name="observed_at"),
-        "provider_environment": env,
         "rights_id": "provider-observation-kraken-spot",
     }
 
@@ -291,9 +290,6 @@ def parse_spot_submission_response(
             "attempt_id": aid,
             "outcome": "UNKNOWN",
             "client_order_id": cid,
-            "provider_received_at": None,
-            "observed_at": when,
-            "provider_environment": env,
             "reason_code": "KRAKEN_SPOT_TRANSPORT_AMBIGUOUS",
             "evidence": [],
             "retry_disposition": "RECONCILE_FIRST",
@@ -319,7 +315,6 @@ def parse_spot_submission_response(
             "outcome": "REJECTED",
             "client_order_id": cid,
             "provider_received_at": when,
-            "provider_environment": env,
             "reason_code": "KRAKEN_SPOT_" + ";".join(nonempty_errors),
             "evidence": evidence,
             "retry_disposition": "NEVER",
@@ -334,13 +329,16 @@ def parse_spot_submission_response(
     normalized = tuple(_text(str(value), name="txid") for value in txids)
     if len(set(normalized)) != len(normalized):
         raise KrakenSpotAdapterError("provider transaction ids must be unique")
+    if len(normalized) != 1:
+        raise KrakenSpotAdapterError(
+            "canonical SubmissionResult requires exactly one provider order id"
+        )
     return {
         "attempt_id": aid,
         "outcome": "ACKNOWLEDGED",
-        "provider_order_ids": normalized,
+        "provider_order_id": normalized[0],
         "client_order_id": cid,
         "provider_received_at": when,
-        "provider_environment": env,
         "evidence": evidence,
         "retry_disposition": "NEVER",
     }

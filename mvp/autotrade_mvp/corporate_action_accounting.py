@@ -95,6 +95,8 @@ def _canonical_entitlement_position_proof(
     accepted: AuthoritativeCorporateAction,
     *,
     activation_cut: datetime,
+    expected_pre_action_quantity: Decimal,
+    excluded_order_key: str,
 ) -> dict[str, object]:
     """Prove dividend quantity from causal durable position history.
 
@@ -130,7 +132,10 @@ def _canonical_entitlement_position_proof(
     contributors: list[dict[str, str]] = []
 
     economic_book.refresh()
-    current_order_key = _order_key(accepted.external_event_id)
+    current_order_key = _text(
+        excluded_order_key,
+        name="excluded_order_key",
+    )
     for transaction in economic_book.transactions:
         # Exact retry of a position-changing action must reconstruct the
         # pre-action entitlement cut, not count its own already-durable effect.
@@ -174,9 +179,10 @@ def _canonical_entitlement_position_proof(
                 }
             )
 
-    if quantity != corporate_book.state.quantity:
+    expected_quantity = Decimal(expected_pre_action_quantity)
+    if quantity != expected_quantity:
         raise AccountingConflict(
-            "corporate-action calculator quantity does not match canonical durable position at entitlement cut"
+            "corporate-action pre-action quantity does not match canonical durable position at entitlement cut"
         )
 
     proof: dict[str, object] = {
@@ -641,14 +647,19 @@ def commit_authoritative_corporate_action(
             economically_active=False,
         )
 
+    candidate, transition = _candidate_book(corporate_book, accepted)
     entitlement_position = _canonical_entitlement_position_proof(
         economic_book,
         corporate_book,
         accepted,
         activation_cut=activation_cut,
+        expected_pre_action_quantity=transition.before.quantity,
+        excluded_order_key=_order_key(
+            accepted.corrects_external_event_id
+            or accepted.external_event_id
+        ),
     )
     evidence_plan = evidence_store.prepare_record_mutation(accepted)
-    candidate, transition = _candidate_book(corporate_book, accepted)
     activation_text = activation_cut.isoformat().replace("+00:00", "Z")
     transactions = _economic_transactions(
         economic_book,

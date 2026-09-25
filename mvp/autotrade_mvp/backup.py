@@ -135,7 +135,12 @@ def _fsync_file(path: Path) -> None:
 
     if path.is_symlink() or not path.is_file():
         raise BackupIntegrityError(f"Durable payload is not a regular file: {path.name}")
-    with path.open("rb") as handle:
+    # Windows' CRT rejects fsync() on a read-only descriptor with EBADF.
+    # Open the already-published payload read/write there solely to obtain a
+    # flushable descriptor; no bytes are modified. POSIX keeps the narrower
+    # read-only descriptor.
+    mode = "rb+" if os.name == "nt" else "rb"
+    with path.open(mode) as handle:
         os.fsync(handle.fileno())
 
 

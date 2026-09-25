@@ -17,10 +17,12 @@ def fill(
     client_order_id="c1",
     instrument="ABC",
     fee_amount="0",
+    environment="PAPER",
 ):
     return ProviderFillEvidence.create(
         provider_id="TEST_PROVIDER",
         account_id="test-account",
+        environment=environment,
         provider_execution_id=execution_id,
         client_order_id=client_order_id,
         instrument=instrument,
@@ -36,6 +38,9 @@ def absence_coverage(**overrides):
     values = []
     for surface in ("OPEN_ORDERS", "ORDER_HISTORY", "EXECUTIONS", "ACTIVITIES"):
         item = dict(
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
             surface=surface,
             coverage_start="2026-09-24T17:00:00Z",
             coverage_end="2026-09-24T19:00:00Z",
@@ -43,7 +48,7 @@ def absence_coverage(**overrides):
             consistency_horizon_satisfied=True,
             provider_semantics_exclude_execution=True,
         )
-        if surface == overrides.get("surface"):
+        if "surface" not in overrides or surface == overrides.get("surface"):
             item.update({key: value for key, value in overrides.items() if key != "surface"})
         values.append(CoverageSurfaceEvidence(**item))
     return values
@@ -54,6 +59,7 @@ class ReconciliationTests(unittest.TestCase):
         values = dict(
             provider_id="TEST_PROVIDER",
             account_id="test-account",
+            environment="PAPER",
             local_cash={"USD": "900"},
             provider_cash={"USD": "900"},
             local_positions={"ABC": "1"},
@@ -61,6 +67,9 @@ class ReconciliationTests(unittest.TestCase):
             local_execution_ids=["e1"],
             provider_fills=[fill()],
             snapshot_consistency=SnapshotConsistencyEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
                 mode="ATOMIC",
                 query_started_at="2026-09-24T17:00:00Z",
                 query_completed_at="2026-09-24T19:00:00Z",
@@ -83,7 +92,11 @@ class ReconciliationTests(unittest.TestCase):
     def test_incomplete_pagination_cannot_prove_unknown_send_absent(self):
         unknown = UnknownSubmission.create(
             attempt_id="a1",
-            client_order_id="missing-order",
+            intent_id="intent-unknown",
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+                        client_order_id="missing-order",
             started_at="2026-09-24T18:00:00Z",
         )
         result = self.base(
@@ -101,7 +114,11 @@ class ReconciliationTests(unittest.TestCase):
     def test_complete_window_plus_explicit_lookup_can_prove_absence(self):
         unknown = UnknownSubmission.create(
             attempt_id="a1",
-            client_order_id="missing-order",
+            intent_id="intent-unknown",
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+                        client_order_id="missing-order",
             started_at="2026-09-24T18:00:00Z",
         )
         result = self.base(
@@ -118,7 +135,11 @@ class ReconciliationTests(unittest.TestCase):
     def test_inconsistent_snapshot_cannot_prove_unknown_send_absent(self):
         unknown = UnknownSubmission.create(
             attempt_id="a-inconsistent-snapshot",
-            client_order_id="missing-order",
+            intent_id="intent-unknown",
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+                        client_order_id="missing-order",
             started_at="2026-09-24T18:00:00Z",
         )
         result = self.base(
@@ -137,7 +158,11 @@ class ReconciliationTests(unittest.TestCase):
     def test_single_complete_activity_window_is_not_enough_for_proven_absence(self):
         unknown = UnknownSubmission.create(
             attempt_id="a-single-window",
-            client_order_id="missing-order",
+            intent_id="intent-unknown",
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+                        client_order_id="missing-order",
             started_at="2026-09-24T18:00:00Z",
         )
         result = self.base(
@@ -154,7 +179,11 @@ class ReconciliationTests(unittest.TestCase):
     def test_missing_required_surface_keeps_unknown(self):
         unknown = UnknownSubmission.create(
             attempt_id="a-missing-surface",
-            client_order_id="missing-order",
+            intent_id="intent-unknown",
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+                        client_order_id="missing-order",
             started_at="2026-09-24T18:00:00Z",
         )
         evidence = [
@@ -172,7 +201,11 @@ class ReconciliationTests(unittest.TestCase):
     def test_unelapsed_consistency_horizon_keeps_unknown(self):
         unknown = UnknownSubmission.create(
             attempt_id="a-history-lag",
-            client_order_id="missing-order",
+            intent_id="intent-unknown",
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+                        client_order_id="missing-order",
             started_at="2026-09-24T18:00:00Z",
         )
         result = self.base(
@@ -188,7 +221,11 @@ class ReconciliationTests(unittest.TestCase):
     def test_provider_semantics_must_exclude_execution_before_proven_absence(self):
         unknown = UnknownSubmission.create(
             attempt_id="a-semantics",
-            client_order_id="missing-order",
+            intent_id="intent-unknown",
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+                        client_order_id="missing-order",
             started_at="2026-09-24T18:00:00Z",
         )
         result = self.base(
@@ -204,7 +241,11 @@ class ReconciliationTests(unittest.TestCase):
     def test_absence_surfaces_must_cover_full_post_send_window(self):
         unknown = UnknownSubmission.create(
             attempt_id="a-truncated-window",
-            client_order_id="missing-order",
+            intent_id="intent-unknown",
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+                        client_order_id="missing-order",
             started_at="2026-09-24T18:00:00Z",
         )
         result = self.base(
@@ -230,7 +271,11 @@ class ReconciliationTests(unittest.TestCase):
     def test_missing_explicit_lookup_keeps_unknown_even_with_complete_pagination(self):
         unknown = UnknownSubmission.create(
             attempt_id="a1",
-            client_order_id="missing-order",
+            intent_id="intent-unknown",
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+                        client_order_id="missing-order",
             started_at="2026-09-24T18:00:00Z",
         )
         result = self.base(unknown_submissions=[unknown])
@@ -281,6 +326,7 @@ class ReconciliationTests(unittest.TestCase):
             ProviderWorkingOrderEvidence(
                 provider_id="TEST_PROVIDER",
                 account_id="test-account",
+                environment="PAPER",
                 provider_order_id="provider-order",
                 client_order_id="client-order",
                 instrument="ABC",
@@ -292,6 +338,7 @@ class ReconciliationTests(unittest.TestCase):
             ProviderFillEvidence(
                 provider_id="TEST_PROVIDER",
                 account_id="test-account",
+                environment="PAPER",
                 provider_execution_id="execution-1",
                 client_order_id="client-1",
                 instrument="ABC",
@@ -305,6 +352,7 @@ class ReconciliationTests(unittest.TestCase):
             ProviderFillEvidence(
                 provider_id="TEST_PROVIDER",
                 account_id="test-account",
+                environment="PAPER",
                 provider_execution_id=" ",
                 client_order_id="client-1",
                 instrument="ABC",
@@ -332,12 +380,17 @@ class ReconciliationTests(unittest.TestCase):
     def test_unknown_send_resolves_to_observed_working_order_without_retry(self):
         unknown = UnknownSubmission.create(
             attempt_id="attempt-working",
-            client_order_id="client-working",
+            intent_id="intent-unknown",
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+                        client_order_id="client-working",
             started_at="2026-09-24T18:00:00Z",
         )
         order = ProviderWorkingOrderEvidence.create(
             provider_id="TEST_PROVIDER",
             account_id="test-account",
+            environment="PAPER",
             provider_order_id="provider-working",
             client_order_id="client-working",
             instrument="ABC",
@@ -370,6 +423,9 @@ class ReconciliationTests(unittest.TestCase):
     def test_snapshot_window_must_be_covered_by_reconciliation_window(self):
         result = self.base(
             snapshot_consistency=SnapshotConsistencyEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
                 mode="ATOMIC",
                 query_started_at="2026-09-24T16:59:59Z",
                 query_completed_at="2026-09-24T18:00:00Z",
@@ -386,11 +442,18 @@ class ReconciliationTests(unittest.TestCase):
     def test_snapshot_completion_after_coverage_end_blocks_unknown_absence(self):
         unknown = UnknownSubmission.create(
             attempt_id="a-window-mismatch",
-            client_order_id="missing-order",
+            intent_id="intent-unknown",
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+                        client_order_id="missing-order",
             started_at="2026-09-24T18:00:00Z",
         )
         result = self.base(
             snapshot_consistency=SnapshotConsistencyEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
                 mode="ATOMIC",
                 query_started_at="2026-09-24T18:00:00Z",
                 query_completed_at="2026-09-24T19:00:01Z",
@@ -409,6 +472,9 @@ class ReconciliationTests(unittest.TestCase):
     def test_atomic_snapshot_with_sequence_gap_is_not_consistent(self):
         result = self.base(
             snapshot_consistency=SnapshotConsistencyEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
                 mode="ATOMIC",
                 query_started_at="2026-09-24T17:00:00Z",
                 query_completed_at="2026-09-24T19:00:00Z",
@@ -426,6 +492,9 @@ class ReconciliationTests(unittest.TestCase):
     def test_composed_snapshot_requires_buffer_replay_without_gap(self):
         result = self.base(
             snapshot_consistency=SnapshotConsistencyEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
                 mode="COMPOSED",
                 query_started_at="2026-09-24T17:00:00Z",
                 query_completed_at="2026-09-24T19:00:00Z",
@@ -439,6 +508,9 @@ class ReconciliationTests(unittest.TestCase):
 
         complete = self.base(
             snapshot_consistency=SnapshotConsistencyEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
                 mode="COMPOSED",
                 query_started_at="2026-09-24T17:00:00Z",
                 query_completed_at="2026-09-24T19:00:00Z",
@@ -452,6 +524,9 @@ class ReconciliationTests(unittest.TestCase):
     def test_stream_gap_blocks_composed_snapshot_even_after_replay(self):
         result = self.base(
             snapshot_consistency=SnapshotConsistencyEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
                 mode="COMPOSED",
                 query_started_at="2026-09-24T17:00:00Z",
                 query_completed_at="2026-09-24T19:00:00Z",
@@ -472,6 +547,7 @@ class ReconciliationTests(unittest.TestCase):
                 ProviderWorkingOrderEvidence.create(
                     provider_id="TEST_PROVIDER",
                     account_id="test-account",
+                    environment="PAPER",
                     provider_order_id="manual-42",
                     client_order_id=None,
                     instrument="XYZ",
@@ -490,6 +566,7 @@ class ReconciliationTests(unittest.TestCase):
         matching = ProviderWorkingOrderEvidence.create(
             provider_id="TEST_PROVIDER",
             account_id="test-account",
+            environment="PAPER",
             provider_order_id="provider-1",
             client_order_id="client-1",
             instrument="ABC",
@@ -523,6 +600,7 @@ class ReconciliationTests(unittest.TestCase):
                     ProviderWorkingOrderEvidence.create(
                         provider_id="TEST_PROVIDER",
                         account_id="test-account",
+                        environment="PAPER",
                         provider_order_id="p1",
                         client_order_id="c-shared",
                         instrument="ABC",
@@ -531,6 +609,7 @@ class ReconciliationTests(unittest.TestCase):
                     ProviderWorkingOrderEvidence.create(
                         provider_id="TEST_PROVIDER",
                         account_id="test-account",
+                        environment="PAPER",
                         provider_order_id="p2",
                         client_order_id="c-shared",
                         instrument="ABC",
@@ -546,6 +625,7 @@ class ReconciliationTests(unittest.TestCase):
                     ProviderFillEvidence.create(
                         provider_id="OTHER_PROVIDER",
                         account_id="test-account",
+                        environment="PAPER",
                         provider_execution_id="e1",
                         client_order_id="c1",
                         instrument="ABC",
@@ -562,6 +642,7 @@ class ReconciliationTests(unittest.TestCase):
                     ProviderFillEvidence.create(
                         provider_id="TEST_PROVIDER",
                         account_id="other-account",
+                        environment="PAPER",
                         provider_execution_id="e1",
                         client_order_id="c1",
                         instrument="ABC",
@@ -577,6 +658,7 @@ class ReconciliationTests(unittest.TestCase):
         foreign = ProviderWorkingOrderEvidence.create(
             provider_id="TEST_PROVIDER",
             account_id="other-account",
+            environment="PAPER",
             provider_order_id="provider-foreign",
             client_order_id="client-1",
             instrument="ABC",
@@ -596,6 +678,7 @@ class ReconciliationTests(unittest.TestCase):
                     ProviderFillEvidence.create(
                         provider_id="TEST_PROVIDER",
                         account_id="test-account",
+                        environment="PAPER",
                         provider_execution_id="e1",
                         client_order_id="c1",
                         instrument="ABC",
@@ -611,6 +694,7 @@ class ReconciliationTests(unittest.TestCase):
         values = dict(
             provider_id="TEST_PROVIDER",
             account_id="test-account",
+            environment="PAPER",
             activity_id="activity-1",
             activity_type="CASH_ADJUSTMENT",
             origin="MANUAL",
@@ -622,6 +706,9 @@ class ReconciliationTests(unittest.TestCase):
 
     def activity_coverage(self, **overrides):
         values = dict(
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
             surface="ACTIVITIES",
             coverage_start="2026-09-24T17:00:00Z",
             coverage_end="2026-09-24T19:00:00Z",
@@ -632,14 +719,11 @@ class ReconciliationTests(unittest.TestCase):
         values.update(overrides)
         return CoverageSurfaceEvidence(**values)
 
-    def test_provider_activity_scope_is_required_and_must_match(self):
+    def test_provider_activity_scope_is_self_bound_and_must_match(self):
         evidence = self.activity()
-        with self.assertRaisesRegex(ValueError, "requires exact provider/account scope"):
-            self.base(
-                provider_activities=[evidence],
-                provider_activity_provider_id=None,
-                provider_activity_account_id=None,
-            )
+        result = self.base(provider_activities=[evidence])
+        self.assertEqual(result.unexpected_provider_activity_ids, ("activity-1",))
+
         with self.assertRaisesRegex(ValueError, "reconciliation provider_id"):
             self.base(
                 provider_activities=[evidence],
@@ -650,9 +734,58 @@ class ReconciliationTests(unittest.TestCase):
                 provider_activities=[evidence],
                 provider_activity_account_id="other-account",
             )
-        foreign = self.activity(provider_id="OTHER")
-        with self.assertRaisesRegex(ValueError, "evidence provider_id mismatch"):
-            self.base(provider_activities=[foreign])
+        with self.assertRaisesRegex(ValueError, "environment mismatch"):
+            self.base(
+                provider_activities=[self.activity(environment="LIVE")],
+            )
+        with self.assertRaisesRegex(ValueError, "coverage scope mismatch"):
+            self.base(
+                activity_coverage=self.activity_coverage(environment="LIVE"),
+                require_activity_reconciliation=True,
+            )
+
+    def test_environment_scope_is_enforced_before_reconciliation(self):
+        with self.assertRaisesRegex(ValueError, "fill evidence environment mismatch"):
+            self.base(provider_fills=[fill(environment="LIVE")])
+
+        working = ProviderWorkingOrderEvidence.create(
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="LIVE",
+            provider_order_id="working-live",
+            client_order_id="client-live",
+            instrument="ABC",
+            remaining_quantity="1",
+        )
+        with self.assertRaisesRegex(ValueError, "working-order evidence environment mismatch"):
+            self.base(provider_working_orders=[working])
+
+        unknown = UnknownSubmission.create(
+            attempt_id="attempt-live",
+            intent_id="intent-live",
+            client_order_id="client-live",
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="LIVE",
+            started_at="2026-09-24T18:00:00Z",
+        )
+        with self.assertRaisesRegex(ValueError, "unknown submission scope mismatch"):
+            self.base(unknown_submissions=[unknown])
+
+        snapshot = SnapshotConsistencyEvidence(
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="LIVE",
+            mode="ATOMIC",
+            query_started_at="2026-09-24T17:00:00Z",
+            query_completed_at="2026-09-24T19:00:00Z",
+        )
+        with self.assertRaisesRegex(ValueError, "snapshot consistency scope mismatch"):
+            self.base(snapshot_consistency=snapshot)
+
+        foreign_coverage = absence_coverage(environment="LIVE")
+        with self.assertRaisesRegex(ValueError, "absence coverage scope mismatch"):
+            self.base(absence_coverage=foreign_coverage)
 
     def test_unexpected_manual_activity_blocks_affected_currency(self):
         result = self.base(provider_activities=[self.activity()])
@@ -723,6 +856,9 @@ class ReconciliationTests(unittest.TestCase):
         )
         wrong_surface = self.base(
             activity_coverage=CoverageSurfaceEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
                 surface="ORDER_HISTORY",
                 coverage_start="2026-09-24T17:00:00Z",
                 coverage_end="2026-09-24T19:00:00Z",
@@ -777,7 +913,11 @@ class ReconciliationTests(unittest.TestCase):
     def test_generic_activity_does_not_resolve_unknown_submission(self):
         unknown = UnknownSubmission.create(
             attempt_id="attempt-activity-only",
-            client_order_id="client-activity-only",
+            intent_id="intent-unknown",
+            provider_id="TEST_PROVIDER",
+            account_id="test-account",
+            environment="PAPER",
+                        client_order_id="client-activity-only",
             started_at="2026-09-24T18:00:00Z",
         )
         result = self.base(

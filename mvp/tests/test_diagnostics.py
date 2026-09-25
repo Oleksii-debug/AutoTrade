@@ -97,6 +97,7 @@ class DiagnosticTraceTests(unittest.TestCase):
             "userinfo_url": "https://api-user:url-password@provider.test/path",
             "connection": "server=db;client_secret=client123;database=main",
             "pem": "-----BEGIN OPENSSH PRIVATE KEY-----\\nprivate-bytes",
+            "encrypted_pem": "-----BEGIN ENCRYPTED PRIVATE KEY-----\\nencrypted-private-bytes",
             "token_text": "token=plain-token-secret",
             "session_text": "session: plain-session-secret",
             "safe": "latency=12ms",
@@ -110,6 +111,7 @@ class DiagnosticTraceTests(unittest.TestCase):
         self.assertNotIn("plain-token-secret", redacted["token_text"])
         self.assertNotIn("plain-session-secret", redacted["session_text"])
         self.assertEqual(redacted["pem"], "[REDACTED]")
+        self.assertEqual(redacted["encrypted_pem"], "[REDACTED]")
         self.assertEqual(redacted["safe"], "latency=12ms")
 
 if __name__ == "__main__":

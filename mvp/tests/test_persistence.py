@@ -1,3 +1,4 @@
+from hashlib import sha256
 from tempfile import TemporaryDirectory
 import json
 import sqlite3
@@ -313,7 +314,21 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(saved, result)
             self.assertEqual([item.event_id for item in appended], ["evt-1", "evt-2"])
             self.assertEqual(len(store.load_events("account", "paper-1")), 2)
-            self.assertEqual(len(store.pending_outbox()), 1)
+            pending = store.pending_outbox()
+            self.assertEqual(len(pending), 1)
+            connection = sqlite3.connect(path)
+            try:
+                payload_json, envelope_hash = connection.execute(
+                    "SELECT payload_json, envelope_hash FROM outbox WHERE event_id = ?",
+                    ("evt-1",),
+                ).fetchone()
+            finally:
+                connection.close()
+            self.assertIsNotNone(envelope_hash)
+            self.assertEqual(
+                envelope_hash,
+                "sha256:" + sha256(payload_json.encode("utf-8")).hexdigest(),
+            )
 
             replayed, inserted, appended = store.commit_command(
                 actor="alice",
@@ -329,6 +344,20 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(replayed, result)
             self.assertEqual(appended, ())
             self.assertEqual(len(store.load_events("account", "paper-1")), 2)
+
+            tamper_connection = sqlite3.connect(path)
+            try:
+                tamper_connection.execute(
+                    "UPDATE outbox SET payload_json = ? WHERE event_id = ?",
+                    ('{"tampered":true}', "evt-1"),
+                )
+                tamper_connection.commit()
+            finally:
+                tamper_connection.close()
+            with self.assertRaisesRegex(
+                ValueError, "outbox envelope hash does not match stored payload"
+            ):
+                store.pending_outbox()
 
     def test_atomic_command_rolls_back_on_event_version_gap(self):
         with TemporaryDirectory() as directory:

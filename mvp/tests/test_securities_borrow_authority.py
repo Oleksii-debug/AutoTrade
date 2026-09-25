@@ -215,9 +215,6 @@ def _authority(store):
 
 
 def _install_risk_resolver(authority, *, context, risk_policy):
-    if authority.risk_authority_resolver is not None:
-        return
-
     def resolve(request):
         return AuthoritativeRiskSnapshot(
             context=context,
@@ -568,6 +565,13 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                 account_id=ACCOUNT_ID,
             )
 
+            missing_context = _risk_context(reserved=None)
+            missing_policy = _risk_policy()
+            _install_risk_resolver(
+                authority,
+                context=missing_context,
+                risk_policy=missing_policy,
+            )
             with self.assertRaisesRegex(
                 AuthorityConflict,
                 "exact scoped borrow reservation",
@@ -594,8 +598,8 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                         expected_state_version=1,
                         instrument_type="EQUITY",
                     ),
-                    risk_context=_risk_context(reserved=None),
-                    risk_policy=_risk_policy(),
+                    risk_context=missing_context,
+                    risk_policy=missing_policy,
                     risk_valid_until="2026-09-25T05:03:00Z",
                     reservation_book=reservations,
                     reservation_id="missing-borrow-reservation",
@@ -630,6 +634,16 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                 )
             self.assertEqual(reservations.total_reserved(key), Decimal("0"))
 
+            cover_context = _risk_context(
+                reserved=None,
+                borrow_available=False,
+            )
+            cover_policy = _risk_policy()
+            _install_risk_resolver(
+                authority,
+                context=cover_context,
+                risk_policy=cover_policy,
+            )
             cover = authority.admit(
                 command_id="cover-command",
                 idempotency_key="cover-idem",
@@ -652,11 +666,8 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                     expected_state_version=1,
                     instrument_type="EQUITY",
                 ),
-                risk_context=_risk_context(
-                    reserved=None,
-                    borrow_available=False,
-                ),
-                risk_policy=_risk_policy(),
+                risk_context=cover_context,
+                risk_policy=cover_policy,
                 risk_valid_until="2026-09-25T05:03:00Z",
                 reservation_book=reservations,
                 reservation_id="cover-reservation",

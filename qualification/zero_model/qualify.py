@@ -46,13 +46,13 @@ def _require_source_sha(value: str) -> str:
     if not isinstance(value, str):
         raise TypeError("source SHA must be text")
     if (
-        len(value) != 40
+        len(value) not in {40, 64}
         or value != value.strip()
         or value != value.lower()
         or any(character not in "0123456789abcdef" for character in value)
     ):
         raise ValueError(
-            "source SHA must be canonical lowercase 40-character Git commit SHA"
+            "source SHA must be a canonical lowercase 40- or 64-character Git object id"
         )
     return value
 

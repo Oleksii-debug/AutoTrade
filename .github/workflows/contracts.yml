@@ -10,6 +10,8 @@ on:
       - "tests/Contracts.DotNet/**"
       - "tests/Contracts.TypeScript/**"
       - "src/AutoTrade.Contracts/**"
+      - "tools/contract_version_guard.py"
+      - "tools/generate_common_scalar_corpus.py"
       - ".github/workflows/contracts.yml"
   pull_request:
     paths:
@@ -18,6 +20,8 @@ on:
       - "tests/Contracts.DotNet/**"
       - "tests/Contracts.TypeScript/**"
       - "src/AutoTrade.Contracts/**"
+      - "tools/contract_version_guard.py"
+      - "tools/generate_common_scalar_corpus.py"
       - ".github/workflows/contracts.yml"
 
 concurrency:

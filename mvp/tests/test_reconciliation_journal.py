@@ -124,7 +124,9 @@ class ReconciliationJournalTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"
             store = JournalStore(path)
-            dispatcher = GuardedDispatcher(\n                store, environment="SIMULATION", account_id="acct-1"\n            )
+            dispatcher = GuardedDispatcher(
+                store, environment="SIMULATION", account_id="acct-1"
+            )
             outbound_calls = []
 
             def authority_check(intent_hash, now):

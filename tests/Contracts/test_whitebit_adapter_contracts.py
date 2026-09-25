@@ -255,6 +255,38 @@ class WhiteBitAdapterContractTests(unittest.TestCase):
         ):
             to_canonical_submission_result(internal)
 
+    def test_ambiguous_transport_requires_real_boolean_and_canonical_environment(self):
+        request = prepared("whitebit-bool-boundary")
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "transport_ambiguous must be a boolean",
+        ):
+            parse_submission_result(
+                request,
+                attempt_id=str(uuid4()),
+                account_id="paper-account",
+                environment="PAPER",
+                observed_at=NOW,
+                response_body=None,
+                http_status=None,
+                transport_ambiguous=1,
+            )
+
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "environment must be one of",
+        ):
+            parse_submission_result(
+                request,
+                attempt_id=str(uuid4()),
+                account_id="paper-account",
+                environment="MAINNET",
+                observed_at=NOW,
+                response_body=None,
+                http_status=None,
+                transport_ambiguous=True,
+            )
+
     def test_internal_response_digest_is_fail_closed(self):
         with self.assertRaisesRegex(
             WhiteBitAdapterError,

@@ -335,12 +335,17 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                     string operationId = CanonicalGuid(
                         RequiredString(result, "operation_id"),
                         "operation_id");
-                    bool recoveryRecordCleared = TryClearPendingCommand();
                     try
                     {
                         EmergencyOperationStatus operation = await GetOperationAsync(
                             operationId,
                             cancellationToken);
+                        bool terminal = operation.State is
+                            EmergencyOperationState.Succeeded
+                            or EmergencyOperationState.Failed
+                            or EmergencyOperationState.Cancelled;
+                        bool recoveryRecordCleared =
+                            terminal && TryClearPendingCommand();
                         return new EmergencyCommandResult(
                             accepted: true,
                             durableBlockConfirmed: operation.DurableBlockConfirmed,
@@ -348,13 +353,17 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                             operationId: operationId,
                             message: "The host accepted the emergency command as operation "
                                 + operationId
-                                + (recoveryRecordCleared
-                                    ? "."
-                                    : ". The secure local recovery record could not be cleared; "
-                                        + "a later Block action will recover this same command before any new command is created."));
+                                + (terminal
+                                    ? (recoveryRecordCleared
+                                        ? "."
+                                        : ". The terminal operation was observed, but the secure local recovery record could not be cleared.")
+                                    : ". The operation is not terminal; the secure local recovery record is retained so a restart can recover this exact command before any new command is created."));
                     }
                     catch (OperationCanceledException)
                     {
+                        // Acceptance was already observed. Keep the persisted exact
+                        // command identity so restart recovery cannot mint a new
+                        // emergency command while the accepted operation is unresolved.
                         throw;
                     }
                     catch
@@ -364,10 +373,8 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                             durableBlockConfirmed: false,
                             inFlightActions: InFlightActionState.Unknown,
                             operationId: operationId,
-                            message: "The host accepted the emergency command, but its current operation phase could not be recovered."
-                                + (recoveryRecordCleared
-                                    ? string.Empty
-                                    : " The secure local recovery record remains and will force exact command recovery before any new command."));
+                            message: "The host accepted the emergency command, but its current operation phase could not be recovered. "
+                                + "The secure local recovery record remains and will force exact command recovery before any new command.");
                     }
                 }
 

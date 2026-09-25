@@ -1,4 +1,4 @@
-from datetime import timezone
+from datetime import timedelta, timezone
 import json
 from tempfile import TemporaryDirectory
 import unittest
@@ -11,13 +11,31 @@ from mvp.autotrade_mvp.dispatch import GuardedDispatcher, stable_client_order_id
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_transport import (
     BYBIT_V5_ENDPOINT_POLICIES,
+    BybitV5AuthenticatedReadSigner,
+    BybitV5AuthenticatedReadTransport,
     BybitV5HttpTransport,
     BybitV5Signer,
     ProviderTransportScopeError,
 )
 from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
-from mvp.tests.test_bybit_v5 import READ_AT, write_capability
-from mvp.tests.test_provider_transport import FakeSecretResolver, RecordingWire
+from mvp.autotrade_mvp.provider_core import Surface, prepare_authenticated_read_query
+from mvp.tests.test_bybit_v5 import READ_AT, read_capability, write_capability
+from mvp.tests.test_provider_transport import (
+    FakeSecretResolver,
+    RecordingCapabilityRegistry,
+    RecordingWire,
+)
+
+
+def read_handle(*, environment="PAPER", account_id="paper-1"):
+    return PersistentCredentialHandle(
+        handle_id="cred-bybit-read",
+        account_id=account_id,
+        provider="BYBIT",
+        environment=environment,
+        purpose="READ",
+        generation=1,
+    )
 
 
 def trade_handle(*, environment="PAPER", account_id="bybit-account"):
@@ -55,6 +73,173 @@ def prepared(client_order_id="bybit-order-1"):
         position_idx=1,
     )
     return capability, request
+
+
+class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
+    def binding(self, capability=None):
+        cap = capability or read_capability()
+        return cap, prepare_authenticated_read_query(
+            capability=cap,
+            surface=Surface.AUTHENTICATED_READ,
+            endpoint="/v5/execution/list",
+            query={"category": "spot", "limit": "100"},
+            at=READ_AT,
+            permission_scope="ORDER.READ",
+        )
+
+    def make_transport(
+        self,
+        *,
+        capability,
+        events,
+        wire=None,
+        clock_utc=None,
+        quota_gate=None,
+    ):
+        registry = RecordingCapabilityRegistry(events)
+        registry.add(capability)
+        resolver = FakeSecretResolver(events)
+        transport = BybitV5AuthenticatedReadTransport(
+            policy=BYBIT_V5_ENDPOINT_POLICIES["TESTNET"],
+            provider_environment="TESTNET",
+            account_id="paper-1",
+            capability_snapshot_id=capability.snapshot_id,
+            capability_registry=registry,
+            secret_resolver=resolver,
+            credential_handle=read_handle(),
+            session_token="session-read",
+            origin="https://localhost",
+            execution_identity="host-owner",
+            clock_millis=lambda: 1700000000000,
+            clock_utc=clock_utc or (lambda: READ_AT),
+            quota_gate=quota_gate,
+            wire_client=wire or RecordingWire(events),
+        )
+        return transport, resolver, registry
+
+    def test_bybit_authenticated_read_signer_has_fixed_exact_vector(self):
+        capability, binding = self.binding()
+        signed = BybitV5AuthenticatedReadSigner.sign(
+            policy=BYBIT_V5_ENDPOINT_POLICIES["TESTNET"],
+            query_binding=binding,
+            credential_plaintext=json.dumps(
+                {
+                    "api_key": "api-key-SECRET",
+                    "api_secret": "signing-SECRET",
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            timestamp_ms=1700000000000,
+            recv_window_ms=5000,
+        )
+        self.assertEqual(
+            signed.url,
+            "https://api-testnet.bybit.com/v5/execution/list?category=spot&limit=100",
+        )
+        self.assertEqual(
+            signed.headers["X-BAPI-SIGN"],
+            "9136a7729db3b9844a299aeaf1c78ee8b97ba6612230ac6850de377d806b1c88",
+        )
+        self.assertEqual(signed.headers["X-BAPI-API-KEY"], "api-key-SECRET")
+        self.assertEqual(signed.headers["X-BAPI-TIMESTAMP"], "1700000000000")
+        self.assertEqual(signed.headers["X-BAPI-RECV-WINDOW"], "5000")
+
+    def test_execution_read_revalidates_capability_and_returns_bound_observation(self):
+        capability, binding = self.binding()
+        events = []
+        wire = RecordingWire(
+            events,
+            response=b'{"retCode":0,"retMsg":"OK","result":{"list":[]}}',
+            http_status=200,
+        )
+
+        def quota(provider, account, environment, purpose):
+            events.append("quota")
+            self.assertEqual(
+                (provider, account, environment, purpose),
+                ("BYBIT", "paper-1", "PAPER", "AUTHENTICATED_READ"),
+            )
+
+        transport, resolver, _registry = self.make_transport(
+            capability=capability,
+            events=events,
+            wire=wire,
+            quota_gate=quota,
+        )
+        observation = transport(binding)
+
+        self.assertEqual(
+            events,
+            ["quota", "capability", "resolve", "capability", "wire"],
+        )
+        self.assertEqual(len(resolver.calls), 1)
+        self.assertEqual(observation.provider_id, "BYBIT")
+        self.assertEqual(observation.account_id, "paper-1")
+        self.assertEqual(observation.environment, "PAPER")
+        self.assertEqual(observation.endpoint, "/v5/execution/list")
+        self.assertEqual(observation.payload["retCode"], 0)
+        self.assertEqual(len(wire.requests), 1)
+
+    def test_read_capability_expiry_after_secret_resolution_blocks_wire_send(self):
+        capability, binding = self.binding()
+        events = []
+        wire = RecordingWire(events)
+        times = iter((READ_AT, READ_AT + timedelta(hours=2)))
+
+        transport, resolver, _registry = self.make_transport(
+            capability=capability,
+            events=events,
+            wire=wire,
+            clock_utc=lambda: next(times),
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "current capability cannot be verified",
+        ):
+            transport(binding)
+        self.assertEqual(len(resolver.calls), 1)
+        self.assertEqual(wire.requests, [])
+
+    def test_wrong_read_endpoint_or_permission_fails_before_secret_access(self):
+        capability, _binding = self.binding()
+        events = []
+        transport, resolver, _registry = self.make_transport(
+            capability=capability,
+            events=events,
+        )
+        wrong = prepare_authenticated_read_query(
+            capability=capability,
+            surface=Surface.AUTHENTICATED_READ,
+            endpoint="/v5/market/time",
+            query={"category": "spot"},
+            at=READ_AT,
+            permission_scope="ORDER.READ",
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "not explicitly allowed",
+        ):
+            transport(wrong)
+        self.assertEqual(resolver.calls, [])
+
+    def test_non_success_http_status_never_becomes_provider_state(self):
+        capability, binding = self.binding()
+        events = []
+        transport, _resolver, _registry = self.make_transport(
+            capability=capability,
+            events=events,
+            wire=RecordingWire(
+                events,
+                response=b'{"retCode":10006,"retMsg":"rate limit"}',
+                http_status=429,
+            ),
+        )
+        with self.assertRaisesRegex(
+            Exception,
+            "unexpected HTTP status",
+        ):
+            transport(binding)
 
 
 class BybitV5SharedTransportTests(unittest.TestCase):

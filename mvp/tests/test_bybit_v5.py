@@ -11,7 +11,23 @@ from mvp.autotrade_mvp.bybit_v5 import (
     server_time_from_response,
     validate_auth_timestamp,
 )
-from mvp.autotrade_mvp.provider_core import ProviderCoreError
+from mvp.autotrade_mvp.provider_core import (
+    BoundReconciliationResponse,
+    PreparedReconciliationRead,
+    ProviderCoreError,
+)
+
+
+def bound_execution_response(response, *, account_id="paper-1", environment="PAPER"):
+    read = PreparedReconciliationRead.create(
+        provider_id="BYBIT",
+        account_id=account_id,
+        environment=environment,
+        surface="EXECUTIONS",
+        endpoint="/v5/execution/list",
+        request={"category": "spot", "limit": 100},
+    )
+    return BoundReconciliationResponse.bind(read, response)
 
 
 class BybitV5AdapterTests(unittest.TestCase):
@@ -350,40 +366,27 @@ class BybitV5AdapterTests(unittest.TestCase):
         response = {
             "retCode": 0,
             "retMsg": "OK",
-            "result": {
-                "list": [
-                    {
-                        "execId": "exec-1",
-                        "orderLinkId": "client-1",
-                        "symbol": "BTCUSDT",
-                        "execQty": "0.25",
-                        "execPrice": "65000.10",
-                        "execFee": "1.23",
-                        "feeCurrency": "USDT",
-                        "execTime": "1790280000123",
-                    },
-                    {
-                        "execId": "exec-1",
-                        "orderLinkId": "client-1",
-                        "symbol": "BTCUSDT",
-                        "execQty": "0.25",
-                        "execPrice": "65000.10",
-                        "execFee": "1.23",
-                        "feeCurrency": "USDT",
-                        "execTime": "1790280000123",
-                    },
-                ]
-            },
+            "result": {"list": [
+                {
+                    "execId": "exec-1", "orderLinkId": "client-1", "symbol": "BTCUSDT",
+                    "execQty": "0.25", "execPrice": "65000.10", "execFee": "1.23",
+                    "feeCurrency": "USDT", "execTime": "1790280000123",
+                },
+                {
+                    "execId": "exec-1", "orderLinkId": "client-1", "symbol": "BTCUSDT",
+                    "execQty": "0.25", "execPrice": "65000.10", "execFee": "1.23",
+                    "feeCurrency": "USDT", "execTime": "1790280000123",
+                },
+            ]},
             "time": 1790280001000,
         }
         fills = parse_executions(
-            response,
+            bound_execution_response(response),
             instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
-        
-            account_id="paper-1",
-            environment="PAPER",)
+        )
         self.assertEqual(len(fills), 1)
         fill = fills[0]
+        self.assertEqual((fill.account_id, fill.environment), ("paper-1", "PAPER"))
         self.assertEqual(fill.provider_execution_id, "exec-1")
         self.assertEqual(fill.instrument, "BTCUSDT@v1")
         self.assertEqual(fill.quantity, Decimal("0.25"))
@@ -392,156 +395,85 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(fill.trade_time, "2026-09-24T20:00:00.123Z")
 
     def test_documented_linear_execution_requires_qualified_fee_currency(self):
-        response = {
-            "retCode": 0,
-            "result": {
-                "category": "linear",
-                "list": [
-                    {
-                        "execId": "e0cbe81d-0f18-5866-9415-cf319b5dab3b",
-                        "orderLinkId": "",
-                        "symbol": "ETHPERP",
-                        "execQty": "0.1",
-                        "execPrice": "1190.15",
-                        "execFee": "0.071409",
-                        "feeCurrency": "",
-                        "extraFees": "",
-                        "execTime": "1672282722429",
-                    }
-                ],
-            },
-        }
-        with self.assertRaisesRegex(
-            ProviderCoreError,
-            "fee currency is unresolved",
-        ):
-            parse_executions(
-                response,
-                instrument_versions={"ETHPERP": "ETHPERP@v1"},
-            
-                account_id="paper-1",
-                environment="PAPER",)
-
+        response = {"retCode": 0, "result": {"category": "linear", "list": [{
+            "execId": "e0cbe81d-0f18-5866-9415-cf319b5dab3b", "orderLinkId": "",
+            "symbol": "ETHPERP", "execQty": "0.1", "execPrice": "1190.15",
+            "execFee": "0.071409", "feeCurrency": "", "extraFees": "",
+            "execTime": "1672282722429",
+        }]}}
+        evidence = bound_execution_response(response)
+        with self.assertRaisesRegex(ProviderCoreError, "fee currency is unresolved"):
+            parse_executions(evidence, instrument_versions={"ETHPERP": "ETHPERP@v1"})
         fills = parse_executions(
-            response,
+            evidence,
             instrument_versions={"ETHPERP": "ETHPERP@v1"},
             qualified_fee_currencies={"ETHPERP@v1": "USDT"},
-        
-            account_id="paper-1",
-            environment="PAPER",)
+        )
         self.assertEqual(len(fills), 1)
         self.assertEqual(fills[0].fee_amount, Decimal("0.071409"))
         self.assertEqual(fills[0].fee_currency, "USDT")
 
     def test_nonempty_extra_fees_cannot_silently_disappear(self):
-        response = {
-            "retCode": 0,
-            "result": {
-                "category": "spot",
-                "list": [
-                    {
-                        "execId": "exec-extra-fee",
-                        "orderLinkId": "",
-                        "symbol": "BTCUSDT",
-                        "execQty": "0.01",
-                        "execPrice": "65000",
-                        "execFee": "0.5",
-                        "feeCurrency": "USDT",
-                        "extraFees": '[{"feeType":"tax","subFeeType":"regional"}]',
-                        "execTime": "1790280000000",
-                    }
-                ],
-            },
-        }
-        with self.assertRaisesRegex(
-            ProviderCoreError,
-            "extraFees",
-        ):
+        response = {"retCode": 0, "result": {"category": "spot", "list": [{
+            "execId": "exec-extra-fee", "orderLinkId": "", "symbol": "BTCUSDT",
+            "execQty": "0.01", "execPrice": "65000", "execFee": "0.5",
+            "feeCurrency": "USDT",
+            "extraFees": '[{"feeType":"tax","subFeeType":"regional"}]',
+            "execTime": "1790280000000",
+        }]}}
+        with self.assertRaisesRegex(ProviderCoreError, "extraFees"):
             parse_executions(
-                response,
+                bound_execution_response(response),
                 instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
-            
-                account_id="paper-1",
-                environment="PAPER",)
+            )
 
     def test_empty_extra_fee_shapes_remain_economically_complete(self):
         for extra_fees in (None, "", [], {}):
             with self.subTest(extra_fees=extra_fees):
                 row = {
-                    "execId": f"exec-{repr(extra_fees)}",
-                    "orderLinkId": "",
-                    "symbol": "BTCUSDT",
-                    "execQty": "0.01",
-                    "execPrice": "65000",
-                    "execFee": "0.5",
-                    "feeCurrency": "USDT",
-                    "execTime": "1790280000000",
+                    "execId": f"exec-{repr(extra_fees)}", "orderLinkId": "",
+                    "symbol": "BTCUSDT", "execQty": "0.01", "execPrice": "65000",
+                    "execFee": "0.5", "feeCurrency": "USDT", "execTime": "1790280000000",
                 }
                 if extra_fees is not None:
                     row["extraFees"] = extra_fees
                 fills = parse_executions(
-                    {"retCode": 0, "result": {"list": [row]}},
+                    bound_execution_response({"retCode": 0, "result": {"list": [row]}}),
                     instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
-                
-                    account_id="paper-1",
-                    environment="PAPER",)
+                )
                 self.assertEqual(fills[0].fee_currency, "USDT")
 
     def test_execution_conflict_and_unknown_symbol_fail_closed(self):
-        conflict = {
-            "retCode": 0,
-            "result": {
-                "list": [
-                    {
-                        "execId": "same",
-                        "orderLinkId": "",
-                        "symbol": "BTCUSDT",
-                        "execQty": "1",
-                        "execPrice": "10",
-                        "execFee": "0",
-                        "feeCurrency": "USDT",
-                        "execTime": "1790280000000",
-                    },
-                    {
-                        "execId": "same",
-                        "orderLinkId": "",
-                        "symbol": "BTCUSDT",
-                        "execQty": "2",
-                        "execPrice": "10",
-                        "execFee": "0",
-                        "feeCurrency": "USDT",
-                        "execTime": "1790280000000",
-                    },
-                ]
-            },
-        }
+        conflict = {"retCode": 0, "result": {"list": [
+            {"execId": "same", "orderLinkId": "", "symbol": "BTCUSDT", "execQty": "1", "execPrice": "10", "execFee": "0", "feeCurrency": "USDT", "execTime": "1790280000000"},
+            {"execId": "same", "orderLinkId": "", "symbol": "BTCUSDT", "execQty": "2", "execPrice": "10", "execFee": "0", "feeCurrency": "USDT", "execTime": "1790280000000"},
+        ]}}
         with self.assertRaisesRegex(ProviderCoreError, "conflicting"):
             parse_executions(
-                conflict,
+                bound_execution_response(conflict),
                 instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
-            
-                account_id="paper-1",
-                environment="PAPER",)
-
-        unknown = {
-            "retCode": 0,
-            "result": {
-                "list": [
-                    {
-                        "execId": "x",
-                        "orderLinkId": "",
-                        "symbol": "UNKNOWN",
-                        "execQty": "1",
-                        "execPrice": "10",
-                        "execFee": "0",
-                        "feeCurrency": "USD",
-                        "execTime": "1790280000000",
-                    }
-                ]
-            },
-        }
+            )
+        unknown = {"retCode": 0, "result": {"list": [{
+            "execId": "x", "orderLinkId": "", "symbol": "UNKNOWN", "execQty": "1",
+            "execPrice": "10", "execFee": "0", "feeCurrency": "USD",
+            "execTime": "1790280000000",
+        }]}}
         with self.assertRaisesRegex(ProviderCoreError, "unmapped"):
-            parse_executions(unknown, instrument_versions={} , account_id="paper-1", environment="PAPER")
+            parse_executions(bound_execution_response(unknown), instrument_versions={})
+
+        scoped = parse_executions(
+            bound_execution_response(
+                {"retCode": 0, "result": {"list": [{
+                    "execId": "scope-1", "orderLinkId": "", "symbol": "BTCUSDT",
+                    "execQty": "1", "execPrice": "10", "execFee": "0",
+                    "feeCurrency": "USDT", "execTime": "1790280000000",
+                }]}},
+                account_id="account-a",
+                environment="TESTNET",
+            ),
+            instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+        )
+        self.assertEqual((scoped[0].account_id, scoped[0].environment), ("account-a", "TESTNET"))
 
     def test_auth_timestamp_window_matches_documented_boundaries(self):
         server = 1_000_000

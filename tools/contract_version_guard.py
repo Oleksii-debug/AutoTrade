@@ -24,15 +24,15 @@ def load_manifest(root: Path) -> dict:
     return json.loads((root / "contracts" / "manifest.json").read_text(encoding="utf-8"))
 
 
-def schema_definitions(root: Path, names: list[str]) -> dict[str, set[str]]:
-    result: dict[str, set[str]] = {}
+def schema_definitions(root: Path, names: list[str]) -> dict[str, dict[str, object]]:
+    result: dict[str, dict[str, object]] = {}
     for name in names:
         path = root / "contracts" / "jsonschema" / name
         payload = json.loads(path.read_text(encoding="utf-8"))
         defs = payload.get("$defs", {})
         if not isinstance(defs, dict):
             raise ValueError(f"{name} has invalid $defs")
-        result[name] = set(defs)
+        result[name] = defs
     return result
 
 
@@ -79,6 +79,107 @@ def schema_required_members(
     return result
 
 
+def _semantic_shape(value: object, *, schema_base_uri: str) -> object:
+    """Normalize version-only local references and ignore documentation annotations."""
+    if isinstance(value, dict):
+        normalized: dict[str, object] = {}
+        for key, child in value.items():
+            if key in ANNOTATION_KEYS:
+                continue
+            normalized[key] = _semantic_shape(child, schema_base_uri=schema_base_uri)
+        return normalized
+    if isinstance(value, list):
+        return [_semantic_shape(child, schema_base_uri=schema_base_uri) for child in value]
+    if isinstance(value, str) and schema_base_uri and value.startswith(schema_base_uri):
+        return "{SCHEMA_BASE}/" + value[len(schema_base_uri):].lstrip("/")
+    return value
+
+
+def changed_existing_definitions(
+    base_root: Path,
+    current_root: Path,
+    schema_names: list[str],
+    *,
+    base_uri: str,
+    current_uri: str,
+) -> dict[str, list[str]]:
+    base_defs = schema_definitions(base_root, schema_names)
+    current_defs = schema_definitions(current_root, schema_names)
+    changed: dict[str, list[str]] = {}
+    for schema_name in schema_names:
+        common_defs = sorted(set(base_defs[schema_name]) & set(current_defs[schema_name]))
+        names = [
+            name
+            for name in common_defs
+            if _semantic_shape(base_defs[schema_name][name], schema_base_uri=base_uri)
+            != _semantic_shape(current_defs[schema_name][name], schema_base_uri=current_uri)
+        ]
+        if names:
+            changed[schema_name] = names
+    return changed
+
+
+def openapi_operation_blocks(
+    root: Path,
+    manifest: dict,
+    *,
+    schema_base_uri: str,
+) -> dict[tuple[str, str], tuple[str, ...]]:
+    """Extract the reviewed OpenAPI operation surface without adding a YAML dependency."""
+    openapi = manifest.get("openapi")
+    if not isinstance(openapi, dict):
+        return {}
+    relative = openapi.get("path")
+    if not isinstance(relative, str) or not relative:
+        raise ValueError("manifest openapi.path must be non-empty text")
+    lines = (root / relative).read_text(encoding="utf-8").splitlines()
+    try:
+        start = next(index for index, line in enumerate(lines) if line == "paths:")
+    except StopIteration as error:
+        raise ValueError("OpenAPI document must contain top-level paths") from error
+
+    operations: dict[tuple[str, str], list[str]] = {}
+    current_path: str | None = None
+    current_key: tuple[str, str] | None = None
+    for line in lines[start + 1 :]:
+        if line and not line.startswith(" ") and not line.lstrip().startswith("#"):
+            break
+        path_match = re.fullmatch(r"  (/[^:]+):\\s*", line)
+        if path_match:
+            current_path = path_match.group(1)
+            current_key = None
+            continue
+        method_match = re.fullmatch(
+            r"    (" + "|".join(sorted(HTTP_METHODS)) + r"):\\s*",
+            line,
+        )
+        if method_match:
+            if current_path is None:
+                raise ValueError("OpenAPI method appeared before a path")
+            current_key = (current_path, method_match.group(1))
+            if current_key in operations:
+                raise ValueError(f"duplicate OpenAPI operation: {current_key}")
+            operations[current_key] = []
+            continue
+        if current_key is None:
+            continue
+        if line.strip() == "" or line.lstrip().startswith("#"):
+            continue
+        if len(line) - len(line.lstrip(" ")) < 6:
+            current_key = None
+            continue
+        normalized = line.strip()
+        if normalized.startswith(("description:", "summary:")):
+            continue
+        if schema_base_uri:
+            normalized = normalized.replace(schema_base_uri.rstrip("/") + "/", "{SCHEMA_BASE}/")
+        operations[current_key].append(normalized)
+
+    if not operations:
+        raise ValueError("OpenAPI document must expose at least one operation")
+    return {key: tuple(value) for key, value in operations.items()}
+
+
 def contract_bytes(root: Path) -> dict[str, bytes]:
     base = root / "contracts"
     files: dict[str, bytes] = {}
@@ -110,9 +211,9 @@ def evaluate(base_root: Path, current_root: Path) -> list[str]:
     base_defs = schema_definitions(base_root, common)
     current_defs = schema_definitions(current_root, common)
     removed_defs = {
-        name: sorted(base_defs[name] - current_defs[name])
+        name: sorted(set(base_defs[name]) - set(current_defs[name]))
         for name in common
-        if base_defs[name] - current_defs[name]
+        if set(base_defs[name]) - set(current_defs[name])
     }
 
     base_required = schema_required_members(base_root, common)
@@ -128,7 +229,39 @@ def evaluate(base_root: Path, current_root: Path) -> list[str]:
         if additions:
             added_required[name] = additions
 
-    breaking_change = bool(removed_schemas or removed_defs or added_required)
+    changed_defs = changed_existing_definitions(
+        base_root,
+        current_root,
+        common,
+        base_uri=str(base.get("schema_base_uri", "")),
+        current_uri=str(current.get("schema_base_uri", "")),
+    )
+
+    base_operations = openapi_operation_blocks(
+        base_root,
+        base,
+        schema_base_uri=str(base.get("schema_base_uri", "")),
+    )
+    current_operations = openapi_operation_blocks(
+        current_root,
+        current,
+        schema_base_uri=str(current.get("schema_base_uri", "")),
+    )
+    removed_operations = sorted(set(base_operations) - set(current_operations))
+    changed_operations = sorted(
+        key
+        for key in set(base_operations) & set(current_operations)
+        if base_operations[key] != current_operations[key]
+    )
+
+    breaking_change = bool(
+        removed_schemas
+        or removed_defs
+        or added_required
+        or changed_defs
+        or removed_operations
+        or changed_operations
+    )
     if breaking_change and current_version[0] <= base_version[0]:
         details = []
         if removed_schemas:
@@ -140,6 +273,18 @@ def evaluate(base_root: Path, current_root: Path) -> list[str]:
                 details.append(
                     f"new required members in {name} at {path}: " + ", ".join(members)
                 )
+        for name, defs in sorted(changed_defs.items()):
+            details.append(f"changed existing definitions in {name}: " + ", ".join(defs))
+        if removed_operations:
+            details.append(
+                "removed OpenAPI operations: "
+                + ", ".join(f"{method.upper()} {path}" for path, method in removed_operations)
+            )
+        if changed_operations:
+            details.append(
+                "changed OpenAPI operations: "
+                + ", ".join(f"{method.upper()} {path}" for path, method in changed_operations)
+            )
         errors.append("breaking contract change requires a new major version; " + "; ".join(details))
 
     return errors

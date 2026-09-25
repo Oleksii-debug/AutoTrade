@@ -224,6 +224,20 @@ class PersistentCredentialHandle:
             raise SecretVaultError("credential generation is invalid")
 
 
+@dataclass(frozen=True)
+class CredentialReattachmentRequirement:
+    """Non-secret credential metadata that must be explicitly reattached."""
+
+    handle: PersistentCredentialHandle
+    was_active: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.handle, PersistentCredentialHandle):
+            raise TypeError("handle must be PersistentCredentialHandle")
+        if type(self.was_active) is not bool:
+            raise SecretVaultError("was_active must be boolean")
+
+
 class ProtectedCredentialVault:
     """Atomic metadata+ciphertext vault using an injected OS protector."""
 
@@ -438,6 +452,129 @@ class ProtectedCredentialVault:
             "purpose": handle.purpose,
             "generation": handle.generation,
         }
+
+    def export_reattachment_manifest(self) -> dict[str, object]:
+        """Export only credential metadata; never ciphertext or owner identity.
+
+        This manifest is intentionally not a credential backup.  Restoring it
+        cannot recreate an admitted credential: every active handle requires
+        explicit secret reattachment and normal capability requalification.
+        """
+
+        with _exclusive_file_lock(self.lock_path):
+            state = self._load()
+            records = state["records"]
+            exported = []
+            for handle_id in sorted(records):
+                record = records[handle_id]
+                handle = self._handle(record)
+                exported.append(
+                    {
+                        "handle": asdict(handle),
+                        "active": record["active"],
+                    }
+                )
+            return {
+                "schema_version": "1.0.0",
+                "source_vault_format_version": self.FORMAT_VERSION,
+                "contains_secrets": False,
+                "restore_mode": "EXPLICIT_REATTACHMENT_REQUIRED",
+                "records": exported,
+            }
+
+    @staticmethod
+    def validate_reattachment_manifest(
+        manifest: object,
+    ) -> tuple[CredentialReattachmentRequirement, ...]:
+        """Validate metadata for an explicit reattachment workflow.
+
+        Validation has no side effects and cannot populate a vault.  Secret
+        material must arrive later through the normal privileged registration
+        boundary under the current OS identity.
+        """
+
+        if not isinstance(manifest, dict) or set(manifest) != {
+            "schema_version",
+            "source_vault_format_version",
+            "contains_secrets",
+            "restore_mode",
+            "records",
+        }:
+            raise SecretVaultError(
+                "credential reattachment manifest shape is invalid"
+            )
+        if manifest["schema_version"] != "1.0.0":
+            raise SecretVaultError(
+                "credential reattachment manifest schema is unsupported"
+            )
+        if manifest["source_vault_format_version"] != ProtectedCredentialVault.FORMAT_VERSION:
+            raise SecretVaultError(
+                "credential reattachment manifest vault format is unsupported"
+            )
+        if manifest["contains_secrets"] is not False:
+            raise SecretVaultError(
+                "credential reattachment manifest must not contain secrets"
+            )
+        if manifest["restore_mode"] != "EXPLICIT_REATTACHMENT_REQUIRED":
+            raise SecretVaultError(
+                "credential reattachment manifest cannot restore authority"
+            )
+        records = manifest["records"]
+        if not isinstance(records, list):
+            raise SecretVaultError(
+                "credential reattachment records must be a list"
+            )
+
+        requirements: list[CredentialReattachmentRequirement] = []
+        seen: set[str] = set()
+        expected_handle_fields = {
+            "handle_id",
+            "account_id",
+            "provider",
+            "environment",
+            "purpose",
+            "generation",
+        }
+        for item in records:
+            if not isinstance(item, dict) or set(item) != {"handle", "active"}:
+                raise SecretVaultError(
+                    "credential reattachment record is invalid"
+                )
+            metadata = item["handle"]
+            if not isinstance(metadata, dict) or set(metadata) != expected_handle_fields:
+                raise SecretVaultError(
+                    "credential reattachment handle metadata is invalid"
+                )
+            try:
+                handle = PersistentCredentialHandle(
+                    handle_id=metadata["handle_id"],
+                    account_id=metadata["account_id"],
+                    provider=metadata["provider"],
+                    environment=metadata["environment"],
+                    purpose=metadata["purpose"],
+                    generation=metadata["generation"],
+                )
+            except (SecretVaultError, TypeError, KeyError) as error:
+                raise SecretVaultError(
+                    "credential reattachment scope metadata is invalid"
+                ) from error
+            if handle.handle_id in seen:
+                raise SecretVaultError(
+                    "credential reattachment handle identity is duplicated"
+                )
+            seen.add(handle.handle_id)
+            active = item["active"]
+            if type(active) is not bool:
+                raise SecretVaultError(
+                    "credential reattachment active flag is invalid"
+                )
+            requirements.append(
+                CredentialReattachmentRequirement(
+                    handle=handle,
+                    was_active=active,
+                )
+            )
+        return tuple(requirements)
 
     def _prove_current_identity_can_decrypt(
         self,

@@ -30,6 +30,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
         version="0",
         actor="alice",
         session="session-a",
+        environment="PAPER",
         action="BLOCK_NEW_EXPOSURE",
         payload=None,
     ):
@@ -39,9 +40,22 @@ class JournalBackedHostApiTests(unittest.TestCase):
             "idempotency_key": key,
             "actor": actor,
             "session": session,
+            "environment": environment,
             "action": action,
             "payload": payload or {},
         }
+
+    def test_environment_is_required_and_scopes_durable_command(self):
+        store = self.store()
+        missing = self.command()
+        missing.pop("environment")
+        with self.assertRaisesRegex(ValueError, "environment"):
+            store.submit(missing)
+        with self.assertRaisesRegex(ValueError, "environment must be"):
+            store.submit(self.command(environment="STAGING"))
+
+        accepted = store.submit(self.command(environment="PAPER"))
+        self.assertEqual(accepted.status, "ACCEPTED")
 
     def test_accepted_command_and_operation_survive_restart(self):
         first = self.store()

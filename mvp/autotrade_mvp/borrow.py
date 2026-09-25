@@ -608,7 +608,13 @@ class BorrowLifecycleJournal:
             evidence_refs=tuple(payload.get("evidence_refs") or ()),
         )
 
-    def state(self) -> BorrowLifecycleState:
+    def state(self, *, through_version: int | None = None) -> BorrowLifecycleState:
+        if through_version is not None and (
+            not isinstance(through_version, int)
+            or isinstance(through_version, bool)
+            or through_version < 0
+        ):
+            raise ValueError("through_version must be a non-negative integer")
         latest_locate: BorrowLocateEvidence | None = None
         latest_loan: BorrowLoanEvidence | None = None
         recalls: dict[str, Decimal] = {}
@@ -617,7 +623,12 @@ class BorrowLifecycleJournal:
         loan_observed: datetime | None = None
         recall_observed: dict[str, datetime] = {}
 
-        for event in self._events():
+        events = self._events()
+        if through_version is not None:
+            if through_version > len(events):
+                raise ValueError("borrow journal cut exceeds durable aggregate version")
+            events = events[:through_version]
+        for event in events:
             payload = event.get("payload")
             if not isinstance(payload, Mapping):
                 raise ValueError("borrow journal payload is required")
@@ -683,6 +694,166 @@ class BorrowLifecycleJournal:
             latest_loan=latest_loan,
             active_recalls=dict(sorted(recalls.items())),
         )
+
+    def authority_snapshot(
+        self,
+        context: RiskContext,
+        *,
+        symbol: str,
+        now: str,
+    ) -> dict[str, object]:
+        """Bind admission to one immutable borrow-journal cut."""
+
+        events = self._events()
+        state = self.state()
+        capacity = validated_borrow_capacity(
+            state,
+            context,
+            symbol=symbol,
+            now=now,
+        )
+        if state.latest_locate is None:
+            raise ValueError("fresh provider borrow locate evidence is required")
+        local_short = local_short_quantity(context, symbol=symbol)
+
+        def matching_event(event_type: str, payload: Mapping[str, object]):
+            digest = payload_digest(payload)
+            matches = [
+                event
+                for event in events
+                if event.get("event_type") == event_type
+                and event.get("payload_hash") == digest
+            ]
+            if len(matches) != 1:
+                raise ValueError(
+                    f"borrow {event_type} evidence is missing or ambiguous"
+                )
+            return matches[0]
+
+        locate_event = matching_event(
+            "BorrowLocateObserved",
+            state.latest_locate.payload(),
+        )
+        loan_event = (
+            None
+            if state.latest_loan is None
+            else matching_event("BorrowLoanObserved", state.latest_loan.payload())
+        )
+        cut = len(events)
+        return {
+            "aggregate_id": self.aggregate_id,
+            "aggregate_version": cut,
+            "resource": self.resource.payload(),
+            "local_short_quantity": _decimal_text(local_short),
+            "active_recall_quantity": _decimal_text(
+                state.active_recall_quantity
+            ),
+            "availability": capacity,
+            "locate_event_id": locate_event.get("event_id"),
+            "locate_payload_hash": locate_event.get("payload_hash"),
+            "loan_event_id": (
+                None if loan_event is None else loan_event.get("event_id")
+            ),
+            "loan_payload_hash": (
+                None if loan_event is None else loan_event.get("payload_hash")
+            ),
+        }
+
+    def validate_authority_snapshot(
+        self,
+        snapshot: Mapping[str, object],
+        *,
+        now: str,
+    ) -> dict[str, str]:
+        """Rebuild and verify the exact historical borrow cut used at admission."""
+
+        if not isinstance(snapshot, Mapping):
+            raise TypeError("borrow authority snapshot must be a mapping")
+        if snapshot.get("aggregate_id") != self.aggregate_id:
+            raise ValueError("borrow authority aggregate identity mismatch")
+        version = snapshot.get("aggregate_version")
+        if (
+            not isinstance(version, int)
+            or isinstance(version, bool)
+            or version < 1
+        ):
+            raise ValueError(
+                "borrow authority aggregate_version must be a positive integer"
+            )
+        raw_resource = snapshot.get("resource")
+        if not isinstance(raw_resource, Mapping):
+            raise ValueError("borrow authority resource identity is required")
+        if raw_resource != self.resource.payload():
+            raise ValueError("borrow authority resource identity mismatch")
+        state = self.state(through_version=version)
+        if state.latest_locate is None:
+            raise ValueError("borrow authority cut lacks locate evidence")
+        state.latest_locate.assert_fresh(now=now)
+        if state.blocks_new_short:
+            raise ValueError("borrow authority cut contains an active recall")
+
+        local_short = _decimal(
+            snapshot.get("local_short_quantity"),
+            name="local_short_quantity",
+        )
+        if state.latest_loan is None:
+            if local_short != 0:
+                raise ValueError(
+                    "borrow authority cut lacks provider loan evidence"
+                )
+        else:
+            state.latest_loan.assert_fresh(now=now)
+            if state.latest_loan.borrowed_quantity != local_short:
+                raise ValueError(
+                    "borrow authority loan quantity differs from bound local short"
+                )
+
+        events = self._events()[:version]
+        by_id = {
+            event.get("event_id"): event
+            for event in events
+            if isinstance(event.get("event_id"), str)
+        }
+        locate_event = by_id.get(snapshot.get("locate_event_id"))
+        if (
+            locate_event is None
+            or locate_event.get("event_type") != "BorrowLocateObserved"
+            or locate_event.get("payload_hash")
+            != snapshot.get("locate_payload_hash")
+            or locate_event.get("payload_hash")
+            != payload_digest(state.latest_locate.payload())
+        ):
+            raise ValueError("borrow locate authority evidence mismatch")
+
+        if state.latest_loan is None:
+            if (
+                snapshot.get("loan_event_id") is not None
+                or snapshot.get("loan_payload_hash") is not None
+            ):
+                raise ValueError("unexpected borrow loan authority evidence")
+        else:
+            loan_event = by_id.get(snapshot.get("loan_event_id"))
+            if (
+                loan_event is None
+                or loan_event.get("event_type") != "BorrowLoanObserved"
+                or loan_event.get("payload_hash")
+                != snapshot.get("loan_payload_hash")
+                or loan_event.get("payload_hash")
+                != payload_digest(state.latest_loan.payload())
+            ):
+                raise ValueError("borrow loan authority evidence mismatch")
+
+        expected = locate_capacity(state.latest_locate, now=now)
+        if snapshot.get("active_recall_quantity") != "0":
+            raise ValueError("borrow authority snapshot must bind zero active recall")
+        if snapshot.get("availability") != expected:
+            raise ValueError("borrow authority capacity mismatch")
+        return expected
+
+    def current_blocks_new_short(self) -> bool:
+        """Current dispatch-time recall fence; no historical reinterpretation."""
+
+        return self.state().blocks_new_short
 
     def _append(self, *, event_type: str, payload: dict[str, object], observed_at: str):
         digest = payload_digest(payload)

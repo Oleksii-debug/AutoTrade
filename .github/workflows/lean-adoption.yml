@@ -7,6 +7,8 @@ on:
     paths:
       - "src/AutoTrade.Engine.Lean/**"
       - "tests/Integration/LeanAdoption/**"
+      - "tools/qualification/prepare_lean_composition.py"
+      - "tests/test_prepare_lean_composition.py"
       - "provenance/components.json"
       - "global.json"
       - "Directory.Build.props"
@@ -15,6 +17,8 @@ on:
     paths:
       - "src/AutoTrade.Engine.Lean/**"
       - "tests/Integration/LeanAdoption/**"
+      - "tools/qualification/prepare_lean_composition.py"
+      - "tests/test_prepare_lean_composition.py"
       - "provenance/components.json"
       - "global.json"
       - "Directory.Build.props"
@@ -91,6 +95,32 @@ jobs:
             throw "LEAN license blob mismatch: expected $env:LEAN_LICENSE_BLOB, got $actualLicense"
           }
 
+      - name: Prepare exact security-qualified LEAN composition
+        shell: pwsh
+        working-directory: autotrade
+        env:
+          LEAN_ROOT: ${{ github.workspace }}/lean
+        run: |
+          $evidenceDir = "artifacts/lean-adoption"
+          New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
+          python tools/qualification/prepare_lean_composition.py --lean-root "$env:LEAN_ROOT" --manifest (Join-Path $evidenceDir "lean-composition.json")
+          if ($LASTEXITCODE -ne 0) {
+            throw "LEAN security composition preparation failed."
+          }
+
+          $expected = @(
+            "Common/QuantConnect.csproj",
+            "Compression/QuantConnect.Compression.csproj"
+          )
+          $actual = @(
+            git -C $env:LEAN_ROOT diff --name-only |
+              Where-Object { $_ -and $_.Trim() } |
+              Sort-Object
+          )
+          if (($actual -join "|") -ne (($expected | Sort-Object) -join "|")) {
+            throw "LEAN composition changed an unexpected source set: $($actual -join ', ')"
+          }
+
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: "10.0.x"
@@ -129,9 +159,17 @@ jobs:
           if ($autoTradeTrackedChanges.Count -ne 0) {
             throw "LEAN adoption probe mutated tracked AutoTrade source."
           }
-          $leanTrackedChanges = @(git -C $env:LEAN_ROOT status --porcelain --untracked-files=no)
-          if ($leanTrackedChanges.Count -ne 0) {
-            throw "LEAN adoption probe mutated tracked LEAN source."
+          $leanTrackedChanges = @(
+            git -C $env:LEAN_ROOT diff --name-only |
+              Where-Object { $_ -and $_.Trim() } |
+              Sort-Object
+          )
+          $expectedLeanChanges = @(
+            "Common/QuantConnect.csproj",
+            "Compression/QuantConnect.Compression.csproj"
+          ) | Sort-Object
+          if (($leanTrackedChanges -join "|") -ne ($expectedLeanChanges -join "|")) {
+            throw "LEAN adoption probe changed source outside the approved security composition."
           }
 
           Write-Output $firstText
@@ -158,6 +196,14 @@ jobs:
           $assetManifest = Join-Path $evidenceDir "lean-project-assets-sha256.txt"
           $assetRows | Set-Content -Encoding utf8 $assetManifest
           $assetManifestHash = (Get-FileHash -Algorithm SHA256 $assetManifest).Hash.ToLowerInvariant()
+          $compositionManifest = Join-Path $evidenceDir "lean-composition.json"
+          if (!(Test-Path $compositionManifest)) {
+            throw "LEAN composition manifest is missing."
+          }
+          $composition = Get-Content -Raw $compositionManifest | ConvertFrom-Json
+          if ($composition.composition_id -ne "autotrade-lean-security-composition-v1") {
+            throw "Unexpected LEAN composition identity."
+          }
           $actualSource = (git rev-parse HEAD).Trim()
           if ($actualSource -ne $env:AUTOTRADE_SOURCE_SHA) {
             throw "AutoTrade checkout mismatch: expected $env:AUTOTRADE_SOURCE_SHA, got $actualSource"
@@ -171,6 +217,8 @@ jobs:
             runner_os = $env:RUNNER_OS
             dotnet_version = (dotnet --version).Trim()
             probe_result = "PASS"
+            lean_composition_id = $composition.composition_id
+            lean_composition_sha256 = $composition.composition_sha256
             dependency_asset_manifest_sha256 = "sha256:$assetManifestHash"
           }
           $evidence |

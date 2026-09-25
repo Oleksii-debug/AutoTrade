@@ -1,4 +1,5 @@
 from decimal import Decimal
+from tempfile import TemporaryDirectory
 import unittest
 
 from mvp.autotrade_mvp.accounting import (
@@ -16,6 +17,8 @@ from mvp.autotrade_mvp.fill_accounting import (
     build_unexpected_provider_fill_transaction,
 )
 from mvp.autotrade_mvp.reconciliation import ProviderFillEvidence, ReconciliationResult
+from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
 
 
 def matched_fill(
@@ -1100,6 +1103,48 @@ class FillAccountingTests(unittest.TestCase):
                     )
                 )
                 self.assertEqual(restarted.audit_digest(), book.audit_digest())
+
+    def test_unexpected_provider_fill_is_durable_across_restart(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(directory + "/journal.sqlite3")
+            reconciliation = self._unexpected_result()
+            fill = self._unexpected_fill(side="BUY")
+            book = DurableProviderEconomicBook(
+                store,
+                provider_id="PROVIDER-A",
+                account_id="acct-1",
+                environment="PAPER",
+            )
+            self.assertTrue(
+                book_unexpected_provider_fill(
+                    book=book,
+                    reconciliation=reconciliation,
+                    provider_fill=fill,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                )
+            )
+            before = book.audit_digest()
+
+            restarted = DurableProviderEconomicBook(
+                JournalStore(directory + "/journal.sqlite3"),
+                provider_id="PROVIDER-A",
+                account_id="acct-1",
+                environment="PAPER",
+            )
+            self.assertEqual(restarted.audit_digest(), before)
+            self.assertEqual(restarted.position("ABC"), Decimal("2"))
+            self.assertEqual(restarted.cash("USD"), Decimal("-201"))
+            self.assertFalse(
+                book_unexpected_provider_fill(
+                    book=restarted,
+                    reconciliation=reconciliation,
+                    provider_fill=fill,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                )
+            )
+            self.assertEqual(restarted.audit_digest(), before)
 
     def test_unexpected_fill_requires_reconciliation_identity_and_provider_direction(self):
         book = ScopedEconomicBook(environment="PAPER", account_id="acct-1")

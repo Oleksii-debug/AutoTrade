@@ -291,6 +291,8 @@ def _split_transaction(
     *,
     order_key: str,
     observed_at: str,
+    corrects_transaction_id: str | None = None,
+    economic_effective_at: str | None = None,
 ) -> JournalTransaction | None:
     before = transition.before
     after = transition.after
@@ -326,10 +328,12 @@ def _split_transaction(
         numerator=numerator,
         denominator=denominator,
         economic_effective_at=(
-            accepted.event.effective_at.isoformat().replace("+00:00", "Z")
+            economic_effective_at
+            or accepted.event.effective_at.isoformat().replace("+00:00", "Z")
         ),
         economic_order_key=order_key,
         observed_at=observed_at,
+        corrects_transaction_id=corrects_transaction_id,
     )
 
 
@@ -358,6 +362,7 @@ def _correction_transactions(
     transition: Transition,
     *,
     exact_retry: bool,
+    transaction_observed_at: str,
 ) -> tuple[JournalTransaction, ...]:
     target_id = accepted.corrects_external_event_id
     if target_id is None:
@@ -393,19 +398,41 @@ def _correction_transactions(
             original,
             transaction_id=expected_reversal_id,
             cause_event_id=committed_reversal.cause_event_id,
-            observed_at=accepted.observed_at,
+            observed_at=transaction_observed_at,
         )
         if rebuilt_reversal != committed_reversal:
             raise AccountingConflict(
                 "corporate-action correction reversal conflicts with retained evidence"
             )
-        replacement = _dividend_transaction(
-            accepted,
-            transition,
-            order_key=original.economic_order_key or order_key,
-            corrects_transaction_id=original.transaction_id,
-            economic_effective_at=original.economic_effective_at,
-        )
+        if accepted.event.kind == "CASH_DIVIDEND":
+            replacement = _dividend_transaction(
+                accepted,
+                transition,
+                order_key=original.economic_order_key or order_key,
+                corrects_transaction_id=original.transaction_id,
+                economic_effective_at=original.economic_effective_at,
+                observed_at=transaction_observed_at,
+            )
+        elif accepted.event.kind == "SPLIT":
+            if _canonical_equity_split_terms(
+                original,
+                instrument=transition.after.symbol,
+            ) is None:
+                raise AccountingConflict(
+                    "equity split correction target lacks canonical split economics"
+                )
+            replacement = _split_transaction(
+                accepted,
+                transition,
+                order_key=original.economic_order_key or order_key,
+                observed_at=transaction_observed_at,
+                corrects_transaction_id=original.transaction_id,
+                economic_effective_at=original.economic_effective_at,
+            )
+        else:
+            raise AccountingConflict(
+                f"{accepted.event.kind} correction has no qualified durable mapping"
+            )
         committed_replacement = next(
             (
                 item
@@ -446,15 +473,37 @@ def _correction_transactions(
             accepted.provenance_digest,
             "reversal",
         ),
-        observed_at=accepted.observed_at,
+        observed_at=transaction_observed_at,
     )
-    replacement = _dividend_transaction(
-        accepted,
-        transition,
-        order_key=original.economic_order_key or order_key,
-        corrects_transaction_id=original.transaction_id,
-        economic_effective_at=original.economic_effective_at,
-    )
+    if accepted.event.kind == "CASH_DIVIDEND":
+        replacement = _dividend_transaction(
+            accepted,
+            transition,
+            order_key=original.economic_order_key or order_key,
+            corrects_transaction_id=original.transaction_id,
+            economic_effective_at=original.economic_effective_at,
+            observed_at=transaction_observed_at,
+        )
+    elif accepted.event.kind == "SPLIT":
+        if _canonical_equity_split_terms(
+            original,
+            instrument=transition.after.symbol,
+        ) is None:
+            raise AccountingConflict(
+                "equity split correction target lacks canonical split economics"
+            )
+        replacement = _split_transaction(
+            accepted,
+            transition,
+            order_key=original.economic_order_key or order_key,
+            observed_at=transaction_observed_at,
+            corrects_transaction_id=original.transaction_id,
+            economic_effective_at=original.economic_effective_at,
+        )
+    else:
+        raise AccountingConflict(
+            f"{accepted.event.kind} correction has no qualified durable mapping"
+        )
     return (reversal,) if replacement is None else (reversal, replacement)
 
 
@@ -472,15 +521,16 @@ def _economic_transactions(
         )
 
     if accepted.corrects_external_event_id is not None:
-        if accepted.event.kind != "CASH_DIVIDEND":
+        if transaction_observed_at is None:
             raise AccountingConflict(
-                "equity split correction/reversal accounting is not yet qualified"
+                "corporate-action correction requires causal observation time"
             )
         return _correction_transactions(
             economic_book,
             accepted,
             transition,
             exact_retry=exact_retry,
+            transaction_observed_at=transaction_observed_at,
         )
 
     order_key = _order_key(accepted.external_event_id)

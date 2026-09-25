@@ -519,6 +519,7 @@ def book_equity_split_adjustment(
     economic_effective_at: str,
     economic_order_key: str,
     observed_at: str,
+    corrects_transaction_id: str | None = None,
 ) -> JournalTransaction:
     """Book a canonical zero-cash equity split quantity transformation.
 
@@ -568,6 +569,7 @@ def book_equity_split_adjustment(
         economic_effective_at=economic_effective_at,
         economic_order_key=economic_order_key,
         observed_at=observed_at,
+        corrects_transaction_id=corrects_transaction_id,
     )
     validate_transaction(transaction)
     return transaction
@@ -859,24 +861,30 @@ def project_equity_position(
         if transaction.reverses_transaction_id is not None
     }
     position_corrections: list[JournalTransaction] = []
+    split_correction_ids: set[str] = set()
     for transaction in transactions:
         if transaction.reverses_transaction_id is None:
             continue
-        original = by_id[transaction.reverses_transaction_id]
-        if _canonical_equity_split_terms(
-            original,
-            instrument=symbol,
-        ) is not None:
+        corrected_id = transaction.reverses_transaction_id
+        corrected = by_id.get(corrected_id)
+        if corrected is None:
             raise AccountingConflict(
-                "Equity split correction/reversal projection is not qualified; "
-                "explicit corrected split semantics are required"
+                "Position correction reversal lacks original transaction"
             )
-        if _canonical_equity_fill_terms(
-            original,
+        split_terms = _canonical_equity_split_terms(
+            corrected,
+            instrument=symbol,
+        )
+        fill_terms = _canonical_equity_fill_terms(
+            corrected,
             instrument=symbol,
             settlement_currency=settlement,
-        ) is not None:
+        )
+        if split_terms is not None or fill_terms is not None:
             position_corrections.append(transaction)
+        if split_terms is not None:
+            split_correction_ids.add(corrected_id)
+
     has_position_correction = bool(position_corrections)
     if has_position_correction:
         for reversal in position_corrections:
@@ -902,6 +910,17 @@ def project_equity_position(
             ):
                 raise AccountingConflict(
                     "Corrected FIFO lineage changed economic identity or observation evidence"
+                )
+            if (
+                corrected_id in split_correction_ids
+                and _canonical_equity_split_terms(
+                    replacement,
+                    instrument=symbol,
+                )
+                is None
+            ):
+                raise AccountingConflict(
+                    "Corrected split history requires one canonical split replacement"
                 )
 
     position_events: list[

@@ -66,6 +66,7 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
             last_trade_at=utc(30, 20),
             delivery_cutoff=utc(30, 20),
             settlement_method="CASH",
+            margin_model_id="TEST_FUTURES_MARGIN_V1",
         )
 
     def _contract(self, *, payoff="LINEAR"):

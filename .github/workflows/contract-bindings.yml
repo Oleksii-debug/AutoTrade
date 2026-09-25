@@ -1,0 +1,35 @@
+name: Contract binding conformance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cross-language:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12.10"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "10.0.100"
+      - name: Run executable cross-language corpus
+        run: python tools/verify_contract_bindings.py

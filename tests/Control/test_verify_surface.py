@@ -36,7 +36,8 @@ class VerifySurfaceTests(unittest.TestCase):
         )
         self.assertNotIn("--suite full-repository", workflow)
         self.assertIn("--suite core-repository", workflow)
-        self.assertIn("LEAN/provider/real-NVDA qualification separate", workflow)
+        self.assertIn('--command "python tools/verify.py"', workflow)
+        self.assertNotIn("python tools/verify.py; LEAN/provider", workflow)
 
 
 if __name__ == "__main__":

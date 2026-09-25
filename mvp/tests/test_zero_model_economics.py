@@ -101,17 +101,17 @@ class ZeroModelEconomicsQualificationTests(unittest.TestCase):
             now_utc=NOW,
         )
         self.assertEqual(decision.status, RouteStatus.NO_MODEL)
-        stress = StressScenarioEvidence.create(
+        stress_evidence = StressScenarioEvidence.create(
             name="zero-model-adverse",
-            shocks={"AAA": "-0.20"},
-            observed_at=NOW.isoformat().replace("+00:00", "Z"),
-            valid_until=(NOW + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
-            source_ref="qualification:zero-model",
+            shocks={"AAA": "-0.10"},
+            observed_at=(NOW - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+            valid_until=(NOW + timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+            source_ref="fixture:zero-model-adverse",
         )
         allocation = allocate_targets(
             [candidate()],
             policy(),
-            stress_evidence=(stress,),
+            stress_evidence=(stress_evidence,),
             decision_time=NOW.isoformat().replace("+00:00", "Z"),
         )
         self.assertEqual(allocation.status, "ALLOCATED")

@@ -432,6 +432,13 @@ class IbkrWebAdapterTests(unittest.TestCase):
             parse_order_submission_response(
                 [{"id": "reply?confirmed=false", "message": ["Confirm"], "messageIds": ["o1"]}]
             )
+        for unsafe_id in (".", ".."):
+            with self.subTest(unsafe_id=unsafe_id), self.assertRaisesRegex(
+                IbkrWebAdapterError, "path segment"
+            ):
+                parse_order_submission_response(
+                    [{"id": unsafe_id, "message": ["Confirm"], "messageIds": ["o1"]}]
+                )
 
         base = {
             "endpoint": "/iserver/reply/safe-reply-id",
@@ -445,6 +452,8 @@ class IbkrWebAdapterTests(unittest.TestCase):
         self.assertEqual(dict(request.body), {"confirmed": True})
         with self.assertRaisesRegex(IbkrWebAdapterError, "reply endpoint|path segment"):
             IbkrReplyRequest(**{**base, "endpoint": "/iserver/reply/../orders"})
+        with self.assertRaisesRegex(IbkrWebAdapterError, "path segment"):
+            IbkrReplyRequest(**{**base, "endpoint": "/iserver/reply/.."})
         with self.assertRaisesRegex(IbkrWebAdapterError, "confirmed=true"):
             IbkrReplyRequest(**{**base, "body": {"confirmed": False}})
 

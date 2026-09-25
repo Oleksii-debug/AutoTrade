@@ -25,6 +25,7 @@ from .accounting import (
     canonical_transaction,
     reverse_transaction,
 )
+from .durable_reservations import reservation_snapshot_digest
 from .persistence import JournalStore, payload_digest
 from .reconciliation import ProviderFillEvidence
 from .reconciliation_journal import require_current_reconciliation_checkpoint
@@ -587,25 +588,7 @@ def build_provider_fill_financial_plan(
             )
 
     usage_items = tuple(sorted(usage.items()))
-    reservation_cut = {
-        "reservation_id": reservation_snapshot.reservation_id,
-        "intent_id": reservation_snapshot.intent_id,
-        "original": {
-            key: format(value, "f")
-            for key, value in sorted(reservation_snapshot.original.items())
-        },
-        "remaining": {
-            key: format(value, "f")
-            for key, value in sorted(reservation_snapshot.remaining.items())
-        },
-        "consumed": {
-            key: format(value, "f")
-            for key, value in sorted(reservation_snapshot.consumed.items())
-        },
-        "state": reservation_snapshot.state,
-        "resolution_evidence": reservation_snapshot.resolution_evidence,
-    }
-    reservation_cut_digest = payload_digest(reservation_cut)
+    reservation_cut_digest = reservation_snapshot_digest(reservation_snapshot)
     material = {
         "schema_version": "1.1.0",
         "provider_id": provider_fill.provider_id,

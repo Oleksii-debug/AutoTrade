@@ -165,6 +165,79 @@ class SnapshotConsistencyEvidence:
 
 
 @dataclass(frozen=True)
+class ResourceAvailabilityEvidence:
+    """Exact provider availability bound to one coherent account snapshot cut.
+
+    This is reservation-capacity evidence, not a derived equity estimate.  It
+    preserves provider/account/environment identity and freshness so the
+    financial writer can fail closed instead of trusting caller-supplied
+    availability.
+    """
+
+    provider_id: str
+    account_id: str
+    environment: str
+    snapshot_id: str
+    query_started_at: str
+    query_completed_at: str
+    valid_until: str
+    available_resources: Mapping[str, Decimal]
+    provider_as_of: str | None = None
+    evidence_refs: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "provider_id", _text(self.provider_id, name="provider_id").upper()
+        )
+        object.__setattr__(
+            self, "account_id", _text(self.account_id, name="account_id")
+        )
+        object.__setattr__(self, "environment", _environment(self.environment))
+        object.__setattr__(
+            self, "snapshot_id", _text(self.snapshot_id, name="snapshot_id")
+        )
+        started = _instant(self.query_started_at, name="query_started_at")
+        completed = _instant(self.query_completed_at, name="query_completed_at")
+        valid = _instant(self.valid_until, name="valid_until")
+        if completed < started:
+            raise ValueError("query_completed_at must not precede query_started_at")
+        if valid <= completed:
+            raise ValueError("valid_until must be after query_completed_at")
+        if self.provider_as_of is not None:
+            _instant(self.provider_as_of, name="provider_as_of")
+        if not isinstance(self.available_resources, Mapping):
+            raise TypeError("available_resources must be a mapping")
+        if not self.available_resources:
+            raise ValueError("available_resources must not be empty")
+        normalized: dict[str, Decimal] = {}
+        for resource, raw in self.available_resources.items():
+            if not isinstance(resource, str):
+                raise TypeError("available_resources keys must be strings")
+            key = _text(resource, name="available_resources key")
+            if key in normalized:
+                raise ValueError(
+                    "available_resources keys must be unique after normalization"
+                )
+            amount = _decimal(raw, name=f"available_resources[{key}]")
+            if amount < 0:
+                raise ValueError("available resource amounts must be non-negative")
+            normalized[key] = amount
+        object.__setattr__(
+            self,
+            "available_resources",
+            MappingProxyType(dict(sorted(normalized.items()))),
+        )
+        refs: list[str] = []
+        for reference in self.evidence_refs:
+            ref = _text(reference, name="evidence_ref")
+            if ref in refs:
+                raise ValueError("evidence_refs must be unique")
+            refs.append(ref)
+        object.__setattr__(self, "evidence_refs", tuple(refs))
+
+
+
+@dataclass(frozen=True)
 class ProviderWorkingOrderEvidence:
     provider_id: str
     account_id: str
@@ -552,6 +625,7 @@ class ReconciliationResult:
     missing_local_provider_activity_ids: tuple[str, ...] = ()
     manual_or_external_activity_ids: tuple[str, ...] = ()
     activity_coverage_complete: bool = True
+    resource_availability: ResourceAvailabilityEvidence | None = None
 
     @property
     def blocks_new_risk(self) -> bool:
@@ -647,6 +721,7 @@ def reconcile_account(
     require_activity_reconciliation: bool = False,
     cash_tolerance: Mapping[str, object] | None = None,
     position_tolerance: Mapping[str, object] | None = None,
+    resource_availability: ResourceAvailabilityEvidence | None = None,
 ) -> ReconciliationResult:
     """Compare local and provider truth without inventing absence evidence.
 
@@ -803,6 +878,45 @@ def reconcile_account(
         and snapshot_consistency.consistent
         and snapshot_window_covered
     )
+
+    if resource_availability is not None:
+        if not isinstance(resource_availability, ResourceAvailabilityEvidence):
+            raise TypeError(
+                "resource_availability must be ResourceAvailabilityEvidence"
+            )
+        if (
+            resource_availability.provider_id != provider_scope
+            or resource_availability.account_id != account_scope
+            or resource_availability.environment != environment_scope
+        ):
+            raise ValueError("resource availability scope mismatch")
+        if snapshot_consistency is None:
+            raise ValueError(
+                "resource availability requires snapshot consistency evidence"
+            )
+        resource_started = _instant(
+            resource_availability.query_started_at,
+            name="resource_availability.query_started_at",
+        )
+        resource_completed = _instant(
+            resource_availability.query_completed_at,
+            name="resource_availability.query_completed_at",
+        )
+        snapshot_started = _instant(
+            snapshot_consistency.query_started_at,
+            name="snapshot_consistency.query_started_at",
+        )
+        snapshot_completed = _instant(
+            snapshot_consistency.query_completed_at,
+            name="snapshot_consistency.query_completed_at",
+        )
+        if (
+            resource_started != snapshot_started
+            or resource_completed != snapshot_completed
+        ):
+            raise ValueError(
+                "resource availability snapshot cut differs from reconciliation"
+            )
 
     cash_differences: dict[str, Decimal] = {}
     for currency in sorted(set(local_cash_map) | set(provider_cash_map)):
@@ -1179,4 +1293,5 @@ def reconcile_account(
         missing_local_provider_activity_ids=missing_local_activities,
         manual_or_external_activity_ids=manual_or_external_activities,
         activity_coverage_complete=activity_coverage_complete,
+        resource_availability=resource_availability,
     )

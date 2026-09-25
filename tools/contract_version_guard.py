@@ -11,6 +11,8 @@ import tarfile
 
 
 SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+ANNOTATION_KEYS = frozenset({"title", "description", "$comment", "examples"})
+HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete", "options", "head", "trace"})
 
 
 def parse_version(value: str) -> tuple[int, int, int]:

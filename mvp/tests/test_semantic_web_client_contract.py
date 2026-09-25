@@ -18,6 +18,51 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertGreaterEqual(html.count('scope="col"'), 2)
         self.assertIn('<label for="host-action">Action</label>', html)
 
+    def test_canonical_snapshot_projections_are_exposed_as_semantic_tables(self):
+        html = INDEX.read_text(encoding="utf-8")
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn('href="#opportunities">Opportunities and decisions</a>', html)
+        for required in (
+            '<caption>Authenticated permission and capability evidence</caption>',
+            '<caption>Strategy and decision projection</caption>',
+            '<caption>Portfolio projection</caption>',
+            '<caption>Risk and authority projection</caption>',
+            '<caption>Background research and replay jobs</caption>',
+            'id="permissions-body"',
+            'id="strategy-body"',
+            'id="portfolio-body"',
+            'id="risk-body"',
+            'id="jobs-body"',
+            'id="server-time"',
+        ):
+            self.assertIn(required, html)
+        self.assertIn("function renderProjection(bodyId, record, emptyMessage)", js)
+        self.assertIn('renderProjection(\n      "permissions-body"', js)
+        self.assertIn('renderProjection(\n      "portfolio-body"', js)
+        self.assertIn('renderProjection(\n      "risk-body"', js)
+        self.assertIn('renderProjection(\n      "strategy-body"', js)
+        self.assertIn("renderJobs(parsed.jobs)", js)
+        self.assertIn('text("server-time", parsed.serverTime)', js)
+        self.assertNotIn("Not loaded.", html)
+
+    def test_projection_rendering_is_text_only_deterministic_and_focusable(self):
+        html = INDEX.read_text(encoding="utf-8")
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("function stableProjectionValue(value)", js)
+        self.assertIn("Object.keys(value).sort()", js)
+        self.assertIn("cell.textContent = projectionText(value)", js)
+        self.assertIn('header.scope = "row"', js)
+        self.assertNotIn("innerHTML", js)
+        for region in (
+            "permissions-region",
+            "strategy-region",
+            "portfolio-region",
+            "risk-region",
+            "jobs-region",
+        ):
+            self.assertIn(f'id="{region}" class="table-scroll" role="region"', html)
+            self.assertIn(f'"{region}"', js)
+
     def test_material_notifications_are_separate_from_market_tick_noise(self):
         js = APP.read_text(encoding="utf-8")
         self.assertIn("const MATERIAL_EVENTS = new Set([", js)

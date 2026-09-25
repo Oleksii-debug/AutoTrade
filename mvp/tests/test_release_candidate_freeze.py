@@ -7,6 +7,7 @@ from research.autotrade_research.artifacts.store import ArtifactStore
 
 from mvp.autotrade_mvp.release_candidate import (
     ReleaseArtifactEvidence,
+    ReleaseCandidateDecision,
     ReleaseCandidateError,
     ReleaseCandidateInput,
     freeze_release_candidate,
@@ -129,6 +130,35 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
         self.assertIsNone(first.manifest_json)
         self.assertIsNone(first.manifest_sha256)
         self.assertEqual(first, second)
+
+    def test_direct_frozen_decision_cannot_forge_release_authority(self):
+        manifest = (
+            '{"artifacts":[],"baseline_hash":"' + BASELINE
+            + '","release_id":"forged-rc","schema_contract_hash":"' + CONTRACTS
+            + '","source_sha":"' + SOURCE + '"}'
+        )
+        digest = "sha256:" + sha256(manifest.encode("utf-8")).hexdigest()
+        with self.assertRaisesRegex(
+            ReleaseCandidateError,
+            "independently verified attestation",
+        ):
+            ReleaseCandidateDecision(
+                status="FROZEN",
+                reasons=(),
+                manifest_json=manifest,
+                manifest_sha256=digest,
+            )
+
+        with self.assertRaisesRegex(
+            ReleaseCandidateError,
+            "digest does not match",
+        ):
+            ReleaseCandidateDecision(
+                status="FROZEN",
+                reasons=(),
+                manifest_json=manifest,
+                manifest_sha256="sha256:" + "0" * 64,
+            )
 
     def test_missing_required_artifact_blocks_freeze(self):
         artifacts = tuple(

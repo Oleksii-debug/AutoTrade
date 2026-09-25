@@ -10,7 +10,7 @@ using System.Text.Json;
 
 namespace AutoTrade.Desktop;
 
-public sealed record EmergencyHostSession(string Actor, string Token)
+public sealed record EmergencyHostSession(string Actor, string Token, Uri Origin)
 {
     public EmergencyHostSession Validated()
     {
@@ -26,7 +26,12 @@ public sealed record EmergencyHostSession(string Actor, string Token)
             throw new InvalidOperationException("Emergency host session token is invalid.");
         }
 
-        return this;
+        Uri canonicalOrigin = AuthenticatedEmergencyHostClient.ValidateBaseUri(Origin);
+        return this with
+        {
+            Actor = Actor.Trim(),
+            Origin = canonicalOrigin,
+        };
     }
 }
 
@@ -43,16 +48,40 @@ public interface IEmergencyHostSessionProvider
 public sealed class WindowsCredentialManagerSessionProvider : IEmergencyHostSessionProvider
 {
     private const uint CredentialTypeGeneric = 1;
+    private const string CredentialTargetPrefix = "AutoTrade.HostSession:";
     private readonly string _targetName;
+    private readonly Uri _expectedOrigin;
 
-    public WindowsCredentialManagerSessionProvider(string targetName)
+    public WindowsCredentialManagerSessionProvider(
+        string targetName,
+        Uri expectedOrigin)
     {
         if (string.IsNullOrWhiteSpace(targetName))
         {
             throw new ArgumentException("Credential target is required.", nameof(targetName));
         }
 
-        _targetName = targetName.Trim();
+        _expectedOrigin = AuthenticatedEmergencyHostClient.ValidateBaseUri(expectedOrigin);
+        string canonicalTarget = CredentialTargetForOrigin(_expectedOrigin);
+        if (!string.Equals(
+                targetName.Trim(),
+                canonicalTarget,
+                StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "Credential target is not bound to the configured paired host origin. "
+                + "Re-pair the host instead of reusing a credential across origins.",
+                nameof(targetName));
+        }
+
+        _targetName = canonicalTarget;
+    }
+
+    public static string CredentialTargetForOrigin(Uri origin)
+    {
+        Uri canonical = AuthenticatedEmergencyHostClient.ValidateBaseUri(origin);
+        string authority = canonical.GetLeftPart(UriPartial.Authority);
+        return CredentialTargetPrefix + authority;
     }
 
     public EmergencyHostSession GetSession()
@@ -97,7 +126,10 @@ public sealed class WindowsCredentialManagerSessionProvider : IEmergencyHostSess
                     0,
                     checked((int)credential.CredentialBlobSize));
                 string token = Encoding.Unicode.GetString(tokenBytes).TrimEnd('\0');
-                return new EmergencyHostSession(actor.Trim(), token).Validated();
+                return new EmergencyHostSession(
+                    actor.Trim(),
+                    token,
+                    _expectedOrigin).Validated();
             }
             finally
             {
@@ -191,6 +223,26 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
 
     public Uri BaseUri { get; }
 
+    private EmergencyHostSession GetBoundSession(
+        EmergencyHostSession? knownSession = null)
+    {
+        EmergencyHostSession session =
+            (knownSession ?? _sessionProvider.GetSession()).Validated();
+        if (Uri.Compare(
+                session.Origin,
+                BaseUri,
+                UriComponents.SchemeAndServer,
+                UriFormat.UriEscaped,
+                StringComparison.OrdinalIgnoreCase) != 0)
+        {
+            throw new InvalidOperationException(
+                "The paired host session origin does not match the configured host origin. "
+                + "No authenticated request was created.");
+        }
+
+        return session;
+    }
+
     public async Task<EmergencyHostStatus> GetStatusAsync(
         CancellationToken cancellationToken)
     {
@@ -204,7 +256,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         await _commandGate.WaitAsync(cancellationToken);
         try
         {
-            EmergencyHostSession currentSession = _sessionProvider.GetSession().Validated();
+            EmergencyHostSession currentSession = GetBoundSession();
             string currentSessionReference =
                 PublicSessionReference(currentSession.Token);
             bool recoveringUncertainCommand = _pendingCommand is not null;
@@ -552,7 +604,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         CancellationToken cancellationToken)
     {
         string canonicalId = CanonicalGuid(operationId, nameof(operationId));
-        EmergencyHostSession session = _sessionProvider.GetSession().Validated();
+        EmergencyHostSession session = GetBoundSession();
         using HttpRequestMessage request = CreateRequest(
             HttpMethod.Get,
             "api/v1/operations/" + Uri.EscapeDataString(canonicalId),
@@ -612,8 +664,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         CancellationToken cancellationToken,
         EmergencyHostSession? knownSession = null)
     {
-        EmergencyHostSession session =
-            (knownSession ?? _sessionProvider.GetSession()).Validated();
+        EmergencyHostSession session = GetBoundSession(knownSession);
         using HttpRequestMessage request = CreateRequest(
             HttpMethod.Get,
             "api/v1/state",
@@ -694,12 +745,13 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         string relativePath,
         EmergencyHostSession session)
     {
+        EmergencyHostSession boundSession = GetBoundSession(session);
         HttpRequestMessage request = new(method, new Uri(BaseUri, relativePath));
         request.Headers.Accept.Add(
             new MediaTypeWithQualityHeaderValue("application/json"));
         request.Headers.Authorization =
-            new AuthenticationHeaderValue("AutoTrade-Session", session.Token);
-        request.Headers.Add("X-AutoTrade-Actor", session.Actor);
+            new AuthenticationHeaderValue("AutoTrade-Session", boundSession.Token);
+        request.Headers.Add("X-AutoTrade-Actor", boundSession.Actor);
         request.Headers.CacheControl = new CacheControlHeaderValue { NoStore = true };
         return request;
     }
@@ -911,7 +963,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         }
     }
 
-    private static Uri ValidateBaseUri(Uri value)
+    internal static Uri ValidateBaseUri(Uri value)
     {
         if (value is null || !value.IsAbsoluteUri)
         {
@@ -989,7 +1041,8 @@ internal static class DesktopHostClientFactory
                 httpClient,
                 uri,
                 new WindowsCredentialManagerSessionProvider(
-                    canonicalCredentialTarget),
+                    canonicalCredentialTarget,
+                    uri),
                 new WindowsCredentialManagerPendingCommandStore(
                     canonicalCredentialTarget + ":pending-emergency-command-v1"));
         }

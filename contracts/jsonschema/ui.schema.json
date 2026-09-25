@@ -109,7 +109,11 @@
         },
         "action": {
           "type": "string",
-          "minLength": 1
+          "enum": [
+            "BLOCK_NEW_EXPOSURE",
+            "REVOKE_AUTHORITY",
+            "SET_AUTHORITY"
+          ]
         },
         "payload": {
           "type": "object"

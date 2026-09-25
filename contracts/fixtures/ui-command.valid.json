@@ -4,7 +4,7 @@
   "idempotency_key": "user-77777777",
   "actor": "owner",
   "session": "desktop-session-1",
-  "action": "AUTHORITY.REVOKE",
+  "action": "REVOKE_AUTHORITY",
   "payload": {
     "policy_id": "policy-1"
   },

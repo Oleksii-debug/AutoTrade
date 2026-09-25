@@ -8,14 +8,44 @@ from control.tools.registry_state import (
     RegistryProtocolError,
     RegistryStaleGenerationError,
     active_mutation_claims,
-    claim,
+    claim as registry_claim,
     expire_leases,
-    release,
-    renew,
+    release as registry_release,
+    renew as registry_renew,
 )
 
 
 NOW = "2026-09-22T10:00:00Z"
+
+
+SERVICE_IDENTITY = {
+    "service_id": "autotrade-claim-service",
+    "principal_id": "github-app-installation:test",
+    "authorized_account_id": "worker-account-a",
+    "authentication_binding_digest": "sha256:" + ("a" * 64),
+    "allowed_claim_modes": [
+        "SOURCE_MUTATION",
+        "INTEGRATION",
+        "READ_ONLY_AUDIT",
+        "RESEARCH",
+        "CI_TRIAGE",
+    ],
+}
+
+
+def claim(*args, **kwargs):
+    kwargs.setdefault("service_identity", SERVICE_IDENTITY)
+    return registry_claim(*args, **kwargs)
+
+
+def renew(*args, **kwargs):
+    kwargs.setdefault("service_identity", SERVICE_IDENTITY)
+    return registry_renew(*args, **kwargs)
+
+
+def release(*args, **kwargs):
+    kwargs.setdefault("service_identity", SERVICE_IDENTITY)
+    return registry_release(*args, **kwargs)
 
 
 def empty_registry(mode="ATOMIC_CLAIMS_ENABLED"):
@@ -47,6 +77,51 @@ class RegistryTests(unittest.TestCase):
         registry, created = claim(empty_registry(), request(), expected_generation=0, now=NOW)
         self.assertEqual(registry["generation"], 1)
         self.assertEqual(created["status"], "ACTIVE")
+
+    def test_mutating_claim_requires_explicit_service_identity(self):
+        with self.assertRaisesRegex(RegistryProtocolError, "service_identity"):
+            registry_claim(
+                empty_registry(),
+                request(),
+                expected_generation=0,
+                now=NOW,
+            )
+
+    def test_service_identity_is_account_and_mode_bound(self):
+        wrong_account = dict(SERVICE_IDENTITY)
+        wrong_account["authorized_account_id"] = "worker-account-b"
+        with self.assertRaisesRegex(RegistryProtocolError, "request account"):
+            registry_claim(
+                empty_registry(),
+                request(),
+                expected_generation=0,
+                now=NOW,
+                service_identity=wrong_account,
+            )
+
+        read_only_identity = dict(SERVICE_IDENTITY)
+        read_only_identity["allowed_claim_modes"] = ["READ_ONLY_AUDIT"]
+        with self.assertRaisesRegex(RegistryProtocolError, "claim mode"):
+            registry_claim(
+                empty_registry(),
+                request(),
+                expected_generation=0,
+                now=NOW,
+                service_identity=read_only_identity,
+            )
+
+    def test_request_id_replay_cannot_change_service_owner(self):
+        first, _ = claim(empty_registry(), request(), expected_generation=0, now=NOW)
+        other_owner = dict(SERVICE_IDENTITY)
+        other_owner["authentication_binding_digest"] = "sha256:" + ("b" * 64)
+        with self.assertRaisesRegex(RegistryProtocolError, "different service identity"):
+            registry_claim(
+                first,
+                request(),
+                expected_generation=1,
+                now=NOW,
+                service_identity=other_owner,
+            )
 
     def test_claim_lease_is_issued_from_service_time_and_bounded_policy(self):
         registry, created = claim(
@@ -195,6 +270,32 @@ class RegistryTests(unittest.TestCase):
         )
         self.assertEqual(value["status"], "RELEASED")
         self.assertEqual(active_mutation_claims(released, now=NOW), [])
+
+    def test_foreign_service_cannot_renew_or_release_claim(self):
+        first, created = claim(empty_registry(), request(), expected_generation=0, now=NOW)
+        foreign = dict(SERVICE_IDENTITY)
+        foreign["principal_id"] = "github-app-installation:other"
+        with self.assertRaisesRegex(RegistryProtocolError, "service identity does not own claim"):
+            registry_renew(
+                first,
+                claim_id=created["claim_id"],
+                run_id="run-a",
+                expected_generation=1,
+                now="2026-09-22T10:30:00Z",
+                service_identity=foreign,
+            )
+        with self.assertRaisesRegex(RegistryProtocolError, "service identity does not own claim"):
+            registry_release(
+                first,
+                claim_id=created["claim_id"],
+                run_id="run-a",
+                expected_generation=1,
+                now=NOW,
+                reason="foreign",
+                service_identity=foreign,
+            )
+        self.assertEqual(first["generation"], 1)
+        self.assertEqual(first["claims"][0]["status"], "ACTIVE")
 
     def test_expiry_closes_stale_lease(self):
         first, _ = claim(empty_registry(), request(), expected_generation=0, now=NOW)

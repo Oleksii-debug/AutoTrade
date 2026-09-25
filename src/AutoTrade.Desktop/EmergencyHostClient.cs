@@ -45,6 +45,56 @@ public sealed record EmergencyHostStatus(
         return this;
     }
 
+    public EmergencyHostStatus ValidateSuccessorOf(EmergencyHostStatus previous)
+    {
+        if (previous is null)
+        {
+            throw new ArgumentNullException(nameof(previous));
+        }
+
+        EmergencyHostStatus current = Validated();
+        EmergencyHostStatus prior = previous.Validated();
+        if (!current.Connected || !prior.Connected)
+        {
+            throw new InvalidOperationException(
+                "Host evidence succession requires two connected observations.");
+        }
+
+        if (!string.Equals(current.HostId, prior.HostId, StringComparison.Ordinal)
+            || !string.Equals(current.AccountId, prior.AccountId, StringComparison.Ordinal)
+            || !string.Equals(current.Environment, prior.Environment, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "Connected host authority identity changed without an explicit transition.");
+        }
+
+        if (CompareCanonicalSequence(current.StateVersion, prior.StateVersion) < 0)
+        {
+            throw new InvalidOperationException(
+                "Connected host state version cannot regress.");
+        }
+
+        if (current.ObservedAtUtc < prior.ObservedAtUtc)
+        {
+            throw new InvalidOperationException(
+                "Connected host evidence time cannot regress.");
+        }
+
+        return current;
+    }
+
+    private static int CompareCanonicalSequence(string left, string right)
+    {
+        ValidateStateVersion(left);
+        ValidateStateVersion(right);
+        if (left.Length != right.Length)
+        {
+            return left.Length.CompareTo(right.Length);
+        }
+
+        return string.Compare(left, right, StringComparison.Ordinal);
+    }
+
     private static void ValidateConnectedIdentity(string value, string name)
     {
         if (string.IsNullOrWhiteSpace(value)
@@ -138,11 +188,18 @@ public sealed record EmergencyCommandResult
                 nameof(durableBlockConfirmed));
         }
 
-        if (accepted && string.IsNullOrWhiteSpace(operationId))
+        string canonicalOperationId = "Unavailable";
+        if (accepted)
         {
-            throw new ArgumentException(
-                "An accepted emergency request requires an operation identity.",
-                nameof(operationId));
+            if (string.IsNullOrWhiteSpace(operationId)
+                || !Guid.TryParse(operationId.Trim(), out Guid parsedOperationId))
+            {
+                throw new ArgumentException(
+                    "An accepted emergency request requires a canonical UUID operation identity.",
+                    nameof(operationId));
+            }
+
+            canonicalOperationId = parsedOperationId.ToString("D");
         }
 
         if (string.IsNullOrWhiteSpace(message))
@@ -153,9 +210,7 @@ public sealed record EmergencyCommandResult
         Accepted = accepted;
         DurableBlockConfirmed = durableBlockConfirmed;
         InFlightActions = inFlightActions;
-        OperationId = string.IsNullOrWhiteSpace(operationId)
-            ? "Unavailable"
-            : operationId.Trim();
+        OperationId = canonicalOperationId;
         Message = message.Trim();
     }
 }

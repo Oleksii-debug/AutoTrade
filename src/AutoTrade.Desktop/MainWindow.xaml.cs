@@ -72,6 +72,11 @@ public partial class MainWindow : Window
 
         if (status.Connected)
         {
+            if (_lastKnownConnectedStatus is { } previous)
+            {
+                status = status.ValidateSuccessorOf(previous);
+            }
+
             _lastKnownConnectedStatus = status;
             HostValue.Text = status.HostId;
             AccountValue.Text = status.AccountId;

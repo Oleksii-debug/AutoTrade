@@ -94,6 +94,34 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("foreach (char character in value)", client)
         self.assertIn("character is < '0' or > '9'", client)
 
+    def test_connected_host_evidence_cannot_regress_or_switch_authority_silently(self):
+        client = CLIENT.read_text(encoding="utf-8")
+        code = CODE.read_text(encoding="utf-8")
+        self.assertIn("ValidateSuccessorOf", client)
+        self.assertIn("Connected host state version cannot regress.", client)
+        self.assertIn("Connected host evidence time cannot regress.", client)
+        self.assertIn(
+            "Connected host authority identity changed without an explicit transition.",
+            client,
+        )
+        self.assertIn("CompareCanonicalSequence", client)
+        self.assertIn("status.ValidateSuccessorOf(previous)", code)
+        self.assertLess(
+            code.index("status.ValidateSuccessorOf(previous)"),
+            code.index("_lastKnownConnectedStatus = status"),
+        )
+
+    def test_accepted_emergency_operation_requires_canonical_uuid_identity(self):
+        client = CLIENT.read_text(encoding="utf-8")
+        self.assertIn("Guid.TryParse", client)
+        self.assertIn('parsedOperationId.ToString("D")', client)
+        self.assertIn(
+            "An accepted emergency request requires a canonical UUID operation identity.",
+            client,
+        )
+        self.assertIn('string canonicalOperationId = "Unavailable";', client)
+        self.assertIn("OperationId = canonicalOperationId;", client)
+
     def test_emergency_control_is_named_keyboard_reachable_and_truthful(self):
         text = XAML.read_text(encoding="utf-8")
         code = CODE.read_text(encoding="utf-8")

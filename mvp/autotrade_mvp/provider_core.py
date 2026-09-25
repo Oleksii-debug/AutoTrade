@@ -13,10 +13,23 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Iterable, Literal, Mapping
+import re
 
 
 class ProviderCoreError(ValueError):
     pass
+
+
+_GIT_OBJECT_ID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+
+
+def _code_sha(value: str, name: str = "adapter_code_sha") -> str:
+    sha = _text(value, name)
+    if _GIT_OBJECT_ID.fullmatch(sha) is None:
+        raise ProviderCoreError(
+            f"{name} must be a canonical 40- or 64-character lowercase Git object id"
+        )
+    return sha
 
 
 def _text(value: str, name: str) -> str:
@@ -161,7 +174,7 @@ class QualificationEvidence:
             raise ProviderCoreError("product family is not declared for provider")
         object.__setattr__(self, "product_family", family)
         object.__setattr__(self, "environment", _text(self.environment, "environment"))
-        object.__setattr__(self, "adapter_code_sha", _text(self.adapter_code_sha, "adapter_code_sha"))
+        object.__setattr__(self, "adapter_code_sha", _code_sha(self.adapter_code_sha))
         object.__setattr__(self, "documentation_ref", _text(self.documentation_ref, "documentation_ref"))
         observed = _utc(self.observed_at, "observed_at")
         expires = _utc(self.expires_at, "expires_at")
@@ -179,7 +192,7 @@ class QualificationEvidence:
 
     def status(self, *, now: datetime, exact_code_sha: str) -> str:
         point = _utc(now, "now")
-        if _text(exact_code_sha, "exact_code_sha") != self.adapter_code_sha:
+        if _code_sha(exact_code_sha, "exact_code_sha") != self.adapter_code_sha:
             return "CODE_MISMATCH"
         if point < self.observed_at:
             return "FUTURE_EVIDENCE"

@@ -7,6 +7,7 @@ from mvp.autotrade_mvp.risk import (
     RiskPolicy,
     evaluate_risk,
     risk_decision_fingerprint,
+    stress_scenario_digest,
 )
 
 
@@ -910,7 +911,12 @@ class IndependentRiskTests(unittest.TestCase):
                 "price_gap",
                 "correlation_one",
                 "venue_loss",
-            )
+            ),
+            required_stress_scenario_digests={
+                "price_gap": stress_scenario_digest({"ABC": "-0.10"}),
+                "correlation_one": stress_scenario_digest({"ABC": "-0.20"}),
+                "venue_loss": stress_scenario_digest({"ABC": "-0.30"}),
+            },
         )
         decision = evaluate_risk(
             intent,
@@ -949,6 +955,29 @@ class IndependentRiskTests(unittest.TestCase):
         self.assertEqual(missing_rule.observed, "MISSING:venue_loss")
         self.assertFalse(missing.admitted)
 
+        substituted = evaluate_risk(
+            intent,
+            context(
+                stress_scenarios=(
+                    {"ABC": "-0.10"},
+                    {"ABC": "-0.01"},
+                    {"ABC": "-0.30"},
+                ),
+                stress_scenario_labels=(
+                    "price_gap",
+                    "correlation_one",
+                    "venue_loss",
+                ),
+            ),
+            configured,
+        )
+        substituted_rule = next(
+            x for x in substituted.rules if x.rule == "stress_regime_coverage"
+        )
+        self.assertFalse(substituted_rule.passed)
+        self.assertEqual(substituted_rule.observed, "MISMATCH:correlation_one")
+        self.assertFalse(substituted.admitted)
+
     def test_full_liquidation_does_not_require_artificial_stress_regime_labels(self):
         decision = evaluate_risk(
             RiskIntent.create(
@@ -966,6 +995,10 @@ class IndependentRiskTests(unittest.TestCase):
             ),
             policy(
                 required_stress_scenario_labels=("price_gap", "correlation_one"),
+                required_stress_scenario_digests={
+                    "price_gap": stress_scenario_digest({"ABC": "-0.10"}),
+                    "correlation_one": stress_scenario_digest({"ABC": "-0.20"}),
+                },
                 max_expected_shortfall="0",
                 expected_shortfall_tail_fraction="1",
             ),
@@ -995,6 +1028,15 @@ class IndependentRiskTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "at least one"):
             policy(required_stress_scenario_labels=())
+        with self.assertRaisesRegex(ValueError, "configured together"):
+            policy(required_stress_scenario_labels=("gap",))
+        with self.assertRaisesRegex(ValueError, "exactly match"):
+            policy(
+                required_stress_scenario_labels=("gap",),
+                required_stress_scenario_digests={
+                    "other": stress_scenario_digest({"ABC": "-0.10"}),
+                },
+            )
 
     def test_expected_shortfall_uses_complete_projected_tail_distribution(self):
         intent = RiskIntent.create(

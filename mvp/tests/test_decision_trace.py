@@ -107,6 +107,31 @@ class DecisionTraceStoreTests(unittest.TestCase):
             ):
                 self.assertNotIn(leaked, raw)
 
+    def test_embedded_secrets_in_safe_named_strings_are_redacted(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = trace("trace-embedded-secrets")
+            item["attributes"] = {
+                "url": "https://provider.test/orders?api_key=abc123&symbol=BTC",
+                "message": "Authorization: Bearer bearer-secret",
+                "dsn": "host=db;password=hunter2;database=autotrade",
+                "key_material": "-----BEGIN PRIVATE KEY-----\\nsecret\\n-----END PRIVATE KEY-----",
+                "safe": "symbol=BTC",
+            }
+            store.append(item)
+
+            raw = path.read_text(encoding="utf-8")
+            for leaked in ("abc123", "bearer-secret", "hunter2", "\\nsecret\\n"):
+                self.assertNotIn(leaked, raw)
+            persisted = json.loads(raw)
+            attrs = persisted["attributes"]
+            self.assertIn("api_key=[REDACTED]", attrs["url"])
+            self.assertIn("Authorization: [REDACTED]", attrs["message"])
+            self.assertIn("password=[REDACTED]", attrs["dsn"])
+            self.assertEqual(attrs["key_material"], "[REDACTED]")
+            self.assertEqual(attrs["safe"], "symbol=BTC")
+
     def test_non_finite_diagnostic_numbers_cannot_enter_durable_trace(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "decision-traces.jsonl"

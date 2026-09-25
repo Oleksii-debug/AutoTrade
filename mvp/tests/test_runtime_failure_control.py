@@ -1,3 +1,4 @@
+from contextlib import closing
 import sqlite3
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -264,7 +265,7 @@ class RuntimeRecoveryTests(unittest.TestCase):
                 reconciled=True,
             )
 
-            with sqlite3.connect(path) as connection:
+            with closing(sqlite3.connect(path)) as connection:
                 row = connection.execute(
                     "SELECT event_id, payload_json FROM events "
                     "WHERE aggregate_type = 'recovery_owner' "
@@ -294,7 +295,7 @@ class RuntimeRecoveryTests(unittest.TestCase):
             owner = controller.start("host-a")
             controller.record_reconciliation(consistent=True)
 
-            with sqlite3.connect(path) as connection:
+            with closing(sqlite3.connect(path)) as connection:
                 connection.execute(
                     "UPDATE events SET payload_json = ? "
                     "WHERE aggregate_type = 'recovery_owner'",

@@ -1,3 +1,4 @@
+from contextlib import closing
 from decimal import Decimal
 from pathlib import Path
 import sqlite3
@@ -405,7 +406,7 @@ class DurableReservationBookTests(unittest.TestCase):
     def test_tampered_payload_is_rejected_on_restart(self):
         book = self.book()
         self.reserve(book)
-        with sqlite3.connect(self.path) as connection:
+        with closing(sqlite3.connect(self.path)) as connection:
             row = connection.execute(
                 "SELECT event_id, payload_json FROM events "
                 "WHERE aggregate_type='reservation_book'"
@@ -422,7 +423,7 @@ class DurableReservationBookTests(unittest.TestCase):
     def test_tampered_snapshot_with_recomputed_hash_still_fails_replay(self):
         book = self.book()
         self.reserve(book)
-        with sqlite3.connect(self.path) as connection:
+        with closing(sqlite3.connect(self.path)) as connection:
             row = connection.execute(
                 "SELECT event_id, payload_json FROM events "
                 "WHERE aggregate_type='reservation_book'"

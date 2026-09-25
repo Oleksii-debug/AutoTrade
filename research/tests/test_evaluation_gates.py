@@ -1,4 +1,5 @@
 from dataclasses import replace
+import json
 from tempfile import TemporaryDirectory
 import unittest
 from uuid import uuid4
@@ -10,6 +11,7 @@ from research.autotrade_research.evaluation.gates import (
     GateDecision,
     GateProfile,
     evaluate_gates,
+    gate_report_payload,
 )
 
 
@@ -79,10 +81,23 @@ def evaluate_with_verified_bundle(gate_profile, evaluation_evidence):
         refs = {}
         for kind in EVIDENCE_KINDS:
             artifact_id = str(uuid4())
+            is_report = kind in {
+                "profile",
+                "trial_log",
+                "causal_audit",
+                "financial_invariants",
+                "retention",
+                "metrics",
+                "independent_review",
+            }
             manifest = store.publish_bytes(
                 artifact_id=artifact_id,
-                data=f"{gate_profile.profile_id}:{kind}".encode("utf-8"),
-                media_type="application/octet-stream",
+                data=(
+                    gate_report_payload(kind, gate_profile, evaluation_evidence)
+                    if is_report
+                    else f"{gate_profile.profile_id}:{kind}".encode("utf-8")
+                ),
+                media_type=("application/json" if is_report else "application/octet-stream"),
                 rights={"storage": True, "export": False},
                 metadata={
                     "evidence_kind": kind,
@@ -191,14 +206,27 @@ class EvaluationGateTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)
             refs = {}
+            base_evidence = evidence()
             for kind in EVIDENCE_KINDS:
                 if kind == "independent_review":
                     continue
                 artifact_id = str(uuid4())
+                is_report = kind in {
+                    "profile",
+                    "trial_log",
+                    "causal_audit",
+                    "financial_invariants",
+                    "retention",
+                    "metrics",
+                }
                 manifest = store.publish_bytes(
                     artifact_id=artifact_id,
-                    data=kind.encode("utf-8"),
-                    media_type="application/octet-stream",
+                    data=(
+                        gate_report_payload(kind, gate_profile, base_evidence)
+                        if is_report
+                        else kind.encode("utf-8")
+                    ),
+                    media_type=("application/json" if is_report else "application/octet-stream"),
                     rights={"storage": True, "export": False},
                     metadata={
                         "evidence_kind": kind,
@@ -223,12 +251,26 @@ class EvaluationGateTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)
             refs = {}
+            base_evidence = evidence()
             for kind in EVIDENCE_KINDS:
                 artifact_id = str(uuid4())
+                is_report = kind in {
+                    "profile",
+                    "trial_log",
+                    "causal_audit",
+                    "financial_invariants",
+                    "retention",
+                    "metrics",
+                    "independent_review",
+                }
                 manifest = store.publish_bytes(
                     artifact_id=artifact_id,
-                    data=kind.encode("utf-8"),
-                    media_type="application/octet-stream",
+                    data=(
+                        gate_report_payload(kind, gate_profile, base_evidence)
+                        if is_report
+                        else kind.encode("utf-8")
+                    ),
+                    media_type=("application/json" if is_report else "application/octet-stream"),
                     rights={"storage": True, "export": False},
                     metadata={
                         "evidence_kind": kind,
@@ -246,6 +288,59 @@ class EvaluationGateTests(unittest.TestCase):
             decision = evaluate_gates(
                 gate_profile,
                 replace(evidence(), evidence_refs=refs),
+                artifact_store=store,
+            )
+            self.assertEqual(decision.status, "FAIL")
+            self.assertEqual(decision.checks["evidence_bundle"], "FAIL")
+
+    def test_metrics_artifact_must_exactly_bind_reported_gate_values(self):
+        gate_profile = profile()
+        base_evidence = evidence()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            refs = {}
+            for kind in EVIDENCE_KINDS:
+                artifact_id = str(uuid4())
+                if kind in {
+                    "profile",
+                    "trial_log",
+                    "causal_audit",
+                    "financial_invariants",
+                    "retention",
+                    "metrics",
+                    "independent_review",
+                }:
+                    payload = gate_report_payload(kind, gate_profile, base_evidence)
+                    media_type = "application/json"
+                    if kind == "metrics":
+                        decoded = json.loads(payload.decode("utf-8"))
+                        decoded["net_advantage"] = "0.30"
+                        payload = json.dumps(
+                            decoded,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                else:
+                    payload = kind.encode("utf-8")
+                    media_type = "application/octet-stream"
+                manifest = store.publish_bytes(
+                    artifact_id=artifact_id,
+                    data=payload,
+                    media_type=media_type,
+                    rights={"storage": True, "export": False},
+                    metadata={
+                        "evidence_kind": kind,
+                        "profile_id": gate_profile.profile_id,
+                    },
+                )
+                refs[kind] = GateEvidenceRef(
+                    artifact_id=artifact_id,
+                    sha256=manifest["sha256"],
+                )
+
+            decision = evaluate_gates(
+                gate_profile,
+                replace(base_evidence, evidence_refs=refs),
                 artifact_store=store,
             )
             self.assertEqual(decision.status, "FAIL")

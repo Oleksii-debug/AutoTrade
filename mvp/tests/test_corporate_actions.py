@@ -99,6 +99,45 @@ class CorporateSettlementTests(unittest.TestCase):
         self.assertEqual(result.economic_pnl, Decimal("0"))
         self.assertEqual(book.apply(event), result)
 
+    def test_split_and_delist_reject_ignored_payload_fields_before_mutation(self):
+        split_book = bound_book(state())
+        original_split_state = split_book.state
+        with self.assertRaisesRegex(ValueError, "exactly numerator and denominator"):
+            split_book.apply(
+                corporate_event(
+                    event_id="split-extra",
+                    kind="SPLIT",
+                    effective_date=date(2026, 1, 2),
+                    source_revision="r1",
+                    payload={
+                        "numerator": 2,
+                        "denominator": 1,
+                        "ignored": "provider-extension",
+                    },
+                )
+            )
+        self.assertEqual(split_book.state, original_split_state)
+        self.assertEqual(split_book.applied_event_ids, ())
+
+        delist_book = bound_book(state())
+        original_delist_state = delist_book.state
+        with self.assertRaisesRegex(ValueError, "exactly cash_per_share and currency"):
+            delist_book.apply(
+                corporate_event(
+                    event_id="delist-extra",
+                    kind="DELIST",
+                    effective_date=date(2026, 1, 2),
+                    source_revision="r1",
+                    payload={
+                        "cash_per_share": "110",
+                        "currency": "USD",
+                        "ignored": "provider-extension",
+                    },
+                )
+            )
+        self.assertEqual(delist_book.state, original_delist_state)
+        self.assertEqual(delist_book.applied_event_ids, ())
+
     def test_split_scales_short_borrow_and_recall_obligations(self):
         book = bound_book(
             state(
@@ -677,6 +716,31 @@ class CorporateSettlementTests(unittest.TestCase):
         self.assertEqual(result.after.unsettled_cash, before.unsettled_cash)
         self.assertEqual(book.instrument_version, second)
         self.assertEqual(book.apply(event), result)
+
+    def test_symbol_change_successor_version_payload_must_be_canonical_ascii_integer(self):
+        first = instrument()
+        second = instrument(
+            version=2,
+            symbol="BBB",
+            effective_from=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        )
+        registry = InstrumentRegistry(versions=(first, second))
+        for raw_version in ("02", "٢"):
+            with self.subTest(raw_version=raw_version):
+                book = bound_book(state(), current=first, registry=registry)
+                with self.assertRaisesRegex(ValueError, "canonical positive integer"):
+                    book.apply(
+                        corporate_event(
+                            event_id="symbol-change-noncanonical-" + raw_version,
+                            kind="SYMBOL_CHANGE",
+                            effective_date=date(2026, 6, 1),
+                            source_revision="r1",
+                            payload={"successor_instrument_version": raw_version},
+                        )
+                    )
+                self.assertEqual(book.state.symbol, "AAA")
+                self.assertEqual(book.instrument_version, first)
+                self.assertEqual(book.applied_event_ids, ())
 
     def test_symbol_change_rejects_economic_identity_drift_before_mutation(self):
         first = instrument()

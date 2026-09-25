@@ -139,6 +139,14 @@ class ChampionRegistry:
                 ) VALUES(1,0,NULL,NULL,NULL,NULL,'1970-01-01T00:00:00+00:00');
                 """
             )
+            columns = {
+                row[1]
+                for row in con.execute("PRAGMA table_info(promotion_history)").fetchall()
+            }
+            if "request_fingerprint" not in columns:
+                con.execute(
+                    "ALTER TABLE promotion_history ADD COLUMN request_fingerprint TEXT"
+                )
 
     @contextmanager
     def _connect(self):

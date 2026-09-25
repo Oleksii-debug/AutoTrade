@@ -143,9 +143,14 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
 
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            settlement = self._bind_provider_evidence(artifacts, settlement)
             store = JournalStore(path)
             state, delta, transaction, inserted = commit_linear_variation_margin(
-                store, opening, settlement
+                store,
+                opening,
+                settlement,
+                evidence_artifact_store=artifacts,
             )
             self.assertTrue(inserted)
             self.assertEqual(delta, Decimal("100"))
@@ -158,11 +163,20 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
             )
 
             reopened = JournalStore(path)
-            rebuilt = restore_linear_variation_margin(reopened, opening)
+            rebuilt = restore_linear_variation_margin(
+                reopened,
+                opening,
+                evidence_artifact_store=artifacts,
+            )
             self.assertEqual(rebuilt, state)
 
             retried, retry_delta, retry_transaction, retry_inserted = (
-                commit_linear_variation_margin(reopened, opening, settlement)
+                commit_linear_variation_margin(
+                    reopened,
+                    opening,
+                    settlement,
+                    evidence_artifact_store=artifacts,
+                )
             )
             self.assertFalse(retry_inserted)
             self.assertEqual(retried, state)
@@ -178,16 +192,22 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
                 1,
             )
 
-            correction = self._settlement(
-                contract,
-                "period-1",
-                "106",
-                sequence=1,
-                revision=1,
+            correction = self._bind_provider_evidence(
+                artifacts,
+                self._settlement(
+                    contract,
+                    "period-1",
+                    "106",
+                    sequence=1,
+                    revision=1,
+                ),
             )
             corrected, correction_delta, correction_tx, correction_inserted = (
                 commit_linear_variation_margin(
-                    reopened, opening, correction
+                    reopened,
+                    opening,
+                    correction,
+                    evidence_artifact_store=artifacts,
                 )
             )
             self.assertTrue(correction_inserted)
@@ -199,10 +219,18 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
             )
             final_store = JournalStore(path)
             self.assertEqual(
-                restore_linear_variation_margin(final_store, opening),
+                restore_linear_variation_margin(
+                    final_store,
+                    opening,
+                    evidence_artifact_store=artifacts,
+                ),
                 corrected,
             )
-            rebuilt_book = rebuild_variation_margin_book(final_store, opening)
+            rebuilt_book = rebuild_variation_margin_book(
+                final_store,
+                opening,
+                evidence_artifact_store=artifacts,
+            )
             self.assertEqual(rebuilt_book.cash("USD"), Decimal("120"))
             self.assertEqual(
                 rebuilt_book.balance("FUTURES_VARIATION_PNL:USD", "USD"),

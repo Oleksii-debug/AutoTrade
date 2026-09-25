@@ -32,6 +32,7 @@ from .durable_reservations import DurableReservationBook
 from .durable_settlement import DurableSettlementBook
 from .fill_accounting import (
     ProjectedFillEvidence,
+    ProviderFillFinancialPlan,
     build_provider_fill_financial_plan,
 )
 from .persistence import JournalStore, canonical_json, payload_digest
@@ -229,6 +230,191 @@ class PreparedEconomicBatch:
     result: dict[str, Any]
     aggregate_version: int
     already_committed: bool = False
+
+
+_PROVIDER_FILL_BINDING_AGGREGATE_TYPE = "provider_fill_financial_binding"
+_PROVIDER_FILL_BINDING_EVENT_TYPE = "ProviderFillFinancialPlanBound"
+
+
+@dataclass(frozen=True)
+class PreparedProviderFillBinding:
+    """Immutable audit binding for one provider fill financial plan.
+
+    The binding is committed in the same JournalStore transaction as the
+    reservation consumption and economic batch. It owns no financial state; it
+    proves which provider execution produced which canonical plan so later
+    corrections cannot accidentally borrow aggregate reservation consumption
+    from an unrelated partial fill.
+    """
+
+    aggregate_id: str
+    envelope: dict[str, Any] | None
+    request: dict[str, Any]
+    result: dict[str, Any]
+    aggregate_version: int
+    already_committed: bool = False
+
+
+def _provider_fill_binding_aggregate_id(
+    *,
+    provider_id: str,
+    account_id: str,
+    environment: str,
+    provider_execution_id: str,
+) -> str:
+    return _scoped_identity(
+        "provider-fill-financial-binding",
+        _text(provider_id, name="provider_id").upper(),
+        _text(account_id, name="account_id"),
+        _environment(environment),
+        _text(provider_execution_id, name="provider_execution_id"),
+    )
+
+
+def _prepare_provider_fill_binding(
+    economic_book: "DurableProviderEconomicBook",
+    *,
+    plan: ProviderFillFinancialPlan,
+    projected_fill: ProjectedFillEvidence,
+    provider_fill: ProviderFillEvidence,
+    committed_at: str,
+) -> PreparedProviderFillBinding:
+    if not isinstance(plan, ProviderFillFinancialPlan):
+        raise TypeError("plan must be ProviderFillFinancialPlan")
+    if not isinstance(projected_fill, ProjectedFillEvidence):
+        raise TypeError("projected_fill must be ProjectedFillEvidence")
+    if not isinstance(provider_fill, ProviderFillEvidence):
+        raise TypeError("provider_fill must be ProviderFillEvidence")
+    if projected_fill.correction_of is not None:
+        raise AccountingConflict(
+            "initial provider fill binding cannot be created from correction evidence"
+        )
+    if plan.provider_execution_id != provider_fill.provider_execution_id:
+        raise AccountingConflict(
+            "provider fill binding execution identity changed"
+        )
+    if plan.intent_id != projected_fill.intent_id:
+        raise AccountingConflict("provider fill binding intent identity changed")
+
+    aggregate_id = _provider_fill_binding_aggregate_id(
+        provider_id=economic_book.provider_id,
+        account_id=economic_book.account_id,
+        environment=economic_book.environment,
+        provider_execution_id=provider_fill.provider_execution_id,
+    )
+    usage = {
+        key: _decimal_text(value)
+        for key, value in plan.usage_items
+    }
+    request = {
+        "schema_version": "1.0.0",
+        "provider_id": economic_book.provider_id,
+        "account_id": economic_book.account_id,
+        "environment": economic_book.environment,
+        "reservation_id": plan.reservation_id,
+        "intent_id": plan.intent_id,
+        "provider_execution_id": plan.provider_execution_id,
+        "fill_id": projected_fill.fill_id,
+        "provider_revision": projected_fill.provider_revision,
+        "plan_digest": plan.plan_digest,
+        "transaction_id": plan.transaction.transaction_id,
+        "transaction_digest": payload_digest(
+            canonical_transaction(plan.transaction)
+        ),
+        "derived_usage": usage,
+    }
+    request_digest = payload_digest(request)
+    events = economic_book.store.load_events(
+        _PROVIDER_FILL_BINDING_AGGREGATE_TYPE,
+        aggregate_id,
+    )
+    matching = []
+    for event in events:
+        if event.get("event_type") != _PROVIDER_FILL_BINDING_EVENT_TYPE:
+            raise AccountingConflict(
+                "provider fill financial binding contains unsupported event type"
+            )
+        payload = event.get("payload")
+        if not isinstance(payload, Mapping):
+            raise AccountingConflict(
+                "provider fill financial binding payload is invalid"
+            )
+        if (
+            payload.get("provider_id") != economic_book.provider_id
+            or payload.get("account_id") != economic_book.account_id
+            or payload.get("environment") != economic_book.environment
+            or payload.get("provider_execution_id") != plan.provider_execution_id
+        ):
+            raise AccountingConflict(
+                "provider fill financial binding scope is invalid"
+            )
+        if payload.get("request_digest") == request_digest:
+            matching.append(event)
+
+    if matching:
+        if len(matching) != 1:
+            raise AccountingConflict(
+                "provider fill financial binding identity is duplicated"
+            )
+        event = matching[0]
+        payload = event["payload"]
+        if payload.get("request") != request:
+            raise AccountingConflict(
+                "provider fill financial binding digest conflicts with content"
+            )
+        return PreparedProviderFillBinding(
+            aggregate_id=aggregate_id,
+            envelope=None,
+            request=request,
+            result={
+                "binding_event_id": event["event_id"],
+                "plan_digest": plan.plan_digest,
+            },
+            aggregate_version=int(event["aggregate_version"]),
+            already_committed=True,
+        )
+
+    if events:
+        raise AccountingConflict(
+            "provider execution already has a different financial binding"
+        )
+
+    event_id = str(
+        uuid5(
+            NAMESPACE_URL,
+            "https://events.autotrade.local/provider-fill-financial-binding/"
+            + aggregate_id,
+        )
+    )
+    payload = {
+        "schema_version": "1.0.0",
+        "provider_id": economic_book.provider_id,
+        "account_id": economic_book.account_id,
+        "environment": economic_book.environment,
+        "provider_execution_id": plan.provider_execution_id,
+        "request_digest": request_digest,
+        "request": request,
+    }
+    envelope = {
+        "event_id": event_id,
+        "event_type": _PROVIDER_FILL_BINDING_EVENT_TYPE,
+        "aggregate_type": _PROVIDER_FILL_BINDING_AGGREGATE_TYPE,
+        "aggregate_id": aggregate_id,
+        "aggregate_version": "1",
+        "committed_at": _instant_text(committed_at, name="committed_at"),
+        "payload": payload,
+        "payload_hash": payload_digest(payload),
+    }
+    return PreparedProviderFillBinding(
+        aggregate_id=aggregate_id,
+        envelope=envelope,
+        request=request,
+        result={
+            "binding_event_id": event_id,
+            "plan_digest": plan.plan_digest,
+        },
+        aggregate_version=1,
+    )
 
 
 class DurableProviderEconomicBook(ScopedEconomicBook):
@@ -536,6 +722,7 @@ def commit_economic_batch_with_reservation_consumption(
     committed_at: str | None = None,
     settlement_book: DurableSettlementBook | None = None,
     settlement_obligations: Iterable[SettlementObligation] = (),
+    provider_fill_binding: PreparedProviderFillBinding | None = None,
 ) -> bool:
     """Atomically commit canonical economics and reservation consumption.
 
@@ -563,6 +750,24 @@ def commit_economic_batch_with_reservation_consumption(
         raise ValueError(
             "economic and reservation books must share account/environment scope"
         )
+
+    if provider_fill_binding is not None:
+        if not isinstance(provider_fill_binding, PreparedProviderFillBinding):
+            raise TypeError(
+                "provider_fill_binding must be PreparedProviderFillBinding or None"
+            )
+        binding_request = provider_fill_binding.request
+        if (
+            binding_request.get("provider_id") != economic_book.provider_id
+            or binding_request.get("account_id") != economic_book.account_id
+            or binding_request.get("environment") != economic_book.environment
+            or binding_request.get("reservation_id") != _text(
+                reservation_id, name="reservation_id"
+            )
+        ):
+            raise AccountingConflict(
+                "provider fill financial binding scope does not match atomic fill"
+            )
 
     settlement_items = tuple(settlement_obligations)
     if settlement_book is None and settlement_items:
@@ -689,6 +894,8 @@ def commit_economic_batch_with_reservation_consumption(
     ]
     if settlement_plan is not None:
         commit_states.append(settlement_plan.already_committed)
+    if provider_fill_binding is not None:
+        commit_states.append(provider_fill_binding.already_committed)
     if any(commit_states) and not all(commit_states):
         reservation_book.refresh()
         economic_book.refresh()
@@ -710,6 +917,13 @@ def commit_economic_batch_with_reservation_consumption(
         raise AccountingConflict(
             "fresh atomic fill settlement plan is missing durable event"
         )
+    if (
+        provider_fill_binding is not None
+        and provider_fill_binding.envelope is None
+    ):
+        raise AccountingConflict(
+            "fresh provider fill financial binding is missing durable event"
+        )
 
     request = {
         "schema_version": "1.0.0",
@@ -721,12 +935,22 @@ def commit_economic_batch_with_reservation_consumption(
         "settlement": (
             None if settlement_plan is None else settlement_plan.request
         ),
+        "provider_fill_binding": (
+            None
+            if provider_fill_binding is None
+            else provider_fill_binding.request
+        ),
     }
     result = {
         "reservation": reservation_plan.snapshot_payload,
         "economic_batch": economic_plan.result,
         "settlement": (
             None if settlement_plan is None else settlement_plan.result
+        ),
+        "provider_fill_binding": (
+            None
+            if provider_fill_binding is None
+            else provider_fill_binding.result
         ),
     }
     command_identity = str(
@@ -763,6 +987,9 @@ def commit_economic_batch_with_reservation_consumption(
                 0
                 if settlement_plan is None
                 else settlement_plan.aggregate_version,
+                0
+                if provider_fill_binding is None
+                else provider_fill_binding.aggregate_version,
             ),
             events=(
                 [
@@ -773,6 +1000,11 @@ def commit_economic_batch_with_reservation_consumption(
                     []
                     if settlement_plan is None
                     else [(settlement_plan.envelope, None)]
+                )
+                + (
+                    []
+                    if provider_fill_binding is None
+                    else [(provider_fill_binding.envelope, None)]
                 )
             ),
         )
@@ -840,6 +1072,18 @@ def commit_provider_fill_with_reservation_consumption(
         )
 
     caller_idempotency = _text(idempotency_key, name="idempotency_key")
+    when = (
+        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        if committed_at is None
+        else _instant_text(committed_at, name="committed_at")
+    )
+    binding = _prepare_provider_fill_binding(
+        economic_book,
+        plan=plan,
+        projected_fill=projected_fill,
+        provider_fill=provider_fill,
+        committed_at=when,
+    )
     return commit_economic_batch_with_reservation_consumption(
         economic_book,
         reservation_book,
@@ -848,9 +1092,10 @@ def commit_provider_fill_with_reservation_consumption(
         reservation_id=rid,
         usage=plan.usage,
         transactions=(plan.transaction,),
-        committed_at=committed_at,
+        committed_at=when,
         settlement_book=settlement_book,
         settlement_obligations=settlement_obligations,
+        provider_fill_binding=binding,
     )
 
 

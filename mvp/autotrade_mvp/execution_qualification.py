@@ -118,6 +118,7 @@ def validate_execution_qualification(
     asset_class: str,
     instrument_version: str,
     protocol_sha256: str,
+    evidence_sha256: str,
     purpose: str,
 ) -> None:
     """Fail closed unless every frozen qualification dimension matches exactly."""
@@ -138,6 +139,7 @@ def validate_execution_qualification(
     if normalized_purpose not in _PURPOSES:
         raise ExecutionQualificationError("unsupported purpose")
     normalized_protocol = _sha256(protocol_sha256, name="protocol_sha256")
+    normalized_evidence = _sha256(evidence_sha256, name="evidence_sha256")
 
     failures: list[str] = []
     if qualification.asset_class != normalized_asset:
@@ -154,6 +156,8 @@ def validate_execution_qualification(
         failures.append("calibration_sha256")
     if qualification.protocol_sha256 != normalized_protocol:
         failures.append("protocol_sha256")
+    if qualification.evidence_sha256 != normalized_evidence:
+        failures.append("evidence_sha256")
     if (
         qualification.instrument_version is not None
         and qualification.instrument_version != normalized_instrument
@@ -178,6 +182,7 @@ def simulate_qualified_execution(
     qualification: ExecutionModelQualification,
     asset_class: str,
     protocol_sha256: str,
+    evidence_sha256: str,
     purpose: str = "REPLAY",
 ) -> SimulatedExecution:
     """Run the existing simulator only after exact qualification succeeds.
@@ -197,6 +202,7 @@ def simulate_qualified_execution(
         asset_class=asset_class,
         instrument_version=order.instrument_version,
         protocol_sha256=protocol_sha256,
+        evidence_sha256=evidence_sha256,
         purpose=purpose,
     )
     result = simulate_execution(order, observation, model)

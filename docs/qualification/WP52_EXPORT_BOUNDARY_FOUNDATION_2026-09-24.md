@@ -11,6 +11,8 @@ lineages.
 
 - output format is fixed to inert UTF-8 JSON; arbitrary bytes, pickle/model
   objects, HTML and executable extensions are rejected;
+- atomic publication rechecks explicit export permission and requires the same
+  rights identity captured during preparation;
 - export requires explicit `rights.export=true` and a non-empty rights ID;
 - nested credential/authorization/token/signature fields are redacted before
   serialized bytes are produced;

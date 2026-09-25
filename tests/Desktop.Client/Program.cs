@@ -358,15 +358,15 @@ internal static class Program
             pendingStore.Payload is not null,
             "uncertain command was not persisted before restart");
         Check.True(
-            !pendingStore.Payload.Contains(token, StringComparison.Ordinal),
+            !pendingStore.Payload!.Contains(token, StringComparison.Ordinal),
             "durable recovery record persisted the reusable bearer credential");
         Check.True(
-            pendingStore.Payload.Contains(
+            pendingStore.Payload!.Contains(
                 AuthenticatedEmergencyHostClient.PublicSessionReference(token),
                 StringComparison.Ordinal),
             "durable recovery record did not persist the canonical public session reference");
         Check.True(
-            pendingStore.Payload.Contains("\"schema_version\":\"2\"", StringComparison.Ordinal),
+            pendingStore.Payload!.Contains("\"schema_version\":\"2\"", StringComparison.Ordinal),
             "durable recovery record was not upgraded to the bearer-free v2 schema");
 
         AuthenticatedEmergencyHostClient restartedProcess = new(

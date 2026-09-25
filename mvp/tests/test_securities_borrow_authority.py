@@ -4,6 +4,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from mvp.autotrade_mvp.authority import (
+    AuthoritativeRiskSnapshot,
     AuthorityConflict,
     AuthorityPolicy,
     AuthorityService,
@@ -213,6 +214,37 @@ def _authority(store):
     return service
 
 
+def _install_risk_resolver(authority, *, context, risk_policy):
+    def resolve(request):
+        return AuthoritativeRiskSnapshot(
+            context=context,
+            risk_policy=risk_policy,
+            account_id=request.account_id,
+            environment=request.environment,
+            provider_id=request.provider_id,
+            instrument_version=request.instrument_version,
+            capability_snapshot_id=request.capability_snapshot_id,
+            reconciliation_checkpoint_event_id=request.reconciliation_checkpoint_event_id,
+            journal_sequence_cut=request.journal_sequence_cut,
+            reservation_version=request.reservation_version,
+            reservation_state_digest=request.reservation_state_digest,
+            authority_policy_id=request.authority_policy_id,
+            authority_policy_version=request.authority_policy_version,
+            evaluated_at=request.evaluated_at,
+            evidence_refs={
+                dimension: f"test:{dimension.lower()}"
+                for dimension in (
+                    "PORTFOLIO", "MARKET", "MARGIN", "POLICY",
+                    "RECONCILIATION", "CAPABILITY", "BORROW", "STRESS",
+                    "FX", "FACTORS", "LIQUIDITY", "LIQUIDATION",
+                    "SETTLEMENT", "OPTION_LIFECYCLE", "FUTURES_LIFECYCLE",
+                )
+            },
+        )
+
+    authority.risk_authority_resolver = resolve
+
+
 def _admit_short(
     authority,
     reservations,
@@ -225,6 +257,13 @@ def _admit_short(
     max_age_seconds="60",
 ):
     key = _borrow_key()
+    context = _risk_context(reserved=reserved)
+    risk_policy = _risk_policy()
+    _install_risk_resolver(
+        authority,
+        context=context,
+        risk_policy=risk_policy,
+    )
     return authority.admit(
         command_id=f"borrow-command-{suffix}",
         idempotency_key=f"borrow-idem-{suffix}",
@@ -247,8 +286,8 @@ def _admit_short(
             expected_state_version=1,
             instrument_type="EQUITY",
         ),
-        risk_context=_risk_context(reserved=reserved),
-        risk_policy=_risk_policy(),
+        risk_context=context,
+        risk_policy=risk_policy,
         risk_valid_until="2026-09-25T05:03:00Z",
         reservation_book=reservations,
         reservation_id=f"borrow-reservation-{suffix}",
@@ -526,6 +565,13 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                 account_id=ACCOUNT_ID,
             )
 
+            missing_context = _risk_context(reserved=None)
+            missing_policy = _risk_policy()
+            _install_risk_resolver(
+                authority,
+                context=missing_context,
+                risk_policy=missing_policy,
+            )
             with self.assertRaisesRegex(
                 AuthorityConflict,
                 "exact scoped borrow reservation",
@@ -552,8 +598,8 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                         expected_state_version=1,
                         instrument_type="EQUITY",
                     ),
-                    risk_context=_risk_context(reserved=None),
-                    risk_policy=_risk_policy(),
+                    risk_context=missing_context,
+                    risk_policy=missing_policy,
                     risk_valid_until="2026-09-25T05:03:00Z",
                     reservation_book=reservations,
                     reservation_id="missing-borrow-reservation",
@@ -588,6 +634,16 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                 )
             self.assertEqual(reservations.total_reserved(key), Decimal("0"))
 
+            cover_context = _risk_context(
+                reserved=None,
+                borrow_available=False,
+            )
+            cover_policy = _risk_policy()
+            _install_risk_resolver(
+                authority,
+                context=cover_context,
+                risk_policy=cover_policy,
+            )
             cover = authority.admit(
                 command_id="cover-command",
                 idempotency_key="cover-idem",
@@ -610,11 +666,8 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                     expected_state_version=1,
                     instrument_type="EQUITY",
                 ),
-                risk_context=_risk_context(
-                    reserved=None,
-                    borrow_available=False,
-                ),
-                risk_policy=_risk_policy(),
+                risk_context=cover_context,
+                risk_policy=cover_policy,
                 risk_valid_until="2026-09-25T05:03:00Z",
                 reservation_book=reservations,
                 reservation_id="cover-reservation",

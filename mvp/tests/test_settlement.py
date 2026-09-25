@@ -2,14 +2,24 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 import unittest
 
+from mvp.autotrade_mvp.accounting import (
+    EconomicBook,
+    book_equity_fill,
+    book_external_cash_flow,
+    reverse_transaction,
+)
 from mvp.autotrade_mvp.reservations import ReservationBook
 from mvp.autotrade_mvp.settlement import (
+    BuyingPowerEvidence,
+    SettlementAccountScope,
     SettlementBook,
     SettlementCheckpoint,
     SettlementConflict,
     SettlementEvidence,
     SettlementObligation,
+    SettlementRuleBinding,
     equity_cash_obligation,
+    equity_cash_obligation_from_transaction,
 )
 
 
@@ -758,6 +768,274 @@ class SettlementBookTests(unittest.TestCase):
                 as_of="2026-09-22",
                 settlement_evidence={"cash-date": evidence("cash-date", "provider:statement:date", day=22)},
             )
+
+
+
+class EconomicSettlementCapitalTests(unittest.TestCase):
+    def setUp(self):
+        self.scope = SettlementAccountScope(
+            provider_id="TEST_PROVIDER",
+            account_id="cash-1",
+            environment="PAPER",
+        )
+
+    def rule(
+        self,
+        *,
+        version="1",
+        effective_from=date(2026, 9, 1),
+        effective_to=None,
+    ):
+        return SettlementRuleBinding(
+            rule_id="cash-equity-settlement",
+            rule_version=version,
+            scope=self.scope,
+            instrument_version=f"ABC@{version}",
+            settlement_currency="USD",
+            effective_from=effective_from,
+            effective_to=effective_to,
+            evidence_refs=(f"instrument:ABC@{version}", f"rule:{version}"),
+        )
+
+    def funded_book(self):
+        book = EconomicBook()
+        book.append(
+            book_external_cash_flow(
+                transaction_id="deposit",
+                cause_event_id="deposit:1",
+                currency="USD",
+                amount="1000",
+            )
+        )
+        return book
+
+    def fill(self, *, transaction_id, side, at="2026-09-24T14:00:00Z"):
+        return book_equity_fill(
+            transaction_id=transaction_id,
+            cause_event_id=f"event:{transaction_id}",
+            instrument="ABC",
+            settlement_currency="USD",
+            side=side,
+            quantity="1",
+            price="100",
+            economic_effective_at=at,
+            economic_order_key=transaction_id,
+            observed_at=at,
+        )
+
+    def bound(self, transaction, *, obligation_id, settlement_day=25, rule=None):
+        return equity_cash_obligation_from_transaction(
+            transaction,
+            obligation_id=obligation_id,
+            instrument="ABC",
+            settlement_currency="USD",
+            settlement_date=date(2026, 9, settlement_day),
+            rule_binding=rule or self.rule(),
+        )
+
+    def test_sell_is_economic_cash_but_not_available_before_settlement(self):
+        book = self.funded_book()
+        sold = self.fill(transaction_id="sell-1", side="SELL")
+        book.append(sold)
+        obligation = self.bound(sold, obligation_id="ob-sell-1")
+
+        settlement = SettlementBook.from_economic_book(
+            economic_book=book,
+            obligations=(obligation,),
+        )
+        snapshot = settlement.snapshot("USD")
+        self.assertEqual(book.cash("USD"), Decimal("1100"))
+        self.assertEqual(snapshot.settled_cash, Decimal("1000"))
+        self.assertEqual(snapshot.unsettled_receivable, Decimal("100"))
+        capital = settlement.available_capital(
+            scope=self.scope,
+            currency="USD",
+            as_of=datetime(2026, 9, 24, 18, tzinfo=timezone.utc),
+        )
+        self.assertEqual(capital.available_cash, Decimal("1000"))
+        self.assertEqual(capital.available_capital, Decimal("1000"))
+        self.assertFalse(capital.blocks_new_risk)
+
+    def test_provider_settlement_releases_sell_proceeds_once_across_restart(self):
+        book = self.funded_book()
+        sold = self.fill(transaction_id="sell-restart", side="SELL")
+        book.append(sold)
+        obligation = self.bound(sold, obligation_id="ob-sell-restart")
+        settled = evidence(
+            "ob-sell-restart",
+            "provider:settlement:sell-restart",
+            day=25,
+            hour=15,
+        )
+
+        rebuilt = SettlementBook.from_economic_book(
+            economic_book=book,
+            obligations=(obligation,),
+            settled_obligation_evidence={"ob-sell-restart": settled},
+        )
+        self.assertEqual(rebuilt.available_to_spend("USD"), Decimal("1100"))
+        checkpoint = rebuilt.checkpoint("after-settlement")
+        restored = SettlementBook.from_history(
+            checkpoint=checkpoint,
+            obligations=rebuilt.obligations,
+            settled_obligation_evidence=rebuilt.settled_obligation_evidence,
+        )
+        self.assertEqual(restored.available_to_spend("USD"), Decimal("1100"))
+        self.assertFalse(
+            restored.settle(
+                "ob-sell-restart",
+                as_of=date(2026, 9, 26),
+                settlement_evidence=settled,
+            )
+        )
+        self.assertEqual(restored.available_to_spend("USD"), Decimal("1100"))
+
+    def test_buy_creates_payable_and_consumes_availability_immediately(self):
+        book = self.funded_book()
+        bought = self.fill(transaction_id="buy-1", side="BUY")
+        book.append(bought)
+        obligation = self.bound(bought, obligation_id="ob-buy-1")
+        settlement = SettlementBook.from_economic_book(
+            economic_book=book,
+            obligations=(obligation,),
+        )
+        snapshot = settlement.snapshot("USD")
+        self.assertEqual(book.cash("USD"), Decimal("900"))
+        self.assertEqual(snapshot.settled_cash, Decimal("1000"))
+        self.assertEqual(snapshot.unsettled_payable, Decimal("100"))
+        self.assertEqual(settlement.available_to_spend("USD"), Decimal("900"))
+
+    def test_margin_buying_power_is_separate_evidence_not_settled_cash(self):
+        book = self.funded_book()
+        bought = self.fill(transaction_id="buy-margin", side="BUY")
+        book.append(bought)
+        settlement = SettlementBook.from_economic_book(
+            economic_book=book,
+            obligations=(self.bound(bought, obligation_id="ob-margin"),),
+        )
+        buying_power = BuyingPowerEvidence(
+            evidence_id="bp-1",
+            scope=self.scope,
+            currency="USD",
+            additional_credit="250",
+            observed_at=datetime(2026, 9, 24, 15, tzinfo=timezone.utc),
+            valid_until=datetime(2026, 9, 24, 17, tzinfo=timezone.utc),
+            evidence_refs=("provider:buying-power:1",),
+        )
+        capital = settlement.available_capital(
+            scope=self.scope,
+            currency="USD",
+            as_of=datetime(2026, 9, 24, 16, tzinfo=timezone.utc),
+            buying_power_evidence=buying_power,
+            require_buying_power_evidence=True,
+        )
+        self.assertEqual(capital.settled_cash, Decimal("1000"))
+        self.assertEqual(capital.available_cash, Decimal("900"))
+        self.assertEqual(capital.additional_buying_power, Decimal("250"))
+        self.assertEqual(capital.available_capital, Decimal("1150"))
+
+        stale = settlement.available_capital(
+            scope=self.scope,
+            currency="USD",
+            as_of=datetime(2026, 9, 24, 17, tzinfo=timezone.utc),
+            buying_power_evidence=buying_power,
+            require_buying_power_evidence=True,
+        )
+        self.assertEqual(stale.additional_buying_power, Decimal("0"))
+        self.assertTrue(stale.blocks_new_risk)
+
+    def test_rule_versions_apply_only_to_trades_in_their_effective_window(self):
+        old_rule = self.rule(
+            version="1",
+            effective_from=date(2026, 9, 1),
+            effective_to=date(2026, 9, 25),
+        )
+        new_rule = self.rule(
+            version="2",
+            effective_from=date(2026, 9, 25),
+        )
+        old_fill = self.fill(
+            transaction_id="old-rule",
+            side="SELL",
+            at="2026-09-24T14:00:00Z",
+        )
+        new_fill = self.fill(
+            transaction_id="new-rule",
+            side="SELL",
+            at="2026-09-25T14:00:00Z",
+        )
+        old_obligation = self.bound(
+            old_fill, obligation_id="old-ob", rule=old_rule
+        )
+        new_obligation = self.bound(
+            new_fill, obligation_id="new-ob", rule=new_rule, settlement_day=28
+        )
+        self.assertNotEqual(
+            old_obligation.rule_binding.digest,
+            new_obligation.rule_binding.digest,
+        )
+        with self.assertRaisesRegex(SettlementConflict, "not effective"):
+            self.bound(
+                old_fill,
+                obligation_id="wrong-ob",
+                rule=new_rule,
+                settlement_day=28,
+            )
+
+    def test_overdue_missing_provider_settlement_is_unknown_and_blocks_risk(self):
+        book = self.funded_book()
+        sold = self.fill(transaction_id="sell-late", side="SELL")
+        book.append(sold)
+        settlement = SettlementBook.from_economic_book(
+            economic_book=book,
+            obligations=(self.bound(sold, obligation_id="ob-late"),),
+        )
+        capital = settlement.available_capital(
+            scope=self.scope,
+            currency="USD",
+            as_of=datetime(2026, 9, 26, 9, tzinfo=timezone.utc),
+        )
+        self.assertEqual(capital.overdue_obligation_ids, ("ob-late",))
+        self.assertTrue(capital.blocks_new_risk)
+        self.assertEqual(capital.available_cash, Decimal("1000"))
+
+    def test_bust_before_or_after_settlement_cannot_double_release_capital(self):
+        for settled_first in (False, True):
+            with self.subTest(settled_first=settled_first):
+                book = self.funded_book()
+                sold = self.fill(
+                    transaction_id=f"sell-bust-{settled_first}",
+                    side="SELL",
+                )
+                book.append(sold)
+                ob = self.bound(
+                    sold,
+                    obligation_id=f"ob-bust-{settled_first}",
+                )
+                history = {}
+                if settled_first:
+                    history[ob.obligation_id] = evidence(
+                        ob.obligation_id,
+                        f"provider:settlement:{settled_first}",
+                        day=25,
+                        hour=15,
+                    )
+                book.append(
+                    reverse_transaction(
+                        sold,
+                        transaction_id=f"bust-{settled_first}",
+                        cause_event_id=f"bust-event-{settled_first}",
+                        observed_at="2026-09-25T16:00:00Z",
+                    )
+                )
+                rebuilt = SettlementBook.from_economic_book(
+                    economic_book=book,
+                    obligations=(ob,),
+                    settled_obligation_evidence=history,
+                )
+                self.assertEqual(book.cash("USD"), Decimal("1000"))
+                self.assertEqual(rebuilt.available_to_spend("USD"), Decimal("1000"))
+                self.assertEqual(rebuilt.obligations, ())
 
 
 if __name__ == "__main__":

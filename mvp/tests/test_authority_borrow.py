@@ -26,6 +26,10 @@ from mvp.autotrade_mvp.reconciliation_journal import (
     record_reconciliation_checkpoint,
 )
 from mvp.autotrade_mvp.risk import RiskContext, RiskIntent, RiskPolicy
+from mvp.tests.borrow_evidence_helpers import (
+    EvidencedBorrowJournal,
+    artifact_store_for,
+)
 
 
 INSTRUMENT_ID = "11111111-1111-4111-8111-111111111111"
@@ -156,7 +160,7 @@ def borrow_resource():
 
 def record_locate(store, *, available="10"):
     resource = borrow_resource()
-    journal = BorrowLifecycleJournal(store, resource)
+    journal = EvidencedBorrowJournal(store, resource)
     journal.record_locate(
         BorrowLocateEvidence(
             resource=resource,
@@ -175,7 +179,7 @@ def record_locate(store, *, available="10"):
 
 def record_loan(store, *, borrowed):
     resource = borrow_resource()
-    journal = BorrowLifecycleJournal(store, resource)
+    journal = EvidencedBorrowJournal(store, resource)
     journal.record_loan(
         BorrowLoanEvidence(
             resource=resource,
@@ -236,7 +240,10 @@ def admit(
 class AuthorityBorrowTests(unittest.TestCase):
     def make_runtime(self, directory):
         store = JournalStore(f"{directory}/journal.sqlite3")
-        authority = AuthorityService(store)
+        authority = AuthorityService(
+            store,
+            evidence_artifact_store=artifact_store_for(store),
+        )
         authority.register_policy(policy())
         reservations = DurableReservationBook(
             store,
@@ -380,7 +387,10 @@ class AuthorityBorrowTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
             store = JournalStore(path)
-            authority = AuthorityService(store)
+            authority = AuthorityService(
+            store,
+            evidence_artifact_store=artifact_store_for(store),
+        )
             authority.register_policy(policy())
             reservations = DurableReservationBook(
                 store,
@@ -399,7 +409,10 @@ class AuthorityBorrowTests(unittest.TestCase):
             self.assertEqual(first.outcome, "ADMITTED")
 
             restarted_store = JournalStore(path)
-            restarted_authority = AuthorityService(restarted_store)
+            restarted_authority = AuthorityService(
+                restarted_store,
+                evidence_artifact_store=artifact_store_for(restarted_store),
+            )
             restarted_reservations = DurableReservationBook(
                 restarted_store,
                 environment=ENVIRONMENT,

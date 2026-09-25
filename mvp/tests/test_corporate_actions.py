@@ -4,6 +4,7 @@ import unittest
 
 from mvp.autotrade_mvp.corporate_actions import (
     CorporateActionBook,
+    CorporateActionCheckpoint,
     CorporateEvent,
     EquityState,
     accrue_borrow_financing,
@@ -396,6 +397,141 @@ class CorporateSettlementTests(unittest.TestCase):
         history = book.events
         self.assertEqual(history, (split, dividend))
         self.assertIsInstance(history, tuple)
+
+    def test_checkpoint_plus_full_history_does_not_double_apply_dividend(self):
+        current = instrument()
+        registry = InstrumentRegistry(versions=(current,))
+        dividend = corporate_event(
+            event_id="checkpoint-dividend",
+            kind="CASH_DIVIDEND",
+            effective_date=date(2026, 2, 1),
+            source_revision="provider:r1",
+            payload={"per_share": "1.25", "currency": "USD"},
+        )
+        running = CorporateActionBook(
+            state(),
+            instrument_version=current,
+            registry=registry,
+        )
+        first = running.apply(dividend)
+        self.assertEqual(first.after.unsettled_cash, Decimal("12.50"))
+        checkpoint = running.checkpoint("after-dividend")
+
+        restored = CorporateActionBook.from_checkpoint(
+            checkpoint,
+            registry=registry,
+            events=running.events,
+        )
+        self.assertEqual(restored.state, running.state)
+        self.assertEqual(restored.state.unsettled_cash, Decimal("12.50"))
+        self.assertEqual(restored.applied_event_ids, ("checkpoint-dividend",))
+        retry = restored.apply(dividend)
+        self.assertEqual(retry, first)
+        self.assertEqual(restored.state.unsettled_cash, Decimal("12.50"))
+
+    def test_checkpoint_replays_only_strict_suffix(self):
+        current = instrument()
+        registry = InstrumentRegistry(versions=(current,))
+        split = corporate_event(
+            event_id="checkpoint-split",
+            kind="SPLIT",
+            effective_date=date(2026, 1, 2),
+            source_revision="provider:r1",
+            payload={"numerator": 2, "denominator": 1},
+        )
+        dividend = corporate_event(
+            event_id="checkpoint-later-dividend",
+            kind="CASH_DIVIDEND",
+            effective_date=date(2026, 1, 3),
+            source_revision="provider:r2",
+            payload={"per_share": "1", "currency": "USD"},
+        )
+
+        running = CorporateActionBook(
+            state(),
+            instrument_version=current,
+            registry=registry,
+        )
+        running.apply(split)
+        checkpoint = running.checkpoint("after-split")
+        running.apply(dividend)
+
+        restored = CorporateActionBook.from_checkpoint(
+            checkpoint,
+            registry=registry,
+            events=running.events,
+        )
+        self.assertEqual(restored.state, running.state)
+        self.assertEqual(restored.state.quantity, Decimal("20"))
+        self.assertEqual(restored.state.unsettled_cash, Decimal("20"))
+        self.assertEqual(
+            restored.applied_event_ids,
+            ("checkpoint-split", "checkpoint-later-dividend"),
+        )
+
+    def test_checkpoint_rejects_changed_or_non_prefix_history_before_replay(self):
+        current = instrument()
+        registry = InstrumentRegistry(versions=(current,))
+        original = corporate_event(
+            event_id="checkpoint-prefix",
+            kind="SPLIT",
+            effective_date=date(2026, 1, 2),
+            source_revision="provider:r1",
+            payload={"numerator": 2, "denominator": 1},
+        )
+        running = CorporateActionBook(
+            state(),
+            instrument_version=current,
+            registry=registry,
+        )
+        running.apply(original)
+        checkpoint = running.checkpoint("prefix")
+
+        changed = corporate_event(
+            event_id="checkpoint-prefix",
+            kind="SPLIT",
+            effective_date=date(2026, 1, 2),
+            source_revision="provider:r2",
+            payload={"numerator": 3, "denominator": 1},
+        )
+        with self.assertRaisesRegex(ValueError, "exact retained-history prefix"):
+            CorporateActionBook.from_checkpoint(
+                checkpoint,
+                registry=registry,
+                events=(changed,),
+            )
+        self.assertEqual(checkpoint.state.quantity, Decimal("20"))
+
+        with self.assertRaisesRegex(ValueError, "unique event identities"):
+            CorporateActionBook.from_checkpoint(
+                checkpoint,
+                registry=registry,
+                events=(original, original),
+            )
+
+    def test_checkpoint_validation_rejects_inconsistent_transition_state(self):
+        current = instrument()
+        registry = InstrumentRegistry(versions=(current,))
+        running = CorporateActionBook(
+            state(),
+            instrument_version=current,
+            registry=registry,
+        )
+        event = corporate_event(
+            event_id="checkpoint-chain",
+            kind="SPLIT",
+            effective_date=date(2026, 1, 2),
+            source_revision="provider:r1",
+            payload={"numerator": 2, "denominator": 1},
+        )
+        transition = running.apply(event)
+        with self.assertRaisesRegex(ValueError, "does not match final"):
+            CorporateActionCheckpoint(
+                checkpoint_id="tampered",
+                state=state(),
+                instrument_version=current,
+                records=((event, transition),),
+            )
 
     def test_corporate_event_rejects_duplicate_normalized_payload_keys(self):
         with self.assertRaisesRegex(ValueError, "unique after normalization"):

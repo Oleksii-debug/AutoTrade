@@ -269,6 +269,64 @@ class Transition:
     reason: str
 
 
+@dataclass(frozen=True)
+class CorporateActionCheckpoint:
+    """Exact corporate-action restart boundary.
+
+    State already includes every transition in records. Restoring from this
+    checkpoint must therefore replay only a retained-history suffix.
+    """
+
+    checkpoint_id: str
+    state: EquityState
+    instrument_version: InstrumentVersion
+    records: tuple[tuple[CorporateEvent, Transition], ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "checkpoint_id",
+            _text(self.checkpoint_id, name="checkpoint_id"),
+        )
+        if not isinstance(self.state, EquityState):
+            raise TypeError("checkpoint state must be EquityState")
+        if not isinstance(self.instrument_version, InstrumentVersion):
+            raise TypeError(
+                "checkpoint instrument_version must be InstrumentVersion"
+            )
+
+        seen: set[str] = set()
+        previous_after: EquityState | None = None
+        for record in self.records:
+            if (
+                not isinstance(record, tuple)
+                or len(record) != 2
+                or not isinstance(record[0], CorporateEvent)
+                or not isinstance(record[1], Transition)
+            ):
+                raise TypeError(
+                    "checkpoint records must contain CorporateEvent/Transition pairs"
+                )
+            event, transition = record
+            if event.event_id in seen:
+                raise ValueError("checkpoint contains duplicate corporate event identity")
+            if transition.event_id != event.event_id:
+                raise ValueError(
+                    "checkpoint transition identity does not match corporate event"
+                )
+            if previous_after is not None and transition.before != previous_after:
+                raise ValueError(
+                    "checkpoint transition chain is not contiguous"
+                )
+            previous_after = transition.after
+            seen.add(event.event_id)
+
+        if self.records and self.records[-1][1].after != self.state:
+            raise ValueError(
+                "checkpoint state does not match final corporate transition"
+            )
+
+
 class CorporateActionBook:
     def __init__(
         self,
@@ -355,6 +413,66 @@ class CorporateActionBook:
             ),
         )
         for event in ordered:
+            book.apply(event)
+        return book
+
+    def checkpoint(self, checkpoint_id: str) -> CorporateActionCheckpoint:
+        """Capture state plus the exact history prefix already reflected in it."""
+
+        return CorporateActionCheckpoint(
+            checkpoint_id=checkpoint_id,
+            state=self.state,
+            instrument_version=self.instrument_version,
+            records=tuple(self._events.values()),
+        )
+
+    @classmethod
+    def from_checkpoint(
+        cls,
+        checkpoint: CorporateActionCheckpoint,
+        *,
+        registry: InstrumentRegistry,
+        events: Iterable[CorporateEvent],
+    ) -> "CorporateActionBook":
+        """Restore checkpoint state and replay only the strict retained suffix."""
+
+        if not isinstance(checkpoint, CorporateActionCheckpoint):
+            raise TypeError("checkpoint must be CorporateActionCheckpoint")
+        materialized = tuple(events)
+        if not all(isinstance(event, CorporateEvent) for event in materialized):
+            raise TypeError("events must contain CorporateEvent values")
+        event_ids = tuple(event.event_id for event in materialized)
+        if len(set(event_ids)) != len(event_ids):
+            raise ValueError(
+                "retained corporate history must contain unique event identities"
+            )
+
+        prefix_records = checkpoint.records
+        prefix_events = tuple(event for event, _transition in prefix_records)
+        if len(materialized) < len(prefix_events):
+            raise ValueError(
+                "retained corporate history is shorter than checkpoint prefix"
+            )
+        if materialized[: len(prefix_events)] != prefix_events:
+            raise ValueError(
+                "checkpoint corporate history is not the exact retained-history prefix"
+            )
+
+        book = cls(
+            checkpoint.state,
+            instrument_version=checkpoint.instrument_version,
+            registry=registry,
+        )
+        book._events = {
+            event.event_id: (event, transition)
+            for event, transition in prefix_records
+        }
+        if prefix_events:
+            last = prefix_events[-1]
+            book._last_effective_date = last.effective_date
+            book._last_source_sequence = last.source_sequence
+
+        for event in materialized[len(prefix_events) :]:
             book.apply(event)
         return book
 

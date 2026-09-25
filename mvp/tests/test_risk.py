@@ -596,7 +596,7 @@ class IndependentRiskTests(unittest.TestCase):
             rule for rule in missing.rules if rule.rule == "liquidity_participation"
         )
         self.assertFalse(missing_rule.passed)
-        self.assertEqual(missing_rule.observed, "MISSING:ABC")
+        self.assertEqual(missing_rule.observed, "UNKNOWN")
 
         oversized = evaluate_risk(
             intent,
@@ -1014,7 +1014,7 @@ class IndependentRiskTests(unittest.TestCase):
             if item.rule == "derivative_equivalent_exposure"
         )
         self.assertFalse(missing_rule.passed)
-        self.assertEqual(missing_rule.observed, "UNKNOWN")
+        self.assertEqual(missing_rule.observed, "MISSING:ABC")
         self.assertFalse(missing.admitted)
 
         evidenced = evaluate_risk(

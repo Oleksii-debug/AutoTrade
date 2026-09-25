@@ -1244,7 +1244,7 @@ class AuthorityService:
             "reservation": (
                 reservation_plan.request if reservation_plan is not None else None
             ),
-            "confirmation_id": confirmation_id,
+            "confirmation_id": candidate.confirmation_id,
             "risk_reducing": risk_reducing,
         }
         request_fingerprint = payload_digest(request)

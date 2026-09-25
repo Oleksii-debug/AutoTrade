@@ -488,9 +488,9 @@ def parse_executions(
             )
 
         fill = ProviderFillEvidence.create(
-        fill =     provider_id="BYBIT",
-        fill =     account_id=account_id,
-        fill =     environment=environment,
+            provider_id="BYBIT",
+            account_id=account_id,
+            environment=environment,
             provider_execution_id=execution_id,
             client_order_id=client_id,
             instrument=instrument,

@@ -1,0 +1,30 @@
+name: reconvergence-integrity
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Guard pull-request repository tree
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: >-
+          python control/tools/reconvergence_integrity.py
+          --base "${{ github.event.pull_request.base.sha }}"
+          --head "${{ github.event.pull_request.head.sha }}"
+      - name: Run guard regression tests
+        run: python -m unittest tests.Control.test_reconvergence_integrity -v

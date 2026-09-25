@@ -1582,6 +1582,10 @@ def allocate_evidence_bound_objective_targets(
                 f"valuation desired_notional currency mismatch for {symbol}"
             )
         if quote_currency == base_currency:
+            if valuation_fx_rate != Decimal("1"):
+                raise ValueError(
+                    f"identity-currency valuation for {symbol} must use unit FX"
+                )
             monetary_rate = Decimal("1")
         else:
             monetary_rate = valuation_fx_rate

@@ -1,14 +1,30 @@
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 import unittest
 
 from mvp.autotrade_mvp.reservations import ReservationBook
 from mvp.autotrade_mvp.settlement import (
     SettlementBook,
+    SettlementCheckpoint,
     SettlementConflict,
+    SettlementEvidence,
     SettlementObligation,
     equity_cash_obligation,
 )
+
+
+def evidence(
+    obligation_id: str,
+    ref: str,
+    *,
+    day: int = 25,
+    hour: int = 12,
+) -> SettlementEvidence:
+    return SettlementEvidence(
+        obligation_id=obligation_id,
+        evidence_ref=ref,
+        observed_at=datetime(2026, 9, day, hour, tzinfo=timezone.utc),
+    )
 
 
 class SettlementBookTests(unittest.TestCase):
@@ -96,9 +112,9 @@ class SettlementBookTests(unittest.TestCase):
         self.assertEqual(before.economic_cash, Decimal("799"))
         self.assertEqual(book.available_to_spend("USD"), Decimal("799"))
         with self.assertRaisesRegex(SettlementConflict, "before contractual"):
-            book.settle("buy-1", as_of=date(2026, 9, 24), settlement_evidence_ref="provider:cash:buy-1")
-        self.assertTrue(book.settle("buy-1", as_of=date(2026, 9, 25), settlement_evidence_ref="provider:cash:buy-1"))
-        self.assertFalse(book.settle("buy-1", as_of=date(2026, 9, 26), settlement_evidence_ref="provider:cash:buy-1"))
+            book.settle("buy-1", as_of=date(2026, 9, 24), settlement_evidence=evidence("buy-1", "provider:cash:buy-1", day=24))
+        self.assertTrue(book.settle("buy-1", as_of=date(2026, 9, 25), settlement_evidence=evidence("buy-1", "provider:cash:buy-1", day=25)))
+        self.assertFalse(book.settle("buy-1", as_of=date(2026, 9, 26), settlement_evidence=evidence("buy-1", "provider:cash:buy-1", day=25)))
         after = book.snapshot("USD")
         self.assertEqual(after.settled_cash, Decimal("799"))
         self.assertEqual(after.unsettled_payable, Decimal("0"))
@@ -115,8 +131,8 @@ class SettlementBookTests(unittest.TestCase):
             book.settle_due(
                 as_of=date(2026, 9, 22),
                 settlement_evidence={
-                    "a": "provider:cash:a",
-                    "b": "provider:cash:b",
+                    "a": evidence("a", "provider:cash:a", day=22),
+                    "b": evidence("b", "provider:cash:b", day=22),
                 },
             ),
             ("a", "b"),
@@ -294,7 +310,7 @@ class SettlementBookTests(unittest.TestCase):
             book.settle(
                 "buy",
                 as_of=date(2026, 9, 25),
-                settlement_evidence_ref="provider:cash:buy",
+                settlement_evidence=evidence("buy", "provider:cash:buy", day=25),
             )
         )
         snapshot = book.snapshot("USD")
@@ -302,7 +318,7 @@ class SettlementBookTests(unittest.TestCase):
         restored = SettlementBook(
             settled_cash={"USD": snapshot.settled_cash},
             obligations=(obligation,),
-            settled_obligation_evidence={"buy": "provider:cash:buy"},
+            settled_obligation_evidence={"buy": evidence("buy", "provider:cash:buy", day=25)},
         )
         self.assertTrue(restored.is_settled("buy"))
         self.assertEqual(restored.snapshot("USD"), snapshot)
@@ -311,7 +327,7 @@ class SettlementBookTests(unittest.TestCase):
             restored.settle(
                 "buy",
                 as_of=date(2026, 9, 26),
-                settlement_evidence_ref="provider:cash:buy",
+                settlement_evidence=evidence("buy", "provider:cash:buy", day=25),
             )
         )
 
@@ -319,7 +335,7 @@ class SettlementBookTests(unittest.TestCase):
         with self.assertRaisesRegex(SettlementConflict, "unknown obligation"):
             SettlementBook(
                 settled_cash={"USD": "100"},
-                settled_obligation_evidence={"missing": "provider:cash:missing"},
+                settled_obligation_evidence={"missing": evidence("missing", "provider:cash:missing", day=25)},
             )
 
 
@@ -336,8 +352,8 @@ class SettlementBookTests(unittest.TestCase):
                 settled_cash={"USD": "10"},
                 obligations=(obligation,),
                 settled_obligation_evidence={
-                    "cash-1": "provider:statement:1",
-                    " cash-1 ": "provider:statement:2",
+                    "cash-1": evidence("cash-1", "provider:statement:1", day=22),
+                    " cash-1 ": evidence("cash-1", "provider:statement:2", day=22),
                 },
             )
 
@@ -450,17 +466,17 @@ class SettlementBookTests(unittest.TestCase):
         with self.assertRaisesRegex(SettlementConflict, "unknown obligation"):
             book.settle_due(
                 as_of=date(2026, 9, 22),
-                settlement_evidence={"cash-typo": "provider:statement:1"},
+                settlement_evidence={"cash-typo": evidence("cash-typo", "provider:statement:1", day=22)},
             )
         with self.assertRaises(ValueError):
             book.settle_due(
                 as_of=date(2026, 9, 22),
-                settlement_evidence={"": "provider:statement:1"},
+                settlement_evidence={"": evidence("", "provider:statement:1", day=22)},
             )
         with self.assertRaises(ValueError):
             book.settle_due(
                 as_of=date(2026, 9, 22),
-                settlement_evidence={"cash-1": " "},
+                settlement_evidence={"cash-1": evidence("cash-1", " ", day=22)},
             )
 
     def test_settlement_retry_with_different_evidence_fails_closed(self):
@@ -479,14 +495,268 @@ class SettlementBookTests(unittest.TestCase):
             book.settle(
                 "cash-1",
                 as_of=date(2026, 9, 22),
-                settlement_evidence_ref="provider:statement:1",
+                settlement_evidence=evidence("cash-1", "provider:statement:1", day=22),
             )
         )
         with self.assertRaisesRegex(SettlementConflict, "different settlement evidence"):
             book.settle(
                 "cash-1",
                 as_of=date(2026, 9, 22),
-                settlement_evidence_ref="provider:statement:2",
+                settlement_evidence=evidence("cash-1", "provider:statement:2", day=22),
+            )
+
+
+    def test_history_replay_derives_cash_from_initial_balance_and_evidence(self):
+        obligation = SettlementObligation(
+            "buy-history",
+            "fill-history",
+            "USD",
+            Decimal("-201"),
+            date(2026, 9, 24),
+            date(2026, 9, 25),
+        )
+        running = SettlementBook(
+            settled_cash={"USD": "1000"},
+            obligations=(obligation,),
+        )
+        self.assertTrue(
+            running.settle(
+                "buy-history",
+                as_of=date(2026, 9, 25),
+                settlement_evidence=evidence("buy-history", "provider:statement:history", day=25),
+            )
+        )
+        self.assertEqual(running.snapshot("USD").settled_cash, Decimal("799"))
+
+        restored = SettlementBook.from_history(
+            checkpoint=SettlementCheckpoint.create(
+                checkpoint_id="opening-balance",
+                settled_cash={"USD": "1000"},
+                settled_obligation_evidence={},
+            ),
+            obligations=running.obligations,
+            settled_obligation_evidence=running.settled_obligation_evidence,
+        )
+        self.assertEqual(restored.snapshot("USD").settled_cash, Decimal("799"))
+        self.assertEqual(restored.available_to_spend("USD"), Decimal("799"))
+        self.assertEqual(
+            restored.settled_obligation_evidence,
+            {"buy-history": evidence("buy-history", "provider:statement:history", day=25)},
+        )
+        self.assertFalse(
+            restored.settle(
+                "buy-history",
+                as_of=date(2026, 9, 26),
+                settlement_evidence=evidence("buy-history", "provider:statement:history", day=25),
+            )
+        )
+
+    def test_history_replay_rejects_duplicate_normalized_evidence_ids(self):
+        obligation = SettlementObligation(
+            "cash-1",
+            "fill-1",
+            "USD",
+            Decimal("10"),
+            date(2026, 9, 20),
+            date(2026, 9, 22),
+        )
+        with self.assertRaisesRegex(
+            SettlementConflict,
+            "duplicate normalized obligation ids",
+        ):
+            SettlementBook.from_history(
+                checkpoint=SettlementCheckpoint.create(
+                    checkpoint_id="opening",
+                    settled_cash={"USD": "0"},
+                    settled_obligation_evidence={},
+                ),
+                obligations=(obligation,),
+                settled_obligation_evidence={
+                    "cash-1": evidence("cash-1", "provider:statement:1", day=22),
+                    " cash-1 ": evidence("cash-1", "provider:statement:1", day=22),
+                },
+            )
+
+    def test_delayed_settlement_evidence_is_not_backdated_or_spendable_early(self):
+        obligation = SettlementObligation(
+            "sale-delayed",
+            "fill-delayed",
+            "USD",
+            Decimal("50"),
+            date(2026, 9, 20),
+            date(2026, 9, 22),
+        )
+        book = SettlementBook(
+            settled_cash={"USD": "100"},
+            obligations=(obligation,),
+        )
+        delayed = evidence(
+            "sale-delayed",
+            "provider:statement:delayed",
+            day=24,
+            hour=15,
+        )
+        self.assertEqual(
+            book.settle_due(
+                as_of=date(2026, 9, 23),
+                settlement_evidence={"sale-delayed": delayed},
+            ),
+            (),
+        )
+        self.assertEqual(book.available_to_spend("USD"), Decimal("100"))
+        self.assertEqual(
+            book.settle_due(
+                as_of=date(2026, 9, 24),
+                settlement_evidence={"sale-delayed": delayed},
+            ),
+            ("sale-delayed",),
+        )
+        self.assertEqual(book.available_to_spend("USD"), Decimal("150"))
+        self.assertEqual(
+            book.settled_obligation_evidence["sale-delayed"].observed_at,
+            datetime(2026, 9, 24, 15, tzinfo=timezone.utc),
+        )
+
+    def test_settlement_evidence_requires_timezone_and_matching_identity(self):
+        with self.assertRaisesRegex(ValueError, "timezone-aware"):
+            SettlementEvidence(
+                obligation_id="x",
+                evidence_ref="provider:x",
+                observed_at=datetime(2026, 9, 22, 12),
+            )
+
+        obligation = SettlementObligation(
+            "x",
+            "fill-x",
+            "USD",
+            Decimal("10"),
+            date(2026, 9, 20),
+            date(2026, 9, 22),
+        )
+        book = SettlementBook(obligations=(obligation,))
+        with self.assertRaisesRegex(SettlementConflict, "does not match"):
+            book.settle(
+                "x",
+                as_of=date(2026, 9, 22),
+                settlement_evidence=evidence("other", "provider:x", day=22),
+            )
+
+    def test_checkpoint_plus_full_history_does_not_double_apply_settlement(self):
+        obligation = SettlementObligation(
+            "buy-checkpoint",
+            "fill-checkpoint",
+            "USD",
+            Decimal("-201"),
+            date(2026, 9, 24),
+            date(2026, 9, 25),
+        )
+        running = SettlementBook(
+            settled_cash={"USD": "1000"},
+            obligations=(obligation,),
+        )
+        running.settle(
+            "buy-checkpoint",
+            as_of=date(2026, 9, 25),
+            settlement_evidence=evidence("buy-checkpoint", "provider:statement:checkpoint", day=25),
+        )
+        checkpoint = running.checkpoint("after-buy")
+        full_history = running.settled_obligation_evidence
+
+        restored = SettlementBook.from_history(
+            checkpoint=checkpoint,
+            obligations=running.obligations,
+            settled_obligation_evidence=full_history,
+        )
+        self.assertEqual(restored.snapshot("USD").settled_cash, Decimal("799"))
+        self.assertFalse(
+            restored.settle(
+                "buy-checkpoint",
+                as_of=date(2026, 9, 26),
+                settlement_evidence=evidence("buy-checkpoint", "provider:statement:checkpoint", day=25),
+            )
+        )
+
+    def test_checkpoint_replays_only_strict_suffix(self):
+        first = SettlementObligation(
+            "a",
+            "fill-a",
+            "USD",
+            Decimal("-100"),
+            date(2026, 9, 20),
+            date(2026, 9, 22),
+        )
+        second = SettlementObligation(
+            "b",
+            "fill-b",
+            "USD",
+            Decimal("50"),
+            date(2026, 9, 21),
+            date(2026, 9, 23),
+        )
+        prefix = SettlementBook(
+            settled_cash={"USD": "1000"},
+            obligations=(first, second),
+        )
+        prefix.settle(
+            "a",
+            as_of=date(2026, 9, 22),
+            settlement_evidence=evidence("a", "provider:a", day=22),
+        )
+        checkpoint = prefix.checkpoint("after-a")
+
+        restored = SettlementBook.from_history(
+            checkpoint=checkpoint,
+            obligations=(first, second),
+            settled_obligation_evidence={
+                "a": evidence("a", "provider:a", day=22),
+                "b": evidence("b", "provider:b", day=23),
+            },
+        )
+        self.assertEqual(restored.snapshot("USD").settled_cash, Decimal("950"))
+        self.assertTrue(restored.is_settled("a"))
+        self.assertTrue(restored.is_settled("b"))
+
+    def test_checkpoint_history_identity_mismatch_fails_before_cash_mutation(self):
+        obligation = SettlementObligation(
+            "a",
+            "fill-a",
+            "USD",
+            Decimal("-100"),
+            date(2026, 9, 20),
+            date(2026, 9, 22),
+        )
+        checkpoint = SettlementCheckpoint.create(
+            checkpoint_id="after-a",
+            settled_cash={"USD": "900"},
+            settled_obligation_evidence={"a": evidence("a", "provider:a", day=22)},
+        )
+        with self.assertRaisesRegex(SettlementConflict, "conflicts"):
+            SettlementBook.from_history(
+                checkpoint=checkpoint,
+                obligations=(obligation,),
+                settled_obligation_evidence={"a": evidence("a", "provider:changed", day=22)},
+            )
+
+    def test_settlement_temporal_boundaries_require_exact_date_values(self):
+        obligation = SettlementObligation(
+            "cash-date",
+            "fill-date",
+            "USD",
+            Decimal("10"),
+            date(2026, 9, 20),
+            date(2026, 9, 22),
+        )
+        book = SettlementBook(obligations=(obligation,))
+        with self.assertRaisesRegex(TypeError, "as_of"):
+            book.settle(
+                "cash-date",
+                as_of="2026-09-22",
+                settlement_evidence=evidence("cash-date", "provider:statement:date", day=22),
+            )
+        with self.assertRaisesRegex(TypeError, "as_of"):
+            book.settle_due(
+                as_of="2026-09-22",
+                settlement_evidence={"cash-date": evidence("cash-date", "provider:statement:date", day=22)},
             )
 
 

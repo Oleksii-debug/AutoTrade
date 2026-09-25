@@ -307,6 +307,130 @@ def load_reconciliation_checkpoint_for_readiness(
     return checkpoint
 
 
+
+def load_submission_resolution_evidence(
+    store: JournalStore,
+    *,
+    checkpoint_event_id: str,
+    provider_id: str,
+    account_id: str,
+    environment: str,
+    attempt_id: str,
+    intent_id: str,
+    client_order_id: str,
+) -> dict[str, Any]:
+    """Load one exact durable reconciliation verdict for a submission attempt.
+
+    This is a read-only authority boundary for downstream financial consumers.
+    Callers identify the immutable AccountReconciled event; the verdict itself is
+    recovered from JournalStore and re-scoped here. Caller-authored outcome or
+    reconciliation-complete booleans are intentionally not accepted as inputs.
+    """
+
+    if not isinstance(store, JournalStore):
+        raise TypeError("store must be JournalStore")
+    event_id = _text(checkpoint_event_id, name="checkpoint_event_id")
+    expected_attempt = _text(attempt_id, name="attempt_id")
+    expected_intent = _text(intent_id, name="intent_id")
+    expected_client = _text(client_order_id, name="client_order_id")
+
+    checkpoint = store.get_event(event_id)
+    if checkpoint is None:
+        raise KeyError(f"Unknown reconciliation checkpoint event: {event_id}")
+    if checkpoint.get("event_type") != "AccountReconciled":
+        raise ValueError("checkpoint event is not AccountReconciled")
+    if checkpoint.get("aggregate_type") != "account_reconciliation":
+        raise ValueError("checkpoint event has invalid reconciliation aggregate type")
+
+    payload = _require_checkpoint_scope(
+        checkpoint,
+        provider_id=provider_id,
+        account_id=account_id,
+        environment=environment,
+    )
+    resolutions = payload.get("submission_resolutions")
+    if not isinstance(resolutions, list):
+        raise ValueError("checkpoint submission_resolutions must be a list")
+
+    matches: list[Mapping[str, Any]] = []
+    for item in resolutions:
+        if not isinstance(item, Mapping):
+            raise ValueError("submission resolution must be an object")
+        item_attempt = _text(item.get("attempt_id"), name="attempt_id")
+        if item_attempt == expected_attempt:
+            matches.append(item)
+    if len(matches) != 1:
+        raise ValueError(
+            "checkpoint must contain exactly one resolution for the submission attempt"
+        )
+
+    item = matches[0]
+    item_intent = _text(item.get("intent_id"), name="intent_id")
+    item_client = _text(item.get("client_order_id"), name="client_order_id")
+    if item_intent != expected_intent or item_client != expected_client:
+        raise ValueError("checkpoint submission identity mismatch")
+
+    outcome = _text(item.get("outcome"), name="outcome").upper()
+    if outcome not in {
+        "UNKNOWN",
+        "PROVEN_ABSENT",
+        "OBSERVED_EXECUTION",
+        "OBSERVED_WORKING_ORDER",
+    }:
+        raise ValueError("checkpoint contains unsupported submission outcome")
+
+    def identities(field: str) -> tuple[str, ...]:
+        values = item.get(field, [])
+        if not isinstance(values, list):
+            raise ValueError(f"checkpoint {field} must be a list")
+        normalized = tuple(_text(value, name=field) for value in values)
+        if len(normalized) != len(set(normalized)):
+            raise ValueError(f"checkpoint {field} must be unique")
+        return tuple(sorted(normalized))
+
+    provider_order_ids = identities("provider_order_ids")
+    provider_execution_ids = identities("provider_execution_ids")
+    if outcome in {"UNKNOWN", "PROVEN_ABSENT"} and (
+        provider_order_ids or provider_execution_ids
+    ):
+        raise ValueError(
+            "absence/unknown resolution cannot carry provider order or execution identity"
+        )
+    if outcome == "OBSERVED_EXECUTION" and not provider_execution_ids:
+        raise ValueError(
+            "observed execution resolution requires provider execution identity"
+        )
+    if outcome == "OBSERVED_WORKING_ORDER":
+        if not provider_order_ids or provider_execution_ids:
+            raise ValueError(
+                "working-order resolution requires order identity and no execution identity"
+            )
+
+    observed_at = _instant(payload.get("observed_at"), name="observed_at")
+    payload_hash = _text(checkpoint.get("payload_hash"), name="payload_hash")
+    aggregate_id = _text(checkpoint.get("aggregate_id"), name="aggregate_id")
+    aggregate_version = checkpoint.get("aggregate_version")
+    if type(aggregate_version) is not int or aggregate_version <= 0:
+        raise ValueError("checkpoint aggregate_version must be a positive integer")
+
+    return {
+        "checkpoint_event_id": event_id,
+        "checkpoint_payload_hash": payload_hash,
+        "checkpoint_aggregate_id": aggregate_id,
+        "checkpoint_aggregate_version": aggregate_version,
+        "observed_at": observed_at,
+        "provider_id": _text(payload.get("provider_id"), name="provider_id").upper(),
+        "account_id": _text(payload.get("account_id"), name="account_id"),
+        "environment": _text(payload.get("environment"), name="environment").upper(),
+        "attempt_id": expected_attempt,
+        "intent_id": item_intent,
+        "client_order_id": item_client,
+        "outcome": outcome,
+        "evidence_reason": _text(item.get("evidence_reason"), name="evidence_reason"),
+        "provider_order_ids": provider_order_ids,
+        "provider_execution_ids": provider_execution_ids,
+    }
+
 def unresolved_attempt_ids_from_checkpoint(
     checkpoint: Mapping[str, Any] | None,
     *,

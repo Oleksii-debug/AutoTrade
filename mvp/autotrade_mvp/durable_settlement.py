@@ -24,6 +24,12 @@ import re
 from typing import Iterable, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from research.autotrade_research.artifacts.store import (
+    ArtifactIntegrityError,
+    ArtifactStore,
+)
+from research.autotrade_research.io.strict_json import strict_json_loads
+
 from .accounting import AccountingConflict, JournalTransaction
 from .durable_reservations import DurableReservationBook
 from .persistence import JournalStore, canonical_json, payload_digest
@@ -44,6 +50,9 @@ _INSTRUMENT_VERSION = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}@[1-9][0-9]*$"
 )
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+SETTLEMENT_EVIDENCE_MEDIA_TYPE = "application/vnd.autotrade.settlement-evidence+json"
+SETTLEMENT_EVIDENCE_TYPE = "AUTOTRADE_SETTLEMENT_EVIDENCE"
+SETTLEMENT_EVIDENCE_SCHEMA_VERSION = 1
 
 
 def _text(value: str, *, name: str) -> str:
@@ -152,6 +161,93 @@ def _immutable_ref(value: str, *, name: str) -> str:
     raise ValueError(
         f"{name} must be an immutable provider-read or artifact SHA-256 reference"
     )
+
+
+def _artifact_ref(value: str, *, name: str) -> tuple[str, str, str]:
+    reference = _text(value, name=name)
+    marker = "@sha256:"
+    if not reference.startswith("artifact:") or marker not in reference:
+        raise SettlementConflict(
+            f"{name} must bind a trusted ArtifactStore UUID and SHA-256 digest"
+        )
+    artifact_id, digest = reference[len("artifact:"):].split(marker, 1)
+    try:
+        artifact_id = str(UUID(artifact_id))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise SettlementConflict(f"{name} artifact identity must be a UUID") from error
+    if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+        raise SettlementConflict(f"{name} must use canonical lowercase SHA-256")
+    canonical = f"artifact:{artifact_id}@sha256:{digest}"
+    if canonical != reference:
+        raise SettlementConflict(f"{name} must be canonical")
+    return artifact_id, digest, canonical
+
+
+def _verify_evidence_artifact(
+    artifact_store: ArtifactStore,
+    *,
+    evidence_ref: str,
+    expected_receipt: Mapping[str, object],
+    expected_metadata: Mapping[str, object],
+    name: str,
+) -> str:
+    if not isinstance(artifact_store, ArtifactStore):
+        raise SettlementConflict(
+            f"{name} requires trusted ArtifactStore"
+        )
+    artifact_id, digest, canonical_ref = _artifact_ref(
+        evidence_ref, name=f"{name} evidence_ref"
+    )
+    try:
+        manifest = artifact_store.load_manifest(artifact_id)
+        manifest_hash = manifest.get("manifest_hash")
+        if (
+            not isinstance(manifest_hash, str)
+            or not manifest_hash.startswith("sha256:")
+            or len(manifest_hash) != 71
+        ):
+            raise ArtifactIntegrityError(
+                f"{name} artifact manifest lacks integrity binding"
+            )
+        if manifest.get("sha256") != f"sha256:{digest}":
+            raise ArtifactIntegrityError(
+                f"{name} artifact digest does not match manifest"
+            )
+        if manifest.get("media_type") != SETTLEMENT_EVIDENCE_MEDIA_TYPE:
+            raise ArtifactIntegrityError(
+                f"{name} artifact has unsupported media type"
+            )
+        if manifest.get("metadata") != dict(expected_metadata):
+            raise ArtifactIntegrityError(
+                f"{name} artifact metadata differs from financial scope"
+            )
+        rights = manifest.get("rights")
+        if not isinstance(rights, dict) or rights.get("storage") is not True:
+            raise ArtifactIntegrityError(
+                f"{name} artifact lacks storage provenance"
+            )
+        raw = artifact_store.read_bytes(artifact_id)
+        parsed = strict_json_loads(raw.decode("utf-8"))
+    except (
+        ArtifactIntegrityError,
+        FileNotFoundError,
+        UnicodeError,
+        ValueError,
+        TypeError,
+    ) as error:
+        raise SettlementConflict(
+            f"{name} artifact verification failed"
+        ) from error
+    expected = dict(expected_receipt)
+    if parsed != expected:
+        raise SettlementConflict(
+            f"{name} artifact does not match supplied financial semantics"
+        )
+    if raw != canonical_json(expected).encode("utf-8"):
+        raise SettlementConflict(
+            f"{name} artifact must use canonical JSON bytes"
+        )
+    return canonical_ref
 
 
 def _scope_id(provider_id: str, account_id: str, environment: str) -> str:
@@ -280,6 +376,154 @@ def _rule_payload(rule: SettlementRuleEvidence) -> dict[str, object]:
     }
 
 
+def _rule_from_payload(value: object) -> SettlementRuleEvidence:
+    if not isinstance(value, Mapping):
+        raise SettlementConflict("settlement rule payload must be an object")
+    return SettlementRuleEvidence(
+        provider_id=value.get("provider_id"),
+        account_id=value.get("account_id"),
+        environment=value.get("environment"),
+        instrument_version=value.get("instrument_version"),
+        trade_date=_date_value(value.get("trade_date"), name="rule.trade_date"),
+        settlement_date=_date_value(
+            value.get("settlement_date"), name="rule.settlement_date"
+        ),
+        evidence_ref=value.get("evidence_ref"),
+    )
+
+
+def settlement_rule_evidence_receipt(
+    rule: SettlementRuleEvidence,
+) -> dict[str, object]:
+    if not isinstance(rule, SettlementRuleEvidence):
+        raise TypeError("rule must be SettlementRuleEvidence")
+    value = _rule_payload(rule)
+    value.pop("evidence_ref", None)
+    return {
+        "schema_version": SETTLEMENT_EVIDENCE_SCHEMA_VERSION,
+        "evidence_type": SETTLEMENT_EVIDENCE_TYPE,
+        "observation_kind": "SETTLEMENT_RULE",
+        "observation": value,
+    }
+
+
+def settlement_rule_evidence_metadata(
+    rule: SettlementRuleEvidence,
+) -> dict[str, object]:
+    return {
+        "evidence_type": SETTLEMENT_EVIDENCE_TYPE,
+        "observation_kind": "SETTLEMENT_RULE",
+        "provider_id": rule.provider_id,
+        "account_id": rule.account_id,
+        "environment": rule.environment,
+        "instrument_version": rule.instrument_version,
+        "trade_date": rule.trade_date.isoformat(),
+        "settlement_date": rule.settlement_date.isoformat(),
+    }
+
+
+def verify_settlement_rule_evidence(
+    rule: SettlementRuleEvidence,
+    artifact_store: ArtifactStore,
+) -> str:
+    return _verify_evidence_artifact(
+        artifact_store,
+        evidence_ref=rule.evidence_ref,
+        expected_receipt=settlement_rule_evidence_receipt(rule),
+        expected_metadata=settlement_rule_evidence_metadata(rule),
+        name="settlement rule",
+    )
+
+
+def settlement_completion_evidence_receipt(
+    *,
+    provider_id: str,
+    account_id: str,
+    environment: str,
+    obligation: SettlementObligation,
+    evidence: SettlementEvidence,
+) -> dict[str, object]:
+    if not isinstance(obligation, SettlementObligation):
+        raise TypeError("obligation must be SettlementObligation")
+    if not isinstance(evidence, SettlementEvidence):
+        raise TypeError("evidence must be SettlementEvidence")
+    return {
+        "schema_version": SETTLEMENT_EVIDENCE_SCHEMA_VERSION,
+        "evidence_type": SETTLEMENT_EVIDENCE_TYPE,
+        "observation_kind": "SETTLEMENT_COMPLETION",
+        "observation": {
+            "provider_id": _text(provider_id, name="provider_id").upper(),
+            "account_id": _text(account_id, name="account_id"),
+            "environment": _environment(environment),
+            "obligation_id": obligation.obligation_id,
+            "cause_event_id": obligation.cause_event_id,
+            "currency": obligation.currency,
+            "signed_amount": _decimal_text(obligation.amount),
+            "trade_date": obligation.trade_date.isoformat(),
+            "settlement_date": obligation.settlement_date.isoformat(),
+            "component_id": obligation.component_id,
+            "observed_at": _utc_text(evidence.observed_at),
+        },
+    }
+
+
+def settlement_completion_evidence_metadata(
+    *,
+    provider_id: str,
+    account_id: str,
+    environment: str,
+    obligation: SettlementObligation,
+    evidence: SettlementEvidence,
+) -> dict[str, object]:
+    return {
+        "evidence_type": SETTLEMENT_EVIDENCE_TYPE,
+        "observation_kind": "SETTLEMENT_COMPLETION",
+        "provider_id": _text(provider_id, name="provider_id").upper(),
+        "account_id": _text(account_id, name="account_id"),
+        "environment": _environment(environment),
+        "obligation_id": obligation.obligation_id,
+        "cause_event_id": obligation.cause_event_id,
+        "currency": obligation.currency,
+        "signed_amount": _decimal_text(obligation.amount),
+        "settlement_date": obligation.settlement_date.isoformat(),
+        "observed_at": _utc_text(evidence.observed_at),
+    }
+
+
+def verify_settlement_completion_evidence(
+    *,
+    provider_id: str,
+    account_id: str,
+    environment: str,
+    obligation: SettlementObligation,
+    evidence: SettlementEvidence,
+    artifact_store: ArtifactStore,
+) -> str:
+    if evidence.obligation_id != obligation.obligation_id:
+        raise SettlementConflict(
+            "settlement completion evidence identity does not match obligation"
+        )
+    return _verify_evidence_artifact(
+        artifact_store,
+        evidence_ref=evidence.evidence_ref,
+        expected_receipt=settlement_completion_evidence_receipt(
+            provider_id=provider_id,
+            account_id=account_id,
+            environment=environment,
+            obligation=obligation,
+            evidence=evidence,
+        ),
+        expected_metadata=settlement_completion_evidence_metadata(
+            provider_id=provider_id,
+            account_id=account_id,
+            environment=environment,
+            obligation=obligation,
+            evidence=evidence,
+        ),
+        name="settlement completion",
+    )
+
+
 def _evidence_payload(evidence: SettlementEvidence) -> dict[str, object]:
     return {
         "obligation_id": evidence.obligation_id,
@@ -315,6 +559,7 @@ class DurableSettlementBook:
         account_id: str,
         environment: str,
         opening_settled_cash: Mapping[str, Decimal | str | int],
+        evidence_artifact_store: ArtifactStore,
     ) -> None:
         if not isinstance(store, JournalStore):
             raise TypeError("store must be JournalStore")
@@ -322,6 +567,9 @@ class DurableSettlementBook:
         self.provider_id = _text(provider_id, name="provider_id").upper()
         self.account_id = _text(account_id, name="account_id")
         self.environment = _environment(environment)
+        if not isinstance(evidence_artifact_store, ArtifactStore):
+            raise TypeError("evidence_artifact_store must be trusted ArtifactStore")
+        self.evidence_artifact_store = evidence_artifact_store
         self._opening = _opening_payload(opening_settled_cash)
         self._opening_digest = payload_digest(self._opening)
         self.scope_id = _scope_id(self.provider_id, self.account_id, self.environment)
@@ -431,8 +679,11 @@ class DurableSettlementBook:
                         or rule.get("settlement_date") != obligation.settlement_date.isoformat()
                     ):
                         raise SettlementConflict("settlement rule scope/date binding is invalid")
-                    _instrument_version(rule.get("instrument_version"))
-                    _immutable_ref(rule.get("evidence_ref"), name="settlement rule evidence_ref")
+                    rule_evidence = _rule_from_payload(rule)
+                    verify_settlement_rule_evidence(
+                        rule_evidence,
+                        self.evidence_artifact_store,
+                    )
                     inserted = book.add(obligation)
                     if not inserted:
                         raise SettlementConflict(
@@ -445,6 +696,26 @@ class DurableSettlementBook:
                 as_of = _date_value(request_dict.get("as_of"), name="as_of")
                 if evidence.obligation_id != obligation_id:
                     raise SettlementConflict("settlement evidence identity mismatch")
+                obligation = next(
+                    (
+                        item
+                        for item in book.obligations
+                        if item.obligation_id == obligation_id
+                    ),
+                    None,
+                )
+                if obligation is None:
+                    raise SettlementConflict(
+                        "settlement evidence references unknown obligation"
+                    )
+                verify_settlement_completion_evidence(
+                    provider_id=self.provider_id,
+                    account_id=self.account_id,
+                    environment=self.environment,
+                    obligation=obligation,
+                    evidence=evidence,
+                    artifact_store=self.evidence_artifact_store,
+                )
                 inserted = book.settle(
                     obligation_id,
                     as_of=as_of,
@@ -648,6 +919,10 @@ class DurableSettlementBook:
                 or rule.settlement_date != obligation.settlement_date
             ):
                 raise SettlementConflict("settlement rule dates do not match obligation")
+            verify_settlement_rule_evidence(
+                rule,
+                self.evidence_artifact_store,
+            )
             if obligation.obligation_id in identities:
                 raise SettlementConflict("duplicate obligation_id in settlement batch")
             identities.add(obligation.obligation_id)
@@ -678,7 +953,24 @@ class DurableSettlementBook:
     ) -> bool:
         if not isinstance(evidence, SettlementEvidence):
             raise TypeError("evidence must be SettlementEvidence")
-        _immutable_ref(evidence.evidence_ref, name="settlement evidence_ref")
+        target = next(
+            (
+                item
+                for item in self._book.obligations
+                if item.obligation_id == obligation_id
+            ),
+            None,
+        )
+        if target is None:
+            raise SettlementConflict("unknown settlement obligation")
+        verify_settlement_completion_evidence(
+            provider_id=self.provider_id,
+            account_id=self.account_id,
+            environment=self.environment,
+            obligation=target,
+            evidence=evidence,
+            artifact_store=self.evidence_artifact_store,
+        )
         request = {
             "obligation_id": _text(obligation_id, name="obligation_id"),
             "as_of": _date_text(as_of, name="as_of"),

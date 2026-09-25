@@ -1171,6 +1171,62 @@ class IndependentRiskTests(unittest.TestCase):
         )
         self.assertFalse(decision.admitted)
 
+    def test_reduce_only_exception_requires_base_scenario_coverage_for_removed_hedge(self):
+        intent = RiskIntent.create(
+            symbol="HEDGE",
+            side="SELL",
+            quantity="1",
+            price="100",
+            expected_state_version=7,
+            reduce_only=True,
+        )
+        configured = policy(
+            max_abs_position="0.5",
+            max_expected_shortfall="10",
+            expected_shortfall_tail_fraction="1",
+            min_liquidation_headroom="0.25",
+            max_stress_loss="10",
+        )
+        # HEDGE is fully removed by the intent while CORE remains projected.
+        # A scenario that omits HEDGE cannot prove that removing it is
+        # non-worsening: the omitted base position may have been the hedge.
+        incomplete = evaluate_risk(
+            intent,
+            context(
+                positions={"HEDGE": "1", "CORE": "1"},
+                marks={"HEDGE": "100", "CORE": "100"},
+                stress_scenarios=({"CORE": "-0.50"},),
+                tail_scenarios=({"CORE": "-0.50"},),
+                liquidation_headroom="0.10",
+            ),
+            configured,
+        )
+        self.assertFalse(incomplete.admitted)
+        failed = {item.rule for item in incomplete.rules if not item.passed}
+        self.assertIn("position_limit", failed)
+        self.assertIn("expected_shortfall", failed)
+        self.assertIn("liquidation_headroom", failed)
+
+        # With complete base coverage we can actually evaluate the hedge
+        # removal. Here HEDGE offsets CORE in the base portfolio, so removing
+        # it worsens tail loss and the protective exception still must not fire.
+        complete = evaluate_risk(
+            intent,
+            context(
+                positions={"HEDGE": "1", "CORE": "1"},
+                marks={"HEDGE": "100", "CORE": "100"},
+                stress_scenarios=({"HEDGE": "0.50", "CORE": "-0.50"},),
+                tail_scenarios=({"HEDGE": "0.50", "CORE": "-0.50"},),
+                liquidation_headroom="0.10",
+            ),
+            configured,
+        )
+        self.assertFalse(complete.admitted)
+        self.assertEqual(
+            next(x for x in complete.rules if x.rule == "expected_shortfall").observed,
+            "50.00",
+        )
+
     def test_strict_reduce_only_can_pass_known_liquidation_breach_when_tail_improves(self):
         decision = evaluate_risk(
             RiskIntent.create(

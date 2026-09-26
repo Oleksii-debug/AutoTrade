@@ -145,6 +145,42 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
         except (OSError, NotImplementedError) as error:
             self.skipTest(f"symlink creation unavailable: {error}")
 
+    def test_installer_manifest_cannot_overwrite_verified_bundle(self):
+        bundle = self.release_bundle()
+        before = bundle.read_bytes()
+
+        with self.assertRaisesRegex(
+            InstallerManifestError,
+            "output must not overwrite verified release bundle",
+        ):
+            build_installer_input_manifest(
+                bundle=bundle,
+                output=bundle,
+                target_framework="net10.0-windows",
+                runtime_mode="SELF_CONTAINED",
+            )
+
+        self.assertEqual(bundle.read_bytes(), before)
+
+    def test_installer_digest_cannot_overwrite_verified_bundle(self):
+        bundle = self.release_bundle(name="installer-input.json.sha256")
+        before = bundle.read_bytes()
+        output = self.root / "installer-input.json"
+
+        with self.assertRaisesRegex(
+            InstallerManifestError,
+            "digest output must not overwrite verified release bundle",
+        ):
+            build_installer_input_manifest(
+                bundle=bundle,
+                output=output,
+                target_framework="net10.0-windows",
+                runtime_mode="SELF_CONTAINED",
+            )
+
+        self.assertFalse(output.exists())
+        self.assertEqual(bundle.read_bytes(), before)
+
     def test_manifest_output_symlink_is_rejected_without_touching_target(self):
         bundle = self.release_bundle()
         victim = self.root / "victim-output.txt"

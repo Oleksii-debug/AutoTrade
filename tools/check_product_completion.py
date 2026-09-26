@@ -298,6 +298,12 @@ def evaluate_completion(
     if type(gates) is not dict or not gates:
         raise ProductCompletionError("qualification gates must be a non-empty object")
     missing_gates = sorted(EXPECTED_GATE_NAMES - set(gates))
+    unknown_gates = [name for name in gates if name not in EXPECTED_GATE_NAMES]
+    if unknown_gates:
+        raise ProductCompletionError(
+            "qualification gates contain unknown entries: "
+            + ", ".join(sorted(repr(name) for name in unknown_gates))
+        )
     nonterminal_gates = {
         str(name): value
         for name, value in sorted(gates.items())

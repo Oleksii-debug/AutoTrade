@@ -977,9 +977,36 @@ class ResearchJobStoreTests(unittest.TestCase):
             expected = f"artifact:{manifest['artifact_id']}@{manifest['sha256']}"
             self.assertEqual(updated["checkpoint_ref"], expected)
 
+            second_manifest, second_updated = store.publish_checkpoint_bytes(
+                job["job_id"],
+                worker_id="worker-a",
+                generation=generation,
+                artifact_store=artifacts,
+                data=b"checkpoint-state-v2",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+                resource_usage={"wall_seconds": 3},
+                now=self.now + timedelta(seconds=2),
+            )
+            second_expected = (
+                f"artifact:{second_manifest['artifact_id']}@{second_manifest['sha256']}"
+            )
+            self.assertNotEqual(second_manifest["artifact_id"], manifest["artifact_id"])
+            self.assertEqual(second_updated["checkpoint_ref"], second_expected)
+
             reopened = ResearchJobStore(path)
-            self.assertEqual(reopened.get(job["job_id"])["checkpoint_ref"], expected)
-            self.assertEqual(artifacts.read_bytes(manifest["artifact_id"]), b"checkpoint-state")
+            self.assertEqual(
+                reopened.get(job["job_id"])["checkpoint_ref"],
+                second_expected,
+            )
+            self.assertEqual(
+                artifacts.read_bytes(manifest["artifact_id"]),
+                b"checkpoint-state",
+            )
+            self.assertEqual(
+                artifacts.read_bytes(second_manifest["artifact_id"]),
+                b"checkpoint-state-v2",
+            )
 
     def test_checkpoint_resource_usage_is_monotonic_and_sparse_updates_preserve_totals(self):
         with TemporaryDirectory() as directory:

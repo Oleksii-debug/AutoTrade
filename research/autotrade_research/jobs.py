@@ -844,10 +844,14 @@ class ResearchJobStore:
             kind = row["kind"]
             connection.commit()
 
+        checkpoint_digest = sha256(data).hexdigest()
         artifact_id = str(
             uuid5(
                 UUID(identifier),
-                f"checkpoint:generation:{generation}:slot:{checkpoint_slot}",
+                (
+                    f"checkpoint:generation:{generation}:slot:{checkpoint_slot}:"
+                    f"sha256:{checkpoint_digest}"
+                ),
             )
         )
         manifest = artifact_store.publish_bytes(

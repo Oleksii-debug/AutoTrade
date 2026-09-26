@@ -1757,6 +1757,22 @@ def classify_whitebit_http_retry(
         raise WhiteBitAdapterError("unsupported retry request class")
 
     delay = min(2 ** min(attempt - 1, 5), 30)
+    if status_code == 408:
+        if kind in {"WRITE", "CANCEL"}:
+            return WhiteBitRetryDecision(
+                automatic_retry=False,
+                base_delay_seconds=None,
+                jitter_required=False,
+                requires_reconciliation=True,
+                classification="AMBIGUOUS_WRITE_TIMEOUT",
+            )
+        return WhiteBitRetryDecision(
+            automatic_retry=True,
+            base_delay_seconds=delay,
+            jitter_required=True,
+            requires_reconciliation=False,
+            classification="REQUEST_TIMEOUT",
+        )
     if status_code == 429:
         if kind in {"WRITE", "CANCEL"}:
             return WhiteBitRetryDecision(

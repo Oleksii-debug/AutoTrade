@@ -121,32 +121,35 @@ class DependencyCompositionGateTests(unittest.TestCase):
             (root / "research").mkdir()
             (root / ".github" / "workflows").mkdir(parents=True)
             (root / "requirements-dev.txt").write_text(
-                "setuptools==84.0.0 \\\n"
-                "    --hash=sha256:"
-                "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670\\n"
-                "jsonschema==4.26.0 \\\n"
-                "    --hash=sha256:"
-                "d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce\\n",
+                """setuptools==84.0.0 \\
+    --hash=sha256:51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670
+jsonschema==4.26.0 \\
+    --hash=sha256:d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce
+""",
                 encoding="utf-8",
             )
-            (root / "research" / "pyproject.toml").write_text(
-                "[build-system]\\n"
-                'requires = ["setuptools==84.0.0"]\\n\\n'
-                "[project]\\n"
-                'name = "sample"\\n'
-                'version = "0.0.1"\\n\\n'
-                "[project.optional-dependencies]\\n"
-                'test = ["jsonschema==4.26.0"]\\n',
+            pyproject = root / "research" / "pyproject.toml"
+            pyproject.write_text(
+                """[build-system]
+requires = ["setuptools==84.0.0"]
+
+[project]
+name = "sample"
+version = "0.0.1"
+
+[project.optional-dependencies]
+test = ["jsonschema==4.26.0"]
+""",
                 encoding="utf-8",
             )
             workflow = root / ".github" / "workflows" / "research-primitives.yml"
             workflow.write_text(
-                'paths:\\n  - "requirements-dev.txt"\\n'
-                "steps:\\n"
-                "  - run: python -m pip install --disable-pip-version-check "
-                "--force-reinstall --no-deps --only-binary=:all: --require-hashes "
-                "-r requirements-dev.txt\\n"
-                "  - run: python -m pip install --no-deps -e research\\n",
+                """paths:
+  - "requirements-dev.txt"
+steps:
+  - run: "python -m pip install --disable-pip-version-check --force-reinstall --no-deps --only-binary=:all: --require-hashes -r requirements-dev.txt"
+  - run: python -m pip install --no-deps -e research
+""",
                 encoding="utf-8",
             )
             blockers, _ = _python_blockers(root)
@@ -154,8 +157,28 @@ class DependencyCompositionGateTests(unittest.TestCase):
                 "RESEARCH_EDITABLE_NO_BUILD_ISOLATION_MISSING",
                 blockers,
             )
+            self.assertNotIn("UNREADABLE_PYTHON_HASH_LOCK", blockers)
+            self.assertNotIn("UNREADABLE_RESEARCH_PYPROJECT", blockers)
+            self.assertNotIn("RESEARCH_HASHED_INSTALL_COMMAND_MISSING", blockers)
             self.assertNotIn("RESEARCH_BUILD_REQUIREMENTS_DRIFT", blockers)
             self.assertNotIn("RESEARCH_TEST_REQUIREMENTS_DRIFT", blockers)
+
+            pyproject.write_text(
+                """[build-system]
+requires = [["setuptools==84.0.0"]]
+
+[project]
+name = "sample"
+version = "0.0.1"
+
+[project.optional-dependencies]
+test = [["jsonschema==4.26.0"]]
+""",
+                encoding="utf-8",
+            )
+            malformed, _ = _python_blockers(root)
+            self.assertIn("MALFORMED_RESEARCH_BUILD_REQUIREMENT", malformed)
+            self.assertIn("MALFORMED_RESEARCH_TEST_REQUIREMENT", malformed)
 
     def test_research_test_extra_matches_exact_resolved_graph(self):
         self.assertFalse(

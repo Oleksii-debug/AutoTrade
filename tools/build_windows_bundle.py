@@ -419,6 +419,27 @@ def _write_entry(archive: zipfile.ZipFile, name: str, data: bytes) -> None:
     archive.writestr(info, data)
 
 
+
+def _prepare_atomic_destination(path: Path, *, name: str) -> Path:
+    if path.is_symlink():
+        raise BundleError(f"{name} cannot be a symlink")
+    if path.exists() and not path.is_file():
+        raise BundleError(f"{name} must be a regular file or absent")
+    temporary = path.with_name(path.name + ".tmp")
+    if temporary.is_symlink():
+        raise BundleError(f"{name} temporary path cannot be a symlink")
+    if temporary.exists():
+        if not temporary.is_file():
+            raise BundleError(f"{name} temporary path must be a regular file or absent")
+        temporary.unlink()
+    return temporary
+
+
+def _cleanup_temporary(path: Path) -> None:
+    if path.exists() or path.is_symlink():
+        path.unlink()
+
+
 def build_bundle(
     *,
     staging: Path,
@@ -521,34 +542,41 @@ def build_bundle(
     ).encode("utf-8")
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_name(output.name + ".tmp")
-    if temporary.exists():
-        temporary.unlink()
-    try:
-        with zipfile.ZipFile(temporary, "w") as archive:
-            _write_entry(archive, "bundle-manifest.json", manifest_bytes)
-            for relative, _, data in files:
-                _write_entry(archive, f"payload/{relative}", data)
-        temporary.replace(output)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
-
-    digest = sha256(output.read_bytes()).hexdigest()
     hash_path = output.with_suffix(output.suffix + ".sha256")
-    hash_temporary = hash_path.with_name(hash_path.name + ".tmp")
-    if hash_temporary.exists():
-        hash_temporary.unlink()
+    temporary = _prepare_atomic_destination(output, name="bundle output")
+    hash_temporary = _prepare_atomic_destination(
+        hash_path,
+        name="bundle hash output",
+    )
     try:
-        hash_temporary.write_text(
-            f"{digest}  {output.name}\n",
-            encoding="utf-8",
-            newline="\n",
-        )
+        try:
+            with temporary.open("xb") as stream:
+                with zipfile.ZipFile(stream, "w") as archive:
+                    _write_entry(archive, "bundle-manifest.json", manifest_bytes)
+                    for relative, _, data in files:
+                        _write_entry(archive, f"payload/{relative}", data)
+                stream.flush()
+        except FileExistsError as error:
+            raise BundleError(
+                "bundle output temporary path changed before creation"
+            ) from error
+
+        digest = sha256(temporary.read_bytes()).hexdigest()
+        digest_payload = f"{digest}  {output.name}\n".encode("utf-8")
+        try:
+            with hash_temporary.open("xb") as stream:
+                stream.write(digest_payload)
+                stream.flush()
+        except FileExistsError as error:
+            raise BundleError(
+                "bundle hash output temporary path changed before creation"
+            ) from error
+
+        temporary.replace(output)
         hash_temporary.replace(hash_path)
     finally:
-        if hash_temporary.exists():
-            hash_temporary.unlink()
+        _cleanup_temporary(temporary)
+        _cleanup_temporary(hash_temporary)
     return {
         "output": str(output),
         "sha256": digest,

@@ -11,6 +11,7 @@ from autotrade_research.artifacts.store import (
     ArtifactConflict,
     ArtifactIntegrityError,
     ArtifactStore,
+    _manifest_integrity_hash,
     atomic_write_json,
 )
 
@@ -67,7 +68,15 @@ class ArtifactStoreTests(unittest.TestCase):
 
     def test_export_is_rights_aware(self):
         with TemporaryDirectory() as directory:
-            store = ArtifactStore(Path(directory) / "store")
+            authorized: set[tuple[str, str]] = set()
+            store = ArtifactStore(
+                Path(directory) / "store",
+                export_authorizer=lambda artifact_id, digest: (
+                    artifact_id,
+                    digest,
+                )
+                in authorized,
+            )
             denied = str(uuid4())
             store.publish_bytes(
                 artifact_id=denied,
@@ -79,14 +88,32 @@ class ArtifactStoreTests(unittest.TestCase):
                 store.export(denied, Path(directory) / "out" / "denied.txt")
 
             allowed = str(uuid4())
-            store.publish_bytes(
+            allowed_manifest = store.publish_bytes(
                 artifact_id=allowed,
                 data=b"public",
                 media_type="text/plain",
                 rights={"storage": True, "export": True},
             )
+            authorized.add((allowed, allowed_manifest["sha256"]))
             target = store.export(allowed, Path(directory) / "out" / "allowed.txt")
             self.assertEqual(target.read_bytes(), b"public")
+
+    def test_export_without_independent_authority_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"public",
+                media_type="text/plain",
+                rights={"storage": True, "export": True},
+            )
+
+            with self.assertRaisesRegex(
+                PermissionError,
+                "independent export authorization is required",
+            ):
+                store.export(artifact_id, Path(directory) / "out.txt")
 
     def test_tampered_manifest_cannot_escalate_export_rights(self):
         with TemporaryDirectory() as directory:
@@ -107,9 +134,104 @@ class ArtifactStoreTests(unittest.TestCase):
                 store.export(artifact_id, Path(directory) / "out.txt")
             self.assertEqual(manifest["rights"]["export"], False)
 
-    def test_legacy_manifest_must_be_rebound_before_export(self):
+    def test_rehashed_manifest_cannot_grant_export_without_independent_authority(self):
+        with TemporaryDirectory() as directory:
+            authorized: set[tuple[str, str]] = set()
+            store = ArtifactStore(
+                Path(directory) / "store",
+                export_authorizer=lambda artifact_id, digest: (
+                    artifact_id,
+                    digest,
+                )
+                in authorized,
+            )
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"private",
+                media_type="text/plain",
+                rights={"storage": True, "export": False},
+            )
+            path = store._manifest_path(artifact_id)
+            tampered = json.loads(path.read_text(encoding="utf-8"))
+            tampered["rights"]["export"] = True
+            tampered["manifest_hash"] = _manifest_integrity_hash(tampered)
+            atomic_write_json(path, tampered)
+
+            with self.assertRaisesRegex(
+                PermissionError,
+                "independent export authority does not permit export",
+            ):
+                store.export(artifact_id, Path(directory) / "out.txt")
+            self.assertEqual(manifest["rights"]["export"], False)
+
+    def test_rehashed_authenticated_manifest_rejects_unknown_top_level_fields(self):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"evidence",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+                source_refs=["source:fixture"],
+                metadata={"kind": "strict-contract"},
+            )
+            path = store._manifest_path(artifact_id)
+            tampered = json.loads(path.read_text(encoding="utf-8"))
+            tampered["unregistered_claim"] = {"qualified": True}
+            tampered["manifest_hash"] = _manifest_integrity_hash(tampered)
+            atomic_write_json(path, tampered)
+
+            with self.assertRaisesRegex(
+                ArtifactIntegrityError,
+                "unexpected authenticated fields",
+            ):
+                store.load_manifest(artifact_id)
+
+    def test_rehashed_authenticated_manifest_rejects_weakened_core_types(self):
+        cases = (
+            ("bytes", "8", "byte count"),
+            (
+                "rights",
+                {"storage": True, "export": "yes"},
+                "rights contract",
+            ),
+            ("source_refs", "source:fixture", "source_refs"),
+            ("metadata", ["not", "an", "object"], "metadata"),
+            ("created_at", "2026-09-26T12:00:00", "must include timezone"),
+        )
+        for field, replacement, expected_error in cases:
+            with self.subTest(field=field):
+                with TemporaryDirectory() as directory:
+                    store = ArtifactStore(Path(directory) / "store")
+                    artifact_id = str(uuid4())
+                    store.publish_bytes(
+                        artifact_id=artifact_id,
+                        data=b"evidence",
+                        media_type="application/octet-stream",
+                        rights={"storage": True, "export": False},
+                        source_refs=["source:fixture"],
+                        metadata={"kind": "strict-contract"},
+                    )
+                    path = store._manifest_path(artifact_id)
+                    tampered = json.loads(path.read_text(encoding="utf-8"))
+                    tampered[field] = replacement
+                    tampered["manifest_hash"] = _manifest_integrity_hash(tampered)
+                    atomic_write_json(path, tampered)
+
+                    with self.assertRaisesRegex(
+                        ArtifactIntegrityError,
+                        expected_error,
+                    ):
+                        store.load_manifest(artifact_id)
+
+    def test_legacy_manifest_must_be_rebound_before_export(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(
+                Path(directory) / "store",
+                export_authorizer=lambda _artifact_id, _digest: True,
+            )
             artifact_id = str(uuid4())
             manifest = store.publish_bytes(
                 artifact_id=artifact_id,
@@ -307,7 +429,10 @@ class ArtifactStoreTests(unittest.TestCase):
 
     def test_publish_and_export_sync_parent_directory_after_replace(self):
         with TemporaryDirectory() as directory:
-            store = ArtifactStore(Path(directory) / "store")
+            store = ArtifactStore(
+                Path(directory) / "store",
+                export_authorizer=lambda _artifact_id, _digest: True,
+            )
             artifact_id = str(uuid4())
             with patch(
                 "autotrade_research.artifacts.store.sync_parent_directory"

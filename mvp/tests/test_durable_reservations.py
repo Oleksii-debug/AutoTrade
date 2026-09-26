@@ -670,6 +670,72 @@ class DurableReservationBookTests(unittest.TestCase):
         with self.assertRaisesRegex(ReservationConflict, "snapshot"):
             self.book()
 
+    def test_replay_rejects_rehashed_cross_environment_event_scope(self):
+        book = self.book()
+        self.reserve(book)
+        with closing(sqlite3.connect(self.path)) as connection:
+            row = connection.execute(
+                "SELECT event_id, payload_json, envelope_json FROM events "
+                "WHERE aggregate_type='reservation_book'"
+            ).fetchone()
+            import json
+
+            payload = json.loads(row[1])
+            payload["environment"] = "LIVE"
+            replacement = canonical_json(payload)
+            envelope = json.loads(row[2])
+            envelope["payload"] = payload
+            envelope["payload_hash"] = payload_digest(payload)
+            envelope_json = canonical_json(envelope)
+            connection.execute(
+                "UPDATE events SET payload_json=?, payload_hash=?, "
+                "envelope_json=?, envelope_hash=? WHERE event_id=?",
+                (
+                    replacement,
+                    payload_digest(payload),
+                    envelope_json,
+                    _event_envelope_digest(envelope_json),
+                    row[0],
+                ),
+            )
+            connection.commit()
+
+        with self.assertRaisesRegex(ReservationConflict, "environment.*scope"):
+            self.book()
+
+    def test_replay_rejects_rehashed_cross_account_event_scope(self):
+        book = self.book()
+        self.reserve(book)
+        with closing(sqlite3.connect(self.path)) as connection:
+            row = connection.execute(
+                "SELECT event_id, payload_json, envelope_json FROM events "
+                "WHERE aggregate_type='reservation_book'"
+            ).fetchone()
+            import json
+
+            payload = json.loads(row[1])
+            payload["account_id"] = "other-account"
+            replacement = canonical_json(payload)
+            envelope = json.loads(row[2])
+            envelope["payload"] = payload
+            envelope["payload_hash"] = payload_digest(payload)
+            envelope_json = canonical_json(envelope)
+            connection.execute(
+                "UPDATE events SET payload_json=?, payload_hash=?, "
+                "envelope_json=?, envelope_hash=? WHERE event_id=?",
+                (
+                    replacement,
+                    payload_digest(payload),
+                    envelope_json,
+                    _event_envelope_digest(envelope_json),
+                    row[0],
+                ),
+            )
+            connection.commit()
+
+        with self.assertRaisesRegex(ReservationConflict, "account.*scope"):
+            self.book()
+
     def test_unknown_still_cannot_erase_consumed_exposure(self):
         book = self.book()
         self.reserve(book, amount="100")

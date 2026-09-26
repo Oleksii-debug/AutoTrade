@@ -143,6 +143,20 @@ class ArtifactStore:
     def _manifest_path(self, artifact_id: str) -> Path:
         return self.manifests / f"{self._artifact_id(artifact_id)}.json"
 
+    def _validate_staging_namespace(self) -> None:
+        try:
+            resolved_root = self.root.resolve(strict=False)
+            expected_staging = resolved_root / "staging"
+            resolved_staging = self.staging.resolve(strict=False)
+        except OSError as error:
+            raise ArtifactIntegrityError(
+                "artifact staging namespace cannot be resolved"
+            ) from error
+        if resolved_staging != expected_staging:
+            raise ArtifactIntegrityError(
+                "artifact staging path escapes store namespace"
+            )
+
     def _validate_manifest_namespace(self, manifest_path: Path) -> None:
         try:
             resolved_root = self.root.resolve(strict=False)
@@ -427,6 +441,7 @@ class ArtifactStore:
                 if entry.st_size != len(data) or sha256_file(object_path) != digest:
                     raise ArtifactIntegrityError("content-addressed object path is corrupt")
             else:
+                self._validate_staging_namespace()
                 temporary: Path | None = None
                 try:
                     with tempfile.NamedTemporaryFile(

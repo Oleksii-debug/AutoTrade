@@ -238,6 +238,14 @@ class DurableReservationBook:
             payload = event["payload"]
             if not isinstance(payload, dict):
                 raise ReservationConflict("reservation event payload must be an object")
+            if payload.get("environment") != self.environment:
+                raise ReservationConflict(
+                    "reservation journal event environment does not match book scope"
+                )
+            if payload.get("account_id") != self.account_id:
+                raise ReservationConflict(
+                    "reservation journal event account does not match book scope"
+                )
             operation = payload.get("operation")
             request = payload.get("request")
             expected_snapshot = payload.get("snapshot")

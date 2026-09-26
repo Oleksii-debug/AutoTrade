@@ -3239,7 +3239,7 @@ class BybitV5HttpTransport:
             provider="BYBIT",
             environment=self.policy.environment,
             purpose="TRADE",
-            provider_environment=self.policy.environment,
+            provider_environment=self.provider_environment,
         )
         try:
             signed = BybitV5Signer.sign(
@@ -3535,7 +3535,7 @@ class BybitV5AuthenticatedReadTransport:
             provider="BYBIT",
             environment=self.policy.environment,
             purpose="READ",
-            provider_environment=self.policy.environment,
+            provider_environment=self.provider_environment,
         )
         try:
             signed = BybitV5AuthenticatedReadSigner.sign(

@@ -79,6 +79,41 @@ def trade_history_observation(
         observed_at=NOW,
     )
 
+def authenticated_activity_observation(
+    endpoint,
+    response,
+    *,
+    query=None,
+    permission_scope="ORDER.READ",
+    account_id="paper-1",
+    environment="PAPER",
+):
+    binding = prepare_authenticated_read_query(
+        capability=capability(
+            account_id=account_id,
+            environment=environment,
+        ),
+        surface=Surface.ACTIVITIES,
+        endpoint=endpoint,
+        query={} if query is None else query,
+        at=NOW,
+        permission_scope=permission_scope,
+    )
+    raw = json.dumps(
+        response,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return observe_authenticated_json_response(
+        query_binding=binding,
+        http_status=200,
+        response_bytes=raw,
+        observed_at=NOW,
+    )
+
+
 def capability(
     *,
     order_types=("MARKET", "LIMIT"),

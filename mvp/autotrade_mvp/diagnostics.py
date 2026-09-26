@@ -87,13 +87,17 @@ def _redact_structured_url_query(value: str) -> str | None:
         parsed = urlsplit(value)
     except ValueError:
         return None
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc or not parsed.query:
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.netloc
+        or not parsed.query
+    ):
         return None
 
     changed = False
     query_parts: list[str] = []
     for part in parsed.query.split("&"):
-        raw_key, separator, raw_value = part.partition("=")
+        raw_key, separator, _ = part.partition("=")
         if _is_sensitive_key(unquote_plus(raw_key)):
             query_parts.append(f"{raw_key}{separator or '='}[REDACTED]")
             changed = True

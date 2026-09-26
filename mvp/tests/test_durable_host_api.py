@@ -775,6 +775,41 @@ class JournalBackedHostApiTests(unittest.TestCase):
         )
 
 
+    def test_block_event_identity_is_scoped_for_same_external_command_id(self):
+        journal = JournalStore(self.path)
+        authority = AuthorityService(journal)
+        shared_command = "11111111-1111-1111-1111-111111111111"
+        authority.block_new_exposure(
+            account_id="paper-account-1",
+            environment="PAPER",
+            reason="host_operator_command:BLOCK_NEW_EXPOSURE:EMERGENCY_STOP",
+            blocked_at="2030-01-01T00:00:00Z",
+            command_id=shared_command,
+        )
+        authority.block_new_exposure(
+            account_id="paper-account-2",
+            environment="PAPER",
+            reason="host_operator_command:BLOCK_NEW_EXPOSURE:EMERGENCY_STOP",
+            blocked_at="2030-01-01T00:00:01Z",
+            command_id=shared_command,
+        )
+
+        events = journal.load_events("authority_state", "canonical")
+        self.assertEqual(
+            [item["event_type"] for item in events],
+            ["AuthorityNewExposureBlocked", "AuthorityNewExposureBlocked"],
+        )
+        self.assertNotEqual(events[0]["event_id"], events[1]["event_id"])
+
+        restored = AuthorityService(JournalStore(self.path))
+        self.assertTrue(
+            restored.is_new_exposure_blocked("paper-account-1", "PAPER")
+        )
+        self.assertTrue(
+            restored.is_new_exposure_blocked("paper-account-2", "PAPER")
+        )
+
+
     def test_repeated_block_reuses_existing_scope_fact_without_corrupting_replay(self):
         first = self.store(now="2030-01-01T00:00:00Z")
         first_accepted = first.submit(

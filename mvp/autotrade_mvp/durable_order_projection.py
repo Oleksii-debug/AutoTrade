@@ -104,8 +104,8 @@ def _canonical_uri(value: object, *, name: str) -> str:
     return text
 
 
-def _canonical_quantity_value(value: object, *, name: str) -> str:
-    """Validate canonical Quantity shape and return its exact decimal value."""
+def _canonical_quantity_value(value: object, *, name: str) -> tuple[str, str]:
+    """Validate canonical Quantity and retain exact value/unit semantics."""
     if not isinstance(value, Mapping):
         raise OrderProjectionConflict(f"{name} must be a canonical Quantity object")
     unknown = set(value) - {"value", "unit"}
@@ -120,8 +120,8 @@ def _canonical_quantity_value(value: object, *, name: str) -> str:
     canonical_value = _decimal_text(raw_value, name=f"{name}.value")
     if canonical_value != raw_value:
         raise OrderProjectionConflict(f"{name}.value must be canonical decimal text")
-    _text(value.get("unit"), name=f"{name}.unit")
-    return raw_value
+    unit = _text(value.get("unit"), name=f"{name}.unit")
+    return raw_value, unit
 
 
 def _canonical_evidence_refs(
@@ -275,6 +275,7 @@ class DurableOrderBookProjection:
             str,
             tuple[str, OrderSnapshot, str],
         ] = {}
+        self._quantity_units: dict[str, str] = {}
         self._reload()
 
     def _new_book(self) -> OrderBookProjection:
@@ -464,9 +465,11 @@ class DurableOrderBookProjection:
     ) -> tuple[
         OrderBookProjection,
         dict[str, tuple[str, OrderSnapshot, str]],
+        dict[str, str],
     ]:
         book = self._new_book()
         idempotency: dict[str, tuple[str, OrderSnapshot, str]] = {}
+        quantity_units: dict[str, str] = {}
         expected_version = 1
 
         for event in events:
@@ -539,16 +542,35 @@ class DurableOrderBookProjection:
                 raise OrderProjectionConflict(
                     "order projection journal snapshot differs from replay"
                 )
+            if operation == "CREATE" and request.get("quantity_unit") is not None:
+                order_id = _text(
+                    request.get("client_order_id"),
+                    name="client_order_id",
+                )
+                unit = _text(
+                    request.get("quantity_unit"),
+                    name="quantity_unit",
+                )
+                prior_unit = quantity_units.get(order_id)
+                if prior_unit is not None and prior_unit != unit:
+                    raise OrderProjectionConflict(
+                        "durable order quantity unit changed across replay"
+                    )
+                quantity_units[order_id] = unit
             idempotency[event_key] = (
                 mutation_hash,
                 snapshot,
                 str(event["event_id"]),
             )
 
-        return book, idempotency
+        return book, idempotency, quantity_units
 
     def _reload(self) -> None:
-        self._book, self._idempotency = self._replay(self._events())
+        (
+            self._book,
+            self._idempotency,
+            self._quantity_units,
+        ) = self._replay(self._events())
 
     def _commit(
         self,
@@ -675,6 +697,7 @@ class DurableOrderBookProjection:
         side: str,
         requested_quantity,
         committed_at: str,
+        quantity_unit: str | None = None,
         oco_group_id: str | None = None,
         parent_intent_id: str | None = None,
     ) -> DurableOrderMutationResult:
@@ -692,6 +715,11 @@ class DurableOrderBookProjection:
                 name="parent_intent_id",
             ),
         }
+        if quantity_unit is not None:
+            request["quantity_unit"] = _text(
+                quantity_unit,
+                name="quantity_unit",
+            )
         return self._commit(
             event_key=event_key,
             operation="CREATE",
@@ -983,6 +1011,7 @@ class DurableOrderBookProjection:
         required = {
             "fill_id",
             "provider_execution_id",
+            "order_ref",
             "instrument_version",
             "side",
             "last_quantity",
@@ -1008,8 +1037,11 @@ class DurableOrderBookProjection:
 
         client_id = _text(client_order_id, name="client_order_id")
         order = self.order(client_id)
-        order_ref = execution_fill.get("order_ref")
-        if order_ref is not None and _text(order_ref, name="order_ref") != client_id:
+        order_ref = _text(
+            execution_fill.get("order_ref"),
+            name="order_ref",
+        )
+        if order_ref != client_id:
             raise OrderProjectionConflict(
                 "canonical ExecutionFill order_ref differs from target order"
             )
@@ -1059,10 +1091,19 @@ class DurableOrderBookProjection:
                 "canonical ExecutionFill cannot be committed before receipt_time"
             )
 
-        quantity_value = _canonical_quantity_value(
+        quantity_value, quantity_unit = _canonical_quantity_value(
             execution_fill.get("last_quantity"),
             name="last_quantity",
         )
+        expected_quantity_unit = self._quantity_units.get(client_id)
+        if expected_quantity_unit is None:
+            raise OrderProjectionConflict(
+                "target order lacks canonical quantity unit"
+            )
+        if quantity_unit != expected_quantity_unit:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill quantity unit differs from target order"
+            )
         last_price = execution_fill.get("last_price")
         if not isinstance(last_price, str):
             raise OrderProjectionConflict(
@@ -1124,10 +1165,7 @@ class DurableOrderBookProjection:
             "side": fill_side,
             "last_quantity": {
                 "value": quantity_value,
-                "unit": _text(
-                    execution_fill["last_quantity"].get("unit"),
-                    name="last_quantity.unit",
-                ),
+                "unit": quantity_unit,
             },
             "last_price": last_price,
             "trade_time": trade_time,

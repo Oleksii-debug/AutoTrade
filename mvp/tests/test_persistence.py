@@ -1754,6 +1754,40 @@ class JournalStoreTests(unittest.TestCase):
                     aggregate_id="paper-1",
                 )
 
+    def test_projection_checkpoint_fractional_version_tamper_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+            store.save_projection_checkpoint(
+                projection_name="position",
+                aggregate_type="account",
+                aggregate_id="paper-1",
+                aggregate_version=1,
+                state={"net_quantity": "1"},
+            )
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE projection_checkpoints "
+                    "SET aggregate_version = 1.5 "
+                    "WHERE projection_name = 'position'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "aggregate_version is not a canonical integer",
+            ):
+                JournalStore(path).load_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                )
+
     def test_projection_checkpoint_identity_tamper_fails_closed(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

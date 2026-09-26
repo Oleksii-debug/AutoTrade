@@ -827,6 +827,60 @@ class JournalStoreTests(unittest.TestCase):
                 connection.close()
             self.assertIsNone(migration_table)
 
+    def test_partial_unique_index_does_not_satisfy_identity_contract(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    """
+                    CREATE TABLE events(
+                        event_id TEXT PRIMARY KEY,
+                        event_type TEXT NOT NULL,
+                        aggregate_type TEXT NOT NULL,
+                        aggregate_id TEXT NOT NULL,
+                        aggregate_version INTEGER NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        payload_hash TEXT NOT NULL,
+                        committed_at TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE UNIQUE INDEX forged_events_identity
+                    ON events(aggregate_type, aggregate_id, aggregate_version)
+                    WHERE 0
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "aggregate_type,aggregate_id,aggregate_version",
+            ):
+                JournalStore(path)
+
+            connection = sqlite3.connect(path)
+            try:
+                migration_table = connection.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'schema_migrations'"
+                ).fetchone()
+                index_rows = {
+                    row[1]: (bool(row[2]), bool(row[4]))
+                    for row in connection.execute("PRAGMA index_list(events)")
+                }
+            finally:
+                connection.close()
+
+            # Initialization is atomic: the adversarial pre-existing index remains
+            # visible as partial, while migration metadata/DDL is rolled back.
+            self.assertIsNone(migration_table)
+            self.assertEqual(index_rows["forged_events_identity"], (True, True))
+
     def test_partial_schema_with_matching_names_but_weakened_column_contract_is_rejected(self):
         cases = (
             ("payload_hash BLOB NOT NULL", "invalid declared type"),

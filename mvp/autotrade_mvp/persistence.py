@@ -394,7 +394,10 @@ class JournalStore:
     def _unique_index_columns(connection, table_name: str) -> set[tuple[str, ...]]:
         unique_indexes: set[tuple[str, ...]] = set()
         for index_row in connection.execute(f"PRAGMA index_list({table_name})"):
-            if not bool(index_row["unique"]):
+            # A partial UNIQUE index constrains only rows matching its WHERE
+            # predicate and therefore cannot satisfy a whole-table identity
+            # invariant, even when PRAGMA index_info reports the same columns.
+            if not bool(index_row["unique"]) or bool(index_row["partial"]):
                 continue
             index_name = str(index_row["name"]).replace("'", "''")
             columns = tuple(

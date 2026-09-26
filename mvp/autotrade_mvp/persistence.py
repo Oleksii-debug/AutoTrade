@@ -38,6 +38,27 @@ def _event_envelope_digest(envelope_json: str) -> str:
     return "sha256:" + sha256(envelope_json.encode("utf-8")).hexdigest()
 
 
+def _projection_checkpoint_digest(
+    *,
+    projection_name: str,
+    aggregate_type: str,
+    aggregate_id: str,
+    aggregate_version: int,
+    state: Any,
+) -> str:
+    """Bind a derived checkpoint to its exact projection identity and journal cut."""
+
+    return payload_digest(
+        {
+            "projection_name": projection_name,
+            "aggregate_type": aggregate_type,
+            "aggregate_id": aggregate_id,
+            "aggregate_version": aggregate_version,
+            "state": state,
+        }
+    )
+
+
 _SEQUENCE_RE = re.compile(r"^(0|[1-9][0-9]*)$")
 
 
@@ -71,7 +92,7 @@ class JournalStore:
     publication intent; a separate qualified dispatcher must perform delivery.
     """
 
-    SCHEMA_VERSION = 7
+    SCHEMA_VERSION = 8
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -215,6 +236,11 @@ class JournalStore:
                 )
                 """,
             )
+        if version == 8:
+            # Schema v8 changes aggregate projection-checkpoint hash semantics.
+            # The table shape is unchanged; _initialize() validates each legacy
+            # checkpoint before rebinding it to identity + aggregate cut + state.
+            return ()
         raise ValueError(f"Unsupported journal migration version: {version}")
 
     @classmethod
@@ -703,6 +729,106 @@ class JournalStore:
                                     row["event_id"],
                                 ),
                             )
+                    if version == 8:
+                        for row in connection.execute(
+                            """
+                            SELECT
+                                projection_name,
+                                aggregate_type,
+                                aggregate_id,
+                                aggregate_version,
+                                state_json,
+                                state_hash
+                            FROM projection_checkpoints
+                            """
+                        ):
+                            projection_name = str(row["projection_name"])
+                            aggregate_type = str(row["aggregate_type"])
+                            aggregate_id = str(row["aggregate_id"])
+                            if (
+                                self._require_text(
+                                    projection_name, "legacy projection_name"
+                                )
+                                != projection_name
+                                or self._require_text(
+                                    aggregate_type, "legacy aggregate_type"
+                                )
+                                != aggregate_type
+                                or self._require_text(
+                                    aggregate_id, "legacy aggregate_id"
+                                )
+                                != aggregate_id
+                            ):
+                                raise ValueError(
+                                    "legacy projection checkpoint identity is not canonical"
+                                )
+
+                            aggregate_version = row["aggregate_version"]
+                            if (
+                                type(aggregate_version) is not int
+                                or aggregate_version < 0
+                            ):
+                                raise ValueError(
+                                    "legacy projection checkpoint version is invalid"
+                                )
+
+                            raw_state_json = row["state_json"]
+                            if not isinstance(raw_state_json, str):
+                                raise ValueError(
+                                    "legacy projection checkpoint state is not text"
+                                )
+                            try:
+                                state = json.loads(raw_state_json)
+                            except (json.JSONDecodeError, TypeError) as error:
+                                raise ValueError(
+                                    "legacy projection checkpoint state is not valid JSON"
+                                ) from error
+                            if canonical_json(state) != raw_state_json:
+                                raise ValueError(
+                                    "legacy projection checkpoint state is not canonical JSON"
+                                )
+                            if row["state_hash"] != payload_digest(state):
+                                raise ValueError(
+                                    "legacy projection checkpoint hash does not match state"
+                                )
+
+                            journal_row = connection.execute(
+                                "SELECT MAX(aggregate_version) FROM events "
+                                "WHERE aggregate_type = ? AND aggregate_id = ?",
+                                (aggregate_type, aggregate_id),
+                            ).fetchone()
+                            journal_version = (
+                                0
+                                if journal_row is None or journal_row[0] is None
+                                else int(journal_row[0])
+                            )
+                            if aggregate_version > journal_version:
+                                raise ValueError(
+                                    "legacy projection checkpoint is ahead of the journal"
+                                )
+
+                            connection.execute(
+                                """
+                                UPDATE projection_checkpoints
+                                SET state_hash = ?
+                                WHERE projection_name = ?
+                                  AND aggregate_type = ?
+                                  AND aggregate_id = ?
+                                """,
+                                (
+                                    _projection_checkpoint_digest(
+                                        projection_name=projection_name,
+                                        aggregate_type=aggregate_type,
+                                        aggregate_id=aggregate_id,
+                                        aggregate_version=aggregate_version,
+                                        state=state,
+                                    ),
+                                    projection_name,
+                                    aggregate_type,
+                                    aggregate_id,
+                                ),
+                            )
+
                     connection.execute(
                         "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                         (version, self._now()),
@@ -1229,7 +1355,17 @@ class JournalStore:
         ):
             raise ValueError("aggregate_version must be a non-negative integer")
         state_json = canonical_json(state)
-        state_hash = payload_digest(state)
+        state_hash = (
+            _projection_checkpoint_digest(
+                projection_name=projection_name,
+                aggregate_type=aggregate_type,
+                aggregate_id=aggregate_id,
+                aggregate_version=aggregate_version,
+                state=state,
+            )
+            if self.SCHEMA_VERSION >= 8
+            else payload_digest(state)
+        )
 
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -1330,17 +1466,40 @@ class JournalStore:
                 (aggregate_type, aggregate_id),
             ).fetchone()[0]
 
-        state = json.loads(row["state_json"])
-        if payload_digest(state) != row["state_hash"]:
-            raise ValueError("projection checkpoint hash does not match state")
+        try:
+            state = json.loads(row["state_json"])
+        except (json.JSONDecodeError, TypeError) as error:
+            raise ValueError(
+                "projection checkpoint state is not valid JSON"
+            ) from error
+        if canonical_json(state) != row["state_json"]:
+            raise ValueError(
+                "projection checkpoint state is not canonical JSON"
+            )
+        aggregate_version = int(row["aggregate_version"])
+        expected_hash = (
+            _projection_checkpoint_digest(
+                projection_name=projection_name,
+                aggregate_type=aggregate_type,
+                aggregate_id=aggregate_id,
+                aggregate_version=aggregate_version,
+                state=state,
+            )
+            if self.SCHEMA_VERSION >= 8
+            else payload_digest(state)
+        )
+        if expected_hash != row["state_hash"]:
+            raise ValueError(
+                "projection checkpoint hash does not match identity, version, and state"
+            )
         journal_version = 0 if current is None else int(current)
-        if int(row["aggregate_version"]) > journal_version:
+        if aggregate_version > journal_version:
             raise ValueError("projection checkpoint is ahead of the journal")
         return {
             "projection_name": projection_name,
             "aggregate_type": aggregate_type,
             "aggregate_id": aggregate_id,
-            "aggregate_version": int(row["aggregate_version"]),
+            "aggregate_version": aggregate_version,
             "state": state,
             "state_hash": row["state_hash"],
             "updated_at": row["updated_at"],

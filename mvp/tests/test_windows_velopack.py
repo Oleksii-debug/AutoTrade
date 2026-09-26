@@ -14,6 +14,10 @@ from tools.build_windows_velopack import (
     VelopackPackagingError,
     build_velopack_release,
 )
+from tools.windows_authenticode import (
+    AuthenticodePolicy,
+    AuthenticodeSigningError,
+)
 
 
 SOURCE_SHA = "a" * 40
@@ -448,6 +452,157 @@ class WindowsVelopackPackagingTests(unittest.TestCase):
                     output_dir=output,
                     runner=self.successful_runner({}),
                 )
+
+        self.assertEqual(list(output.iterdir()), [])
+
+    def signing_policy(self):
+        return AuthenticodePolicy(
+            enabled=True,
+            backend="AZURE_ARTIFACT_SIGNING",
+            endpoint="https://eus.codesigning.azure.net/",
+            code_signing_account_name="autotrade-signing",
+            certificate_profile_name="production",
+            timestamp_required=True,
+        )
+
+    def test_signing_mode_fails_closed_while_canonical_policy_is_disabled(self):
+        bundle, manifest = self.release_inputs(stem="signing-disabled")
+        output = self.root / "signing-disabled-out"
+        called = False
+
+        def forbidden_runner(*args, **kwargs):
+            nonlocal called
+            called = True
+            raise AssertionError("vpk must not run with disabled signing policy")
+
+        with (
+            patch.object(velopack_module, "assert_windows_signing_environment"),
+            self.assertRaisesRegex(
+                VelopackPackagingError,
+                "canonical Authenticode signing policy is disabled",
+            ),
+        ):
+            build_velopack_release(
+                bundle=bundle,
+                installer_manifest=manifest,
+                output_dir=output,
+                sign=True,
+                runner=forbidden_runner,
+            )
+
+        self.assertFalse(called)
+        self.assertEqual(list(output.iterdir()), [])
+
+    def test_signing_mode_uses_only_canonical_azure_profile_and_records_verification(self):
+        bundle, manifest = self.release_inputs(stem="signed")
+        output = self.root / "signed-out"
+        captured = {}
+        policy = self.signing_policy()
+        policy_digest = "sha256:" + "c" * 64
+        signing_evidence = {
+            "backend": "AZURE_ARTIFACT_SIGNING",
+            "policy_sha256": policy_digest,
+            "profile": {
+                "endpoint": policy.endpoint,
+                "code_signing_account_name": policy.code_signing_account_name,
+                "certificate_profile_name": policy.certificate_profile_name,
+            },
+            "timestamp_required": True,
+            "signer_thumbprint": "A" * 40,
+            "verified_files": [],
+        }
+        base_runner = self.successful_runner(captured)
+
+        def signing_runner(command, **kwargs):
+            metadata = Path(
+                command[command.index("--azureTrustedSignFile") + 1]
+            )
+            self.assertTrue(metadata.is_file())
+            self.assertEqual(
+                json.loads(metadata.read_text(encoding="utf-8")),
+                {
+                    "Endpoint": policy.endpoint,
+                    "CodeSigningAccountName": policy.code_signing_account_name,
+                    "CertificateProfileName": policy.certificate_profile_name,
+                },
+            )
+            return base_runner(command, **kwargs)
+
+        with (
+            patch.object(velopack_module, "assert_windows_signing_environment"),
+            patch.object(
+                velopack_module,
+                "load_canonical_authenticode_policy",
+                return_value=(policy, policy_digest),
+            ),
+            patch.object(
+                velopack_module,
+                "verify_velopack_authenticode",
+                return_value=signing_evidence,
+            ) as verifier,
+            patch.dict(
+                os.environ,
+                {
+                    "VPK_AZURE_TRUSTED_SIGN_FILE": "candidate-controlled.json",
+                    "VPK_SIGN_PARAMS": "/f candidate.pfx",
+                },
+                clear=False,
+            ),
+        ):
+            result = build_velopack_release(
+                bundle=bundle,
+                installer_manifest=manifest,
+                output_dir=output,
+                sign=True,
+                runner=signing_runner,
+            )
+
+        command = captured["command"]
+        self.assertIn("--azureTrustedSignFile", command)
+        self.assertNotIn("--signParams", command)
+        self.assertNotIn("--signTemplate", command)
+        self.assertFalse(
+            any(key.upper().startswith("VPK_") for key in captured["kwargs"]["env"])
+        )
+        verifier.assert_called_once()
+        build_manifest = result["manifest"]
+        self.assertEqual(
+            build_manifest["signing_status"],
+            "AUTHENTICODE_VERIFIED_REQUIRES_WP64",
+        )
+        self.assertEqual(build_manifest["signing"], signing_evidence)
+        self.assertFalse(build_manifest["release_eligible"])
+        self.assertFalse(build_manifest["trading_authority_granted_by_artifact"])
+
+    def test_failed_authenticode_verification_publishes_no_artifacts(self):
+        bundle, manifest = self.release_inputs(stem="bad-signature")
+        output = self.root / "bad-signature-out"
+        policy = self.signing_policy()
+
+        with (
+            patch.object(velopack_module, "assert_windows_signing_environment"),
+            patch.object(
+                velopack_module,
+                "load_canonical_authenticode_policy",
+                return_value=(policy, "sha256:" + "c" * 64),
+            ),
+            patch.object(
+                velopack_module,
+                "verify_velopack_authenticode",
+                side_effect=AuthenticodeSigningError("signature mismatch"),
+            ),
+            self.assertRaisesRegex(
+                VelopackPackagingError,
+                "Authenticode verification failed closed",
+            ),
+        ):
+            build_velopack_release(
+                bundle=bundle,
+                installer_manifest=manifest,
+                output_dir=output,
+                sign=True,
+                runner=self.successful_runner({}),
+            )
 
         self.assertEqual(list(output.iterdir()), [])
 

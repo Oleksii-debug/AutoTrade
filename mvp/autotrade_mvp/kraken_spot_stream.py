@@ -332,6 +332,8 @@ class KrakenSpotExecutionFrame:
             raise TypeError(
                 "reports must contain KrakenSpotExecutionReport"
             )
+        if type(self.response_bytes) is not bytes:
+            raise TypeError("response_bytes must be bytes")
         evidence_ref = _canonical_text(
             self.evidence_ref,
             name="evidence_ref",
@@ -344,10 +346,6 @@ class KrakenSpotExecutionFrame:
             raise KrakenSpotStreamError(
                 "Kraken stream evidence_ref does not match exact bytes"
             )
-        if type(self.response_bytes) is not bytes:
-            raise TypeError("response_bytes must be bytes")
-
-
 def parse_execution_frame(
     response_bytes: object,
     *,
@@ -441,6 +439,7 @@ class KrakenSpotStreamRecoveryEvidence:
     gap_expected_sequence: int | None = None
     gap_observed_sequence: int | None = None
     gap_evidence_ref: str | None = None
+    recovery_reason: str | None = None
 
     @property
     def trading_ready(self) -> bool:
@@ -499,6 +498,7 @@ class KrakenSpotExecutionStreamRecovery:
         self._gap_expected_sequence: int | None = None
         self._gap_observed_sequence: int | None = None
         self._gap_evidence_ref: str | None = None
+        self._recovery_reason: str | None = None
 
     def begin_connection(self) -> int:
         """Start/restart a stream generation and require a fresh snapshot."""
@@ -514,6 +514,7 @@ class KrakenSpotExecutionStreamRecovery:
         self._gap_expected_sequence = None
         self._gap_observed_sequence = None
         self._gap_evidence_ref = None
+        self._recovery_reason = "fresh_subscription_required"
         return self.connection_generation
 
     def disconnect(self) -> None:
@@ -529,6 +530,7 @@ class KrakenSpotExecutionStreamRecovery:
         self._gap_expected_sequence = None
         self._gap_observed_sequence = None
         self._gap_evidence_ref = None
+        self._recovery_reason = None
 
     def apply_subscription_ack(
         self,
@@ -555,6 +557,7 @@ class KrakenSpotExecutionStreamRecovery:
                 "Kraken subscription acknowledgement scope mismatch"
             )
         self._subscription_ack_evidence_ref = acknowledgement.evidence_ref
+        self._recovery_reason = "fresh_snapshot_required"
         self.phase = self.AWAITING_SNAPSHOT
 
     def _require_scope(self, frame: KrakenSpotExecutionFrame) -> None:
@@ -574,11 +577,16 @@ class KrakenSpotExecutionStreamRecovery:
         expected: int,
         observed: int,
         evidence_ref: str,
+        reason: str,
     ) -> None:
         self.phase = self.GAP_RECONCILIATION_REQUIRED
         self._gap_expected_sequence = expected
         self._gap_observed_sequence = observed
         self._gap_evidence_ref = evidence_ref
+        self._recovery_reason = _canonical_text(
+            reason,
+            name="recovery_reason",
+        )
         self._snapshot_order_ids = ()
         self._buffered_updates.clear()
 
@@ -621,6 +629,7 @@ class KrakenSpotExecutionStreamRecovery:
             self._snapshot_order_ids = tuple(
                 sorted({report.order_id for report in frame.reports})
             )
+            self._recovery_reason = "snapshot_requires_rest_crosscheck"
             self.phase = self.REST_RECONCILIATION_REQUIRED
             return
 
@@ -638,6 +647,7 @@ class KrakenSpotExecutionStreamRecovery:
                 expected=expected,
                 observed=frame.sequence,
                 evidence_ref=frame.evidence_ref,
+                reason="sequence_gap",
             )
             return
         if len(self._buffered_updates) >= self.max_buffered_updates:
@@ -645,6 +655,7 @@ class KrakenSpotExecutionStreamRecovery:
                 expected=expected,
                 observed=frame.sequence,
                 evidence_ref=frame.evidence_ref,
+                reason="buffer_exhausted",
             )
             return
         self._buffered_updates.append(frame)
@@ -669,4 +680,5 @@ class KrakenSpotExecutionStreamRecovery:
             gap_expected_sequence=self._gap_expected_sequence,
             gap_observed_sequence=self._gap_observed_sequence,
             gap_evidence_ref=self._gap_evidence_ref,
+            recovery_reason=self._recovery_reason,
         )

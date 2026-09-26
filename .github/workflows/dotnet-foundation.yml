@@ -48,7 +48,10 @@ jobs:
       - run: dotnet --info
       # Bootstrap has no NuGet package references yet. WP-03 must add committed
       # package locks and locked-mode before introducing release dependencies.
-      - run: dotnet restore src/AutoTrade.Contracts/AutoTrade.Contracts.csproj
+      - run: dotnet restore src/AutoTrade.Contracts/AutoTrade.Contracts.csproj --use-lock-file
+      - name: Emit generated Contracts NuGet lock
+        shell: pwsh
+        run: Get-Content -Raw src/AutoTrade.Contracts/packages.lock.json
       - run: dotnet build src/AutoTrade.Contracts/AutoTrade.Contracts.csproj --configuration Release --no-restore
 
   desktop-build:
@@ -63,5 +66,8 @@ jobs:
         shell: pwsh
         run: Get-Content -Raw src/AutoTrade.Desktop/packages.lock.json
       - run: dotnet build src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --configuration Release --no-restore
-      - run: dotnet restore tests/Desktop.Client/Desktop.Client.csproj
+      - run: dotnet restore tests/Desktop.Client/Desktop.Client.csproj --use-lock-file
+      - name: Emit generated Desktop.Client NuGet lock
+        shell: pwsh
+        run: Get-Content -Raw tests/Desktop.Client/packages.lock.json
       - run: dotnet run --project tests/Desktop.Client/Desktop.Client.csproj --configuration Release --no-restore

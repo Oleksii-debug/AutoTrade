@@ -141,8 +141,14 @@ def _redact_structured_url_query(value: str) -> str | None:
 def _redact_embedded_secret_text(value: str) -> str:
     if any(marker in value for marker in _PRIVATE_KEY_MARKERS):
         return "[REDACTED]"
-    redacted = _redact_structured_json_text(value) or value
-    redacted = _redact_structured_url_query(redacted) or redacted
+    structured_json = _redact_structured_json_text(value)
+    if structured_json is not None:
+        # Structured redaction has already recursively sanitized every JSON value.
+        # Do not run the generic text regexes over the serialized JSON: those
+        # regexes intentionally normalize key/value syntax and would make the
+        # valid redacted JSON unparsable.
+        return structured_json
+    redacted = _redact_structured_url_query(value) or value
     for pattern in _EMBEDDED_SECRET_PATTERNS:
         def replacement(match: re.Match[str]) -> str:
             name = match.group(1)

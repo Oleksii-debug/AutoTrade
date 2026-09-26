@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
+from threading import Lock
 from typing import Mapping
 from uuid import UUID
 import base64
@@ -34,6 +35,7 @@ WHITEBIT_OFFICIAL_DOCS = MappingProxyType(
         "order_types": "https://docs.whitebit.com/concepts/order-types",
         "client_order_id": "https://docs.whitebit.com/guides/client-order-id",
         "websocket": "https://docs.whitebit.com/websocket/overview",
+        "rate_limits": "https://docs.whitebit.com/api-reference/rate-limits",
     }
 )
 
@@ -1584,6 +1586,314 @@ def sign_private_request(
         headers=headers,
         nonce=nonce,
         nonce_window=nonce_window,
+    )
+
+
+@dataclass(frozen=True)
+class WhiteBitNonceState:
+    """Serializable provider nonce checkpoint for one fenced credential scope.
+
+    The state deliberately contains no API key or secret. scope_id must be a
+    non-secret identity supplied by the credential boundary. The active execution
+    owner must durably persist the returned state before a signed request can be
+    submitted.
+    """
+
+    scope_id: str
+    owner_id: str
+    owner_generation: int
+    last_nonce: int
+
+    def __post_init__(self) -> None:
+        scope = _text(self.scope_id, name="scope_id")
+        owner = _text(self.owner_id, name="owner_id")
+        if (
+            not isinstance(self.owner_generation, int)
+            or isinstance(self.owner_generation, bool)
+            or self.owner_generation <= 0
+        ):
+            raise WhiteBitAdapterError("owner_generation must be a positive integer")
+        if (
+            not isinstance(self.last_nonce, int)
+            or isinstance(self.last_nonce, bool)
+            or self.last_nonce < 0
+        ):
+            raise WhiteBitAdapterError("last_nonce must be a non-negative integer")
+        object.__setattr__(self, "scope_id", scope)
+        object.__setattr__(self, "owner_id", owner)
+
+    def to_record(self) -> Mapping[str, object]:
+        return MappingProxyType(
+            {
+                "scope_id": self.scope_id,
+                "owner_id": self.owner_id,
+                "owner_generation": self.owner_generation,
+                "last_nonce": self.last_nonce,
+            }
+        )
+
+    @classmethod
+    def from_record(cls, value: Mapping[str, object]) -> "WhiteBitNonceState":
+        if not isinstance(value, Mapping):
+            raise TypeError("nonce state record must be a mapping")
+        expected = {"scope_id", "owner_id", "owner_generation", "last_nonce"}
+        if set(value) != expected:
+            raise WhiteBitAdapterError(
+                "nonce state record must contain exactly the canonical fields"
+            )
+        return cls(
+            scope_id=value["scope_id"],
+            owner_id=value["owner_id"],
+            owner_generation=value["owner_generation"],
+            last_nonce=value["last_nonce"],
+        )
+
+
+class WhiteBitNonceAllocator:
+    """Thread-safe nonce allocation inside one fenced active execution owner.
+
+    This is not a cross-process ownership service. Cross-process ownership remains
+    the responsibility of the canonical execution-owner fence. Within that owner
+    it prevents concurrent callers from reusing a nonce, preserves a checkpoint
+    that can be restored after restart, and rejects stale owner generations. The
+    checkpoint must be durably recorded before network send.
+    """
+
+    def __init__(self, state: WhiteBitNonceState):
+        if not isinstance(state, WhiteBitNonceState):
+            raise TypeError("state must be WhiteBitNonceState")
+        self._state = state
+        self._lock = Lock()
+
+    @property
+    def state(self) -> WhiteBitNonceState:
+        with self._lock:
+            return self._state
+
+    def transfer_owner(
+        self,
+        *,
+        owner_id: str,
+        new_generation: int,
+        expected_generation: int,
+    ) -> WhiteBitNonceState:
+        new_owner = _text(owner_id, name="owner_id")
+        if (
+            not isinstance(new_generation, int)
+            or isinstance(new_generation, bool)
+            or new_generation <= 0
+        ):
+            raise WhiteBitAdapterError("new_generation must be a positive integer")
+        if (
+            not isinstance(expected_generation, int)
+            or isinstance(expected_generation, bool)
+            or expected_generation <= 0
+        ):
+            raise WhiteBitAdapterError(
+                "expected_generation must be a positive integer"
+            )
+        with self._lock:
+            current = self._state
+            if current.owner_generation != expected_generation:
+                raise WhiteBitAdapterError("stale nonce owner generation")
+            if new_generation <= current.owner_generation:
+                raise WhiteBitAdapterError(
+                    "new nonce owner generation must strictly increase"
+                )
+            self._state = WhiteBitNonceState(
+                scope_id=current.scope_id,
+                owner_id=new_owner,
+                owner_generation=new_generation,
+                last_nonce=current.last_nonce,
+            )
+            return self._state
+
+    def reserve(
+        self,
+        *,
+        clock_ms: int,
+        owner_id: str,
+        owner_generation: int,
+        nonce_window: bool = False,
+        server_time_ms: int | None = None,
+    ) -> int:
+        """Reserve one unique nonce; persist state before signing or sending."""
+        if not isinstance(clock_ms, int) or isinstance(clock_ms, bool) or clock_ms <= 0:
+            raise WhiteBitAdapterError("clock_ms must be a positive integer")
+        owner = _text(owner_id, name="owner_id")
+        if (
+            not isinstance(owner_generation, int)
+            or isinstance(owner_generation, bool)
+            or owner_generation <= 0
+        ):
+            raise WhiteBitAdapterError("owner_generation must be a positive integer")
+        if type(nonce_window) is not bool:
+            raise WhiteBitAdapterError("nonce_window must be boolean")
+        if nonce_window:
+            if (
+                not isinstance(server_time_ms, int)
+                or isinstance(server_time_ms, bool)
+                or server_time_ms <= 0
+            ):
+                raise WhiteBitAdapterError(
+                    "nonceWindow requires positive server_time_ms evidence"
+                )
+        elif server_time_ms is not None:
+            raise WhiteBitAdapterError(
+                "server_time_ms is valid only when nonce_window is enabled"
+            )
+
+        with self._lock:
+            current = self._state
+            if (
+                owner != current.owner_id
+                or owner_generation != current.owner_generation
+            ):
+                raise WhiteBitAdapterError("stale or foreign nonce owner")
+            candidate = max(clock_ms, current.last_nonce + 1)
+            if nonce_window and abs(candidate - server_time_ms) > 5000:
+                raise WhiteBitAdapterError(
+                    "reserved nonce is outside the WhiteBIT ±5 second nonceWindow"
+                )
+            self._state = WhiteBitNonceState(
+                scope_id=current.scope_id,
+                owner_id=current.owner_id,
+                owner_generation=current.owner_generation,
+                last_nonce=candidate,
+            )
+            return candidate
+
+
+@dataclass(frozen=True)
+class WhiteBitRateLimitBudget:
+    """Partition an evidenced endpoint quota into normal/recovery/cancel capacity.
+
+    No provider-wide quota is assumed because WhiteBIT documents endpoint-specific
+    limits. The caller supplies the currently evidenced window capacity. Normal
+    traffic cannot consume recovery/cancel reserves; recovery cannot consume the
+    cancel reserve; cancellation has highest admission priority.
+    """
+
+    capacity: int
+    used: int = 0
+    reserved_recovery: int = 0
+    reserved_cancel: int = 0
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("capacity", self.capacity),
+            ("used", self.used),
+            ("reserved_recovery", self.reserved_recovery),
+            ("reserved_cancel", self.reserved_cancel),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise WhiteBitAdapterError(f"{name} must be an integer")
+        if self.capacity <= 0:
+            raise WhiteBitAdapterError("capacity must be positive")
+        if min(self.used, self.reserved_recovery, self.reserved_cancel) < 0:
+            raise WhiteBitAdapterError("rate-limit counters cannot be negative")
+        if self.used > self.capacity:
+            raise WhiteBitAdapterError("used quota cannot exceed capacity")
+        if self.reserved_recovery + self.reserved_cancel >= self.capacity:
+            raise WhiteBitAdapterError(
+                "recovery and cancel reserves must leave normal capacity"
+            )
+
+    @property
+    def remaining(self) -> int:
+        return self.capacity - self.used
+
+    def can_admit(self, request_class: str) -> bool:
+        kind = _text(request_class, name="request_class").upper()
+        if kind not in {"NORMAL", "RECOVERY", "CANCEL"}:
+            raise WhiteBitAdapterError("unsupported rate-limit request class")
+        after = self.remaining - 1
+        if after < 0:
+            return False
+        if kind == "NORMAL":
+            return after >= self.reserved_recovery + self.reserved_cancel
+        if kind == "RECOVERY":
+            return after >= self.reserved_cancel
+        return True
+
+    def consume(self, request_class: str) -> "WhiteBitRateLimitBudget":
+        if not self.can_admit(request_class):
+            raise WhiteBitAdapterError(
+                "request would consume reserved WhiteBIT recovery/cancel quota"
+            )
+        return WhiteBitRateLimitBudget(
+            capacity=self.capacity,
+            used=self.used + 1,
+            reserved_recovery=self.reserved_recovery,
+            reserved_cancel=self.reserved_cancel,
+        )
+
+
+@dataclass(frozen=True)
+class WhiteBitRetryDecision:
+    automatic_retry: bool
+    base_delay_seconds: int | None
+    jitter_required: bool
+    requires_reconciliation: bool
+    classification: str
+
+
+def classify_whitebit_http_retry(
+    *,
+    status_code: int,
+    attempt: int,
+    request_class: str,
+) -> WhiteBitRetryDecision:
+    """Classify HTTP retry without weakening UNKNOWN outbound-write semantics."""
+    if (
+        not isinstance(status_code, int)
+        or isinstance(status_code, bool)
+        or not 100 <= status_code <= 599
+    ):
+        raise WhiteBitAdapterError("status_code must be an HTTP status integer")
+    if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt <= 0:
+        raise WhiteBitAdapterError("attempt must be a positive integer")
+    kind = _text(request_class, name="request_class").upper()
+    if kind not in {"READ", "WRITE", "RECOVERY", "CANCEL"}:
+        raise WhiteBitAdapterError("unsupported retry request class")
+
+    delay = min(2 ** min(attempt - 1, 5), 30)
+    if status_code == 429:
+        return WhiteBitRetryDecision(
+            automatic_retry=True,
+            base_delay_seconds=delay,
+            jitter_required=True,
+            requires_reconciliation=False,
+            classification="RATE_LIMIT",
+        )
+    if 500 <= status_code <= 599:
+        if kind in {"WRITE", "CANCEL"}:
+            return WhiteBitRetryDecision(
+                automatic_retry=False,
+                base_delay_seconds=None,
+                jitter_required=False,
+                requires_reconciliation=True,
+                classification="AMBIGUOUS_WRITE",
+            )
+        return WhiteBitRetryDecision(
+            automatic_retry=True,
+            base_delay_seconds=delay,
+            jitter_required=True,
+            requires_reconciliation=False,
+            classification="SERVER_TRANSIENT",
+        )
+    if status_code in {401, 403}:
+        classification = "AUTHENTICATION"
+    elif 400 <= status_code <= 499:
+        classification = "CLIENT_OR_VALIDATION"
+    else:
+        classification = "NO_RETRY"
+    return WhiteBitRetryDecision(
+        automatic_retry=False,
+        base_delay_seconds=None,
+        jitter_required=False,
+        requires_reconciliation=False,
+        classification=classification,
     )
 
 

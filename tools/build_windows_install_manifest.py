@@ -8,12 +8,20 @@ policies instead of trusting an arbitrary staging directory.
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 from hashlib import sha256
 import json
 from pathlib import Path, PurePosixPath
 import re
 import sys
 import zipfile
+
+from research.autotrade_research.artifacts.durable_publish import (
+    DurablePublishLockError,
+    atomic_write_bytes,
+    durable_path_lock,
+    validate_publication_destination,
+)
 
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -459,47 +467,22 @@ def verify_release_bundle(bundle: Path) -> dict[str, object]:
 
 
 
-def _prepare_atomic_destination(path: Path, *, name: str) -> Path:
-    """Validate a release-tool output and clear only a stale regular temp file."""
-
-    if path.is_symlink():
-        raise InstallerManifestError(f"{name} cannot be a symlink")
-    if path.exists() and not path.is_file():
-        raise InstallerManifestError(f"{name} must be a regular file or absent")
-    temporary = path.with_name(path.name + ".tmp")
-    if temporary.is_symlink():
-        raise InstallerManifestError(f"{name} temporary path cannot be a symlink")
-    if temporary.exists():
-        if not temporary.is_file():
-            raise InstallerManifestError(
-                f"{name} temporary path must be a regular file or absent"
-            )
-        temporary.unlink()
-    return temporary
-
-
-def _write_prepared_atomic(
-    destination: Path,
-    temporary: Path,
-    data: bytes,
-    *,
-    name: str,
-) -> None:
-    """Write through an exclusive temp file, then replace the destination."""
-
+def _validate_output_destination(path: Path, *, name: str) -> None:
     try:
-        try:
-            with temporary.open("xb") as stream:
-                stream.write(data)
-                stream.flush()
-        except FileExistsError as error:
-            raise InstallerManifestError(
-                f"{name} temporary path changed before creation"
-            ) from error
-        temporary.replace(destination)
-    finally:
-        if temporary.exists() or temporary.is_symlink():
-            temporary.unlink()
+        validate_publication_destination(path)
+    except (DurablePublishLockError, OSError) as error:
+        raise InstallerManifestError(f"{name} is unsafe: {error}") from error
+
+
+def _cleanup_legacy_temporary(path: Path) -> None:
+    try:
+        validate_publication_destination(path)
+    except (DurablePublishLockError, OSError):
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def build_installer_input_manifest(
@@ -511,7 +494,7 @@ def build_installer_input_manifest(
     runtime_prerequisite: str | None = None,
 ) -> dict[str, object]:
     verified = verify_release_bundle(bundle)
-    bundle_resolved = bundle.resolve(strict=True)
+    bundle_resolved = bundle.resolve(strict=False)
     output_resolved = output.resolve(strict=False)
     digest_path = output.with_suffix(output.suffix + ".sha256")
     digest_resolved = digest_path.resolve(strict=False)
@@ -580,29 +563,32 @@ def build_installer_input_manifest(
     }
     payload = _canonical_bytes(manifest)
     output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = _prepare_atomic_destination(
-        output,
-        name="installer manifest output",
-    )
-    digest_temporary = _prepare_atomic_destination(
+    _validate_output_destination(output, name="installer manifest output")
+    _validate_output_destination(
         digest_path,
         name="installer manifest digest output",
+    )
+    _cleanup_legacy_temporary(output.with_name(output.name + ".tmp"))
+    _cleanup_legacy_temporary(
+        digest_path.with_name(digest_path.name + ".tmp")
     )
     manifest_digest = sha256(payload).hexdigest()
     digest_payload = f"{manifest_digest}  {output.name}\n".encode("utf-8")
 
-    _write_prepared_atomic(
-        output,
-        temporary,
-        payload,
-        name="installer manifest output",
+    lock_paths = sorted(
+        (output, digest_path),
+        key=lambda path: str(path.resolve(strict=False)),
     )
-    _write_prepared_atomic(
-        digest_path,
-        digest_temporary,
-        digest_payload,
-        name="installer manifest digest output",
-    )
+    try:
+        with ExitStack() as stack:
+            for path in lock_paths:
+                stack.enter_context(durable_path_lock(path))
+            atomic_write_bytes(output, payload)
+            atomic_write_bytes(digest_path, digest_payload)
+    except (DurablePublishLockError, OSError) as error:
+        raise InstallerManifestError(
+            f"installer manifest publication failed closed: {error}"
+        ) from error
     return {
         "output": str(output),
         "sha256": manifest_digest,

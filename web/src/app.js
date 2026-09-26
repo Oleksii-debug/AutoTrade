@@ -220,10 +220,51 @@
     "authority-policy-version"
   ]);
 
+  function authorityReviewScopeKey() {
+    return String(state.accountId ?? "") + "\n" + String(state.environment ?? "");
+  }
+
+  function invalidateAuthorityPolicyReview() {
+    const confirmation = byId("authority-policy-confirm");
+    if (!confirmation) return;
+    confirmation.checked = false;
+    delete confirmation.dataset.reviewStateVersion;
+    delete confirmation.dataset.reviewScope;
+  }
+
+  function bindAuthorityPolicyReviewInvalidation() {
+    for (const id of [
+      ...AUTHORITY_POLICY_REQUIRED_FIELD_IDS,
+      "authority-autonomous",
+      "authority-protection-only"
+    ]) {
+      const input = byId(id);
+      if (!input) continue;
+      input.addEventListener("input", invalidateAuthorityPolicyReview);
+      input.addEventListener("change", invalidateAuthorityPolicyReview);
+    }
+    const confirmation = byId("authority-policy-confirm");
+    if (!confirmation) return;
+    confirmation.addEventListener("change", () => {
+      if (!confirmation.checked || !state.snapshotReady) {
+        invalidateAuthorityPolicyReview();
+        return;
+      }
+      confirmation.dataset.reviewStateVersion = state.version.toString();
+      confirmation.dataset.reviewScope = authorityReviewScopeKey();
+    });
+  }
+
   function syncAuthorityPolicyFields(action) {
     const container = byId("authority-policy-fields");
     if (!container) return;
     const active = action === "SET_AUTHORITY";
+    const scopeKey = active ? authorityReviewScopeKey() : "";
+    const priorScopeKey = container.dataset.authorityScopeKey || "";
+    if (!active || (priorScopeKey !== "" && priorScopeKey !== scopeKey)) {
+      invalidateAuthorityPolicyReview();
+    }
+    container.dataset.authorityScopeKey = scopeKey;
     container.hidden = !active;
     for (const id of AUTHORITY_POLICY_REQUIRED_FIELD_IDS) {
       const input = byId(id);
@@ -957,6 +998,13 @@
     if (!confirmation || !confirmation.checked) {
       throw new Error("review confirmation is required before authority policy submission");
     }
+    if (
+      confirmation.dataset.reviewStateVersion !== state.version.toString() ||
+      confirmation.dataset.reviewScope !== authorityReviewScopeKey()
+    ) {
+      throw new Error(
+        "review confirmation must be renewed after host state or policy scope changes");
+    }
     const instrumentId = requiredPolicyInput(
       "authority-instrument-id", "instrument ID");
     if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(
@@ -1171,6 +1219,7 @@
   }
 
   async function start() {
+    bindAuthorityPolicyReviewInvalidation();
     byId("host-command-form").addEventListener("submit", submitCommand);
     byId("host-action").addEventListener("change", () => {
       syncAuthorityPolicyFields(byId("host-action").value);

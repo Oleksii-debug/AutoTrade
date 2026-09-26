@@ -2738,6 +2738,96 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
         self.assertEqual(fills[0].fee_amount, Decimal("2.50"))
         self.assertEqual(fills[0].evidence_refs, (observation.evidence_ref,))
 
+    def test_invalid_private_read_query_fails_before_quota_nonce_secret_or_wire(self):
+        cases = (
+            (
+                "/0/private/OpenOrders",
+                {"unexpected": "1"},
+                "ORDER.READ",
+                frozenset({"ORDERS"}),
+                "unsupported fields",
+            ),
+            (
+                "/0/private/OpenOrders",
+                {"trades": "True"},
+                "ORDER.READ",
+                frozenset({"ORDERS"}),
+                "canonical boolean text",
+            ),
+            (
+                "/0/private/OpenOrders",
+                {"userref": str(1 << 31)},
+                "ORDER.READ",
+                frozenset({"ORDERS"}),
+                "outside the documented range",
+            ),
+            (
+                "/0/private/TradesHistory",
+                {"ofs": "-1"},
+                "TRADE.READ",
+                frozenset({"TRADES"}),
+                "canonical integer text",
+            ),
+            (
+                "/0/private/TradesHistory",
+                {"limit": "101"},
+                "TRADE.READ",
+                frozenset({"TRADES"}),
+                "outside the documented range",
+            ),
+            (
+                "/0/private/ClosedOrders",
+                {"closetime": "created"},
+                "ORDER.READ",
+                frozenset({"ORDERS"}),
+                "outside the documented enum",
+            ),
+            (
+                "/0/private/Ledgers",
+                {"type": "mystery"},
+                "ACCOUNT.READ",
+                frozenset({"ACTIVITIES"}),
+                "outside the documented enum",
+            ),
+        )
+        for endpoint, query, permission, entitlements, message in cases:
+            with self.subTest(endpoint=endpoint, query=query):
+                events = []
+                capability = verified_kraken_read_capability(
+                    permission_scopes=frozenset({permission}),
+                    data_entitlements=entitlements,
+                )
+                with TemporaryDirectory() as directory:
+                    wire = RecordingWire(events)
+                    transport, resolver, allocator = self.make_transport(
+                        directory=directory,
+                        events=events,
+                        wire=wire,
+                        capability=capability,
+                        quota_gate=lambda *_args: events.append("quota"),
+                    )
+                    binding = kraken_authenticated_read_binding(
+                        endpoint=endpoint,
+                        query=query,
+                        capability=capability,
+                        permission_scope=permission,
+                    )
+                    with self.assertRaisesRegex(
+                        ProviderTransportScopeError,
+                        message,
+                    ):
+                        transport(binding)
+                    self.assertEqual(events, [])
+                    self.assertEqual(resolver.calls, [])
+                    self.assertEqual(wire.requests, [])
+                    self.assertEqual(
+                        allocator.journal.load_events(
+                            "provider_nonce",
+                            allocator.aggregate_id,
+                        ),
+                        [],
+                    )
+
     def test_unsupported_private_endpoint_fails_before_nonce_secret_or_wire(self):
         events = []
         with TemporaryDirectory() as directory:

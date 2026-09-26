@@ -29,6 +29,7 @@ from mvp.autotrade_mvp.qualification_attestation import (
     SignedQualificationAttestation,
     parse_signed_qualification_attestation,
     verify_canonical_qualification_attestation,
+    _trusted_git_environment as _qualification_trusted_git_environment,
 )
 from research.autotrade_research.artifacts.store import ArtifactStore
 from tools.check_nvda_qualification import (
@@ -141,15 +142,9 @@ class ProductCompletionError(ValueError):
 
 
 def _trusted_git_environment() -> dict[str, str]:
-    """Run terminal source checks without caller-selected Git authority."""
+    """Reuse the canonical fail-closed Git subprocess environment."""
 
-    environment = {
-        key: value
-        for key, value in os.environ.items()
-        if not key.upper().startswith("GIT_")
-    }
-    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
-    return environment
+    return _qualification_trusted_git_environment()
 
 
 def _trusted_git_executable(*, source_root: Path) -> str:
@@ -230,8 +225,9 @@ def _verify_exact_source_checkout(
         )
 
     try:
+        root_path = ROOT.resolve(strict=True)
         relative_paths = tuple(
-            path.resolve().relative_to(ROOT.resolve()).as_posix()
+            Path(os.path.abspath(path)).relative_to(root_path).as_posix()
             for path in canonical_paths
         )
     except (OSError, ValueError) as error:

@@ -24,6 +24,14 @@ from .host_api import (
     scoped_host_operation_id,
 )
 from .persistence import JournalStore, payload_digest
+from .operator_authority_commands import (
+    OperatorAuthorityConflict,
+    canonical_operator_payload,
+    execute_operator_authority_action,
+    observed_authority_operation_effects,
+    validate_authority_success_evidence,
+    validate_persisted_payload,
+)
 
 
 class JournalBackedHostCommandStore:
@@ -33,6 +41,7 @@ class JournalBackedHostCommandStore:
     LEGACY_AGGREGATE_ID = "host"
     TERMINAL_PHASES = {"SUCCEEDED", "FAILED", "CANCELLED"}
     UPDATE_PHASES = {"RUNNING", "WAITING_EXTERNAL", "UNKNOWN", *TERMINAL_PHASES}
+    LEGACY_AUTHORITY_UNCERTAINTY = "legacy_authority_payload_unavailable"
 
     def __init__(
         self,
@@ -301,6 +310,16 @@ class JournalBackedHostCommandStore:
                 )
             return self._command_result(stored)
 
+        action_payload = canonical_operator_payload(
+            self._journal,
+            action,
+            command["payload"],
+            command_id,
+            account_id,
+            environment,
+        )
+        action_payload_hash = payload_digest(action_payload)
+
         operation_id = scoped_host_operation_id(
             account_id=self.account_id,
             environment=self.environment,
@@ -326,6 +345,8 @@ class JournalBackedHostCommandStore:
                 "command_id": command_id,
                 "operation_id": operation_id,
                 "action": action,
+                "action_payload": action_payload,
+                "action_payload_hash": action_payload_hash,
                 "actor": actor,
                 "account_id": account_id,
                 "environment": environment,
@@ -367,8 +388,84 @@ class JournalBackedHostCommandStore:
         # original durable result, not a newly fabricated stale-state conflict.
         return returned
 
+    @staticmethod
+    def _authority_contract_if_present(
+        payload: Mapping[str, object],
+    ) -> tuple[str, dict[str, object], str, str] | None:
+        has_payload = "action_payload" in payload
+        has_hash = "action_payload_hash" in payload
+        if has_payload != has_hash:
+            raise ValueError(
+                "Host journal accepted authority payload binding is incomplete"
+            )
+        if not has_payload:
+            return None
+        return JournalBackedHostCommandStore._authority_contract(payload)
+
+    @staticmethod
+    def _authority_contract(
+        payload: Mapping[str, object],
+    ) -> tuple[str, dict[str, object], str, str]:
+        action = canonical_host_action(
+            JournalBackedHostCommandStore._required_text(payload, "action")
+        )
+        action_payload = payload.get("action_payload")
+        action_payload_hash = payload.get("action_payload_hash")
+        account_id = JournalBackedHostCommandStore._required_text(
+            payload, "account_id"
+        )
+        environment = JournalBackedHostCommandStore._required_text(
+            payload, "environment"
+        )
+        canonical = validate_persisted_payload(
+            action,
+            action_payload,
+            action_payload_hash,
+            account_id,
+            environment,
+        )
+        command_id = JournalBackedHostCommandStore._required_text(
+            payload, "command_id"
+        )
+        if canonical.get("command_id") != command_id:
+            raise ValueError(
+                "Host journal action payload command identity does not match accepted command"
+            )
+        accepted_at = JournalBackedHostCommandStore._required_text(
+            payload, "started_at"
+        )
+        return action, canonical, str(action_payload_hash), accepted_at
+
+    def _accepted_authority_contract(
+        self,
+        operation_id: str,
+    ) -> tuple[str, dict[str, object], str, str]:
+        matches: list[Mapping[str, object]] = []
+        for event in self._events():
+            if event["event_type"] != "COMMAND_ACCEPTED":
+                continue
+            payload = event["payload"]
+            if not isinstance(payload, Mapping):
+                raise ValueError("Host journal event payload must be an object")
+            if payload.get("operation_id") == operation_id:
+                matches.append(payload)
+        if len(matches) != 1:
+            raise ValueError(
+                "Host journal must contain exactly one accepted authority operation"
+            )
+        contract = self._authority_contract_if_present(matches[0])
+        if contract is None:
+            raise ValueError(
+                "Accepted authority operation predates durable action payload "
+                "and cannot be executed"
+            )
+        return contract
+
     def _operation_projection(self) -> dict[str, OperationResult]:
         operations: dict[str, OperationResult] = {}
+        authority_contracts: dict[
+            str, tuple[str, dict[str, object], str, str] | None
+        ] = {}
         for event in self._events():
             payload = event["payload"]
             if not isinstance(payload, Mapping):
@@ -381,6 +478,9 @@ class JournalBackedHostCommandStore:
                         "Host journal command scope does not match active host account/environment"
                     )
                 operation_id = self._required_text(payload, "operation_id")
+                authority_contracts[operation_id] = (
+                    self._authority_contract_if_present(payload)
+                )
                 if operation_id in operations:
                     raise ValueError(
                         "Host journal contains duplicate COMMAND_ACCEPTED operation identity"
@@ -451,6 +551,28 @@ class JournalBackedHostCommandStore:
                     payload,
                     default=current.evidence,
                 )
+                if phase == "SUCCEEDED":
+                    contract = authority_contracts.get(operation_id)
+                    if contract is None:
+                        # Pre-payload host journals may contain historical success
+                        # assertions that cannot be re-proved against canonical
+                        # authority. Keep the journal readable but downgrade that
+                        # claim to UNKNOWN rather than trusting or fabricating it.
+                        phase = "UNKNOWN"
+                        uncertainty = (self.LEGACY_AUTHORITY_UNCERTAINTY,)
+                    else:
+                        action, action_payload, action_hash, accepted_at = contract
+                        validate_authority_success_evidence(
+                            self._journal,
+                            action,
+                            action_payload,
+                            action_hash,
+                            self.account_id,
+                            self.environment,
+                            accepted_at,
+                            affected_refs,
+                            evidence,
+                        )
                 operations[operation_id] = OperationResult(
                     operation_id=operation_id,
                     phase=phase,
@@ -497,6 +619,21 @@ class JournalBackedHostCommandStore:
             if evidence is None
             else self._normalize_evidence(evidence)
         )
+        if phase == "SUCCEEDED":
+            action, action_payload, action_hash, accepted_at = (
+                self._accepted_authority_contract(operation_id)
+            )
+            validate_authority_success_evidence(
+                self._journal,
+                action,
+                action_payload,
+                action_hash,
+                self.account_id,
+                self.environment,
+                accepted_at,
+                normalized_refs,
+                normalized_evidence,
+            )
         if (
             current.phase == phase
             and current.remaining_uncertainty == normalized_uncertainty
@@ -548,6 +685,62 @@ class JournalBackedHostCommandStore:
             remaining_uncertainty=normalized_uncertainty,
         )
 
+    def execute_authority_operation(self, operation_id: str) -> OperationResult:
+        """Execute or resume an accepted host authority operation safely."""
+
+        current = self.get_operation(operation_id)
+        if current.phase in self.TERMINAL_PHASES:
+            return current
+        action, action_payload, action_hash, accepted_at = (
+            self._accepted_authority_contract(operation_id)
+        )
+        if current.phase == "QUEUED":
+            current = self.update_operation(
+                operation_id,
+                "RUNNING",
+                remaining_uncertainty=("authority_commit_pending",),
+            )
+        try:
+            result = execute_operator_authority_action(
+                self._journal,
+                action,
+                action_payload,
+                action_hash,
+                self.account_id,
+                self.environment,
+                accepted_at,
+            )
+        except OperatorAuthorityConflict:
+            observed = observed_authority_operation_effects(
+                self._journal,
+                action,
+                action_payload,
+                action_hash,
+                self.account_id,
+                self.environment,
+                accepted_at,
+            )
+            return self.update_operation(
+                operation_id,
+                "FAILED",
+                affected_refs=observed.affected_refs,
+                evidence=observed.evidence
+                + (
+                    {
+                        "kind": "authority-command-rejected",
+                        "reason_code": "authority_state_changed",
+                    },
+                ),
+                remaining_uncertainty=(),
+            )
+        return self.update_operation(
+            operation_id,
+            "SUCCEEDED",
+            affected_refs=result.affected_refs,
+            evidence=result.evidence,
+            remaining_uncertainty=(),
+        )
+
     def get_operation(self, operation_id: str) -> OperationResult:
         try:
             return self._operation_projection()[operation_id]
@@ -579,18 +772,44 @@ class JournalBackedHostCommandStore:
             raise ValueError("Cursor is ahead of host state")
 
         durable = self._events()
+        legacy_operation_ids: set[str] = set()
+        for event in durable:
+            if event["event_type"] != "COMMAND_ACCEPTED":
+                continue
+            payload = event["payload"]
+            if not isinstance(payload, Mapping):
+                raise ValueError("Host journal event payload must be an object")
+            operation_id = self._required_text(payload, "operation_id")
+            contract = self._authority_contract_if_present(payload)
+            if contract is None:
+                legacy_operation_ids.add(operation_id)
+
         visible = durable[-self._max_events :]
         if visible:
             oldest = int(visible[0]["aggregate_version"])
             if cursor < oldest - 1:
                 raise EventGap("Event cursor gap requires a fresh state snapshot")
-        return tuple(
-            HostEvent(
-                cursor=int(event["aggregate_version"]),
-                kind=str(event["event_type"]),
-                state_version=int(event["aggregate_version"]),
-                payload=dict(event["payload"]),
+        result: list[HostEvent] = []
+        for event in visible:
+            event_cursor = int(event["aggregate_version"])
+            if event_cursor <= cursor:
+                continue
+            payload = dict(event["payload"])
+            if (
+                event["event_type"] == "OPERATION_UPDATED"
+                and payload.get("operation_id") in legacy_operation_ids
+                and payload.get("phase") == "SUCCEEDED"
+            ):
+                payload["phase"] = "UNKNOWN"
+                payload["remaining_uncertainty"] = [
+                    self.LEGACY_AUTHORITY_UNCERTAINTY
+                ]
+            result.append(
+                HostEvent(
+                    cursor=event_cursor,
+                    kind=str(event["event_type"]),
+                    state_version=event_cursor,
+                    payload=payload,
+                )
             )
-            for event in visible
-            if int(event["aggregate_version"]) > cursor
-        )
+        return tuple(result)

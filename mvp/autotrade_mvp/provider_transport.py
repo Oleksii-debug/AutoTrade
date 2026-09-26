@@ -534,6 +534,183 @@ def _binance_authenticated_read_rule(
     return rule
 
 
+_KRAKEN_SPOT_AUTHENTICATED_READ_QUERY_FIELDS: Mapping[str, frozenset[str]] = (
+    MappingProxyType(
+        {
+            "/0/private/OpenOrders": frozenset(
+                {"trades", "userref", "cl_ord_id", "rebase_multiplier"}
+            ),
+            "/0/private/ClosedOrders": frozenset(
+                {
+                    "trades",
+                    "userref",
+                    "cl_ord_id",
+                    "start",
+                    "end",
+                    "ofs",
+                    "closetime",
+                    "consolidate_taker",
+                    "without_count",
+                    "rebase_multiplier",
+                }
+            ),
+            "/0/private/TradesHistory": frozenset(
+                {
+                    "type",
+                    "trades",
+                    "start",
+                    "end",
+                    "ofs",
+                    "without_count",
+                    "consolidate_taker",
+                    "ledgers",
+                    "rebase_multiplier",
+                    "aclass",
+                    "pair",
+                    "limit",
+                }
+            ),
+            "/0/private/Ledgers": frozenset(
+                {
+                    "asset",
+                    "aclass",
+                    "type",
+                    "start",
+                    "end",
+                    "ofs",
+                    "without_count",
+                    "rebase_multiplier",
+                }
+            ),
+        }
+    )
+)
+
+_KRAKEN_SPOT_BOOLEAN_QUERY_FIELDS = frozenset(
+    {"trades", "consolidate_taker", "without_count", "ledgers"}
+)
+
+
+def _kraken_spot_canonical_integer(
+    value: str,
+    *,
+    name: str,
+    minimum: int,
+    maximum: int | None = None,
+) -> int:
+    try:
+        parsed = int(value, 10)
+    except ValueError as error:
+        raise ProviderTransportScopeError(
+            f"Kraken Spot {name} must be canonical integer text"
+        ) from error
+    if str(parsed) != value or parsed < minimum:
+        raise ProviderTransportScopeError(
+            f"Kraken Spot {name} must be canonical integer text"
+        )
+    if maximum is not None and parsed > maximum:
+        raise ProviderTransportScopeError(
+            f"Kraken Spot {name} is outside the documented range"
+        )
+    return parsed
+
+
+def _validate_kraken_spot_authenticated_read_query(
+    binding: AuthenticatedReadQueryBinding,
+) -> None:
+    allowed = _KRAKEN_SPOT_AUTHENTICATED_READ_QUERY_FIELDS[binding.endpoint]
+    unsupported = set(binding.query) - allowed
+    if unsupported:
+        raise ProviderTransportScopeError(
+            "Kraken Spot authenticated-read query contains unsupported fields: "
+            + ",".join(sorted(unsupported))
+        )
+
+    for field in _KRAKEN_SPOT_BOOLEAN_QUERY_FIELDS & set(binding.query):
+        if binding.query[field] not in {"true", "false"}:
+            raise ProviderTransportScopeError(
+                f"Kraken Spot {field} must be canonical boolean text"
+            )
+
+    if "ofs" in binding.query:
+        _kraken_spot_canonical_integer(
+            binding.query["ofs"],
+            name="ofs",
+            minimum=0,
+        )
+    if "limit" in binding.query:
+        _kraken_spot_canonical_integer(
+            binding.query["limit"],
+            name="limit",
+            minimum=1,
+            maximum=100,
+        )
+    if "userref" in binding.query:
+        _kraken_spot_canonical_integer(
+            binding.query["userref"],
+            name="userref",
+            minimum=-(1 << 31),
+            maximum=(1 << 31) - 1,
+        )
+    if "cl_ord_id" in binding.query:
+        try:
+            validate_spot_client_order_id(binding.query["cl_ord_id"])
+        except ValueError as error:
+            raise ProviderTransportScopeError(
+                "Kraken Spot cl_ord_id filter is invalid"
+            ) from error
+
+    enum_fields = {
+        "rebase_multiplier": frozenset({"rebased", "base"}),
+    }
+    if binding.endpoint == "/0/private/ClosedOrders":
+        enum_fields["closetime"] = frozenset({"open", "close", "both"})
+    elif binding.endpoint == "/0/private/TradesHistory":
+        enum_fields["type"] = frozenset(
+            {
+                "all",
+                "any position",
+                "closed position",
+                "closing position",
+                "no position",
+            }
+        )
+        enum_fields["aclass"] = frozenset(
+            {
+                "forex",
+                "equity_pair",
+                "futures_contract",
+                "synthetic_pair",
+                "external_pair",
+            }
+        )
+    elif binding.endpoint == "/0/private/Ledgers":
+        enum_fields["aclass"] = frozenset({"currency"})
+        enum_fields["type"] = frozenset(
+            {
+                "all",
+                "trade",
+                "deposit",
+                "withdrawal",
+                "transfer",
+                "margin",
+                "adjustment",
+                "rollover",
+                "credit",
+                "settled",
+                "staking",
+                "dividend",
+                "sale",
+                "nft_rebate",
+            }
+        )
+    for field, values in enum_fields.items():
+        if field in binding.query and binding.query[field] not in values:
+            raise ProviderTransportScopeError(
+                f"Kraken Spot {field} is outside the documented enum"
+            )
+
+
 def _kraken_spot_authenticated_read_rule(
     binding: AuthenticatedReadQueryBinding,
 ) -> AuthenticatedReadEndpointRule:
@@ -550,6 +727,7 @@ def _kraken_spot_authenticated_read_rule(
         raise ProviderTransportScopeError(
             "authenticated-read permission scope does not match Kraken Spot endpoint policy"
         )
+    _validate_kraken_spot_authenticated_read_query(binding)
     return rule
 
 

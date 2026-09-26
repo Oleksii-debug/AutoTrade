@@ -104,6 +104,21 @@ def _canonical_json(value: object) -> bytes:
     ).encode("utf-8")
 
 
+def _reject_duplicate_json_object(
+    pairs: Iterable[tuple[str, object]],
+) -> dict[str, object]:
+    """Reject ambiguous trust-policy JSON before schema validation."""
+
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise QualificationTrustError(
+                "canonical qualification trust policy contains duplicate JSON object key"
+            )
+        result[key] = value
+    return result
+
+
 def _strict_mapping(
     value: object,
     *,
@@ -749,7 +764,10 @@ def load_canonical_qualification_trust_policy(
         expected_source_sha=expected_source_sha
     )
     try:
-        payload = json.loads(raw.decode("utf-8"))
+        payload = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_json_object,
+        )
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise QualificationTrustError(
             "canonical qualification trust policy is malformed"

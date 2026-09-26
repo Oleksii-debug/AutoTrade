@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using QuantConnect.Orders;
 
 namespace AutoTrade.Engine.Lean;
@@ -18,6 +19,7 @@ public sealed class LeanCallbackCharacterizer
     private static readonly JsonSerializerOptions StateJsonOptions = new()
     {
         WriteIndented = false,
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
     };
 
     private readonly Dictionary<(int OrderId, int EventId), CallbackFingerprint> _seen = new();

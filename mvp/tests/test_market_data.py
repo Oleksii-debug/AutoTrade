@@ -821,6 +821,10 @@ class MarketNormalizationTests(unittest.TestCase):
                 source=at(7, 1, 12),
                 available=at(7, 1, 12, 0, 1),
                 ingested=at(7, 1, 12, 0, 2),
+                evidence={
+                    **EVIDENCE,
+                    "observed_at": "2026-07-01T12:00:01Z",
+                },
             )
         )
         self.assertIn("NOT_TRADABLE_AT_EVENT_TIME", event.quality_flags)
@@ -843,6 +847,10 @@ class MarketNormalizationTests(unittest.TestCase):
                 source=saturday,
                 available=saturday + timedelta(seconds=1),
                 ingested=saturday + timedelta(seconds=2),
+                evidence={
+                    **EVIDENCE,
+                    "observed_at": "2026-09-26T12:00:01Z",
+                },
             )
         )
         self.assertIn("NOT_TRADABLE_AT_EVENT_TIME", weekend.quality_flags)

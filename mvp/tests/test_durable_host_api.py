@@ -1244,6 +1244,59 @@ class JournalBackedHostApiTests(unittest.TestCase):
         )
         self.assertEqual(restarted.submit(command), accepted)
 
+    def test_set_authority_restore_mode_is_explicit_and_preexisting_only(self):
+        store = self.store(now="2030-01-01T00:00:00Z")
+        policy_payload = {
+            "policy_id": "restore-mode-policy",
+            "environments": ["PAPER"],
+            "instruments": [
+                {
+                    "instrument_id": "11111111-1111-4111-8111-111111111111",
+                    "version": 1,
+                }
+            ],
+            "actions": ["ORDER.SUBMIT"],
+            "max_notional": "250",
+            "valid_from": "2030-01-01T00:00:00Z",
+            "expires_at": "2035-01-01T00:00:00Z",
+            "autonomous": False,
+            "protection_only": False,
+            "version": 1,
+        }
+        cases = (
+            (
+                {"reason_code": "POLICY_REVIEW"},
+                "requires restore_new_exposure=true",
+            ),
+            (
+                {
+                    "restore_new_exposure": False,
+                    "reason_code": "POLICY_REVIEW",
+                },
+                "restore_new_exposure must be true",
+            ),
+            (
+                {
+                    "restore_new_exposure": True,
+                    "reason_code": "POLICY_REVIEW",
+                },
+                "exact policy to be already registered",
+            ),
+        )
+        for extension, expected in cases:
+            with self.subTest(extension=extension), self.assertRaisesRegex(
+                ValueError,
+                expected,
+            ):
+                store.submit(
+                    self.command(
+                        action="SET_AUTHORITY",
+                        payload={**policy_payload, **extension},
+                    )
+                )
+            self.assertEqual(store.state_version, 0)
+            self.assertEqual(store.events_after(0), ())
+
     def test_set_authority_cannot_reactivate_revoked_policy_identity(self):
         journal = JournalStore(self.path)
         authority = AuthorityService(journal)

@@ -15,6 +15,7 @@ from uuid import NAMESPACE_URL, uuid5
 from contracts.bindings.python.common_scalars import is_valid_common_scalar
 
 from .host_actions import canonical_host_action
+from .host_action_payloads import canonical_authority_action_payload
 from .host_api import (
     CommandResult,
     EventGap,
@@ -156,6 +157,10 @@ class JournalBackedHostCommandStore:
         return self._journal.load_events(self.AGGREGATE_TYPE, self.AGGREGATE_ID)
 
     @property
+    def journal(self) -> JournalStore:
+        return self._journal
+
+    @property
     def state_version(self) -> int:
         events = self._events()
         return int(events[-1]["aggregate_version"]) if events else 0
@@ -221,6 +226,12 @@ class JournalBackedHostCommandStore:
             raise PermissionError(
                 "Session is not authorized for actor, request origin, and action"
             )
+        action_payload = canonical_authority_action_payload(
+            action,
+            command["payload"],
+            account_id=account_id,
+            environment=environment,
+        )
 
         current = self.state_version
         expected = int(expected_raw)
@@ -275,6 +286,8 @@ class JournalBackedHostCommandStore:
                 "actor": actor,
                 "account_id": account_id,
                 "environment": environment,
+                "action_payload": action_payload,
+                "action_payload_hash": payload_digest(action_payload),
                 "phase": "QUEUED",
                 "started_at": operation_time,
                 "updated_at": operation_time,
@@ -310,6 +323,92 @@ class JournalBackedHostCommandStore:
         # original durable result, not a newly fabricated stale-state conflict.
         return returned
 
+    def _accepted_command_event(
+        self,
+        event: Mapping[str, object],
+        *,
+        require_action_payload: bool,
+    ) -> dict[str, object]:
+        payload = event.get("payload")
+        if not isinstance(payload, Mapping):
+            raise ValueError("Host journal event payload must be an object")
+        account_id = self._required_text(payload, "account_id")
+        environment = self._required_text(payload, "environment")
+        if account_id != self.account_id or environment != self.environment:
+            raise ValueError(
+                "Host journal command scope does not match active host account/environment"
+            )
+        action = canonical_host_action(payload.get("action"))
+        raw_action_payload = payload.get("action_payload")
+        raw_action_payload_hash = payload.get("action_payload_hash")
+        if raw_action_payload is None and raw_action_payload_hash is None:
+            if require_action_payload:
+                raise ValueError(
+                    "Accepted host command lacks durable canonical action payload"
+                )
+            action_payload = None
+            action_payload_hash = None
+        else:
+            if not isinstance(raw_action_payload, Mapping):
+                raise ValueError(
+                    "Host journal action_payload must be an object"
+                )
+            if not isinstance(raw_action_payload_hash, str):
+                raise ValueError(
+                    "Host journal action_payload_hash must be text"
+                )
+            action_payload = canonical_authority_action_payload(
+                action,
+                raw_action_payload,
+                account_id=account_id,
+                environment=environment,
+            )
+            if dict(raw_action_payload) != action_payload:
+                raise ValueError(
+                    "Host journal action payload is not canonical"
+                )
+            action_payload_hash = payload_digest(action_payload)
+            if action_payload_hash != raw_action_payload_hash:
+                raise ValueError(
+                    "Host journal action payload integrity failure"
+                )
+        return {
+            "command_id": self._required_text(payload, "command_id"),
+            "operation_id": self._required_text(payload, "operation_id"),
+            "action": action,
+            "actor": self._required_text(payload, "actor"),
+            "account_id": account_id,
+            "environment": environment,
+            "started_at": str(payload.get("started_at") or event["committed_at"]),
+            "action_payload": action_payload,
+            "action_payload_hash": action_payload_hash,
+        }
+
+    def get_accepted_command(self, operation_id: str) -> dict[str, object]:
+        if not isinstance(operation_id, str) or not operation_id.strip():
+            raise ValueError("operation_id must be a non-empty string")
+        matches = []
+        for event in self._events():
+            if event["event_type"] != "COMMAND_ACCEPTED":
+                continue
+            accepted = self._accepted_command_event(
+                event,
+                require_action_payload=False,
+            )
+            if accepted["operation_id"] == operation_id:
+                matches.append((event, accepted))
+        if len(matches) != 1:
+            if not matches:
+                raise KeyError("Unknown accepted operation")
+            raise ValueError(
+                "Host journal contains duplicate COMMAND_ACCEPTED operation identity"
+            )
+        event, _ = matches[0]
+        return self._accepted_command_event(
+            event,
+            require_action_payload=True,
+        )
+
     def _operation_projection(self) -> dict[str, OperationResult]:
         operations: dict[str, OperationResult] = {}
         for event in self._events():
@@ -317,13 +416,11 @@ class JournalBackedHostCommandStore:
             if not isinstance(payload, Mapping):
                 raise ValueError("Host journal event payload must be an object")
             if event["event_type"] == "COMMAND_ACCEPTED":
-                account_id = self._required_text(payload, "account_id")
-                environment = self._required_text(payload, "environment")
-                if account_id != self.account_id or environment != self.environment:
-                    raise ValueError(
-                        "Host journal command scope does not match active host account/environment"
-                    )
-                operation_id = self._required_text(payload, "operation_id")
+                accepted = self._accepted_command_event(
+                    event,
+                    require_action_payload=False,
+                )
+                operation_id = str(accepted["operation_id"])
                 if operation_id in operations:
                     raise ValueError(
                         "Host journal contains duplicate COMMAND_ACCEPTED operation identity"

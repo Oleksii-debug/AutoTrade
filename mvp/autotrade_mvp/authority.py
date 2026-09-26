@@ -942,6 +942,7 @@ class AuthorityService:
         self._confirmations: dict[str, Confirmation] = {}
         self._used_confirmations: set[str] = set()
         self._admissions: dict[str, AdmissionRecord] = {}
+        self._new_exposure_blocks: dict[tuple[str, str], dict[str, str]] = {}
         self._epoch = 0
         # Last authority aggregate version this process has actually replayed
         # or committed. This is deliberately separate from authority epoch:
@@ -1159,6 +1160,12 @@ class AuthorityService:
                 if existing is None:
                     self._policies[policy.policy_id] = policy
                     self._epoch += 1
+                    if not policy.protection_only:
+                        for policy_environment in policy.environments:
+                            self._new_exposure_blocks.pop(
+                                (policy.account_id, policy_environment),
+                                None,
+                            )
             elif event_type == "AuthorityPolicyRevoked":
                 policy_id = _text(payload.get("policy_id"), name="policy_id")
                 if policy_id not in self._policies:
@@ -1173,6 +1180,25 @@ class AuthorityService:
                 if existing is None:
                     self._revocations[policy_id] = value
                     self._epoch += 1
+            elif event_type == "AuthorityNewExposureBlocked":
+                command_id = _text(payload.get("command_id"), name="command_id")
+                account_id = _text(payload.get("account_id"), name="account_id")
+                environment = _text(
+                    payload.get("environment"),
+                    name="environment",
+                ).upper()
+                if environment not in {"SIMULATION", "PAPER", "LIVE"}:
+                    raise AuthorityConflict(
+                        "durable new-exposure block environment is unsupported"
+                    )
+                reason = _text(payload.get("reason"), name="reason")
+                blocked_at = _text(payload.get("blocked_at"), name="blocked_at")
+                _instant(blocked_at, name="blocked_at")
+                self._new_exposure_blocks[(account_id, environment)] = {
+                    "command_id": command_id,
+                    "reason": reason,
+                    "blocked_at": blocked_at,
+                }
             elif event_type == "AuthorityConfirmationAdded":
                 instrument = payload.get("instrument")
                 if not isinstance(instrument, dict):
@@ -1813,6 +1839,89 @@ class AuthorityService:
         )
         self._policies[policy.policy_id] = policy
         self._epoch += 1
+        if not policy.protection_only:
+            for policy_environment in policy.environments:
+                self._new_exposure_blocks.pop(
+                    (policy.account_id, policy_environment),
+                    None,
+                )
+        return True
+
+    def policy(self, policy_id: str) -> AuthorityPolicy:
+        pid = _text(policy_id, name="policy_id")
+        try:
+            return self._policies[pid]
+        except KeyError as error:
+            raise KeyError(pid) from error
+
+    def is_new_exposure_blocked(
+        self,
+        account_id: str,
+        environment: str,
+    ) -> bool:
+        account = _text(account_id, name="account_id")
+        env = _text(environment, name="environment").upper()
+        if env not in {"SIMULATION", "PAPER", "LIVE"}:
+            raise ValueError("environment is unsupported for financial authority")
+        return (account, env) in self._new_exposure_blocks
+
+    def block_new_exposure(
+        self,
+        *,
+        account_id: str,
+        environment: str,
+        reason: str,
+        blocked_at: str,
+        command_id: str,
+    ) -> bool:
+        """Durably block only new risk for one financial account/environment.
+
+        Existing admitted risk-reducing/protective actions remain eligible for
+        their normal checks. A later newly registered non-protection policy is
+        the explicit re-authorization event that clears this scoped block.
+        """
+
+        if self.store is None:
+            raise AuthorityConflict(
+                "durable new-exposure block requires a JournalStore"
+            )
+        account = _text(account_id, name="account_id")
+        env = _text(environment, name="environment").upper()
+        if env not in {"SIMULATION", "PAPER", "LIVE"}:
+            raise ValueError("environment is unsupported for financial authority")
+        normalized_reason = _text(reason, name="reason")
+        normalized_at = _text(blocked_at, name="blocked_at")
+        _instant(normalized_at, name="blocked_at")
+        cid = _text(command_id, name="command_id")
+        payload = {
+            "command_id": cid,
+            "account_id": account,
+            "environment": env,
+            "reason": normalized_reason,
+            "blocked_at": normalized_at,
+        }
+        event_id = _authority_event_id("AuthorityNewExposureBlocked", cid)
+        existing = self.store.get_event(event_id)
+        if existing is not None:
+            if (
+                existing["event_type"] != "AuthorityNewExposureBlocked"
+                or existing["payload"] != payload
+            ):
+                raise AuthorityConflict(
+                    "new-exposure block command conflicts with durable content"
+                )
+            return False
+        self._persist(
+            "AuthorityNewExposureBlocked",
+            cid,
+            payload,
+            committed_at=normalized_at,
+        )
+        self._new_exposure_blocks[(account, env)] = {
+            "command_id": cid,
+            "reason": normalized_reason,
+            "blocked_at": normalized_at,
+        }
         return True
 
     def revoke_policy(self, policy_id: str, *, reason: str, revoked_at: str) -> bool:
@@ -1965,6 +2074,10 @@ class AuthorityService:
             (identity in policy.instruments, "instrument_version_out_of_scope"),
             (normalized_action in policy.actions, "action_out_of_scope"),
             (amount <= policy.max_notional, "notional_out_of_scope"),
+            (
+                not self.is_new_exposure_blocked(account, env) or risk_reducing,
+                "new_exposure_blocked",
+            ),
             (not policy.protection_only or risk_reducing, "protection_policy_requires_risk_reduction"),
         ]
         outcome = "ADMITTED"
@@ -3357,6 +3470,11 @@ class AuthorityService:
         )
         if scope != recorded_scope:
             return False, "admission_scope_changed"
+        if (
+            self.is_new_exposure_blocked(record.account_id, record.environment)
+            and not record.risk_reducing
+        ):
+            return False, "new_exposure_blocked"
         policy = self._policies[record.policy_id]
         active, reason = self._policy_active(policy, now)
         if not active:
@@ -3665,6 +3783,15 @@ class AuthorityService:
             "confirmations": confirmations,
             "used_confirmations": sorted(self._used_confirmations),
             "admissions": admissions,
+            "new_exposure_blocks": [
+                {
+                    "account_id": account_id,
+                    "environment": environment,
+                    **dict(value),
+                }
+                for (account_id, environment), value
+                in sorted(self._new_exposure_blocks.items())
+            ],
         }
 
     @classmethod
@@ -3679,6 +3806,7 @@ class AuthorityService:
         confirmations = state.get("confirmations")
         admissions = state.get("admissions")
         used_confirmations = state.get("used_confirmations")
+        new_exposure_blocks = state.get("new_exposure_blocks", [])
         if not all(
             isinstance(value, list)
             for value in (
@@ -3687,6 +3815,7 @@ class AuthorityService:
                 confirmations,
                 admissions,
                 used_confirmations,
+                new_exposure_blocks,
             )
         ):
             raise ValueError("authority state collections must be lists")
@@ -3851,4 +3980,31 @@ class AuthorityService:
             raise ValueError("authority epoch does not match durable mutations")
         service._admissions = restored_admissions
         service._used_confirmations = normalized_used
+
+        restored_blocks: dict[tuple[str, str], dict[str, str]] = {}
+        for item in new_exposure_blocks:
+            if not isinstance(item, dict):
+                raise ValueError("new-exposure block snapshot entry must be an object")
+            account_id = _text(item.get("account_id"), name="account_id")
+            environment = _text(
+                item.get("environment"),
+                name="environment",
+            ).upper()
+            if environment not in {"SIMULATION", "PAPER", "LIVE"}:
+                raise ValueError("new-exposure block environment is unsupported")
+            command_id = _text(item.get("command_id"), name="command_id")
+            reason = _text(item.get("reason"), name="reason")
+            blocked_at = _text(item.get("blocked_at"), name="blocked_at")
+            _instant(blocked_at, name="blocked_at")
+            scope = (account_id, environment)
+            if scope in restored_blocks:
+                raise AuthorityConflict(
+                    "duplicate new-exposure block scope in authority snapshot"
+                )
+            restored_blocks[scope] = {
+                "command_id": command_id,
+                "reason": reason,
+                "blocked_at": blocked_at,
+            }
+        service._new_exposure_blocks = restored_blocks
         return service

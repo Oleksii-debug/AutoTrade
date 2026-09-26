@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Iterable
 from uuid import NAMESPACE_URL, uuid5
 
-from .dispatch import submission_attempt_aggregate_id
+from .dispatch import GuardedDispatcher, submission_attempt_aggregate_id
 from .persistence import JournalStore, payload_digest
 from .reconciliation_journal import load_reconciliation_checkpoint_for_readiness
 
@@ -291,6 +291,49 @@ class RecoveryController:
         self.reason_codes = {"startup_reconciliation_required"}
         self._recover_scoped_submission_uncertainty_from_owner_scope()
         return self.owner
+
+    def build_guarded_dispatcher(
+        self,
+        *,
+        store: JournalStore,
+        environment: str,
+        account_id: str,
+        prepared_lease_seconds: int = 60,
+    ) -> GuardedDispatcher:
+        """Bind final send fencing to the current durable recovery owner.
+
+        PAPER/LIVE production composition must not invent an owner token or rely
+        on callers to remember the final sender fence on each dispatch.
+        """
+
+        normalized_environment, normalized_account = self._normalized_submission_scope(
+            environment,
+            account_id,
+        )
+        if self._owner_store is None:
+            raise PermissionError(
+                "recovery-bound dispatcher requires durable owner journal"
+            )
+        if self.owner is None:
+            raise PermissionError("recovery-bound dispatcher requires active owner")
+        if self._owner_scope != f"{normalized_environment}:{normalized_account}":
+            raise PermissionError(
+                "recovery owner scope does not match dispatcher account scope"
+            )
+        if Path(store.path) != Path(self._owner_store.path):
+            raise PermissionError(
+                "recovery-bound dispatcher must use the durable owner journal"
+            )
+        self._require_current_durable_owner()
+        return GuardedDispatcher(
+            store,
+            environment=normalized_environment,
+            account_id=normalized_account,
+            owner_token=self.owner.owner_id,
+            owner_epoch=self.owner.epoch,
+            prepared_lease_seconds=prepared_lease_seconds,
+            sender_check=self.validate_sender,
+        )
 
     @staticmethod
     def _normalized_submission_scope(

@@ -1776,6 +1776,37 @@ class WhiteBitAdapterTests(unittest.TestCase):
         self.assertFalse(budget.can_admit("CANCEL"))
 
     def test_retry_policy_backs_off_safe_reads_without_blind_financial_write_retry(self):
+        timed_out_write = classify_whitebit_http_retry(
+            status_code=408,
+            attempt=1,
+            request_class="WRITE",
+        )
+        self.assertFalse(timed_out_write.automatic_retry)
+        self.assertTrue(timed_out_write.requires_reconciliation)
+        self.assertEqual(
+            timed_out_write.classification,
+            "AMBIGUOUS_WRITE_TIMEOUT",
+        )
+
+        timed_out_cancel = classify_whitebit_http_retry(
+            status_code=408,
+            attempt=1,
+            request_class="CANCEL",
+        )
+        self.assertFalse(timed_out_cancel.automatic_retry)
+        self.assertTrue(timed_out_cancel.requires_reconciliation)
+
+        timed_out_read = classify_whitebit_http_retry(
+            status_code=408,
+            attempt=2,
+            request_class="READ",
+        )
+        self.assertTrue(timed_out_read.automatic_retry)
+        self.assertEqual(timed_out_read.base_delay_seconds, 2)
+        self.assertTrue(timed_out_read.jitter_required)
+        self.assertFalse(timed_out_read.requires_reconciliation)
+        self.assertEqual(timed_out_read.classification, "REQUEST_TIMEOUT")
+
         rate_limited_write = classify_whitebit_http_retry(
             status_code=429,
             attempt=1,

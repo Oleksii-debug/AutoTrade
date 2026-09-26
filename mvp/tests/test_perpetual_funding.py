@@ -87,6 +87,7 @@ def perpetual_version(
     symbol="BTCUSDT",
     payoff="LINEAR",
     settlement_currency="USDT",
+    funding_schedule=None,
 ) -> InstrumentVersion:
     return InstrumentVersion(
         instrument_id=FUNDING_ID,
@@ -109,7 +110,11 @@ def perpetual_version(
         payoff=payoff,
         underlying_id=f"{UNDERLYING_ID}@1",
         settlement_method="CASH",
-        funding_schedule={"interval_hours": 8},
+        funding_schedule=(
+            {"interval_hours": 8}
+            if funding_schedule is None
+            else funding_schedule
+        ),
         margin_model_id="binance-usdm-v1",
     )
 
@@ -558,6 +563,259 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
             self.assertEqual(
                 store.load_events("perpetual_funding", authority.aggregate_id),
                 [],
+            )
+
+    def test_inverse_contract_settles_exact_fraction_at_versioned_quantum(self):
+        evidence = sealed_funding(collateral_currency="BTC")
+        inverse = InstrumentRegistry(
+            versions=(
+                perpetual_version(
+                    payoff="INVERSE",
+                    settlement_currency="BTC",
+                    multiplier="100",
+                    funding_schedule={
+                        "interval_hours": 8,
+                        "settlement_quantum": "0.00000001",
+                        "settlement_rounding": "HALF_EVEN",
+                    },
+                ),
+            )
+        )
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            authority, book = self.authority(
+                store, [evidence], registry=inverse
+            )
+
+            first = authority.apply(evidence.evidence_ref)
+            self.assertTrue(first.inserted)
+            self.assertEqual(first.currency, "BTC")
+            self.assertEqual(first.cashflow, Decimal("-0.000002"))
+            self.assertEqual(book.cash("BTC"), Decimal("-0.000002"))
+
+            restarted, restarted_book = self.authority(
+                JournalStore(path),
+                [evidence],
+                registry=inverse,
+                seed=False,
+            )
+            replay = restarted.apply(evidence.evidence_ref)
+            self.assertFalse(replay.inserted)
+            self.assertEqual(replay.active_transaction_id, first.active_transaction_id)
+            self.assertEqual(replay.cashflow, Decimal("-0.000002"))
+            self.assertEqual(restarted_book.cash("BTC"), Decimal("-0.000002"))
+
+    def test_inverse_half_even_quantization_is_deterministic(self):
+        evidence = sealed_funding(
+            rate="0.00075",
+            collateral_currency="BTC",
+        )
+        inverse = InstrumentRegistry(
+            versions=(
+                perpetual_version(
+                    payoff="INVERSE",
+                    settlement_currency="BTC",
+                    multiplier="1",
+                    funding_schedule={
+                        "interval_hours": 8,
+                        "settlement_quantum": "0.00000001",
+                        "settlement_rounding": "HALF_EVEN",
+                    },
+                ),
+            )
+        )
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority, book = self.authority(
+                store, [evidence], registry=inverse
+            )
+            result = authority.apply(evidence.evidence_ref)
+            self.assertEqual(result.cashflow, Decimal("-0.00000002"))
+            self.assertEqual(book.cash("BTC"), Decimal("-0.00000002"))
+
+    def test_inverse_contract_rejects_unqualified_rounding_policy_before_mutation(self):
+        evidence = sealed_funding(collateral_currency="BTC")
+        inverse = InstrumentRegistry(
+            versions=(
+                perpetual_version(
+                    payoff="INVERSE",
+                    settlement_currency="BTC",
+                    multiplier="1",
+                    funding_schedule={
+                        "interval_hours": 8,
+                        "settlement_quantum": "0.00000001",
+                        "settlement_rounding": "UP",
+                    },
+                ),
+            )
+        )
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority, book = self.authority(
+                store, [evidence], registry=inverse
+            )
+            before = book.audit_digest()
+            with self.assertRaisesRegex(
+                PerpetualFundingError, "HALF_EVEN or DOWN"
+            ):
+                authority.apply(evidence.evidence_ref)
+            self.assertEqual(book.audit_digest(), before)
+            self.assertEqual(
+                store.load_events("perpetual_funding", authority.aggregate_id),
+                [],
+            )
+
+    def test_inverse_provider_correction_reverses_quantized_cashflow(self):
+        original = sealed_funding(collateral_currency="BTC")
+        correction = sealed_funding(
+            external_event_id="funding-inverse-2",
+            revision="2",
+            rate="0.002",
+            observed_offset=2,
+            corrects="funding-1",
+            collateral_currency="BTC",
+        )
+        inverse = InstrumentRegistry(
+            versions=(
+                perpetual_version(
+                    payoff="INVERSE",
+                    settlement_currency="BTC",
+                    multiplier="100",
+                    funding_schedule={
+                        "interval_hours": 8,
+                        "settlement_quantum": "0.00000001",
+                        "settlement_rounding": "HALF_EVEN",
+                    },
+                ),
+            )
+        )
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            authority, book = self.authority(
+                JournalStore(path),
+                [original, correction],
+                registry=inverse,
+            )
+
+            first = authority.apply(original.evidence_ref)
+            corrected = authority.apply(correction.evidence_ref)
+
+            self.assertEqual(first.cashflow, Decimal("-0.00000200"))
+            self.assertTrue(corrected.inserted)
+            self.assertEqual(corrected.cashflow, Decimal("-0.00000400"))
+            self.assertIsNotNone(corrected.reversal_transaction_id)
+            self.assertNotEqual(
+                corrected.active_transaction_id,
+                first.active_transaction_id,
+            )
+            self.assertEqual(book.cash("BTC"), Decimal("-0.00000400"))
+
+            restarted, restarted_book = self.authority(
+                JournalStore(path),
+                [original, correction],
+                registry=inverse,
+                seed=False,
+            )
+            replay = restarted.apply(correction.evidence_ref)
+            self.assertFalse(replay.inserted)
+            self.assertEqual(
+                replay.reversal_transaction_id,
+                corrected.reversal_transaction_id,
+            )
+            self.assertEqual(replay.cashflow, Decimal("-0.00000400"))
+            self.assertEqual(
+                restarted_book.cash("BTC"),
+                Decimal("-0.00000400"),
+            )
+
+    def test_inverse_subquantum_zero_retains_event_and_correction_lineage(self):
+        original = sealed_funding(
+            rate="0.0001",
+            collateral_currency="BTC",
+        )
+        correction = sealed_funding(
+            external_event_id="funding-subquantum-2",
+            revision="2",
+            rate="0.001",
+            observed_offset=2,
+            corrects="funding-1",
+            collateral_currency="BTC",
+        )
+        inverse = InstrumentRegistry(
+            versions=(
+                perpetual_version(
+                    payoff="INVERSE",
+                    settlement_currency="BTC",
+                    multiplier="1",
+                    funding_schedule={
+                        "interval_hours": 8,
+                        "settlement_quantum": "0.00000001",
+                        "settlement_rounding": "HALF_EVEN",
+                    },
+                ),
+            )
+        )
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            authority, book = self.authority(
+                JournalStore(path),
+                [original, correction],
+                registry=inverse,
+            )
+
+            first = authority.apply(original.evidence_ref)
+            self.assertTrue(first.inserted)
+            self.assertEqual(first.cashflow, Decimal("0"))
+            self.assertEqual(book.cash("BTC"), Decimal("0"))
+            self.assertEqual(
+                len(
+                    authority.store.load_events(
+                        "perpetual_funding",
+                        authority.aggregate_id,
+                    )
+                ),
+                1,
+            )
+
+            restarted, restarted_book = self.authority(
+                JournalStore(path),
+                [original, correction],
+                registry=inverse,
+                seed=False,
+            )
+            duplicate = restarted.apply(original.evidence_ref)
+            self.assertFalse(duplicate.inserted)
+            self.assertEqual(
+                duplicate.active_transaction_id,
+                first.active_transaction_id,
+            )
+            self.assertEqual(restarted_book.cash("BTC"), Decimal("0"))
+
+            corrected = restarted.apply(correction.evidence_ref)
+            self.assertTrue(corrected.inserted)
+            self.assertEqual(corrected.cashflow, Decimal("-0.00000002"))
+            self.assertIsNotNone(corrected.reversal_transaction_id)
+            self.assertEqual(
+                restarted_book.cash("BTC"),
+                Decimal("-0.00000002"),
+            )
+
+            final, final_book = self.authority(
+                JournalStore(path),
+                [original, correction],
+                registry=inverse,
+                seed=False,
+            )
+            correction_replay = final.apply(correction.evidence_ref)
+            self.assertFalse(correction_replay.inserted)
+            self.assertEqual(
+                correction_replay.active_transaction_id,
+                corrected.active_transaction_id,
+            )
+            self.assertEqual(
+                final_book.cash("BTC"),
+                Decimal("-0.00000002"),
             )
 
     def test_provider_correction_atomically_reverses_and_replaces_funding(self):

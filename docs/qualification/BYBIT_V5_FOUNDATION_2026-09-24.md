@@ -109,10 +109,25 @@ fill evidence; execution economics still require `/v5/execution/list` and
 reconciliation.
 
 An empty final cursor proves only that this exact read finished pagination. It
-does not by itself set
-`provider_semantics_exclude_execution=true`, does not resolve an UNKNOWN send,
-and does not qualify MAINNET/TESTNET/DEMO behavior without recorded exact-build
-provider evidence.
+does not by itself resolve an UNKNOWN send. Bybit documents a narrower retention
+contract for no-fill terminal outcomes: `Cancelled`, `Rejected` and
+`Deactivated` are queryable only for the last 24 hours, while older history
+progressively excludes such outcomes. Therefore order-history exclusion
+authority is accepted only under the exact built-in contract identifier
+`BYBIT_V5_ORDER_HISTORY_NO_FILL_24H_2026_09_26`, and only when the complete
+requested window is no older than 24 hours at the latest exact response
+observation and does not extend beyond that observation cut. A complete older
+cursor chain remains positive/history evidence, but its
+`provider_semantics_exclude_execution` flag is demoted to false. This keeps
+offline/restart recovery UNKNOWN instead of manufacturing PROVEN_ABSENT after
+provider retention has discarded a possible no-fill terminal order.
+
+The realtime closed-order cache is not treated as historical absence authority:
+Bybit documents that this cache may be cleared after a service release/restart
+and older records must then be queried through order history. The independent
+`consistency_horizon_satisfied` fact is still required because order-history
+creation/cancellation data may lag. None of this qualifies
+MAINNET/TESTNET/DEMO behavior without recorded exact-build provider evidence.
 
 Current official references:
 - https://bybit-exchange.github.io/docs/v5/order/open-order

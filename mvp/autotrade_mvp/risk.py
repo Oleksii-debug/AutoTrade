@@ -1515,24 +1515,45 @@ def evaluate_risk(
         raise ValueError(
             f"{intent.instrument_type} equivalent exposure per unit must be positive for {intent.symbol}"
         )
+    scoped_position_quantities = {
+        **context.positions,
+        **{
+            symbol: context.positions.get(symbol, Decimal("0")) + delta
+            for symbol, delta in context.reserved_position_delta.items()
+        },
+    }
+    exposed_symbols = {
+        symbol
+        for symbol, quantity in scoped_position_quantities.items()
+        if quantity != 0
+    }
+    missing_instrument_type_symbols = tuple(
+        sorted(
+            symbol
+            for symbol in exposed_symbols
+            if symbol != intent.symbol
+            and symbol not in context_instrument_types
+        )
+    )
     required_equivalent_symbols = {
         symbol
-        for symbol, quantity in {
-            **context.positions,
-            **{
-                symbol: context.positions.get(symbol, Decimal("0")) + delta
-                for symbol, delta in context.reserved_position_delta.items()
-            },
-        }.items()
-        if quantity != 0
-        and context_instrument_types.get(symbol) in derivative_instrument_types
+        for symbol in exposed_symbols
+        if (
+            intent.instrument_type
+            if symbol == intent.symbol
+            else context_instrument_types.get(symbol)
+        )
+        in derivative_instrument_types
     }
     if derivative_requires_equivalent_exposure:
         required_equivalent_symbols.add(intent.symbol)
     missing_equivalent_symbols = tuple(
         sorted(required_equivalent_symbols - set(equivalent_exposure_map))
     )
-    derivative_exposure_evidenced = not missing_equivalent_symbols
+    derivative_exposure_evidenced = (
+        not missing_instrument_type_symbols
+        and not missing_equivalent_symbols
+    )
     current = context.positions.get(intent.symbol, Decimal("0"))
     reserved = context.reserved_position_delta.get(intent.symbol, Decimal("0"))
     base_position = current + reserved
@@ -1860,16 +1881,24 @@ def evaluate_risk(
                 if derivative_exposure_evidenced
                 and derivative_requires_equivalent_exposure
                 else (
-                    "MISSING:" + ",".join(missing_equivalent_symbols)
-                    if missing_equivalent_symbols
-                    else "NOT_REQUIRED"
+                    "MISSING_TYPE:" + ",".join(missing_instrument_type_symbols)
+                    if missing_instrument_type_symbols
+                    else (
+                        "MISSING:" + ",".join(missing_equivalent_symbols)
+                        if missing_equivalent_symbols
+                        else "NOT_REQUIRED"
+                    )
                 )
             ),
             "REQUIRED_FOR_DERIVATIVE",
             (
-                "derivative equivalent exposure is evidenced"
+                "instrument family and derivative equivalent exposure are evidenced"
                 if derivative_exposure_evidenced
-                else "derivative leverage cannot use premium/mark as exposure proxy"
+                else (
+                    "nonzero portfolio exposure lacks canonical instrument family"
+                    if missing_instrument_type_symbols
+                    else "derivative leverage cannot use premium/mark as exposure proxy"
+                )
             ),
         )
     )

@@ -164,6 +164,12 @@ def context(**overrides):
         borrow_available=True,
         stress_scenarios=({"ABC": "-0.10", "XYZ": "-0.20"},),
         equivalent_exposure_per_unit={"ABC": "100", "XYZ": "50"},
+        instrument_types={
+            "ABC": "EQUITY",
+            "XYZ": "EQUITY",
+            "CORE": "EQUITY",
+            "HEDGE": "EQUITY",
+        },
     )
     values.update(overrides)
     return RiskContext.create(**values)
@@ -1074,6 +1080,38 @@ class IndependentRiskTests(unittest.TestCase):
         )
         self.assertFalse(rule.passed)
         self.assertEqual(rule.observed, "MISSING:XYZ")
+        self.assertFalse(decision.admitted)
+
+    def test_existing_position_without_instrument_type_cannot_use_mark_as_exposure(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="1",
+                price="100",
+                expected_state_version=7,
+                instrument_type="EQUITY",
+            ),
+            context(
+                positions={"ABC": "0", "XYZ": "10"},
+                marks={"ABC": "100", "XYZ": "1"},
+                instrument_types={"ABC": "EQUITY"},
+                equivalent_exposure_per_unit={"ABC": "100"},
+                stress_scenarios=({"ABC": "-0.10", "XYZ": "-0.10"},),
+            ),
+            policy(
+                max_single_notional="10000",
+                max_gross_leverage="10",
+                max_net_leverage="10",
+            ),
+        )
+        rule = next(
+            item
+            for item in decision.rules
+            if item.rule == "derivative_equivalent_exposure"
+        )
+        self.assertFalse(rule.passed)
+        self.assertEqual(rule.observed, "MISSING_TYPE:XYZ")
         self.assertFalse(decision.admitted)
 
     def test_derivative_equivalent_exposure_rejects_context_type_mismatch(self):

@@ -511,6 +511,19 @@ def build_installer_input_manifest(
     runtime_prerequisite: str | None = None,
 ) -> dict[str, object]:
     verified = verify_release_bundle(bundle)
+    bundle_resolved = bundle.resolve(strict=True)
+    output_resolved = output.resolve(strict=False)
+    digest_path = output.with_suffix(output.suffix + ".sha256")
+    digest_resolved = digest_path.resolve(strict=False)
+    if output_resolved == bundle_resolved:
+        raise InstallerManifestError(
+            "installer manifest output must not overwrite verified release bundle"
+        )
+    if digest_resolved == bundle_resolved:
+        raise InstallerManifestError(
+            "installer manifest digest output must not overwrite verified release bundle"
+        )
+
     framework = _text(target_framework, name="target_framework")
     mode = _text(runtime_mode, name="runtime_mode").upper()
     if mode not in {"SELF_CONTAINED", "FRAMEWORK_DEPENDENT"}:
@@ -567,7 +580,6 @@ def build_installer_input_manifest(
     }
     payload = _canonical_bytes(manifest)
     output.parent.mkdir(parents=True, exist_ok=True)
-    digest_path = output.with_suffix(output.suffix + ".sha256")
     temporary = _prepare_atomic_destination(
         output,
         name="installer manifest output",

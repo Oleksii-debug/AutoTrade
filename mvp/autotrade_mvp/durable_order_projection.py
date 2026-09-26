@@ -8,9 +8,10 @@ then the in-memory OrderBookProjection is rebuilt from that immutable history.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Mapping, Sequence
+from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from research.autotrade_research.artifacts.store import (
@@ -91,6 +92,38 @@ def _optional_text(value: str | None, *, name: str) -> str | None:
     return None if value is None else _text(value, name=name)
 
 
+def _canonical_uri(value: object, *, name: str) -> str:
+    text = _text(value, name=name)
+    if any(character.isspace() for character in text):
+        raise ValueError(f"{name} must be an absolute URI")
+    parsed = urlsplit(text)
+    if not parsed.scheme:
+        raise ValueError(f"{name} must be an absolute URI")
+    if parsed.scheme.lower() in {"http", "https"} and not parsed.netloc:
+        raise ValueError(f"{name} must be an absolute URI")
+    return text
+
+
+def _canonical_quantity_value(value: object, *, name: str) -> tuple[str, str]:
+    """Validate canonical Quantity and retain exact value/unit semantics."""
+    if not isinstance(value, Mapping):
+        raise OrderProjectionConflict(f"{name} must be a canonical Quantity object")
+    unknown = set(value) - {"value", "unit"}
+    missing = {"value", "unit"} - set(value)
+    if unknown or missing:
+        raise OrderProjectionConflict(
+            f"{name} must contain exactly value and unit"
+        )
+    raw_value = value.get("value")
+    if not isinstance(raw_value, str):
+        raise OrderProjectionConflict(f"{name}.value must be a decimal string")
+    canonical_value = _decimal_text(raw_value, name=f"{name}.value")
+    if canonical_value != raw_value:
+        raise OrderProjectionConflict(f"{name}.value must be canonical decimal text")
+    unit = _text(value.get("unit"), name=f"{name}.unit")
+    return raw_value, unit
+
+
 def _canonical_evidence_refs(
     value: Sequence[Mapping[str, object]] | None,
 ) -> tuple[dict[str, str], ...]:
@@ -127,9 +160,13 @@ def _canonical_evidence_refs(
             "sha256": digest,
             "observed_at": _instant(raw.get("observed_at"), name="observed_at"),
         }
-        for optional in ("source_uri", "rights_id"):
-            if raw.get(optional) is not None:
-                ref[optional] = _text(raw.get(optional), name=optional)
+        if raw.get("source_uri") is not None:
+            ref["source_uri"] = _canonical_uri(
+                raw.get("source_uri"),
+                name="source_uri",
+            )
+        if raw.get("rights_id") is not None:
+            ref["rights_id"] = _text(raw.get("rights_id"), name="rights_id")
         identity = canonical_json(ref)
         if identity in identities:
             raise ValueError("evidence_refs must be unique")
@@ -238,6 +275,7 @@ class DurableOrderBookProjection:
             str,
             tuple[str, OrderSnapshot, str],
         ] = {}
+        self._quantity_units: dict[str, str] = {}
         self._reload()
 
     def _new_book(self) -> OrderBookProjection:
@@ -427,9 +465,11 @@ class DurableOrderBookProjection:
     ) -> tuple[
         OrderBookProjection,
         dict[str, tuple[str, OrderSnapshot, str]],
+        dict[str, str],
     ]:
         book = self._new_book()
         idempotency: dict[str, tuple[str, OrderSnapshot, str]] = {}
+        quantity_units: dict[str, str] = {}
         expected_version = 1
 
         for event in events:
@@ -502,16 +542,35 @@ class DurableOrderBookProjection:
                 raise OrderProjectionConflict(
                     "order projection journal snapshot differs from replay"
                 )
+            if operation == "CREATE" and request.get("quantity_unit") is not None:
+                order_id = _text(
+                    request.get("client_order_id"),
+                    name="client_order_id",
+                )
+                unit = _text(
+                    request.get("quantity_unit"),
+                    name="quantity_unit",
+                )
+                prior_unit = quantity_units.get(order_id)
+                if prior_unit is not None and prior_unit != unit:
+                    raise OrderProjectionConflict(
+                        "durable order quantity unit changed across replay"
+                    )
+                quantity_units[order_id] = unit
             idempotency[event_key] = (
                 mutation_hash,
                 snapshot,
                 str(event["event_id"]),
             )
 
-        return book, idempotency
+        return book, idempotency, quantity_units
 
     def _reload(self) -> None:
-        self._book, self._idempotency = self._replay(self._events())
+        (
+            self._book,
+            self._idempotency,
+            self._quantity_units,
+        ) = self._replay(self._events())
 
     def _commit(
         self,
@@ -638,6 +697,7 @@ class DurableOrderBookProjection:
         side: str,
         requested_quantity,
         committed_at: str,
+        quantity_unit: str | None = None,
         oco_group_id: str | None = None,
         parent_intent_id: str | None = None,
     ) -> DurableOrderMutationResult:
@@ -655,6 +715,11 @@ class DurableOrderBookProjection:
                 name="parent_intent_id",
             ),
         }
+        if quantity_unit is not None:
+            request["quantity_unit"] = _text(
+                quantity_unit,
+                name="quantity_unit",
+            )
         return self._commit(
             event_key=event_key,
             operation="CREATE",
@@ -879,6 +944,7 @@ class DurableOrderBookProjection:
         committed_at: str,
         provider_revision: str | None = None,
         evidence_refs: Sequence[Mapping[str, object]] | None = None,
+        canonical_execution_fill_hash: str | None = None,
     ) -> DurableOrderMutationResult:
         request = {
             "client_order_id": _text(client_order_id, name="client_order_id"),
@@ -894,12 +960,318 @@ class DurableOrderBookProjection:
                 name="provider_revision",
             ),
         }
+        if canonical_execution_fill_hash is not None:
+            request["canonical_execution_fill_hash"] = _text(
+                canonical_execution_fill_hash,
+                name="canonical_execution_fill_hash",
+            )
         return self._commit(
             event_key=event_key,
             operation="RECORD_FILL",
             request=request,
             committed_at=committed_at,
             evidence_refs=evidence_refs,
+        )
+
+    def ingest_execution_fill(
+        self,
+        *,
+        client_order_id: str,
+        execution_fill: Mapping[str, object],
+        event_key: str,
+        committed_at: str,
+    ) -> DurableOrderMutationResult:
+        """Apply one canonical ExecutionFill through the existing order authority.
+
+        Provider adapters and reconciliation normalize provider-specific payloads
+        before this boundary. This method deliberately does not interpret raw
+        provider responses and does not create a second lifecycle state machine.
+        """
+        if not isinstance(execution_fill, Mapping):
+            raise TypeError("execution_fill must be a mapping")
+
+        allowed = {
+            "fill_id",
+            "provider_execution_id",
+            "provider_revision",
+            "order_ref",
+            "intent_ref",
+            "instrument_version",
+            "side",
+            "last_quantity",
+            "last_price",
+            "trade_time",
+            "receipt_time",
+            "fees",
+            "liquidity_flag",
+            "settlement_date",
+            "correction_reference",
+            "evidence",
+        }
+        required = {
+            "fill_id",
+            "provider_execution_id",
+            "order_ref",
+            "instrument_version",
+            "side",
+            "last_quantity",
+            "last_price",
+            "trade_time",
+            "receipt_time",
+            "fees",
+            "settlement_date",
+            "evidence",
+        }
+        unknown = set(execution_fill) - allowed
+        if unknown:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill contains unsupported fields: "
+                + ", ".join(sorted(str(item) for item in unknown))
+            )
+        missing = required - set(execution_fill)
+        if missing:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill is missing required fields: "
+                + ", ".join(sorted(missing))
+            )
+
+        client_id = _text(client_order_id, name="client_order_id")
+        order = self.order(client_id)
+        order_ref = _text(
+            execution_fill.get("order_ref"),
+            name="order_ref",
+        )
+        if order_ref != client_id:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill order_ref differs from target order"
+            )
+        if (
+            _text(execution_fill.get("instrument_version"), name="instrument_version")
+            != order.instrument
+        ):
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill instrument differs from target order"
+            )
+        fill_side = _text(execution_fill.get("side"), name="side")
+        if fill_side not in {"BUY", "SELL"}:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill side must be BUY or SELL"
+            )
+        if fill_side != order.side:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill side differs from target order"
+            )
+
+        intent_ref = execution_fill.get("intent_ref")
+        if intent_ref is not None:
+            normalized_intent_ref = _text(intent_ref, name="intent_ref")
+            if (
+                order.parent_intent_id is None
+                or normalized_intent_ref != order.parent_intent_id
+            ):
+                raise OrderProjectionConflict(
+                    "canonical ExecutionFill intent_ref differs from target order"
+                )
+
+        trade_time = _instant(execution_fill.get("trade_time"), name="trade_time")
+        receipt_time = _instant(
+            execution_fill.get("receipt_time"),
+            name="receipt_time",
+        )
+        committed = _instant(committed_at, name="committed_at")
+        trade_dt = datetime.fromisoformat(trade_time.replace("Z", "+00:00"))
+        receipt_dt = datetime.fromisoformat(receipt_time.replace("Z", "+00:00"))
+        committed_dt = datetime.fromisoformat(committed.replace("Z", "+00:00"))
+        if receipt_dt < trade_dt:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill receipt_time precedes trade_time"
+            )
+        if committed_dt < receipt_dt:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill cannot be committed before receipt_time"
+            )
+
+        quantity_value, quantity_unit = _canonical_quantity_value(
+            execution_fill.get("last_quantity"),
+            name="last_quantity",
+        )
+        expected_quantity_unit = self._quantity_units.get(client_id)
+        if expected_quantity_unit is None:
+            raise OrderProjectionConflict(
+                "target order lacks canonical quantity unit"
+            )
+        if quantity_unit != expected_quantity_unit:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill quantity unit differs from target order"
+            )
+        last_price = execution_fill.get("last_price")
+        if not isinstance(last_price, str):
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill last_price must be a decimal string"
+            )
+        if _decimal_text(last_price, name="last_price") != last_price:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill last_price must be canonical decimal text"
+            )
+
+        fees = execution_fill.get("fees")
+        if isinstance(fees, (str, bytes)) or not isinstance(fees, Sequence):
+            raise OrderProjectionConflict("canonical ExecutionFill fees must be an array")
+        for index, fee in enumerate(fees):
+            if not isinstance(fee, Mapping) or set(fee) != {"amount", "currency"}:
+                raise OrderProjectionConflict(
+                    f"canonical ExecutionFill fees[{index}] must be Money"
+                )
+            amount = fee.get("amount")
+            if not isinstance(amount, str) or _decimal_text(
+                amount, name=f"fees[{index}].amount"
+            ) != amount:
+                raise OrderProjectionConflict(
+                    f"canonical ExecutionFill fees[{index}].amount must be canonical decimal text"
+                )
+            _text(fee.get("currency"), name=f"fees[{index}].currency")
+
+        liquidity_flag = execution_fill.get("liquidity_flag")
+        if liquidity_flag is not None:
+            _text(liquidity_flag, name="liquidity_flag")
+
+        evidence = execution_fill.get("evidence")
+        if isinstance(evidence, (str, bytes)) or not isinstance(evidence, Sequence):
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill evidence must be an array"
+            )
+        settlement_date = _text(
+            execution_fill.get("settlement_date"),
+            name="settlement_date",
+        )
+        try:
+            parsed_settlement_date = date.fromisoformat(settlement_date)
+        except ValueError as error:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill settlement_date must be an ISO calendar date"
+            ) from error
+        if parsed_settlement_date.isoformat() != settlement_date:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill settlement_date must be canonical YYYY-MM-DD"
+            )
+
+        canonical_fill: dict[str, object] = {
+            "fill_id": _text(execution_fill.get("fill_id"), name="fill_id"),
+            "provider_execution_id": _text(
+                execution_fill.get("provider_execution_id"),
+                name="provider_execution_id",
+            ),
+            "instrument_version": order.instrument,
+            "side": fill_side,
+            "last_quantity": {
+                "value": quantity_value,
+                "unit": quantity_unit,
+            },
+            "last_price": last_price,
+            "trade_time": trade_time,
+            "receipt_time": receipt_time,
+            "fees": [
+                {
+                    "amount": str(fee["amount"]),
+                    "currency": _text(
+                        fee["currency"],
+                        name=f"fees[{index}].currency",
+                    ),
+                }
+                for index, fee in enumerate(fees)
+            ],
+            "settlement_date": settlement_date,
+            "evidence": [
+                dict(ref) for ref in _canonical_evidence_refs(evidence)
+            ],
+        }
+        for optional in (
+            "provider_revision",
+            "order_ref",
+            "intent_ref",
+            "liquidity_flag",
+            "correction_reference",
+        ):
+            if execution_fill.get(optional) is not None:
+                canonical_fill[optional] = _text(
+                    execution_fill.get(optional),
+                    name=optional,
+                )
+        canonical_execution_fill_hash = payload_digest(canonical_fill)
+
+        correction_reference = execution_fill.get("correction_reference")
+        if correction_reference is not None:
+            provider_revision = execution_fill.get("provider_revision")
+            if provider_revision is None:
+                raise OrderProjectionConflict(
+                    "corrected ExecutionFill requires provider_revision"
+                )
+            correction_target = _text(
+                correction_reference,
+                name="correction_reference",
+            )
+            incoming_execution_id = _text(
+                execution_fill.get("provider_execution_id"),
+                name="provider_execution_id",
+            )
+            target_observation = next(
+                (
+                    item
+                    for item in reversed(order.fill_history)
+                    if item.fill_id == correction_target
+                    or item.correction_of == correction_target
+                ),
+                None,
+            )
+            if target_observation is None:
+                raise OrderProjectionConflict(
+                    "corrected ExecutionFill references an unknown fill"
+                )
+            if target_observation.provider_execution_id != incoming_execution_id:
+                raise OrderProjectionConflict(
+                    "corrected ExecutionFill provider_execution_id differs from target fill"
+                )
+            root_fill_id = order.provider_execution_index.get(incoming_execution_id)
+            if root_fill_id is None:
+                raise OrderProjectionConflict(
+                    "corrected ExecutionFill execution lineage is not indexed"
+                )
+            return self.correct_fill(
+                event_key=event_key,
+                client_order_id=client_id,
+                fill_id=root_fill_id,
+                correction_fill_id=_text(
+                    execution_fill.get("fill_id"),
+                    name="fill_id",
+                ),
+                quantity=quantity_value,
+                price=last_price,
+                provider_revision=_text(
+                    provider_revision,
+                    name="provider_revision",
+                ),
+                committed_at=committed,
+                evidence_refs=evidence,
+                canonical_execution_fill_hash=canonical_execution_fill_hash,
+            )
+
+        return self.record_fill(
+            event_key=event_key,
+            client_order_id=client_id,
+            fill_id=_text(execution_fill.get("fill_id"), name="fill_id"),
+            provider_execution_id=_text(
+                execution_fill.get("provider_execution_id"),
+                name="provider_execution_id",
+            ),
+            quantity=quantity_value,
+            price=last_price,
+            provider_revision=_optional_text(
+                execution_fill.get("provider_revision"),
+                name="provider_revision",
+            ),
+            committed_at=committed,
+            evidence_refs=evidence,
+            canonical_execution_fill_hash=canonical_execution_fill_hash,
         )
 
     def correct_fill(
@@ -914,6 +1286,7 @@ class DurableOrderBookProjection:
         committed_at: str,
         correction_fill_id: str | None = None,
         evidence_refs: Sequence[Mapping[str, object]] | None = None,
+        canonical_execution_fill_hash: str | None = None,
     ) -> DurableOrderMutationResult:
         request = {
             "client_order_id": _text(client_order_id, name="client_order_id"),
@@ -929,6 +1302,11 @@ class DurableOrderBookProjection:
                 name="correction_fill_id",
             ),
         }
+        if canonical_execution_fill_hash is not None:
+            request["canonical_execution_fill_hash"] = _text(
+                canonical_execution_fill_hash,
+                name="canonical_execution_fill_hash",
+            )
         return self._commit(
             event_key=event_key,
             operation="CORRECT_FILL",

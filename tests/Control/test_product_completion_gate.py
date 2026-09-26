@@ -14,6 +14,10 @@ from mvp.autotrade_mvp.qualification_attestation import (
     QualificationScope,
     SignedQualificationAttestation,
 )
+from mvp.tests.test_nvda_qualification_gate import (
+    REQUIREMENTS as NVDA_REQUIREMENTS,
+    complete_evidence as complete_nvda_evidence,
+)
 from mvp.tests.test_qualification_attestation import (
     policy as fixture_policy,
     root as fixture_root,
@@ -155,21 +159,106 @@ def verified_evidence(store, trust_root):
     return records
 
 
+def verified_nvda_fixture(store, trust_root, trust_policy):
+    evidence = complete_nvda_evidence()
+    evidence["source_sha"] = SHA
+    evidence_bytes = json.dumps(
+        evidence,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    artifact_id = str(uuid5(NAMESPACE_URL, "whole-product-nvda-raw-evidence"))
+    manifest = store.publish_bytes(
+        artifact_id=artifact_id,
+        data=evidence_bytes,
+        media_type="application/vnd.autotrade.nvda-evidence+json",
+        rights={"storage": True, "export": False},
+        source_refs=[f"git:{SHA}"],
+        metadata={"evidence_kind": "NVDA_REAL_RUN"},
+    )
+    evidence_ref = EvidenceArtifactRef(
+        artifact_id=artifact_id,
+        sha256=manifest["sha256"],
+        media_type="application/vnd.autotrade.nvda-evidence+json",
+        evidence_kind="NVDA_REAL_RUN",
+        source_sha=SHA,
+    )
+    requirement_ids = tuple(
+        sorted(item["id"] for item in NVDA_REQUIREMENTS["workflows"])
+    )
+    attestation = QualificationAttestation(
+        attestation_id=str(uuid5(NAMESPACE_URL, "whole-product-nvda-attestation")),
+        source_sha=SHA,
+        domain="ACCESSIBILITY",
+        gate="NVDA_RELEASE",
+        package_id="WP-53",
+        protocol_id="real-nvda-keyboard-v1",
+        protocol_version="1.0.0",
+        requirement_ids=requirement_ids,
+        evidence_refs=(evidence_ref,),
+        producer_id=trust_root.producer_id,
+        verifier_id=trust_root.verifier_id,
+        trust_root_id=trust_root.root_id,
+        runner_id="nvda-test-runner",
+        harness_version="1.0.0",
+        started_at="2026-09-25T03:00:00Z",
+        completed_at="2026-09-25T03:10:00Z",
+        signed_at="2026-09-25T03:11:00Z",
+        result="PASS",
+        release_artifact_id=evidence["release_artifact_id"],
+        release_artifact_sha256=evidence["artifact_sha256"],
+    )
+    receipt = SignedQualificationAttestation(
+        attestation=attestation,
+        signature_b64=fixture_sign(attestation),
+    )
+    status = {
+        "qualified": True,
+        "reason": "QUALIFIED_SIGNED_REAL_NVDA_RELEASE",
+        "source_sha": SHA,
+        "release_artifact_id": evidence["release_artifact_id"],
+        "artifact_sha256": evidence["artifact_sha256"],
+        "evidence_sha256": manifest["sha256"],
+        "attestation_id": attestation.attestation_id,
+        "attestation_digest": attestation.content_digest,
+        "policy_id": trust_policy.policy_id,
+        "trust_root_id": trust_root.root_id,
+    }
+    return status, receipt
+
+
 def verified_completion_fixture(directory):
     store = ArtifactStore(directory)
     trust_root = fixture_root(
-        scopes=(QualificationScope("WHOLE_PRODUCT", "COMPLETION"),)
+        scopes=(
+            QualificationScope("WHOLE_PRODUCT", "COMPLETION"),
+            QualificationScope("ACCESSIBILITY", "NVDA_RELEASE"),
+        )
     )
     trust_policy = fixture_policy(trust_root)
+    nvda_status, nvda_receipt = verified_nvda_fixture(
+        store,
+        trust_root,
+        trust_policy,
+    )
     context = WholeProductEvidenceContext(
         evidence_store=store,
         policy=trust_policy,
         expected_policy_id=trust_policy.policy_id,
         expected_policy_version=trust_policy.policy_version,
+        nvda_receipt=nvda_receipt,
+        nvda_requirements_json=json.dumps(
+            NVDA_REQUIREMENTS,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ),
     )
     return (
         complete_qualification(verified_evidence(store, trust_root)),
         context,
+        nvda_status,
     )
 
 
@@ -240,9 +329,14 @@ class ProductCompletionGateTests(unittest.TestCase):
 
     def test_only_independently_verified_exact_matrix_can_report_complete(self):
         with TemporaryDirectory() as directory:
-            qualification, evidence_context = verified_completion_fixture(directory)
+            (
+                qualification,
+                evidence_context,
+                nvda_status,
+            ) = verified_completion_fixture(directory)
             report = evaluate(
                 qualification=qualification,
+                nvda_status=nvda_status,
                 evidence_context=evidence_context,
             )
         self.assertTrue(report["complete"])
@@ -252,6 +346,41 @@ class ProductCompletionGateTests(unittest.TestCase):
         self.assertEqual(report["nonpassing_evidence"], [])
         self.assertTrue(report["nvda_source_matches"])
         self.assertTrue(report["qualification_source_matches"])
+
+    def test_well_formed_but_unverified_nvda_identity_cannot_complete(self):
+        with TemporaryDirectory() as directory:
+            (
+                qualification,
+                evidence_context,
+                valid_nvda,
+            ) = verified_completion_fixture(directory)
+
+            forged = nvda()
+            report = evaluate(
+                qualification=qualification,
+                nvda_status=forged,
+                evidence_context=evidence_context,
+            )
+            self.assertFalse(report["complete"])
+            self.assertFalse(report["nvda_qualified"])
+
+            forged = dict(valid_nvda)
+            forged["attestation_id"] = "33333333-3333-4333-8333-333333333333"
+            report = evaluate(
+                qualification=qualification,
+                nvda_status=forged,
+                evidence_context=evidence_context,
+            )
+            self.assertFalse(report["nvda_qualified"])
+
+            forged = dict(valid_nvda)
+            forged["evidence_sha256"] = "sha256:" + "f" * 64
+            report = evaluate(
+                qualification=qualification,
+                nvda_status=forged,
+                evidence_context=evidence_context,
+            )
+            self.assertFalse(report["nvda_qualified"])
 
     def test_product_spec_toc_cannot_mask_missing_or_renamed_body_section(self):
         marker = "28. Accessible desktop and web interfaces"
@@ -374,26 +503,40 @@ class ProductCompletionGateTests(unittest.TestCase):
         self.assertFalse(report["nvda_source_matches"])
 
     def test_nvda_completion_requires_signed_release_identity(self):
-        required_fields = (
-            "release_artifact_id",
-            "artifact_sha256",
-            "evidence_sha256",
-            "attestation_id",
-            "attestation_digest",
-            "policy_id",
-            "trust_root_id",
-        )
-        for field in required_fields:
-            with self.subTest(field=field):
-                status = nvda()
-                status.pop(field)
-                report = evaluate(nvda_status=status)
-                self.assertFalse(report["nvda_qualified"])
+        with TemporaryDirectory() as directory:
+            (
+                qualification,
+                evidence_context,
+                valid_status,
+            ) = verified_completion_fixture(directory)
+            required_fields = (
+                "release_artifact_id",
+                "artifact_sha256",
+                "evidence_sha256",
+                "attestation_id",
+                "attestation_digest",
+                "policy_id",
+                "trust_root_id",
+            )
+            for field in required_fields:
+                with self.subTest(field=field):
+                    status = dict(valid_status)
+                    status.pop(field)
+                    report = evaluate(
+                        qualification=qualification,
+                        nvda_status=status,
+                        evidence_context=evidence_context,
+                    )
+                    self.assertFalse(report["nvda_qualified"])
 
-        status = nvda()
-        status["reason"] = "QUALIFIED"
-        report = evaluate(nvda_status=status)
-        self.assertFalse(report["nvda_qualified"])
+            status = dict(valid_status)
+            status["reason"] = "QUALIFIED"
+            report = evaluate(
+                qualification=qualification,
+                nvda_status=status,
+                evidence_context=evidence_context,
+            )
+            self.assertFalse(report["nvda_qualified"])
 
     def test_missing_or_noncanonical_exact_source_sha_blocks_completion(self):
         report = evaluate(source_sha=None)

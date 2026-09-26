@@ -1,9 +1,12 @@
 from hashlib import sha256
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
+
+from mvp.autotrade_mvp import qualification_attestation as qualification_trust
 
 from mvp.autotrade_mvp.qualification_attestation import (
     EvidenceArtifactRef,
@@ -116,6 +119,19 @@ def _signed_science_receipt(value):
     )
 
 
+def _qualify_signed(value, receipt, trust_policy, store):
+    with patch.object(
+        qualification_trust,
+        "load_canonical_qualification_trust_policy",
+        return_value=trust_policy,
+    ):
+        return qualify_scientific_learning(
+            value,
+            qualification_receipt=receipt,
+            evidence_store=store,
+        )
+
+
 def qualify(value):
     receipt, trust_policy = _signed_science_receipt(value)
     with TemporaryDirectory() as directory:
@@ -129,14 +145,7 @@ def qualify(value):
             source_refs=[f"git:{SOURCE}"],
             metadata={"evidence_kind": "SCIENCE_POPULATION_COVERAGE"},
         )
-        return qualify_scientific_learning(
-            value,
-            qualification_receipt=receipt,
-            qualification_policy=trust_policy,
-            evidence_store=store,
-            expected_policy_id=trust_policy.policy_id,
-            expected_policy_version=trust_policy.policy_version,
-        )
+        return _qualify_signed(value, receipt, trust_policy, store)
 
 
 class ScientificQualificationTests(unittest.TestCase):
@@ -161,6 +170,35 @@ class ScientificQualificationTests(unittest.TestCase):
         self.assertFalse(result.economic_claim_accepted)
         self.assertIn(
             "SCIENCE.EVIDENCE_UNVERIFIED:forward_evidence",
+            result.reason_codes,
+        )
+
+    def test_caller_selected_trust_policy_is_rejected(self):
+        value = evidence(claim="ECONOMIC_EDGE_QUALIFIED")
+        receipt, trust_policy = _signed_science_receipt(value)
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            store.publish_bytes(
+                artifact_id=_POPULATION_ID,
+                data=_POPULATION_BYTES,
+                media_type="application/vnd.autotrade.qualification-evidence",
+                rights={"storage": True, "export": False},
+                source_refs=[f"git:{SOURCE}"],
+                metadata={"evidence_kind": "SCIENCE_POPULATION_COVERAGE"},
+            )
+            result = qualify_scientific_learning(
+                value,
+                qualification_receipt=receipt,
+                qualification_policy=trust_policy,
+                evidence_store=store,
+                expected_policy_id=trust_policy.policy_id,
+                expected_policy_version=trust_policy.policy_version,
+            )
+        self.assertEqual(result.status, "FAIL")
+        self.assertFalse(result.economic_claim_accepted)
+        self.assertIn(
+            "SCIENCE.CALLER_SELECTED_TRUST_POLICY_FORBIDDEN",
             result.reason_codes,
         )
 
@@ -236,13 +274,8 @@ class ScientificQualificationTests(unittest.TestCase):
                 source_refs=[f"git:{SOURCE}"],
                 metadata={"evidence_kind": "SCIENCE_POPULATION_COVERAGE"},
             )
-            result = qualify_scientific_learning(
-                value,
-                qualification_receipt=receipt,
-                qualification_policy=trust_policy,
-                evidence_store=store,
-                expected_policy_id=trust_policy.policy_id,
-                expected_policy_version=trust_policy.policy_version,
+            result = _qualify_signed(
+                value, receipt, trust_policy, store
             )
         self.assertEqual(result.status, "FAIL")
         self.assertFalse(result.economic_claim_accepted)
@@ -299,13 +332,8 @@ class ScientificQualificationTests(unittest.TestCase):
                 source_refs=[f"git:{SOURCE}"],
                 metadata={"evidence_kind": "SCIENCE_POPULATION_COVERAGE"},
             )
-            result = qualify_scientific_learning(
-                tampered,
-                qualification_receipt=receipt,
-                qualification_policy=trust_policy,
-                evidence_store=store,
-                expected_policy_id=trust_policy.policy_id,
-                expected_policy_version=trust_policy.policy_version,
+            result = _qualify_signed(
+                tampered, receipt, trust_policy, store
             )
 
         self.assertEqual(result.status, "FAIL")
@@ -339,13 +367,8 @@ class ScientificQualificationTests(unittest.TestCase):
                 source_refs=[f"git:{SOURCE}"],
                 metadata={"evidence_kind": "SCIENCE_POPULATION_COVERAGE"},
             )
-            result = qualify_scientific_learning(
-                tampered,
-                qualification_receipt=receipt,
-                qualification_policy=trust_policy,
-                evidence_store=store,
-                expected_policy_id=trust_policy.policy_id,
-                expected_policy_version=trust_policy.policy_version,
+            result = _qualify_signed(
+                tampered, receipt, trust_policy, store
             )
 
         self.assertEqual(result.status, "FAIL")
@@ -371,13 +394,8 @@ class ScientificQualificationTests(unittest.TestCase):
                 source_refs=[f"git:{SOURCE}"],
                 metadata={"evidence_kind": "SCIENCE_POPULATION_COVERAGE"},
             )
-            result = qualify_scientific_learning(
-                tampered,
-                qualification_receipt=receipt,
-                qualification_policy=trust_policy,
-                evidence_store=store,
-                expected_policy_id=trust_policy.policy_id,
-                expected_policy_version=trust_policy.policy_version,
+            result = _qualify_signed(
+                tampered, receipt, trust_policy, store
             )
 
         self.assertEqual(result.status, "FAIL")

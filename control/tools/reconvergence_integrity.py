@@ -24,8 +24,17 @@ from control.tools.registry_state import _normalized_scopes, path_covers
 
 PROTECTED_SENTINELS = frozenset(
     {
+        ".github/workflows/baseline.yml",
+        ".github/workflows/contracts.yml",
+        ".github/workflows/control-plane.yml",
+        ".github/workflows/dotnet-foundation.yml",
+        ".github/workflows/futures-qualification.yml",
+        ".github/workflows/lean-adoption.yml",
         ".github/workflows/reconvergence-integrity.yml",
+        ".github/workflows/research-primitives.yml",
+        ".github/workflows/science-qualification.yml",
         ".github/workflows/verify.yml",
+        ".github/workflows/zero-model-qualification.yml",
         "AGENTS.md",
         "control/CONSTITUTION.md",
         "control/INDEX.json",

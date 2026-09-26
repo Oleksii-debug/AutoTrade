@@ -66,7 +66,7 @@ def _normalized_key(value: object) -> str:
 _EMBEDDED_SECRET_PATTERNS = (
     re.compile(
         r"""(?i)(?:["'])?\b(authorization|proxy-authorization)\b"""
-        r"""(?:["'])?\s*[:=]\s*"""
+        r"""(?:["'])?\s*[:=]\s*(?!\[REDACTED\])"""
         r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]+)"""
     ),
     re.compile(
@@ -75,7 +75,7 @@ _EMBEDDED_SECRET_PATTERNS = (
     re.compile(
         r"""(?i)(?:["'])?\b(api[_-]?key|x[_-]?txc[_-]?apikey|x[_-]?txc[_-]?payload|x[_-]?txc[_-]?signature|"""
         r"""token|access[_-]?token|refresh[_-]?token|session|session[_-]?token|secret|credential|api[_-]?secret|"""
-        r"""client[_-]?secret|private[_-]?key|password)\b(?:["'])?\s*[:=]\s*"""
+        r"""client[_-]?secret|private[_-]?key|password)\b(?:["'])?\s*[:=]\s*(?!\[REDACTED\])"""
         r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^&\s;,}\]]+)"""
     ),
 )

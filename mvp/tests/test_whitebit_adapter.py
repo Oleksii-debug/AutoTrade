@@ -16,6 +16,7 @@ from mvp.autotrade_mvp.capabilities import (
 from mvp.autotrade_mvp.whitebit import (
     WhiteBitAbsenceEvidence,
     WhiteBitAdapterError,
+    WhiteBitCredentialBoundary,
     WhiteBitMarketRules,
     WhiteBitNonceAllocator,
     WhiteBitNonceState,
@@ -1676,6 +1677,59 @@ class WhiteBitAdapterTests(unittest.TestCase):
                 api_key="key",
                 api_secret="secret",
             )
+
+    def test_credential_boundary_admits_only_info_trading_live_key(self):
+        evidence = WhiteBitCredentialBoundary(
+            credential_binding_id="credential-binding:whitebit:account-1",
+            permissions=frozenset({"Info", "Trading"}),
+            ip_whitelist_enabled=True,
+            environment="live",
+            observed_at=NOW,
+            evidence_ref="https://docs.whitebit.com/best-practices/security",
+        )
+        self.assertIs(evidence.assert_autotrade_safe(), evidence)
+        self.assertEqual(evidence.permissions, frozenset({"INFO", "TRADING"}))
+        self.assertEqual(evidence.environment, "LIVE")
+
+    def test_credential_boundary_rejects_fund_movement_authority(self):
+        for extra in ("DEPOSIT", "WITHDRAW"):
+            with self.subTest(extra=extra):
+                evidence = WhiteBitCredentialBoundary(
+                    credential_binding_id="credential-binding:whitebit:unsafe",
+                    permissions=frozenset({"INFO", "TRADING", extra}),
+                    ip_whitelist_enabled=True,
+                    environment="LIVE",
+                    observed_at=NOW,
+                    evidence_ref="https://docs.whitebit.com/best-practices/security",
+                )
+                with self.assertRaisesRegex(
+                    WhiteBitAdapterError,
+                    "deposit/withdraw authority is forbidden",
+                ):
+                    evidence.assert_autotrade_safe()
+
+    def test_credential_boundary_rejects_unqualified_environment_and_open_ip(self):
+        paper = WhiteBitCredentialBoundary(
+            credential_binding_id="credential-binding:whitebit:paper",
+            permissions=frozenset({"INFO", "TRADING"}),
+            ip_whitelist_enabled=True,
+            environment="PAPER",
+            observed_at=NOW,
+            evidence_ref="https://docs.whitebit.com/best-practices/security",
+        )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "no public sandbox"):
+            paper.assert_autotrade_safe()
+
+        unrestricted = WhiteBitCredentialBoundary(
+            credential_binding_id="credential-binding:whitebit:live",
+            permissions=frozenset({"INFO", "TRADING"}),
+            ip_whitelist_enabled=False,
+            environment="LIVE",
+            observed_at=NOW,
+            evidence_ref="https://docs.whitebit.com/best-practices/security",
+        )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "IP whitelist"):
+            unrestricted.assert_autotrade_safe()
 
     def test_nonce_allocator_is_unique_under_concurrency_and_restart(self):
         clock_ms = 1_790_280_000_000

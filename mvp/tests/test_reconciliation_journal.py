@@ -126,6 +126,113 @@ class ReconciliationJournalTests(unittest.TestCase):
         )
         self.assertNotEqual(left, right)
 
+    def test_unexpected_fill_checkpoint_binds_exact_normalized_provider_evidence(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            unexpected_fill = ProviderFillEvidence.create(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                provider_execution_id="external-exec-1",
+                client_order_id=None,
+                instrument="ABC",
+                side="SELL",
+                quantity="2.00",
+                price="101.500",
+                fee_amount="0.25",
+                fee_currency="USD",
+                trade_time="2026-09-24T18:00:00+00:00",
+                evidence_refs=(
+                    "provider:page-2",
+                    "provider:page-1",
+                ),
+            )
+            result = reconciliation(
+                local_execution_ids=[],
+                provider_fills=[unexpected_fill],
+            )
+            self.assertEqual(
+                result.unexpected_execution_ids,
+                ("external-exec-1",),
+            )
+            self.assertEqual(
+                result.unexpected_provider_fills,
+                (unexpected_fill,),
+            )
+
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="unexpected-fill-binding",
+                result=result,
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            bindings = checkpoint["payload"]["unexpected_provider_fill_bindings"]
+            self.assertEqual(len(bindings), 1)
+            binding = bindings[0]
+            self.assertEqual(
+                binding["provider_execution_id"],
+                "external-exec-1",
+            )
+            identity = binding["identity"]
+            self.assertEqual(identity["side"], "SELL")
+            self.assertEqual(identity["quantity"], "2")
+            self.assertEqual(identity["price"], "101.5")
+            self.assertEqual(identity["fee_amount"], "0.25")
+            self.assertEqual(
+                identity["evidence_refs"],
+                ["provider:page-1", "provider:page-2"],
+            )
+            self.assertEqual(
+                binding["identity_digest"],
+                payload_digest(identity),
+            )
+
+    def test_unexpected_fill_checkpoint_rejects_cross_scope_binding(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            wrong_scope_fill = ProviderFillEvidence.create(
+                provider_id="OTHER_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                provider_execution_id="external-exec-1",
+                client_order_id=None,
+                instrument="ABC",
+                side="BUY",
+                quantity="1",
+                price="100",
+                fee_currency="USD",
+                trade_time="2026-09-24T18:00:00Z",
+            )
+            result = reconciliation(
+                local_execution_ids=[],
+                provider_fills=[],
+            )
+            forged = type(result)(
+                **{
+                    **result.__dict__,
+                    "unexpected_execution_ids": ("external-exec-1",),
+                    "unexpected_provider_fills": (wrong_scope_fill,),
+                }
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "scope must match reconciliation result",
+            ):
+                record_reconciliation_checkpoint(
+                    store,
+                    reconciliation_id="cross-scope-unexpected-fill",
+                    result=forged,
+                    observed_at="2026-09-24T19:00:00Z",
+                    host_id="test-host",
+                    owner_epoch="epoch-1",
+                )
+            self.assertEqual(
+                store.load_events_by_aggregate_type("account_reconciliation"),
+                [],
+            )
+
     def test_checkpoint_round_trip_is_exact_and_idempotent(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

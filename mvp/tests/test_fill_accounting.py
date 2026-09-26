@@ -1108,7 +1108,11 @@ class FillAccountingTests(unittest.TestCase):
 
 
 
-    def _unexpected_result(self, execution_id="external-exec-1"):
+    def _unexpected_result(self, execution_id="external-exec-1", *, fill=None):
+        if fill is None:
+            fill = self._unexpected_fill(execution_id=execution_id)
+        if fill.provider_execution_id != execution_id:
+            raise ValueError("unexpected fill execution identity mismatch")
         return ReconciliationResult(
             provider_id="PROVIDER-A",
             account_id="acct-1",
@@ -1131,35 +1135,61 @@ class FillAccountingTests(unittest.TestCase):
             submission_resolutions=(),
             blocking_resources=("EXECUTION:" + execution_id,),
             reasons=("unexpected provider execution",),
+            unexpected_provider_fills=(fill,),
         )
 
-    def _record_unexpected_checkpoint(self, store, execution_id="external-exec-1"):
+    def _record_unexpected_checkpoint(
+        self,
+        store,
+        execution_id="external-exec-1",
+        *,
+        fill=None,
+    ):
+        if fill is None:
+            fill = self._unexpected_fill(execution_id=execution_id)
         event = record_reconciliation_checkpoint(
             store,
             reconciliation_id="unexpected-" + execution_id,
-            result=self._unexpected_result(execution_id=execution_id),
+            result=self._unexpected_result(
+                execution_id=execution_id,
+                fill=fill,
+            ),
             observed_at="2026-01-01T00:00:02Z",
             host_id="host-1",
             owner_epoch="epoch-1",
         )
         return event["event_id"]
 
-    def _unexpected_fill(self, *, side="BUY", position_side=None, execution_id="external-exec-1"):
+    def _unexpected_fill(
+        self,
+        *,
+        side="BUY",
+        position_side=None,
+        position_effect=None,
+        execution_id="external-exec-1",
+        instrument="ABC",
+        quantity="2",
+        price="100",
+        fee="1",
+        trade_time="2026-01-01T00:00:00Z",
+        evidence_refs=("sha256:provider-read",),
+    ):
         return ProviderFillEvidence.create(
             provider_id="PROVIDER-A",
             account_id="acct-1",
             environment="PAPER",
             provider_execution_id=execution_id,
             client_order_id=None,
-            instrument="ABC",
+            instrument=instrument,
             side=side,
             position_side=position_side,
-            quantity="2",
-            price="100",
-            fee_amount="1",
+            position_effect=position_effect,
+            quantity=quantity,
+            price=price,
+            fee_amount=fee,
             fee_currency="USD",
-            trade_time="2026-01-01T00:00:00Z",
-            evidence_refs=("sha256:provider-read",),
+            trade_time=trade_time,
+            evidence_refs=evidence_refs,
         )
 
     def test_unexpected_provider_buy_and_sell_book_signed_economics_exactly_once(self):
@@ -1170,14 +1200,17 @@ class FillAccountingTests(unittest.TestCase):
         for side, expected_position, expected_cash in cases:
             with self.subTest(side=side), TemporaryDirectory() as directory:
                 store = JournalStore(directory + "/journal.sqlite3")
-                checkpoint_event_id = self._record_unexpected_checkpoint(store)
+                fill = self._unexpected_fill(side=side)
+                checkpoint_event_id = self._record_unexpected_checkpoint(
+                    store,
+                    fill=fill,
+                )
                 book = DurableProviderEconomicBook(
                     store,
                     provider_id="PROVIDER-A",
                     account_id="acct-1",
                     environment="PAPER",
                 )
-                fill = self._unexpected_fill(side=side)
                 self.assertTrue(
                     book_unexpected_provider_fill(
                         store=store,
@@ -1205,8 +1238,11 @@ class FillAccountingTests(unittest.TestCase):
     def test_unexpected_provider_fill_is_durable_across_restart(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(directory + "/journal.sqlite3")
-            checkpoint_event_id = self._record_unexpected_checkpoint(store)
             fill = self._unexpected_fill(side="BUY")
+            checkpoint_event_id = self._record_unexpected_checkpoint(
+                store,
+                fill=fill,
+            )
             book = DurableProviderEconomicBook(
                 store,
                 provider_id="PROVIDER-A",
@@ -1309,7 +1345,7 @@ class FillAccountingTests(unittest.TestCase):
                 fee_currency=fill.fee_currency,
                 trade_time=fill.trade_time,
             )
-            with self.assertRaisesRegex(AccountingConflict, "not independently evidenced"):
+            with self.assertRaisesRegex(AccountingConflict, "checkpoint-bound"):
                 build_unexpected_provider_fill_transaction(
                     store=store,
                     checkpoint_event_id=current,
@@ -1323,28 +1359,47 @@ class FillAccountingTests(unittest.TestCase):
     def test_unexpected_hedge_leg_fails_closed_and_changed_direction_conflicts(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(directory + "/journal.sqlite3")
-            checkpoint_event_id = self._record_unexpected_checkpoint(store)
+            hedge = self._unexpected_fill(
+                side="BUY",
+                position_side="LONG",
+                position_effect="OPEN",
+            )
+            checkpoint_event_id = self._record_unexpected_checkpoint(
+                store,
+                fill=hedge,
+            )
             book = DurableProviderEconomicBook(
                 store,
                 provider_id="PROVIDER-A",
                 account_id="acct-1",
                 environment="PAPER",
             )
+            before = book.audit_digest()
             with self.assertRaisesRegex(AccountingConflict, "leg-aware"):
                 book_unexpected_provider_fill(
                     store=store,
                     checkpoint_event_id=checkpoint_event_id,
                     book=book,
-                    provider_fill=self._unexpected_fill(
-                        side="BUY",
-                        position_side="LONG",
-                    ),
+                    provider_fill=hedge,
                     expected_instrument="ABC",
                     settlement_currency="USD",
                 )
             self.assertEqual(book.transactions, ())
+            self.assertEqual(book.audit_digest(), before)
 
+        with TemporaryDirectory() as directory:
+            store = JournalStore(directory + "/journal.sqlite3")
             buy = self._unexpected_fill(side="BUY")
+            checkpoint_event_id = self._record_unexpected_checkpoint(
+                store,
+                fill=buy,
+            )
+            book = DurableProviderEconomicBook(
+                store,
+                provider_id="PROVIDER-A",
+                account_id="acct-1",
+                environment="PAPER",
+            )
             self.assertTrue(
                 book_unexpected_provider_fill(
                     store=store,
@@ -1356,7 +1411,7 @@ class FillAccountingTests(unittest.TestCase):
                 )
             )
             before = book.audit_digest()
-            with self.assertRaises(AccountingConflict):
+            with self.assertRaisesRegex(AccountingConflict, "checkpoint-bound"):
                 book_unexpected_provider_fill(
                     store=store,
                     checkpoint_event_id=checkpoint_event_id,
@@ -1367,6 +1422,109 @@ class FillAccountingTests(unittest.TestCase):
                 )
             self.assertEqual(book.audit_digest(), before)
             self.assertEqual(len(book.transactions), 1)
+
+    def test_unexpected_provider_fill_must_match_checkpoint_bound_identity_before_mutation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(directory + "/journal.sqlite3")
+            original = self._unexpected_fill(side="BUY")
+            checkpoint_event_id = self._record_unexpected_checkpoint(
+                store,
+                fill=original,
+            )
+            book = DurableProviderEconomicBook(
+                store,
+                provider_id="PROVIDER-A",
+                account_id="acct-1",
+                environment="PAPER",
+            )
+            before_digest = book.audit_digest()
+
+            conflicting_fills = (
+                self._unexpected_fill(side="SELL"),
+                self._unexpected_fill(quantity="3"),
+                self._unexpected_fill(quantity="2.000000000000000000000000000001"),
+                self._unexpected_fill(price="101"),
+                self._unexpected_fill(price="100.000000000000000000000000000001"),
+                self._unexpected_fill(fee="2"),
+                self._unexpected_fill(fee="1.000000000000000000000000000001"),
+                self._unexpected_fill(trade_time="2026-01-01T00:00:01Z"),
+                self._unexpected_fill(evidence_refs=("sha256:other-provider-read",)),
+                self._unexpected_fill(position_side="BOTH"),
+                self._unexpected_fill(position_effect="REDUCE"),
+            )
+            for conflicting in conflicting_fills:
+                with self.subTest(conflicting=conflicting):
+                    with self.assertRaisesRegex(
+                        AccountingConflict,
+                        "checkpoint-bound",
+                    ):
+                        book_unexpected_provider_fill(
+                            store=store,
+                            checkpoint_event_id=checkpoint_event_id,
+                            book=book,
+                            provider_fill=conflicting,
+                            expected_instrument="ABC",
+                            settlement_currency="USD",
+                        )
+                    self.assertEqual(book.transactions, ())
+                    self.assertEqual(book.audit_digest(), before_digest)
+
+    def test_legacy_id_only_unexpected_checkpoint_grants_no_booking_authority(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(directory + "/journal.sqlite3")
+            fill = self._unexpected_fill(side="BUY")
+            legacy = ReconciliationResult(
+                provider_id="PROVIDER-A",
+                account_id="acct-1",
+                environment="PAPER",
+                complete=False,
+                matched_execution_ids=(),
+                unexpected_execution_ids=(fill.provider_execution_id,),
+                missing_local_execution_ids=(),
+                matched_working_client_order_ids=(),
+                unexpected_working_provider_order_ids=(),
+                missing_local_working_client_order_ids=(),
+                snapshot_consistent=True,
+                provider_cash={},
+                provider_positions={},
+                snapshot_mode="ATOMIC",
+                snapshot_query_started_at="2026-01-01T00:00:00Z",
+                snapshot_query_completed_at="2026-01-01T00:00:01Z",
+                cash_differences={},
+                position_differences={},
+                submission_resolutions=(),
+                blocking_resources=("EXECUTION:" + fill.provider_execution_id,),
+                reasons=("legacy id-only unexpected provider execution",),
+            )
+            event = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="legacy-id-only",
+                result=legacy,
+                observed_at="2026-01-01T00:00:02Z",
+                host_id="host-1",
+                owner_epoch="epoch-1",
+            )
+            book = DurableProviderEconomicBook(
+                store,
+                provider_id="PROVIDER-A",
+                account_id="acct-1",
+                environment="PAPER",
+            )
+            before = book.audit_digest()
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "does not bind exact unexpected provider fill evidence",
+            ):
+                book_unexpected_provider_fill(
+                    store=store,
+                    checkpoint_event_id=event["event_id"],
+                    book=book,
+                    provider_fill=fill,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                )
+            self.assertEqual(book.transactions, ())
+            self.assertEqual(book.audit_digest(), before)
 
 
 

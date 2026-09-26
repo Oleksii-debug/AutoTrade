@@ -118,6 +118,9 @@ class ForwardPaperTerminalQualificationTests(unittest.TestCase):
         artifact_id=EVIDENCE_ID,
         artifact_sha256,
         result="PASS",
+        started_at="2026-09-24T21:02:00Z",
+        completed_at="2026-09-24T21:03:00Z",
+        signed_at="2026-09-24T21:04:00Z",
     ):
         ref = EvidenceArtifactRef(
             artifact_id=artifact_id,
@@ -144,9 +147,9 @@ class ForwardPaperTerminalQualificationTests(unittest.TestCase):
             trust_root_id="sha256:" + "f" * 64,
             runner_id="qualification-runner-1",
             harness_version="1.0.0",
-            started_at="2026-09-24T21:02:00Z",
-            completed_at="2026-09-24T21:03:00Z",
-            signed_at="2026-09-24T21:04:00Z",
+            started_at=started_at,
+            completed_at=completed_at,
+            signed_at=signed_at,
             result=result,
         )
         receipt = SignedQualificationAttestation(
@@ -301,6 +304,41 @@ class ForwardPaperTerminalQualificationTests(unittest.TestCase):
             "independent_forward_paper_evidence_set_mismatch",
             result.reason_codes,
         )
+
+    def test_terminal_receipt_cannot_complete_before_observed_evidence(self):
+        protocol = self.protocol()
+        evidence = self.evidence(protocol)
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            manifest = self.publish(store, protocol, evidence)
+            receipt, accepted = self.receipt(
+                protocol,
+                artifact_sha256=manifest["sha256"],
+                started_at="2026-09-24T20:58:00Z",
+                completed_at="2026-09-24T21:00:30Z",
+                signed_at="2026-09-24T21:00:45Z",
+            )
+            with patch(
+                "mvp.autotrade_mvp.forward_paper_qualification."
+                "verify_canonical_qualification_attestation",
+                return_value=accepted,
+            ) as verify:
+                result = qualify_forward_paper(
+                    protocol,
+                    evidence,
+                    evidence_store=store,
+                    evidence_artifact_id=EVIDENCE_ID,
+                    evidence_artifact_sha256=manifest["sha256"],
+                    qualification_receipt=receipt,
+                )
+
+        self.assertEqual(result.status, "FAIL")
+        self.assertIn(
+            "independent_forward_paper_qualification_predates_evidence",
+            result.reason_codes,
+        )
+        self.assertIsNone(result.qualification_attestation_id)
+        verify.assert_not_called()
 
     def test_independent_pass_cannot_upgrade_incomplete_campaign_mechanics(self):
         protocol = self.protocol()

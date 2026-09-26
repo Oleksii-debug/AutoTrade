@@ -280,6 +280,10 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
             recovery.evidence().phase,
             recovery.AWAITING_SUBSCRIPTION_ACK,
         )
+        self.assertEqual(
+            recovery.evidence().recovery_reason,
+            "fresh_subscription_required",
+        )
 
         with self.assertRaisesRegex(
             KrakenSpotStreamError,
@@ -297,6 +301,10 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
         self.assertEqual(
             recovery.evidence().subscription_ack_evidence_ref,
             acknowledgement.evidence_ref,
+        )
+        self.assertEqual(
+            recovery.evidence().recovery_reason,
+            "fresh_snapshot_required",
         )
         with self.assertRaisesRegex(
             KrakenSpotStreamError,
@@ -337,6 +345,10 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
             ("O-1", "O-2"),
         )
         self.assertEqual(evidence.buffered_update_evidence_refs, ())
+        self.assertEqual(
+            evidence.recovery_reason,
+            "snapshot_requires_rest_crosscheck",
+        )
         self.assertFalse(evidence.trading_ready)
 
     def test_snapshot_rejects_terminal_orders_under_snap_orders_contract(self):
@@ -431,6 +443,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
                     evidence.gap_evidence_ref,
                     gap.evidence_ref,
                 )
+                self.assertEqual(evidence.recovery_reason, "sequence_gap")
                 self.assertEqual(
                     evidence.provisional_snapshot_order_ids,
                     (),
@@ -470,6 +483,10 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
         self.assertIsNone(reset.snapshot_evidence_ref)
         self.assertEqual(reset.buffered_update_evidence_refs, ())
         self.assertEqual(reset.provisional_snapshot_order_ids, ())
+        self.assertEqual(
+            reset.recovery_reason,
+            "fresh_subscription_required",
+        )
 
         with self.assertRaisesRegex(
             KrakenSpotStreamError,
@@ -510,6 +527,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
         self.assertEqual(evidence.phase, recovery.DISCONNECTED)
         self.assertIsNone(evidence.last_sequence)
         self.assertEqual(evidence.provisional_snapshot_order_ids, ())
+        self.assertIsNone(evidence.recovery_reason)
         with self.assertRaisesRegex(
             KrakenSpotStreamError,
             "while disconnected",
@@ -572,6 +590,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
         self.assertEqual(evidence.gap_observed_sequence, 102)
         self.assertEqual(evidence.gap_evidence_ref, overflow.evidence_ref)
         self.assertEqual(evidence.buffered_update_evidence_refs, ())
+        self.assertEqual(evidence.recovery_reason, "buffer_exhausted")
         self.assertFalse(evidence.trading_ready)
 
 

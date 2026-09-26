@@ -849,6 +849,90 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         self.assertEqual(fills[0].side, "SELL")
         self.assertIsNone(fills[0].position_side)
 
+    def test_client_order_identity_map_is_fully_validated_before_fill_mapping(self):
+        row = {
+            "symbol": "BTCUSDT",
+            "id": 8,
+            "orderId": 43,
+            "price": "101.25",
+            "qty": "0.1",
+            "commission": "0.001",
+            "commissionAsset": "BNB",
+            "isBuyer": True,
+            "time": 1790272801123,
+        }
+        observation = execution_observation([row])
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "must be a mapping"):
+            parse_account_trades(
+                observation,
+                instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
+                client_ids_by_order_id=[],
+            )
+
+        for bad_map in (
+            {"43": "at-spot-fill"},
+            {True: "at-spot-fill"},
+            {-1: "at-spot-fill"},
+        ):
+            with self.subTest(bad_map=bad_map), self.assertRaisesRegex(
+                BinanceSpotAdapterError,
+                "non-negative integer order ids",
+            ):
+                parse_account_trades(
+                    observation,
+                    instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
+                    client_ids_by_order_id=bad_map,
+                )
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "client_order_id"):
+            parse_account_trades(
+                observation,
+                instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
+                client_ids_by_order_id={99: "bad client id with spaces"},
+            )
+
+    def test_instrument_identity_map_is_fully_validated_before_fill_mapping(self):
+        row = {
+            "symbol": "BTCUSDT",
+            "id": 8,
+            "orderId": 43,
+            "price": "101.25",
+            "qty": "0.1",
+            "commission": "0.001",
+            "commissionAsset": "BNB",
+            "isBuyer": True,
+            "time": 1790272801123,
+        }
+        observation = execution_observation([row])
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "canonical uppercase"):
+            parse_account_trades(
+                observation,
+                instrument_versions={
+                    "BTCUSDT": "BTCUSDT:v1",
+                    "ethusdt": "ETHUSDT:v1",
+                },
+            )
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "instrument_version"):
+            parse_account_trades(
+                observation,
+                instrument_versions={
+                    "BTCUSDT": "BTCUSDT:v1",
+                    "ETHUSDT": "",
+                },
+            )
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "duplicate normalized"):
+            parse_account_trades(
+                observation,
+                instrument_versions={
+                    "BTCUSDT": "BTCUSDT:v1",
+                    " BTCUSDT ": "BTCUSDT:v2",
+                },
+            )
+
     def test_spot_fill_remains_compatible_with_cash_equity_financial_plan(self):
         row = {
             "symbol": "BTCUSDT",

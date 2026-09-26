@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 from hashlib import sha256
 import json
 from pathlib import Path, PurePosixPath
 import re
 import sys
 import zipfile
+
+from research.autotrade_research.artifacts.durable_publish import (
+    DurablePublishLockError,
+    atomic_write_bytes,
+    atomic_write_stream,
+    durable_path_lock,
+    sha256_file,
+    validate_publication_destination,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -420,24 +430,22 @@ def _write_entry(archive: zipfile.ZipFile, name: str, data: bytes) -> None:
 
 
 
-def _prepare_atomic_destination(path: Path, *, name: str) -> Path:
-    if path.is_symlink():
-        raise BundleError(f"{name} cannot be a symlink")
-    if path.exists() and not path.is_file():
-        raise BundleError(f"{name} must be a regular file or absent")
-    temporary = path.with_name(path.name + ".tmp")
-    if temporary.is_symlink():
-        raise BundleError(f"{name} temporary path cannot be a symlink")
-    if temporary.exists():
-        if not temporary.is_file():
-            raise BundleError(f"{name} temporary path must be a regular file or absent")
-        temporary.unlink()
-    return temporary
+def _validate_output_destination(path: Path, *, name: str) -> None:
+    try:
+        validate_publication_destination(path)
+    except (DurablePublishLockError, OSError) as error:
+        raise BundleError(f"{name} is unsafe: {error}") from error
 
 
-def _cleanup_temporary(path: Path) -> None:
-    if path.exists() or path.is_symlink():
+def _cleanup_legacy_temporary(path: Path) -> None:
+    try:
+        validate_publication_destination(path)
+    except (DurablePublishLockError, OSError):
+        return
+    try:
         path.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def build_bundle(
@@ -561,40 +569,33 @@ def build_bundle(
 
     output.parent.mkdir(parents=True, exist_ok=True)
     hash_path = output.with_suffix(output.suffix + ".sha256")
-    temporary = _prepare_atomic_destination(output, name="bundle output")
-    hash_temporary = _prepare_atomic_destination(
-        hash_path,
-        name="bundle hash output",
+    _validate_output_destination(output, name="bundle output")
+    _validate_output_destination(hash_path, name="bundle hash output")
+    _cleanup_legacy_temporary(output.with_name(output.name + ".tmp"))
+    _cleanup_legacy_temporary(hash_path.with_name(hash_path.name + ".tmp"))
+
+    def write_archive(stream) -> None:
+        with zipfile.ZipFile(stream, "w") as archive:
+            _write_entry(archive, "bundle-manifest.json", manifest_bytes)
+            for relative, _, data in files:
+                _write_entry(archive, f"payload/{relative}", data)
+
+    lock_paths = sorted(
+        (output, hash_path),
+        key=lambda path: str(path.resolve(strict=False)),
     )
     try:
-        try:
-            with temporary.open("xb") as stream:
-                with zipfile.ZipFile(stream, "w") as archive:
-                    _write_entry(archive, "bundle-manifest.json", manifest_bytes)
-                    for relative, _, data in files:
-                        _write_entry(archive, f"payload/{relative}", data)
-                stream.flush()
-        except FileExistsError as error:
-            raise BundleError(
-                "bundle output temporary path changed before creation"
-            ) from error
-
-        digest = sha256(temporary.read_bytes()).hexdigest()
-        digest_payload = f"{digest}  {output.name}\n".encode("utf-8")
-        try:
-            with hash_temporary.open("xb") as stream:
-                stream.write(digest_payload)
-                stream.flush()
-        except FileExistsError as error:
-            raise BundleError(
-                "bundle hash output temporary path changed before creation"
-            ) from error
-
-        temporary.replace(output)
-        hash_temporary.replace(hash_path)
-    finally:
-        _cleanup_temporary(temporary)
-        _cleanup_temporary(hash_temporary)
+        with ExitStack() as stack:
+            for path in lock_paths:
+                stack.enter_context(durable_path_lock(path))
+            atomic_write_stream(output, write_archive)
+            digest = sha256_file(output)
+            atomic_write_bytes(
+                hash_path,
+                f"{digest}  {output.name}\n".encode("utf-8"),
+            )
+    except (DurablePublishLockError, OSError) as error:
+        raise BundleError(f"bundle publication failed closed: {error}") from error
     return {
         "output": str(output),
         "sha256": digest,

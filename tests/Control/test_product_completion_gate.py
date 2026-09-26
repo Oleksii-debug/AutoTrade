@@ -1,3 +1,4 @@
+from hashlib import sha256
 import json
 from pathlib import Path
 import subprocess
@@ -17,6 +18,7 @@ from mvp.autotrade_mvp.qualification_attestation import (
 from mvp.tests.test_nvda_qualification_gate import (
     REQUIREMENTS as NVDA_REQUIREMENTS,
     complete_evidence as complete_nvda_evidence,
+    write_release_bundle,
 )
 from mvp.tests.test_qualification_attestation import (
     policy as fixture_policy,
@@ -159,9 +161,13 @@ def verified_evidence(store, trust_root):
     return records
 
 
-def verified_nvda_fixture(store, trust_root, trust_policy):
+def verified_nvda_fixture(store, trust_root, trust_policy, release_artifact):
+    write_release_bundle(release_artifact, source_sha=SHA)
     evidence = complete_nvda_evidence()
     evidence["source_sha"] = SHA
+    evidence["artifact_sha256"] = (
+        "sha256:" + sha256(release_artifact.read_bytes()).hexdigest()
+    )
     evidence_bytes = json.dumps(
         evidence,
         sort_keys=True,
@@ -237,10 +243,12 @@ def verified_completion_fixture(directory):
         )
     )
     trust_policy = fixture_policy(trust_root)
+    release_artifact = Path(directory) / "AutoTrade-release.zip"
     nvda_status, nvda_receipt = verified_nvda_fixture(
         store,
         trust_root,
         trust_policy,
+        release_artifact,
     )
     context = WholeProductEvidenceContext(
         evidence_store=store,
@@ -254,6 +262,7 @@ def verified_completion_fixture(directory):
             separators=(",", ":"),
             ensure_ascii=False,
         ),
+        nvda_release_artifact=release_artifact,
     )
     return (
         complete_qualification(verified_evidence(store, trust_root)),
@@ -375,6 +384,15 @@ class ProductCompletionGateTests(unittest.TestCase):
 
             forged = dict(valid_nvda)
             forged["evidence_sha256"] = "sha256:" + "f" * 64
+            report = evaluate(
+                qualification=qualification,
+                nvda_status=forged,
+                evidence_context=evidence_context,
+            )
+            self.assertFalse(report["nvda_qualified"])
+
+            forged = dict(valid_nvda)
+            forged["artifact_sha256"] = "sha256:" + "e" * 64
             report = evaluate(
                 qualification=qualification,
                 nvda_status=forged,

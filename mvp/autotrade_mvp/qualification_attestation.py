@@ -649,6 +649,27 @@ def _load_exact_source_qualification_trust_policy_bytes(
         name="expected_source_sha",
     )
     try:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=_QUALIFICATION_TRUST_REPOSITORY_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as error:
+        raise QualificationTrustUnavailable(
+            "exact-source qualification checkout verification is unavailable"
+        ) from error
+    if head.returncode != 0:
+        raise QualificationTrustUnavailable(
+            "exact-source qualification checkout verification failed"
+        )
+    if head.stdout.strip() != source_sha:
+        raise QualificationTrustError(
+            "qualification trust source SHA does not match checkout HEAD"
+        )
+
+    try:
         result = subprocess.run(
             [
                 "git",

@@ -666,16 +666,15 @@ class FuturesLifecycleTests(unittest.TestCase):
         self.assertEqual(first.cause_event_id, retry.cause_event_id)
         self.assertIn("sha256:", first.transaction_id)
 
-    def test_physical_delivery_is_fail_closed_without_explicit_authority(self):
+    def test_physical_delivery_cutoff_is_hard_fail_closed_boundary(self):
         contract = self._linear_contract(settlement_method="PHYSICAL")
         self.assertEqual(lifecycle_gate(contract, utc(29, 11)), "OPEN")
-        self.assertEqual(lifecycle_gate(contract, utc(29, 12)), "DELIVERY_BLOCKED")
-        with self.assertRaises(FuturesError):
-            require_open_for_new_exposure(contract, utc(29, 12))
         self.assertEqual(
-            lifecycle_gate(contract, utc(29, 12), physical_delivery_authorized=True),
-            "OPEN",
+            lifecycle_gate(contract, utc(29, 12)),
+            "DELIVERY_BLOCKED",
         )
+        with self.assertRaisesRegex(FuturesError, "DELIVERY_BLOCKED"):
+            require_open_for_new_exposure(contract, utc(29, 12))
 
     def test_last_trade_and_expiry_are_hard_gates(self):
         contract = self._linear_contract()
@@ -693,18 +692,20 @@ class FuturesLifecycleTests(unittest.TestCase):
                 exit_price=101,
             )
 
-    def test_physical_delivery_authority_is_strict_boolean(self):
+    def test_caller_cannot_supply_legacy_boolean_delivery_bypass(self):
         contract = self._linear_contract(settlement_method="PHYSICAL")
-        for unsafe in (1, "yes", object()):
-            with self.subTest(unsafe=unsafe):
-                with self.assertRaisesRegex(
-                    FuturesError, "physical_delivery_authorized must be boolean"
-                ):
-                    lifecycle_gate(
-                        contract,
-                        utc(29, 12),
-                        physical_delivery_authorized=unsafe,
-                    )
+        with self.assertRaises(TypeError):
+            lifecycle_gate(
+                contract,
+                utc(29, 12),
+                physical_delivery_authorized=True,
+            )
+        with self.assertRaises(TypeError):
+            require_open_for_new_exposure(
+                contract,
+                utc(29, 12),
+                physical_delivery_authorized=True,
+            )
 
     def test_physical_delivery_cutoff_cannot_follow_last_trade(self):
         with self.assertRaisesRegex(

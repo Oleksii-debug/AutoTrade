@@ -126,7 +126,7 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
 
         self.assertFalse(result.allowed)
         self.assertEqual(result.protected_deletions, (sentinel,))
-        self.assertIn("protected canonical sentinel deletion", result.reasons[0])
+        self.assertIn("protected canonical sentinel damage", result.reasons[0])
 
     def test_rename_is_not_counted_as_deletion(self):
         changes = parse_name_status(["R100\told.py\tnew.py"])
@@ -145,6 +145,148 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
     def test_parser_rejects_malformed_records(self):
         with self.assertRaises(ValueError):
             parse_name_status(["R100\tonly-old-path"])
+
+
+    def test_guard_itself_and_canonical_control_authorities_are_protected(self):
+        for path in (
+            ".github/workflows/reconvergence-integrity.yml",
+            "control/tools/reconvergence_integrity.py",
+            "AGENTS.md",
+            "control/CONSTITUTION.md",
+            "control/qualification.json",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(path, PROTECTED_SENTINELS)
+
+    def test_protected_sentinel_rename_away_fails_closed(self):
+        sentinel = "control/INDEX.json"
+        result = assess_reconvergence(
+            base_paths=[sentinel, "README.md"],
+            changes=[
+                Change(
+                    status="R100",
+                    previous_path=sentinel,
+                    path="control/INDEX.old.json",
+                )
+            ],
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.protected_deletions, ())
+        self.assertEqual(
+            result.protected_violations,
+            ("control/INDEX.json -> control/INDEX.old.json (rename)",),
+        )
+        self.assertIn("protected canonical sentinel damage", result.reasons[0])
+
+    def test_copy_of_protected_sentinel_does_not_mutate_source(self):
+        sentinel = "control/INDEX.json"
+        result = assess_reconvergence(
+            base_paths=[sentinel, "README.md"],
+            changes=[
+                Change(
+                    status="C100",
+                    previous_path=sentinel,
+                    path="evidence/INDEX-copy.json",
+                )
+            ],
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual(result.protected_violations, ())
+
+    def test_protected_sentinel_type_change_fails_closed(self):
+        sentinel = "control/qualification.json"
+        result = assess_reconvergence(
+            base_paths=[sentinel, "README.md"],
+            changes=[Change(status="T", path=sentinel)],
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(
+            result.protected_violations,
+            ("control/qualification.json (type change)",),
+        )
+
+    def test_declared_scope_rejects_small_unrelated_blob_change(self):
+        result = assess_reconvergence(
+            base_paths=[
+                "mvp/autotrade_mvp/recovery.py",
+                "mvp/tests/test_recovery.py",
+                "README.md",
+            ],
+            changes=[
+                Change(status="M", path="mvp/autotrade_mvp/recovery.py"),
+                Change(status="M", path="README.md"),
+            ],
+            protected_sentinels=frozenset(),
+            allowed_scopes=("mvp/autotrade_mvp/recovery.py",),
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.deletion_count, 0)
+        self.assertEqual(result.scope_violations, ("README.md",))
+        self.assertIn(
+            "changed paths outside declared mutation scope",
+            result.reasons[0],
+        )
+
+    def test_declared_directory_scope_covers_owned_descendants(self):
+        result = assess_reconvergence(
+            base_paths=["web/src/app.js", "web/src/index.html"],
+            changes=[
+                Change(status="M", path="web/src/app.js"),
+                Change(status="M", path="web/src/index.html"),
+            ],
+            protected_sentinels=frozenset(),
+            allowed_scopes=("web/src",),
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual(result.scope_violations, ())
+
+    def test_scope_guard_checks_both_sides_of_rename(self):
+        result = assess_reconvergence(
+            base_paths=["owned/old.py", "other/file.py"],
+            changes=[
+                Change(
+                    status="R100",
+                    previous_path="owned/old.py",
+                    path="other/new.py",
+                )
+            ],
+            protected_sentinels=frozenset(),
+            allowed_scopes=("owned",),
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.scope_violations, ("other/new.py",))
+
+    def test_scope_guard_checks_only_copy_destination(self):
+        result = assess_reconvergence(
+            base_paths=["shared/source.py", "owned/existing.py"],
+            changes=[
+                Change(
+                    status="C100",
+                    previous_path="shared/source.py",
+                    path="owned/copied.py",
+                )
+            ],
+            protected_sentinels=frozenset(),
+            allowed_scopes=("owned",),
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual(result.scope_violations, ())
+
+    def test_scope_guard_rejects_noncanonical_registry_scope(self):
+        with self.assertRaises(ValueError):
+            assess_reconvergence(
+                base_paths=["web/src/app.js"],
+                changes=[Change(status="M", path="web/src/app.js")],
+                protected_sentinels=frozenset(),
+                allowed_scopes=("web/*",),
+            )
 
 
 if __name__ == "__main__":

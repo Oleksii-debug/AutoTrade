@@ -275,13 +275,23 @@ def select_provider(
         else:
             if latest_capability.snapshot_id != capability.snapshot_id:
                 reasons.append("CAPABILITY_SUPERSEDED")
+            elif latest_capability != capability:
+                reasons.append("CAPABILITY_CONTENT_MISMATCH")
             try:
                 admitted_capability = capability_registry.require_verified(**lookup)
             except CapabilityError:
                 reasons.append("CAPABILITY_NOT_CURRENTLY_VERIFIED")
             else:
+                if admitted_capability != latest_capability:
+                    reasons.append("CAPABILITY_REGISTRY_CHANGED_DURING_SELECTION")
                 if admitted_capability.snapshot_id != capability.snapshot_id:
-                    reasons.append("CAPABILITY_SUPERSEDED")
+                    if "CAPABILITY_SUPERSEDED" not in reasons:
+                        reasons.append("CAPABILITY_SUPERSEDED")
+                elif (
+                    admitted_capability != capability
+                    and "CAPABILITY_CONTENT_MISMATCH" not in reasons
+                ):
+                    reasons.append("CAPABILITY_CONTENT_MISMATCH")
                 if not admitted_capability.admits(
                     at=point,
                     order_type=request.order_type,

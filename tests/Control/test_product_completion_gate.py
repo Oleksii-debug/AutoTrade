@@ -220,6 +220,7 @@ def verified_nvda_fixture(store, trust_root, trust_policy, release_artifact):
         signature_b64=fixture_sign(attestation),
     )
     status = {
+        "schema_version": "1.0.0",
         "qualified": True,
         "reason": "QUALIFIED_SIGNED_REAL_NVDA_RELEASE",
         "source_sha": SHA,
@@ -273,8 +274,13 @@ def verified_completion_fixture(directory):
 
 def nvda(*, qualified=True, source_sha=SHA):
     if not qualified:
-        return {"qualified": False, "source_sha": source_sha}
+        return {
+            "schema_version": "1.0.0",
+            "qualified": False,
+            "source_sha": source_sha,
+        }
     return {
+        "schema_version": "1.0.0",
         "qualified": True,
         "reason": "QUALIFIED_SIGNED_REAL_NVDA_RELEASE",
         "source_sha": source_sha,
@@ -444,6 +450,37 @@ class ProductCompletionGateTests(unittest.TestCase):
         report = evaluate(qualification=qualification)
         self.assertFalse(report["complete"])
         self.assertIn("economic_edge", report["missing_required_gates"])
+
+    def test_completion_protocol_rejects_schema_version_drift(self):
+        bank = complete_bank()
+        bank["schema_version"] = "9.0.0"
+        with self.assertRaisesRegex(
+            ProductCompletionError,
+            "unsupported work-package bank schema_version",
+        ):
+            evaluate(bank=bank)
+
+        qualification = complete_qualification()
+        qualification["schema_version"] = "9.0.0"
+        with self.assertRaisesRegex(
+            ProductCompletionError,
+            "unsupported qualification schema_version",
+        ):
+            evaluate(qualification=qualification)
+
+        with TemporaryDirectory() as directory:
+            (
+                qualification,
+                evidence_context,
+                status,
+            ) = verified_completion_fixture(directory)
+            status["schema_version"] = "9.0.0"
+            report = evaluate(
+                qualification=qualification,
+                nvda_status=status,
+                evidence_context=evidence_context,
+            )
+        self.assertFalse(report["nvda_qualified"])
 
     def test_unknown_qualification_gate_is_protocol_error(self):
         qualification = complete_qualification()

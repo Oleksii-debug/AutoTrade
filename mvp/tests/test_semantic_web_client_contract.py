@@ -524,6 +524,14 @@ class SemanticWebClientContractTests(unittest.TestCase):
     def test_policy_review_confirmation_is_bound_to_exact_fields_and_snapshot_context(self):
         js = APP.read_text(encoding="utf-8")
         self.assertIn("function authorityReviewScopeKey()", js)
+        self.assertIn(
+            'state.sessionIdentity === null ? "" : state.sessionIdentity.actor',
+            js,
+        )
+        self.assertIn(
+            'state.sessionIdentity === null ? "" : state.sessionIdentity.session',
+            js,
+        )
         self.assertIn("function invalidateAuthorityPolicyReview()", js)
         self.assertIn("function bindAuthorityPolicyReviewInvalidation()", js)
         self.assertIn(

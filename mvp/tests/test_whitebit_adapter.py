@@ -15,12 +15,15 @@ from mvp.autotrade_mvp.capabilities import (
 from mvp.autotrade_mvp.whitebit import (
     WhiteBitAbsenceEvidence,
     WhiteBitAdapterError,
+    WhiteBitCredentialBoundary,
     WhiteBitMarketRules,
     WhiteBitOrderIntent,
     WhiteBitPreparedRequest,
     WhiteBitPageEvidence,
     WhiteBitRecoveryCheckpoint,
+    WhiteBitRateLimitBudget,
     absence_evidence_from_coverages,
+    classify_whitebit_http_retry,
     collateral_balance_request,
     decode_whitebit_json,
     execution_history_coverage,
@@ -1671,6 +1674,195 @@ class WhiteBitAdapterTests(unittest.TestCase):
                 api_key="key",
                 api_secret="secret",
             )
+
+    def test_credential_boundary_admits_only_info_trading_live_key(self):
+        evidence = WhiteBitCredentialBoundary(
+            credential_binding_id="credential-binding:whitebit:account-1",
+            credential_generation=1,
+            account_id="acct-wb",
+            permissions=frozenset({"Info", "Trading"}),
+            ip_whitelist_enabled=True,
+            environment="live",
+            observed_at=NOW,
+            evidence_ref="https://docs.whitebit.com/best-practices/security",
+        )
+        self.assertIs(evidence.assert_autotrade_safe(), evidence)
+        self.assertEqual(evidence.permissions, frozenset({"INFO", "TRADING"}))
+        self.assertEqual(evidence.environment, "LIVE")
+
+    def test_credential_boundary_rejects_invalid_generation(self):
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "credential_generation must be a positive integer",
+        ):
+            WhiteBitCredentialBoundary(
+                credential_binding_id="credential-binding:whitebit:invalid",
+                credential_generation=0,
+                account_id="acct-wb",
+                permissions=frozenset({"INFO", "TRADING"}),
+                ip_whitelist_enabled=True,
+                environment="LIVE",
+                observed_at=NOW,
+                evidence_ref="https://docs.whitebit.com/best-practices/security",
+            )
+
+    def test_credential_boundary_rejects_fund_movement_authority(self):
+        for extra in ("DEPOSIT", "WITHDRAW"):
+            with self.subTest(extra=extra):
+                evidence = WhiteBitCredentialBoundary(
+                    credential_binding_id="credential-binding:whitebit:unsafe",
+                    credential_generation=1,
+                    account_id="acct-wb",
+                    permissions=frozenset({"INFO", "TRADING", extra}),
+                    ip_whitelist_enabled=True,
+                    environment="LIVE",
+                    observed_at=NOW,
+                    evidence_ref="https://docs.whitebit.com/best-practices/security",
+                )
+                with self.assertRaisesRegex(
+                    WhiteBitAdapterError,
+                    "deposit/withdraw authority is forbidden",
+                ):
+                    evidence.assert_autotrade_safe()
+
+    def test_credential_boundary_rejects_unqualified_environment_and_open_ip(self):
+        paper = WhiteBitCredentialBoundary(
+            credential_binding_id="credential-binding:whitebit:paper",
+            credential_generation=1,
+            account_id="acct-wb",
+            permissions=frozenset({"INFO", "TRADING"}),
+            ip_whitelist_enabled=True,
+            environment="PAPER",
+            observed_at=NOW,
+            evidence_ref="https://docs.whitebit.com/best-practices/security",
+        )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "no public sandbox"):
+            paper.assert_autotrade_safe()
+
+        unrestricted = WhiteBitCredentialBoundary(
+            credential_binding_id="credential-binding:whitebit:live",
+            credential_generation=1,
+            account_id="acct-wb",
+            permissions=frozenset({"INFO", "TRADING"}),
+            ip_whitelist_enabled=False,
+            environment="LIVE",
+            observed_at=NOW,
+            evidence_ref="https://docs.whitebit.com/best-practices/security",
+        )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "IP whitelist"):
+            unrestricted.assert_autotrade_safe()
+
+    def test_rate_budget_preserves_recovery_and_cancel_capacity(self):
+        budget = WhiteBitRateLimitBudget(
+            capacity=10,
+            reserved_recovery=2,
+            reserved_cancel=2,
+        )
+        for _ in range(6):
+            budget = budget.consume("NORMAL")
+        self.assertEqual(budget.remaining, 4)
+        with self.assertRaisesRegex(WhiteBitAdapterError, "reserved"):
+            budget.consume("NORMAL")
+
+        budget = budget.consume("RECOVERY")
+        budget = budget.consume("RECOVERY")
+        self.assertEqual(budget.remaining, 2)
+        with self.assertRaisesRegex(WhiteBitAdapterError, "reserved"):
+            budget.consume("RECOVERY")
+
+        budget = budget.consume("CANCEL")
+        budget = budget.consume("CANCEL")
+        self.assertEqual(budget.remaining, 0)
+        self.assertFalse(budget.can_admit("CANCEL"))
+
+    def test_retry_policy_backs_off_safe_reads_without_blind_financial_write_retry(self):
+        timed_out_write = classify_whitebit_http_retry(
+            status_code=408,
+            attempt=1,
+            request_class="WRITE",
+        )
+        self.assertFalse(timed_out_write.automatic_retry)
+        self.assertTrue(timed_out_write.requires_reconciliation)
+        self.assertEqual(
+            timed_out_write.classification,
+            "AMBIGUOUS_WRITE_TIMEOUT",
+        )
+
+        timed_out_cancel = classify_whitebit_http_retry(
+            status_code=408,
+            attempt=1,
+            request_class="CANCEL",
+        )
+        self.assertFalse(timed_out_cancel.automatic_retry)
+        self.assertTrue(timed_out_cancel.requires_reconciliation)
+
+        timed_out_read = classify_whitebit_http_retry(
+            status_code=408,
+            attempt=2,
+            request_class="READ",
+        )
+        self.assertTrue(timed_out_read.automatic_retry)
+        self.assertEqual(timed_out_read.base_delay_seconds, 2)
+        self.assertTrue(timed_out_read.jitter_required)
+        self.assertFalse(timed_out_read.requires_reconciliation)
+        self.assertEqual(timed_out_read.classification, "REQUEST_TIMEOUT")
+
+        rate_limited_write = classify_whitebit_http_retry(
+            status_code=429,
+            attempt=1,
+            request_class="WRITE",
+        )
+        self.assertFalse(rate_limited_write.automatic_retry)
+        self.assertIsNone(rate_limited_write.base_delay_seconds)
+        self.assertTrue(rate_limited_write.requires_reconciliation)
+        self.assertEqual(
+            rate_limited_write.classification,
+            "AMBIGUOUS_WRITE_RATE_LIMIT",
+        )
+
+        rate_limited_cancel = classify_whitebit_http_retry(
+            status_code=429,
+            attempt=2,
+            request_class="CANCEL",
+        )
+        self.assertFalse(rate_limited_cancel.automatic_retry)
+        self.assertTrue(rate_limited_cancel.requires_reconciliation)
+
+        capped = classify_whitebit_http_retry(
+            status_code=429,
+            attempt=20,
+            request_class="READ",
+        )
+        self.assertTrue(capped.automatic_retry)
+        self.assertEqual(capped.base_delay_seconds, 30)
+        self.assertTrue(capped.jitter_required)
+        self.assertFalse(capped.requires_reconciliation)
+
+        ambiguous = classify_whitebit_http_retry(
+            status_code=503,
+            attempt=1,
+            request_class="WRITE",
+        )
+        self.assertFalse(ambiguous.automatic_retry)
+        self.assertTrue(ambiguous.requires_reconciliation)
+        self.assertEqual(ambiguous.classification, "AMBIGUOUS_WRITE")
+
+        read_retry = classify_whitebit_http_retry(
+            status_code=503,
+            attempt=2,
+            request_class="READ",
+        )
+        self.assertTrue(read_retry.automatic_retry)
+        self.assertEqual(read_retry.base_delay_seconds, 2)
+        self.assertFalse(read_retry.requires_reconciliation)
+
+        auth = classify_whitebit_http_retry(
+            status_code=401,
+            attempt=1,
+            request_class="READ",
+        )
+        self.assertFalse(auth.automatic_retry)
+        self.assertEqual(auth.classification, "AUTHENTICATION")
 
     def test_recursive_debug_redaction_covers_nested_auth_fields(self):
         redacted = redact_whitebit_debug(

@@ -43,7 +43,11 @@ from .kraken_spot import (
     spot_submission_requires_reconciliation,
     validate_spot_client_order_id,
 )
-from .whitebit import sign_private_request, validate_client_order_id
+from .whitebit import (
+    classify_whitebit_http_retry,
+    sign_private_request,
+    validate_client_order_id,
+)
 from .provider_core import (
     AuthenticatedReadQueryBinding,
     ProviderResponseObservation,
@@ -1078,6 +1082,34 @@ def _exact_trading_response(
     )
 
 
+def _whitebit_exact_trading_response(
+    value: object,
+) -> ExactJsonTransportResponse:
+    """Bind WhiteBIT financial-write HTTP ambiguity to durable dispatch state.
+
+    WhiteBIT 429 and 5xx responses after the send barrier do not prove that the
+    financial write was not accepted. They therefore remain UNKNOWN until
+    reconciliation, rather than becoming a retry-safe SubmissionSent terminal.
+    """
+
+    exact = _exact_trading_response(value)
+    if exact.http_status is None:
+        return exact
+    decision = classify_whitebit_http_retry(
+        status_code=exact.http_status,
+        attempt=1,
+        request_class="WRITE",
+    )
+    if not decision.requires_reconciliation:
+        return exact
+    return ExactJsonTransportResponse(
+        exact.response_bytes,
+        http_status=exact.http_status,
+        requires_reconciliation=True,
+        ambiguity_reason="whitebit_" + decision.classification.lower(),
+    )
+
+
 @dataclass(frozen=True)
 class WhiteBitCredential:
     api_key: str
@@ -1377,8 +1409,14 @@ class _DurableProviderNonceAllocator:
         return self.allocate()
 
 
-class WhiteBitDurableNonceAllocator(_DurableProviderNonceAllocator):
-    """Journal-backed monotonic WhiteBIT nonce authority."""
+class WhiteBitDurableNonceAllocator:
+    """Journal-backed WhiteBIT nonce authority keyed by provider API-key identity.
+
+    WhiteBIT authenticates the nonce together with X-TXC-APIKEY.  Local account
+    labels and credential-handle generations are therefore admission metadata,
+    not independent provider nonce domains.  Only a SHA-256 API-key fingerprint
+    is persisted.
+    """
 
     def __init__(
         self,
@@ -1390,16 +1428,148 @@ class WhiteBitDurableNonceAllocator(_DurableProviderNonceAllocator):
         clock_utc: ClockUtc | None = None,
         max_contention_retries: int = 32,
     ) -> None:
-        super().__init__(
+        if not isinstance(journal, JournalStore):
+            raise TypeError("journal must be JournalStore")
+        account = _canonical_text(account_id, name="account_id")
+        env = _canonical_environment(environment)
+        if env != "LIVE":
+            raise ProviderTransportScopeError(
+                "WhiteBIT durable nonce allocation is qualified only for LIVE"
+            )
+        if not callable(clock_millis):
+            raise TypeError("clock_millis must be callable")
+        if clock_utc is not None and not callable(clock_utc):
+            raise TypeError("clock_utc must be callable or None")
+        if (
+            isinstance(max_contention_retries, bool)
+            or not isinstance(max_contention_retries, int)
+            or max_contention_retries < 1
+            or max_contention_retries > 1024
+        ):
+            raise ProviderTransportScopeError(
+                "max_contention_retries must be an integer from 1 through 1024"
+            )
+
+        self.journal = journal
+        self.account_id = account
+        self.environment = env
+        self.clock_millis = clock_millis
+        self.clock_utc = clock_utc
+        self.max_contention_retries = max_contention_retries
+        self.legacy_nonce_floor = self._load_legacy_nonce_floor()
+
+    def _load_legacy_nonce_floor(self) -> int:
+        """Carry integrity-valid pre-API-key WhiteBIT nonce history forward."""
+
+        highest = 0
+        previous_version = 0
+        previous_nonce = 0
+        expected_aggregate_id = (
+            "WHITEBIT:"
+            + sha256(
+                f"{self.account_id}|{self.environment}".encode("utf-8")
+            ).hexdigest()
+        )
+        for event in self.journal.load_events_by_aggregate_type(
+            _DurableProviderNonceAllocator.AGGREGATE_TYPE
+        ):
+            payload = event.get("payload")
+            if not isinstance(payload, Mapping):
+                raise ProviderTransportError(
+                    "provider nonce journal payload is invalid"
+                )
+            if payload.get("provider_id") != "WHITEBIT":
+                continue
+            if (
+                payload.get("account_id") != self.account_id
+                or payload.get("environment") != self.environment
+            ):
+                continue
+            scope_keys = set(payload) - {
+                "provider_id",
+                "account_id",
+                "environment",
+                "nonce",
+            }
+            if scope_keys == {"provider_api_key_fingerprint"}:
+                continue
+            if scope_keys:
+                raise ProviderTransportError(
+                    "WhiteBIT nonce journal contains an unknown legacy scope"
+                )
+            if (
+                event.get("event_type")
+                != _DurableProviderNonceAllocator.EVENT_TYPE
+            ):
+                raise ProviderTransportError(
+                    "WhiteBIT legacy nonce journal contains an unexpected event type"
+                )
+            if event.get("aggregate_id") != expected_aggregate_id:
+                raise ProviderTransportError(
+                    "WhiteBIT legacy nonce aggregate identity is invalid"
+                )
+            nonce = payload.get("nonce")
+            version = event.get("aggregate_version")
+            if (
+                isinstance(nonce, bool)
+                or not isinstance(nonce, int)
+                or nonce <= 0
+                or isinstance(version, bool)
+                or not isinstance(version, int)
+                or version < 1
+            ):
+                raise ProviderTransportError(
+                    "WhiteBIT legacy nonce journal is invalid"
+                )
+            if version != previous_version + 1:
+                raise ProviderTransportError(
+                    "WhiteBIT legacy nonce aggregate sequence is invalid"
+                )
+            if nonce <= previous_nonce:
+                raise ProviderTransportError(
+                    "WhiteBIT legacy nonce journal is not strictly monotonic"
+                )
+            previous_version = version
+            previous_nonce = nonce
+            highest = nonce
+        return highest
+
+    @staticmethod
+    def provider_api_key_fingerprint(provider_api_key: object) -> str:
+        api_key = _canonical_text(
+            provider_api_key,
+            name="WhiteBIT provider API key",
+        )
+        return "sha256:" + sha256(api_key.encode("utf-8")).hexdigest()
+
+    def for_provider_api_key(
+        self,
+        provider_api_key: object,
+    ) -> _DurableProviderNonceAllocator:
+        fingerprint = self.provider_api_key_fingerprint(provider_api_key)
+        return _DurableProviderNonceAllocator(
             provider_id="WHITEBIT",
             display_name="WhiteBIT",
-            journal=journal,
-            account_id=account_id,
-            environment=environment,
-            clock_millis=clock_millis,
-            clock_utc=clock_utc,
-            max_contention_retries=max_contention_retries,
+            journal=self.journal,
+            account_id=self.account_id,
+            environment=self.environment,
+            clock_millis=self.clock_millis,
+            clock_utc=self.clock_utc,
+            max_contention_retries=self.max_contention_retries,
+            scope_fields={
+                "provider_api_key_fingerprint": fingerprint,
+            },
+            aggregate_identity_material=(
+                f"WHITEBIT|{self.environment}|provider-api-key|{fingerprint}"
+            ),
+            initial_nonce_floor=self.legacy_nonce_floor,
         )
+
+    def aggregate_id_for_provider_api_key(self, provider_api_key: object) -> str:
+        return self.for_provider_api_key(provider_api_key).aggregate_id
+
+    def send_lock_path_for_provider_api_key(self, provider_api_key: object):
+        return self.for_provider_api_key(provider_api_key)._send_lock_path
 
 
 class KrakenSpotDurableNonceAllocator:
@@ -1685,8 +1855,10 @@ class WhiteBitHttpTransport:
             raise ProviderTransportScopeError(
                 "nonce allocator account/environment mismatch"
             )
-        if quota_gate is not None and not callable(quota_gate):
-            raise TypeError("quota_gate must be callable or None")
+        if not callable(quota_gate):
+            raise TypeError(
+                "quota_gate must be callable for WhiteBIT LIVE transport"
+            )
         if wire_client is not None and not hasattr(wire_client, "send"):
             raise TypeError("wire_client must implement send")
 
@@ -1764,15 +1936,13 @@ class WhiteBitHttpTransport:
                 "prepared request client order identity mismatch"
             )
 
-        if self.quota_gate is not None:
-            self.quota_gate(
-                "WHITEBIT",
-                self.account_id,
-                "LIVE",
-                "ORDER_WRITE",
-            )
+        self.quota_gate(
+            "WHITEBIT",
+            self.account_id,
+            "LIVE",
+            "ORDER_WRITE",
+        )
 
-        nonce = self.nonce_allocator.allocate()
         credential_plaintext = self.secret_resolver.resolve_for_execution(
             self.session_token,
             origin=self.origin,
@@ -1785,6 +1955,14 @@ class WhiteBitHttpTransport:
         )
         try:
             credential = WhiteBitCredential.parse(credential_plaintext)
+        finally:
+            credential_plaintext = None
+
+        provider_nonce = self.nonce_allocator.for_provider_api_key(
+            credential.api_key
+        )
+        with provider_nonce.serialized_send():
+            nonce = provider_nonce.allocate()
             provider_signed = sign_private_request(
                 endpoint=endpoint,
                 parameters=body,
@@ -1800,12 +1978,10 @@ class WhiteBitHttpTransport:
                 body=provider_signed.body,
                 timeout_seconds=self.policy.timeout_seconds,
             )
-        finally:
-            credential_plaintext = None
 
-        final_guard()
-        wire_response = self.wire_client.send(signed)
-        return _exact_trading_response(wire_response)
+            final_guard()
+            wire_response = self.wire_client.send(signed)
+            return _whitebit_exact_trading_response(wire_response)
 
 
 @dataclass(frozen=True)

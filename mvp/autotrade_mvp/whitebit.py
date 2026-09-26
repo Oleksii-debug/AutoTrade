@@ -34,6 +34,8 @@ WHITEBIT_OFFICIAL_DOCS = MappingProxyType(
         "order_types": "https://docs.whitebit.com/concepts/order-types",
         "client_order_id": "https://docs.whitebit.com/guides/client-order-id",
         "websocket": "https://docs.whitebit.com/websocket/overview",
+        "rate_limits": "https://docs.whitebit.com/api-reference/rate-limits",
+        "security": "https://docs.whitebit.com/best-practices/security",
     }
 )
 
@@ -1584,6 +1586,237 @@ def sign_private_request(
         headers=headers,
         nonce=nonce,
         nonce_window=nonce_window,
+    )
+
+
+@dataclass(frozen=True)
+class WhiteBitCredentialBoundary:
+    """Exact credential evidence admitted for AutoTrade WhiteBIT trading.
+
+    WhiteBIT currently documents Info + Trading as the minimum trading-application
+    permission set and does not offer a public sandbox/testnet. AutoTrade therefore
+    accepts only an IP-restricted LIVE credential binding with exactly those two
+    permissions. Deposit/Withdraw authority is intentionally outside this product.
+    """
+
+    credential_binding_id: str
+    credential_generation: int
+    account_id: str
+    permissions: frozenset[str]
+    ip_whitelist_enabled: bool
+    environment: str
+    observed_at: datetime
+    evidence_ref: str
+
+    def __post_init__(self) -> None:
+        binding = _text(
+            self.credential_binding_id,
+            name="credential_binding_id",
+        )
+        if (
+            isinstance(self.credential_generation, bool)
+            or not isinstance(self.credential_generation, int)
+            or self.credential_generation < 1
+        ):
+            raise WhiteBitAdapterError(
+                "credential_generation must be a positive integer"
+            )
+        account = _text(self.account_id, name="account_id")
+        if not isinstance(self.permissions, frozenset):
+            raise TypeError("permissions must be a frozenset")
+        normalized = frozenset(
+            _text(value, name="permission").upper()
+            for value in self.permissions
+        )
+        known = frozenset({"INFO", "TRADING", "DEPOSIT", "WITHDRAW"})
+        if not normalized or not normalized.issubset(known):
+            raise WhiteBitAdapterError(
+                "credential permissions contain unknown or empty authority"
+            )
+        if type(self.ip_whitelist_enabled) is not bool:
+            raise WhiteBitAdapterError("ip_whitelist_enabled must be boolean")
+        environment = _text(self.environment, name="environment").upper()
+        observed = _instant(self.observed_at, name="observed_at")
+        evidence = _text(self.evidence_ref, name="evidence_ref")
+        object.__setattr__(self, "credential_binding_id", binding)
+        object.__setattr__(self, "account_id", account)
+        object.__setattr__(self, "permissions", normalized)
+        object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "observed_at", observed)
+        object.__setattr__(self, "evidence_ref", evidence)
+
+    def assert_autotrade_safe(self) -> "WhiteBitCredentialBoundary":
+        if self.environment != "LIVE":
+            raise WhiteBitAdapterError(
+                "WhiteBIT credential environment must be LIVE; no public sandbox "
+                "credential environment is qualified"
+            )
+        if self.permissions != frozenset({"INFO", "TRADING"}):
+            raise WhiteBitAdapterError(
+                "AutoTrade WhiteBIT credential must have exactly INFO and TRADING "
+                "permissions; deposit/withdraw authority is forbidden"
+            )
+        if not self.ip_whitelist_enabled:
+            raise WhiteBitAdapterError(
+                "AutoTrade WhiteBIT LIVE credential requires an IP whitelist"
+            )
+        return self
+
+
+@dataclass(frozen=True)
+class WhiteBitRateLimitBudget:
+    """Partition an evidenced endpoint quota into normal/recovery/cancel capacity.
+
+    No provider-wide quota is assumed because WhiteBIT documents endpoint-specific
+    limits. The caller supplies the currently evidenced window capacity. Normal
+    traffic cannot consume recovery/cancel reserves; recovery cannot consume the
+    cancel reserve; cancellation has highest admission priority.
+    """
+
+    capacity: int
+    used: int = 0
+    reserved_recovery: int = 0
+    reserved_cancel: int = 0
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("capacity", self.capacity),
+            ("used", self.used),
+            ("reserved_recovery", self.reserved_recovery),
+            ("reserved_cancel", self.reserved_cancel),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise WhiteBitAdapterError(f"{name} must be an integer")
+        if self.capacity <= 0:
+            raise WhiteBitAdapterError("capacity must be positive")
+        if min(self.used, self.reserved_recovery, self.reserved_cancel) < 0:
+            raise WhiteBitAdapterError("rate-limit counters cannot be negative")
+        if self.used > self.capacity:
+            raise WhiteBitAdapterError("used quota cannot exceed capacity")
+        if self.reserved_recovery + self.reserved_cancel >= self.capacity:
+            raise WhiteBitAdapterError(
+                "recovery and cancel reserves must leave normal capacity"
+            )
+
+    @property
+    def remaining(self) -> int:
+        return self.capacity - self.used
+
+    def can_admit(self, request_class: str) -> bool:
+        kind = _text(request_class, name="request_class").upper()
+        if kind not in {"NORMAL", "RECOVERY", "CANCEL"}:
+            raise WhiteBitAdapterError("unsupported rate-limit request class")
+        after = self.remaining - 1
+        if after < 0:
+            return False
+        if kind == "NORMAL":
+            return after >= self.reserved_recovery + self.reserved_cancel
+        if kind == "RECOVERY":
+            return after >= self.reserved_cancel
+        return True
+
+    def consume(self, request_class: str) -> "WhiteBitRateLimitBudget":
+        if not self.can_admit(request_class):
+            raise WhiteBitAdapterError(
+                "request would consume reserved WhiteBIT recovery/cancel quota"
+            )
+        return WhiteBitRateLimitBudget(
+            capacity=self.capacity,
+            used=self.used + 1,
+            reserved_recovery=self.reserved_recovery,
+            reserved_cancel=self.reserved_cancel,
+        )
+
+
+@dataclass(frozen=True)
+class WhiteBitRetryDecision:
+    automatic_retry: bool
+    base_delay_seconds: int | None
+    jitter_required: bool
+    requires_reconciliation: bool
+    classification: str
+
+
+def classify_whitebit_http_retry(
+    *,
+    status_code: int,
+    attempt: int,
+    request_class: str,
+) -> WhiteBitRetryDecision:
+    """Classify HTTP retry without weakening UNKNOWN outbound-write semantics."""
+    if (
+        not isinstance(status_code, int)
+        or isinstance(status_code, bool)
+        or not 100 <= status_code <= 599
+    ):
+        raise WhiteBitAdapterError("status_code must be an HTTP status integer")
+    if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt <= 0:
+        raise WhiteBitAdapterError("attempt must be a positive integer")
+    kind = _text(request_class, name="request_class").upper()
+    if kind not in {"READ", "WRITE", "RECOVERY", "CANCEL"}:
+        raise WhiteBitAdapterError("unsupported retry request class")
+
+    delay = min(2 ** min(attempt - 1, 5), 30)
+    if status_code == 408:
+        if kind in {"WRITE", "CANCEL"}:
+            return WhiteBitRetryDecision(
+                automatic_retry=False,
+                base_delay_seconds=None,
+                jitter_required=False,
+                requires_reconciliation=True,
+                classification="AMBIGUOUS_WRITE_TIMEOUT",
+            )
+        return WhiteBitRetryDecision(
+            automatic_retry=True,
+            base_delay_seconds=delay,
+            jitter_required=True,
+            requires_reconciliation=False,
+            classification="REQUEST_TIMEOUT",
+        )
+    if status_code == 429:
+        if kind in {"WRITE", "CANCEL"}:
+            return WhiteBitRetryDecision(
+                automatic_retry=False,
+                base_delay_seconds=None,
+                jitter_required=False,
+                requires_reconciliation=True,
+                classification="AMBIGUOUS_WRITE_RATE_LIMIT",
+            )
+        return WhiteBitRetryDecision(
+            automatic_retry=True,
+            base_delay_seconds=delay,
+            jitter_required=True,
+            requires_reconciliation=False,
+            classification="RATE_LIMIT",
+        )
+    if 500 <= status_code <= 599:
+        if kind in {"WRITE", "CANCEL"}:
+            return WhiteBitRetryDecision(
+                automatic_retry=False,
+                base_delay_seconds=None,
+                jitter_required=False,
+                requires_reconciliation=True,
+                classification="AMBIGUOUS_WRITE",
+            )
+        return WhiteBitRetryDecision(
+            automatic_retry=True,
+            base_delay_seconds=delay,
+            jitter_required=True,
+            requires_reconciliation=False,
+            classification="SERVER_TRANSIENT",
+        )
+    if status_code in {401, 403}:
+        classification = "AUTHENTICATION"
+    elif 400 <= status_code <= 499:
+        classification = "CLIENT_OR_VALIDATION"
+    else:
+        classification = "NO_RETRY"
+    return WhiteBitRetryDecision(
+        automatic_retry=False,
+        base_delay_seconds=None,
+        jitter_required=False,
+        requires_reconciliation=False,
+        classification=classification,
     )
 
 

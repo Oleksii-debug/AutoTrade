@@ -42,23 +42,8 @@ _QUALIFICATION_TRUST_SOURCE_ROOT = Path(__file__).resolve().parents[2]
 # authenticates this pin as part of the executable/source payload, while the
 # mutable packaged JSON remains data only.  None means terminal packaged trust is
 # intentionally unavailable; callers cannot provide or override this value.
-_CANONICAL_PACKAGED_QUALIFICATION_TRUST_SOURCE_SHA: str | None = None
 _CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256: str | None = None
 _MAX_QUALIFICATION_TRUST_POLICY_BYTES = 1_048_576
-
-
-def canonical_packaged_qualification_trust_source_sha() -> str | None:
-    """Return the source-controlled packaged-release source SHA, when configured.
-
-    Release packaging consumes the same immutable source pin as the installed
-    non-Git verifier.  Keeping this accessor source-controlled prevents a
-    composition caller from selecting which source identity authorizes trust.
-    """
-
-    value = _CANONICAL_PACKAGED_QUALIFICATION_TRUST_SOURCE_SHA
-    if value is None:
-        return None
-    return _git_sha(value, name="packaged qualification trust source SHA")
 
 
 def canonical_packaged_qualification_trust_policy_digest() -> str | None:
@@ -857,8 +842,11 @@ def _canonical_packaged_qualification_trust_policy_bytes(
     """Read a release policy only when signed runtime source pins its digest.
 
     This is deliberately a non-Git release path, not a working-tree fallback.
-    The digest pin is source code shipped inside the exact/signed release
+    The policy digest pin is source code shipped inside the exact/signed release
     composition; evidence callers cannot supply a path, digest, policy, or pin.
+    Exact candidate source identity remains bound by the signed qualification
+    attestation and by the release composition's source_sha; it is deliberately
+    not self-pinned inside the same Git commit.
     A source checkout remains on the Git-object authority path even when Git is
     temporarily unavailable, preventing an untracked working-tree policy from
     acquiring trust by matching a release pin.
@@ -869,20 +857,6 @@ def _canonical_packaged_qualification_trust_policy_bytes(
     if _has_git_metadata_ancestor(source_root):
         raise QualificationTrustUnavailable(
             "packaged qualification trust policy is forbidden in a source checkout"
-        )
-
-    expected_packaged_source_sha = _CANONICAL_PACKAGED_QUALIFICATION_TRUST_SOURCE_SHA
-    if expected_packaged_source_sha is None:
-        raise QualificationTrustUnavailable(
-            "packaged qualification trust source SHA is not pinned by release composition"
-        )
-    expected_packaged_source_sha = _git_sha(
-        expected_packaged_source_sha,
-        name="packaged qualification trust source SHA",
-    )
-    if source_sha != expected_packaged_source_sha:
-        raise QualificationTrustError(
-            "packaged qualification trust source SHA does not match signed release pin"
         )
 
     expected_digest = _CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256

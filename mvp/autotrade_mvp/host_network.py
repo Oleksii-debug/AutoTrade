@@ -16,6 +16,7 @@ import ipaddress
 import json
 import re
 import ssl
+from threading import Lock
 from types import MappingProxyType
 from typing import Callable, Mapping
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -246,6 +247,7 @@ class AuthenticatedHostApplication:
         self._principal_resolver = principal_resolver
         self._snapshot_provider = snapshot_provider
         self._now = now
+        self._authority_operation_lock = Lock()
         self.store = JournalBackedHostCommandStore(
             journal,
             account_id=account_id,
@@ -265,35 +267,36 @@ class AuthenticatedHostApplication:
         is repaired without inventing financial completion in the POST result.
         """
 
-        operations = self.store.snapshot().get("operations")
-        if not isinstance(operations, dict):
-            raise ValueError("Host operation projection is malformed")
-        resumed: list[str] = []
-        for operation_id, phase in operations.items():
-            if phase in self.store.TERMINAL_PHASES:
-                continue
-            try:
-                result = self.store.execute_authority_operation(operation_id)
-            except (TypeError, ValueError, OverflowError):
-                current = self.store.get_operation(operation_id)
-                if current.phase in self.store.TERMINAL_PHASES:
-                    result = current
-                else:
-                    result = self.store.update_operation(
-                        operation_id,
-                        "UNKNOWN",
-                        affected_refs=current.affected_refs,
-                        evidence=current.evidence
-                        + (
-                            {
-                                "kind": "authority-execution-fault",
-                                "reason_code": "internal_validation_failed",
-                            },
-                        ),
-                        remaining_uncertainty=("authority_execution_fault",),
-                    )
-            resumed.append(result.operation_id)
-        return tuple(resumed)
+        with self._authority_operation_lock:
+            operations = self.store.snapshot().get("operations")
+            if not isinstance(operations, dict):
+                raise ValueError("Host operation projection is malformed")
+            resumed: list[str] = []
+            for operation_id, phase in operations.items():
+                if phase in self.store.TERMINAL_PHASES:
+                    continue
+                try:
+                    result = self.store.execute_authority_operation(operation_id)
+                except (TypeError, ValueError, OverflowError):
+                    current = self.store.get_operation(operation_id)
+                    if current.phase in self.store.TERMINAL_PHASES:
+                        result = current
+                    else:
+                        result = self.store.update_operation(
+                            operation_id,
+                            "UNKNOWN",
+                            affected_refs=current.affected_refs,
+                            evidence=current.evidence
+                            + (
+                                {
+                                    "kind": "authority-execution-fault",
+                                    "reason_code": "internal_validation_failed",
+                                },
+                            ),
+                            remaining_uncertainty=("authority_execution_fault",),
+                        )
+                resumed.append(result.operation_id)
+            return tuple(resumed)
 
     def _validate_command_session(
         self,
@@ -707,9 +710,15 @@ class AuthenticatedHostServer(ThreadingHTTPServer):
             self.server_close()
             raise ValueError("public_origin port does not match the bound listener")
         self.application = application
-        # Repair the acceptance/execution crash boundary before serving new
-        # traffic.  Canonical authority mutation is idempotent and evidence
-        # validated by JournalBackedHostCommandStore.
-        self.application.resume_authority_operations()
-        if tls_context is not None:
-            self.socket = tls_context.wrap_socket(self.socket, server_side=True)
+        try:
+            # Repair the acceptance/execution crash boundary before serving new
+            # traffic. Canonical authority mutation is idempotent and evidence
+            # validated by JournalBackedHostCommandStore.
+            self.application.resume_authority_operations()
+            if tls_context is not None:
+                self.socket = tls_context.wrap_socket(self.socket, server_side=True)
+        except Exception:
+            # Binding the listener precedes recovery. Never leak a bound socket
+            # when startup recovery or TLS setup fails closed.
+            self.server_close()
+            raise

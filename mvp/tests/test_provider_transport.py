@@ -642,58 +642,36 @@ class AlpacaProviderTransportTests(unittest.TestCase):
 
 
 class WhiteBitProviderTransportTests(unittest.TestCase):
-
     def test_durable_nonce_survives_restart_and_clock_regression(self):
-        fixed = datetime(2026, 9, 26, 0, 0, tzinfo=timezone.utc)
-        provider_api_key = "kraken-test-key"
+        fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
-            handle = kraken_trade_handle()
-            first = KrakenSpotDurableNonceAllocator(
+            first = WhiteBitDurableNonceAllocator(
                 journal=JournalStore(path),
-                account_id="acct-kraken",
+                account_id="acct-wb",
                 environment="LIVE",
-                credential_handle=handle,
                 clock_millis=lambda: 1_700_000_000_000,
                 clock_utc=lambda: fixed,
             )
-            first_domain = first.for_provider_api_key(provider_api_key)
-            self.assertEqual(first_domain.allocate(), 1_700_000_000_000)
+            self.assertEqual(first.allocate(), 1_700_000_000_000)
 
-            reopened = KrakenSpotDurableNonceAllocator(
+            reopened = WhiteBitDurableNonceAllocator(
                 journal=JournalStore(path),
-                account_id="acct-kraken",
+                account_id="acct-wb",
                 environment="LIVE",
-                credential_handle=handle,
                 clock_millis=lambda: 1_699_999_999_000,
                 clock_utc=lambda: fixed + timedelta(seconds=1),
             )
-            reopened_domain = reopened.for_provider_api_key(provider_api_key)
-            self.assertEqual(reopened_domain.allocate(), 1_700_000_000_001)
+            self.assertEqual(reopened.allocate(), 1_700_000_000_001)
             events = JournalStore(path).load_events(
                 "provider_nonce",
-                reopened_domain.aggregate_id,
-            )
-            self.assertEqual(
-                [item["payload"]["provider_id"] for item in events],
-                ["KRAKEN", "KRAKEN"],
+                reopened.aggregate_id,
             )
             self.assertEqual(
                 [item["payload"]["nonce"] for item in events],
                 [1_700_000_000_000, 1_700_000_000_001],
             )
-            fingerprint = reopened.provider_api_key_fingerprint(provider_api_key)
-            self.assertEqual(
-                [
-                    item["payload"]["provider_api_key_fingerprint"]
-                    for item in events
-                ],
-                [fingerprint, fingerprint],
-            )
-            for item in events:
-                self.assertNotIn("credential_handle_id", item["payload"])
-                self.assertNotIn("credential_generation", item["payload"])
-            self.assertNotIn(provider_api_key, json.dumps(events, sort_keys=True))
+
     def test_whitebit_transport_has_one_guarded_send_after_durable_nonce(self):
         events = []
         fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
@@ -1062,8 +1040,10 @@ class KrakenSpotProviderTransportTests(unittest.TestCase):
             "https://api.kraken.com/0/private/AddOrder",
         )
 
+
     def test_durable_nonce_survives_restart_and_clock_regression(self):
         fixed = datetime(2026, 9, 26, 0, 0, tzinfo=timezone.utc)
+        provider_api_key = "kraken-test-key"
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
             handle = kraken_trade_handle()
@@ -1075,7 +1055,8 @@ class KrakenSpotProviderTransportTests(unittest.TestCase):
                 clock_millis=lambda: 1_700_000_000_000,
                 clock_utc=lambda: fixed,
             )
-            self.assertEqual(first.allocate(), 1_700_000_000_000)
+            first_domain = first.for_provider_api_key(provider_api_key)
+            self.assertEqual(first_domain.allocate(), 1_700_000_000_000)
 
             reopened = KrakenSpotDurableNonceAllocator(
                 journal=JournalStore(path),
@@ -1085,10 +1066,11 @@ class KrakenSpotProviderTransportTests(unittest.TestCase):
                 clock_millis=lambda: 1_699_999_999_000,
                 clock_utc=lambda: fixed + timedelta(seconds=1),
             )
-            self.assertEqual(reopened.allocate(), 1_700_000_000_001)
+            reopened_domain = reopened.for_provider_api_key(provider_api_key)
+            self.assertEqual(reopened_domain.allocate(), 1_700_000_000_001)
             events = JournalStore(path).load_events(
                 "provider_nonce",
-                reopened.aggregate_id,
+                reopened_domain.aggregate_id,
             )
             self.assertEqual(
                 [item["payload"]["provider_id"] for item in events],
@@ -1098,15 +1080,18 @@ class KrakenSpotProviderTransportTests(unittest.TestCase):
                 [item["payload"]["nonce"] for item in events],
                 [1_700_000_000_000, 1_700_000_000_001],
             )
+            fingerprint = reopened.provider_api_key_fingerprint(provider_api_key)
             self.assertEqual(
-                [item["payload"]["credential_handle_id"] for item in events],
-                ["cred-kraken-trade", "cred-kraken-trade"],
+                [
+                    item["payload"]["provider_api_key_fingerprint"]
+                    for item in events
+                ],
+                [fingerprint, fingerprint],
             )
-            self.assertEqual(
-                [item["payload"]["credential_generation"] for item in events],
-                [1, 1],
-            )
-
+            for item in events:
+                self.assertNotIn("credential_handle_id", item["payload"])
+                self.assertNotIn("credential_generation", item["payload"])
+            self.assertNotIn(provider_api_key, json.dumps(events, sort_keys=True))
 
     def test_nonce_authority_is_shared_by_provider_key_across_handles_and_generations(self):
         fixed = datetime(2026, 9, 26, 0, 0, tzinfo=timezone.utc)

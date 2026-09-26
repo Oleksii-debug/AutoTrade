@@ -253,6 +253,37 @@ class ProductCompletionGateTests(unittest.TestCase):
         self.assertTrue(report["nvda_source_matches"])
         self.assertTrue(report["qualification_source_matches"])
 
+    def test_product_spec_toc_cannot_mask_missing_or_renamed_body_section(self):
+        marker = "28. Accessible desktop and web interfaces"
+        prefix, separator, suffix = SPEC.rpartition(marker)
+        self.assertTrue(separator)
+
+        missing_body = prefix + suffix
+        with self.assertRaisesRegex(
+            ProductCompletionError,
+            "table of contents and one 1..40 body heading sequence",
+        ):
+            evaluate_completion(
+                complete_bank(),
+                complete_qualification(),
+                nvda(),
+                spec_text=missing_body,
+                exact_source_sha=SHA,
+            )
+
+        renamed_body = prefix + "28. Renamed inaccessible body section" + suffix
+        with self.assertRaisesRegex(
+            ProductCompletionError,
+            "table of contents does not match body headings",
+        ):
+            evaluate_completion(
+                complete_bank(),
+                complete_qualification(),
+                nvda(),
+                spec_text=renamed_body,
+                exact_source_sha=SHA,
+            )
+
     def test_one_unfinished_package_blocks_whole_product_completion(self):
         bank = complete_bank()
         bank["packages"][31]["proposed_status"] = "IN_PROGRESS"

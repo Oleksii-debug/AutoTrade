@@ -313,6 +313,8 @@ class BinanceUsdmSymbolRules:
     price_min: Decimal
     price_max: Decimal
     tick_size: Decimal
+    percent_price_multiplier_up: Decimal | None
+    percent_price_multiplier_down: Decimal | None
     min_notional: Decimal | None
     _verification_token: InitVar[object | None] = None
 
@@ -391,6 +393,28 @@ class BinanceUsdmSymbolRules:
                 "MARKET_LOT_SIZE minQty exceeds maxQty"
             )
 
+        multiplier_up = self.percent_price_multiplier_up
+        multiplier_down = self.percent_price_multiplier_down
+        if (multiplier_up is None) != (multiplier_down is None):
+            raise BinanceUsdmAdapterError(
+                "PERCENT_PRICE multipliers must be present together"
+            )
+        if multiplier_up is not None and multiplier_down is not None:
+            multiplier_up = _decimal(
+                multiplier_up,
+                name="percent_price_multiplier_up",
+                positive=True,
+            )
+            multiplier_down = _decimal(
+                multiplier_down,
+                name="percent_price_multiplier_down",
+                positive=True,
+            )
+            if multiplier_down > multiplier_up:
+                raise BinanceUsdmAdapterError(
+                    "PERCENT_PRICE multiplierDown exceeds multiplierUp"
+                )
+
         min_notional = self.min_notional
         if min_notional is not None:
             min_notional = _decimal(
@@ -412,6 +436,16 @@ class BinanceUsdmSymbolRules:
         object.__setattr__(self, "price_min", price_min)
         object.__setattr__(self, "price_max", price_max)
         object.__setattr__(self, "tick_size", tick)
+        object.__setattr__(
+            self,
+            "percent_price_multiplier_up",
+            multiplier_up,
+        )
+        object.__setattr__(
+            self,
+            "percent_price_multiplier_down",
+            multiplier_down,
+        )
         object.__setattr__(self, "min_notional", min_notional)
 
     @classmethod
@@ -558,6 +592,24 @@ class BinanceUsdmSymbolRules:
             market_max = raw_max if raw_max > 0 else None
             market_step = raw_step if raw_step > 0 else None
 
+        multiplier_up = multiplier_down = None
+        percent_filter = by_type.get("PERCENT_PRICE")
+        if percent_filter is not None:
+            multiplier_up = _decimal(
+                percent_filter.get("multiplierUp"),
+                name="PERCENT_PRICE multiplierUp",
+                positive=True,
+            )
+            multiplier_down = _decimal(
+                percent_filter.get("multiplierDown"),
+                name="PERCENT_PRICE multiplierDown",
+                positive=True,
+            )
+            if multiplier_down > multiplier_up:
+                raise BinanceUsdmAdapterError(
+                    "PERCENT_PRICE multiplierDown exceeds multiplierUp"
+                )
+
         min_notional = None
         notional_filter = by_type.get("MIN_NOTIONAL")
         if notional_filter is not None:
@@ -596,6 +648,8 @@ class BinanceUsdmSymbolRules:
             price_min=price_min,
             price_max=price_max,
             tick_size=tick_size,
+            percent_price_multiplier_up=multiplier_up,
+            percent_price_multiplier_down=multiplier_down,
             min_notional=min_notional,
             _verification_token=_EXCHANGE_INFO_RULES_TOKEN,
         )
@@ -681,36 +735,12 @@ class BinanceUsdmSymbolRules:
             name="quantity",
         )
 
-        if intent.order_type == "LIMIT":
-            if intent.price is None:
-                raise BinanceUsdmAdapterError("LIMIT price is required")
-            if self.price_min > 0 and intent.price < self.price_min:
-                raise BinanceUsdmAdapterError(
-                    "price is below exchangeInfo minimum"
-                )
-            if self.price_max > 0 and intent.price > self.price_max:
-                raise BinanceUsdmAdapterError(
-                    "price exceeds exchangeInfo maximum"
-                )
-            self._require_step(
-                intent.price,
-                self.tick_size,
-                minimum=self.price_min,
-                name="price",
-            )
+        selected_mark_price: BinanceUsdmMarkPrice | None = None
 
-        if self.min_notional is None or intent.reduce_only:
-            return None
-
-        if intent.order_type == "LIMIT":
-            if intent.price is None:
-                raise BinanceUsdmAdapterError("LIMIT price is required")
-            effective_price = intent.price
-            selected_mark_price = None
-        else:
+        def require_bound_mark_price(*, role: str) -> BinanceUsdmMarkPrice:
             if not isinstance(mark_price, BinanceUsdmMarkPrice):
                 raise BinanceUsdmAdapterError(
-                    "MARKET min-notional admission requires canonical mark-price evidence"
+                    f"{role} requires canonical mark-price evidence"
                 )
             if (
                 isinstance(maximum_mark_price_age_seconds, bool)
@@ -739,8 +769,63 @@ class BinanceUsdmSymbolRules:
                 raise BinanceUsdmAdapterError(
                     "mark-price evidence is stale"
                 )
-            effective_price = mark_price.price
-            selected_mark_price = mark_price
+            return mark_price
+
+        if intent.order_type == "LIMIT":
+            if intent.price is None:
+                raise BinanceUsdmAdapterError("LIMIT price is required")
+            if self.price_min > 0 and intent.price < self.price_min:
+                raise BinanceUsdmAdapterError(
+                    "price is below exchangeInfo minimum"
+                )
+            if self.price_max > 0 and intent.price > self.price_max:
+                raise BinanceUsdmAdapterError(
+                    "price exceeds exchangeInfo maximum"
+                )
+            self._require_step(
+                intent.price,
+                self.tick_size,
+                minimum=self.price_min,
+                name="price",
+            )
+            if (
+                self.percent_price_multiplier_up is not None
+                and self.percent_price_multiplier_down is not None
+            ):
+                selected_mark_price = require_bound_mark_price(
+                    role="LIMIT PERCENT_PRICE admission"
+                )
+                if (
+                    intent.side == "BUY"
+                    and intent.price
+                    > selected_mark_price.price
+                    * self.percent_price_multiplier_up
+                ):
+                    raise BinanceUsdmAdapterError(
+                        "BUY price exceeds exchangeInfo PERCENT_PRICE cap"
+                    )
+                if (
+                    intent.side == "SELL"
+                    and intent.price
+                    < selected_mark_price.price
+                    * self.percent_price_multiplier_down
+                ):
+                    raise BinanceUsdmAdapterError(
+                        "SELL price is below exchangeInfo PERCENT_PRICE floor"
+                    )
+
+        if self.min_notional is None or intent.reduce_only:
+            return selected_mark_price
+
+        if intent.order_type == "LIMIT":
+            if intent.price is None:
+                raise BinanceUsdmAdapterError("LIMIT price is required")
+            effective_price = intent.price
+        else:
+            selected_mark_price = require_bound_mark_price(
+                role="MARKET min-notional admission"
+            )
+            effective_price = selected_mark_price.price
 
         if intent.quantity * effective_price < self.min_notional:
             raise BinanceUsdmAdapterError(

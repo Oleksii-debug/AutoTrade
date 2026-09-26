@@ -93,18 +93,35 @@ public partial class MainWindow : Window
                 status = status.ValidateSuccessorOf(previous);
             }
 
-            _lastKnownConnectedStatus = status;
-            HostValue.Text = status.HostId;
-            AccountValue.Text = status.AccountId;
-            EnvironmentValue.Text = status.Environment;
-            StateVersionValue.Text = status.StateVersion;
-            LastEvidenceValue.Text = status.ObservedAtUtc.ToString("O");
-            ConnectionStatus.Text = status.Message;
+            if (status.IsCurrent)
+            {
+                _lastKnownConnectedStatus = status;
+                HostValue.Text = status.HostId;
+                AccountValue.Text = status.AccountId;
+                EnvironmentValue.Text = status.Environment;
+                StateVersionValue.Text = status.StateVersion;
+                LastEvidenceValue.Text = status.ObservedAtUtc.ToString("O");
+                ConnectionStatus.Text = status.Message;
+            }
+            else
+            {
+                HostValue.Text = $"{status.HostId} (stale)";
+                AccountValue.Text = $"{status.AccountId} (stale)";
+                EnvironmentValue.Text = $"{status.Environment} (stale)";
+                StateVersionValue.Text = $"{status.StateVersion} (stale)";
+                LastEvidenceValue.Text = $"{status.ObservedAtUtc:O} (stale)";
+                ConnectionStatus.Text =
+                    $"{status.Message} Snapshot values are stale and are not current evidence.";
+            }
+
             if (announce)
             {
+                string prefix = status.IsCurrent
+                    ? "Host status refreshed."
+                    : "Host status is stale.";
                 SetLiveRegionText(
                     HostStatusAnnouncement,
-                    $"Host status refreshed. {status.Message} State version {status.StateVersion}.");
+                    $"{prefix} {ConnectionStatus.Text} State version {status.StateVersion}. No cancellation, flattening, or provider outcome is implied.");
             }
 
             return;

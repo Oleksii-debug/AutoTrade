@@ -1,174 +1,178 @@
 # WhiteBIT adapter foundation evidence — 2026-09-26
 
-Status: **implementation/recorded-fixture foundation only; NOT QUALIFIED for LIVE
-provider authority and NOT evidence of a WhiteBIT paper/testnet environment**.
+Status: **implementation / deterministic-fixture foundation only; NOT QUALIFIED for LIVE provider authority and NOT evidence of a WhiteBIT paper/testnet environment**.
 
-Exact implementation source revision covered by this evidence:
-`e2571d461bcaf7f51dedfc693ffb19c96c4e31a0`.
+This is the single canonical WP-24 foundation note for issue #494. It records evidence that can be checked without credentials or network writes. It does not authorize credentials, provider probes, real orders, or LIVE trading.
 
-Canonical implementation and tests:
+## Exact identities
+
+- AutoTrade implementation source revision covered by this evidence: `527a19441ac3338d740f9feaffae2339b3dfb8d3`.
+- WhiteBIT official API documentation repository snapshot inspected: `whitebit-exchange/api-docs@fc217867a35de12118319c1ced7b1ae126b328e8`.
+- Documentation snapshot inspected on: 2026-09-26.
+- Changelog data at that documentation snapshot includes entries through 2025-09-22.
+- Qualification signature: **ABSENT**.
+- Exact-head CI result for this candidate lineage: **PENDING** when this note was written.
+- Real-account / production-equivalent sandbox evidence: **ABSENT**.
+
+The absence of a signature, terminal exact-head CI and provider-environment evidence means this document MUST NOT be interpreted as a QUALIFIED/PASS provider decision.
+
+Canonical implementation/tests covered here:
 - `mvp/autotrade_mvp/whitebit.py`
+- `mvp/autotrade_mvp/provider_transport.py`
 - `mvp/tests/test_whitebit_adapter.py`
-
-This artifact advances WP-24 without granting financial authority. It records the
-provider semantics that can be checked without credentials or network writes and
-keeps every missing real-account fact explicit.
+- `mvp/tests/test_provider_transport.py`
 
 ## Canonical AutoTrade requirements
 
-`docs/engineering/03_DATA_MARKET_PROVIDER_EXECUTION_ARCHITECTURE.md` requires:
-- actual account capability discovery rather than country/product assumptions;
-- endpoint/account-scoped quotas with reserved cancel/recovery capacity;
-- bounded read retry, but provider/idempotency/reconciliation evidence before a
-  possibly-sent financial write can be retried;
-- clock-drift fencing;
-- acknowledgement distinct from fill;
-- reconciliation after UNKNOWN;
-- provider qualification tied to the exact source/evidence class.
+`docs/engineering/03_DATA_MARKET_PROVIDER_EXECUTION_ARCHITECTURE.md` requires actual account capability evidence rather than geography/product assumptions; endpoint/account-scoped quotas with protected recovery/cancel capacity; bounded safe read retry; reconciliation before retry after a possibly-sent financial write; clock-drift fencing; ACK distinct from fill; UNKNOWN reconciliation; and provider qualification tied to exact evidence.
 
-The canonical provider research also states that a complete
-production-equivalent WhiteBIT sandbox was not established. This foundation does
-not reinterpret local simulation as provider parity.
+Local simulation or deterministic fixtures are not re-labelled as provider parity.
 
-## Public provider documentation checked on 2026-09-26
+## Official provider documentation basis
 
-- API overview: https://docs.whitebit.com/api-reference/overview
-- Private authentication: https://docs.whitebit.com/api-reference/authentication
-- REST rate limits/errors: https://docs.whitebit.com/api-reference/rate-limits
-- Security best practices: https://docs.whitebit.com/best-practices/security
-- Markets: https://docs.whitebit.com/concepts/markets
-- Order types: https://docs.whitebit.com/concepts/order-types
-- Spot API: https://docs.whitebit.com/api-reference/spot-trading/overview
-- Collateral API: https://docs.whitebit.com/api-reference/collateral-trading/overview
-- Futures overview: https://docs.whitebit.com/products/futures/overview
-- WebSocket API: https://docs.whitebit.com/websocket/overview
-- Changelog: https://docs.whitebit.com/changelog
+The source contract was checked against the official WhiteBIT documentation snapshot above, including:
 
-Observed provider contracts used by the implementation:
-1. Private REST requests are HMAC-SHA512 signed and carry a unique incrementing
-   nonce. With `nonceWindow`, nonce is Unix milliseconds and must remain within
-   the documented ±5 second server-time window.
-2. The provider documents per-IP rate limits and warns that endpoint-specific
-   limits can override broad defaults. AutoTrade therefore does not embed a
-   universal provider quota in its admission policy.
-3. HTTP 429 is documented for exponential retry starting at 1 second, doubling
-   to a 30-second cap with jitter. AutoTrade applies automatic backoff only to
-   READ/RECOVERY classes. Until provider-side financial idempotency is separately
-   qualified, WRITE/CANCEL 429 and 5xx outcomes enter reconciliation-first
-   handling rather than blind retry.
-4. WhiteBIT security guidance identifies `Info + Trading` as the minimal
-   trading-application permission set and reserves `Deposit + Withdraw` for
-   applications that move funds.
-5. The same security guidance states that WhiteBIT does not offer a public
-   testnet/sandbox and recommends IP whitelisting for production keys.
+- `pages/private/http-auth.mdx`: POST authentication, monotonically increasing nonce, optional `nonceWindow`, millisecond nonce guidance, ±5-second server-time window, uniqueness, HMAC-SHA512 signing, IP restriction and endpoint restriction guidance.
+- `pages/private/http-trade-v4.mdx`: private trade endpoints, endpoint-specific rate limits, create/cancel/history contracts and documented HTTP response classes.
+- `pages/faq.mdx`: 429 rate-limit behavior, wait-for-window guidance, minimum-permission/IP-restriction security guidance and reconnect/backoff guidance.
+- `public/data/changelog.json`: provider API/WebSocket change history, including stream and hedge-mode changes.
+- the source-level `WHITEBIT_OFFICIAL_DOCS` references.
+
+Documentation statements are provider contract inputs, not runtime proof that an account currently has a capability or that an endpoint is healthy.
+
+## Environment matrix
+
+| Environment | AutoTrade evidence use | Current provider qualification |
+| --- | --- | --- |
+| REPLAY | Recorded/local deterministic fixtures | Foundation only; not a WhiteBIT environment |
+| SIMULATION | Local simulator/deterministic fixtures | Foundation only; not a WhiteBIT environment |
+| PAPER | AutoTrade semantic environment only | NOT QUALIFIED; no proven production-equivalent WhiteBIT sandbox here |
+| LIVE | Real WhiteBIT service/account | NOT QUALIFIED; no authorized credential/probe/order evidence in this lineage |
+
+No test, demo, paper, or local result may be promoted to LIVE evidence.
 
 ## Credential boundary
 
-The foundation now has a machine-checked `WhiteBitCredentialBoundary`:
-- credential identity is a non-secret binding identifier;
-- exact admitted permissions are `INFO` + `TRADING`;
-- `DEPOSIT` and `WITHDRAW` are forbidden;
+The branch includes a machine-checked `WhiteBitCredentialBoundary` policy model requiring the intended minimum AutoTrade trading authority:
+
+- exact non-secret credential-binding identity;
+- `INFO` + `TRADING` only;
+- `DEPOSIT` / `WITHDRAW` fund-movement authority forbidden;
 - unknown permission names fail closed;
-- actual provider credentials are bound to `LIVE`;
-- LIVE admission requires an IP whitelist;
-- no API key or secret is stored in this evidence object.
+- actual provider credential environment must be LIVE for any future LIVE qualification;
+- IP allowlisting required by AutoTrade policy;
+- secrets never enter this evidence model.
 
-This contract does not prove that any particular account currently has these
-permissions. That remains account evidence.
+This is a policy/test contract. It is **not runtime proof** that any configured WhiteBIT credential currently satisfies those restrictions. Endpoint-level restriction and actual account capability still require provider/account evidence.
 
-## Nonce ownership and restart contract
+## Capability matrix
 
-`WhiteBitNonceState` and `WhiteBitNonceAllocator` add a provider-local,
-secret-free nonce checkpoint:
-- nonce scope is a credential-binding identity, not a raw key;
-- owner generation fences stale senders;
-- a lock prevents same-process concurrent callers from reusing a nonce;
-- restored checkpoints continue strictly above the previous nonce;
-- nonceWindow drift fails closed without advancing state;
-- the checkpoint contains no credential material.
+| Surface | Deterministic implementation evidence | Current qualification |
+| --- | --- | --- |
+| SPOT | exact decimals; market metadata; market/limit/stop request shapes; order/execution history; balances; recovery policy | Foundation only |
+| COLLATERAL | collateral request shapes; reduce-only preservation; positions; balances/borrow; funding; hedge-mode evidence | Foundation only |
+| FUTURES | futures market classification; position/funding/fee primitives; position-side evidence | Foundation only |
+| TRADFIFUTURES execution | explicit source rejection where provider capability is not established | Unsupported / fail closed |
+| guarded order submission | existing one-shot LIVE transport; ambiguous send becomes UNKNOWN/reconcile | Source behavior only |
+| order/execution history | pagination/normalization/reconciliation fixtures | Foundation only |
+| WebSocket recovery | endpoint validation and recovery checkpoint/policy fixtures | Foundation only |
 
-The allocator is **not** a second execution-owner service. Canonical
-cross-process sender ownership stays outside this module. The returned checkpoint
-must be durably recorded by the active execution owner before a signed request is
-submitted. A crash-safe journal/send integration test remains required before
-LIVE qualification.
+The matrix is not a real-account capability claim. Unsupported or account-specific semantics remain fail-closed.
+
+## Canonical nonce ownership, restart and concurrent send ordering
+
+There is exactly one production nonce authority for WhiteBIT: the existing journal-backed `WhiteBitDurableNonceAllocator` in `provider_transport.py`.
+
+The earlier branch-local in-memory `WhiteBitNonceState/WhiteBitNonceAllocator` experiment has been removed; it is not production evidence and must not reappear as a parallel nonce authority.
+
+The canonical WhiteBIT transport now holds the existing serialized-send lock from durable nonce allocation through signing, the final execution guard and the single wire send. This closes the race where a concurrently allocated nonce `n+1` could otherwise reach WhiteBIT before `n`.
+
+Relevant deterministic regressions include:
+
+- `test_durable_nonce_survives_restart_and_clock_regression`
+- `test_whitebit_transport_has_one_guarded_send_after_durable_nonce`
+- `test_whitebit_concurrent_sends_cannot_overtake_nonce_order`
+- `test_whitebit_final_guard_failure_never_reaches_wire`
+- `test_private_signer_uses_exact_body_and_caller_owned_nonce`
+- `test_nonce_window_requires_current_server_time_evidence`
+- `test_private_signer_rejects_nonce_conflict_and_binary_float`
+
+Provider-side clock skew and nonce acceptance on a real account remain unqualified.
 
 ## Rate-limit and retry contract
 
-`WhiteBitRateLimitBudget` takes an evidenced endpoint/window capacity from its
-caller. It reserves capacity in this priority order:
-1. normal traffic must preserve both recovery and cancel reserves;
-2. recovery may use its own reserve but must preserve cancel capacity;
-3. cancel has highest admission priority.
+`WhiteBitRateLimitBudget` takes an evidenced endpoint/window capacity from its caller. It does not assume one provider-wide quota. Normal traffic preserves recovery and cancel reserves; recovery preserves cancel capacity; cancel has highest admission priority.
 
-`classify_whitebit_http_retry` records:
-- 429 READ/RECOVERY: bounded exponential backoff with jitter;
-- 429 WRITE/CANCEL: no automatic retry; reconciliation required;
-- 5xx READ/RECOVERY: bounded backoff;
-- 5xx WRITE/CANCEL: no automatic retry; reconciliation required;
-- authentication and client/validation failures: no automatic retry.
+`classify_whitebit_http_retry` deliberately preserves the canonical UNKNOWN semantics:
 
-This is admission/classification logic, not a network scheduler and not proof of
-provider quota behavior on an actual account/IP.
+- 429 READ/RECOVERY: bounded backoff with jitter may be admitted;
+- 429 WRITE/CANCEL: **no automatic retry; reconciliation required**;
+- 5xx READ/RECOVERY: bounded backoff may be admitted;
+- 5xx WRITE/CANCEL: **no automatic retry; reconciliation required**;
+- authentication/client-validation classes: no automatic retry.
 
-## Capability / environment matrix
+Relevant regressions:
+- `test_rate_budget_preserves_recovery_and_cancel_capacity`
+- `test_retry_policy_backs_off_safe_reads_without_blind_financial_write_retry`
 
-| Surface | Foundation evidence | Provider qualification |
-|---|---|---|
-| SPOT | exact decimals, market metadata, market/limit/stop request shapes, order/execution history, spot balances, reconnect policy | **UNQUALIFIED** for actual account/LIVE |
-| COLLATERAL | collateral request shapes, reduce-only preservation, positions, collateral balances/borrow, funding, hedge-mode evidence | **UNQUALIFIED** for actual account/LIVE |
-| FUTURES | futures market classification, collateral-position/funding primitives, position-side evidence | **UNQUALIFIED** for actual account/LIVE |
-| REPLAY | local deterministic evidence only | not a WhiteBIT environment |
-| SIMULATION | local deterministic evidence only | not a WhiteBIT environment |
-| PAPER | AutoTrade-local evidence class only | WhiteBIT public sandbox/testnet not established |
-| LIVE | actual WhiteBIT service | **UNQUALIFIED; no probe authorized here** |
+Actual rate-limit feedback, endpoint/IP quota measurement and provider-side retry behavior remain unqualified until separately observed.
 
-Unsupported/unfinished provider semantics remain fail-closed. In particular this
-foundation does not claim universal OCO/OTO/RPI support, account-specific leverage
-or position modes, live stream completeness, provider-side idempotency, or
-production execution parity.
+## Submission and economic truth
 
-## Network-free regression evidence expected
+The existing submission parser treats a successful create response only as ACKNOWLEDGED, never as a fill. A possibly-sent request without a qualified definitive response becomes UNKNOWN and requires reconciliation before retry.
 
-Focused command:
-`python -m unittest mvp.tests.test_whitebit_adapter -v`
+Deterministic fixtures include:
 
-Repository gate:
-`python tools/verify.py`
+- `test_submission_success_is_acknowledged_not_fill`
+- `test_ambiguous_transport_requires_reconcile_before_retry`
+- `test_taker_band_cancellation_is_partial_fill_not_failure`
+- `test_external_order_without_client_id_remains_provider_truth`
+- `test_unique_execution_deal_maps_to_reconciliation_fill`
+- `test_execution_history_deduplicates_exact_rows_and_rejects_conflicts`
+- `test_funding_fingerprint_is_deterministic_but_changes_with_correction`
+- `test_whitebit_prepared_request_flows_through_dispatcher_and_ambiguity_never_retries`
 
-The focused suite now includes:
-- exact request/signature/nonceWindow fixtures;
-- concurrent nonce uniqueness and restart continuity;
-- stale owner-generation rejection;
-- credential permission and environment fencing;
-- rate-reserve starvation prevention;
-- 429 backoff and reconciliation-first 5xx financial write behavior;
-- partial-fill/cancel semantics;
-- execution identity/history pagination;
-- balances/positions/funding;
-- private/public stream recovery policy;
-- recursive secret redaction.
+These reduce implementation risk but do not prove full lifecycle completeness against a real provider account.
 
-CI results must be taken from the exact pull-request head after this evidence is
-committed. This document never turns a pending/cancelled workflow into PASS.
+## Stream/recovery evidence
 
-## Remaining WP-24 terminal evidence
+Deterministic fixtures include:
 
-Before any WP-24 capability can be marked QUALIFIED for LIVE:
-- obtain separately authorized, redacted account capability evidence;
-- prove the exact credential permission/IP binding without exposing secret values;
-- bind durable nonce checkpoint persistence atomically to the canonical guarded
-  send lifecycle and exercise restart boundaries;
-- record actual quota/429/Retry-After behavior for the qualified endpoint/IP
-  scope without exhausting safety reserves;
-- qualify public/private WebSocket authentication, reconnect, gap, REST backfill
-  and full-snapshot boundaries against recorded provider evidence;
-- exercise order rejection, partial fill, cancel/fill race, timeout-after-send,
-  duplicate/lost event and terminal correction scenarios;
-- reconcile positions, spot/collateral balances, executions and external/manual
-  activity across one coherent account snapshot;
-- record exact source SHA, CI/test artifacts, environment and unresolved limits;
-- keep any real-account probe behind separate explicit WP-58 authorization.
+- `test_current_websocket_host_is_required`
+- `test_positions_recover_only_after_new_full_snapshot`
+- `test_incremental_balance_requires_baseline_and_subscription`
+- `test_event_stream_reconnect_requires_backfill_not_just_resubscribe`
 
-No credential use, withdrawal authority or live order is introduced by this
-foundation.
+They prove local recovery semantics only. Production stream retention, authentication, reconnect timing, sequence-gap behavior and provider-side backfill completeness remain unqualified.
+
+## Focused and repository gates
+
+Useful deterministic commands include:
+
+- `python -m unittest mvp.tests.test_whitebit_adapter -v`
+- `python -m unittest mvp.tests.test_provider_transport.WhiteBitProviderTransportTests -v`
+- `python tools/verify.py`
+
+Results must be taken from the exact final head. A queued, cancelled, stale, or different-head workflow is never PASS.
+
+## Remaining terminal WP-24 evidence
+
+WP-24 remains **NOT QUALIFIED** until all applicable terminal evidence is present without weakening safety:
+
+1. terminal exact-head baseline, reconvergence-integrity and full Verify AutoTrade;
+2. a redacted machine-readable qualification artifact binding exact source/docs/test evidence;
+3. independent signature verification for the terminal qualification artifact;
+4. exact provider/account/environment capability evidence;
+5. actual credential restriction evidence without exposing secret material;
+6. provider-side quota/429 behavior with reserved recovery/cancel capacity;
+7. public/private stream authentication, reconnect, gap/backfill and snapshot completeness evidence;
+8. order rejection, partial fill, cancel/fill race, timeout-after-send, duplicate/lost event and terminal correction evidence;
+9. coherent positions/balances/orders/executions/manual-activity reconciliation for the exact account/environment scope;
+10. explicit test-environment evidence. If no production-equivalent WhiteBIT sandbox exists for the required surfaces, that absence remains explicit rather than becoming PAPER qualification;
+11. any real-account probe remains separately authorized and bounded; this foundation grants no such authority.
+
+## Current decision
+
+**IMPLEMENTATION / RECORDED-FIXTURE FOUNDATION ONLY — NOT QUALIFIED.**
+
+The current branch materially strengthens nonce send ordering and no-blind-retry behavior while reusing canonical authorities. It does not change WhiteBIT real-account or LIVE-trading authority.

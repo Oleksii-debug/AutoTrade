@@ -1,4 +1,5 @@
 from hashlib import sha1
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -50,6 +51,26 @@ class ReleaseManifestPortabilityTests(unittest.TestCase):
             outside.write_text("outside\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "inside repository"):
                 git_blob_sha(outside)
+
+    def test_manifest_records_hash_locked_python_artifacts(self):
+        document = json.loads(rendered_manifest())
+        dependencies = document["python_development_dependencies"]
+        self.assertGreater(len(dependencies), 0)
+        for dependency in dependencies:
+            self.assertGreater(len(dependency["hashes"]), 0)
+            self.assertTrue(
+                all(
+                    hash_value.startswith("sha256:") and len(hash_value) == 71
+                    for hash_value in dependency["hashes"]
+                )
+            )
+
+    def test_manifest_binds_research_dependency_entrypoint(self):
+        document = json.loads(rendered_manifest())
+        self.assertEqual(
+            document["source_inventory"]["research_pyproject_blob_sha"],
+            git_blob_sha(ROOT / "research" / "pyproject.toml"),
+        )
 
     def test_manifest_check_is_read_only_and_byte_stable(self):
         before = OUTPUT.read_bytes()

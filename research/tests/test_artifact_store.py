@@ -535,6 +535,107 @@ class ArtifactStoreTests(unittest.TestCase):
                 ):
                     store.load_manifest(artifact_id)
 
+    def test_manifest_aba_replacement_fails_before_transient_bytes_are_read(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"manifest-aba-boundary",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+                metadata={"kind": "canonical"},
+            )
+            manifest_path = store._manifest_path(artifact_id)
+
+            transient = dict(manifest)
+            transient["metadata"] = {"kind": "transient"}
+            transient["manifest_hash"] = _manifest_integrity_hash(transient)
+            transient_path = Path(directory) / "transient-manifest.json"
+            atomic_write_json(transient_path, transient)
+
+            canonical_backup = Path(directory) / "canonical-manifest.json"
+            transient_backup = Path(directory) / "transient-backup.json"
+            original_validate = store._validate_manifest_entry
+            validation_count = 0
+
+            def validate_with_aba(path):
+                nonlocal validation_count
+                entry = original_validate(path)
+                validation_count += 1
+                if validation_count == 1:
+                    os.replace(manifest_path, canonical_backup)
+                    os.replace(transient_path, manifest_path)
+                elif validation_count == 2:
+                    os.replace(manifest_path, transient_backup)
+                    os.replace(canonical_backup, manifest_path)
+                return entry
+
+            with patch.object(
+                store,
+                "_validate_manifest_entry",
+                side_effect=validate_with_aba,
+            ), patch(
+                "autotrade_research.artifacts.store.os.read"
+            ) as read_call:
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "manifest changed during read",
+                ):
+                    store.load_manifest(artifact_id)
+                read_call.assert_not_called()
+
+            restored = store.load_manifest(artifact_id)
+            self.assertEqual(restored["metadata"], {"kind": "canonical"})
+
+    @unittest.skipUnless(
+        hasattr(os, "mkfifo") and os.name != "nt",
+        "FIFO replacement requires POSIX mkfifo",
+    )
+    def test_manifest_fifo_swap_before_open_is_rejected_without_blocking_read(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"manifest-fifo-boundary",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+            manifest_path = store._manifest_path(artifact_id)
+            canonical_backup = Path(directory) / "canonical-manifest.json"
+            original_validate = store._validate_manifest_entry
+            swapped = False
+
+            def validate_then_swap(path):
+                nonlocal swapped
+                entry = original_validate(path)
+                if not swapped:
+                    swapped = True
+                    os.replace(manifest_path, canonical_backup)
+                    os.mkfifo(manifest_path)
+                return entry
+
+            try:
+                with patch.object(
+                    store,
+                    "_validate_manifest_entry",
+                    side_effect=validate_then_swap,
+                ), patch(
+                    "autotrade_research.artifacts.store.os.read"
+                ) as read_call:
+                    with self.assertRaisesRegex(
+                        ArtifactIntegrityError,
+                        "descriptor must be a regular file",
+                    ):
+                        store.load_manifest(artifact_id)
+                    read_call.assert_not_called()
+            finally:
+                if manifest_path.exists():
+                    manifest_path.unlink()
+                if canonical_backup.exists():
+                    os.replace(canonical_backup, manifest_path)
+
     def test_manifest_hard_link_alias_is_rejected_and_audited(self):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(Path(directory) / "store")

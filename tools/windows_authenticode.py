@@ -271,15 +271,18 @@ def _powershell_environment() -> dict[str, str]:
 def _verify_authenticode_file(path: Path, *, runner=subprocess.run) -> dict[str, str]:
     powershell = _trusted_windows_powershell()
     script = r"""
-$ErrorActionPreference = 'Stop'
-$s = Get-AuthenticodeSignature -LiteralPath $args[0]
-$result = [ordered]@{
-  status = $s.Status.ToString()
-  signer_thumbprint = if ($null -ne $s.SignerCertificate) { $s.SignerCertificate.Thumbprint } else { $null }
-  signer_subject = if ($null -ne $s.SignerCertificate) { $s.SignerCertificate.Subject } else { $null }
-  timestamp_thumbprint = if ($null -ne $s.TimeStamperCertificate) { $s.TimeStamperCertificate.Thumbprint } else { $null }
+& {
+  param([string]$TargetPath)
+  $ErrorActionPreference = 'Stop'
+  $s = Get-AuthenticodeSignature -LiteralPath $TargetPath
+  $result = [ordered]@{
+    status = $s.Status.ToString()
+    signer_thumbprint = if ($null -ne $s.SignerCertificate) { $s.SignerCertificate.Thumbprint } else { $null }
+    signer_subject = if ($null -ne $s.SignerCertificate) { $s.SignerCertificate.Subject } else { $null }
+    timestamp_thumbprint = if ($null -ne $s.TimeStamperCertificate) { $s.TimeStamperCertificate.Thumbprint } else { $null }
+  }
+  $result | ConvertTo-Json -Compress
 }
-$result | ConvertTo-Json -Compress
 """.strip()
     try:
         completed = runner(
@@ -290,7 +293,6 @@ $result | ConvertTo-Json -Compress
                 "-NonInteractive",
                 "-Command",
                 script,
-                "--",
                 os.fspath(path),
             ],
             env=_powershell_environment(),

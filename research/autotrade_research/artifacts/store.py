@@ -412,10 +412,24 @@ class ArtifactStore:
             raise ArtifactIntegrityError("artifact object hash mismatch")
         return object_path
 
+    def _read_verified_object_bytes(self, manifest: dict[str, Any]) -> bytes:
+        source = self._verify_manifest_object(manifest)
+        expected_digest = manifest["sha256"].removeprefix("sha256:")
+        expected_bytes = manifest["bytes"]
+        try:
+            data = source.read_bytes()
+        except OSError as error:
+            raise ArtifactIntegrityError("artifact object could not be read") from error
+        if len(data) != expected_bytes or sha256(data).hexdigest() != expected_digest:
+            raise ArtifactIntegrityError("artifact object changed during read")
+        if source.is_symlink():
+            raise ArtifactIntegrityError("artifact object must not be a symlink")
+        return data
+
     def read_bytes(self, artifact_id: str) -> bytes:
         manifest = self.load_manifest(artifact_id)
         _verify_manifest_integrity(manifest, required=True)
-        return self._verify_manifest_object(manifest).read_bytes()
+        return self._read_verified_object_bytes(manifest)
 
     def export(self, artifact_id: str, destination: str | Path) -> Path:
         manifest = self.load_manifest(artifact_id)

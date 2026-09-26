@@ -1,5 +1,6 @@
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -30,6 +31,12 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
             link.symlink_to(target)
         except (OSError, NotImplementedError) as error:
             self.skipTest(f"symlink creation unavailable: {error}")
+
+    def _hardlink_or_skip(self, link: Path, target: Path):
+        try:
+            os.link(target, link)
+        except (OSError, NotImplementedError) as error:
+            self.skipTest(f"hardlink creation unavailable: {error}")
 
     def provenance(self, *, eligible=False, source_sha=None):
         path = self.root / "provenance.json"
@@ -697,6 +704,25 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
         self.assertFalse(output.exists())
         self.assertEqual(provenance.read_bytes(), before)
 
+    def test_bundle_output_hardlink_is_rejected_without_touching_alias(self):
+        victim = self.root / "victim-bundle-hardlink.bin"
+        victim.write_bytes(b"do-not-touch")
+        output = self.root / "diagnostics.zip"
+        self._hardlink_or_skip(output, victim)
+
+        with self.assertRaisesRegex(BundleError, "bundle output is unsafe"):
+            build_bundle(
+                staging=self.staging,
+                output=output,
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+
+        self.assertEqual(victim.read_bytes(), b"do-not-touch")
+        self.assertEqual(output.read_bytes(), b"do-not-touch")
+
     def test_bundle_output_symlink_is_rejected_without_touching_target(self):
         victim = self.root / "victim-bundle.bin"
         victim.write_bytes(b"do-not-touch")
@@ -738,6 +764,31 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
             output.with_suffix(".zip.sha256").read_text(encoding="utf-8").split()[0],
             result["sha256"],
         )
+
+    def test_bundle_hash_hardlink_is_rejected_before_bundle_mutation(self):
+        output = self.root / "diagnostics.zip"
+        output.write_bytes(b"old-bundle")
+        victim = self.root / "victim-bundle-hash-hardlink.txt"
+        victim.write_text("do-not-touch", encoding="utf-8")
+        hash_path = output.with_suffix(output.suffix + ".sha256")
+        self._hardlink_or_skip(hash_path, victim)
+
+        with self.assertRaisesRegex(
+            BundleError,
+            "bundle hash output is unsafe",
+        ):
+            build_bundle(
+                staging=self.staging,
+                output=output,
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+
+        self.assertEqual(output.read_bytes(), b"old-bundle")
+        self.assertEqual(victim.read_text(encoding="utf-8"), "do-not-touch")
+        self.assertEqual(hash_path.read_text(encoding="utf-8"), "do-not-touch")
 
     def test_bundle_hash_symlink_is_rejected_before_bundle_mutation(self):
         output = self.root / "diagnostics.zip"

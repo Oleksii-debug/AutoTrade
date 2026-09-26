@@ -790,19 +790,29 @@ def build_population_coverage(
         if no_trade and outcome_class != "NULL":
             raise ValueError("NO_TRADE semantic subtype must use NULL outcome class")
 
-        reconciliation_evidence = (
-            {
+        if no_trade:
+            reconciliation_evidence = {
                 "status": "NOT_REQUIRED",
                 "episode_id": episode_id,
                 "reason": "NO_TRADE_HAS_NO_EXTERNAL_EXECUTION",
             }
-            if no_trade
-            else resolve_reconciliation_evidence(
-                episode_id,
-                causal_cutoff=cutoff,
-                resolver=reconciliation_evidence_resolver,
-            )
-        )
+        else:
+            try:
+                reconciliation_evidence = resolve_reconciliation_evidence(
+                    episode_id,
+                    causal_cutoff=cutoff,
+                    resolver=reconciliation_evidence_resolver,
+                )
+            except (TypeError, ValueError):
+                # Population construction is a qualification boundary. A malformed
+                # or cross-episode authority record must make the row ineligible,
+                # not abort manifest construction and bypass durable NO_UPDATE
+                # evidence generation.
+                reconciliation_evidence = {
+                    "status": "UNVERIFIED",
+                    "episode_id": episode_id,
+                    "reason": "RECONCILIATION_EVIDENCE_INVALID",
+                }
         reconciliation_state = (
             "RECONCILED"
             if no_trade or reconciliation_evidence.get("status") == "VERIFIED"

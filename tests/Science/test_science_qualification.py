@@ -1,6 +1,7 @@
 from dataclasses import replace
 from hashlib import sha256
 import json
+from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -218,7 +219,7 @@ class ScientificQualificationTests(unittest.TestCase):
 
         with TemporaryDirectory() as repository_directory:
             source_sha, policy_path = _initialize_exact_source_policy_repo(
-                qualification_trust.Path(repository_directory),
+                Path(repository_directory),
                 canonical_policy,
             )
             policy_path.write_text(
@@ -257,7 +258,7 @@ class ScientificQualificationTests(unittest.TestCase):
                 with patch.object(
                     qualification_trust,
                     "_QUALIFICATION_TRUST_REPOSITORY_ROOT",
-                    qualification_trust.Path(repository_directory),
+                    Path(repository_directory),
                 ):
                     result = qualify_scientific_learning(
                         value,

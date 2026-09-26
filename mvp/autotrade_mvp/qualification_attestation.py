@@ -50,6 +50,8 @@ def _trusted_git_environment() -> dict[str, str]:
     # Replacement-object semantics are forbidden at this trust boundary.
     environment["GIT_NO_REPLACE_OBJECTS"] = "1"
     return environment
+
+
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$")
 _RSA_METHOD = "RSA_PKCS1V15_SHA256"

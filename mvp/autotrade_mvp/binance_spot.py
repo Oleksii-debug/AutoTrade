@@ -1201,6 +1201,11 @@ def coverage_evidence(
     ):
         if type(value) is not bool:
             raise TypeError(f"{name} must be boolean")
+    if qualified_exclusion_semantics:
+        raise BinanceSpotAdapterError(
+            "Binance Spot foundation cannot self-assert provider exclusion semantics; "
+            "exact qualification evidence is required"
+        )
     return CoverageSurfaceEvidence(
         provider_id="BINANCE",
         account_id=account_id,

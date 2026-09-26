@@ -163,6 +163,10 @@ class DiagnosticTraceTests(unittest.TestCase):
             "message": '{"api_secret":"WHITEBIT-JSON-SECRET","safe":"ok"}',
             "repr_message": "{'api-secret': 'WHITEBIT-REPR-SECRET', 'safe': 'ok'}",
             "header_text": "X-TXC-SIGNATURE: WHITEBIT-TEXT-SIGNATURE",
+            "sentinel_prefixed": "X-TXC-SIGNATURE=[REDACTED]WHITEBIT-SENTINEL-BYPASS",
+            "sentinel_spaced": "api_secret=[REDACTED] WHITEBIT-SPACED-SENTINEL-BYPASS",
+            "password_spaced": "password=TOP SECRET",
+            "api_secret_spaced": "api_secret=ABC DEF",
             "signed_url": (
                 "https://provider.test/private?"
                 "X-TXC-PAYLOAD=WHITEBIT-URL-PAYLOAD&symbol=BTC"
@@ -183,6 +187,19 @@ class DiagnosticTraceTests(unittest.TestCase):
             redacted["header_text"],
             "X-TXC-SIGNATURE:[REDACTED]",
         )
+        self.assertEqual(
+            redacted["sentinel_prefixed"],
+            "X-TXC-SIGNATURE=[REDACTED]",
+        )
+        self.assertNotIn("WHITEBIT-SENTINEL-BYPASS", redacted["sentinel_prefixed"])
+        self.assertEqual(redacted["sentinel_spaced"], "api_secret=[REDACTED]")
+        self.assertNotIn(
+            "WHITEBIT-SPACED-SENTINEL-BYPASS", redacted["sentinel_spaced"]
+        )
+        self.assertEqual(redacted["password_spaced"], "password=[REDACTED]")
+        self.assertEqual(redacted["api_secret_spaced"], "api_secret=[REDACTED]")
+        self.assertNotIn("TOP SECRET", redacted["password_spaced"])
+        self.assertNotIn("ABC DEF", redacted["api_secret_spaced"])
         self.assertEqual(
             redacted["signed_url"],
             "https://provider.test/private?"

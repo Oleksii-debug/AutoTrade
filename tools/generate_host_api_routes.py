@@ -265,7 +265,7 @@ def render_web(operations: tuple[Operation, ...]) -> str:
     }}
     let value = template;
     const required = [
-      ...template.matchAll(/\{{([A-Za-z_][A-Za-z0-9_]*)\}}/g)
+      ...template.matchAll(/\\{{([A-Za-z_][A-Za-z0-9_]*)\\}}/g)
     ].map((match) => match[1]);
     for (const name of required) {{
       const raw = parameters[name];
@@ -280,7 +280,7 @@ def render_web(operations: tuple[Operation, ...]) -> str:
       }}
       value = value.replace("{{" + name + "}}", encodeURIComponent(raw));
     }}
-    if (/\{{|\}}/.test(value)) {{
+    if (/\\{{|\\}}/.test(value)) {{
       throw new Error("Host API route template was not fully resolved");
     }}
     return value;

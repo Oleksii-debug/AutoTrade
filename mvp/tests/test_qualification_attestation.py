@@ -424,6 +424,7 @@ class QualificationAttestationTests(unittest.TestCase):
                 )
             self.assertEqual(loaded.roots, canonical_policy.roots)
             self.assertNotEqual(loaded.roots, hostile_policy.roots)
+
     def test_canonical_policy_rejects_caller_selected_historical_source(self):
         canonical_policy = policy(root())
         with TemporaryDirectory() as directory:

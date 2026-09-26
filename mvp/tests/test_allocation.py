@@ -57,6 +57,12 @@ class AllocationTests(unittest.TestCase):
             holding_cost_rate=holding_cost_rate,
         )
 
+    def test_empty_portfolio_fallback_has_known_zero_stress_loss(self):
+        result = allocate_targets([], self.policy())
+        self.assertEqual(result.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(result.gross_notional, Decimal("0"))
+        self.assertEqual(result.worst_stress_loss, Decimal("0"))
+
     def test_funded_request_is_accepted_without_scaling(self):
         result = allocate_targets([self.candidate()], self.policy())
         self.assertEqual(result.status, "ALLOCATED")

@@ -823,6 +823,130 @@ class JournalBackedHostApiTests(unittest.TestCase):
         )
 
 
+        authority_event_count_before_restore = len(
+            JournalStore(self.path).load_events("authority_state", "canonical")
+        )
+        restore_payload = dict(fresh_policy_payload)
+        restore_payload.update(
+            {
+                "restore_new_exposure": True,
+                "reason_code": "POLICY_REVIEW",
+            }
+        )
+        restore_command = self.command(
+            command_id="33333333-3333-3333-3333-333333333333",
+            key="restore-after-reconciliation",
+            version=restarted_host.snapshot()["state_version"],
+            environment="SIMULATION",
+            action="SET_AUTHORITY",
+            payload=restore_payload,
+        )
+        restore_accepted = restarted_host.submit(restore_command)
+        self.assertEqual(restore_accepted.status, "ACCEPTED")
+        restore_event = next(
+            item
+            for item in restarted_host.events_after(0)
+            if item.payload.get("operation_id") == restore_accepted.operation_id
+            and item.kind == "COMMAND_ACCEPTED"
+        )
+        self.assertTrue(
+            restore_event.payload["action_payload"]["restore_new_exposure"]
+        )
+        self.assertEqual(
+            restore_event.payload["action_payload"]["reason_code"],
+            "POLICY_REVIEW",
+        )
+        self.assertEqual(
+            restore_event.payload["action_payload"]["expected_block"],
+            {
+                "command_id": "11111111-1111-1111-1111-111111111111",
+                "reason": (
+                    "host_operator_command:"
+                    "BLOCK_NEW_EXPOSURE:EMERGENCY_STOP"
+                ),
+                "blocked_at": "2030-01-01T00:00:00Z",
+            },
+        )
+
+        restore_completed = restarted_host.execute_authority_operation(
+            restore_accepted.operation_id
+        )
+        self.assertEqual(restore_completed.phase, "SUCCEEDED")
+        self.assertEqual(
+            restore_completed.affected_refs,
+            (
+                "authority-policy:fresh-exposure-policy",
+                "authority-new-exposure-block:"
+                "paper-account-1:SIMULATION",
+            ),
+        )
+        self.assertEqual(
+            [item["event_type"] for item in restore_completed.evidence],
+            ["AuthorityPolicyRegistered", "AuthorityNewExposureRestored"],
+        )
+
+        after_restore = AuthorityService(JournalStore(self.path))
+        self.assertFalse(
+            after_restore.is_new_exposure_blocked(
+                "paper-account-1",
+                "SIMULATION",
+            )
+        )
+        admitted = after_restore._admit_unverified(
+            admission_id="restored-new-risk",
+            policy_id="fresh-exposure-policy",
+            intent_hash="restored-risk-intent",
+            account_id="paper-account-1",
+            environment="SIMULATION",
+            instrument_id="11111111-1111-4111-8111-111111111111",
+            instrument_version=1,
+            action="ORDER.SUBMIT",
+            notional="10",
+            state_version=3,
+            risk_admitted=True,
+            risk_reducing=False,
+            now="2030-01-01T00:00:05Z",
+        )
+        self.assertEqual(admitted.outcome, "ADMITTED")
+        self.assertEqual(
+            after_restore.dispatch_allowed(
+                admitted.admission_id,
+                intent_hash="restored-risk-intent",
+                account_id="paper-account-1",
+                environment="SIMULATION",
+                instrument_id="11111111-1111-4111-8111-111111111111",
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                now="2030-01-01T00:00:06Z",
+            ),
+            (True, "allowed"),
+        )
+
+        restarted_after_restore = self.store(
+            environment="SIMULATION",
+            now="2030-01-01T00:00:07Z",
+        )
+        self.assertFalse(
+            AuthorityService(JournalStore(self.path)).is_new_exposure_blocked(
+                "paper-account-1",
+                "SIMULATION",
+            )
+        )
+        replayed_restore = restarted_after_restore.execute_authority_operation(
+            restore_accepted.operation_id
+        )
+        self.assertEqual(replayed_restore.phase, "SUCCEEDED")
+        self.assertEqual(
+            len(
+                JournalStore(self.path).load_events(
+                    "authority_state",
+                    "canonical",
+                )
+            ),
+            authority_event_count_before_restore + 2,
+        )
+
+
     def test_stale_restore_cannot_clear_newer_new_exposure_block(self):
         journal = JournalStore(self.path)
         service = AuthorityService(journal)

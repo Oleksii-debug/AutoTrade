@@ -195,6 +195,31 @@ def reference_price(
     )
 
 
+def provider_reference(
+    *,
+    instrument_version="BTCUSDT:v1",
+    symbol="BTCUSDT",
+    price="40000",
+    observed_at=NOW - timedelta(seconds=1),
+):
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    delta = observed_at - epoch
+    timestamp_ms = (
+        delta.days * 86_400_000
+        + delta.seconds * 1_000
+        + delta.microseconds // 1_000
+    )
+    return BinanceSpotReferencePrice.from_reference_price_payload(
+        instrument_version=instrument_version,
+        symbol=symbol,
+        payload={
+            "symbol": symbol,
+            "referencePrice": price,
+            "timestamp": timestamp_ms,
+        },
+    )
+
+
 class BinanceSpotFoundationTests(unittest.TestCase):
     def test_limit_request_preserves_exact_strings_and_requests_ack_only(self):
         intent = BinanceSpotOrderIntent.create(
@@ -236,6 +261,7 @@ class BinanceSpotFoundationTests(unittest.TestCase):
             capability=capability(),
             symbol_rules=symbol_rules(),
             at=NOW,
+            reference_price_observation=provider_reference(price=None),
             market_reference=reference,
             maximum_market_reference_age_seconds=30,
         )
@@ -356,6 +382,7 @@ class BinanceSpotFoundationTests(unittest.TestCase):
                 capability=capability(),
                 symbol_rules=symbol_rules(min_notional="50"),
                 at=NOW,
+                reference_price_observation=provider_reference(price=None),
                 market_reference=reference_price(price="40000"),
                 maximum_market_reference_age_seconds=30,
             )
@@ -377,6 +404,7 @@ class BinanceSpotFoundationTests(unittest.TestCase):
             rules.validate(
                 intent,
                 at=NOW,
+                reference_price_observation=provider_reference(price=None),
                 market_reference="40000",
                 maximum_market_reference_age_seconds=30,
             )
@@ -388,9 +416,11 @@ class BinanceSpotFoundationTests(unittest.TestCase):
                 capability=capability(),
                 symbol_rules=rules,
                 at=NOW,
-                market_reference=reference_price(
+                reference_price_observation=provider_reference(
+                    price=None,
                     observed_at=NOW - timedelta(seconds=31),
                 ),
+                market_reference=reference_price(),
                 maximum_market_reference_age_seconds=30,
             )
 
@@ -401,9 +431,11 @@ class BinanceSpotFoundationTests(unittest.TestCase):
                 capability=capability(),
                 symbol_rules=rules,
                 at=NOW,
-                market_reference=reference_price(
+                reference_price_observation=provider_reference(
+                    price=None,
                     observed_at=NOW + timedelta(seconds=1),
                 ),
+                market_reference=reference_price(),
                 maximum_market_reference_age_seconds=30,
             )
 
@@ -422,9 +454,11 @@ class BinanceSpotFoundationTests(unittest.TestCase):
                 capability=capability(),
                 symbol_rules=symbol_rules(),
                 at=NOW,
-                market_reference=reference_price(
+                reference_price_observation=provider_reference(
                     instrument_version="BTCUSDT:v2",
+                    price=None,
                 ),
+                market_reference=reference_price(),
                 maximum_market_reference_age_seconds=30,
             )
         with self.assertRaisesRegex(BinanceSpotAdapterError, "symbol"):
@@ -434,7 +468,11 @@ class BinanceSpotFoundationTests(unittest.TestCase):
                 capability=capability(),
                 symbol_rules=symbol_rules(),
                 at=NOW,
-                market_reference=reference_price(symbol="ETHUSDT"),
+                reference_price_observation=provider_reference(
+                    symbol="ETHUSDT",
+                    price=None,
+                ),
+                market_reference=reference_price(),
                 maximum_market_reference_age_seconds=30,
             )
 
@@ -455,6 +493,7 @@ class BinanceSpotFoundationTests(unittest.TestCase):
                 capability=capability(),
                 symbol_rules=rules,
                 at=NOW,
+                reference_price_observation=provider_reference(price=None),
                 market_reference=reference_price(
                     price="60",
                     avg_price_mins=0,
@@ -469,6 +508,7 @@ class BinanceSpotFoundationTests(unittest.TestCase):
                 capability=capability(),
                 symbol_rules=rules,
                 at=NOW,
+                reference_price_observation=provider_reference(price=None),
                 market_reference=reference_price(
                     price="40",
                     avg_price_mins=5,
@@ -482,6 +522,7 @@ class BinanceSpotFoundationTests(unittest.TestCase):
             capability=capability(),
             symbol_rules=rules,
             at=NOW,
+            reference_price_observation=provider_reference(price=None),
             market_reference=reference_price(
                 price="60",
                 avg_price_mins=5,
@@ -508,6 +549,7 @@ class BinanceSpotFoundationTests(unittest.TestCase):
                 capability=capability(),
                 symbol_rules=rules,
                 at=NOW,
+                reference_price_observation=provider_reference(price=None),
                 market_reference=reference_price(
                     price="60",
                     avg_price_mins=5,
@@ -521,6 +563,7 @@ class BinanceSpotFoundationTests(unittest.TestCase):
             capability=capability(),
             symbol_rules=rules,
             at=NOW,
+            reference_price_observation=provider_reference(price=None),
             market_reference=reference_price(
                 price="60",
                 avg_price_mins=0,
@@ -529,6 +572,145 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         )
         self.assertEqual(accepted.market_reference_kind, "LAST")
         self.assertEqual(accepted.market_reference_window_minutes, 0)
+
+    def test_provider_reference_price_precedes_average_fallback(self):
+        intent = BinanceSpotOrderIntent.create(
+            instrument_version="BTCUSDT:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="MARKET",
+            quantity="1",
+        )
+        rules = symbol_rules(min_notional="50", avg_price_mins=5)
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "notional"):
+            prepare_order_request(
+                intent,
+                client_order_id="at-provider-reference-wins-reject",
+                capability=capability(),
+                symbol_rules=rules,
+                at=NOW,
+                reference_price_observation=provider_reference(price="40"),
+                market_reference=reference_price(
+                    price="60",
+                    avg_price_mins=5,
+                ),
+                maximum_market_reference_age_seconds=30,
+            )
+
+        provider = provider_reference(price="60")
+        accepted = prepare_order_request(
+            intent,
+            client_order_id="at-provider-reference-wins-accept",
+            capability=capability(),
+            symbol_rules=rules,
+            at=NOW,
+            reference_price_observation=provider,
+            market_reference=reference_price(
+                price="40",
+                avg_price_mins=5,
+            ),
+            maximum_market_reference_age_seconds=30,
+        )
+        self.assertEqual(accepted.market_reference_kind, "REFERENCE")
+        self.assertIsNone(accepted.market_reference_window_minutes)
+        self.assertEqual(
+            accepted.reference_price_observation_source_sha256,
+            provider.source_sha256,
+        )
+        self.assertEqual(
+            accepted.market_reference_source_sha256,
+            provider.source_sha256,
+        )
+
+    def test_null_provider_reference_permits_exact_avg_price_fallback_only(self):
+        intent = BinanceSpotOrderIntent.create(
+            instrument_version="BTCUSDT:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="MARKET",
+            quantity="1",
+        )
+        rules = symbol_rules(min_notional="50", avg_price_mins=5)
+        provider = provider_reference(price=None)
+        fallback = reference_price(price="60", avg_price_mins=5)
+
+        accepted = prepare_order_request(
+            intent,
+            client_order_id="at-null-reference-fallback",
+            capability=capability(),
+            symbol_rules=rules,
+            at=NOW,
+            reference_price_observation=provider,
+            market_reference=fallback,
+            maximum_market_reference_age_seconds=30,
+        )
+        self.assertEqual(accepted.market_reference_kind, "AVERAGE")
+        self.assertEqual(accepted.market_reference_window_minutes, 5)
+        self.assertEqual(
+            accepted.reference_price_observation_source_sha256,
+            provider.source_sha256,
+        )
+        self.assertEqual(
+            accepted.market_reference_source_sha256,
+            fallback.source_sha256,
+        )
+        self.assertNotEqual(provider.source_sha256, fallback.source_sha256)
+
+        with self.assertRaisesRegex(
+            BinanceSpotAdapterError,
+            "provider reference-price observation",
+        ):
+            prepare_order_request(
+                intent,
+                client_order_id="at-missing-reference-observation",
+                capability=capability(),
+                symbol_rules=rules,
+                at=NOW,
+                market_reference=fallback,
+                maximum_market_reference_age_seconds=30,
+            )
+
+    def test_reference_price_endpoint_parser_binds_nullable_price_symbol_and_time(self):
+        missing = provider_reference(price=None)
+        self.assertEqual(missing.reference_kind, "REFERENCE")
+        self.assertIsNone(missing.price)
+        self.assertIsNone(missing.averaging_window_minutes)
+
+        present = provider_reference(price="60000.25")
+        self.assertEqual(present.price, Decimal("60000.25"))
+        self.assertEqual(present.reference_kind, "REFERENCE")
+        self.assertIsNone(present.averaging_window_minutes)
+
+        epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        timestamp_ms = int((NOW - epoch).total_seconds() * 1000)
+        with self.assertRaisesRegex(
+            BinanceSpotAdapterError,
+            "does not match requested symbol",
+        ):
+            BinanceSpotReferencePrice.from_reference_price_payload(
+                instrument_version="BTCUSDT:v1",
+                symbol="BTCUSDT",
+                payload={
+                    "symbol": "ETHUSDT",
+                    "referencePrice": "60000",
+                    "timestamp": timestamp_ms,
+                },
+            )
+        with self.assertRaisesRegex(
+            BinanceSpotAdapterError,
+            "fields are not canonical",
+        ):
+            BinanceSpotReferencePrice.from_reference_price_payload(
+                instrument_version="BTCUSDT:v1",
+                symbol="BTCUSDT",
+                payload={
+                    "symbol": "BTCUSDT",
+                    "referencePrice": None,
+                    "timestamp": timestamp_ms,
+                    "unexpected": True,
+                },
+            )
 
     def test_exchange_info_avg_price_mins_is_strictly_validated(self):
         for invalid in (True, -1, "5"):

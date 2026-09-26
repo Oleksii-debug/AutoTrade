@@ -47,6 +47,20 @@ _CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256: str | None = None
 _MAX_QUALIFICATION_TRUST_POLICY_BYTES = 1_048_576
 
 
+def canonical_packaged_qualification_trust_source_sha() -> str | None:
+    """Return the source-controlled packaged-release source SHA, when configured.
+
+    Release packaging consumes the same immutable source pin as the installed
+    non-Git verifier.  Keeping this accessor source-controlled prevents a
+    composition caller from selecting which source identity authorizes trust.
+    """
+
+    value = _CANONICAL_PACKAGED_QUALIFICATION_TRUST_SOURCE_SHA
+    if value is None:
+        return None
+    return _git_sha(value, name="packaged qualification trust source SHA")
+
+
 def canonical_packaged_qualification_trust_policy_digest() -> str | None:
     """Return the source-controlled release-policy digest, when configured.
 

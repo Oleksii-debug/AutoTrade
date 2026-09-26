@@ -328,6 +328,67 @@ class RecoveryController:
             account_id=account_id,
         )
 
+    @staticmethod
+    def _validated_submission_event_sequence(
+        aggregate_id: str,
+        aggregate_events: list[dict[str, object]],
+    ) -> tuple[str, ...]:
+        """Validate one durable submission attempt before recovery classifies it.
+
+        JournalStore proves byte integrity; recovery must still prove the
+        dispatch state machine.  In particular, no unknown tail or fabricated
+        terminal event may erase a previously durable send barrier.
+        """
+
+        if not aggregate_events:
+            raise RuntimeError("Submission journal aggregate is empty")
+        event_types: list[str] = []
+        for expected_version, event in enumerate(aggregate_events, start=1):
+            if event.get("aggregate_id") != aggregate_id:
+                raise RuntimeError("Submission journal aggregate identity changed")
+            version = event.get("aggregate_version")
+            if type(version) is not int or version != expected_version:
+                raise RuntimeError(
+                    "Submission journal aggregate versions are not contiguous"
+                )
+            event_type = event.get("event_type")
+            if not isinstance(event_type, str) or not event_type:
+                raise RuntimeError("Submission journal event type is invalid")
+            event_types.append(event_type)
+
+        sequence = tuple(event_types)
+        valid_sequences = {
+            ("SubmissionPrepared",),
+            ("SubmissionPrepared", "SubmissionBlocked"),
+            ("SubmissionPrepared", "SubmissionUnknown"),
+            ("SubmissionPrepared", "SubmissionSending"),
+            (
+                "SubmissionPrepared",
+                "SubmissionSending",
+                "SubmissionSent",
+            ),
+            (
+                "SubmissionPrepared",
+                "SubmissionSending",
+                "SubmissionUnknown",
+            ),
+            # A provider wrapper may swallow/mask a final-guard rejection.
+            # The dispatcher records Blocked first, then upgrades the outcome
+            # to UNKNOWN because an outbound side effect can no longer be
+            # disproved.  Recovery must preserve that legitimate ambiguity.
+            (
+                "SubmissionPrepared",
+                "SubmissionBlocked",
+                "SubmissionUnknown",
+            ),
+        }
+        if sequence not in valid_sequences:
+            raise RuntimeError(
+                "Submission journal transition sequence is invalid: "
+                + " -> ".join(sequence)
+            )
+        return sequence
+
     def recover_durable_submission_uncertainty(
         self,
         *,
@@ -382,8 +443,25 @@ class RecoveryController:
             ):
                 continue
 
+            sequence = self._validated_submission_event_sequence(
+                aggregate_id,
+                aggregate_events,
+            )
             last = aggregate_events[-1]
-            if last.get("event_type") not in {
+
+            attempt_id = payload.get("attempt_id")
+            if isinstance(attempt_id, str) and attempt_id.strip():
+                expected_aggregate = submission_attempt_aggregate_id(
+                    environment=normalized_environment,
+                    account_id=normalized_account,
+                    attempt_id=attempt_id.strip(),
+                )
+                if expected_aggregate != aggregate_id:
+                    raise RuntimeError(
+                        "SubmissionPrepared attempt identity does not match durable aggregate"
+                    )
+
+            if sequence[-1] not in {
                 "SubmissionSending",
                 "SubmissionUnknown",
             }:
@@ -398,15 +476,6 @@ class RecoveryController:
                 self.reason_codes.add("legacy_submission_identity_unrecoverable")
                 continue
             attempt_id = attempt_id.strip()
-            expected_aggregate = submission_attempt_aggregate_id(
-                environment=normalized_environment,
-                account_id=normalized_account,
-                attempt_id=attempt_id,
-            )
-            if expected_aggregate != aggregate_id:
-                raise RuntimeError(
-                    "SubmissionPrepared attempt identity does not match durable aggregate"
-                )
             intent_id = payload.get("intent_id")
             client_order_id = payload.get("client_order_id")
             provider = payload.get("provider")

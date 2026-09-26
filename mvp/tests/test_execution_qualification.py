@@ -445,6 +445,12 @@ class ExecutionQualificationTests(unittest.TestCase):
                 media_type="application/json",
                 rights={"storage": True, "export": False},
             )
+            tampered_store.publish_bytes(
+                artifact_id=DATA_QUALITY_ARTIFACT_ID,
+                data=DATA_QUALITY_BYTES,
+                media_type="application/json",
+                rights={"storage": True, "export": False},
+            )
             with self.assertRaisesRegex(
                 ExecutionQualificationError,
                 "evidence_sha256",

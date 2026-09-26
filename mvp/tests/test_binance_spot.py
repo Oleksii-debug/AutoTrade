@@ -905,6 +905,16 @@ class BinanceSpotFoundationTests(unittest.TestCase):
                 client_ids_by_order_id={99: "bad client id with spaces"},
             )
 
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "multiple provider order ids"):
+            parse_account_trades(
+                observation,
+                instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
+                client_ids_by_order_id={
+                    43: "at-spot-same-client",
+                    44: "at-spot-same-client",
+                },
+            )
+
     def test_instrument_identity_map_is_fully_validated_before_fill_mapping(self):
         row = {
             "symbol": "BTCUSDT",

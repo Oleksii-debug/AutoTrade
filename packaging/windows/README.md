@@ -2,7 +2,7 @@
 
 This directory documents the release-packaging boundary. It is **not** evidence that AutoTrade has a qualified or signed Windows release.
 
-`tools/build_windows_bundle.py` creates a byte-deterministic ZIP from an already built staging directory. Entries are sorted, timestamps and permissions are fixed, compression is disabled to avoid zlib-version drift, every payload file is SHA-256 listed, the archive is bound to an exact 40-character source SHA, and a sibling SHA-256 file is written.
+`tools/build_windows_bundle.py` creates a byte-deterministic ZIP from an already built staging directory. Entries are sorted, timestamps and permissions are fixed, compression is disabled to avoid zlib-version drift, every payload file is SHA-256 listed, the archive is bound to an exact 40-character source SHA, and a sibling SHA-256 file is written. Bundle and SHA-sidecar destinations reject symlinks/special files, and their temporary files are created exclusively before replacement so packaging never follows a pre-positioned output symlink.
 
 Two modes exist:
 

@@ -786,21 +786,21 @@ def book_variation_margin(
 def lifecycle_gate(
     contract: FuturesContract,
     at: datetime,
-    *,
-    physical_delivery_authorized: bool = False,
 ) -> str:
-    """Return a conservative lifecycle state for holding/trading the contract."""
+    """Return the conservative lifecycle state for holding/trading the contract.
+
+    Physical delivery is intentionally not authorizable in this provider-neutral
+    primitive.  Until a separately qualified canonical authority/provider path
+    exists, reaching the delivery cutoff is a hard fail-closed boundary.
+    """
 
     point = _utc(at, "at")
-    if type(physical_delivery_authorized) is not bool:
-        raise FuturesError("physical_delivery_authorized must be boolean")
     if point >= contract.expiry:
         return "EXPIRED"
     if point >= contract.last_trade_at:
         return "TRADING_ENDED"
     if (
         contract.settlement_method == "PHYSICAL"
-        and not physical_delivery_authorized
         and point >= contract.delivery_cutoff
     ):
         return "DELIVERY_BLOCKED"
@@ -810,13 +810,7 @@ def lifecycle_gate(
 def require_open_for_new_exposure(
     contract: FuturesContract,
     at: datetime,
-    *,
-    physical_delivery_authorized: bool = False,
 ) -> None:
-    state = lifecycle_gate(
-        contract,
-        at,
-        physical_delivery_authorized=physical_delivery_authorized,
-    )
+    state = lifecycle_gate(contract, at)
     if state != "OPEN":
         raise FuturesError(f"new futures exposure is blocked: {state}")

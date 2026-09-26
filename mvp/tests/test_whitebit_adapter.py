@@ -1876,23 +1876,37 @@ class WhiteBitAdapterTests(unittest.TestCase):
         self.assertEqual(budget.remaining, 0)
         self.assertFalse(budget.can_admit("CANCEL"))
 
-    def test_retry_policy_backs_off_429_without_blind_5xx_write_retry(self):
-        first = classify_whitebit_http_retry(
+    def test_retry_policy_backs_off_safe_reads_without_blind_financial_write_retry(self):
+        rate_limited_write = classify_whitebit_http_retry(
             status_code=429,
             attempt=1,
             request_class="WRITE",
         )
-        self.assertTrue(first.automatic_retry)
-        self.assertEqual(first.base_delay_seconds, 1)
-        self.assertTrue(first.jitter_required)
-        self.assertFalse(first.requires_reconciliation)
+        self.assertFalse(rate_limited_write.automatic_retry)
+        self.assertIsNone(rate_limited_write.base_delay_seconds)
+        self.assertTrue(rate_limited_write.requires_reconciliation)
+        self.assertEqual(
+            rate_limited_write.classification,
+            "AMBIGUOUS_WRITE_RATE_LIMIT",
+        )
+
+        rate_limited_cancel = classify_whitebit_http_retry(
+            status_code=429,
+            attempt=2,
+            request_class="CANCEL",
+        )
+        self.assertFalse(rate_limited_cancel.automatic_retry)
+        self.assertTrue(rate_limited_cancel.requires_reconciliation)
 
         capped = classify_whitebit_http_retry(
             status_code=429,
             attempt=20,
             request_class="READ",
         )
+        self.assertTrue(capped.automatic_retry)
         self.assertEqual(capped.base_delay_seconds, 30)
+        self.assertTrue(capped.jitter_required)
+        self.assertFalse(capped.requires_reconciliation)
 
         ambiguous = classify_whitebit_http_retry(
             status_code=503,

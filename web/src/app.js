@@ -209,6 +209,16 @@
     return true;
   }
 
+  function pendingCommandMatchesCurrentScope() {
+    return state.pendingCommand === null || (
+      state.sessionIdentity !== null &&
+      state.pendingCommand.actor === state.sessionIdentity.actor &&
+      state.pendingCommand.session === state.sessionIdentity.session &&
+      state.pendingCommand.account_id === state.accountId &&
+      state.pendingCommand.environment === state.environment
+    );
+  }
+
   const AUTHORITY_POLICY_REQUIRED_FIELD_IDS = Object.freeze([
     "authority-policy-id",
     "authority-instrument-id",
@@ -495,7 +505,8 @@
     const roleAllowed = state.sessionIdentity !== null &&
       effectiveAction !== null &&
       actionCanSubmitInCurrentScope(state.sessionIdentity.role, effectiveAction);
-    if (button) button.disabled = !enabled || !roleAllowed;
+    const pendingScopeMatches = pendingCommandMatchesCurrentScope();
+    if (button) button.disabled = !enabled || !roleAllowed || !pendingScopeMatches;
   }
 
   function freshnessText(parsed) {

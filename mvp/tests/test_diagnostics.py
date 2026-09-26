@@ -77,8 +77,10 @@ class DiagnosticTraceTests(unittest.TestCase):
             "nested": {
                 "Authorization": "Bearer value",
                 "accessToken": "token-value",
+                "session_id": "session-identifier-secret",
                 "safe": "visible",
             },
+            "session": "top-level-session-secret",
             "rows": [{"password": "secret-value", "value": 3}],
         }
         redacted = redact_diagnostic_value(payload)
@@ -86,6 +88,8 @@ class DiagnosticTraceTests(unittest.TestCase):
         self.assertEqual(redacted["api_key"], "[REDACTED]")
         self.assertEqual(redacted["nested"]["Authorization"], "[REDACTED]")
         self.assertEqual(redacted["nested"]["accessToken"], "[REDACTED]")
+        self.assertEqual(redacted["nested"]["session_id"], "[REDACTED]")
+        self.assertEqual(redacted["session"], "[REDACTED]")
         self.assertEqual(redacted["nested"]["safe"], "visible")
         self.assertEqual(redacted["rows"][0]["password"], "[REDACTED]")
 

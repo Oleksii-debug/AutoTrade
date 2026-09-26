@@ -180,6 +180,24 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             self.assertEqual(attrs["refresh-token"], "[REDACTED]")
             self.assertEqual(attrs["private key pem"], "[REDACTED]")
 
+    def test_metric_backlog_rejects_non_finite_or_non_numeric_values(self):
+        backlog = BoundedMetricBacklog(max_items=2)
+        for value in (
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            True,
+            "1.0",
+        ):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError,
+                "finite number",
+            ):
+                backlog.record("queue.delay", value)
+        self.assertEqual(backlog.snapshot(), ())
+        backlog.record("queue.delay", 1)
+        self.assertEqual(backlog.snapshot()[0]["value"], 1)
+
     def test_metric_backlog_is_bounded_and_redacts_labels(self):
         backlog = BoundedMetricBacklog(max_items=2)
         backlog.record("queue.delay", 1.0, token="a")

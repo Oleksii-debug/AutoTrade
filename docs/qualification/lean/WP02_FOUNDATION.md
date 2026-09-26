@@ -13,6 +13,11 @@ verifies its Git identity before build, compiles through LEAN's actual
 `Common/QuantConnect.csproj`, and runs an executable probe through the
 AutoTrade boundary.
 
+The restart characterization checkpoint is diagnostic-only and does not replace
+the AutoTrade journal, order projection or reconciliation authority. Its typed state is
+SHA-256 integrity-bound before process exit and the digest is verified before restore,
+so a structurally valid but mutated callback identity/economic fingerprint fails closed.
+
 The probe checks:
 
 - canonical AutoTrade Decimal input before it enters LEAN;

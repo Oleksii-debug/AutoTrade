@@ -31,8 +31,9 @@ PYTHON_TEST_DIRS = (
 )
 
 
-def verification_commands() -> tuple[tuple[str, ...], ...]:
-    return (
+def verification_commands(*, platform: str | None = None) -> tuple[tuple[str, ...], ...]:
+    platform = sys.platform if platform is None else platform
+    commands = (
         (sys.executable, "tools/baseline.py", "check"),
         (sys.executable, "tools/build_provenance_manifest.py", "--check"),
         (sys.executable, "tools/check_nvda_qualification.py", "--check-status"),
@@ -48,7 +49,29 @@ def verification_commands() -> tuple[tuple[str, ...], ...]:
             )
             for folder in PYTHON_TEST_DIRS
         ),
+        (
+            "dotnet",
+            "run",
+            "--project",
+            "tests/Contracts.DotNet/Contracts.DotNet.csproj",
+            "--configuration",
+            "Release",
+            "--",
+            "contracts/fixtures/common-scalars.corpus.json",
+        ),
     )
+    if platform == "win32":
+        commands += (
+            (
+                "dotnet",
+                "run",
+                "--project",
+                "tests/Desktop.Client/Desktop.Client.csproj",
+                "--configuration",
+                "Release",
+            ),
+        )
+    return commands
 
 
 def main() -> int:
@@ -59,8 +82,9 @@ def main() -> int:
         if result.returncode:
             return result.returncode
     print(
-        "Repository Python, simulated MVP, observability and baseline checks passed. "
-        "Windows/.NET/provider/NVDA qualification is separate."
+        "Repository Python, .NET contracts, simulated MVP, observability and baseline "
+        "checks passed. The desktop authenticated-host executable is additionally run "
+        "on Windows. LEAN, provider and real NVDA qualification remain separate."
     )
     return 0
 

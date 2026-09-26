@@ -1,6 +1,6 @@
 {
   "$schema":"https://json-schema.org/draft/2020-12/schema",
-  "$id":"https://schemas.autotrade.local/3.0.0/data.schema.json",
+  "$id":"https://schemas.autotrade.local/3.0.1/data.schema.json",
   "title":"AutoTrade information and dataset contracts",
   "$defs":{
     "InformationClaim":{

@@ -106,7 +106,23 @@ class JournalBackedHostApiTests(unittest.TestCase):
             request_origin_provider=lambda: "https://local.autotrade.invalid",
             now=lambda: "2026-09-24T18:00:00Z",
         )
-        self.assertEqual(memory.submit(command), self.store().submit(command))
+        durable = self.store()
+        self.assertEqual(memory.submit(command), durable.submit(command))
+
+        padded_memory = HostCommandStore(
+            account_id="  paper-account-1  ",
+            environment="PAPER",
+            session_validator=lambda session, actor, origin, action: (session, actor) in self.sessions,
+            request_origin_provider=lambda: "https://local.autotrade.invalid",
+            now=lambda: "2026-09-24T18:00:00Z",
+        )
+        padded_durable = self.store(account_id="  paper-account-1  ")
+        self.assertEqual(padded_memory.account_id, "paper-account-1")
+        self.assertEqual(padded_durable.account_id, "paper-account-1")
+        self.assertEqual(
+            padded_memory.submit(command),
+            padded_durable.submit(command),
+        )
 
     def test_whitespace_only_account_scope_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "account_id must be a non-empty string"):

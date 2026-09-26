@@ -21,6 +21,7 @@ from mvp.autotrade_mvp.qualification_attestation import (
     parse_qualification_trust_policy,
     parse_signed_qualification_attestation,
     qualification_trust_policy_payload,
+    load_canonical_qualification_trust_policy,
     verify_canonical_qualification_attestation,
     verify_qualification_attestation,
 )
@@ -299,6 +300,82 @@ class QualificationAttestationTests(unittest.TestCase):
                             expected_release_artifact_id=RELEASE_A,
                             expected_release_artifact_sha256=RELEASE_A_SHA,
                         )
+
+    def test_canonical_policy_rejects_caller_selected_historical_source(self):
+        canonical_policy = policy(root())
+        with TemporaryDirectory() as directory:
+            source_root = Path(directory) / "source"
+            policy_path = (
+                source_root
+                / "mvp"
+                / "autotrade_mvp"
+                / "qualification_trust_policy.json"
+            )
+            policy_path.parent.mkdir(parents=True)
+            policy_path.write_text(
+                json.dumps(
+                    qualification_trust_policy_payload(canonical_policy),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-q"], cwd=source_root, check=True)
+            subprocess.run(
+                ["git", "add", "mvp/autotrade_mvp/qualification_trust_policy.json"],
+                cwd=source_root,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git", "-c", "user.name=AutoTrade Test",
+                    "-c", "user.email=autotrade-test@example.invalid",
+                    "commit", "-q", "-m", "trusted policy",
+                ],
+                cwd=source_root,
+                check=True,
+            )
+            historical_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=source_root,
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+            (source_root / "README.md").write_text(
+                "advance trusted checkout\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "README.md"], cwd=source_root, check=True)
+            subprocess.run(
+                [
+                    "git", "-c", "user.name=AutoTrade Test",
+                    "-c", "user.email=autotrade-test@example.invalid",
+                    "commit", "-q", "-m", "advance trusted checkout",
+                ],
+                cwd=source_root,
+                check=True,
+            )
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_QUALIFICATION_TRUST_SOURCE_ROOT",
+                    source_root,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_CANONICAL_QUALIFICATION_TRUST_POLICY_PATH",
+                    policy_path,
+                ),
+                self.assertRaisesRegex(
+                    QualificationTrustError,
+                    "source SHA does not match checkout HEAD",
+                ),
+            ):
+                load_canonical_qualification_trust_policy(
+                    expected_source_sha=historical_sha
+                )
 
     def test_valid_signed_receipt_resolves_exact_evidence(self):
         trust_root = root()

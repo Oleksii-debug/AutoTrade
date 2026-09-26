@@ -642,36 +642,58 @@ class AlpacaProviderTransportTests(unittest.TestCase):
 
 
 class WhiteBitProviderTransportTests(unittest.TestCase):
+
     def test_durable_nonce_survives_restart_and_clock_regression(self):
-        fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+        fixed = datetime(2026, 9, 26, 0, 0, tzinfo=timezone.utc)
+        provider_api_key = "kraken-test-key"
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
-            first = WhiteBitDurableNonceAllocator(
+            handle = kraken_trade_handle()
+            first = KrakenSpotDurableNonceAllocator(
                 journal=JournalStore(path),
-                account_id="acct-wb",
+                account_id="acct-kraken",
                 environment="LIVE",
+                credential_handle=handle,
                 clock_millis=lambda: 1_700_000_000_000,
                 clock_utc=lambda: fixed,
             )
-            self.assertEqual(first.allocate(), 1_700_000_000_000)
+            first_domain = first.for_provider_api_key(provider_api_key)
+            self.assertEqual(first_domain.allocate(), 1_700_000_000_000)
 
-            reopened = WhiteBitDurableNonceAllocator(
+            reopened = KrakenSpotDurableNonceAllocator(
                 journal=JournalStore(path),
-                account_id="acct-wb",
+                account_id="acct-kraken",
                 environment="LIVE",
+                credential_handle=handle,
                 clock_millis=lambda: 1_699_999_999_000,
                 clock_utc=lambda: fixed + timedelta(seconds=1),
             )
-            self.assertEqual(reopened.allocate(), 1_700_000_000_001)
+            reopened_domain = reopened.for_provider_api_key(provider_api_key)
+            self.assertEqual(reopened_domain.allocate(), 1_700_000_000_001)
             events = JournalStore(path).load_events(
                 "provider_nonce",
-                reopened.aggregate_id,
+                reopened_domain.aggregate_id,
+            )
+            self.assertEqual(
+                [item["payload"]["provider_id"] for item in events],
+                ["KRAKEN", "KRAKEN"],
             )
             self.assertEqual(
                 [item["payload"]["nonce"] for item in events],
                 [1_700_000_000_000, 1_700_000_000_001],
             )
-
+            fingerprint = reopened.provider_api_key_fingerprint(provider_api_key)
+            self.assertEqual(
+                [
+                    item["payload"]["provider_api_key_fingerprint"]
+                    for item in events
+                ],
+                [fingerprint, fingerprint],
+            )
+            for item in events:
+                self.assertNotIn("credential_handle_id", item["payload"])
+                self.assertNotIn("credential_generation", item["payload"])
+            self.assertNotIn(provider_api_key, json.dumps(events, sort_keys=True))
     def test_whitebit_transport_has_one_guarded_send_after_durable_nonce(self):
         events = []
         fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
@@ -1085,59 +1107,92 @@ class KrakenSpotProviderTransportTests(unittest.TestCase):
                 [1, 1],
             )
 
-    def test_nonce_authority_is_independent_per_handle_and_generation(self):
+
+    def test_nonce_authority_is_shared_by_provider_key_across_handles_and_generations(self):
         fixed = datetime(2026, 9, 26, 0, 0, tzinfo=timezone.utc)
+        provider_api_key = "shared-kraken-key"
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
-            handle_a = kraken_trade_handle(handle_id="kraken-a", generation=1)
-            handle_b = kraken_trade_handle(handle_id="kraken-b", generation=1)
-            handle_a2 = kraken_trade_handle(handle_id="kraken-a", generation=2)
+            trade_handle = kraken_trade_handle(
+                handle_id="kraken-trade-a",
+                generation=1,
+            )
+            read_handle = PersistentCredentialHandle(
+                handle_id="kraken-read-b",
+                account_id="acct-kraken",
+                provider="KRAKEN",
+                environment="LIVE",
+                purpose="READ",
+                generation=1,
+            )
+            rotated_trade_handle = kraken_trade_handle(
+                handle_id="kraken-trade-a",
+                generation=2,
+            )
 
-            first_a = KrakenSpotDurableNonceAllocator(
+            trade = KrakenSpotDurableNonceAllocator(
                 journal=store,
                 account_id="acct-kraken",
                 environment="LIVE",
-                credential_handle=handle_a,
+                credential_handle=trade_handle,
                 clock_millis=lambda: 100,
                 clock_utc=lambda: fixed,
             )
-            first_b = KrakenSpotDurableNonceAllocator(
+            read = KrakenSpotDurableNonceAllocator(
                 journal=store,
                 account_id="acct-kraken",
                 environment="LIVE",
-                credential_handle=handle_b,
+                credential_handle=read_handle,
                 clock_millis=lambda: 100,
                 clock_utc=lambda: fixed,
             )
-            rotated_a = KrakenSpotDurableNonceAllocator(
+            rotated_trade = KrakenSpotDurableNonceAllocator(
                 journal=store,
                 account_id="acct-kraken",
                 environment="LIVE",
-                credential_handle=handle_a2,
+                credential_handle=rotated_trade_handle,
                 clock_millis=lambda: 100,
                 clock_utc=lambda: fixed,
             )
-            self.assertEqual(first_a.allocate(), 100)
-            self.assertEqual(first_b.allocate(), 100)
-            self.assertEqual(rotated_a.allocate(), 100)
+
+            trade_domain = trade.for_provider_api_key(provider_api_key)
+            read_domain = read.for_provider_api_key(provider_api_key)
+            rotated_domain = rotated_trade.for_provider_api_key(provider_api_key)
+            self.assertEqual(trade_domain.allocate(), 100)
+            self.assertEqual(read_domain.allocate(), 101)
+            self.assertEqual(rotated_domain.allocate(), 102)
             self.assertEqual(
-                len({first_a.aggregate_id, first_b.aggregate_id, rotated_a.aggregate_id}),
-                3,
+                {
+                    trade_domain.aggregate_id,
+                    read_domain.aggregate_id,
+                    rotated_domain.aggregate_id,
+                },
+                {trade_domain.aggregate_id},
             )
 
-            restarted_a = KrakenSpotDurableNonceAllocator(
+            restarted_read = KrakenSpotDurableNonceAllocator(
                 journal=store,
                 account_id="acct-kraken",
                 environment="LIVE",
-                credential_handle=handle_a,
+                credential_handle=read_handle,
                 clock_millis=lambda: 50,
                 clock_utc=lambda: fixed + timedelta(seconds=1),
+            ).for_provider_api_key(provider_api_key)
+            self.assertEqual(restarted_read.allocate(), 103)
+
+            distinct_key_domain = trade.for_provider_api_key(
+                "different-kraken-key"
             )
-            self.assertEqual(restarted_a.allocate(), 101)
+            self.assertEqual(distinct_key_domain.allocate(), 100)
+            self.assertNotEqual(
+                distinct_key_domain.aggregate_id,
+                trade_domain.aggregate_id,
+            )
 
     def test_nonce_uint64_boundary_fails_closed_before_persist_or_sign(self):
         maximum = (1 << 64) - 1
         fixed = datetime(2026, 9, 26, 0, 0, tzinfo=timezone.utc)
+        provider_api_key = "kraken-test-key"
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             handle = kraken_trade_handle()
@@ -1149,7 +1204,8 @@ class KrakenSpotProviderTransportTests(unittest.TestCase):
                 clock_millis=lambda: maximum,
                 clock_utc=lambda: fixed,
             )
-            self.assertEqual(allocator.allocate(), maximum)
+            domain = allocator.for_provider_api_key(provider_api_key)
+            self.assertEqual(domain.allocate(), maximum)
             reopened = KrakenSpotDurableNonceAllocator(
                 journal=store,
                 account_id="acct-kraken",
@@ -1158,13 +1214,19 @@ class KrakenSpotProviderTransportTests(unittest.TestCase):
                 clock_millis=lambda: maximum,
                 clock_utc=lambda: fixed + timedelta(seconds=1),
             )
+            reopened_domain = reopened.for_provider_api_key(provider_api_key)
             with self.assertRaisesRegex(
                 ProviderTransportScopeError,
                 "exhausted unsigned 64-bit",
             ):
-                reopened.allocate()
+                reopened_domain.allocate()
             self.assertEqual(
-                len(store.load_events("provider_nonce", reopened.aggregate_id)),
+                len(
+                    store.load_events(
+                        "provider_nonce",
+                        reopened_domain.aggregate_id,
+                    )
+                ),
                 1,
             )
         with self.assertRaisesRegex(
@@ -1178,7 +1240,6 @@ class KrakenSpotProviderTransportTests(unittest.TestCase):
                 credential_plaintext=self.credential_plaintext(),
                 nonce=maximum + 1,
             )
-
     def test_transport_rejects_nonce_allocator_from_stale_credential_generation(self):
         with TemporaryDirectory() as directory:
             events = []
@@ -1212,7 +1273,8 @@ class KrakenSpotProviderTransportTests(unittest.TestCase):
                 )
             self.assertEqual(events, [])
 
-    def test_transport_orders_quota_nonce_secret_guard_and_one_wire_send(self):
+
+    def test_transport_orders_quota_secret_nonce_guard_and_one_wire_send(self):
         events = []
         with TemporaryDirectory() as directory:
             wire = RecordingWire(
@@ -1240,7 +1302,7 @@ class KrakenSpotProviderTransportTests(unittest.TestCase):
 
             self.assertEqual(
                 events,
-                ["quota", "nonce", "resolve", "guard", "wire"],
+                ["quota", "resolve", "nonce", "guard", "wire"],
             )
             self.assertEqual(
                 response.payload,
@@ -1258,7 +1320,6 @@ class KrakenSpotProviderTransportTests(unittest.TestCase):
             self.assertIn(b"nonce=1700000000000", signed.body)
             self.assertIn(b"cl_ord_id=at-kraken-1", signed.body)
             self.assertIn(b"timeinforce=GTC", signed.body)
-
     def test_ioc_is_emitted_with_exact_provider_case(self):
         events = []
         with TemporaryDirectory() as directory:
@@ -1300,40 +1361,115 @@ class KrakenSpotProviderTransportTests(unittest.TestCase):
             self.assertEqual(resolver.calls, [])
             self.assertEqual(wire.requests, [])
 
-    def test_nonce_send_lock_identity_is_stable_across_allocator_instances(self):
+
+    def test_nonce_send_lock_identity_is_provider_key_scoped_across_handles(self):
+        provider_api_key = "shared-kraken-key"
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
-            handle = kraken_trade_handle()
-            first = KrakenSpotDurableNonceAllocator(
+            trade_handle = kraken_trade_handle()
+            read_handle = PersistentCredentialHandle(
+                handle_id="cred-kraken-read-other",
+                account_id=trade_handle.account_id,
+                provider=trade_handle.provider,
+                environment=trade_handle.environment,
+                purpose="READ",
+                generation=1,
+            )
+            rotated_trade = PersistentCredentialHandle(
+                handle_id=trade_handle.handle_id,
+                account_id=trade_handle.account_id,
+                provider=trade_handle.provider,
+                environment=trade_handle.environment,
+                purpose=trade_handle.purpose,
+                generation=2,
+            )
+            trade = KrakenSpotDurableNonceAllocator(
                 journal=JournalStore(path),
                 account_id="acct-kraken",
                 environment="LIVE",
-                credential_handle=handle,
+                credential_handle=trade_handle,
                 clock_millis=lambda: 100,
             )
-            second = KrakenSpotDurableNonceAllocator(
+            read = KrakenSpotDurableNonceAllocator(
                 journal=JournalStore(path),
                 account_id="acct-kraken",
                 environment="LIVE",
-                credential_handle=handle,
+                credential_handle=read_handle,
                 clock_millis=lambda: 100,
             )
             rotated = KrakenSpotDurableNonceAllocator(
                 journal=JournalStore(path),
                 account_id="acct-kraken",
                 environment="LIVE",
+                credential_handle=rotated_trade,
+                clock_millis=lambda: 100,
+            )
+            paths = {
+                trade.send_lock_path_for_provider_api_key(provider_api_key),
+                read.send_lock_path_for_provider_api_key(provider_api_key),
+                rotated.send_lock_path_for_provider_api_key(provider_api_key),
+            }
+            self.assertEqual(len(paths), 1)
+            self.assertNotIn(
+                trade.send_lock_path_for_provider_api_key(
+                    "different-kraken-key"
+                ),
+                paths,
+            )
+
+    def test_cross_handle_nonce_send_lock_serializes_same_provider_key(self):
+        provider_api_key = "shared-kraken-key"
+        first_entered = Event()
+        second_entered = Event()
+        release_first = Event()
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            trade = KrakenSpotDurableNonceAllocator(
+                journal=store,
+                account_id="acct-kraken",
+                environment="LIVE",
+                credential_handle=kraken_trade_handle(),
+                clock_millis=lambda: 100,
+            )
+            read = KrakenSpotDurableNonceAllocator(
+                journal=store,
+                account_id="acct-kraken",
+                environment="LIVE",
                 credential_handle=PersistentCredentialHandle(
-                    handle_id=handle.handle_id,
-                    account_id=handle.account_id,
-                    provider=handle.provider,
-                    environment=handle.environment,
-                    purpose=handle.purpose,
-                    generation=2,
+                    handle_id="cred-kraken-read-other",
+                    account_id="acct-kraken",
+                    provider="KRAKEN",
+                    environment="LIVE",
+                    purpose="READ",
+                    generation=1,
                 ),
                 clock_millis=lambda: 100,
             )
-            self.assertEqual(first._send_lock_path, second._send_lock_path)
-            self.assertNotEqual(first._send_lock_path, rotated._send_lock_path)
+            trade_domain = trade.for_provider_api_key(provider_api_key)
+            read_domain = read.for_provider_api_key(provider_api_key)
+
+            def hold_first():
+                with trade_domain.serialized_send():
+                    first_entered.set()
+                    if not release_first.wait(2):
+                        raise TimeoutError("test nonce lock release timed out")
+
+            def enter_second():
+                if not first_entered.wait(2):
+                    raise TimeoutError("first nonce lock was not acquired")
+                with read_domain.serialized_send():
+                    second_entered.set()
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                first_future = pool.submit(hold_first)
+                second_future = pool.submit(enter_second)
+                self.assertTrue(first_entered.wait(2))
+                self.assertFalse(second_entered.wait(0.1))
+                release_first.set()
+                first_future.result(timeout=2)
+                second_future.result(timeout=2)
+                self.assertTrue(second_entered.is_set())
 
     def test_nonce_send_lock_is_enforced_across_process_boundary(self):
         probe = r"""
@@ -1383,14 +1519,17 @@ with open(path, "a+b") as stream:
                 credential_handle=kraken_trade_handle(),
                 clock_millis=lambda: 100,
             )
+            nonce_domain = allocator.for_provider_api_key(
+                "kraken-test-key"
+            )
 
-            with allocator.serialized_send():
+            with nonce_domain.serialized_send():
                 blocked = subprocess.run(
                     [
                         sys.executable,
                         "-c",
                         probe,
-                        str(allocator._send_lock_path),
+                        str(nonce_domain._send_lock_path),
                     ],
                     check=True,
                     capture_output=True,
@@ -1404,7 +1543,7 @@ with open(path, "a+b") as stream:
                     sys.executable,
                     "-c",
                     probe,
-                    str(allocator._send_lock_path),
+                    str(nonce_domain._send_lock_path),
                 ],
                 check=True,
                 capture_output=True,
@@ -1412,7 +1551,6 @@ with open(path, "a+b") as stream:
                 timeout=5,
             )
             self.assertEqual(released.stdout.strip(), "FREE")
-
     def test_same_credential_concurrent_sends_serialize_nonce_through_wire(self):
         events = []
         first_wire_entered = Event()
@@ -1652,7 +1790,7 @@ with open(path, "a+b") as stream:
 
             self.assertEqual(outcome.status, "UNKNOWN")
             self.assertEqual(outcome.reason, "transport_result_ambiguous")
-            self.assertEqual(events, ["nonce", "resolve", "wire"])
+            self.assertEqual(events, ["resolve", "nonce", "wire"])
             self.assertEqual(len(resolver.calls), 1)
             self.assertEqual(len(wire.requests), 1)
 
@@ -2634,6 +2772,7 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
         self.assertNotIn("c2VjcmV0", request.body.decode("ascii"))
         self.assertNotIn("c2VjcmV0", request.url)
 
+
     def test_open_orders_read_binds_scope_nonce_capability_and_exact_bytes(self):
         events = []
         wire = RecordingWire(
@@ -2663,7 +2802,7 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
 
         self.assertEqual(
             events,
-            ["quota", "capability", "nonce", "resolve", "capability", "wire"],
+            ["quota", "capability", "resolve", "nonce", "capability", "wire"],
         )
         self.assertEqual(len(resolver.calls), 1)
         self.assertEqual(resolver.calls[0]["purpose"], "READ")
@@ -2687,14 +2826,17 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
         self.assertTrue(observation.evidence_ref.startswith("provider-read:sha256:"))
         nonce_events = allocator.journal.load_events(
             "provider_nonce",
-            allocator.aggregate_id,
+            allocator.aggregate_id_for_provider_api_key("key"),
         )
         self.assertEqual(len(nonce_events), 1)
+        fingerprint = allocator.provider_api_key_fingerprint("key")
         self.assertEqual(
-            nonce_events[0]["payload"]["credential_handle_id"],
-            "cred-kraken-read",
+            nonce_events[0]["payload"]["provider_api_key_fingerprint"],
+            fingerprint,
         )
-
+        self.assertNotIn("credential_handle_id", nonce_events[0]["payload"])
+        self.assertNotIn("credential_generation", nonce_events[0]["payload"])
+        self.assertNotIn("key", json.dumps(nonce_events, sort_keys=True))
     def test_trades_history_pagination_query_flows_into_existing_fill_parser(self):
         events = []
         capability = verified_kraken_read_capability(
@@ -2884,7 +3026,7 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
                     self.assertEqual(
                         allocator.journal.load_events(
                             "provider_nonce",
-                            allocator.aggregate_id,
+                            allocator.aggregate_id_for_provider_api_key("key"),
                         ),
                         [],
                     )
@@ -2912,10 +3054,11 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
             self.assertEqual(
                 allocator.journal.load_events(
                     "provider_nonce",
-                    allocator.aggregate_id,
+                    allocator.aggregate_id_for_provider_api_key("key"),
                 ),
                 [],
             )
+
 
     def test_read_capability_supersession_after_secret_blocks_wire(self):
         events = []
@@ -2958,7 +3101,7 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
 
         self.assertEqual(
             events,
-            ["capability", "nonce", "resolve", "capability"],
+            ["capability", "resolve", "nonce", "capability"],
         )
         self.assertEqual(len(resolver.calls), 1)
         self.assertEqual(wire.requests, [])
@@ -2966,12 +3109,11 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
             len(
                 allocator.journal.load_events(
                     "provider_nonce",
-                    allocator.aggregate_id,
+                    allocator.aggregate_id_for_provider_api_key("key"),
                 )
             ),
             1,
         )
-
     def test_trade_credential_cannot_be_reused_for_private_read(self):
         events = []
         handle = kraken_trade_handle()
@@ -3022,7 +3164,7 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
                     transport(kraken_authenticated_read_binding())
                 self.assertEqual(
                     events,
-                    ["capability", "nonce", "resolve", "capability", "wire"],
+                    ["capability", "resolve", "nonce", "capability", "wire"],
                 )
                 self.assertEqual(len(resolver.calls), 1)
                 self.assertEqual(len(wire.requests), 1)

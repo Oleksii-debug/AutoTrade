@@ -1087,13 +1087,7 @@ class JournalStore:
         ):
             raise ValueError("aggregate_version must be a non-negative integer")
         state_json = canonical_json(state)
-        state_hash = payload_digest(
-            {
-                "projection_name": projection_name,
-                "journal_sequence": journal_sequence,
-                "state": state,
-            }
-        )
+        state_hash = payload_digest(state)
 
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")

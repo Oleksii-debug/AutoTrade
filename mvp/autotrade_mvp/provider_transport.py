@@ -1434,9 +1434,10 @@ class KrakenSpotDurableNonceAllocator:
         self.legacy_nonce_floor = self._load_legacy_nonce_floor()
 
     def _load_legacy_nonce_floor(self) -> int:
-        """Carry pre-provider-key Kraken nonce history forward across upgrade."""
+        """Carry only integrity-valid pre-provider-key Kraken history forward."""
 
         highest = 0
+        legacy_state: dict[str, tuple[tuple[str, int], int, int]] = {}
         for event in self.journal.load_events_by_aggregate_type(
             _DurableProviderNonceAllocator.AGGREGATE_TYPE
         ):
@@ -1467,16 +1468,87 @@ class KrakenSpotDurableNonceAllocator:
                 raise ProviderTransportError(
                     "Kraken Spot nonce journal contains an unknown legacy scope"
                 )
+            if (
+                event.get("event_type")
+                != _DurableProviderNonceAllocator.EVENT_TYPE
+            ):
+                raise ProviderTransportError(
+                    "Kraken Spot legacy nonce journal contains an unexpected event type"
+                )
+
+            handle_id = payload.get("credential_handle_id")
+            generation = payload.get("credential_generation")
+            if (
+                not isinstance(handle_id, str)
+                or not handle_id
+                or handle_id != handle_id.strip()
+                or any(ord(character) < 0x20 for character in handle_id)
+                or isinstance(generation, bool)
+                or not isinstance(generation, int)
+                or generation < 1
+            ):
+                raise ProviderTransportError(
+                    "Kraken Spot legacy nonce scope is invalid"
+                )
+            scope = (handle_id, generation)
+            legacy_scope = {
+                "credential_handle_id": handle_id,
+                "credential_generation": generation,
+            }
+            aggregate_material = (
+                f"{self.account_id}|{self.environment}|"
+                + json.dumps(
+                    legacy_scope,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                )
+            )
+            expected_aggregate_id = (
+                "KRAKEN:"
+                + sha256(aggregate_material.encode("utf-8")).hexdigest()
+            )
+            aggregate_id = event.get("aggregate_id")
+            if aggregate_id != expected_aggregate_id:
+                raise ProviderTransportError(
+                    "Kraken Spot legacy nonce aggregate identity is invalid"
+                )
+
             nonce = payload.get("nonce")
+            version = event.get("aggregate_version")
             if (
                 isinstance(nonce, bool)
                 or not isinstance(nonce, int)
                 or nonce <= 0
                 or nonce > _UINT64_MAX
+                or isinstance(version, bool)
+                or not isinstance(version, int)
+                or version < 1
             ):
                 raise ProviderTransportError(
                     "Kraken Spot legacy nonce journal is invalid"
                 )
+
+            previous = legacy_state.get(aggregate_id)
+            if previous is None:
+                previous_scope = scope
+                previous_version = 0
+                previous_nonce = 0
+            else:
+                previous_scope, previous_version, previous_nonce = previous
+            if scope != previous_scope:
+                raise ProviderTransportError(
+                    "Kraken Spot legacy nonce scope changed within one aggregate"
+                )
+            if version != previous_version + 1:
+                raise ProviderTransportError(
+                    "Kraken Spot legacy nonce aggregate sequence is invalid"
+                )
+            if nonce <= previous_nonce:
+                raise ProviderTransportError(
+                    "Kraken Spot legacy nonce journal is not strictly monotonic"
+                )
+            legacy_state[aggregate_id] = (scope, version, nonce)
             highest = max(highest, nonce)
         return highest
 

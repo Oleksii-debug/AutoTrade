@@ -43,7 +43,11 @@ from .kraken_spot import (
     spot_submission_requires_reconciliation,
     validate_spot_client_order_id,
 )
-from .whitebit import sign_private_request, validate_client_order_id
+from .whitebit import (
+    classify_whitebit_http_retry,
+    sign_private_request,
+    validate_client_order_id,
+)
 from .provider_core import (
     AuthenticatedReadQueryBinding,
     ProviderResponseObservation,
@@ -1078,6 +1082,34 @@ def _exact_trading_response(
     )
 
 
+def _whitebit_exact_trading_response(
+    value: object,
+) -> ExactJsonTransportResponse:
+    """Bind WhiteBIT financial-write HTTP ambiguity to durable dispatch state.
+
+    WhiteBIT 429 and 5xx responses after the send barrier do not prove that the
+    financial write was not accepted. They therefore remain UNKNOWN until
+    reconciliation, rather than becoming a retry-safe SubmissionSent terminal.
+    """
+
+    exact = _exact_trading_response(value)
+    if exact.http_status is None:
+        return exact
+    decision = classify_whitebit_http_retry(
+        status_code=exact.http_status,
+        attempt=1,
+        request_class="WRITE",
+    )
+    if not decision.requires_reconciliation:
+        return exact
+    return ExactJsonTransportResponse(
+        exact.response_bytes,
+        http_status=exact.http_status,
+        requires_reconciliation=True,
+        ambiguity_reason="whitebit_" + decision.classification.lower(),
+    )
+
+
 @dataclass(frozen=True)
 class WhiteBitCredential:
     api_key: str
@@ -1806,7 +1838,7 @@ class WhiteBitHttpTransport:
 
             final_guard()
             wire_response = self.wire_client.send(signed)
-            return _exact_trading_response(wire_response)
+            return _whitebit_exact_trading_response(wire_response)
 
 
 @dataclass(frozen=True)

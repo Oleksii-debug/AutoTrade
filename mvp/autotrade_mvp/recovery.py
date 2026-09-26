@@ -945,14 +945,15 @@ class RecoveryController:
             self._require_current_durable_owner()
         if self.owner is None or owner_epoch != self.owner.epoch:
             raise PermissionError("Admission owner epoch is stale")
-        if self.state is not HostState.READY:
-            raise PermissionError("Host is not ready")
         if not self.storage_writable:
             raise PermissionError("Durable journal is unavailable")
         if not self.clock_trusted:
             raise PermissionError("Clock is not trusted")
         if self.unresolved_attempts:
             raise PermissionError("External uncertainty is unresolved")
+        if self.state is HostState.READY:
+            return
+        raise PermissionError("Host is not ready")
 
     def on_lease_expired(self) -> None:
         """Lease expiry never transfers sender authority by itself."""

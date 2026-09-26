@@ -271,6 +271,91 @@ class QualificationAttestationTests(unittest.TestCase):
         self.assertEqual(loaded.policy_version, canonical.policy_version)
         self.assertNotEqual(loaded.policy_id, hostile.policy_id)
 
+    def test_canonical_policy_ignores_git_replace_object_substitution(self):
+        canonical = policy(root())
+        hostile_root = TrustRoot(
+            producer_id="candidate.self",
+            verifier_id=root().verifier_id,
+            public_modulus_hex=root().public_modulus_hex,
+            public_exponent=root().public_exponent,
+            allowed_scopes=root().allowed_scopes,
+            valid_from=root().valid_from,
+        )
+        hostile = policy(hostile_root)
+        with TemporaryDirectory() as directory:
+            repository_root = Path(directory)
+            source_sha, policy_path = _initialize_exact_source_policy_repo(
+                repository_root,
+                canonical,
+            )
+            policy_path.write_text(
+                json.dumps(
+                    qualification_trust_policy_payload(hostile),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "add", "mvp/autotrade_mvp/qualification_trust_policy.json"],
+                cwd=repository_root,
+                capture_output=True,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git", "-c", "user.name=AutoTrade Test",
+                    "-c", "user.email=autotrade-test@example.invalid",
+                    "commit", "-m", "hostile replacement policy",
+                ],
+                cwd=repository_root,
+                capture_output=True,
+                check=True,
+            )
+            hostile_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repository_root,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            subprocess.run(
+                ["git", "reset", "--hard", source_sha],
+                cwd=repository_root,
+                capture_output=True,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "replace", source_sha, hostile_sha],
+                cwd=repository_root,
+                capture_output=True,
+                check=True,
+            )
+            replaced = subprocess.run(
+                [
+                    "git", "show",
+                    f"{source_sha}:mvp/autotrade_mvp/qualification_trust_policy.json",
+                ],
+                cwd=repository_root,
+                capture_output=True,
+                check=True,
+            ).stdout
+            self.assertIn(b"candidate.self", replaced)
+
+            with patch.object(
+                qualification_trust,
+                "_QUALIFICATION_TRUST_REPOSITORY_ROOT",
+                repository_root,
+            ):
+                loaded = (
+                    qualification_trust.load_canonical_qualification_trust_policy(
+                        expected_source_sha=source_sha,
+                    )
+                )
+
+        self.assertEqual(loaded.policy_id, canonical.policy_id)
+        self.assertNotEqual(loaded.policy_id, hostile.policy_id)
     def test_canonical_policy_rejects_historical_caller_selected_source(self):
         canonical = policy(root())
         with TemporaryDirectory() as directory:

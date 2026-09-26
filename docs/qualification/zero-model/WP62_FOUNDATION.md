@@ -24,8 +24,12 @@ The qualification deliberately uses `RoutingMode.ZERO`. A passing run requires:
   restart/replay safe, and still produce a reconciled zero-trade economic report;
 - evidence to name the exact canonical lowercase 40- or 64-character Git object id.
 
-The workflow writes `zero-model-evidence.json` as an exact-head artifact. The
-artifact is qualification evidence, not financial authority.
+The workflow runs the same exact-head qualification on both `ubuntu-latest` and
+`windows-latest`, and publishes OS-distinct `zero-model-evidence.json` artifacts. Each evidence JSON also
+records the runtime-observed operating system and Python implementation/version,
+so the artifact remains platform-identifiable after download. This cross-platform evidence checks deterministic no-model behavior on the supported
+Windows execution substrate as well as Linux; it is qualification evidence, not
+financial authority.
 
 ## Explicit unresolved scope
 

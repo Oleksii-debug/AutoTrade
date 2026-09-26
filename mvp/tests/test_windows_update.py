@@ -223,6 +223,36 @@ def frozen_release(
     return decision
 
 
+def unsafe_frozen_decision(
+    decision: ReleaseCandidateDecision,
+    *,
+    manifest_json: str | None = None,
+    manifest_sha256: str | None = None,
+) -> ReleaseCandidateDecision:
+    """Bypass constructor invariants only to exercise downstream trust revalidation."""
+
+    forged = object.__new__(ReleaseCandidateDecision)
+    values = {
+        "status": decision.status,
+        "reasons": decision.reasons,
+        "manifest_json": (
+            decision.manifest_json if manifest_json is None else manifest_json
+        ),
+        "manifest_sha256": (
+            decision.manifest_sha256
+            if manifest_sha256 is None
+            else manifest_sha256
+        ),
+        "qualification_attestation_id": decision.qualification_attestation_id,
+        "qualification_attestation_digest": decision.qualification_attestation_digest,
+        "qualification_policy_id": decision.qualification_policy_id,
+        "qualification_trust_root_id": decision.qualification_trust_root_id,
+    }
+    for name, value in values.items():
+        object.__setattr__(forged, name, value)
+    return forged
+
+
 def rehashed_plan(plan: WindowsUpdatePlan, mutate) -> WindowsUpdatePlan:
     body = json.loads(plan.plan_json)
     mutate(body)
@@ -664,15 +694,12 @@ class WindowsUpdatePlanTests(unittest.TestCase):
         )
         from hashlib import sha256
 
-        forged = ReleaseCandidateDecision(
-            status="FROZEN",
-            reasons=(),
+        forged = unsafe_frozen_decision(
+            self.current,
             manifest_json=forged_json,
-            manifest_sha256="sha256:" + sha256(forged_json.encode("utf-8")).hexdigest(),
-            qualification_attestation_id=self.current.qualification_attestation_id,
-            qualification_attestation_digest=self.current.qualification_attestation_digest,
-            qualification_policy_id=self.current.qualification_policy_id,
-            qualification_trust_root_id=self.current.qualification_trust_root_id,
+            manifest_sha256=(
+                "sha256:" + sha256(forged_json.encode("utf-8")).hexdigest()
+            ),
         )
         with self.assertRaisesRegex(
             WindowsUpdateError,
@@ -699,17 +726,12 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             ensure_ascii=False,
             allow_nan=False,
         )
-        forged = ReleaseCandidateDecision(
-            status="FROZEN",
-            reasons=(),
+        forged = unsafe_frozen_decision(
+            self.current,
             manifest_json=forged_json,
             manifest_sha256=(
                 "sha256:" + sha256(forged_json.encode("utf-8")).hexdigest()
             ),
-            qualification_attestation_id=self.current.qualification_attestation_id,
-            qualification_attestation_digest=self.current.qualification_attestation_digest,
-            qualification_policy_id=self.current.qualification_policy_id,
-            qualification_trust_root_id=self.current.qualification_trust_root_id,
         )
         with self.assertRaisesRegex(
             WindowsUpdateError,
@@ -725,17 +747,10 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             )
 
     def test_forged_manifest_digest_is_rejected(self):
-        forged = ReleaseCandidateDecision(
-            status="FROZEN",
-            reasons=(),
-            manifest_json=self.current.manifest_json,
-            manifest_sha256=self.current.manifest_sha256,
-            qualification_attestation_id=self.current.qualification_attestation_id,
-            qualification_attestation_digest=self.current.qualification_attestation_digest,
-            qualification_policy_id=self.current.qualification_policy_id,
-            qualification_trust_root_id=self.current.qualification_trust_root_id,
+        forged = unsafe_frozen_decision(
+            self.current,
+            manifest_sha256="sha256:" + "f" * 64,
         )
-        object.__setattr__(forged, "manifest_sha256", "sha256:" + "f" * 64)
         with self.assertRaisesRegex(
             WindowsUpdateError,
             "digest does not match",

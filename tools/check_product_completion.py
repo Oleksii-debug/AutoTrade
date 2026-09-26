@@ -14,7 +14,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import subprocess
 import sys
 from typing import Any
@@ -30,6 +29,7 @@ from mvp.autotrade_mvp.qualification_attestation import (
     parse_signed_qualification_attestation,
     verify_canonical_qualification_attestation,
     _trusted_git_environment as _qualification_trusted_git_environment,
+    _trusted_git_executable as _qualification_trusted_git_executable,
 )
 from research.autotrade_research.artifacts.store import ArtifactStore
 from tools.check_nvda_qualification import (
@@ -148,27 +148,14 @@ def _trusted_git_environment() -> dict[str, str]:
 
 
 def _trusted_git_executable(*, source_root: Path) -> str:
-    """Resolve Git outside the candidate-controlled release checkout."""
+    """Reuse the canonical OS-managed Git resolver; never consult candidate PATH."""
 
-    candidate = shutil.which("git")
-    if candidate is None:
-        raise ProductCompletionError(
-            "exact-source Git executable is unavailable"
-        )
     try:
-        executable = Path(candidate).resolve(strict=True)
-        trusted_root = source_root.resolve(strict=True)
-    except OSError as error:
+        return _qualification_trusted_git_executable(source_root=source_root)
+    except QualificationTrustError as error:
         raise ProductCompletionError(
-            "exact-source Git executable could not be resolved"
+            "exact-source Git executable is unavailable or untrusted"
         ) from error
-    try:
-        executable.relative_to(trusted_root)
-    except ValueError:
-        return os.fspath(executable)
-    raise ProductCompletionError(
-        "exact-source Git executable originates from candidate checkout"
-    )
 
 
 def _load(path: Path, *, name: str) -> dict[str, Any]:

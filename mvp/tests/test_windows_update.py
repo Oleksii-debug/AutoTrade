@@ -20,6 +20,7 @@ from mvp.autotrade_mvp.release_candidate import (
     ReleaseCandidateDecision,
     ReleaseCandidateInput,
     freeze_release_candidate,
+    release_candidate_subject_requirement,
 )
 from mvp.autotrade_mvp.windows_update import (
     BackupEvidence,
@@ -191,7 +192,10 @@ def frozen_release(
         package_id="WP-54",
         protocol_id="release-freeze-v1",
         protocol_version="1.0.0",
-        requirement_ids=("release-candidate-freeze",),
+        requirement_ids=(
+            "release-candidate-freeze",
+            release_candidate_subject_requirement(candidate),
+        ),
         evidence_refs=evidence_refs,
         producer_id=trust_root.producer_id,
         verifier_id=trust_root.verifier_id,

@@ -219,17 +219,39 @@ class ArtifactStoreTests(unittest.TestCase):
             ):
                 store.load_manifest(artifact_id)
 
-    def test_publish_rejects_non_boolean_or_extended_rights_contract(self):
+    def test_publish_preserves_canonical_rights_identity_and_rejects_extensions(self):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(Path(directory) / "store")
             artifact_id = str(uuid4())
-            for rights in (
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"evidence",
+                media_type="application/octet-stream",
+                rights={
+                    "storage": True,
+                    "export": False,
+                    "rights_id": "capability-evidence-test",
+                },
+            )
+            self.assertEqual(
+                manifest["rights"],
+                {
+                    "storage": True,
+                    "export": False,
+                    "rights_id": "capability-evidence-test",
+                },
+            )
+
+            invalid_rights = (
                 {"storage": True, "export": 1},
                 {"storage": True, "export": False, "qualified": True},
-            ):
+                {"storage": True, "export": False, "rights_id": ""},
+                {"storage": True, "export": False, "rights_id": " padded "},
+            )
+            for rights in invalid_rights:
                 with self.subTest(rights=rights), self.assertRaises(ValueError):
                     store.publish_bytes(
-                        artifact_id=artifact_id,
+                        artifact_id=str(uuid4()),
                         data=b"evidence",
                         media_type="application/octet-stream",
                         rights=rights,

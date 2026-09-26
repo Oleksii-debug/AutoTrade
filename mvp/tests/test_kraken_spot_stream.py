@@ -569,6 +569,132 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
         self.assertEqual(evidence.phase, recovery.AWAITING_SNAPSHOT)
         self.assertIsNone(evidence.last_sequence)
 
+    def test_rest_crosscheck_plan_chunks_query_orders_and_never_grants_ready(self):
+        recovery = self.make_recovery()
+        recovery.begin_connection()
+        acknowledgement = self.acknowledge(recovery)
+        reports = [
+            {
+                "order_id": f"O-{index:03d}",
+                "exec_type": "new",
+                "order_status": "new",
+            }
+            for index in range(51)
+        ]
+        snapshot = self.parse(
+            frame_type="snapshot",
+            sequence=5,
+            reports=reports,
+        )
+        recovery.apply_frame(snapshot)
+
+        plan = recovery.rest_crosscheck_plan()
+        self.assertEqual(
+            plan.required_endpoints,
+            (
+                "/0/private/OpenOrders",
+                "/0/private/ClosedOrders",
+                "/0/private/TradesHistory",
+                "/0/private/QueryOrders",
+            ),
+        )
+        self.assertEqual(len(plan.query_order_chunks), 2)
+        self.assertEqual(len(plan.query_order_chunks[0]), 50)
+        self.assertEqual(len(plan.query_order_chunks[1]), 1)
+        self.assertEqual(
+            tuple(
+                order_id
+                for chunk in plan.query_order_chunks
+                for order_id in chunk
+            ),
+            tuple(f"O-{index:03d}" for index in range(51)),
+        )
+        self.assertEqual(
+            plan.evidence_refs,
+            (
+                acknowledgement.evidence_ref,
+                snapshot.evidence_ref,
+            ),
+        )
+        self.assertEqual(
+            plan.recovery_reason,
+            "snapshot_requires_rest_crosscheck",
+        )
+        self.assertFalse(plan.trading_ready)
+
+    def test_gap_crosscheck_plan_retains_known_ids_and_exact_evidence(self):
+        recovery = self.make_recovery()
+        recovery.begin_connection()
+        acknowledgement = self.acknowledge(recovery)
+        snapshot = self.parse(
+            frame_type="snapshot",
+            sequence=10,
+            reports=[
+                {
+                    "order_id": "O-1",
+                    "exec_type": "new",
+                    "order_status": "new",
+                }
+            ],
+        )
+        update = self.parse(
+            frame_type="update",
+            sequence=11,
+            reports=[
+                {
+                    "order_id": "O-2",
+                    "exec_type": "new",
+                    "order_status": "new",
+                }
+            ],
+        )
+        gap = self.parse(
+            frame_type="update",
+            sequence=13,
+            reports=[
+                {
+                    "order_id": "O-3",
+                    "exec_type": "new",
+                    "order_status": "new",
+                }
+            ],
+        )
+        recovery.apply_frame(snapshot)
+        recovery.apply_frame(update)
+        recovery.apply_frame(gap)
+
+        plan = recovery.rest_crosscheck_plan()
+        self.assertEqual(plan.recovery_reason, "sequence_gap")
+        self.assertEqual(
+            plan.query_order_chunks,
+            (("O-1", "O-2", "O-3"),),
+        )
+        self.assertEqual(
+            plan.evidence_refs,
+            (
+                acknowledgement.evidence_ref,
+                snapshot.evidence_ref,
+                update.evidence_ref,
+                gap.evidence_ref,
+            ),
+        )
+        self.assertFalse(plan.trading_ready)
+
+    def test_rest_crosscheck_plan_is_unavailable_before_snapshot_evidence(self):
+        recovery = self.make_recovery()
+        recovery.begin_connection()
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "requires stream recovery evidence",
+        ):
+            recovery.rest_crosscheck_plan()
+        self.acknowledge(recovery)
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "requires stream recovery evidence",
+        ):
+            recovery.rest_crosscheck_plan()
+
     def test_buffer_bound_fails_closed_instead_of_dropping_updates(self):
         recovery = self.make_recovery(max_buffered_updates=1)
         recovery.begin_connection()

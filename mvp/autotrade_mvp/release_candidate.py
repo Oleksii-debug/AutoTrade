@@ -222,6 +222,12 @@ class ReleaseCandidateInput:
                     f"duplicate release artifact role: {artifact.role}"
                 )
             roles.add(artifact.role)
+        unsupported_roles = sorted(roles - _REQUIRED_ROLES)
+        if unsupported_roles:
+            raise ReleaseCandidateError(
+                "unsupported release artifact role: "
+                + ", ".join(unsupported_roles)
+            )
 
         if isinstance(self.unresolved_blockers, (str, bytes)) or not isinstance(
             self.unresolved_blockers,
@@ -290,6 +296,12 @@ class ReleaseCandidateInput:
                     f"duplicate release artifact role: {artifact.role}"
                 )
             roles.add(artifact.role)
+        unsupported_roles = sorted(roles - _REQUIRED_ROLES)
+        if unsupported_roles:
+            raise ReleaseCandidateError(
+                "unsupported release artifact role: "
+                + ", ".join(unsupported_roles)
+            )
         if isinstance(unresolved_blockers, (str, bytes)) or not isinstance(
             unresolved_blockers,
             Sequence,

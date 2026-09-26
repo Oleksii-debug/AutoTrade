@@ -1928,7 +1928,7 @@ class AuthorityService:
             return False
         self._persist(
             "AuthorityNewExposureBlocked",
-            cid,
+            event_key,
             payload,
             committed_at=normalized_at,
         )

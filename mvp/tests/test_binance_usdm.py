@@ -217,6 +217,21 @@ def exchange_info_observation(
     )
 
 
+def parse_exchange_info(*, observation, symbol="BTCUSDT"):
+    origin, request_url, request_digest = public_source(
+        environment=observation.environment,
+        endpoint="/fapi/v1/exchangeInfo",
+        query=dict(observation.query_binding.query),
+    )
+    return BinanceUsdmSymbolRules._from_provider_observation(
+        observation=observation,
+        symbol=symbol,
+        origin=origin,
+        request_url=request_url,
+        request_url_sha256=request_digest,
+    )
+
+
 def symbol_rules(
     *,
     status="TRADING",
@@ -1132,23 +1147,23 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             sort_keys=True,
             separators=(", ", ": "),
         ).encode("utf-8")
-        first_observation = public_observation(
+        first_observation = raw_public_observation(
             endpoint="/fapi/v1/exchangeInfo",
             payload={},
             query={},
             response_bytes=compact,
         )
-        second_observation = public_observation(
+        second_observation = raw_public_observation(
             endpoint="/fapi/v1/exchangeInfo",
             payload={},
             query={},
             response_bytes=spaced,
         )
-        first = BinanceUsdmSymbolRules.from_exchange_info(
+        first = parse_exchange_info(
             observation=first_observation,
             symbol="BTCUSDT",
         )
-        second = BinanceUsdmSymbolRules.from_exchange_info(
+        second = parse_exchange_info(
             observation=second_observation,
             symbol="BTCUSDT",
         )
@@ -1165,7 +1180,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             "timeInForce": ["GTC", "IOC"],
         }
         with self.assertRaisesRegex(BinanceUsdmAdapterError, "required PRICE_FILTER"):
-            BinanceUsdmSymbolRules.from_exchange_info(
+            parse_exchange_info(
                 observation=exchange_info_observation(
                     {
                         **base,
@@ -1189,7 +1204,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             "tickSize": "0.1",
         }
         with self.assertRaisesRegex(BinanceUsdmAdapterError, "duplicate"):
-            BinanceUsdmSymbolRules.from_exchange_info(
+            parse_exchange_info(
                 observation=exchange_info_observation(
                     {
                         **base,
@@ -1209,7 +1224,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             )
 
         with self.assertRaisesRegex(BinanceUsdmAdapterError, "MIN_NOTIONAL"):
-            BinanceUsdmSymbolRules.from_exchange_info(
+            parse_exchange_info(
                 observation=exchange_info_observation(
                     {
                         **base,

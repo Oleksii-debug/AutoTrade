@@ -106,6 +106,67 @@ class ArtifactStoreTests(unittest.TestCase):
                     store.read_bytes(artifact_id)
                 read_call.assert_not_called()
 
+    def test_windows_object_open_reuses_canonical_no_follow_descriptor_helper(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"windows-safe-open",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+            canonical = store._object_path(
+                manifest["sha256"].removeprefix("sha256:")
+            )
+            real_descriptor = os.open(
+                canonical,
+                os.O_RDONLY | getattr(os, "O_BINARY", 0),
+            )
+            descriptor = None
+            try:
+                with patch(
+                    "autotrade_research.artifacts.store.os.name",
+                    "nt",
+                ), patch(
+                    "autotrade_research.artifacts.store._open_read_only_descriptor",
+                    return_value=real_descriptor,
+                ) as safe_open:
+                    descriptor, opened = store._open_object_descriptor(
+                        canonical,
+                        expected_bytes=len(b"windows-safe-open"),
+                    )
+                self.assertEqual(descriptor, real_descriptor)
+                self.assertEqual(opened.st_size, len(b"windows-safe-open"))
+                safe_open.assert_called_once_with(canonical)
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
+                else:
+                    os.close(real_descriptor)
+
+    @unittest.skipIf(os.name == "nt", "POSIX no-follow capability test")
+    def test_posix_object_open_fails_closed_without_no_follow_support(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"no-follow-required",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+            with patch(
+                "autotrade_research.artifacts.store.os.O_NOFOLLOW",
+                0,
+                create=True,
+            ):
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "opened safely",
+                ):
+                    store.read_bytes(artifact_id)
+
     @unittest.skipIf(
         os.name == "nt",
         "open-object replacement semantics differ on Windows",

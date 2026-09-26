@@ -569,6 +569,93 @@ class ProductCompletionGateTests(unittest.TestCase):
                     canonical_paths=(trust_policy, requirements),
                 )
 
+    def test_exact_source_git_environment_drops_loader_and_config_authority(self):
+        hostile = {
+            "PATH": "/attacker/bin",
+            "HOME": "/attacker/home",
+            "XDG_CONFIG_HOME": "/attacker/config",
+            "LD_PRELOAD": "/attacker/libinject.so",
+            "LD_LIBRARY_PATH": "/attacker/lib",
+            "DYLD_INSERT_LIBRARIES": "/attacker/libinject.dylib",
+            "PYTHONPATH": "/attacker/python",
+            "GIT_OBJECT_DIRECTORY": "/attacker/objects",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES": "/attacker/alternates",
+            "SYSTEMROOT": r"C:\\Windows",
+        }
+        with patch.dict(completion_gate.os.environ, hostile, clear=True):
+            environment = completion_gate._trusted_git_environment()
+
+        self.assertEqual(environment["SYSTEMROOT"], r"C:\\Windows")
+        self.assertEqual(environment["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(environment["GIT_CONFIG_GLOBAL"], completion_gate.os.devnull)
+        self.assertEqual(environment["GIT_NO_REPLACE_OBJECTS"], "1")
+        for key in (
+            "PATH",
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "DYLD_INSERT_LIBRARIES",
+            "PYTHONPATH",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        ):
+            self.assertNotIn(key, environment)
+
+    def test_exact_source_rejects_canonical_symlink_substitution(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _source_sha, requirements = _initialize_exact_source_test_repo(root)
+            decoy = requirements.with_name("decoy-requirements.json")
+            decoy.write_text(requirements.read_text(encoding="utf-8"), encoding="utf-8")
+            subprocess.run(
+                ["git", "add", decoy.relative_to(root).as_posix()],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=AutoTrade Test",
+                    "-c",
+                    "user.email=autotrade-test@example.invalid",
+                    "commit",
+                    "-m",
+                    "add clean decoy requirements",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            source_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            requirements.unlink()
+            try:
+                requirements.symlink_to(decoy.name)
+            except OSError as error:
+                self.skipTest(f"working-tree symlink unavailable: {error}")
+
+            with (
+                patch.object(completion_gate, "ROOT", root),
+                self.assertRaisesRegex(
+                    ProductCompletionError,
+                    "canonical completion inputs differ from exact source checkout",
+                ),
+            ):
+                completion_gate._verify_exact_source_checkout(
+                    source_sha,
+                    canonical_paths=(requirements,),
+                )
+
     def test_exact_source_rejects_dirty_nvda_requirements(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

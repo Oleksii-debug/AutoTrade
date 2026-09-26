@@ -24,6 +24,7 @@ class ResearchBoundaryError(ValueError):
 _MAX_INPUT_NODES = 10_000
 _MAX_CONTAINER_ITEMS = 2_048
 _MAX_STRING_UTF8_BYTES = 1_048_576
+_MAX_TOTAL_STRING_UTF8_BYTES = 8 * _MAX_STRING_UTF8_BYTES
 _MAX_INTEGER_BITS = 4_096
 
 
@@ -92,7 +93,8 @@ def _freeze_proposal(
     """
 
     if _budget is None:
-        _budget = [0]
+        # [visited_nodes, aggregate_utf8_bytes]
+        _budget = [0, 0]
     _budget[0] += 1
     if _budget[0] > _MAX_INPUT_NODES:
         raise ResearchBoundaryError(
@@ -109,9 +111,15 @@ def _freeze_proposal(
         for key, nested in value.items():
             if not isinstance(key, str):
                 raise ResearchBoundaryError(f"{label} object keys must be strings")
-            if _utf8_size(key, label=f"{label} object key") > _MAX_STRING_UTF8_BYTES:
+            key_size = _utf8_size(key, label=f"{label} object key")
+            if key_size > _MAX_STRING_UTF8_BYTES:
                 raise ResearchBoundaryError(
                     f"{label} object key exceeds maximum text size"
+                )
+            _budget[1] += key_size
+            if _budget[1] > _MAX_TOTAL_STRING_UTF8_BYTES:
+                raise ResearchBoundaryError(
+                    f"{label} exceeds aggregate UTF-8 text budget"
                 )
             frozen[key] = _freeze_proposal(
                 nested,
@@ -137,9 +145,15 @@ def _freeze_proposal(
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, str):
-        if _utf8_size(value, label=f"{label} text value") > _MAX_STRING_UTF8_BYTES:
+        value_size = _utf8_size(value, label=f"{label} text value")
+        if value_size > _MAX_STRING_UTF8_BYTES:
             raise ResearchBoundaryError(
                 f"{label} text value exceeds maximum size"
+            )
+        _budget[1] += value_size
+        if _budget[1] > _MAX_TOTAL_STRING_UTF8_BYTES:
+            raise ResearchBoundaryError(
+                f"{label} exceeds aggregate UTF-8 text budget"
             )
         return value
     if isinstance(value, int):

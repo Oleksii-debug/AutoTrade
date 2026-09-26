@@ -484,6 +484,45 @@ class ArtifactStoreTests(unittest.TestCase):
             self.assertEqual(store.audit().objects, 0)
 
 
+    def test_canonical_object_hard_link_alias_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            data = b"hard-linked-evidence"
+            digest = hashlib.sha256(data).hexdigest()
+            canonical = store._object_path(digest)
+            canonical.parent.mkdir(parents=True, exist_ok=True)
+            external = Path(directory) / "outside-hard-link.bin"
+            external.write_bytes(data)
+            os.link(external, canonical)
+
+            with self.assertRaisesRegex(ArtifactIntegrityError, "hard-link aliases"):
+                store.publish_bytes(
+                    artifact_id=str(uuid4()),
+                    data=data,
+                    media_type="application/octet-stream",
+                    rights={"storage": True, "export": False},
+                )
+
+    @unittest.skipIf(os.name == "nt", "symlink creation is not reliably available on Windows CI")
+    def test_digest_directory_symlink_cannot_escape_store_namespace(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            data = b"escaped-evidence"
+            digest = hashlib.sha256(data).hexdigest()
+            digest_dir = store.objects / digest[:2]
+            outside = Path(directory) / "outside-digest-dir"
+            outside.mkdir()
+            digest_dir.symlink_to(outside, target_is_directory=True)
+
+            with self.assertRaisesRegex(ArtifactIntegrityError, "escapes store namespace"):
+                store.publish_bytes(
+                    artifact_id=str(uuid4()),
+                    data=data,
+                    media_type="application/octet-stream",
+                    rights={"storage": True, "export": False},
+                )
+            self.assertFalse((outside / digest).exists())
+
     @unittest.skipIf(os.name == "nt", "symlink creation is not reliably available on Windows CI")
     def test_canonical_object_symlink_is_never_accepted_as_artifact_content(self):
         with TemporaryDirectory() as directory:

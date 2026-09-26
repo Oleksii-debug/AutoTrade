@@ -65,17 +65,25 @@ _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _trusted_git_environment() -> dict[str, str]:
-    """Run trust-policy Git reads without caller-selected Git authority."""
+    """Run trust-policy Git reads without caller-selected process authority."""
 
+    # Do not inherit the ambient process environment wholesale. An absolute Git
+    # executable is still vulnerable to dynamic-loader injection (for example
+    # LD_PRELOAD / DYLD_*), user-selected HOME config, and other process-level
+    # overrides if those variables are forwarded to the trust-critical child.
+    # Git's exact-object reads need only a tiny environment; retain the Windows
+    # process bootstrap variables when present and explicitly disable external
+    # Git configuration plus replacement-object semantics.
     environment = {
         key: value
-        for key, value in os.environ.items()
-        if not key.upper().startswith("GIT_")
+        for key in ("SYSTEMROOT", "WINDIR", "COMSPEC")
+        if (value := os.environ.get(key))
     }
-    # Git replace refs can make cat-file on a trusted SHA resolve bytes from
-    # a different commit while rev-parse HEAD still reports the trusted SHA.
-    # Replacement-object semantics are forbidden at this trust boundary.
+    environment["GIT_CONFIG_NOSYSTEM"] = "1"
+    environment["GIT_CONFIG_GLOBAL"] = os.devnull
     environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    environment["LC_ALL"] = "C"
+    environment["LANG"] = "C"
     return environment
 
 

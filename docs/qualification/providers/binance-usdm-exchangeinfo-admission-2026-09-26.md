@@ -13,9 +13,12 @@ qualification artifact.
 
 ## Implemented admission boundaries
 
-USD-M order preparation now requires a provider-parsed, version-bound
-`/fapi/v1/exchangeInfo` symbol payload. The exact symbol payload is
-canonical-JSON hashed and the digest is carried on the prepared request.
+USD-M order preparation now requires a version-bound
+`/fapi/v1/exchangeInfo` response admitted through the canonical
+`ProviderResponseObservation` exact-byte boundary. The response is bound to
+provider, environment, endpoint, query, instrument version, exact response
+SHA-256 and canonical evidence identity before symbol rules can authorize an
+order.
 
 The adapter validates the following provider rules before a LIMIT or MARKET
 request can be prepared:
@@ -35,10 +38,11 @@ Filter increments use Binance USD-M's documented offset semantics:
 `pricePrecision` as tick size or `quantityPrecision` as step size.
 
 Where a rule depends on mark price, order preparation accepts only a
-`BinanceUsdmMarkPrice` created from a canonical provider premium-index payload.
-The evidence is bound to the exact instrument version and symbol, cannot be
-from the future, must satisfy an explicit maximum age, and its payload digest is
-carried on the prepared request.
+`BinanceUsdmMarkPrice` created from the canonical exact-byte public-response
+observation for `/fapi/v1/premiumIndex?symbol=<exact symbol>`. The evidence is
+bound to provider/environment/query/instrument/symbol and the exact response
+digest; the provider timestamp cannot be after the network observation, cannot
+be from the future at admission, and must satisfy an explicit maximum age.
 
 For MARKET `MIN_NOTIONAL`, mark price is used because USD-M documents that
 MARKET orders have no order price and use mark price for the notional rule.
@@ -81,7 +85,10 @@ Checked 2026-09-26 against Binance Futures (USDⓈ-M) documentation:
 
 ## Merge evidence required
 
-Before this work can be integrated, the exact PR head still requires successful
-`baseline`, `reconvergence-integrity`, and full `Verify AutoTrade`.
+Before this work can be integrated, the exact repaired PR head still requires
+successful `baseline`, `reconvergence-integrity`, and full
+`Verify AutoTrade`. The provenance regression suite must also prove that raw
+caller mappings, wrong provider/environment/endpoint/query/instrument scope and
+changed exact response bytes cannot silently authorize ORDER_WRITE admission.
 Those checks are implementation evidence only; they are not provider
 qualification.

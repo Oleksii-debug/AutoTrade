@@ -41,6 +41,7 @@ PROTECTED_SENTINELS = frozenset(
         "control/qualification.json",
         "control/work-packages/bank.json",
         "control/tools/reconvergence_integrity.py",
+        "control/tools/registry_state.py",
         "docs/product/PRODUCT_SPEC_CANONICAL.txt",
         "docs/engineering/00_AUTOTRADE_MASTER_ENGINEERING_SPEC.md",
         "requirements-dev.txt",

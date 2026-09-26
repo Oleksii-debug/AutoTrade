@@ -189,12 +189,33 @@ class ArtifactStoreTests(unittest.TestCase):
             ):
                 store.load_manifest(artifact_id)
 
+    def test_publish_rejects_non_boolean_or_extended_rights_contract(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            for rights in (
+                {"storage": True, "export": 1},
+                {"storage": True, "export": False, "qualified": True},
+            ):
+                with self.subTest(rights=rights), self.assertRaises(ValueError):
+                    store.publish_bytes(
+                        artifact_id=artifact_id,
+                        data=b"evidence",
+                        media_type="application/octet-stream",
+                        rights=rights,
+                    )
+
     def test_rehashed_authenticated_manifest_rejects_weakened_core_types(self):
         cases = (
             ("bytes", "8", "byte count"),
             (
                 "rights",
                 {"storage": True, "export": "yes"},
+                "rights contract",
+            ),
+            (
+                "rights",
+                {"storage": True, "export": False, "qualified": True},
                 "rights contract",
             ),
             ("source_refs", "source:fixture", "source_refs"),

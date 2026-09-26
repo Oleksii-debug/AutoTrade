@@ -152,23 +152,27 @@ class ExactHeadCiEvidenceTests(unittest.TestCase):
         self.assertIn("actions/upload-artifact@v4", workflow)
         self.assertNotIn("${{ secrets.", workflow)
 
-    def test_all_ci_workflows_cancel_stale_runs_for_the_same_pr_or_ref(self):
-        for relative in (
-            ".github/workflows/baseline.yml",
-            ".github/workflows/verify.yml",
-            ".github/workflows/contracts.yml",
-            ".github/workflows/research-primitives.yml",
-            ".github/workflows/dotnet-foundation.yml",
-            ".github/workflows/control-plane.yml",
-        ):
+    def test_all_pull_request_workflows_cancel_stale_runs_for_the_same_pr_or_ref(self):
+        workflow_dir = ROOT / ".github" / "workflows"
+        checked = []
+        for path in sorted(workflow_dir.glob("*.y*ml")):
+            text = path.read_text(encoding="utf-8")
+            if "pull_request:" not in text:
+                continue
+            relative = path.relative_to(ROOT).as_posix()
+            checked.append(relative)
             with self.subTest(relative=relative):
-                text = (ROOT / relative).read_text(encoding="utf-8")
                 self.assertIn("concurrency:", text)
                 self.assertIn(
                     "group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}",
                     text,
                 )
                 self.assertIn("cancel-in-progress: true", text)
+        self.assertGreaterEqual(len(checked), 10)
+        self.assertIn(
+            ".github/workflows/zero-model-qualification.yml",
+            checked,
+        )
 
     def test_path_scoped_workflows_do_not_duplicate_feature_branch_push_and_pr_runs(self):
         for relative in (

@@ -751,6 +751,52 @@ class JournalBackedHostApiTests(unittest.TestCase):
             "QUEUED",
         )
 
+    def test_partial_authority_commit_is_reported_when_later_state_change_conflicts(self):
+        journal = JournalStore(self.path)
+        authority = AuthorityService(journal)
+        authority.register_policy(self.authority_policy("a-policy"))
+        authority.register_policy(self.authority_policy("b-policy"))
+        store = self.store(now="2030-01-01T00:00:00Z")
+        accepted = store.submit(self.command())
+        accepted_event = store.events_after(0)[0]
+        accepted_at = accepted_event.payload["started_at"]
+
+        AuthorityService(JournalStore(self.path)).revoke_policy(
+            "a-policy",
+            reason="host_operator_command:BLOCK_NEW_EXPOSURE:OPERATOR_REQUEST",
+            revoked_at=accepted_at,
+        )
+        AuthorityService(JournalStore(self.path)).register_policy(
+            self.authority_policy("outside-policy")
+        )
+
+        failed = store.execute_authority_operation(accepted.operation_id)
+        self.assertEqual(failed.phase, "FAILED")
+        self.assertEqual(
+            failed.affected_refs,
+            ("authority-policy:a-policy",),
+        )
+        self.assertEqual(
+            failed.evidence[0]["event_type"],
+            "AuthorityPolicyRevoked",
+        )
+        self.assertEqual(
+            failed.evidence[-1]["reason_code"],
+            "authority_state_changed",
+        )
+
+        restored = AuthorityService(JournalStore(self.path)).export_state()
+        self.assertEqual(
+            {item["policy_id"] for item in restored["revocations"]},
+            {"a-policy"},
+        )
+        self.assertEqual(
+            self.store(now="2030-01-01T00:00:01Z")
+            .get_operation(accepted.operation_id)
+            .affected_refs,
+            ("authority-policy:a-policy",),
+        )
+
     def test_retention_gap_is_explicit_but_full_snapshot_remains_current(self):
         store = self.store(max_events=2)
         accepted = store.submit(self.command())

@@ -3,6 +3,7 @@ import http.client
 import json
 from pathlib import Path
 import socket
+import time
 from tempfile import TemporaryDirectory
 from threading import Thread
 import unittest
@@ -814,19 +815,47 @@ class HostNetworkTests(unittest.TestCase):
         self.assertEqual(first_payload["status"], "ACCEPTED")
         conn.close()
 
-        # The concrete handler resumes accepted authority work after writing the
-        # response. Observe the resulting canonical state instead of racing that
-        # durable completion with a hard-coded state version.
+        # The concrete handler resumes accepted authority work only after
+        # writing ACCEPTED. Poll the public operation resource with a bounded
+        # timeout instead of racing the server thread through the internal store.
         operation_id = first_payload["operation_id"]
-        for _ in range(100):
-            if app.store.get_operation(operation_id).phase in {
+        deadline = time.monotonic() + 2.0
+        operation_payload = None
+        while time.monotonic() < deadline:
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+            conn.request(
+                "GET",
+                "/api/v1/operations/" + operation_id,
+                headers=self._wire_headers(session, origin=origin),
+            )
+            operation_response = conn.getresponse()
+            operation_payload = json.loads(
+                operation_response.read().decode("utf-8")
+            )
+            conn.close()
+            self.assertEqual(operation_response.status, 200)
+            if operation_payload["phase"] in {
                 "SUCCEEDED",
                 "FAILED",
                 "CANCELLED",
             }:
                 break
-        self.assertEqual(app.store.get_operation(operation_id).phase, "SUCCEEDED")
-        current_state_version = str(app.store.state_version)
+            time.sleep(0.01)
+
+        self.assertIsNotNone(operation_payload)
+        self.assertEqual(operation_payload["phase"], "SUCCEEDED")
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        conn.request(
+            "GET",
+            "/api/v1/state",
+            headers=self._wire_headers(session, origin=origin),
+        )
+        state_response = conn.getresponse()
+        state_payload = json.loads(state_response.read().decode("utf-8"))
+        conn.close()
+        self.assertEqual(state_response.status, 200)
+        current_state_version = str(state_payload["state_version"])
 
         native = self._wire_command(
             session,

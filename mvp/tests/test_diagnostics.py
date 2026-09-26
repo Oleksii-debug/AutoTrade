@@ -77,6 +77,16 @@ class DiagnosticTraceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Duplicate"):
                 build_diagnostic_snapshot(directory)
 
+    def test_duplicate_checkpoint_evidence_identifier_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            checkpoint["evidence_ids"].append(checkpoint["evidence_ids"][0])
+            checkpoint_path.write_text(json.dumps(checkpoint) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "same episodes"):
+                build_diagnostic_snapshot(directory)
+
     def test_credential_shaped_fields_are_redacted_recursively(self):
         payload = {
             "account": "demo",

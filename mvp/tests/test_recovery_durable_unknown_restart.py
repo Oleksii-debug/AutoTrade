@@ -324,6 +324,7 @@ class DurableUnknownRestartTests(unittest.TestCase):
                 now="2026-09-25T20:00:00Z",
                 authority_check=lambda _intent_hash, _now: (True, "allowed"),
                 transport_send=transport,
+                sender_check=lambda _owner_token, _owner_epoch: None,
             )
 
             self.assertEqual(outcome.status, "UNKNOWN")

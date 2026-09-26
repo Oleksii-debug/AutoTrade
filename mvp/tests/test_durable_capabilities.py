@@ -220,13 +220,21 @@ class DurableCapabilityRegistryTests(unittest.TestCase):
                 NOW,
             )
             registry.add(snapshot)
-            with sqlite3.connect(path) as connection:
-                connection.execute(
-                    "UPDATE events SET event_type=? "
-                    "WHERE aggregate_type='capability_history'",
-                    ("ForeignCapabilityEvent.v1",),
-                )
-                connection.commit()
+            event = registry.store.load_events_by_aggregate_type(
+                "capability_history"
+            )[0]
+            registry.store.append_event(
+                {
+                    "event_id": "foreign-capability-event",
+                    "event_type": "ForeignCapabilityEvent.v1",
+                    "aggregate_type": event["aggregate_type"],
+                    "aggregate_id": event["aggregate_id"],
+                    "aggregate_version": "2",
+                    "payload": event["payload"],
+                    "payload_hash": event["payload_hash"],
+                    "committed_at": (NOW + timedelta(seconds=1)).isoformat(),
+                }
+            )
             with self.assertRaisesRegex(
                 CapabilityError,
                 "unsupported durable capability event type",

@@ -29,6 +29,7 @@ from mvp.autotrade_mvp.kraken_spot import (
     KrakenSpotAbsenceEvidence,
     KrakenSpotAdapterError,
     KrakenSpotOrderIntent,
+    KrakenSpotOpenOrdersSnapshotEvidence,
     KrakenSpotPageEvidence,
     KrakenSpotPaginationCoverage,
     absence_evidence_from_pagination,
@@ -37,6 +38,7 @@ from mvp.autotrade_mvp.kraken_spot import (
     derivatives_supported_by_this_module,
     parse_trade_history,
     parse_spot_submission_response,
+    open_orders_snapshot_from_observation,
     pagination_page_from_observation,
     prepare_spot_order_request,
     validate_spot_client_order_id,
@@ -994,6 +996,8 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         ):
             KrakenSpotPageEvidence(
                 surface="EXECUTIONS",
+                account_id="paper-1",
+                environment="PAPER",
                 offset=0,
                 limit=50,
                 record_count=0,
@@ -1044,9 +1048,18 @@ class KrakenSpotAdapterTests(unittest.TestCase):
             )
         )
 
+        open_orders = open_orders_snapshot_from_observation(
+            authenticated_activity_observation(
+                "/0/private/OpenOrders",
+                {
+                    "error": [],
+                    "result": {"open": {}},
+                },
+            )
+        )
         evidence = absence_evidence_from_pagination(
             order_found=False,
-            open_orders_complete=True,
+            open_orders=open_orders,
             order_history=order_history,
             executions=executions,
             activities=activities,
@@ -1064,7 +1077,7 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         ):
             absence_evidence_from_pagination(
                 order_found=False,
-                open_orders_complete=True,
+                open_orders=open_orders,
                 order_history=order_history,
                 executions=executions,
                 activities=activities,

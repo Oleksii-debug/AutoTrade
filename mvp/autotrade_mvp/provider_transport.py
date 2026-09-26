@@ -23,6 +23,7 @@ import base64
 import binascii
 import hmac
 import json
+from threading import Lock
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Protocol
 from urllib.error import HTTPError
@@ -80,6 +81,18 @@ class ProviderWireClient(Protocol):
 QuotaGate = Callable[[str, str, str, str], None]
 ClockMillis = Callable[[], int]
 ClockUtc = Callable[[], datetime]
+_UINT64_MAX = (1 << 64) - 1
+_NONCE_SEND_LOCKS_GUARD = Lock()
+_NONCE_SEND_LOCKS: dict[str, object] = {}
+
+
+def _serialized_nonce_send_lock(aggregate_id: str):
+    with _NONCE_SEND_LOCKS_GUARD:
+        lock = _NONCE_SEND_LOCKS.get(aggregate_id)
+        if lock is None:
+            lock = Lock()
+            _NONCE_SEND_LOCKS[aggregate_id] = lock
+        return lock
 
 
 def _text(value: object, *, name: str) -> str:
@@ -752,6 +765,7 @@ class _DurableProviderNonceAllocator:
         clock_millis: ClockMillis,
         clock_utc: ClockUtc | None = None,
         max_contention_retries: int = 32,
+        scope_fields: Mapping[str, object] | None = None,
     ) -> None:
         if not isinstance(journal, JournalStore):
             raise TypeError("journal must be JournalStore")
@@ -776,6 +790,29 @@ class _DurableProviderNonceAllocator:
             raise ProviderTransportScopeError(
                 "max_contention_retries must be an integer from 1 through 1024"
             )
+        scope: dict[str, str | int] = {}
+        if scope_fields is not None:
+            if not isinstance(scope_fields, Mapping):
+                raise TypeError("scope_fields must be a mapping or None")
+            for raw_key, raw_value in scope_fields.items():
+                key = _canonical_text(raw_key, name="nonce scope field")
+                if isinstance(raw_value, bool):
+                    raise ProviderTransportScopeError(
+                        f"nonce scope field {key} must be canonical text or a positive integer"
+                    )
+                if isinstance(raw_value, int):
+                    if raw_value < 1:
+                        raise ProviderTransportScopeError(
+                            f"nonce scope field {key} must be positive"
+                        )
+                    value: str | int = raw_value
+                else:
+                    value = _canonical_text(
+                        raw_value,
+                        name=f"nonce scope field {key}",
+                    )
+                scope[key] = value
+
         self.provider_id = provider
         self.display_name = label
         self.journal = journal
@@ -784,13 +821,21 @@ class _DurableProviderNonceAllocator:
         self.clock_millis = clock_millis
         self.clock_utc = clock_utc or (lambda: datetime.now(timezone.utc))
         self.max_contention_retries = max_contention_retries
+        self.scope_fields = MappingProxyType(scope)
+        aggregate_material = f"{self.account_id}|{self.environment}"
+        if scope:
+            aggregate_material += "|" + json.dumps(
+                scope,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
         self.aggregate_id = (
             self.provider_id
             + ":"
-            + sha256(
-                f"{self.account_id}|{self.environment}".encode("utf-8")
-            ).hexdigest()
+            + sha256(aggregate_material.encode("utf-8")).hexdigest()
         )
+        self._send_lock = _serialized_nonce_send_lock(self.aggregate_id)
 
     def _history(self) -> tuple[int, int]:
         events = self.journal.load_events(self.AGGREGATE_TYPE, self.aggregate_id)
@@ -810,6 +855,10 @@ class _DurableProviderNonceAllocator:
                 payload.get("provider_id") != self.provider_id
                 or payload.get("account_id") != self.account_id
                 or payload.get("environment") != self.environment
+                or any(
+                    payload.get(key) != value
+                    for key, value in self.scope_fields.items()
+                )
             ):
                 raise ProviderTransportError(
                     f"{self.display_name} nonce journal scope does not match allocator"
@@ -819,6 +868,7 @@ class _DurableProviderNonceAllocator:
                 isinstance(nonce, bool)
                 or not isinstance(nonce, int)
                 or nonce <= previous_nonce
+                or nonce > _UINT64_MAX
             ):
                 raise ProviderTransportError(
                     f"{self.display_name} nonce journal is not strictly monotonic"
@@ -844,11 +894,20 @@ class _DurableProviderNonceAllocator:
                 isinstance(candidate, bool)
                 or not isinstance(candidate, int)
                 or candidate <= 0
+                or candidate > _UINT64_MAX
             ):
                 raise ProviderTransportScopeError(
-                    f"{self.display_name} nonce clock must return a positive integer"
+                    f"{self.display_name} nonce clock must return an unsigned 64-bit positive integer"
+                )
+            if previous_nonce >= _UINT64_MAX:
+                raise ProviderTransportScopeError(
+                    f"{self.display_name} nonce authority exhausted unsigned 64-bit domain"
                 )
             nonce = max(candidate, previous_nonce + 1)
+            if nonce > _UINT64_MAX:
+                raise ProviderTransportScopeError(
+                    f"{self.display_name} nonce authority exhausted unsigned 64-bit domain"
+                )
             committed_at = self.clock_utc()
             if (
                 not isinstance(committed_at, datetime)
@@ -865,6 +924,7 @@ class _DurableProviderNonceAllocator:
                 "account_id": self.account_id,
                 "environment": self.environment,
                 "nonce": nonce,
+                **self.scope_fields,
             }
             allocation_identity = (
                 f"{self.aggregate_id}|{version}|{nonce}|"
@@ -894,6 +954,9 @@ class _DurableProviderNonceAllocator:
         raise ProviderTransportError(
             f"{self.display_name} nonce allocation exceeded local contention budget"
         )
+
+    def serialized_send(self):
+        return self._send_lock
 
     def __call__(self) -> int:
         return self.allocate()
@@ -925,7 +988,7 @@ class WhiteBitDurableNonceAllocator(_DurableProviderNonceAllocator):
 
 
 class KrakenSpotDurableNonceAllocator(_DurableProviderNonceAllocator):
-    """Journal-backed monotonic Kraken Spot nonce authority."""
+    """Journal-backed Kraken Spot nonce authority scoped to one credential generation."""
 
     def __init__(
         self,
@@ -933,21 +996,41 @@ class KrakenSpotDurableNonceAllocator(_DurableProviderNonceAllocator):
         journal: JournalStore,
         account_id: str,
         environment: str,
+        credential_handle: PersistentCredentialHandle,
         clock_millis: ClockMillis,
         clock_utc: ClockUtc | None = None,
         max_contention_retries: int = 32,
     ) -> None:
+        if not isinstance(credential_handle, PersistentCredentialHandle):
+            raise TypeError(
+                "credential_handle must be PersistentCredentialHandle"
+            )
+        account = _canonical_text(account_id, name="account_id")
+        if (
+            credential_handle.provider != "KRAKEN"
+            or credential_handle.environment != "LIVE"
+            or credential_handle.purpose != "TRADE"
+            or credential_handle.account_id != account
+        ):
+            raise ProviderTransportScopeError(
+                "Kraken Spot nonce credential scope mismatch"
+            )
+        self.credential_handle_id = credential_handle.handle_id
+        self.credential_generation = credential_handle.generation
         super().__init__(
             provider_id="KRAKEN",
             display_name="Kraken Spot",
             journal=journal,
-            account_id=account_id,
+            account_id=account,
             environment=environment,
             clock_millis=clock_millis,
             clock_utc=clock_utc,
             max_contention_retries=max_contention_retries,
+            scope_fields={
+                "credential_handle_id": credential_handle.handle_id,
+                "credential_generation": credential_handle.generation,
+            },
         )
-
 
 class WhiteBitHttpTransport:
     """GuardedDispatcher-compatible WhiteBIT LIVE order transport.
@@ -1199,9 +1282,14 @@ class KrakenSpotSigner:
             raise ProviderTransportScopeError(
                 "Kraken Spot signer body must be a mapping"
             )
-        if isinstance(nonce, bool) or not isinstance(nonce, int) or nonce <= 0:
+        if (
+            isinstance(nonce, bool)
+            or not isinstance(nonce, int)
+            or nonce <= 0
+            or nonce > _UINT64_MAX
+        ):
             raise ProviderTransportScopeError(
-                "Kraken Spot nonce must be a positive integer"
+                "Kraken Spot nonce must be an unsigned 64-bit positive integer"
             )
         canonical: dict[str, str] = {}
         for key, value in body.items():
@@ -1283,9 +1371,9 @@ def _kraken_spot_prepared_body(
             "prepared Kraken Spot ordertype must be market or limit"
         )
     tif = _canonical_text(normalized["timeinforce"], name="timeinforce")
-    if tif not in {"gtc", "ioc"}:
+    if tif not in {"GTC", "IOC"}:
         raise ProviderTransportScopeError(
-            "prepared Kraken Spot timeinforce must be gtc or ioc"
+            "prepared Kraken Spot timeinforce must be GTC or IOC"
         )
     for field in ("volume", "price"):
         value = normalized.get(field)
@@ -1324,7 +1412,7 @@ def _kraken_spot_prepared_body(
             raise ProviderTransportScopeError(
                 "prepared Kraken Spot oflags is unsupported"
             )
-        if order_type != "limit" or tif == "ioc":
+        if order_type != "limit" or tif == "IOC":
             raise ProviderTransportScopeError(
                 "prepared Kraken Spot post-only order shape is invalid"
             )
@@ -1394,9 +1482,11 @@ class KrakenSpotHttpTransport:
         if (
             nonce_allocator.account_id != account
             or nonce_allocator.environment != "LIVE"
+            or nonce_allocator.credential_handle_id != credential_handle.handle_id
+            or nonce_allocator.credential_generation != credential_handle.generation
         ):
             raise ProviderTransportScopeError(
-                "nonce allocator account/environment mismatch"
+                "nonce allocator credential/account/environment scope mismatch"
             )
         if quota_gate is not None and not callable(quota_gate):
             raise TypeError("quota_gate must be callable or None")
@@ -1481,31 +1571,32 @@ class KrakenSpotHttpTransport:
                 "ORDER_WRITE",
             )
 
-        nonce = self.nonce_allocator.allocate()
-        credential_plaintext = self.secret_resolver.resolve_for_execution(
-            self.session_token,
-            origin=self.origin,
-            handle=self.credential_handle,
-            execution_identity=self.execution_identity,
-            account_id=self.account_id,
-            provider="KRAKEN",
-            environment="LIVE",
-            purpose="TRADE",
-        )
-        try:
-            signed = KrakenSpotSigner.sign(
-                policy=self.policy,
-                endpoint=endpoint,
-                body=body,
-                credential_plaintext=credential_plaintext,
-                nonce=nonce,
+        with self.nonce_allocator.serialized_send():
+            nonce = self.nonce_allocator.allocate()
+            credential_plaintext = self.secret_resolver.resolve_for_execution(
+                self.session_token,
+                origin=self.origin,
+                handle=self.credential_handle,
+                execution_identity=self.execution_identity,
+                account_id=self.account_id,
+                provider="KRAKEN",
+                environment="LIVE",
+                purpose="TRADE",
             )
-        finally:
-            credential_plaintext = None
+            try:
+                signed = KrakenSpotSigner.sign(
+                    policy=self.policy,
+                    endpoint=endpoint,
+                    body=body,
+                    credential_plaintext=credential_plaintext,
+                    nonce=nonce,
+                )
+            finally:
+                credential_plaintext = None
 
-        final_guard()
-        wire_response = self.wire_client.send(signed)
-        return _exact_trading_response(wire_response)
+            final_guard()
+            wire_response = self.wire_client.send(signed)
+            return _exact_trading_response(wire_response)
 
 
 @dataclass(frozen=True)

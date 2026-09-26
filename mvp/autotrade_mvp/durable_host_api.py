@@ -40,6 +40,7 @@ class JournalBackedHostCommandStore:
     AGGREGATE_ID = "host"
     TERMINAL_PHASES = {"SUCCEEDED", "FAILED", "CANCELLED"}
     UPDATE_PHASES = {"RUNNING", "WAITING_EXTERNAL", "UNKNOWN", *TERMINAL_PHASES}
+    LEGACY_AUTHORITY_UNCERTAINTY = "legacy_authority_payload_unavailable"
 
     def __init__(
         self,
@@ -330,6 +331,20 @@ class JournalBackedHostCommandStore:
         return returned
 
     @staticmethod
+    def _authority_contract_if_present(
+        payload: Mapping[str, object],
+    ) -> tuple[str, dict[str, object], str, str] | None:
+        has_payload = "action_payload" in payload
+        has_hash = "action_payload_hash" in payload
+        if has_payload != has_hash:
+            raise ValueError(
+                "Host journal accepted authority payload binding is incomplete"
+            )
+        if not has_payload:
+            return None
+        return JournalBackedHostCommandStore._authority_contract(payload)
+
+    @staticmethod
     def _authority_contract(
         payload: Mapping[str, object],
     ) -> tuple[str, dict[str, object], str, str]:
@@ -373,12 +388,18 @@ class JournalBackedHostCommandStore:
             raise ValueError(
                 "Host journal must contain exactly one accepted authority operation"
             )
-        return self._authority_contract(matches[0])
+        contract = self._authority_contract_if_present(matches[0])
+        if contract is None:
+            raise ValueError(
+                "Accepted authority operation predates durable action payload "
+                "and cannot be executed"
+            )
+        return contract
 
     def _operation_projection(self) -> dict[str, OperationResult]:
         operations: dict[str, OperationResult] = {}
         authority_contracts: dict[
-            str, tuple[str, dict[str, object], str, str]
+            str, tuple[str, dict[str, object], str, str] | None
         ] = {}
         for event in self._events():
             payload = event["payload"]
@@ -392,7 +413,9 @@ class JournalBackedHostCommandStore:
                         "Host journal command scope does not match active host account/environment"
                     )
                 operation_id = self._required_text(payload, "operation_id")
-                authority_contracts[operation_id] = self._authority_contract(payload)
+                authority_contracts[operation_id] = (
+                    self._authority_contract_if_present(payload)
+                )
                 if operation_id in operations:
                     raise ValueError(
                         "Host journal contains duplicate COMMAND_ACCEPTED operation identity"
@@ -466,21 +489,25 @@ class JournalBackedHostCommandStore:
                 if phase == "SUCCEEDED":
                     contract = authority_contracts.get(operation_id)
                     if contract is None:
-                        raise ValueError(
-                            "SUCCEEDED authority operation is missing accepted contract"
+                        # Pre-payload host journals may contain historical success
+                        # assertions that cannot be re-proved against canonical
+                        # authority. Keep the journal readable but downgrade that
+                        # claim to UNKNOWN rather than trusting or fabricating it.
+                        phase = "UNKNOWN"
+                        uncertainty = (self.LEGACY_AUTHORITY_UNCERTAINTY,)
+                    else:
+                        action, action_payload, action_hash, accepted_at = contract
+                        validate_authority_success_evidence(
+                            self._journal,
+                            action,
+                            action_payload,
+                            action_hash,
+                            self.account_id,
+                            self.environment,
+                            accepted_at,
+                            affected_refs,
+                            evidence,
                         )
-                    action, action_payload, action_hash, accepted_at = contract
-                    validate_authority_success_evidence(
-                        self._journal,
-                        action,
-                        action_payload,
-                        action_hash,
-                        self.account_id,
-                        self.environment,
-                        accepted_at,
-                        affected_refs,
-                        evidence,
-                    )
                 operations[operation_id] = OperationResult(
                     operation_id=operation_id,
                     phase=phase,
@@ -680,18 +707,44 @@ class JournalBackedHostCommandStore:
             raise ValueError("Cursor is ahead of host state")
 
         durable = self._events()
+        legacy_operation_ids: set[str] = set()
+        for event in durable:
+            if event["event_type"] != "COMMAND_ACCEPTED":
+                continue
+            payload = event["payload"]
+            if not isinstance(payload, Mapping):
+                raise ValueError("Host journal event payload must be an object")
+            operation_id = self._required_text(payload, "operation_id")
+            contract = self._authority_contract_if_present(payload)
+            if contract is None:
+                legacy_operation_ids.add(operation_id)
+
         visible = durable[-self._max_events :]
         if visible:
             oldest = int(visible[0]["aggregate_version"])
             if cursor < oldest - 1:
                 raise EventGap("Event cursor gap requires a fresh state snapshot")
-        return tuple(
-            HostEvent(
-                cursor=int(event["aggregate_version"]),
-                kind=str(event["event_type"]),
-                state_version=int(event["aggregate_version"]),
-                payload=dict(event["payload"]),
+        result: list[HostEvent] = []
+        for event in visible:
+            event_cursor = int(event["aggregate_version"])
+            if event_cursor <= cursor:
+                continue
+            payload = dict(event["payload"])
+            if (
+                event["event_type"] == "OPERATION_UPDATED"
+                and payload.get("operation_id") in legacy_operation_ids
+                and payload.get("phase") == "SUCCEEDED"
+            ):
+                payload["phase"] = "UNKNOWN"
+                payload["remaining_uncertainty"] = [
+                    self.LEGACY_AUTHORITY_UNCERTAINTY
+                ]
+            result.append(
+                HostEvent(
+                    cursor=event_cursor,
+                    kind=str(event["event_type"]),
+                    state_version=event_cursor,
+                    payload=payload,
+                )
             )
-            for event in visible
-            if int(event["aggregate_version"]) > cursor
-        )
+        return tuple(result)

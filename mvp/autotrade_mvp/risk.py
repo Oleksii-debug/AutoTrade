@@ -1518,35 +1518,33 @@ def evaluate_risk(
         raise ValueError(
             f"{intent.instrument_type} equivalent exposure per unit must be positive for {intent.symbol}"
         )
-    scoped_position_quantities = {
-        **context.positions,
-        **{
-            symbol: context.positions.get(symbol, Decimal("0")) + delta
-            for symbol, delta in context.reserved_position_delta.items()
-        },
-    }
-    exposed_symbols = {
+    current = context.positions.get(intent.symbol, Decimal("0"))
+    reserved = context.reserved_position_delta.get(intent.symbol, Decimal("0"))
+    pre_intent_exposure_symbols = {
         symbol
-        for symbol, quantity in scoped_position_quantities.items()
-        if quantity != 0
+        for symbol in set(context.positions) | set(context.reserved_position_delta)
+        if (
+            context.positions.get(symbol, Decimal("0")) != 0
+            or context.reserved_position_delta.get(symbol, Decimal("0")) != 0
+        )
     }
     missing_instrument_type_symbols = tuple(
         sorted(
             symbol
-            for symbol in exposed_symbols
-            if symbol != intent.symbol
-            and symbol not in context_instrument_types
+            for symbol in pre_intent_exposure_symbols
+            if symbol not in context_instrument_types
         )
     )
+
+    def authoritative_instrument_type(symbol: str) -> str | None:
+        if symbol == intent.symbol and symbol not in pre_intent_exposure_symbols:
+            return intent.instrument_type
+        return context_instrument_types.get(symbol)
+
     required_equivalent_symbols = {
         symbol
-        for symbol in exposed_symbols
-        if (
-            intent.instrument_type
-            if symbol == intent.symbol
-            else context_instrument_types.get(symbol)
-        )
-        in derivative_instrument_types
+        for symbol in pre_intent_exposure_symbols
+        if authoritative_instrument_type(symbol) in derivative_instrument_types
     }
     if derivative_requires_equivalent_exposure:
         required_equivalent_symbols.add(intent.symbol)
@@ -1557,8 +1555,6 @@ def evaluate_risk(
         not missing_instrument_type_symbols
         and not missing_equivalent_symbols
     )
-    current = context.positions.get(intent.symbol, Decimal("0"))
-    reserved = context.reserved_position_delta.get(intent.symbol, Decimal("0"))
     base_position = current + reserved
     resulting = base_position + signed
 
@@ -1573,11 +1569,7 @@ def evaluate_risk(
         raise ValueError(f"Missing marks for positions: {', '.join(sorted(missing_marks))}")
 
     def exposure_per_unit(symbol: str) -> Decimal:
-        instrument_type = (
-            intent.instrument_type
-            if symbol == intent.symbol
-            else context_instrument_types.get(symbol)
-        )
+        instrument_type = authoritative_instrument_type(symbol)
         if instrument_type in derivative_instrument_types:
             return equivalent_exposure_map.get(symbol, context.marks[symbol])
         return context.marks[symbol]

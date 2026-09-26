@@ -659,6 +659,7 @@ def validate_authority_success_evidence(
     account_id: str,
     environment: str,
     accepted_at: str,
+    affected_refs: tuple[str, ...],
     evidence: tuple[Mapping[str, object], ...],
 ) -> None:
     """Verify terminal success from canonical authority events, read-only."""
@@ -679,6 +680,8 @@ def validate_authority_success_evidence(
     )
     if result is None:
         raise ValueError("terminal authority operation has no canonical outcome")
+    if tuple(affected_refs) != result.affected_refs:
+        raise ValueError("terminal authority affected_refs do not match journal")
     if tuple(dict(item) for item in evidence) != tuple(
         dict(item) for item in result.evidence
     ):

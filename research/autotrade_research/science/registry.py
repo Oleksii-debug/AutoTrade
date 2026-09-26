@@ -14,6 +14,8 @@ import sqlite3
 from typing import Any
 from uuid import UUID, uuid4
 
+from ..artifacts.store import ArtifactIntegrityError, ArtifactStore
+
 
 REQUIRED_PROTOCOL_FIELDS = {
     "hypothesis",
@@ -269,10 +271,69 @@ class LockedEvaluationEvidence:
 
 
 class ScientificRegistry:
-    def __init__(self, path: str | Path):
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        artifact_store: ArtifactStore | None = None,
+    ):
+        if artifact_store is not None and not isinstance(artifact_store, ArtifactStore):
+            raise TypeError("artifact_store must be the canonical ArtifactStore")
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.artifact_store = artifact_store
         self._init()
+
+    def _verify_stopping_evidence(
+        self,
+        reference: Any,
+        *,
+        protocol_id: str,
+        stopping_rules_hash: str,
+    ) -> str:
+        immutable_ref = _immutable_artifact_ref(
+            reference,
+            "stopping_evidence_ref",
+        )
+        if self.artifact_store is None:
+            raise ProtocolViolation(
+                "early locked evaluation requires a resolvable immutable "
+                "stopping-evidence artifact"
+            )
+        artifact_text = immutable_ref.removeprefix("artifact:")
+        artifact_id, digest = artifact_text.split("@sha256:", 1)
+        expected_digest = "sha256:" + digest
+        try:
+            manifest = self.artifact_store.load_manifest(artifact_id)
+            self.artifact_store.read_bytes(artifact_id)
+        except (
+            FileNotFoundError,
+            ArtifactIntegrityError,
+            OSError,
+            ValueError,
+        ) as error:
+            raise ProtocolViolation(
+                "early locked evaluation stopping evidence cannot be verified"
+            ) from error
+        if manifest.get("sha256") != expected_digest:
+            raise ProtocolViolation(
+                "early locked evaluation stopping evidence digest mismatch"
+            )
+        metadata = manifest.get("metadata")
+        required_metadata = {
+            "kind": "stopping-rule-evidence",
+            "protocol_id": protocol_id,
+            "stopping_rules_hash": stopping_rules_hash,
+        }
+        if (
+            not isinstance(metadata, dict)
+            or any(metadata.get(key) != value for key, value in required_metadata.items())
+        ):
+            raise ProtocolViolation(
+                "early locked evaluation stopping evidence is not bound to "
+                "the registered protocol and stopping rules"
+            )
+        return immutable_ref
 
     @contextmanager
     def _connect(self):
@@ -620,6 +681,34 @@ class ScientificRegistry:
                 holdout_identity=holdout_identity,
             )
             protocol_payload = json.loads(p["payload_json"])
+            trial_budget = protocol_payload["trial_budget"]
+            recorded_trials = int(
+                con.execute(
+                    "SELECT COUNT(*) FROM trials WHERE protocol_id=?",
+                    (protocol,),
+                ).fetchone()[0]
+            )
+            if recorded_trials < trial_budget:
+                if result.get("stopping_rule_triggered") is not True:
+                    raise ProtocolViolation(
+                        "locked holdout cannot be accessed before registered trial "
+                        "budget is exhausted or a registered stopping rule is triggered"
+                    )
+                stopping_rules_hash = _hash(protocol_payload["stopping_rules"])
+                if result.get("stopping_rules_hash") != stopping_rules_hash:
+                    raise ProtocolViolation(
+                        "early locked evaluation must bind the registered stopping rules"
+                    )
+                try:
+                    self._verify_stopping_evidence(
+                        result.get("stopping_evidence_ref"),
+                        protocol_id=protocol,
+                        stopping_rules_hash=stopping_rules_hash,
+                    )
+                except ValueError as error:
+                    raise ProtocolViolation(
+                        "early locked evaluation requires immutable stopping evidence"
+                    ) from error
             forward_start, forward_end = _period(
                 protocol_payload["forward_period"],
                 "forward_period",

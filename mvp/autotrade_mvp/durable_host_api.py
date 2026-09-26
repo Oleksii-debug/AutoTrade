@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Callable, Mapping
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import NAMESPACE_URL, uuid5
 
 from contracts.bindings.python.common_scalars import is_valid_common_scalar
 
@@ -517,32 +517,15 @@ class JournalBackedHostCommandStore:
                 affected_refs = self._replay_text_array(payload, "affected_refs")
                 evidence = self._replay_evidence(payload)
 
-                if authority_contract is None:
-                    # Legacy COMMAND_ACCEPTED events predate durable action-payload
-                    # binding and therefore cannot be re-derived from the scoped
-                    # command identity. Preserve only the historical UUID-shaped
-                    # read model; _accepted_authority_contract still prevents it
-                    # from acquiring execution authority.
-                    try:
-                        legacy_operation_id = UUID(operation_id)
-                    except ValueError as error:
-                        raise ValueError(
-                            "Host journal operation identity does not match canonical command scope"
-                        ) from error
-                    if str(legacy_operation_id) != operation_id:
-                        raise ValueError(
-                            "Host journal operation identity does not match canonical command scope"
-                        )
-                else:
-                    expected_operation_id = scoped_host_operation_id(
-                        account_id=self.account_id,
-                        environment=self.environment,
-                        command_id=command_id,
+                expected_operation_id = scoped_host_operation_id(
+                    account_id=self.account_id,
+                    environment=self.environment,
+                    command_id=command_id,
+                )
+                if operation_id != expected_operation_id:
+                    raise ValueError(
+                        "Host journal operation identity does not match canonical command scope"
                     )
-                    if operation_id != expected_operation_id:
-                        raise ValueError(
-                            "Host journal operation identity does not match canonical command scope"
-                        )
 
                 authority_contracts[operation_id] = authority_contract
                 operations[operation_id] = OperationResult(

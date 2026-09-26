@@ -91,3 +91,30 @@ REST `/v5/execution/list` не вважається повним економі�
 ## Environment-bound response provenance
 
 Recorded order-submission evidence is not environment-neutral. The adapter now requires an explicit `MAINNET`, `TESTNET` or `DEMO` environment for every parsed create-order response and binds the evidence URI to the corresponding documented REST service (`api.bybit.com`, `api-testnet.bybit.com`, or `api-demo.bybit.com`). Unknown environments fail closed. This prevents testnet/demo observations from being mislabeled as mainnet evidence; regional/entity-specific production endpoints remain outside this bounded foundation until separately qualified.
+
+## Order reconciliation page foundation — 2026-09-26
+
+The adapter now has a network-free, capability-bound request/parser seam for
+Bybit V5 `/v5/order/realtime` and `/v5/order/history`. The implementation
+preserves the provider's opaque `nextPageCursor`, binds every response to the
+exact authenticated query evidence, and requires the response `category` and
+an exact queried `orderLinkId` to match before order-state evidence is
+accepted.
+
+For order history, caller-supplied start/end windows are fail-closed at the
+documented maximum of seven days and page limits are bounded to 1..50.
+Realtime-order reads reject history-only time-window parameters. Order status is
+preserved as provider state and is deliberately **not** promoted to canonical
+fill evidence; execution economics still require `/v5/execution/list` and
+reconciliation.
+
+An empty final cursor proves only that this exact read finished pagination. It
+does not by itself set
+`provider_semantics_exclude_execution=true`, does not resolve an UNKNOWN send,
+and does not qualify MAINNET/TESTNET/DEMO behavior without recorded exact-build
+provider evidence.
+
+Current official references:
+- https://bybit-exchange.github.io/docs/v5/order/open-order
+- https://bybit-exchange.github.io/docs/v5/order/order-list
+

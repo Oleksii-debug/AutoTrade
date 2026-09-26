@@ -29,6 +29,7 @@ def capability(
     *,
     environment="PAPER",
     order_types=("LIMIT", "MARKET"),
+    native_protection=(),
     observed_at=NOW,
     evidence_valid=True,
 ):
@@ -49,7 +50,7 @@ def capability(
                 time_in_force=frozenset({"GTC", "IOC"}),
                 permission_scopes=frozenset({"ORDER.WRITE", "ORDER.READ"}),
                 position_mode="NET",
-                native_protection=frozenset(),
+                native_protection=frozenset(native_protection),
                 rate_limit_policy_id=f"{provider.lower()}-limits",
                 data_entitlements=frozenset({"QUOTE", "TRADE"}),
                 evidence_ref={
@@ -187,6 +188,36 @@ class ProviderSelectionTests(unittest.TestCase):
         )
         self.assertEqual(missing.status, "NO_ELIGIBLE_PREFERRED_PROVIDER")
         self.assertIsNone(missing.selected)
+
+    def test_same_snapshot_id_with_different_content_is_not_authoritative(self):
+        authoritative = capability("BYBIT", native_protection=())
+        cached = capability("BYBIT", native_protection=("STOP_LOSS",))
+        self.assertEqual(cached.snapshot_id, authoritative.snapshot_id)
+        self.assertNotEqual(cached, authoritative)
+
+        base = candidate("BYBIT", "SPOT")
+        shadow_candidate = ProviderCandidate(
+            provider_id=base.provider_id,
+            product_family=base.product_family,
+            adapter_code_sha=base.adapter_code_sha,
+            qualification=base.qualification,
+            capability=cached,
+        )
+        registry = CapabilityRegistry()
+        registry.add(authoritative)
+
+        result = select(
+            request(),
+            [shadow_candidate],
+            capability_registry=registry,
+        )
+
+        self.assertEqual(result.status, "NO_ELIGIBLE_PROVIDER")
+        self.assertIn(
+            "CAPABILITY_CONTENT_MISMATCH",
+            result.decisions[0].reasons,
+        )
+        self.assertNotIn(shadow_candidate, result.eligible)
 
     def test_newer_capability_downgrade_revokes_cached_verified_candidate(self):
         bybit = candidate("BYBIT", "SPOT")

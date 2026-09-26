@@ -52,7 +52,7 @@ class ProviderCoreTests(unittest.TestCase):
         store = JournalStore(f"{directory}/journal.sqlite3")
         dispatcher = GuardedDispatcher(
             store,
-            environment="SIMULATION",
+            environment="PAPER",
             account_id="acct",
             owner_token="owner",
         )
@@ -70,6 +70,7 @@ class ProviderCoreTests(unittest.TestCase):
             "prepared_request_sha256": request_sha,
             "capability_snapshot_ids": list(capability_snapshot_ids),
             "instrument_versions": list(instrument_versions),
+            "provider_environment": "TESTNET",
         }
 
         def transport(_client_id, _request, guard):
@@ -91,7 +92,7 @@ class ProviderCoreTests(unittest.TestCase):
         return (
             load_submission_response_binding(
                 store,
-                environment="SIMULATION",
+                environment="PAPER",
                 account_id="acct",
                 attempt_id="provider-evidence-a1",
             ),
@@ -108,6 +109,7 @@ class ProviderCoreTests(unittest.TestCase):
                 prepared_request_sha256=request_sha,
                 capability_snapshot_ids=("cap-1",),
                 instrument_versions=("BTCUSD:v1",),
+                provider_environment="TESTNET",
             )
             self.assertIsInstance(observation, ProviderSubmissionObservation)
             self.assertEqual(observation.payload["orderId"], "provider-1")
@@ -120,7 +122,8 @@ class ProviderCoreTests(unittest.TestCase):
                 capability_snapshot_ids=("cap-1",),
                 instrument_versions=("BTCUSD:v1",),
                 account_id="acct",
-                environment="SIMULATION",
+                environment="PAPER",
+                provider_environment="TESTNET",
                 client_order_id=binding.client_order_id,
             )
 
@@ -133,6 +136,7 @@ class ProviderCoreTests(unittest.TestCase):
                 {"prepared_request_sha256": "sha256:" + "0" * 64},
                 {"capability_snapshot_ids": ("cap-2",)},
                 {"instrument_versions": ("ETHUSD:v1",)},
+                {"provider_environment": "DEMO"},
             ):
                 values = {
                     "response_binding": binding,
@@ -141,6 +145,7 @@ class ProviderCoreTests(unittest.TestCase):
                     "prepared_request_sha256": request_sha,
                     "capability_snapshot_ids": ("cap-1",),
                     "instrument_versions": ("BTCUSD:v1",),
+                    "provider_environment": "TESTNET",
                 }
                 values.update(kwargs)
                 with self.subTest(kwargs=kwargs), self.assertRaises(ProviderCoreError):

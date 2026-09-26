@@ -23,6 +23,43 @@
     BLOCK_NEW_EXPOSURE: new Set(["OWNER", "OPERATOR"]),
     REVOKE_AUTHORITY: new Set(["OWNER"])
   });
+  const TABLE_TOOLS = Object.freeze([
+    Object.freeze({
+      bodyId: "strategy-body",
+      filterId: "strategy-filter",
+      copyId: "strategy-copy",
+      statusId: "strategy-filter-status",
+      label: "strategy and decision"
+    }),
+    Object.freeze({
+      bodyId: "portfolio-body",
+      filterId: "portfolio-filter",
+      copyId: "portfolio-copy",
+      statusId: "portfolio-filter-status",
+      label: "portfolio"
+    }),
+    Object.freeze({
+      bodyId: "risk-body",
+      filterId: "risk-filter",
+      copyId: "risk-copy",
+      statusId: "risk-filter-status",
+      label: "risk and authority"
+    }),
+    Object.freeze({
+      bodyId: "jobs-body",
+      filterId: "jobs-filter",
+      copyId: "jobs-copy",
+      statusId: "jobs-filter-status",
+      label: "research and replay jobs"
+    }),
+    Object.freeze({
+      bodyId: "event-history-body",
+      filterId: "event-history-filter",
+      copyId: "event-history-copy",
+      statusId: "event-history-filter-status",
+      label: "received host events"
+    })
+  ]);
 
   const state = {
     cursor: 0n,
@@ -51,6 +88,16 @@
     "risk-region",
     "jobs-region",
     "event-history-region",
+    "strategy-filter",
+    "strategy-copy",
+    "portfolio-filter",
+    "portfolio-copy",
+    "risk-filter",
+    "risk-copy",
+    "jobs-filter",
+    "jobs-copy",
+    "event-history-filter",
+    "event-history-copy",
     "host-action",
     "submit-command",
     "refresh-state",
@@ -448,6 +495,7 @@
 
   function appendProjectionRow(body, label, value) {
     const row = document.createElement("tr");
+    row.dataset.filterableRow = "true";
     const header = document.createElement("th");
     header.scope = "row";
     header.textContent = label;
@@ -469,11 +517,13 @@
       cell.textContent = emptyMessage;
       row.appendChild(cell);
       body.appendChild(row);
+      reapplyTableFilter(bodyId);
       return;
     }
     for (const [key, value] of entries) {
       appendProjectionRow(body, key, value);
     }
+    reapplyTableFilter(bodyId);
   }
 
   function renderPermissionSummary(permissionSummary) {
@@ -505,10 +555,12 @@
       cell.textContent = "No background jobs reported by the host snapshot.";
       row.appendChild(cell);
       body.appendChild(row);
+      reapplyTableFilter("jobs-body");
       return;
     }
     jobs.forEach((job, index) => {
       const row = document.createElement("tr");
+      row.dataset.filterableRow = "true";
       const header = document.createElement("th");
       header.scope = "row";
       header.textContent = "Job " + String(index + 1);
@@ -517,6 +569,115 @@
       row.append(header, cell);
       body.appendChild(row);
     });
+    reapplyTableFilter("jobs-body");
+  }
+
+  function normalizedTableQuery(value) {
+    return String(value ?? "").trim().toLocaleLowerCase();
+  }
+
+  function tableSearchText(row) {
+    return [...row.cells]
+      .map((cell) => cell.textContent.replace(/\s+/g, " ").trim())
+      .join(" ")
+      .toLocaleLowerCase();
+  }
+
+  function toolForBody(bodyId) {
+    return TABLE_TOOLS.find((tool) => tool.bodyId === bodyId) || null;
+  }
+
+  function filterableRows(body) {
+    return [...body.querySelectorAll('tr[data-filterable-row="true"]')];
+  }
+
+  function applyTableFilter(tool, {announce = true} = {}) {
+    const body = byId(tool.bodyId);
+    const filter = byId(tool.filterId);
+    if (!body || !filter) return;
+    const rows = filterableRows(body);
+    const query = normalizedTableQuery(filter.value);
+    let visible = 0;
+    for (const row of rows) {
+      const matches = query === "" || tableSearchText(row).includes(query);
+      row.hidden = !matches;
+      if (matches) visible += 1;
+    }
+    if (!announce) return;
+    if (rows.length === 0) {
+      text(tool.statusId, "No host rows are available to filter.");
+    } else if (query === "") {
+      text(tool.statusId, String(rows.length) + " rows shown.");
+    } else {
+      text(
+        tool.statusId,
+        String(visible) + " of " + String(rows.length) +
+          " rows match the current filter.");
+    }
+  }
+
+  function reapplyTableFilter(bodyId) {
+    const tool = toolForBody(bodyId);
+    if (tool !== null) applyTableFilter(tool, {announce: false});
+  }
+
+  function resetTableFiltersForScopeChange() {
+    for (const tool of TABLE_TOOLS) {
+      const filter = byId(tool.filterId);
+      if (filter) filter.value = "";
+      text(tool.statusId, "Filter cleared for new account/environment scope.");
+    }
+  }
+
+  function visibleTableRows(tool) {
+    const body = byId(tool.bodyId);
+    if (!body) return [];
+    return filterableRows(body).filter((row) => !row.hidden);
+  }
+
+  function tabSeparatedRowText(row) {
+    return [...row.cells]
+      .map((cell) => cell.textContent.replace(/\s+/g, " ").trim())
+      .join("\t");
+  }
+
+  async function copyVisibleTableRows(tool) {
+    const rows = visibleTableRows(tool);
+    if (rows.length === 0) {
+      text(tool.statusId, "No visible " + tool.label + " rows are available to copy.");
+      return;
+    }
+    if (!navigator.clipboard ||
+        typeof navigator.clipboard.writeText !== "function") {
+      text(
+        tool.statusId,
+        "Clipboard access is unavailable. Use normal text selection and copy.");
+      return;
+    }
+    const payload = rows.map((row) => tabSeparatedRowText(row)).join("\n");
+    try {
+      await navigator.clipboard.writeText(payload);
+      text(
+        tool.statusId,
+        String(rows.length) + " visible " + tool.label + " rows copied.");
+    } catch {
+      text(
+        tool.statusId,
+        "Clipboard copy was not permitted. Use normal text selection and copy.");
+    }
+  }
+
+  function bindTableTools() {
+    for (const tool of TABLE_TOOLS) {
+      const filter = byId(tool.filterId);
+      const copy = byId(tool.copyId);
+      if (!filter || !copy) continue;
+      filter.addEventListener("input", () => applyTableFilter(tool));
+      copy.addEventListener("click", () => {
+        void copyVisibleTableRows(tool);
+      });
+      applyTableFilter(tool, {announce: false});
+    }
   }
 
   function announceLiveText(id, message) {
@@ -641,6 +802,7 @@
 
     const row = document.createElement("tr");
     row.dataset.hostEventCursor = cursor.toString();
+    row.dataset.filterableRow = "true";
     for (let index = 0; index < 4; index += 1) {
       row.appendChild(document.createElement("td"));
     }
@@ -653,6 +815,7 @@
     while (body.children.length > 100) {
       body.lastElementChild.remove();
     }
+    reapplyTableFilter("event-history-body");
   }
 
   function resetEventHistoryForScope() {
@@ -665,6 +828,7 @@
     cell.textContent = "No canonical host events received in this account/environment session.";
     row.appendChild(cell);
     body.appendChild(row);
+    reapplyTableFilter("event-history-body");
   }
 
   function renderSnapshot(snapshot, {announceRefresh = false} = {}) {
@@ -675,6 +839,7 @@
     if (scopeChanged) {
       state.cursor = 0n;
       state.version = 0n;
+      resetTableFiltersForScopeChange();
       resetEventHistoryForScope();
     }
     if (parsed.version < state.version || parsed.cursor < state.cursor) {
@@ -1017,6 +1182,7 @@
   }
 
   async function start() {
+    bindTableTools();
     byId("host-command-form").addEventListener("submit", submitCommand);
     byId("host-action").addEventListener("change", () => {
       setCommandAvailability(state.snapshotReady && state.sessionIdentity !== null);

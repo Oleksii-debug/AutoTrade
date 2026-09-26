@@ -712,5 +712,141 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("renderPermissionSummary(parsed.permissionSummary)", js)
 
 
+    def test_live_projection_tables_have_keyboard_filter_and_copy_controls(self):
+        html = INDEX.read_text(encoding="utf-8")
+        js = APP.read_text(encoding="utf-8")
+        for prefix in (
+            "strategy",
+            "portfolio",
+            "risk",
+            "jobs",
+            "event-history",
+        ):
+            self.assertIn(f'id="{prefix}-filter" type="search"', html)
+            self.assertIn(f'id="{prefix}-copy" type="button"', html)
+            self.assertIn(
+                f'id="{prefix}-filter-status"',
+                html,
+            )
+        self.assertIn("const TABLE_TOOLS = Object.freeze([", js)
+        self.assertIn("function applyTableFilter(tool, {announce = true} = {})", js)
+        self.assertIn("function copyVisibleTableRows(tool)", js)
+        self.assertIn("function bindTableTools()", js)
+        self.assertIn("bindTableTools();", js)
+
+    def test_projection_filter_is_local_text_only_and_reapplied_after_live_updates(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn('row.dataset.filterableRow = "true"', js)
+        self.assertIn("tableSearchText(row).includes(query)", js)
+        self.assertIn("row.hidden = !matches", js)
+        self.assertIn('reapplyTableFilter("jobs-body")', js)
+        self.assertIn('reapplyTableFilter("event-history-body")', js)
+        self.assertIn("reapplyTableFilter(bodyId)", js)
+        filter_scope = js[
+            js.index("function applyTableFilter(tool, {announce = true} = {})"):
+            js.index("function reapplyTableFilter(bodyId)")
+        ]
+        self.assertNotIn("fetch(", filter_scope)
+        self.assertNotIn("submitCanonicalCommand", filter_scope)
+        self.assertNotIn("innerHTML", filter_scope)
+
+    def test_passive_live_refresh_does_not_spam_filter_live_status(self):
+        js = APP.read_text(encoding="utf-8")
+        apply_scope = js[
+            js.index("function applyTableFilter(tool, {announce = true} = {})"):
+            js.index("function reapplyTableFilter(bodyId)")
+        ]
+        self.assertIn("if (!announce) return;", apply_scope)
+
+        reapply_scope = js[
+            js.index("function reapplyTableFilter(bodyId)"):
+            js.index("function visibleTableRows(tool)")
+        ]
+        self.assertIn(
+            "applyTableFilter(tool, {announce: false})",
+            reapply_scope,
+        )
+
+        bind_scope = js[
+            js.index("function bindTableTools()"):
+            js.index("function announceLiveText", js.index("function bindTableTools()"))
+        ]
+        self.assertIn(
+            'filter.addEventListener("input", () => applyTableFilter(tool))',
+            bind_scope,
+        )
+        self.assertIn(
+            "applyTableFilter(tool, {announce: false})",
+            bind_scope,
+        )
+
+
+    def test_scope_transition_clears_all_table_filters_before_rendering_new_scope(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("function resetTableFiltersForScopeChange()", js)
+        reset = js[
+            js.index("function resetTableFiltersForScopeChange()"):
+            js.index("function visibleTableRows(tool)")
+        ]
+        self.assertIn("for (const tool of TABLE_TOOLS)", reset)
+        self.assertIn('filter.value = ""', reset)
+        self.assertIn(
+            'text(tool.statusId, "Filter cleared for new account/environment scope.")',
+            reset,
+        )
+        snapshot = js[
+            js.index("function renderSnapshot(snapshot"):
+            js.index("async function refreshSnapshot", js.index("function renderSnapshot(snapshot"))
+        ]
+        clear = snapshot.index("resetTableFiltersForScopeChange();")
+        events = snapshot.index("resetEventHistoryForScope();")
+        portfolio = snapshot.index('renderProjection(\n      "portfolio-body"')
+        self.assertLess(clear, events)
+        self.assertLess(clear, portfolio)
+
+    def test_copy_visible_rows_uses_only_rendered_text_and_fails_accessibly(self):
+        html = INDEX.read_text(encoding="utf-8")
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn('role="status" aria-live="polite"', html)
+        self.assertIn("function visibleTableRows(tool)", js)
+        self.assertIn("filterableRows(body).filter((row) => !row.hidden)", js)
+        self.assertIn("function tabSeparatedRowText(row)", js)
+        self.assertIn("cell.textContent.replace(/\\s+/g, \" \").trim()", js)
+        self.assertIn("await navigator.clipboard.writeText(payload)", js)
+        self.assertIn(
+            "Clipboard access is unavailable. Use normal text selection and copy.",
+            js,
+        )
+        self.assertIn(
+            "Clipboard copy was not permitted. Use normal text selection and copy.",
+            js,
+        )
+        self.assertNotIn("document.execCommand", js)
+
+    def test_table_tool_focus_targets_survive_browser_page_restore(self):
+        js = APP.read_text(encoding="utf-8")
+        for target in (
+            "strategy-filter",
+            "strategy-copy",
+            "portfolio-filter",
+            "portfolio-copy",
+            "risk-filter",
+            "risk-copy",
+            "jobs-filter",
+            "jobs-copy",
+            "event-history-filter",
+            "event-history-copy",
+        ):
+            self.assertIn(f'\"{target}\"', js)
+
+    def test_table_tools_reflow_without_horizontal_viewport_locking(self):
+        css = CSS.read_text(encoding="utf-8")
+        self.assertIn(".table-tools {", css)
+        self.assertIn("flex-wrap: wrap", css)
+        self.assertIn("max-inline-size: 100%", css)
+        self.assertIn("overflow-wrap: anywhere", css)
+        self.assertNotIn("overflow-x: hidden", css.lower())
+
+
 if __name__ == "__main__":
     unittest.main()

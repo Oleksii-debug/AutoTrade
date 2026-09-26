@@ -463,13 +463,31 @@ def build_bundle(
         raise BundleError("staging must be an existing directory") from error
     output_resolved = output.resolve(strict=False)
     hash_resolved = output.with_suffix(output.suffix + ".sha256").resolve(strict=False)
-    for candidate, name in ((output_resolved, "output"), (hash_resolved, "hash output")):
+    destinations = (
+        (output_resolved, "output"),
+        (hash_resolved, "hash output"),
+    )
+    for candidate, name in destinations:
         try:
             candidate.relative_to(staging_resolved)
         except ValueError:
             pass
         else:
             raise BundleError(f"{name} must be outside the staging directory")
+
+    protected_inputs = [
+        (provenance_path.resolve(strict=False), "release provenance input"),
+    ]
+    if composition_path is not None:
+        protected_inputs.append(
+            (composition_path.resolve(strict=False), "Windows composition input")
+        )
+    for candidate, name in destinations:
+        for protected, protected_name in protected_inputs:
+            if candidate == protected:
+                raise BundleError(
+                    f"{name} must not overwrite {protected_name}"
+                )
 
     provenance, provenance_sha256 = _load_provenance(provenance_path)
     blockers = provenance["blocking_issues"]

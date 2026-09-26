@@ -21,9 +21,8 @@ from research.autotrade_research.artifacts.store import ArtifactStore
 from .qualification_attestation import (
     AcceptedQualificationAttestation,
     QualificationTrustError,
-    QualificationTrustPolicy,
     SignedQualificationAttestation,
-    verify_qualification_attestation,
+    verify_canonical_qualification_attestation,
 )
 
 
@@ -590,9 +589,6 @@ def assess_bounded_real_qualification(
     observations: BoundedRealObservations,
     evidence_verifier: ArtifactStoreEvidenceVerifier | None = None,
     qualification_receipt: SignedQualificationAttestation | None = None,
-    qualification_policy: QualificationTrustPolicy | None = None,
-    expected_policy_id: str | None = None,
-    expected_policy_version: str | None = None,
 ) -> BoundedRealQualificationResult:
     """Validate a bounded-real evidence bundle without granting authority."""
 
@@ -715,16 +711,8 @@ def assess_bounded_real_qualification(
                 suffix = "conflicted" if verification.conflicted else "unverified"
                 reasons.append(f"immutable_evidence_{suffix}:{label}")
 
-    trust_inputs = (
-        qualification_receipt,
-        qualification_policy,
-        expected_policy_id,
-        expected_policy_version,
-    )
-    if all(value is None for value in trust_inputs):
+    if qualification_receipt is None:
         reasons.append("independent_evidence_trust_unavailable")
-    elif any(value is None for value in trust_inputs):
-        reasons.append("independent_evidence_trust_incomplete")
     elif not isinstance(evidence_verifier, ArtifactStoreEvidenceVerifier):
         reasons.append("independent_evidence_trust_unavailable")
     else:
@@ -741,12 +729,9 @@ def assess_bounded_real_qualification(
             for _, ref in all_refs
         )
         try:
-            accepted = verify_qualification_attestation(
+            accepted = verify_canonical_qualification_attestation(
                 qualification_receipt,
-                policy=qualification_policy,
                 evidence_store=evidence_verifier.store,
-                expected_policy_id=expected_policy_id,
-                expected_policy_version=expected_policy_version,
                 expected_source_sha=envelope.source_sha,
                 expected_domain=_QUALIFICATION_DOMAIN,
                 expected_gate=_QUALIFICATION_GATE,

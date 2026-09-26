@@ -263,9 +263,9 @@ class ForwardPaperProtocol:
         registered = _instant(registered_at, name="registered_at")
         start = _instant(starts_at, name="starts_at")
         end = _instant(ends_at, name="ends_at")
-        if registered > start:
+        if registered >= start:
             raise ForwardPaperError(
-                "registered_at must not be after campaign starts_at"
+                "registered_at must be strictly before campaign starts_at"
             )
         if end <= start:
             raise ForwardPaperError("ends_at must be after starts_at")

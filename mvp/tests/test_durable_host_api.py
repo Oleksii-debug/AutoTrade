@@ -149,7 +149,6 @@ class JournalBackedHostApiTests(unittest.TestCase):
         second = self.store(account_id="other-account")
         first_command = self.command(key="shared-account-key")
         second_command = self.command(
-            command_id="33333333-3333-3333-3333-333333333333",
             key="shared-account-key",
             account_id="other-account",
         )
@@ -157,10 +156,12 @@ class JournalBackedHostApiTests(unittest.TestCase):
         first_result = first.submit(first_command)
         second_result = second.submit(second_command)
 
+        self.assertEqual(first_command["command_id"], second_command["command_id"])
         self.assertEqual(first_result.status, "ACCEPTED")
         self.assertEqual(second_result.status, "ACCEPTED")
         self.assertEqual(first_result.state_version, "1")
         self.assertEqual(second_result.state_version, "1")
+        self.assertNotEqual(first_result.operation_id, second_result.operation_id)
         self.assertEqual(first.submit(first_command), first_result)
         self.assertEqual(second.submit(second_command), second_result)
 

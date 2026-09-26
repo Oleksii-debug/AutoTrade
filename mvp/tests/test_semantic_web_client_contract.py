@@ -521,6 +521,45 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertNotIn("state.snapshotReady = false", local_slice)
         self.assertNotIn("state.sessionIdentity = null", local_slice)
 
+    def test_policy_review_confirmation_is_bound_to_exact_fields_and_snapshot_context(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("function authorityReviewScopeKey()", js)
+        self.assertIn("function invalidateAuthorityPolicyReview()", js)
+        self.assertIn("function bindAuthorityPolicyReviewInvalidation()", js)
+        self.assertIn(
+            'input.addEventListener("input", invalidateAuthorityPolicyReview)',
+            js,
+        )
+        self.assertIn(
+            'input.addEventListener("change", invalidateAuthorityPolicyReview)',
+            js,
+        )
+        self.assertIn(
+            "confirmation.dataset.reviewStateVersion = state.version.toString()",
+            js,
+        )
+        self.assertIn(
+            "confirmation.dataset.reviewScope = authorityReviewScopeKey()",
+            js,
+        )
+        self.assertIn(
+            "confirmation.dataset.reviewStateVersion !== state.version.toString()",
+            js,
+        )
+        self.assertIn(
+            "confirmation.dataset.reviewScope !== authorityReviewScopeKey()",
+            js,
+        )
+        self.assertIn(
+            "review confirmation must be renewed after host state or policy scope changes",
+            js,
+        )
+        self.assertIn(
+            "priorScopeKey !== \"\" && priorScopeKey !== scopeKey",
+            js,
+        )
+        self.assertIn("bindAuthorityPolicyReviewInvalidation();", js)
+
     def test_action_change_rechecks_role_before_enabling_submit(self):
         js = APP.read_text(encoding="utf-8")
         self.assertIn(
@@ -544,7 +583,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
     def test_pending_owner_command_is_not_retried_after_role_downgrade(self):
         js = APP.read_text(encoding="utf-8")
         submit = js.index("async function submitCommand(event)")
-        payload = js.index("const payload = commandForSubmission(action)", submit)
+        payload = js.index("payload = commandForSubmission(action)", submit)
         role_fence = js.index(
             "if (recovering && !roleCanSubmitAction(",
             submit,

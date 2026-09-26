@@ -1579,6 +1579,28 @@ class JournalStore:
                             "global projection checkpoint journal_sequence "
                             "is not a canonical integer"
                         )
+                    try:
+                        existing_state = json.loads(existing["state_json"])
+                    except (json.JSONDecodeError, TypeError) as error:
+                        raise ValueError(
+                            "global projection checkpoint state is not valid JSON"
+                        ) from error
+                    if canonical_json(existing_state) != existing["state_json"]:
+                        raise ValueError(
+                            "global projection checkpoint state is not canonical JSON"
+                        )
+                    existing_hash = payload_digest(
+                        {
+                            "projection_name": projection_name,
+                            "journal_sequence": existing_sequence,
+                            "state": existing_state,
+                        }
+                    )
+                    if existing_hash != existing["state_hash"]:
+                        raise ValueError(
+                            "global projection checkpoint hash does not match "
+                            "identity, cut, and state"
+                        )
                     exact = (
                         existing_sequence == journal_sequence
                         and existing["state_json"] == state_json

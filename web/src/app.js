@@ -147,10 +147,40 @@
     return value;
   }
 
+  function parsePermissionSummary(value) {
+    const permissionSummary = requiredObject(value, "permission_summary");
+    const allowed = new Set(["actor", "session", "role", "capabilities"]);
+    for (const key of Object.keys(permissionSummary)) {
+      if (!allowed.has(key)) {
+        throw new Error("permission_summary contains non-canonical field " + key);
+      }
+    }
+
+    const actor = requiredText(
+      permissionSummary.actor, "permission_summary.actor");
+    const session = requiredText(
+      permissionSummary.session, "permission_summary.session");
+    if (!/^sid-[0-9a-f]{64}$/.test(session)) {
+      throw new Error(
+        "permission_summary.session must be a canonical public session reference");
+    }
+    const role = requiredText(
+      permissionSummary.role, "permission_summary.role");
+    const capabilities = permissionSummary.capabilities === undefined
+      ? []
+      : requiredStringArray(
+        permissionSummary.capabilities, "permission_summary.capabilities");
+    if (capabilities.some((item) => item !== item.trim()) ||
+        new Set(capabilities).size !== capabilities.length) {
+      throw new Error(
+        "permission_summary.capabilities must contain unique canonical strings");
+    }
+    return {actor, session, role, capabilities};
+  }
+
   function readSessionIdentity(permissionSummary) {
     const actor = permissionSummary.actor;
     const session = permissionSummary.session;
-    if (actor === undefined && session === undefined) return null;
     return {
       actor: requiredText(actor, "permission_summary.actor"),
       session: requiredText(session, "permission_summary.session"),
@@ -194,8 +224,8 @@
     if (Object.keys(connectionFreshness).length === 0) {
       throw new Error("connection_freshness evidence is required");
     }
-    const permissionSummary = requiredObject(
-      snapshot.permission_summary, "permission_summary");
+    const permissionSummary = parsePermissionSummary(
+      snapshot.permission_summary);
     if (!Array.isArray(snapshot.jobs)) throw new Error("jobs must be an array");
 
     return {
@@ -382,12 +412,56 @@
     return String(value);
   }
 
+  function flattenProjectionRows(record) {
+    const rows = [];
+
+    function visit(value, path) {
+      if (Array.isArray(value)) {
+        if (value.length === 0) {
+          rows.push([path, "[]"]);
+          return;
+        }
+        value.forEach((item, index) => {
+          visit(item, path + "[" + String(index + 1) + "]");
+        });
+        return;
+      }
+      if (value && typeof value === "object") {
+        const keys = Object.keys(value).sort();
+        if (keys.length === 0) {
+          rows.push([path, "{}"]);
+          return;
+        }
+        for (const key of keys) {
+          visit(value[key], path ? path + "." + key : key);
+        }
+        return;
+      }
+      rows.push([path, projectionText(value)]);
+    }
+
+    for (const key of Object.keys(record).sort()) {
+      visit(record[key], key);
+    }
+    return rows;
+  }
+
+  function appendProjectionRow(body, label, value) {
+    const row = document.createElement("tr");
+    const header = document.createElement("th");
+    header.scope = "row";
+    header.textContent = label;
+    const cell = document.createElement("td");
+    cell.textContent = value;
+    row.append(header, cell);
+    body.appendChild(row);
+  }
+
   function renderProjection(bodyId, record, emptyMessage) {
     const body = byId(bodyId);
     if (!body) return;
     body.replaceChildren();
-    const entries = Object.entries(record)
-      .sort(([left], [right]) => left.localeCompare(right));
+    const entries = flattenProjectionRows(record);
     if (entries.length === 0) {
       const row = document.createElement("tr");
       const cell = document.createElement("td");
@@ -398,15 +472,26 @@
       return;
     }
     for (const [key, value] of entries) {
-      const row = document.createElement("tr");
-      const header = document.createElement("th");
-      header.scope = "row";
-      header.textContent = key;
-      const cell = document.createElement("td");
-      cell.textContent = projectionText(value);
-      row.append(header, cell);
-      body.appendChild(row);
+      appendProjectionRow(body, key, value);
     }
+  }
+
+  function renderPermissionSummary(permissionSummary) {
+    const body = byId("permissions-body");
+    if (!body) return;
+    body.replaceChildren();
+    appendProjectionRow(body, "Actor", permissionSummary.actor);
+    appendProjectionRow(body, "Session", permissionSummary.session);
+    appendProjectionRow(body, "Role", permissionSummary.role);
+    if (permissionSummary.capabilities.length === 0) {
+      appendProjectionRow(
+        body, "Capabilities", "No capabilities reported by the host snapshot.");
+      return;
+    }
+    permissionSummary.capabilities.forEach((capability, index) => {
+      appendProjectionRow(
+        body, "Capability " + String(index + 1), capability);
+    });
   }
 
   function renderJobs(jobs) {
@@ -617,10 +702,7 @@
         ". Environment: " + parsed.environment + ".");
     text("freshness", freshnessText(parsed));
     text("server-time", parsed.serverTime);
-    renderProjection(
-      "permissions-body",
-      parsed.permissionSummary,
-      "No permission or capability evidence reported by the host snapshot.");
+    renderPermissionSummary(parsed.permissionSummary);
     renderProjection(
       "portfolio-body",
       parsed.portfolio,

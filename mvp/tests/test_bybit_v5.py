@@ -42,6 +42,11 @@ from mvp.autotrade_mvp.provider_core import (
     observe_submission_json_response,
     prepare_authenticated_read_query,
 )
+from mvp.autotrade_mvp.reconciliation import (
+    SnapshotConsistencyEvidence,
+    UnknownSubmission,
+    reconcile_account,
+)
 
 
 READ_AT = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
@@ -1991,6 +1996,83 @@ class BybitV5AdapterTests(unittest.TestCase):
                     surface="OPEN_ORDERS",
                 )
             )
+
+
+    def test_exact_bybit_working_page_resolves_unknown_send_without_retry(self):
+        page = parse_order_page(
+            bound_order_response(
+                {
+                    "retCode": 0,
+                    "result": {
+                        "category": "spot",
+                        "nextPageCursor": "",
+                        "list": [
+                            {
+                                "orderId": "provider-unknown-resolved",
+                                "orderLinkId": "client_unknown_resolved",
+                                "symbol": "BTCUSDT",
+                                "orderStatus": "New",
+                                "leavesQty": "0.4",
+                                "createdTime": "1790279999000",
+                                "updatedTime": "1790280000000",
+                            }
+                        ],
+                    },
+                },
+                surface="OPEN_ORDERS",
+                client_order_id="client_unknown_resolved",
+            )
+        )
+        working = working_orders_from_page(
+            page,
+            instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+        )
+        unknown = UnknownSubmission.create(
+            attempt_id="attempt-bybit-unknown",
+            intent_id="intent-bybit-unknown",
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+            provider_environment="TESTNET",
+            client_order_id="client_unknown_resolved",
+            started_at="2026-09-24T19:59:00Z",
+        )
+        result = reconcile_account(
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+            provider_environment="TESTNET",
+            local_cash={},
+            provider_cash={},
+            local_positions={},
+            provider_positions={},
+            local_execution_ids=(),
+            provider_fills=(),
+            local_working_client_order_ids=("client_unknown_resolved",),
+            provider_working_orders=working,
+            snapshot_consistency=SnapshotConsistencyEvidence(
+                provider_id="BYBIT",
+                account_id="paper-1",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                mode="ATOMIC",
+                query_started_at="2026-09-24T20:00:00Z",
+                query_completed_at="2026-09-24T20:00:00Z",
+            ),
+            unknown_submissions=(unknown,),
+            searched_client_order_ids=("client_unknown_resolved",),
+            coverage_start="2026-09-24T19:59:00Z",
+            coverage_end="2026-09-24T20:01:00Z",
+            pagination_complete=True,
+        )
+        resolution = result.submission_resolutions[0]
+        self.assertEqual(resolution.outcome, "OBSERVED_WORKING_ORDER")
+        self.assertEqual(
+            resolution.provider_order_ids,
+            ("provider-unknown-resolved",),
+        )
+        self.assertTrue(result.complete)
+        self.assertFalse(result.blocks_new_risk)
 
 
 if __name__ == "__main__":

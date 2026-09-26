@@ -6,6 +6,7 @@ from research.autotrade_research.features.causal import (
     CausalFold,
     FeaturePoint,
     LabelPoint,
+    Normalizer,
     SourceValue,
     causal_cross_market_point,
     fit_fold_normalizer,
@@ -246,6 +247,50 @@ class CausalFeatureTests(unittest.TestCase):
                 provenance_hash="sha256:" + "0" * 64,
             )
 
+    def test_direct_normalizer_construction_cannot_bypass_fit_invariants(self):
+        with self.assertRaisesRegex(ValueError, "canonical causal fit_normalizer"):
+            Normalizer(
+                mean=Decimal("1"),
+                scale=Decimal("1"),
+                fit_cutoff=BASE,
+                fit_input_ids=("feature-1",),
+                provenance_hash="sha256:" + "a" * 64,
+            )
+
+    def test_normalizer_fit_rejects_duck_typed_feature_population(self):
+        class FakeFeature:
+            decision_time = BASE
+            value = Decimal("1")
+            feature_name = "x"
+            input_ids = ("fake",)
+            source_revisions = ("r1",)
+
+        with self.assertRaisesRegex(TypeError, "FeaturePoint"):
+            fit_normalizer([FakeFeature()], fit_cutoff=BASE)
+
+    def test_normalizer_fit_rejects_mixed_feature_families(self):
+        first = FeaturePoint(
+            "AAA",
+            BASE,
+            Decimal("1"),
+            ("a",),
+            ("r1",),
+            "feature-a",
+        )
+        second = FeaturePoint(
+            "AAA",
+            BASE + timedelta(seconds=1),
+            Decimal("2"),
+            ("b",),
+            ("r1",),
+            "feature-b",
+        )
+        with self.assertRaisesRegex(ValueError, "cannot mix"):
+            fit_normalizer(
+                [first, second],
+                fit_cutoff=BASE + timedelta(seconds=1),
+            )
+
     def test_delayed_label_cannot_enter_training_early(self):
         feature = rolling_return(
             [source(0, "100"), source(1, "101")],
@@ -396,6 +441,63 @@ class CausalFeatureTests(unittest.TestCase):
             second.source_population_fingerprint,
         )
         self.assertNotEqual(first.provenance_hash, second.provenance_hash)
+
+    def test_feature_point_requires_tuple_lineage_fields(self):
+        with self.assertRaisesRegex(ValueError, "input_ids must be a tuple"):
+            FeaturePoint(
+                "AAA",
+                BASE,
+                Decimal("1"),
+                "event-1",
+                ("r1",),
+                "x",
+            )
+        with self.assertRaisesRegex(ValueError, "source_revisions must be a tuple"):
+            FeaturePoint(
+                "AAA",
+                BASE,
+                Decimal("1"),
+                ("event-1",),
+                "r1",
+                "x",
+            )
+
+    def test_required_universe_rejects_duck_typed_source_population(self):
+        class FakeSource:
+            symbol = "AAA"
+            event_time = BASE
+            available_at = BASE
+            value = Decimal("100")
+            source_revision = "r1"
+            observation_id = "fake"
+
+        with self.assertRaisesRegex(TypeError, "SourceValue"):
+            require_universe_members(
+                ["AAA"],
+                [FakeSource()],
+                decision_time=BASE,
+            )
+
+    def test_required_universe_rejects_string_empty_and_duplicate_symbol_sets(self):
+        observations = [source(0, "100", symbol="AAA")]
+        with self.assertRaisesRegex(ValueError, "required_symbols must be a sequence"):
+            require_universe_members(
+                "AAA",
+                observations,
+                decision_time=BASE,
+            )
+        with self.assertRaisesRegex(ValueError, "non-empty"):
+            require_universe_members(
+                [],
+                observations,
+                decision_time=BASE,
+            )
+        with self.assertRaisesRegex(ValueError, "duplicates"):
+            require_universe_members(
+                ["AAA", "AAA"],
+                observations,
+                decision_time=BASE,
+            )
 
     def test_missing_asset_fails_explicitly(self):
         with self.assertRaises(ValueError):

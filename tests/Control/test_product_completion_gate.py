@@ -468,6 +468,22 @@ class ProductCompletionGateTests(unittest.TestCase):
         ):
             evaluate(qualification=qualification)
 
+        legacy_in_progress = complete_qualification()
+        legacy_in_progress["schema_version"] = "1.0.0"
+        legacy_in_progress["overall_status"] = (
+            "IMPLEMENTATION_IN_PROGRESS_SIMULATED_VERTICAL_SLICE_AVAILABLE"
+        )
+        report = evaluate(qualification=legacy_in_progress)
+        self.assertFalse(report["complete"])
+
+        legacy_terminal = complete_qualification()
+        legacy_terminal["schema_version"] = "1.0.0"
+        with self.assertRaisesRegex(
+            ProductCompletionError,
+            "FULL_PRODUCT_QUALIFIED requires qualification schema_version",
+        ):
+            evaluate(qualification=legacy_terminal)
+
         with TemporaryDirectory() as directory:
             (
                 qualification,

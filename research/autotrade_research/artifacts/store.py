@@ -552,13 +552,6 @@ class ArtifactStore:
 
         object_digests: set[str] = set()
         for path in self.objects.glob("*/*"):
-            if path.is_symlink():
-                corrupt.append(
-                    "object:" + path.relative_to(self.root).as_posix()
-                )
-                continue
-            if not path.is_file():
-                continue
             digest = path.name
             try:
                 canonical = self._object_path(digest)
@@ -568,6 +561,13 @@ class ArtifactStore:
                 )
                 continue
             if path != canonical:
+                corrupt.append(
+                    "object:" + path.relative_to(self.root).as_posix()
+                )
+                continue
+            try:
+                self._validate_object_entry(path)
+            except ArtifactIntegrityError:
                 corrupt.append(
                     "object:" + path.relative_to(self.root).as_posix()
                 )

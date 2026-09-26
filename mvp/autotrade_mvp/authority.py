@@ -1893,6 +1893,18 @@ class AuthorityService:
             "reason": normalized_reason,
             "blocked_at": normalized_at,
         }
+        scope = (account, env)
+        existing_scope = self._new_exposure_blocks.get(scope)
+        if existing_scope is not None:
+            if existing_scope == {
+                "command_id": cid,
+                "reason": normalized_reason,
+                "blocked_at": normalized_at,
+            }:
+                return False
+            raise AuthorityConflict(
+                "new-exposure scope is already durably blocked"
+            )
         event_id = _authority_event_id("AuthorityNewExposureBlocked", cid)
         existing = self.store.get_event(event_id)
         if existing is not None:

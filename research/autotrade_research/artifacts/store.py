@@ -666,16 +666,22 @@ class ArtifactStore:
         with ResourceLock(self.lock_path):
             self._validate_staging_namespace()
             before = self.audit()
-            for digest in before.unreferenced_objects:
-                path = self._object_path(digest)
-                try:
-                    self._validate_object_entry(path)
-                except ArtifactIntegrityError:
-                    continue
-                try:
-                    path.unlink()
-                except FileNotFoundError:
-                    pass
+            corrupt_manifests = tuple(
+                item
+                for item in before.corrupt_objects
+                if not item.startswith("object:")
+            )
+            if not corrupt_manifests:
+                for digest in before.unreferenced_objects:
+                    path = self._object_path(digest)
+                    try:
+                        self._validate_object_entry(path)
+                    except ArtifactIntegrityError:
+                        continue
+                    try:
+                        path.unlink()
+                    except FileNotFoundError:
+                        pass
             self._validate_staging_namespace()
             for path in self.staging.glob("*"):
                 try:

@@ -133,6 +133,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 instrument="instrument-v1",
                 side="BUY",
                 requested_quantity="2",
+                quantity_unit="unit",
                 parent_intent_id="intent-1",
                 committed_at=T0,
             )
@@ -143,6 +144,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 execution_fill={
                     "fill_id": "fill-1",
                     "provider_execution_id": "exec-1",
+                    "order_ref": "c1",
                     "provider_revision": "rev-1",
                     "order_ref": "c1",
                     "intent_ref": "intent-1",
@@ -178,11 +180,13 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 instrument="instrument-v1",
                 side="BUY",
                 requested_quantity="2",
+                quantity_unit="unit",
                 committed_at=T0,
             )
             base_fill = {
                 "fill_id": "fill-1",
                 "provider_execution_id": "exec-1",
+                    "order_ref": "c1",
                 "instrument_version": "instrument-v1",
                 "side": "BUY",
                 "last_quantity": {"value": "1", "unit": "unit"},
@@ -267,6 +271,85 @@ class DurableOrderProjectionTests(unittest.TestCase):
             self.assertEqual(restarted.order("c1").filled_quantity, Decimal("0"))
             self.assertEqual(book.order("c1").filled_quantity, Decimal("0"))
 
+    def test_canonical_execution_fill_cannot_redirect_order_or_change_quantity_unit(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store)
+            for order_id in ("c1", "c2"):
+                book.create_order(
+                    event_key=f"create-{order_id}",
+                    client_order_id=order_id,
+                    instrument="instrument-v1",
+                    side="BUY",
+                    requested_quantity="2",
+                    quantity_unit="unit",
+                    committed_at=T0,
+                )
+
+            canonical = {
+                "fill_id": "fill-identity-1",
+                "provider_execution_id": "exec-identity-1",
+                "order_ref": "c1",
+                "instrument_version": "instrument-v1",
+                "side": "BUY",
+                "last_quantity": {"value": "1", "unit": "unit"},
+                "last_price": "100",
+                "trade_time": T1,
+                "receipt_time": T2,
+                "fees": [],
+                "settlement_date": "2026-09-27",
+                "evidence": [],
+            }
+
+            missing_ref = dict(canonical)
+            missing_ref.pop("order_ref")
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "missing required fields: order_ref",
+            ):
+                book.ingest_execution_fill(
+                    event_key="missing-order-ref",
+                    client_order_id="c2",
+                    committed_at=T2,
+                    execution_fill=missing_ref,
+                )
+
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "order_ref differs from target order",
+            ):
+                book.ingest_execution_fill(
+                    event_key="redirected-order-ref",
+                    client_order_id="c2",
+                    committed_at=T2,
+                    execution_fill=canonical,
+                )
+
+            wrong_unit = {
+                **canonical,
+                "last_quantity": {"value": "2", "unit": "contracts"},
+            }
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "quantity unit differs from target order",
+            ):
+                book.ingest_execution_fill(
+                    event_key="wrong-quantity-unit",
+                    client_order_id="c1",
+                    committed_at=T2,
+                    execution_fill=wrong_unit,
+                )
+
+            self.assertEqual(book.order("c1").filled_quantity, Decimal("0"))
+            self.assertEqual(book.order("c2").filled_quantity, Decimal("0"))
+            self.assertEqual(
+                len(store.load_events("order_projection_book", book.aggregate_id)),
+                2,
+            )
+            restarted = durable(store)
+            self.assertEqual(restarted.order("c1").filled_quantity, Decimal("0"))
+            self.assertEqual(restarted.order("c2").filled_quantity, Decimal("0"))
+
     def test_canonical_execution_fill_event_key_binds_full_fill_content(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
@@ -277,11 +360,13 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 instrument="instrument-v1",
                 side="BUY",
                 requested_quantity="2",
+                quantity_unit="unit",
                 committed_at=T0,
             )
             fill = {
                 "fill_id": "fill-1",
                 "provider_execution_id": "exec-1",
+                    "order_ref": "c1",
                 "instrument_version": "instrument-v1",
                 "side": "BUY",
                 "last_quantity": {"value": "1", "unit": "unit"},
@@ -344,6 +429,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 instrument="instrument-v1",
                 side="BUY",
                 requested_quantity="2",
+                quantity_unit="unit",
                 committed_at=T0,
             )
             book.ingest_execution_fill(
@@ -353,6 +439,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 execution_fill={
                     "fill_id": "fill-1",
                     "provider_execution_id": "exec-1",
+                    "order_ref": "c1",
                     "provider_revision": "r1",
                     "instrument_version": "instrument-v1",
                     "side": "BUY",
@@ -372,6 +459,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 execution_fill={
                     "fill_id": "fill-1-r2",
                     "provider_execution_id": "exec-1",
+                    "order_ref": "c1",
                     "provider_revision": "r2",
                     "instrument_version": "instrument-v1",
                     "side": "BUY",
@@ -402,6 +490,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 instrument="instrument-v1",
                 side="BUY",
                 requested_quantity="2",
+                quantity_unit="unit",
                 committed_at=T0,
             )
             book.ingest_execution_fill(
@@ -411,6 +500,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 execution_fill={
                     "fill_id": "fill-1",
                     "provider_execution_id": "exec-1",
+                    "order_ref": "c1",
                     "provider_revision": "r1",
                     "instrument_version": "instrument-v1",
                     "side": "BUY",
@@ -430,6 +520,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 execution_fill={
                     "fill_id": "fill-1-r2",
                     "provider_execution_id": "exec-1",
+                    "order_ref": "c1",
                     "provider_revision": "r2",
                     "instrument_version": "instrument-v1",
                     "side": "BUY",
@@ -450,6 +541,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 execution_fill={
                     "fill_id": "fill-1-r3",
                     "provider_execution_id": "exec-1",
+                    "order_ref": "c1",
                     "provider_revision": "r3",
                     "instrument_version": "instrument-v1",
                     "side": "BUY",
@@ -482,6 +574,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 instrument="instrument-v1",
                 side="BUY",
                 requested_quantity="2",
+                quantity_unit="unit",
                 committed_at=T0,
             )
             book.ingest_execution_fill(
@@ -491,6 +584,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 execution_fill={
                     "fill_id": "fill-1",
                     "provider_execution_id": "exec-1",
+                    "order_ref": "c1",
                     "provider_revision": "r1",
                     "instrument_version": "instrument-v1",
                     "side": "BUY",
@@ -517,6 +611,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                     execution_fill={
                         "fill_id": "fill-1-r2",
                         "provider_execution_id": "exec-other",
+                        "order_ref": "c1",
                         "provider_revision": "r2",
                         "instrument_version": "instrument-v1",
                         "side": "BUY",

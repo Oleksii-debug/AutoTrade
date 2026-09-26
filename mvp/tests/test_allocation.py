@@ -57,6 +57,12 @@ class AllocationTests(unittest.TestCase):
             holding_cost_rate=holding_cost_rate,
         )
 
+    def test_empty_portfolio_fallback_has_known_zero_stress_loss(self):
+        result = allocate_targets([], self.policy())
+        self.assertEqual(result.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(result.gross_notional, Decimal("0"))
+        self.assertEqual(result.worst_stress_loss, Decimal("0"))
+
     def test_funded_request_is_accepted_without_scaling(self):
         result = allocate_targets([self.candidate()], self.policy())
         self.assertEqual(result.status, "ALLOCATED")
@@ -87,6 +93,32 @@ class AllocationTests(unittest.TestCase):
         self.assertEqual(result.targets[0].turnover_notional, Decimal("100"))
         self.assertEqual(result.turnover_notional, Decimal("100"))
 
+    def test_zero_scale_preserves_reconciled_odd_lot_below_new_order_minimum(self):
+        result = allocate_targets(
+            [
+                self.candidate(
+                    desired="100",
+                    price="10",
+                    lot="1",
+                    min_notional="10",
+                    current_quantity="0.5",
+                    turnover_cost_rate="0",
+                    holding_cost_rate="0",
+                )
+            ],
+            self.policy(
+                cash_available="1000",
+                max_gross_notional="5",
+                max_net_notional="5",
+                max_symbol_notional="5",
+                max_turnover_notional="0",
+            ),
+        )
+        self.assertEqual(result.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(result.targets[0].quantity, Decimal("0.5"))
+        self.assertEqual(result.targets[0].notional, Decimal("5"))
+        self.assertEqual(result.turnover_notional, Decimal("0"))
+
     def test_zero_turnover_budget_preserves_current_position_fail_closed(self):
         result = allocate_targets(
             [
@@ -107,6 +139,91 @@ class AllocationTests(unittest.TestCase):
         self.assertEqual(result.targets[0].quantity, Decimal("20"))
         self.assertEqual(result.targets[0].notional, Decimal("200"))
         self.assertEqual(result.turnover_notional, Decimal("0"))
+
+    def test_no_increase_fallback_reports_preserved_capital_and_holding_cost(self):
+        result = allocate_targets(
+            [
+                self.candidate(
+                    desired="500",
+                    price="10",
+                    current_quantity="20",
+                    cost="0.02",
+                    capital_requirement="0.5",
+                    turnover_cost_rate="0",
+                    holding_cost_rate="0.02",
+                )
+            ],
+            self.policy(
+                cash_available="2000",
+                max_turnover_notional="0",
+            ),
+            stress_scenarios={"down": {"AAA": "-0.25"}},
+        )
+        self.assertEqual(result.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(result.targets[0].quantity, Decimal("20"))
+        self.assertEqual(result.targets[0].notional, Decimal("200"))
+        self.assertEqual(result.targets[0].turnover_notional, Decimal("0"))
+        self.assertEqual(result.targets[0].estimated_cost, Decimal("4.00"))
+        self.assertEqual(result.estimated_cost, Decimal("4.00"))
+        self.assertEqual(result.cash_required, Decimal("104.00"))
+        self.assertEqual(result.worst_stress_loss, Decimal("50.00"))
+
+    def test_incomplete_stress_coverage_preserves_current_portfolio_without_keyerror(self):
+        result = allocate_targets(
+            [
+                self.candidate(
+                    "AAA",
+                    desired="500",
+                    price="10",
+                    current_quantity="20",
+                    turnover_cost_rate="0",
+                    holding_cost_rate="0",
+                ),
+                self.candidate(
+                    "BBB",
+                    desired="500",
+                    price="10",
+                    current_quantity="10",
+                    turnover_cost_rate="0",
+                    holding_cost_rate="0",
+                ),
+            ],
+            self.policy(
+                cash_available="5000",
+                max_gross_notional="5000",
+                max_net_notional="5000",
+                max_symbol_notional="5000",
+            ),
+            stress_scenarios={"partial": {"AAA": "-0.20"}},
+        )
+
+        self.assertEqual(result.status, "NO_INCREASE_FALLBACK")
+        self.assertIn("stress evidence is missing", result.reason)
+        targets = {target.symbol: target for target in result.targets}
+        self.assertEqual(targets["AAA"].quantity, Decimal("20"))
+        self.assertEqual(targets["BBB"].quantity, Decimal("10"))
+        self.assertEqual(result.turnover_notional, Decimal("0"))
+        self.assertIsNone(result.worst_stress_loss)
+
+    def test_missing_stress_evidence_never_reports_zero_for_preserved_exposure(self):
+        result = allocate_targets(
+            [
+                self.candidate(
+                    desired="500",
+                    price="10",
+                    current_quantity="20",
+                    turnover_cost_rate="0",
+                    holding_cost_rate="0",
+                )
+            ],
+            self.policy(
+                cash_available="2000",
+                max_turnover_notional="0",
+            ),
+        )
+        self.assertEqual(result.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(result.targets[0].notional, Decimal("200"))
+        self.assertIsNone(result.worst_stress_loss)
 
     def test_cost_split_prices_turnover_and_holding_exposure_separately(self):
         result = allocate_targets(
@@ -246,15 +363,19 @@ class AllocationTests(unittest.TestCase):
         self.assertLessEqual(result.worst_stress_loss, Decimal("100"))
 
     def test_incomplete_stress_scenario_fails_closed(self):
-        with self.assertRaisesRegex(ValueError, "missing explicit shocks"):
-            allocate_targets(
-                [
-                    self.candidate("AAA", desired="500", price="10"),
-                    self.candidate("BBB", desired="500", price="10"),
-                ],
-                self.policy(cash_available="2000", max_gross_notional="2000"),
-                stress_scenarios={"partial": {"AAA": "-0.20"}},
-            )
+        result = allocate_targets(
+            [
+                self.candidate("AAA", desired="500", price="10"),
+                self.candidate("BBB", desired="500", price="10"),
+            ],
+            self.policy(cash_available="2000", max_gross_notional="2000"),
+            stress_scenarios={"partial": {"AAA": "-0.20"}},
+        )
+        self.assertEqual(result.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(result.gross_notional, Decimal("0"))
+        self.assertEqual(result.turnover_notional, Decimal("0"))
+        self.assertEqual(result.worst_stress_loss, Decimal("0"))
+        self.assertIn("missing explicit shocks", result.reason)
 
     def test_minimum_lot_can_force_cash_fallback(self):
         result = allocate_targets(
@@ -534,6 +655,142 @@ class AllocationTests(unittest.TestCase):
         self.assertEqual(result.allocation.status, "ALLOCATED")
         self.assertGreater(result.expected_net_utility, Decimal("0"))
 
+    def test_liquidity_cap_rounding_cannot_overshoot_sell_turnover(self):
+        result = allocate_targets(
+            [
+                self.candidate(
+                    desired="0",
+                    price="10",
+                    lot="1",
+                    current_quantity="10",
+                    max_executable_notional="15",
+                    turnover_cost_rate="0",
+                    holding_cost_rate="0",
+                )
+            ],
+            self.policy(
+                cash_available="1000",
+                max_gross_notional="1000",
+                max_net_notional="1000",
+                max_symbol_notional="1000",
+            ),
+        )
+        self.assertEqual(result.status, "ALLOCATED")
+        self.assertEqual(result.targets[0].quantity, Decimal("9"))
+        self.assertEqual(result.targets[0].notional, Decimal("90"))
+        self.assertEqual(result.targets[0].turnover_notional, Decimal("10"))
+        self.assertLessEqual(
+            result.targets[0].turnover_notional,
+            Decimal("15"),
+        )
+
+    def test_bounded_search_probes_zero_crossing_before_discarding_feasible_interval(self):
+        result = allocate_targets(
+            [
+                self.candidate(
+                    desired="-100",
+                    price="10",
+                    lot="1",
+                    current_quantity="100",
+                    turnover_cost_rate="0",
+                    holding_cost_rate="0",
+                )
+            ],
+            self.policy(
+                cash_available="5000",
+                max_gross_notional="50",
+                max_net_notional="50",
+                max_symbol_notional="50",
+                max_turnover_notional="2000",
+            ),
+        )
+
+        self.assertEqual(result.status, "ALLOCATED")
+        self.assertGreater(result.turnover_notional, Decimal("0"))
+        self.assertLessEqual(result.gross_notional, Decimal("50"))
+        self.assertLessEqual(abs(result.targets[0].notional), Decimal("50"))
+        self.assertLess(result.targets[0].quantity, Decimal("0"))
+
+    def test_bounded_search_probes_portfolio_net_zero_interior(self):
+        result = allocate_targets(
+            [
+                self.candidate(
+                    symbol="AAA",
+                    desired="-1000",
+                    price="10",
+                    current_quantity="100",
+                    turnover_cost_rate="0",
+                    holding_cost_rate="0",
+                ),
+                self.candidate(
+                    symbol="BBB",
+                    desired="-900",
+                    price="10",
+                    current_quantity="-20",
+                    turnover_cost_rate="0",
+                    holding_cost_rate="0",
+                ),
+            ],
+            self.policy(
+                cash_available="5000",
+                max_gross_notional="5000",
+                max_net_notional="50",
+                max_symbol_notional="5000",
+                max_turnover_notional="5000",
+            ),
+        )
+
+        # Continuous portfolio net is 800 - 2700*scale, whose zero is 8/27.
+        # Scale 0, 0.25, 0.5 and 1 are all net-infeasible after lot rounding,
+        # but the interior around 8/27 is feasible (roughly +410 / -400).
+        self.assertEqual(result.status, "ALLOCATED")
+        self.assertGreater(result.scale, Decimal("0.25"))
+        self.assertLess(result.scale, Decimal("0.5"))
+        self.assertLessEqual(result.net_notional, Decimal("50"))
+        self.assertGreater(result.turnover_notional, Decimal("0"))
+        by_symbol = {target.symbol: target for target in result.targets}
+        self.assertGreater(by_symbol["AAA"].notional, Decimal("0"))
+        self.assertLess(by_symbol["BBB"].notional, Decimal("0"))
+
+    def test_order_lot_rounding_preserves_odd_lot_current_position(self):
+        result = allocate_targets(
+            [
+                self.candidate(
+                    desired="25",
+                    price="10",
+                    lot="1",
+                    current_quantity="0.5",
+                    turnover_cost_rate="0",
+                    holding_cost_rate="0",
+                )
+            ],
+            self.policy(cash_available="1000"),
+        )
+        self.assertEqual(result.status, "ALLOCATED")
+        self.assertEqual(result.targets[0].quantity, Decimal("2.5"))
+        self.assertEqual(result.targets[0].notional, Decimal("25"))
+        self.assertEqual(result.targets[0].turnover_notional, Decimal("20"))
+
+    def test_subminimum_order_preserves_existing_position_instead_of_liquidating(self):
+        result = allocate_targets(
+            [
+                self.candidate(
+                    desired="90",
+                    price="10",
+                    lot="1",
+                    min_notional="20",
+                    current_quantity="10",
+                    turnover_cost_rate="0",
+                    holding_cost_rate="0",
+                )
+            ],
+            self.policy(cash_available="1000"),
+        )
+        self.assertEqual(result.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(result.targets[0].quantity, Decimal("10"))
+        self.assertEqual(result.targets[0].notional, Decimal("100"))
+        self.assertEqual(result.targets[0].turnover_notional, Decimal("0"))
+
     def test_liquidity_capacity_caps_requested_target_without_increasing_risk(self):
         result = allocate_targets(
             [
@@ -681,6 +938,90 @@ class AllocationTests(unittest.TestCase):
             self.policy(),
         )
         self.assertEqual(result.allocation.status, "NO_INCREASE_FALLBACK")
+        self.assertIn("risk penalty", result.reason)
+
+    def test_objective_subset_cannot_hide_existing_unselected_portfolio_risk(self):
+        result = allocate_objective_targets(
+            [
+                ObjectiveCandidate.create(
+                    symbol="HELD",
+                    desired_notional="0",
+                    price="10",
+                    lot_size="1",
+                    expected_return_rate="0",
+                    current_quantity="80",
+                    turnover_cost_rate="0",
+                    holding_cost_rate="0",
+                ),
+                ObjectiveCandidate.create(
+                    symbol="NEW",
+                    desired_notional="1000",
+                    price="10",
+                    lot_size="1",
+                    expected_return_rate="0.10",
+                ),
+            ],
+            self.policy(
+                cash_available="1000",
+                max_gross_notional="1000",
+                max_net_notional="1000",
+                max_symbol_notional="1000",
+                max_turnover_notional="1000",
+                require_adverse_stress_evidence=False,
+            ),
+            stress_scenarios={
+                "joint_down": {
+                    "HELD": "-0.10",
+                    "NEW": "-0.10",
+                }
+            },
+        )
+        self.assertEqual(result.allocation.status, "ALLOCATED")
+        by_symbol = {
+            target.symbol: target
+            for target in result.allocation.targets
+        }
+        self.assertEqual(by_symbol["HELD"].quantity, Decimal("80"))
+        self.assertEqual(by_symbol["HELD"].notional, Decimal("800"))
+        self.assertLessEqual(by_symbol["NEW"].notional, Decimal("200"))
+        self.assertLessEqual(result.allocation.gross_notional, Decimal("1000"))
+        self.assertLessEqual(result.allocation.cash_required, Decimal("1000"))
+        self.assertGreaterEqual(
+            result.allocation.worst_stress_loss,
+            Decimal("80"),
+        )
+        self.assertEqual(result.selected_symbols, ("NEW",))
+
+    def test_objective_fallback_preserves_current_stress_economics(self):
+        result = allocate_objective_targets(
+            [
+                ObjectiveCandidate.create(
+                    symbol="RISKY",
+                    desired_notional="500",
+                    price="10",
+                    lot_size="1",
+                    expected_return_rate="0.03",
+                    risk_penalty_rate="0.04",
+                    current_quantity="20",
+                    cost_rate="0.02",
+                    capital_requirement_rate="0.5",
+                    turnover_cost_rate="0",
+                    holding_cost_rate="0.02",
+                )
+            ],
+            self.policy(
+                cash_available="2000",
+                max_gross_notional="2000",
+                max_net_notional="2000",
+                max_symbol_notional="2000",
+            ),
+            stress_scenarios={"down": {"RISKY": "-0.25"}},
+        )
+        self.assertEqual(result.allocation.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(result.allocation.targets[0].notional, Decimal("200"))
+        self.assertEqual(result.allocation.targets[0].estimated_cost, Decimal("4.00"))
+        self.assertEqual(result.allocation.cash_required, Decimal("104.00"))
+        self.assertEqual(result.allocation.worst_stress_loss, Decimal("50.00"))
         self.assertIn("risk penalty", result.reason)
 
     def test_objective_search_budget_fails_closed_instead_of_truncating(self):
@@ -849,8 +1190,15 @@ class AllocationTests(unittest.TestCase):
         self.assertEqual(result.expected_net_utility, Decimal("50"))
         self.assertEqual(
             tuple(target.symbol for target in result.allocation.targets),
-            ("CHEAP_LOWER",),
+            ("EXPENSIVE_HIGH", "CHEAP_LOWER"),
         )
+        targets = {
+            target.symbol: target
+            for target in result.allocation.targets
+        }
+        self.assertEqual(targets["EXPENSIVE_HIGH"].notional, Decimal("0"))
+        self.assertEqual(targets["EXPENSIVE_HIGH"].turnover_notional, Decimal("0"))
+        self.assertEqual(targets["CHEAP_LOWER"].notional, Decimal("1000"))
 
     def test_objective_budget_covers_complete_subset_space(self):
         result = allocate_objective_targets(

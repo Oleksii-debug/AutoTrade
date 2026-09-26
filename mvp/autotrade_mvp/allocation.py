@@ -6,7 +6,7 @@ treats simulated or expected returns as evidence of profitability.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from hashlib import sha256
@@ -499,7 +499,7 @@ class AllocationResult:
     gross_notional: Decimal
     net_notional: Decimal
     estimated_cost: Decimal
-    worst_stress_loss: Decimal
+    worst_stress_loss: Decimal | None
     cash_required: Decimal
     reason: str
     turnover_notional: Decimal = Decimal("0")
@@ -526,6 +526,8 @@ def _round_quantity(notional: Decimal, price: Decimal, lot_size: Decimal) -> Dec
 def _normalize_stress_scenarios(
     candidates: Sequence[AllocationCandidate],
     stress_scenarios: Mapping[str, Mapping[str, object]] | None,
+    *,
+    require_complete: bool = True,
 ) -> dict[str, dict[str, Decimal]]:
     symbols = [candidate.symbol for candidate in candidates]
     if len(symbols) != len(set(symbols)):
@@ -555,13 +557,14 @@ def _normalize_stress_scenarios(
             f"stress scenarios reference unknown symbols: {', '.join(unknown)}"
         )
 
-    for scenario_name, scenario in normalized.items():
-        missing = sorted(symbol_set - set(scenario))
-        if missing:
-            raise ValueError(
-                f"stress scenario {scenario_name} is missing explicit shocks for: "
-                f"{', '.join(missing)}"
-            )
+    if require_complete:
+        for scenario_name, scenario in normalized.items():
+            missing = sorted(symbol_set - set(scenario))
+            if missing:
+                raise ValueError(
+                    f"stress scenario {scenario_name} is missing explicit shocks for: "
+                    f"{', '.join(missing)}"
+                )
     return normalized
 
 
@@ -613,28 +616,35 @@ def _evaluate(
         scaled = current_notional + (
             candidate.desired_notional - current_notional
         ) * scale
-        quantity = _round_quantity(scaled, candidate.price, candidate.lot_size)
-        notional = quantity * candidate.price
-        delta_notional = notional - current_notional
+        raw_delta_notional = scaled - current_notional
+        if candidate.max_executable_notional is not None:
+            cap = candidate.max_executable_notional
+            if abs(raw_delta_notional) > cap:
+                raw_delta_notional = (
+                    cap if raw_delta_notional > 0 else -cap
+                )
+
+        # Lot size and minimum notional are order constraints. Apply them to the
+        # proposed delta, never to the already-reconciled holding. This preserves
+        # odd/fractional legacy positions exactly while ensuring every new order
+        # increment is executable and cannot overshoot a liquidity cap after
+        # target rounding.
+        delta_quantity = _round_quantity(
+            raw_delta_notional,
+            candidate.price,
+            candidate.lot_size,
+        )
+        executable_delta_notional = delta_quantity * candidate.price
         if (
-            candidate.max_executable_notional is not None
-            and abs(delta_notional) > candidate.max_executable_notional
+            executable_delta_notional != 0
+            and abs(executable_delta_notional) < candidate.min_notional
         ):
-            direction = Decimal("1") if delta_notional > 0 else Decimal("-1")
-            capped_target = (
-                current_notional
-                + direction * candidate.max_executable_notional
-            )
-            quantity = _round_quantity(
-                capped_target,
-                candidate.price,
-                candidate.lot_size,
-            )
-            notional = quantity * candidate.price
-        if quantity != 0 and abs(notional) < candidate.min_notional:
-            quantity = Decimal("0")
-            notional = Decimal("0")
-        turnover = abs(notional - current_notional)
+            delta_quantity = Decimal("0")
+            executable_delta_notional = Decimal("0")
+
+        quantity = candidate.current_quantity + delta_quantity
+        notional = current_notional + executable_delta_notional
+        turnover = abs(executable_delta_notional)
         if candidate.turnover_cost_rate is None:
             proportional_cost = abs(notional) * candidate.cost_rate
             cost = (
@@ -721,30 +731,91 @@ def _cash_fallback(
     candidates: Sequence[AllocationCandidate],
     *,
     reason: str,
+    stress_scenarios: Mapping[str, Mapping[str, Decimal]] | None = None,
 ) -> AllocationResult:
-    current_targets = tuple(
-        AllocationTarget(
-            symbol=candidate.symbol,
-            quantity=candidate.current_quantity,
-            notional=candidate.current_quantity * candidate.price,
-            estimated_cost=Decimal("0"),
-            turnover_notional=Decimal("0"),
+    """Preserve current reconciled positions without inventing zero economics.
+
+    A no-increase decision is not an all-cash state when reconciled holdings
+    already exist.  Turnover is zero, but existing exposure still consumes
+    capital and can carry holding costs.  Report those known economics exactly
+    so downstream risk/authority code cannot mistake a preserved portfolio for
+    unused capital.  When qualified stress scenarios are available, preserved
+    exposure is marked to those scenarios as well. Callers that lack qualified
+    stress evidence must rely on the fail-closed status and reason rather than
+    treating this fallback as a fresh risk approval.
+    """
+
+    targets: list[AllocationTarget] = []
+    current_notionals: list[Decimal] = []
+    total_holding_cost = Decimal("0")
+    capital_required = Decimal("0")
+    for candidate in candidates:
+        notional = candidate.current_quantity * candidate.price
+        if candidate.current_quantity == 0:
+            holding_cost = Decimal("0")
+        else:
+            if candidate.holding_cost_rate is None:
+                raise ValueError(
+                    "non-zero current position lacks explicit holding cost rate"
+                )
+            holding_cost = abs(notional) * candidate.holding_cost_rate
+        total_holding_cost += holding_cost
+        capital_required += abs(notional) * candidate.capital_requirement_rate
+        current_notionals.append(notional)
+        targets.append(
+            AllocationTarget(
+                symbol=candidate.symbol,
+                quantity=candidate.current_quantity,
+                notional=notional,
+                estimated_cost=holding_cost,
+                turnover_notional=Decimal("0"),
+            )
         )
-        for candidate in candidates
+
+    exposed_symbols = {
+        candidate.symbol
+        for candidate, notional in zip(candidates, current_notionals)
+        if notional != 0
+    }
+    scenarios = tuple((stress_scenarios or {}).values())
+    stress_is_qualified = (
+        not exposed_symbols
+        or (
+            bool(scenarios)
+            and all(exposed_symbols <= set(scenario) for scenario in scenarios)
+        )
     )
-    current_notionals = tuple(target.notional for target in current_targets)
+    worst_stress_loss: Decimal | None
+    if not stress_is_qualified:
+        # Missing/incomplete stress evidence is unknown, not a measured zero.
+        # Preserve the portfolio fail-closed without emitting a fabricated
+        # economic fact that downstream logs/UI could mistake for qualification.
+        worst_stress_loss = None
+    else:
+        worst_stress_loss = Decimal("0")
+        for scenario in scenarios:
+            pnl = sum(
+                (
+                    notional * scenario[candidate.symbol]
+                    for candidate, notional in zip(candidates, current_notionals)
+                    if notional != 0
+                ),
+                Decimal("0"),
+            )
+            worst_stress_loss = max(worst_stress_loss, -pnl)
+
     return AllocationResult(
         status="NO_INCREASE_FALLBACK",
         scale=Decimal("0"),
-        targets=current_targets,
+        targets=tuple(targets),
         gross_notional=sum(
             (abs(value) for value in current_notionals),
             Decimal("0"),
         ),
         net_notional=abs(sum(current_notionals, Decimal("0"))),
-        estimated_cost=Decimal("0"),
-        worst_stress_loss=Decimal("0"),
-        cash_required=Decimal("0"),
+        estimated_cost=total_holding_cost,
+        worst_stress_loss=worst_stress_loss,
+        cash_required=capital_required + total_holding_cost,
         turnover_notional=Decimal("0"),
         reason=reason,
     )
@@ -767,7 +838,11 @@ def allocate_targets(
     if not candidates:
         return _cash_fallback(candidates, reason="no allocation candidates")
 
-    normalized_stress = _normalize_stress_scenarios(candidates, stress_scenarios)
+    normalized_stress = _normalize_stress_scenarios(
+        candidates,
+        stress_scenarios,
+        require_complete=False,
+    )
     if policy.require_adverse_stress_evidence and policy.require_fresh_stress_evidence:
         normalized_stress, evidence_problem = _normalize_stress_evidence(
             candidates,
@@ -775,11 +850,43 @@ def allocate_targets(
             decision_time=decision_time,
         )
         if evidence_problem is not None:
-            return _cash_fallback(candidates, reason=evidence_problem)
+            return _cash_fallback(
+                candidates,
+                reason=evidence_problem,
+                stress_scenarios=normalized_stress,
+            )
+
+    stress_relevant_symbols = {
+        candidate.symbol
+        for candidate in candidates
+        if (
+            candidate.current_quantity != 0
+            or candidate.desired_notional != 0
+        )
+    }
+    incomplete_scenarios = {
+        scenario_name: sorted(stress_relevant_symbols - set(scenario))
+        for scenario_name, scenario in normalized_stress.items()
+        if stress_relevant_symbols - set(scenario)
+    }
+    if incomplete_scenarios:
+        details = "; ".join(
+            f"{name}: {', '.join(symbols)}"
+            for name, symbols in sorted(incomplete_scenarios.items())
+        )
+        return _cash_fallback(
+            candidates,
+            stress_scenarios=normalized_stress,
+            reason=(
+                "stress evidence is missing explicit shocks for the current/requested "
+                f"portfolio: {details}"
+            ),
+        )
 
     if policy.minimum_cash_reserve > policy.cash_available:
         return _cash_fallback(
             candidates,
+            stress_scenarios=normalized_stress,
             reason="minimum cash reserve exceeds available cash",
         )
 
@@ -792,6 +899,7 @@ def allocate_targets(
         if requested_symbols and not normalized_stress:
             return _cash_fallback(
                 candidates,
+                stress_scenarios=normalized_stress,
                 reason=(
                     "adverse stress evidence is required before increasing exposure; "
                     "no stress scenarios were supplied"
@@ -812,18 +920,34 @@ def allocate_targets(
         if uncovered:
             return _cash_fallback(
                 candidates,
+                stress_scenarios=normalized_stress,
                 reason=(
                     "adverse stress evidence is missing for requested exposure: "
                     + ", ".join(sorted(uncovered))
                 ),
             )
 
+    requested_change = any(
+        candidate.desired_notional
+        != candidate.current_quantity * candidate.price
+        for candidate in candidates
+    )
     requested = _evaluate(candidates, policy, normalized_stress, Decimal("1"))
     if requested.status == "ALLOCATED":
+        if requested_change and requested.turnover_notional == 0:
+            return _cash_fallback(
+                candidates,
+                stress_scenarios=normalized_stress,
+                reason=(
+                    "requested change is below executable lot/minimum-notional "
+                    "constraints; preserve the current portfolio"
+                ),
+            )
         if requested.gross_notional > 0:
             return requested
         return _cash_fallback(
             candidates,
+            stress_scenarios=normalized_stress,
             reason=(
                 "requested allocation contains no executable positive lot after "
                 "lot-size and minimum-notional constraints; remain in cash"
@@ -833,6 +957,81 @@ def allocate_targets(
     low = Decimal("0")
     high = Decimal("1")
     best = _evaluate(candidates, policy, normalized_stress, low)
+
+    # Uniform scaling is not globally monotone around absolute-value risk
+    # surfaces.  A feasible interior can exist even when scale 0, 0.5 and 1 are
+    # all infeasible.  Seed the search at deterministic extrema/corners of the
+    # continuous risk functions before using bisection for the upper feasible
+    # boundary.  In particular, portfolio net zero is independent of any one
+    # position crossing zero.
+    critical_scales: set[Decimal] = set()
+
+    def add_interior_root(constant: Decimal, slope: Decimal) -> None:
+        if slope == 0:
+            return
+        crossing = -constant / slope
+        if Decimal("0") < crossing < Decimal("1"):
+            critical_scales.add(crossing)
+
+    current_notionals: dict[str, Decimal] = {}
+    notional_changes: dict[str, Decimal] = {}
+    for candidate in candidates:
+        current_notional = candidate.current_quantity * candidate.price
+        change = candidate.desired_notional - current_notional
+        current_notionals[candidate.symbol] = current_notional
+        notional_changes[candidate.symbol] = change
+        add_interior_root(current_notional, change)
+
+        # A liquidity cap changes the affine target path into a flat segment.
+        # Probe the saturation corner as another deterministic piecewise point.
+        if candidate.max_executable_notional is not None and change != 0:
+            saturation = candidate.max_executable_notional / abs(change)
+            if Decimal("0") < saturation < Decimal("1"):
+                critical_scales.add(saturation)
+
+    add_interior_root(
+        sum(current_notionals.values(), Decimal("0")),
+        sum(notional_changes.values(), Decimal("0")),
+    )
+
+    # Worst stress loss is the upper envelope of affine scenario-loss lines.
+    # Its interior minimum can occur where two scenarios exchange dominance,
+    # not only where one scenario P&L crosses zero.  Probe both roots and all
+    # pairwise intersections so a V-shaped feasible stress interval is not
+    # discarded by an infeasible midpoint.
+    stress_lines: list[tuple[Decimal, Decimal]] = []
+    for scenario in normalized_stress.values():
+        current_pnl = sum(
+            (
+                current_notionals[candidate.symbol] * scenario[candidate.symbol]
+                for candidate in candidates
+            ),
+            Decimal("0"),
+        )
+        pnl_change = sum(
+            (
+                notional_changes[candidate.symbol] * scenario[candidate.symbol]
+                for candidate in candidates
+            ),
+            Decimal("0"),
+        )
+        add_interior_root(current_pnl, pnl_change)
+        stress_lines.append((current_pnl, pnl_change))
+
+    for index, (left_constant, left_slope) in enumerate(stress_lines):
+        for right_constant, right_slope in stress_lines[index + 1 :]:
+            add_interior_root(
+                left_constant - right_constant,
+                left_slope - right_slope,
+            )
+
+    for scale in sorted(critical_scales):
+        probe = _evaluate(candidates, policy, normalized_stress, scale)
+        if probe.status == "ALLOCATED" and (
+            best.status != "ALLOCATED" or scale > best.scale
+        ):
+            best = probe
+            low = scale
 
     for _ in range(policy.max_iterations):
         if high - low <= policy.min_scale_tolerance:
@@ -845,9 +1044,10 @@ def allocate_targets(
         else:
             high = mid
 
-    if best.turnover_notional == 0 and requested.turnover_notional > 0:
+    if best.turnover_notional == 0 and requested_change:
         return _cash_fallback(
             candidates,
+            stress_scenarios=normalized_stress,
             reason=(
                 "bounded search found no positive-turnover feasible allocation; "
                 "preserve the current portfolio without increasing risk"
@@ -856,6 +1056,7 @@ def allocate_targets(
     if best.gross_notional == 0:
         return _cash_fallback(
             candidates,
+            stress_scenarios=normalized_stress,
             reason=(
                 "bounded search found no positive-lot feasible allocation; "
                 "remain in cash"
@@ -889,9 +1090,14 @@ def _expected_net_utility(
             abs(target.notional)
             * objective_by_symbol[target.symbol].objective_rate
             for target in result.targets
+            if target.symbol in objective_by_symbol
         ),
         Decimal("0"),
     )
+    if result.worst_stress_loss is None:
+        raise ValueError(
+            "objective utility requires qualified worst_stress_loss evidence"
+        )
     stress_penalty = (
         result.worst_stress_loss * policy.stress_loss_penalty_rate
     )
@@ -953,7 +1159,11 @@ def allocate_objective_targets(
             decision_time=decision_time,
         )
         if evidence_problem is not None:
-            fallback = _cash_fallback(allocation_candidates, reason=evidence_problem)
+            fallback = _cash_fallback(
+                allocation_candidates,
+                stress_scenarios=normalized_stress,
+                reason=evidence_problem,
+            )
             return ObjectiveAllocationResult(
                 allocation=fallback,
                 selected_symbols=(),
@@ -975,6 +1185,7 @@ def allocate_objective_targets(
     if not ranked:
         fallback = _cash_fallback(
             allocation_candidates,
+            stress_scenarios=normalized_stress,
             reason="no candidate has positive expected return after risk penalty",
         )
         return ObjectiveAllocationResult(
@@ -989,6 +1200,7 @@ def allocate_objective_targets(
     if candidate_set_count > max_candidate_sets:
         fallback = _cash_fallback(
             allocation_candidates,
+            stress_scenarios=normalized_stress,
             reason=(
                 "objective search budget exceeded before complete subset "
                 "evaluation"
@@ -1020,40 +1232,47 @@ def allocate_objective_targets(
             if subset_mask & (1 << index)
         ]
         subset_symbols = tuple(item.candidate.symbol for item in subset)
-        projected_stress = {
-            scenario_name: {
-                symbol: scenario[symbol]
-                for symbol in subset_symbols
-            }
-            for scenario_name, scenario in normalized_stress.items()
-        }
-        projected_evidence = tuple(
-            StressScenarioEvidence.create(
-                name=item.name,
-                shocks={symbol: item.shocks[symbol] for symbol in subset_symbols},
-                observed_at=item.observed_at,
-                valid_until=item.valid_until,
-                source_ref=item.source_ref,
+        selected = set(subset_symbols)
+        portfolio_candidates = [
+            item.candidate
+            if item.candidate.symbol in selected
+            else replace(
+                item.candidate,
+                desired_notional=(
+                    item.candidate.current_quantity * item.candidate.price
+                ),
             )
-            for item in normalized_evidence
-        )
+            for item in candidates
+        ]
+        # Hard constraints always see the whole reconciled portfolio. Symbols
+        # omitted from the objective subset are frozen at their current holding;
+        # they do not disappear from gross/net/capital/stress just because the
+        # optimizer chose not to trade them.
         result = allocate_targets(
-            [item.candidate for item in subset],
+            portfolio_candidates,
             policy,
-            stress_scenarios=projected_stress,
-            stress_evidence=projected_evidence,
+            stress_scenarios=normalized_stress,
+            stress_evidence=normalized_evidence,
             decision_time=decision_time,
         )
         if result.status != "ALLOCATED":
             continue
-        utility = _expected_net_utility(result, objective_by_symbol, policy)
+        subset_objective = {
+            item.candidate.symbol: item
+            for item in subset
+        }
+        utility = _expected_net_utility(result, subset_objective, policy)
         if utility <= 0:
             continue
+        target_by_symbol = {
+            target.symbol: target
+            for target in result.targets
+        }
         active_symbols = tuple(
             sorted(
-                target.symbol
-                for target in result.targets
-                if target.notional != 0
+                symbol
+                for symbol in subset_symbols
+                if target_by_symbol[symbol].notional != 0
             )
         )
         if not active_symbols:
@@ -1083,6 +1302,7 @@ def allocate_objective_targets(
     if best_result is None:
         fallback = _cash_fallback(
             allocation_candidates,
+            stress_scenarios=normalized_stress,
             reason=(
                 "no positive-utility feasible allocation survived hard "
                 "constraints and estimated costs"
@@ -1529,7 +1749,11 @@ def _allocation_decision_digest(
             "gross_notional": str(result.allocation.gross_notional),
             "net_notional": str(result.allocation.net_notional),
             "estimated_cost": str(result.allocation.estimated_cost),
-            "worst_stress_loss": str(result.allocation.worst_stress_loss),
+            "worst_stress_loss": (
+                None
+                if result.allocation.worst_stress_loss is None
+                else str(result.allocation.worst_stress_loss)
+            ),
             "cash_required": str(result.allocation.cash_required),
             "turnover_notional": str(result.allocation.turnover_notional),
             "targets": [

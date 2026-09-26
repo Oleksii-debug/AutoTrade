@@ -1,3 +1,4 @@
+using AutoTrade.Contracts;
 using System.ComponentModel;
 using System.IO;
 using System.Net;
@@ -298,7 +299,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
 
             using HttpRequestMessage request = CreateRequest(
                 HttpMethod.Post,
-                "api/v1/commands",
+                HostApiRoutes.SubmitCommand,
                 currentSession);
             request.Content = new StringContent(
                 JsonSerializer.Serialize(
@@ -607,7 +608,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         EmergencyHostSession session = GetBoundSession();
         using HttpRequestMessage request = CreateRequest(
             HttpMethod.Get,
-            "api/v1/operations/" + Uri.EscapeDataString(canonicalId),
+            HostApiRoutes.GetOperation(canonicalId),
             session);
         using HttpResponseMessage response = await _httpClient.SendAsync(
             request,
@@ -667,7 +668,7 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         EmergencyHostSession session = GetBoundSession(knownSession);
         using HttpRequestMessage request = CreateRequest(
             HttpMethod.Get,
-            "api/v1/state",
+            HostApiRoutes.GetState,
             session);
         using HttpResponseMessage response = await _httpClient.SendAsync(
             request,

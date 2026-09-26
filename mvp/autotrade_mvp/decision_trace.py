@@ -65,7 +65,7 @@ def _normalized_key(value: object) -> str:
 
 _EMBEDDED_SECRET_PATTERNS = (
     re.compile(
-        r"""(?i)(?:["'])?\b(authorization|proxy-authorization)\b"""
+        r"""(?i)(?:["'])?\b(authorization(?:[_-]?header)?|proxy[_-]?authorization)\b"""
         r"""(?:["'])?\s*[:=]\s*"""
         r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]+)"""
     ),
@@ -73,9 +73,10 @@ _EMBEDDED_SECRET_PATTERNS = (
         r"(?i)\b(https?://)[^/@\s]+@"
     ),
     re.compile(
-        r"""(?i)(?:["'])?\b(api[_-]?key|x[_-]?txc[_-]?apikey|x[_-]?txc[_-]?payload|x[_-]?txc[_-]?signature|"""
-        r"""token|access[_-]?token|refresh[_-]?token|session|session[_-]?token|secret|credential|api[_-]?secret|"""
-        r"""client[_-]?secret|private[_-]?key|password)\b(?:["'])?\s*[:=]\s*"""
+        r"""(?i)(?:["'])?\b(api[_-]?key|x[_-]?api[_-]?key|x[_-]?txc[_-]?apikey|x[_-]?txc[_-]?payload|x[_-]?txc[_-]?signature|"""
+        r"""token|bearer[_-]?token|access[_-]?token|refresh[_-]?token|id[_-]?token|session|session[_-]?token|session[_-]?id|"""
+        r"""secret|credential|cookie|api[_-]?secret|client[_-]?secret|private[_-]?key(?:[_-]?pem)?|password(?:[_-]?hash)?)\b"""
+        r"""(?:["'])?\s*[:=]\s*"""
         r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\[REDACTED\][^&;,\r\n]*|[^&;,\r\n]+)"""
     ),
 )

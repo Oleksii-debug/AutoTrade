@@ -171,6 +171,15 @@ class DiagnosticTraceTests(unittest.TestCase):
             "plain_brace_secret": "api_secret=ABC}WHITEBIT-PLAIN-BRACE-SECRET",
             "password_spaced": "password=TOP SECRET",
             "api_secret_spaced": "api_secret=ABC DEF",
+            "alias_case_one": "id_token=ID-TOKEN-EMBEDDED-SECRET",
+            "alias_case_two": "session_id=SESSION-ID-EMBEDDED-SECRET",
+            "alias_case_three": "x_api_key=X-API-KEY-EMBEDDED-SECRET",
+            "alias_case_four": "private_key_pem=PRIVATE-PEM-EMBEDDED-SECRET",
+            "alias_case_five": "proxy_authorization: Basic PROXY-AUTH-EMBEDDED-SECRET",
+            "alias_case_six": "authorization_header=Bearer AUTH-HEADER-EMBEDDED-SECRET",
+            "alias_case_seven": "bearer_token=BEARER-TOKEN-EMBEDDED-SECRET",
+            "alias_case_eight": "cookie=COOKIE-EMBEDDED-SECRET",
+            "alias_case_nine": "password_hash=PASSWORD-HASH-EMBEDDED-SECRET",
             "signed_url": (
                 "https://provider.test/private?"
                 "X-TXC-PAYLOAD=WHITEBIT-URL-PAYLOAD&symbol=BTC"
@@ -212,6 +221,19 @@ class DiagnosticTraceTests(unittest.TestCase):
         self.assertEqual(redacted["api_secret_spaced"], "api_secret=[REDACTED]")
         self.assertNotIn("TOP SECRET", redacted["password_spaced"])
         self.assertNotIn("ABC DEF", redacted["api_secret_spaced"])
+        for key, leaked in (
+            ("alias_case_one", "ID-TOKEN-EMBEDDED-SECRET"),
+            ("alias_case_two", "SESSION-ID-EMBEDDED-SECRET"),
+            ("alias_case_three", "X-API-KEY-EMBEDDED-SECRET"),
+            ("alias_case_four", "PRIVATE-PEM-EMBEDDED-SECRET"),
+            ("alias_case_five", "PROXY-AUTH-EMBEDDED-SECRET"),
+            ("alias_case_six", "AUTH-HEADER-EMBEDDED-SECRET"),
+            ("alias_case_seven", "BEARER-TOKEN-EMBEDDED-SECRET"),
+            ("alias_case_eight", "COOKIE-EMBEDDED-SECRET"),
+            ("alias_case_nine", "PASSWORD-HASH-EMBEDDED-SECRET"),
+        ):
+            self.assertIn("[REDACTED]", redacted[key])
+            self.assertNotIn(leaked, redacted[key])
         self.assertEqual(
             redacted["signed_url"],
             "https://provider.test/private?"

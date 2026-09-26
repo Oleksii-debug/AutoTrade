@@ -243,6 +243,15 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 "plain_brace_secret": "api_secret=ABC}WHITEBIT-PLAIN-BRACE-SECRET",
                 "password_spaced": "password=TOP SECRET",
                 "api_secret_spaced": "api_secret=ABC DEF",
+                "alias_case_one": "id_token=ID-TOKEN-EMBEDDED-SECRET",
+                "alias_case_two": "session_id=SESSION-ID-EMBEDDED-SECRET",
+                "alias_case_three": "x_api_key=X-API-KEY-EMBEDDED-SECRET",
+                "alias_case_four": "private_key_pem=PRIVATE-PEM-EMBEDDED-SECRET",
+                "alias_case_five": "proxy_authorization: Basic PROXY-AUTH-EMBEDDED-SECRET",
+                "alias_case_six": "authorization_header=Bearer AUTH-HEADER-EMBEDDED-SECRET",
+                "alias_case_seven": "bearer_token=BEARER-TOKEN-EMBEDDED-SECRET",
+                "alias_case_eight": "cookie=COOKIE-EMBEDDED-SECRET",
+                "alias_case_nine": "password_hash=PASSWORD-HASH-EMBEDDED-SECRET",
                 "signed_url": (
                     "https://provider.test/private?"
                     "X-TXC-SIGNATURE=WHITEBIT-URL-SIGNATURE&symbol=BTC"
@@ -269,6 +278,15 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 "WHITEBIT-PLAIN-BRACE-SECRET",
                 "TOP SECRET",
                 "ABC DEF",
+                "ID-TOKEN-EMBEDDED-SECRET",
+                "SESSION-ID-EMBEDDED-SECRET",
+                "X-API-KEY-EMBEDDED-SECRET",
+                "PRIVATE-PEM-EMBEDDED-SECRET",
+                "PROXY-AUTH-EMBEDDED-SECRET",
+                "AUTH-HEADER-EMBEDDED-SECRET",
+                "BEARER-TOKEN-EMBEDDED-SECRET",
+                "COOKIE-EMBEDDED-SECRET",
+                "PASSWORD-HASH-EMBEDDED-SECRET",
             ):
                 self.assertNotIn(leaked, raw)
 
@@ -306,6 +324,18 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 attributes["api_secret_spaced"],
                 "api_secret=[REDACTED]",
             )
+            for key in (
+                "alias_case_one",
+                "alias_case_two",
+                "alias_case_three",
+                "alias_case_four",
+                "alias_case_five",
+                "alias_case_six",
+                "alias_case_seven",
+                "alias_case_eight",
+                "alias_case_nine",
+            ):
+                self.assertIn("[REDACTED]", attributes[key])
             self.assertEqual(
                 attributes["signed_url"],
                 "https://provider.test/private?"

@@ -192,10 +192,18 @@ def render_csharp(operations: tuple[Operation, ...]) -> str:
         name = _pascal_case(operation.operation_id)
         relative = operation.path.removeprefix("/")
         if not operation.parameters:
-            lines.append(
-                f"    public const string {name} = {_csharp_string(relative)};"
+            lines.extend(
+                [
+                    "    /// <summary>",
+                    (
+                        "    /// Relative route for OpenAPI operation "
+                        f"{operation.operation_id}."
+                    ),
+                    "    /// </summary>",
+                    f"    public const string {name} = {_csharp_string(relative)};",
+                    "",
+                ]
             )
-            lines.append("")
             continue
 
         parameter_names = {
@@ -209,6 +217,25 @@ def render_csharp(operations: tuple[Operation, ...]) -> str:
         signature = ", ".join(
             f"string {parameter_names[item]}"
             for item in operation.parameters
+        )
+        lines.extend(
+            [
+                "    /// <summary>",
+                (
+                    "    /// Resolve the relative route for OpenAPI operation "
+                    f"{operation.operation_id}."
+                ),
+                "    /// </summary>",
+            ]
+        )
+        for parameter in operation.parameters:
+            local = parameter_names[parameter]
+            lines.append(
+                f'    /// <param name="{local}">Canonical value for '
+                f"{parameter}.</param>"
+            )
+        lines.append(
+            "    /// <returns>The relative route with encoded path parameters.</returns>"
         )
         lines.append(f"    public static string {name}({signature})")
         lines.append("    {")

@@ -106,6 +106,12 @@
 
     <section id="risk" aria-labelledby="risk-heading">
       <h2 id="risk-heading">Risk and authority</h2>
+      <div class="table-tools" aria-label="Risk and authority table tools">
+        <label for="risk-filter">Filter risk and authority rows</label>
+        <input id="risk-filter" type="search" autocomplete="off" spellcheck="false">
+        <button id="risk-copy" type="button">Copy visible rows</button>
+        <output id="risk-filter-status" for="risk-filter" role="status" aria-live="polite">No host rows are available to filter.</output>
+      </div>
       <div id="risk-region" class="table-scroll" role="region" aria-label="Risk and authority projection" tabindex="0">
         <table>
           <caption>Risk and authority projection</caption>

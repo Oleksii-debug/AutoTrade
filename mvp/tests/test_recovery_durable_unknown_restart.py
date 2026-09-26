@@ -2,7 +2,11 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from mvp.autotrade_mvp.dispatch import DispatchBlocked, GuardedDispatcher
+from mvp.autotrade_mvp.dispatch import (
+    DispatchBlocked,
+    ExactJsonTransportResponse,
+    GuardedDispatcher,
+)
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.recovery import HostState, RecoveryController
 
@@ -288,6 +292,76 @@ class DurableUnknownRestartTests(unittest.TestCase):
                 {"attempt-blocked-unknown"},
             )
             self.assertEqual(recovery.state, HostState.DEGRADED)
+
+    def test_exact_response_requiring_reconciliation_is_durable_unknown_after_restart(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="LIVE",
+                account_id="acct",
+                owner_token="sender-a",
+                owner_epoch=1,
+            )
+            exact_bytes = b'{"error":["provider-deadline"],"result":null}'
+
+            def transport(_client_id, _request, final_guard):
+                final_guard()
+                return ExactJsonTransportResponse(
+                    exact_bytes,
+                    http_status=200,
+                    reconciliation_required=True,
+                )
+
+            outcome = dispatcher.dispatch(
+                attempt_id="attempt-response-unknown",
+                intent_id="intent-response-unknown",
+                intent_hash="intent-hash-response-unknown",
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-09-25T20:00:00Z",
+                authority_check=lambda _intent_hash, _now: (True, "allowed"),
+                transport_send=transport,
+            )
+
+            self.assertEqual(outcome.status, "UNKNOWN")
+            self.assertEqual(
+                outcome.reason,
+                "provider_response_requires_reconciliation",
+            )
+            events = store.load_events_by_aggregate_type("submission_attempt")
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
+            )
+            unknown_payload = events[-1]["payload"]
+            self.assertEqual(
+                unknown_payload["response_text"],
+                exact_bytes.decode("utf-8"),
+            )
+            self.assertEqual(
+                unknown_payload["response_sha256"],
+                "sha256:"
+                + __import__("hashlib").sha256(exact_bytes).hexdigest(),
+            )
+            self.assertEqual(unknown_payload["http_status"], 200)
+            self.assertEqual(
+                unknown_payload["reason"],
+                "provider_response_requires_reconciliation",
+            )
+
+            recovery = RecoveryController(
+                owner_store=store,
+                owner_scope="LIVE:acct",
+            )
+            recovery.start("host-restarted")
+            self.assertEqual(
+                recovery.unresolved_attempts,
+                {"attempt-response-unknown"},
+            )
+            self.assertEqual(recovery.state, HostState.DEGRADED)
+            with self.assertRaisesRegex(PermissionError, "not ready|unresolved"):
+                recovery.validate_admission(recovery.owner.epoch)
 
     def test_exact_reconciliation_terminal_verdict_clears_recovered_unknown(self):
         with TemporaryDirectory() as directory:

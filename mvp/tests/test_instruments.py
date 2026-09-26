@@ -110,6 +110,7 @@ def publish_metadata_evidence(
     artifact_store: ArtifactStore,
     observed_at: datetime,
     *,
+    version: InstrumentVersion,
     artifact_id: str = B,
     committed_at: datetime | None = None,
 ) -> dict[str, str]:
@@ -124,7 +125,10 @@ def publish_metadata_evidence(
             media_type="application/vnd.autotrade.instrument-metadata+json",
             rights={"storage": True, "export": False},
             source_refs=["provider:instrument-metadata"],
-            metadata={"kind": "instrument-metadata"},
+            metadata={
+                "kind": "instrument-metadata",
+                "instrument_version_binding": version.metadata_evidence_binding(),
+            },
         )
     return {
         "artifact_id": artifact_id,
@@ -155,14 +159,22 @@ class InstrumentRegistryTests(unittest.TestCase):
     def test_causal_lookup_does_not_let_late_metadata_retroactively_truncate_history(self):
         with TemporaryDirectory() as directory:
             artifact_store = ArtifactStore(Path(directory) / "artifacts")
+            old_version = spot(symbol="OLD")
+            new_version = spot(
+                version=2,
+                symbol="NEW",
+                effective_from=when(6),
+            )
             old_evidence = publish_metadata_evidence(
                 artifact_store,
                 when(1),
+                version=old_version,
                 artifact_id=B,
             )
             new_evidence = publish_metadata_evidence(
                 artifact_store,
                 when(8),
+                version=new_version,
                 artifact_id=C,
             )
             registry = InstrumentRegistry()
@@ -225,6 +237,43 @@ class InstrumentRegistryTests(unittest.TestCase):
                 2,
             )
 
+    def test_causal_lookup_rejects_evidence_bound_to_different_instrument_version(self):
+        with TemporaryDirectory() as directory:
+            artifact_store = ArtifactStore(Path(directory) / "artifacts")
+            version_one = spot(symbol="OLD")
+            evidence = publish_metadata_evidence(
+                artifact_store,
+                when(1),
+                version=version_one,
+                artifact_id=B,
+            )
+            registry = InstrumentRegistry()
+            registry.add(
+                spot(
+                    symbol="OLD",
+                    metadata_evidence=(evidence,),
+                )
+            )
+            registry.add(
+                spot(
+                    version=2,
+                    symbol="NEW",
+                    effective_from=when(6),
+                    metadata_evidence=(evidence,),
+                )
+            )
+
+            with self.assertRaisesRegex(
+                InstrumentRegistryError,
+                "not bound to this instrument version",
+            ):
+                registry.at_known(
+                    A,
+                    when(7),
+                    knowledge_cutoff=when(8),
+                    artifact_store=artifact_store,
+                )
+
     def test_causal_lookup_requires_resolvable_immutable_metadata_evidence(self):
         with TemporaryDirectory() as directory:
             artifact_store = ArtifactStore(Path(directory) / "artifacts")
@@ -255,9 +304,11 @@ class InstrumentRegistryTests(unittest.TestCase):
     def test_causal_lookup_uses_immutable_commit_time_not_claimed_observation_only(self):
         with TemporaryDirectory() as directory:
             artifact_store = ArtifactStore(Path(directory) / "artifacts")
+            version = spot()
             evidence = publish_metadata_evidence(
                 artifact_store,
                 when(1),
+                version=version,
                 artifact_id=B,
                 committed_at=when(8),
             )
@@ -304,14 +355,17 @@ class InstrumentRegistryTests(unittest.TestCase):
     def test_all_metadata_evidence_must_be_committed_before_causal_version_is_visible(self):
         with TemporaryDirectory() as directory:
             artifact_store = ArtifactStore(Path(directory) / "artifacts")
+            version = spot()
             first = publish_metadata_evidence(
                 artifact_store,
                 when(1),
+                version=version,
                 artifact_id=B,
             )
             second = publish_metadata_evidence(
                 artifact_store,
                 when(3),
+                version=version,
                 artifact_id=C,
             )
             registry = InstrumentRegistry()

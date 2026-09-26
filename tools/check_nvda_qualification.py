@@ -22,6 +22,7 @@ from mvp.autotrade_mvp.qualification_attestation import (
     SignedQualificationAttestation,
     parse_qualification_trust_policy,
     parse_signed_qualification_attestation,
+    verify_canonical_qualification_attestation,
     verify_qualification_attestation,
 )
 from research.autotrade_research.artifacts.store import ArtifactStore
@@ -327,10 +328,11 @@ def validate_trusted_nvda_qualification(
     evidence_sha256: str,
     release_artifact_sha256: str,
     receipt: SignedQualificationAttestation,
-    policy: QualificationTrustPolicy,
     evidence_store: ArtifactStore,
-    expected_policy_id: str,
-    expected_policy_version: str,
+    policy: QualificationTrustPolicy | None = None,
+    expected_policy_id: str | None = None,
+    expected_policy_version: str | None = None,
+    canonical_trust: bool = False,
 ) -> dict[str, object]:
     result = validate_evidence(evidence, requirements)
     if SHA256.fullmatch(evidence_sha256) is None:
@@ -379,25 +381,51 @@ def validate_trusted_nvda_qualification(
             "signed NVDA attestation must resolve the exact raw NVDA evidence payload"
         )
 
+    if type(canonical_trust) is not bool:
+        raise NvdaQualificationError("canonical_trust must be boolean")
+    if not canonical_trust and (
+        policy is None
+        or expected_policy_id is None
+        or expected_policy_version is None
+    ):
+        raise NvdaQualificationError(
+            "generic signed NVDA verification requires explicit trust policy pins"
+        )
+
     accepted = None
     for requirement_id in requirement_ids:
         try:
-            current = verify_qualification_attestation(
-                receipt,
-                policy=policy,
-                evidence_store=evidence_store,
-                expected_policy_id=expected_policy_id,
-                expected_policy_version=expected_policy_version,
-                expected_source_sha=result["source_sha"],
-                expected_domain=NVDA_DOMAIN,
-                expected_gate=NVDA_GATE,
-                expected_package_id=NVDA_PACKAGE_ID,
-                expected_protocol_id=NVDA_PROTOCOL_ID,
-                expected_protocol_version=NVDA_PROTOCOL_VERSION,
-                expected_requirement_id=requirement_id,
-                expected_release_artifact_id=release_artifact_id,
-                expected_release_artifact_sha256=release_artifact_sha256,
-            )
+            if canonical_trust:
+                current = verify_canonical_qualification_attestation(
+                    receipt,
+                    evidence_store=evidence_store,
+                    expected_source_sha=result["source_sha"],
+                    expected_domain=NVDA_DOMAIN,
+                    expected_gate=NVDA_GATE,
+                    expected_package_id=NVDA_PACKAGE_ID,
+                    expected_protocol_id=NVDA_PROTOCOL_ID,
+                    expected_protocol_version=NVDA_PROTOCOL_VERSION,
+                    expected_requirement_id=requirement_id,
+                    expected_release_artifact_id=release_artifact_id,
+                    expected_release_artifact_sha256=release_artifact_sha256,
+                )
+            else:
+                current = verify_qualification_attestation(
+                    receipt,
+                    policy=policy,
+                    evidence_store=evidence_store,
+                    expected_policy_id=expected_policy_id,
+                    expected_policy_version=expected_policy_version,
+                    expected_source_sha=result["source_sha"],
+                    expected_domain=NVDA_DOMAIN,
+                    expected_gate=NVDA_GATE,
+                    expected_package_id=NVDA_PACKAGE_ID,
+                    expected_protocol_id=NVDA_PROTOCOL_ID,
+                    expected_protocol_version=NVDA_PROTOCOL_VERSION,
+                    expected_requirement_id=requirement_id,
+                    expected_release_artifact_id=release_artifact_id,
+                    expected_release_artifact_sha256=release_artifact_sha256,
+                )
         except (QualificationTrustError, TypeError, ValueError) as error:
             raise NvdaQualificationError(
                 "signed NVDA qualification verification failed"

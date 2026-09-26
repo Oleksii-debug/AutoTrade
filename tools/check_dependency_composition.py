@@ -45,25 +45,63 @@ def is_exact_python_requirement(value: str) -> bool:
     ) is not None
 
 
-def _meaningful_requirements(path: Path) -> list[str]:
-    result: list[str] = []
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
+def _hashed_requirements(path: Path) -> list[tuple[str, tuple[str, ...]]]:
+    """Parse canonical pip requirement entries with SHA-256 artifact hashes."""
+
+    entries: list[tuple[str, tuple[str, ...]]] = []
+    logical = ""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as error:
+        raise ValueError("requirements file is unreadable") from error
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
             continue
-        result.append(line)
-    return result
+        continued = stripped.endswith("\\")
+        fragment = stripped[:-1].rstrip() if continued else stripped
+        logical = f"{logical} {fragment}".strip()
+        if continued:
+            continue
+
+        tokens = logical.split()
+        requirement = tokens[0]
+        hashes: list[str] = []
+        for token in tokens[1:]:
+            match = re.fullmatch(r"--hash=sha256:([0-9a-f]{64})", token)
+            if match is None:
+                raise ValueError(f"invalid requirement option: {token}")
+            hashes.append(match.group(1))
+        entries.append((requirement, tuple(hashes)))
+        logical = ""
+    if logical:
+        raise ValueError("unterminated requirement continuation")
+    return entries
 
 
 def _python_blockers(root: Path) -> tuple[list[str], list[str]]:
     blockers: list[str] = []
-    dev_requirements = _meaningful_requirements(root / "requirements-dev.txt")
+    try:
+        entries = _hashed_requirements(root / "requirements-dev.txt")
+    except ValueError:
+        return ["UNREADABLE_PYTHON_HASH_LOCK"], []
+
     exact: list[str] = []
-    for requirement in dev_requirements:
+    dev_requirements: list[str] = []
+    seen_requirements: set[str] = set()
+    for requirement, hashes in entries:
+        dev_requirements.append(requirement)
+        if requirement in seen_requirements:
+            blockers.append(f"DUPLICATE_PYTHON_REQUIREMENT:{requirement}")
+        seen_requirements.add(requirement)
         if is_exact_python_requirement(requirement):
             exact.append(requirement)
         else:
             blockers.append(f"NON_EXACT_PYTHON_REQUIREMENT:{requirement}")
+        if not hashes:
+            blockers.append(f"MISSING_PYTHON_REQUIREMENT_HASH:{requirement}")
+        elif len(hashes) != len(set(hashes)):
+            blockers.append(f"DUPLICATE_PYTHON_REQUIREMENT_HASH:{requirement}")
 
     pyproject = root / "research" / "pyproject.toml"
     try:

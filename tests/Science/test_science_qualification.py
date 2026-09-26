@@ -134,6 +134,7 @@ def _qualify_signed(value, receipt, trust_policy, store):
             value,
             qualification_receipt=receipt,
             evidence_store=store,
+            trusted_source_sha=value.source_sha,
         )
 
 
@@ -207,6 +208,62 @@ class ScientificQualificationTests(unittest.TestCase):
             result.reason_codes,
         )
 
+    def test_signed_science_requires_independent_trusted_source_sha(self):
+        value = evidence(claim="ECONOMIC_EDGE_QUALIFIED")
+        receipt, trust_policy = _signed_science_receipt(value)
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            store.publish_bytes(
+                artifact_id=_POPULATION_ID,
+                data=_POPULATION_BYTES,
+                media_type="application/vnd.autotrade.qualification-evidence",
+                rights={"storage": True, "export": False},
+                source_refs=[f"git:{SOURCE}"],
+                metadata={"evidence_kind": "SCIENCE_POPULATION_COVERAGE"},
+            )
+            with patch.object(
+                qualification_trust,
+                "load_canonical_qualification_trust_policy",
+                return_value=trust_policy,
+            ):
+                result = qualify_scientific_learning(
+                    value,
+                    qualification_receipt=receipt,
+                    evidence_store=store,
+                )
+        self.assertEqual(result.status, "FAIL")
+        self.assertFalse(result.economic_claim_accepted)
+        self.assertIn("SCIENCE.TRUSTED_SOURCE_MISSING", result.reason_codes)
+
+    def test_signed_science_rejects_payload_source_drift_from_trusted_source(self):
+        value = evidence(claim="ECONOMIC_EDGE_QUALIFIED")
+        receipt, trust_policy = _signed_science_receipt(value)
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            store.publish_bytes(
+                artifact_id=_POPULATION_ID,
+                data=_POPULATION_BYTES,
+                media_type="application/vnd.autotrade.qualification-evidence",
+                rights={"storage": True, "export": False},
+                source_refs=[f"git:{SOURCE}"],
+                metadata={"evidence_kind": "SCIENCE_POPULATION_COVERAGE"},
+            )
+            with patch.object(
+                qualification_trust,
+                "load_canonical_qualification_trust_policy",
+                return_value=trust_policy,
+            ):
+                result = qualify_scientific_learning(
+                    value,
+                    qualification_receipt=receipt,
+                    evidence_store=store,
+                    trusted_source_sha="b" * 40,
+                )
+        self.assertEqual(result.status, "FAIL")
+        self.assertFalse(result.economic_claim_accepted)
+        self.assertIn("SCIENCE.TRUSTED_SOURCE_MISMATCH", result.reason_codes)
     def test_dirty_hostile_trust_policy_cannot_authorize_science_pass(self):
         canonical_root = root()
         hostile_root = replace(
@@ -264,6 +321,7 @@ class ScientificQualificationTests(unittest.TestCase):
                         value,
                         qualification_receipt=receipt,
                         evidence_store=store,
+                        trusted_source_sha=source_sha,
                     )
 
         self.assertEqual(result.status, "FAIL")

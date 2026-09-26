@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import MagicMock, patch
 
 from mvp.autotrade_mvp.diagnostics import (
     build_diagnostic_snapshot,
@@ -38,6 +39,61 @@ class DiagnosticTraceTests(unittest.TestCase):
             self.assertIn(f"position {first.position}", text)
             self.assertIn(f"equity {first.equity}", text)
             self.assertNotIn("{", text)
+
+    def test_pending_outbox_truncation_uses_authoritative_durable_count(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence = {
+                "evidence_id": "evidence-1",
+                "decision": "HOLD",
+                "decision_reason": "no_edge",
+                "risk_outcome": "not_applicable",
+                "order_id": None,
+                "fill_id": None,
+                "cash": "100",
+                "position": "0",
+                "equity": "100",
+                "reconciled": True,
+            }
+            (root / "checkpoint.json").write_text(
+                json.dumps(
+                    {
+                        "symbol": "TEST",
+                        "evidence_ids": ["evidence-1"],
+                        "evidence_records": {"evidence-1": evidence},
+                    }
+                ) + "\n",
+                encoding="utf-8",
+            )
+            (root / "learning-evidence.jsonl").write_text(
+                json.dumps(evidence) + "\n", encoding="utf-8"
+            )
+            (root / "journal.sqlite3").touch()
+
+            store = MagicMock()
+            store.load_events.return_value = [
+                {
+                    "event_type": "SimulationEpisodeRecorded",
+                    "aggregate_version": 1,
+                    "event_id": "event-1",
+                    "payload": evidence,
+                }
+            ]
+            store.pending_outbox.return_value = [{}] * 1000
+
+            with patch("mvp.autotrade_mvp.diagnostics.JournalStore", return_value=store):
+                store.pending_outbox_count.return_value = 1000
+                exact = build_diagnostic_snapshot(root)
+                self.assertEqual(exact.pending_outbox_sample_count, 1000)
+                self.assertFalse(exact.pending_outbox_sample_truncated)
+
+                store.pending_outbox_count.return_value = 1001
+                truncated = build_diagnostic_snapshot(root)
+                self.assertTrue(truncated.pending_outbox_sample_truncated)
+
+                store.pending_outbox_count.return_value = 999
+                with self.assertRaisesRegex(ValueError, "smaller than"):
+                    build_diagnostic_snapshot(root)
 
     def test_missing_journal_linkage_fails_closed(self):
         with TemporaryDirectory() as directory:

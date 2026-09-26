@@ -193,6 +193,7 @@ def canonical_operator_payload(
     journal: JournalStore,
     action: object,
     raw_payload: Mapping[str, object],
+    command_id: str,
     account_id: str,
     environment: str,
 ) -> dict[str, object]:
@@ -203,6 +204,7 @@ def canonical_operator_payload(
     if not isinstance(raw_payload, Mapping):
         raise ValueError("payload must be an object")
     action_name = canonical_host_action(action)
+    command = _text(command_id, "command_id")
     account = _text(account_id, "account_id")
     env = _text(environment, "environment")
     _service, state, _authority_events, version = _state(journal)
@@ -212,6 +214,9 @@ def canonical_operator_payload(
 
     base: dict[str, object] = {
         "schema_version": PAYLOAD_SCHEMA,
+        "command_id": command,
+        "account_id": account,
+        "environment": env,
         "expected_authority_epoch": str(epoch),
         "expected_authority_version": str(version),
     }
@@ -321,8 +326,19 @@ def validate_persisted_payload(
     _seq(value.get("expected_authority_epoch"), "expected_authority_epoch")
     _seq(value.get("expected_authority_version"), "expected_authority_version")
 
+    command_id = _text(value.get("command_id"), "command_id")
+    payload_account = _text(value.get("account_id"), "account_id")
+    payload_environment = _text(value.get("environment"), "environment")
+    if payload_account != account or payload_environment != env:
+        raise ValueError("persisted authority payload scope mismatch")
+    if command_id != value.get("command_id"):
+        raise ValueError("persisted authority command identity is not canonical")
+
     common = {
         "schema_version",
+        "command_id",
+        "account_id",
+        "environment",
         "expected_authority_epoch",
         "expected_authority_version",
     }
@@ -380,6 +396,63 @@ def _find(
             "duplicate authority event for policy " + policy_id
         )
     return matches[0] if matches else None
+
+
+def _find_new_exposure_block(
+    events: list[dict[str, Any]],
+    command_id: str,
+) -> dict[str, Any] | None:
+    matches = [
+        event
+        for event in events
+        if event.get("event_type") == "AuthorityNewExposureBlocked"
+        and isinstance(event.get("payload"), Mapping)
+        and event["payload"].get("command_id") == command_id
+    ]
+    if len(matches) > 1:
+        raise OperatorAuthorityConflict(
+            "duplicate new-exposure block for command " + command_id
+        )
+    return matches[0] if matches else None
+
+
+def _validated_new_exposure_block(
+    events: list[dict[str, Any]],
+    payload: Mapping[str, object],
+    accepted_at: str,
+    expected_version: int,
+) -> dict[str, Any] | None:
+    command_id = _text(payload.get("command_id"), "command_id")
+    event = _find_new_exposure_block(events, command_id)
+    if event is None:
+        return None
+    reason = "host_operator_command:BLOCK_NEW_EXPOSURE:" + _text(
+        payload.get("reason_code"), "reason_code"
+    )
+    expected_payload = {
+        "command_id": command_id,
+        "account_id": _text(payload.get("account_id"), "account_id"),
+        "environment": _text(payload.get("environment"), "environment"),
+        "reason": reason,
+        "blocked_at": accepted_at,
+    }
+    if (
+        event.get("payload") != expected_payload
+        or int(event["aggregate_version"]) <= expected_version
+    ):
+        raise OperatorAuthorityConflict(
+            "new-exposure block event does not match accepted command"
+        )
+    return event
+
+
+def _new_exposure_block_ref(payload: Mapping[str, object]) -> str:
+    return (
+        "authority-new-exposure-block:"
+        + _text(payload.get("account_id"), "account_id")
+        + ":"
+        + _text(payload.get("environment"), "environment")
+    )
 
 
 def _evidence(event: Mapping[str, object]) -> dict[str, object]:
@@ -454,17 +527,28 @@ def _resolved(
 
     targets = payload.get("target_policies")
     assert isinstance(targets, list)
-    if not targets:
-        return AuthorityExecutionResult(
-            ("authority-state:canonical",),
-            (_cut_evidence(events, expected_version, expected_epoch),),
-        )
-
     reason = "host_operator_command:" + action + ":" + _text(
         payload.get("reason_code"), "reason_code"
     )
     affected: list[str] = []
     evidence: list[Mapping[str, object]] = []
+
+    if action == "BLOCK_NEW_EXPOSURE":
+        block = _validated_new_exposure_block(
+            events,
+            payload,
+            accepted_at,
+            expected_version,
+        )
+        if block is None:
+            return None
+        affected.append(_new_exposure_block_ref(payload))
+        evidence.append(_evidence(block))
+    elif not targets:
+        return AuthorityExecutionResult(
+            ("authority-state:canonical",),
+            (_cut_evidence(events, expected_version, expected_epoch),),
+        )
     for target in targets:
         assert isinstance(target, Mapping)
         policy_id = str(target["policy_id"])
@@ -516,15 +600,9 @@ def execute_operator_authority_action(
         account_id,
         environment,
     )
-    targets_empty = (
-        action_name != "SET_AUTHORITY"
-        and isinstance(payload.get("target_policies"), list)
-        and not payload["target_policies"]
-    )
-    if not targets_empty:
-        resolved = _resolved(journal, action_name, payload, accepted)
-        if resolved is not None:
-            return resolved
+    resolved = _resolved(journal, action_name, payload, accepted)
+    if resolved is not None:
+        return resolved
 
     expected_version = _seq(
         payload["expected_authority_version"],
@@ -550,13 +628,6 @@ def execute_operator_authority_action(
     else:
         targets = payload["target_policies"]
         assert isinstance(targets, list)
-        if not targets:
-            if state.get("epoch") != expected_epoch or current_version != expected_version:
-                raise OperatorAuthorityConflict("authority changed after acceptance")
-            resolved = _resolved(journal, action_name, payload, accepted)
-            assert resolved is not None
-            return resolved
-
         reason = (
             "host_operator_command:"
             + action_name
@@ -602,46 +673,75 @@ def execute_operator_authority_action(
                 )
             exact_done += 1
 
-        if missing:
-            post_cut = [
-                event
-                for event in events
-                if int(event["aggregate_version"]) > expected_version
-            ]
-            if len(post_cut) != exact_done:
+        block_event = None
+        block_done = 0
+        if action_name == "BLOCK_NEW_EXPOSURE":
+            block_event = _validated_new_exposure_block(
+                events,
+                payload,
+                accepted,
+                expected_version,
+            )
+            block_done = 1 if block_event is not None else 0
+
+        post_cut = [
+            event
+            for event in events
+            if int(event["aggregate_version"]) > expected_version
+        ]
+        if len(post_cut) != exact_done + block_done:
+            raise OperatorAuthorityConflict(
+                "authority changed outside accepted operation"
+            )
+        for event in post_cut:
+            raw = event.get("payload")
+            is_revocation = (
+                event.get("event_type") == "AuthorityPolicyRevoked"
+                and isinstance(raw, Mapping)
+                and raw.get("policy_id") in target_ids
+                and raw.get("reason") == reason
+                and raw.get("revoked_at") == accepted
+            )
+            is_block = block_event is not None and event.get("event_id") == block_event.get(
+                "event_id"
+            )
+            if not is_revocation and not is_block:
                 raise OperatorAuthorityConflict(
                     "authority changed outside accepted operation"
                 )
-            for event in post_cut:
-                raw = event.get("payload")
-                if (
-                    event.get("event_type") != "AuthorityPolicyRevoked"
-                    or not isinstance(raw, Mapping)
-                    or raw.get("policy_id") not in target_ids
-                    or raw.get("reason") != reason
-                    or raw.get("revoked_at") != accepted
-                ):
-                    raise OperatorAuthorityConflict(
-                        "authority changed outside accepted operation"
-                    )
-            if (
-                state.get("epoch") != expected_epoch + exact_done
-                or current_version != expected_version + exact_done
-            ):
-                raise OperatorAuthorityConflict(
-                    "authority cut changed outside accepted operation"
+        if (
+            state.get("epoch") != expected_epoch + exact_done
+            or current_version != expected_version + exact_done + block_done
+        ):
+            raise OperatorAuthorityConflict(
+                "authority cut changed outside accepted operation"
+            )
+
+        if action_name == "BLOCK_NEW_EXPOSURE" and block_event is None:
+            try:
+                service.block_new_exposure(
+                    account_id=_text(payload["account_id"], "account_id"),
+                    environment=_text(payload["environment"], "environment"),
+                    reason=reason,
+                    blocked_at=accepted,
+                    command_id=_text(payload["command_id"], "command_id"),
                 )
-            for policy_id in missing:
-                try:
-                    service.revoke_policy(
-                        policy_id,
-                        reason=reason,
-                        revoked_at=accepted,
-                    )
-                except AuthorityConflict as error:
-                    raise OperatorAuthorityConflict(
-                        "AuthorityService rejected revocation: " + policy_id
-                    ) from error
+            except AuthorityConflict as error:
+                raise OperatorAuthorityConflict(
+                    "AuthorityService rejected new-exposure block"
+                ) from error
+
+        for policy_id in missing:
+            try:
+                service.revoke_policy(
+                    policy_id,
+                    reason=reason,
+                    revoked_at=accepted,
+                )
+            except AuthorityConflict as error:
+                raise OperatorAuthorityConflict(
+                    "AuthorityService rejected revocation: " + policy_id
+                ) from error
 
     resolved = _resolved(journal, action_name, payload, accepted)
     if resolved is None:
@@ -700,6 +800,16 @@ def observed_authority_operation_effects(
     )
     affected: list[str] = []
     evidence: list[Mapping[str, object]] = []
+    if action_name == "BLOCK_NEW_EXPOSURE":
+        block = _validated_new_exposure_block(
+            events,
+            payload,
+            accepted,
+            expected_version,
+        )
+        if block is not None:
+            affected.append(_new_exposure_block_ref(payload))
+            evidence.append(_evidence(block))
     for target in targets:
         assert isinstance(target, Mapping)
         policy_id = str(target["policy_id"])

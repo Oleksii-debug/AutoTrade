@@ -403,15 +403,22 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
 
     def test_release_composition_requires_configured_qualification_policy_pin(self):
         composition = self.composition()
-        with patch(
-            "tools.build_windows_bundle."
-            "canonical_packaged_qualification_trust_policy_digest",
-            return_value="sha256:" + "f" * 64,
-        ):
-            with self.assertRaisesRegex(
+        with (
+            patch(
+                "tools.build_windows_bundle."
+                "canonical_packaged_qualification_trust_source_sha",
+                return_value=SOURCE_SHA,
+            ),
+            patch(
+                "tools.build_windows_bundle."
+                "canonical_packaged_qualification_trust_policy_digest",
+                return_value="sha256:" + "f" * 64,
+            ),
+            self.assertRaisesRegex(
                 BundleError,
                 "requires exactly one qualification-trust-policy",
-            ):
+            ),
+        ):
                 build_bundle(
                     staging=self.staging,
                     output=self.root / "missing-trust-policy.zip",
@@ -442,10 +449,17 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        with patch(
-            "tools.build_windows_bundle."
-            "canonical_packaged_qualification_trust_policy_digest",
-            return_value=policy_digest,
+        with (
+            patch(
+                "tools.build_windows_bundle."
+                "canonical_packaged_qualification_trust_source_sha",
+                return_value=SOURCE_SHA,
+            ),
+            patch(
+                "tools.build_windows_bundle."
+                "canonical_packaged_qualification_trust_policy_digest",
+                return_value=policy_digest,
+            ),
         ):
             result = build_bundle(
                 staging=self.staging,
@@ -464,15 +478,22 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
         self.assertEqual(len(matching), 1)
         self.assertEqual(matching[0]["sha256"], policy_digest)
 
-        with patch(
-            "tools.build_windows_bundle."
-            "canonical_packaged_qualification_trust_policy_digest",
-            return_value="sha256:" + "e" * 64,
-        ):
-            with self.assertRaisesRegex(
+        with (
+            patch(
+                "tools.build_windows_bundle."
+                "canonical_packaged_qualification_trust_source_sha",
+                return_value=SOURCE_SHA,
+            ),
+            patch(
+                "tools.build_windows_bundle."
+                "canonical_packaged_qualification_trust_policy_digest",
+                return_value="sha256:" + "e" * 64,
+            ),
+            self.assertRaisesRegex(
                 BundleError,
                 "does not match the source-controlled release trust pin",
-            ):
+            ),
+        ):
                 build_bundle(
                     staging=self.staging,
                     output=self.root / "trust-policy-mismatch.zip",
@@ -482,6 +503,66 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
                     provenance_path=self.provenance(eligible=True),
                     composition_path=composition_path,
                 )
+
+    def test_release_composition_rejects_incomplete_qualification_trust_pins(self):
+        composition = self.composition()
+        for source_pin, policy_pin in (
+            (SOURCE_SHA, None),
+            (None, "sha256:" + "f" * 64),
+        ):
+            with (
+                self.subTest(source_pin=source_pin, policy_pin=policy_pin),
+                patch(
+                    "tools.build_windows_bundle."
+                    "canonical_packaged_qualification_trust_source_sha",
+                    return_value=source_pin,
+                ),
+                patch(
+                    "tools.build_windows_bundle."
+                    "canonical_packaged_qualification_trust_policy_digest",
+                    return_value=policy_pin,
+                ),
+                self.assertRaisesRegex(
+                    BundleError,
+                    "qualification trust release pins are incomplete",
+                ),
+            ):
+                build_bundle(
+                    staging=self.staging,
+                    output=self.root / "incomplete-trust-pins.zip",
+                    version="1.0.0",
+                    source_sha=SOURCE_SHA,
+                    mode="release",
+                    provenance_path=self.provenance(eligible=True),
+                    composition_path=composition,
+                )
+
+    def test_release_composition_rejects_qualification_trust_source_pin_mismatch(self):
+        with (
+            patch(
+                "tools.build_windows_bundle."
+                "canonical_packaged_qualification_trust_source_sha",
+                return_value="b" * 40,
+            ),
+            patch(
+                "tools.build_windows_bundle."
+                "canonical_packaged_qualification_trust_policy_digest",
+                return_value="sha256:" + "f" * 64,
+            ),
+            self.assertRaisesRegex(
+                BundleError,
+                "source_sha does not match the source-controlled qualification trust",
+            ),
+        ):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "wrong-trust-source.zip",
+                version="1.0.0",
+                source_sha=SOURCE_SHA,
+                mode="release",
+                provenance_path=self.provenance(eligible=True),
+                composition_path=self.composition(),
+            )
 
     def test_release_composition_rejects_wrong_source_and_component_digest(self):
         wrong_source = self.composition(source_sha="b" * 40)

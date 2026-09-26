@@ -59,11 +59,16 @@ class JournalBackedHostApiTests(unittest.TestCase):
         }
 
     @staticmethod
-    def authority_policy(policy_id, *, protection_only=False):
+    def authority_policy(
+        policy_id,
+        *,
+        protection_only=False,
+        environment="PAPER",
+    ):
         return AuthorityPolicy.create(
             policy_id=policy_id,
             account_id="paper-account-1",
-            environments={"PAPER"},
+            environments={environment},
             instruments={
                 ("11111111-1111-4111-8111-111111111111", 1),
             },
@@ -609,22 +614,163 @@ class JournalBackedHostApiTests(unittest.TestCase):
         self.assertEqual(completed.phase, "SUCCEEDED")
         self.assertEqual(
             completed.affected_refs,
-            ("authority-policy:exposure-policy",),
+            (
+                "authority-new-exposure-block:paper-account-1:PAPER",
+                "authority-policy:exposure-policy",
+            ),
         )
         self.assertEqual(
-            completed.evidence[0]["event_type"],
-            "AuthorityPolicyRevoked",
+            [item["event_type"] for item in completed.evidence],
+            ["AuthorityNewExposureBlocked", "AuthorityPolicyRevoked"],
         )
 
-        restored = AuthorityService(JournalStore(self.path)).export_state()
+        restored_service = AuthorityService(JournalStore(self.path))
+        self.assertTrue(
+            restored_service.is_new_exposure_blocked(
+                "paper-account-1",
+                "PAPER",
+            )
+        )
+        restored = restored_service.export_state()
         revoked = {item["policy_id"] for item in restored["revocations"]}
         self.assertEqual(revoked, {"exposure-policy"})
+        self.assertEqual(
+            restored["new_exposure_blocks"],
+            [
+                {
+                    "account_id": "paper-account-1",
+                    "environment": "PAPER",
+                    "command_id": "11111111-1111-1111-1111-111111111111",
+                    "reason": "host_operator_command:BLOCK_NEW_EXPOSURE:EMERGENCY_STOP",
+                    "blocked_at": "2030-01-01T00:00:00Z",
+                }
+            ],
+        )
         self.assertEqual(
             self.store(now="2030-01-01T00:00:01Z")
             .get_operation(accepted.operation_id)
             .phase,
             "SUCCEEDED",
         )
+
+    def test_block_survives_restart_and_fresh_set_authority_cannot_reopen_risk(self):
+        journal = JournalStore(self.path)
+        AuthorityService(journal).register_policy(
+            self.authority_policy(
+                "protection-policy",
+                protection_only=True,
+                environment="SIMULATION",
+            )
+        )
+        store = self.store(
+            environment="SIMULATION",
+            now="2030-01-01T00:00:00Z",
+        )
+        blocked_command = self.command(
+            environment="SIMULATION",
+            payload={"reason_code": "EMERGENCY_STOP"},
+        )
+        accepted = store.submit(blocked_command)
+        blocked = store.execute_authority_operation(accepted.operation_id)
+        self.assertEqual(blocked.phase, "SUCCEEDED")
+        self.assertEqual(
+            blocked.affected_refs,
+            (
+                "authority-new-exposure-block:paper-account-1:SIMULATION",
+            ),
+        )
+
+        restarted_host = self.store(
+            environment="SIMULATION",
+            now="2030-01-01T00:00:01Z",
+        )
+        fresh_policy_payload = {
+            "policy_id": "fresh-exposure-policy",
+            "environments": ["SIMULATION"],
+            "instruments": [
+                {
+                    "instrument_id": "11111111-1111-4111-8111-111111111111",
+                    "version": 1,
+                }
+            ],
+            "actions": ["ORDER.SUBMIT"],
+            "max_notional": "1000",
+            "valid_from": "2029-01-01T00:00:00Z",
+            "expires_at": "2035-01-01T00:00:00Z",
+            "autonomous": True,
+            "protection_only": False,
+            "version": 1,
+        }
+        set_command = self.command(
+            command_id="22222222-2222-2222-2222-222222222222",
+            key="set-after-block",
+            version=restarted_host.snapshot()["state_version"],
+            environment="SIMULATION",
+            action="SET_AUTHORITY",
+            payload=fresh_policy_payload,
+        )
+        set_accepted = restarted_host.submit(set_command)
+        self.assertEqual(set_accepted.status, "ACCEPTED")
+        set_completed = restarted_host.execute_authority_operation(
+            set_accepted.operation_id
+        )
+        self.assertEqual(set_completed.phase, "SUCCEEDED")
+
+        restored = AuthorityService(JournalStore(self.path))
+        self.assertTrue(
+            restored.is_new_exposure_blocked(
+                "paper-account-1",
+                "SIMULATION",
+            )
+        )
+        rejected = restored._admit_unverified(
+            admission_id="blocked-new-risk",
+            policy_id="fresh-exposure-policy",
+            intent_hash="fresh-risk-intent",
+            account_id="paper-account-1",
+            environment="SIMULATION",
+            instrument_id="11111111-1111-4111-8111-111111111111",
+            instrument_version=1,
+            action="ORDER.SUBMIT",
+            notional="10",
+            state_version=1,
+            risk_admitted=True,
+            risk_reducing=False,
+            now="2030-01-01T00:00:02Z",
+        )
+        self.assertEqual(rejected.outcome, "REJECTED")
+        self.assertEqual(rejected.reason, "new_exposure_blocked")
+
+        protective = restored._admit_unverified(
+            admission_id="protective-risk-reduction",
+            policy_id="protection-policy",
+            intent_hash="protective-intent",
+            account_id="paper-account-1",
+            environment="SIMULATION",
+            instrument_id="11111111-1111-4111-8111-111111111111",
+            instrument_version=1,
+            action="ORDER.SUBMIT",
+            notional="10",
+            state_version=2,
+            risk_admitted=True,
+            risk_reducing=True,
+            now="2030-01-01T00:00:03Z",
+        )
+        self.assertEqual(protective.outcome, "ADMITTED")
+        self.assertEqual(
+            restored.dispatch_allowed(
+                protective.admission_id,
+                intent_hash="protective-intent",
+                account_id="paper-account-1",
+                environment="SIMULATION",
+                instrument_id="11111111-1111-4111-8111-111111111111",
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                now="2030-01-01T00:00:04Z",
+            ),
+            (True, "allowed"),
+        )
+
 
     def test_revoke_authority_includes_protection_policies(self):
         journal = JournalStore(self.path)

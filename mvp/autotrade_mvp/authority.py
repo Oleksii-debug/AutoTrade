@@ -1905,7 +1905,17 @@ class AuthorityService:
             raise AuthorityConflict(
                 "new-exposure scope is already durably blocked"
             )
-        event_id = _authority_event_id("AuthorityNewExposureBlocked", cid)
+        event_key = payload_digest(
+            {
+                "command_id": cid,
+                "account_id": account,
+                "environment": env,
+            }
+        )
+        event_id = _authority_event_id(
+            "AuthorityNewExposureBlocked",
+            event_key,
+        )
         existing = self.store.get_event(event_id)
         if existing is not None:
             if (

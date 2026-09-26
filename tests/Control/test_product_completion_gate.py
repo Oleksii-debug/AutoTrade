@@ -5,9 +5,13 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
+
+from tools import check_product_completion as completion_gate
+from mvp.autotrade_mvp import qualification_attestation as qualification_trust
 
 from mvp.autotrade_mvp.qualification_attestation import (
     EvidenceArtifactRef,
@@ -42,6 +46,50 @@ EVIDENCE_MEDIA_TYPE = "application/vnd.autotrade.whole-product-evidence"
 EVIDENCE_KIND = "WHOLE_PRODUCT_QUALIFICATION"
 
 
+def _initialize_exact_source_test_repo(root: Path) -> tuple[str, Path]:
+    requirements = root / "qualification" / "nvda" / "requirements.json"
+    requirements.parent.mkdir(parents=True, exist_ok=True)
+    requirements.write_text('{"schema_version":"test"}\n', encoding="utf-8")
+    subprocess.run(
+        ["git", "init"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "add", "."],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=AutoTrade Test",
+            "-c",
+            "user.email=autotrade-test@example.invalid",
+            "commit",
+            "-m",
+            "initial exact-source fixture",
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    return head, requirements
+
+
 def complete_bank():
     return {
         "schema_version": "1.0.0",
@@ -73,6 +121,16 @@ def complete_evidence():
         }
         for package in EXPECTED_PACKAGE_IDS
     )
+    records.extend(
+        {
+            "kind": "QUALIFICATION_GATE",
+            "requirement_id": gate,
+            "source_sha": SHA,
+            "status": "PASS",
+            "evidence_ref": f"artifact://whole-product/gate/{gate}",
+        }
+        for gate in sorted(EXPECTED_GATE_NAMES)
+    )
     return records
 
 
@@ -92,6 +150,8 @@ def verified_evidence(store, trust_root):
         ("PRODUCT_SECTION", section) for section in EXPECTED_SECTION_IDS
     ] + [
         ("WORK_PACKAGE", package) for package in EXPECTED_PACKAGE_IDS
+    ] + [
+        ("QUALIFICATION_GATE", gate) for gate in sorted(EXPECTED_GATE_NAMES)
     ]
     for kind, requirement_id in requirements:
         artifact_id = str(
@@ -129,7 +189,7 @@ def verified_evidence(store, trust_root):
             package_id="WP-60",
             protocol_id="whole-product-completion-v1",
             protocol_version="1.0.0",
-            requirement_ids=(requirement_id,),
+            requirement_ids=(f"{kind}/{requirement_id}",),
             evidence_refs=(evidence_ref,),
             producer_id=trust_root.producer_id,
             verifier_id=trust_root.verifier_id,
@@ -253,9 +313,6 @@ def verified_completion_fixture(directory):
     )
     context = WholeProductEvidenceContext(
         evidence_store=store,
-        policy=trust_policy,
-        expected_policy_id=trust_policy.policy_id,
-        expected_policy_version=trust_policy.policy_version,
         nvda_receipt=nvda_receipt,
         nvda_requirements_json=json.dumps(
             NVDA_REQUIREMENTS,
@@ -269,6 +326,7 @@ def verified_completion_fixture(directory):
         complete_qualification(verified_evidence(store, trust_root)),
         context,
         nvda_status,
+        trust_policy,
     )
 
 
@@ -342,22 +400,307 @@ class ProductCompletionGateTests(unittest.TestCase):
             )
         )
 
+    def test_terminal_completion_rejects_caller_selected_trust_policy(self):
+        with TemporaryDirectory() as directory:
+            policy_path = Path(directory) / "hostile-policy.json"
+            policy_path.write_text("{}", encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "tools/check_product_completion.py",
+                    "--qualification-policy",
+                    str(policy_path),
+                    "--expected-policy-id",
+                    "sha256:" + "1" * 64,
+                    "--expected-policy-version",
+                    "attacker-controlled",
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(
+            "caller-selected qualification trust policy is forbidden",
+            result.stderr,
+        )
+
+    def test_terminal_completion_rejects_caller_selected_canonical_inputs(self):
+        with TemporaryDirectory() as directory:
+            alternate = Path(directory) / "alternate.json"
+            alternate.write_text("{}", encoding="utf-8")
+            for flag, label in (
+                ("--spec", "product spec"),
+                ("--bank", "work-package bank"),
+                ("--qualification", "qualification"),
+                ("--nvda-status", "NVDA status"),
+            ):
+                with self.subTest(flag=flag):
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            "tools/check_product_completion.py",
+                            flag,
+                            str(alternate),
+                        ],
+                        cwd=ROOT,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn(
+                        "caller-selected canonical completion inputs are forbidden",
+                        result.stderr,
+                    )
+                    self.assertIn(label, result.stderr)
+
+    def test_terminal_completion_binds_source_sha_to_checkout_head(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "tools/check_product_completion.py",
+                "--source-sha",
+                "a" * 40,
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(
+            "exact source SHA does not match checkout HEAD",
+            result.stderr,
+        )
+
+    def test_exact_source_rejects_untracked_canonical_trust_policy_injection(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_sha, requirements = _initialize_exact_source_test_repo(root)
+            trust_policy = (
+                root
+                / "mvp"
+                / "autotrade_mvp"
+                / "qualification_trust_policy.json"
+            )
+            trust_policy.parent.mkdir(parents=True, exist_ok=True)
+            trust_policy.write_text('{"attacker":"controlled"}\n', encoding="utf-8")
+
+            with patch.object(completion_gate, "ROOT", root):
+                with self.assertRaisesRegex(
+                    ProductCompletionError,
+                    "canonical completion inputs differ from exact source checkout",
+                ):
+                    completion_gate._verify_exact_source_checkout(
+                        source_sha,
+                        canonical_paths=(trust_policy, requirements),
+                    )
+
+    def test_exact_source_ignores_inherited_git_work_tree_redirect(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "source"
+            root.mkdir()
+            source_sha, requirements = _initialize_exact_source_test_repo(root)
+            trust_policy = (
+                root
+                / "mvp"
+                / "autotrade_mvp"
+                / "qualification_trust_policy.json"
+            )
+
+            clean_tree = Path(directory) / "decoy-work-tree"
+            clean_requirements = (
+                clean_tree / "qualification" / "nvda" / "requirements.json"
+            )
+            clean_requirements.parent.mkdir(parents=True)
+            clean_requirements.write_text(
+                requirements.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+
+            requirements.write_text(
+                '{"schema_version":"weakened-real-work-tree"}\n',
+                encoding="utf-8",
+            )
+
+            with (
+                patch.object(completion_gate, "ROOT", root),
+                patch.dict(
+                    completion_gate.os.environ,
+                    {"GIT_WORK_TREE": str(clean_tree)},
+                    clear=False,
+                ),
+                self.assertRaisesRegex(
+                    ProductCompletionError,
+                    "canonical completion inputs differ from exact source checkout",
+                ),
+            ):
+                completion_gate._verify_exact_source_checkout(
+                    source_sha,
+                    canonical_paths=(trust_policy, requirements),
+                )
+    def test_exact_source_git_resolution_ignores_candidate_path(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "source"
+            root.mkdir()
+            attacker_bin = Path(directory) / "attacker-bin"
+            attacker_bin.mkdir()
+            candidate_git = attacker_bin / ("git.exe" if sys.platform == "win32" else "git")
+            candidate_git.write_bytes(b"candidate-controlled executable")
+            trusted_git = Path(directory) / "os-managed-git"
+            trusted_git.write_bytes(b"independently selected executable")
+
+            with (
+                patch.object(
+                    qualification_trust,
+                    "_trusted_git_candidate_paths",
+                    return_value=(trusted_git,),
+                ),
+                patch.dict(
+                    completion_gate.os.environ,
+                    {"PATH": str(attacker_bin)},
+                    clear=False,
+                ),
+            ):
+                resolved = completion_gate._trusted_git_executable(source_root=root)
+
+            self.assertEqual(Path(resolved).resolve(), trusted_git.resolve())
+            self.assertNotEqual(Path(resolved).resolve(), candidate_git.resolve())
+
+    def test_exact_source_git_environment_drops_loader_and_config_authority(self):
+        hostile = {
+            "PATH": "/attacker/bin",
+            "HOME": "/attacker/home",
+            "XDG_CONFIG_HOME": "/attacker/config",
+            "LD_PRELOAD": "/attacker/libinject.so",
+            "LD_LIBRARY_PATH": "/attacker/lib",
+            "DYLD_INSERT_LIBRARIES": "/attacker/libinject.dylib",
+            "PYTHONPATH": "/attacker/python",
+            "GIT_OBJECT_DIRECTORY": "/attacker/objects",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES": "/attacker/alternates",
+            "SYSTEMROOT": r"C:\\Windows",
+        }
+        with patch.dict(completion_gate.os.environ, hostile, clear=True):
+            environment = completion_gate._trusted_git_environment()
+
+        self.assertEqual(environment["SYSTEMROOT"], r"C:\\Windows")
+        self.assertEqual(environment["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(environment["GIT_CONFIG_GLOBAL"], completion_gate.os.devnull)
+        self.assertEqual(environment["GIT_NO_REPLACE_OBJECTS"], "1")
+        for key in (
+            "PATH",
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "DYLD_INSERT_LIBRARIES",
+            "PYTHONPATH",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        ):
+            self.assertNotIn(key, environment)
+
+    def test_exact_source_rejects_canonical_symlink_substitution(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _source_sha, requirements = _initialize_exact_source_test_repo(root)
+            decoy = requirements.with_name("decoy-requirements.json")
+            decoy.write_text(requirements.read_text(encoding="utf-8"), encoding="utf-8")
+            subprocess.run(
+                ["git", "add", decoy.relative_to(root).as_posix()],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=AutoTrade Test",
+                    "-c",
+                    "user.email=autotrade-test@example.invalid",
+                    "commit",
+                    "-m",
+                    "add clean decoy requirements",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            source_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            requirements.unlink()
+            try:
+                requirements.symlink_to(decoy.name)
+            except OSError as error:
+                self.skipTest(f"working-tree symlink unavailable: {error}")
+
+            with (
+                patch.object(completion_gate, "ROOT", root),
+                self.assertRaisesRegex(
+                    ProductCompletionError,
+                    "canonical completion inputs differ from exact source checkout",
+                ),
+            ):
+                completion_gate._verify_exact_source_checkout(
+                    source_sha,
+                    canonical_paths=(requirements,),
+                )
+
+    def test_exact_source_rejects_dirty_nvda_requirements(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_sha, requirements = _initialize_exact_source_test_repo(root)
+            trust_policy = (
+                root
+                / "mvp"
+                / "autotrade_mvp"
+                / "qualification_trust_policy.json"
+            )
+            requirements.write_text(
+                '{"schema_version":"weakened-working-tree"}\n',
+                encoding="utf-8",
+            )
+
+            with patch.object(completion_gate, "ROOT", root):
+                with self.assertRaisesRegex(
+                    ProductCompletionError,
+                    "canonical completion inputs differ from exact source checkout",
+                ):
+                    completion_gate._verify_exact_source_checkout(
+                        source_sha,
+                        canonical_paths=(trust_policy, requirements),
+                    )
+
     def test_only_independently_verified_exact_matrix_can_report_complete(self):
         with TemporaryDirectory() as directory:
             (
                 qualification,
                 evidence_context,
                 nvda_status,
+                trust_policy,
             ) = verified_completion_fixture(directory)
-            report = evaluate(
-                qualification=qualification,
-                nvda_status=nvda_status,
-                evidence_context=evidence_context,
-            )
+            with patch.object(
+                qualification_trust,
+                "load_canonical_qualification_trust_policy",
+                return_value=trust_policy,
+            ):
+                report = evaluate(
+                    qualification=qualification,
+                    nvda_status=nvda_status,
+                    evidence_context=evidence_context,
+                )
         self.assertTrue(report["complete"])
         self.assertEqual(report["blockers"], [])
         self.assertEqual(report["missing_section_evidence"], [])
         self.assertEqual(report["missing_package_evidence"], [])
+        self.assertEqual(report["missing_gate_evidence"], [])
         self.assertEqual(report["nonpassing_evidence"], [])
         self.assertTrue(report["nvda_source_matches"])
         self.assertTrue(report["qualification_source_matches"])
@@ -368,7 +711,16 @@ class ProductCompletionGateTests(unittest.TestCase):
                 qualification,
                 evidence_context,
                 valid_nvda,
+                trust_policy,
             ) = verified_completion_fixture(directory)
+
+            policy_patch = patch.object(
+                qualification_trust,
+                "load_canonical_qualification_trust_policy",
+                return_value=trust_policy,
+            )
+            policy_patch.start()
+            self.addCleanup(policy_patch.stop)
 
             forged = nvda()
             report = evaluate(
@@ -451,6 +803,64 @@ class ProductCompletionGateTests(unittest.TestCase):
         self.assertFalse(report["complete"])
         self.assertIn("economic_edge", report["missing_required_gates"])
 
+    def test_terminal_gate_requires_independently_verified_gate_evidence(self):
+        qualification = complete_qualification()
+        qualification["whole_product_evidence"] = [
+            item
+            for item in qualification["whole_product_evidence"]
+            if not (
+                item["kind"] == "QUALIFICATION_GATE"
+                and item["requirement_id"] == "economic_edge"
+            )
+        ]
+        report = evaluate(qualification=qualification)
+        self.assertFalse(report["complete"])
+        self.assertIn("economic_edge", report["missing_gate_evidence"])
+
+    def test_whole_product_receipt_binds_requirement_kind(self):
+        with TemporaryDirectory() as directory:
+            (
+                qualification,
+                evidence_context,
+                nvda_status,
+                trust_policy,
+            ) = verified_completion_fixture(directory)
+
+            target = next(
+                item
+                for item in qualification["whole_product_evidence"]
+                if item["kind"] == "WORK_PACKAGE"
+                and item["requirement_id"] == "WP-01"
+            )
+            target["kind"] = "PRODUCT_SECTION"
+            target["requirement_id"] = "SECTION-01"
+            qualification["whole_product_evidence"] = [
+                item
+                for item in qualification["whole_product_evidence"]
+                if not (
+                    item is not target
+                    and item["kind"] == "PRODUCT_SECTION"
+                    and item["requirement_id"] == "SECTION-01"
+                )
+            ]
+
+            with patch.object(
+                qualification_trust,
+                "load_canonical_qualification_trust_policy",
+                return_value=trust_policy,
+            ):
+                report = evaluate(
+                    qualification=qualification,
+                    nvda_status=nvda_status,
+                    evidence_context=evidence_context,
+                )
+        self.assertFalse(report["complete"])
+        self.assertIn(
+            "PRODUCT_SECTION:SECTION-01:independent_verification",
+            report["nonpassing_evidence"],
+        )
+        self.assertIn("WP-01", report["missing_package_evidence"])
+
     def test_completion_protocol_rejects_schema_version_drift(self):
         bank = complete_bank()
         bank["schema_version"] = "9.0.0"
@@ -489,13 +899,19 @@ class ProductCompletionGateTests(unittest.TestCase):
                 qualification,
                 evidence_context,
                 status,
+                trust_policy,
             ) = verified_completion_fixture(directory)
             status["schema_version"] = "9.0.0"
-            report = evaluate(
-                qualification=qualification,
-                nvda_status=status,
-                evidence_context=evidence_context,
-            )
+            with patch.object(
+                qualification_trust,
+                "load_canonical_qualification_trust_policy",
+                return_value=trust_policy,
+            ):
+                report = evaluate(
+                    qualification=qualification,
+                    nvda_status=status,
+                    evidence_context=evidence_context,
+                )
         self.assertFalse(report["nvda_qualified"])
 
     def test_unknown_qualification_gate_is_protocol_error(self):
@@ -579,7 +995,15 @@ class ProductCompletionGateTests(unittest.TestCase):
                 qualification,
                 evidence_context,
                 valid_status,
+                trust_policy,
             ) = verified_completion_fixture(directory)
+            policy_patch = patch.object(
+                qualification_trust,
+                "load_canonical_qualification_trust_policy",
+                return_value=trust_policy,
+            )
+            policy_patch.start()
+            self.addCleanup(policy_patch.stop)
             required_fields = (
                 "release_artifact_id",
                 "artifact_sha256",

@@ -246,6 +246,65 @@ internal static class Program
             "current-evidence successor validation must still reject evidence-time regression");
     }
 
+    static void StaleSuccessorRejectsDurableRegressionAndIdentityChangeTest()
+    {
+        DateTimeOffset observed = DateTimeOffset.Parse(
+            "2026-09-25T09:29:00Z",
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AssumeUniversal
+                | System.Globalization.DateTimeStyles.AdjustToUniversal);
+        EmergencyHostStatus staleNine = new(
+            Connected: true,
+            HostId: "host-local-1",
+            AccountId: "paper-account-1",
+            Environment: "PAPER",
+            StateVersion: "9",
+            ObservedAtUtc: observed,
+            Message: "stale-nine")
+        {
+            IsCurrent = false,
+        };
+
+        EmergencyHostStatus regressed = staleNine with
+        {
+            StateVersion = "8",
+            ObservedAtUtc = observed.AddMinutes(-1),
+            Message = "stale-eight",
+        };
+        bool versionRejected = false;
+        try
+        {
+            regressed.ValidateStaleSuccessorOf(staleNine);
+        }
+        catch (InvalidOperationException)
+        {
+            versionRejected = true;
+        }
+        Check.True(
+            versionRejected,
+            "stale-to-stale succession must reject durable state-version regression");
+
+        EmergencyHostStatus changedIdentity = staleNine with
+        {
+            HostId = "host-other",
+            StateVersion = "10",
+            ObservedAtUtc = observed.AddMinutes(-2),
+            Message = "stale-other-host",
+        };
+        bool identityRejected = false;
+        try
+        {
+            changedIdentity.ValidateStaleSuccessorOf(staleNine);
+        }
+        catch (InvalidOperationException)
+        {
+            identityRejected = true;
+        }
+        Check.True(
+            identityRejected,
+            "stale-to-stale succession must reject silent host authority identity change");
+    }
+
     static async Task NonCurrentFreshnessRemainsExplicitTest()
     {
         const string token = "session-token-stale";
@@ -897,6 +956,7 @@ internal static class Program
         await PairedOriginMismatchFailsBeforeTransportTest();
         await CanonicalStatusAndOperationTest();
         StaleSuccessorMayCarryOlderEvidenceTimeTest();
+        StaleSuccessorRejectsDurableRegressionAndIdentityChangeTest();
         await NonCurrentFreshnessRemainsExplicitTest();
         await StaleFreshnessDoesNotDisableEmergencyBlockTest();
         await AmbiguousPostExactRetryTest();

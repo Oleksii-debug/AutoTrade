@@ -1,7 +1,10 @@
 import base64
 from hashlib import sha256
+import json
+from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
@@ -13,6 +16,7 @@ from mvp.autotrade_mvp.qualification_attestation import (
     QualificationTrustPolicy,
     SignedQualificationAttestation,
     TrustRoot,
+    qualification_trust_policy_payload,
 )
 
 from mvp.autotrade_mvp.supply_chain_qualification import (
@@ -251,9 +255,9 @@ def _sign_attestation(value):
     return base64.b64encode(signature).decode("ascii")
 
 
-def _trust_root():
+def _trust_root(*, producer_id="qualifier.supply-chain.service"):
     return TrustRoot(
-        producer_id="qualifier.supply-chain.service",
+        producer_id=producer_id,
         verifier_id="autotrade.trust.verifier",
         public_modulus_hex=format(_RSA_N, "x"),
         public_exponent=65537,
@@ -326,8 +330,8 @@ def _evidence_refs(value):
     return tuple(refs)
 
 
-def _signed_review(value, *, refs=None, result="PASS"):
-    root = _trust_root()
+def _signed_review(value, *, refs=None, result="PASS", root=None):
+    root = _trust_root() if root is None else root
     attestation = QualificationAttestation(
         attestation_id=artifact_id("wp64-independent-review"),
         source_sha=value.release_commit_sha,
@@ -355,7 +359,7 @@ def _signed_review(value, *, refs=None, result="PASS"):
     )
 
 
-def qualify_signed(value, *, receipt=None, policy=None):
+def qualify_signed(value, *, receipt=None, canonical_policy=None):
     with TemporaryDirectory() as directory:
         store = ArtifactStore(directory)
         entries = [
@@ -420,16 +424,29 @@ def qualify_signed(value, *, receipt=None, policy=None):
                 release_sha=value.release_commit_sha,
                 metadata=metadata,
             )
-        if receipt is None or policy is None:
-            receipt, policy = _signed_review(value)
-        return qualify_supply_chain(
-            value,
-            evidence_store=store,
-            trust_receipt=receipt,
-            trust_policy=policy,
-            expected_trust_policy_id=policy.policy_id,
-            expected_trust_policy_version=policy.policy_version,
+        if receipt is None:
+            receipt, _ = _signed_review(value)
+        if canonical_policy is None:
+            canonical_policy = _trust_policy(_trust_root())
+        policy_path = Path(directory) / "qualification_trust_policy.json"
+        policy_path.write_text(
+            json.dumps(
+                qualification_trust_policy_payload(canonical_policy),
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
         )
+        with patch(
+            "mvp.autotrade_mvp.qualification_attestation."
+            "_CANONICAL_QUALIFICATION_TRUST_POLICY_PATH",
+            policy_path,
+        ):
+            return qualify_supply_chain(
+                value,
+                evidence_store=store,
+                trust_receipt=receipt,
+            )
 
 class SupplyChainQualificationTests(unittest.TestCase):
 
@@ -443,11 +460,32 @@ class SupplyChainQualificationTests(unittest.TestCase):
             result.reason_codes,
         )
 
+    def test_self_selected_valid_root_cannot_replace_canonical_policy(self):
+        value = evidence()
+        candidate_root = _trust_root(producer_id="candidate.self")
+        candidate_receipt, candidate_policy = _signed_review(
+            value,
+            root=candidate_root,
+        )
+        canonical_policy = _trust_policy(_trust_root())
+        self.assertNotEqual(candidate_policy.policy_id, canonical_policy.policy_id)
+        result = qualify_signed(
+            value,
+            receipt=candidate_receipt,
+            canonical_policy=canonical_policy,
+        )
+        self.assertEqual(result.status, "FAIL")
+        self.assertIn(
+            "SUPPLY_CHAIN.TRUST_ATTESTATION_INVALID",
+            result.reason_codes,
+        )
+
+
     def test_signed_review_must_cover_exact_supply_chain_evidence_set(self):
         value = evidence()
         refs = _evidence_refs(value)[:-1]
         receipt, policy = _signed_review(value, refs=refs)
-        result = qualify_signed(value, receipt=receipt, policy=policy)
+        result = qualify_signed(value, receipt=receipt, canonical_policy=policy)
         self.assertEqual(result.status, "FAIL")
         self.assertIn(
             "SUPPLY_CHAIN.TRUST_EVIDENCE_SET_MISMATCH",
@@ -461,7 +499,7 @@ class SupplyChainQualificationTests(unittest.TestCase):
             receipt.attestation,
             base64.b64encode(b"x" * 256).decode("ascii"),
         )
-        result = qualify_signed(value, receipt=forged, policy=policy)
+        result = qualify_signed(value, receipt=forged, canonical_policy=policy)
         self.assertEqual(result.status, "FAIL")
         self.assertIn(
             "SUPPLY_CHAIN.TRUST_ATTESTATION_INVALID",
@@ -471,7 +509,7 @@ class SupplyChainQualificationTests(unittest.TestCase):
     def test_inconclusive_independent_review_cannot_produce_supply_chain_pass(self):
         value = evidence()
         receipt, policy = _signed_review(value, result="INCONCLUSIVE")
-        result = qualify_signed(value, receipt=receipt, policy=policy)
+        result = qualify_signed(value, receipt=receipt, canonical_policy=policy)
         self.assertEqual(result.status, "INCONCLUSIVE")
         self.assertIn(
             "SUPPLY_CHAIN.INDEPENDENT_REVIEW_INCONCLUSIVE",

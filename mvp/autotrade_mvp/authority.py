@@ -1847,16 +1847,24 @@ class AuthorityService:
         except KeyError as error:
             raise KeyError(pid) from error
 
+    def new_exposure_block(
+        self,
+        account_id: str,
+        environment: str,
+    ) -> Mapping[str, str] | None:
+        account = _text(account_id, name="account_id")
+        env = _text(environment, name="environment").upper()
+        if env not in {"SIMULATION", "PAPER", "LIVE"}:
+            raise ValueError("environment is unsupported for financial authority")
+        value = self._new_exposure_blocks.get((account, env))
+        return None if value is None else MappingProxyType(dict(value))
+
     def is_new_exposure_blocked(
         self,
         account_id: str,
         environment: str,
     ) -> bool:
-        account = _text(account_id, name="account_id")
-        env = _text(environment, name="environment").upper()
-        if env not in {"SIMULATION", "PAPER", "LIVE"}:
-            raise ValueError("environment is unsupported for financial authority")
-        return (account, env) in self._new_exposure_blocks
+        return self.new_exposure_block(account_id, environment) is not None
 
     def block_new_exposure(
         self,
@@ -1887,6 +1895,8 @@ class AuthorityService:
         normalized_at = _text(blocked_at, name="blocked_at")
         _instant(normalized_at, name="blocked_at")
         cid = _text(command_id, name="command_id")
+        if (account, env) in self._new_exposure_blocks:
+            return False
         payload = {
             "command_id": cid,
             "account_id": account,
@@ -1917,6 +1927,12 @@ class AuthorityService:
             "blocked_at": normalized_at,
         }
         return True
+
+    def revocation(self, policy_id: str) -> tuple[str, str] | None:
+        pid = _text(policy_id, name="policy_id")
+        if pid not in self._policies:
+            raise KeyError(pid)
+        return self._revocations.get(pid)
 
     def revoke_policy(self, policy_id: str, *, reason: str, revoked_at: str) -> bool:
         pid = _text(policy_id, name="policy_id")

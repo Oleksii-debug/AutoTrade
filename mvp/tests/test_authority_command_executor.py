@@ -302,6 +302,81 @@ class AuthorityCommandExecutionTests(unittest.TestCase):
             again.is_new_exposure_blocked("paper-account-1", "PAPER")
         )
 
+    def test_distinct_block_commands_reuse_existing_authority_fact(self):
+        first = self.host.submit(
+            self.command(
+                action="BLOCK_NEW_EXPOSURE",
+                payload={},
+                suffix="block-a",
+            )
+        )
+        first_done = self.executor.execute(first.operation_id)
+        second = self.host.submit(
+            self.command(
+                action="BLOCK_NEW_EXPOSURE",
+                payload={},
+                suffix="block-b",
+            )
+        )
+        second_done = self.executor.execute(second.operation_id)
+
+        block_events = [
+            event
+            for event in self.journal.load_events("authority_state", "canonical")
+            if event["event_type"] == "AuthorityNewExposureBlocked"
+        ]
+        self.assertEqual(len(block_events), 1)
+        self.assertEqual(first_done.phase, "SUCCEEDED")
+        self.assertEqual(second_done.phase, "SUCCEEDED")
+        self.assertEqual(
+            first_done.evidence[0]["artifact_id"],
+            second_done.evidence[0]["artifact_id"],
+        )
+
+    def test_distinct_revoke_commands_reuse_existing_revocation(self):
+        self.authority.register_policy(
+            AuthorityPolicy.create(
+                policy_id="policy-revoke",
+                account_id="paper-account-1",
+                environments={"PAPER"},
+                instruments=[(INSTRUMENT_ID, 1)],
+                actions={"ORDER.SUBMIT"},
+                max_notional="10",
+                expires_at="2026-09-27T00:00:00Z",
+                autonomous=True,
+            )
+        )
+        first = self.host.submit(
+            self.command(
+                action="REVOKE_AUTHORITY",
+                payload={"policy_id": "policy-revoke"},
+                suffix="revoke-a",
+            )
+        )
+        first_done = self.executor.execute(first.operation_id)
+        second = self.host.submit(
+            self.command(
+                action="REVOKE_AUTHORITY",
+                payload={"policy_id": "policy-revoke"},
+                suffix="revoke-b",
+            )
+        )
+        second_done = self.executor.execute(second.operation_id)
+
+        revocations = [
+            event
+            for event in self.journal.load_events("authority_state", "canonical")
+            if event["event_type"] == "AuthorityPolicyRevoked"
+            and event["payload"]["policy_id"] == "policy-revoke"
+        ]
+        self.assertEqual(len(revocations), 1)
+        self.assertEqual(first_done.phase, "SUCCEEDED")
+        self.assertEqual(second_done.phase, "SUCCEEDED")
+        self.assertEqual(
+            first_done.evidence[0]["artifact_id"],
+            second_done.evidence[0]["artifact_id"],
+        )
+
     def test_executor_retry_after_authority_commit_is_idempotent(self):
         accepted = self.host.submit(
             self.command(

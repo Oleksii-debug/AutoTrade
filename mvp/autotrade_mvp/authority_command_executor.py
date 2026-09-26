@@ -121,11 +121,12 @@ class AuthorityCommandExecutor:
                     raise ValueError(
                         "REVOKE_AUTHORITY policy does not match accepted host scope"
                     )
-                self.authority.revoke_policy(
-                    policy_id,
-                    reason=str(action_payload["reason"]),
-                    revoked_at=accepted_at,
-                )
+                if self.authority.revocation(policy_id) is None:
+                    self.authority.revoke_policy(
+                        policy_id,
+                        reason=str(action_payload["reason"]),
+                        revoked_at=accepted_at,
+                    )
                 event = self._authority_event(
                     "AuthorityPolicyRevoked",
                     field="policy_id",
@@ -135,17 +136,25 @@ class AuthorityCommandExecutor:
                 evidence = (self._evidence(event),)
 
             elif action == "BLOCK_NEW_EXPOSURE":
-                self.authority.block_new_exposure(
-                    account_id=account_id,
-                    environment=environment,
-                    reason=str(action_payload["reason"]),
-                    blocked_at=accepted_at,
-                    command_id=str(accepted["command_id"]),
+                existing_block = self.authority.new_exposure_block(
+                    account_id,
+                    environment,
                 )
+                if existing_block is None:
+                    self.authority.block_new_exposure(
+                        account_id=account_id,
+                        environment=environment,
+                        reason=str(action_payload["reason"]),
+                        blocked_at=accepted_at,
+                        command_id=str(accepted["command_id"]),
+                    )
+                    block_command_id = str(accepted["command_id"])
+                else:
+                    block_command_id = str(existing_block["command_id"])
                 event = self._authority_event(
                     "AuthorityNewExposureBlocked",
                     field="command_id",
-                    value=str(accepted["command_id"]),
+                    value=block_command_id,
                 )
                 affected_refs = (
                     f"new-exposure-block:{environment}:{account_id}",

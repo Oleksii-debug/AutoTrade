@@ -2,6 +2,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from mvp.autotrade_mvp.authority import AuthorityPolicy, AuthorityService
 from mvp.autotrade_mvp.durable_host_api import JournalBackedHostCommandStore
 from mvp.autotrade_mvp.host_api import EventGap, HostCommandStore
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
@@ -20,6 +21,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
         max_events=100,
         account_id="paper-account-1",
         environment="PAPER",
+        now="2026-09-24T18:00:00Z",
     ):
         return JournalBackedHostCommandStore(
             JournalStore(self.path),
@@ -28,7 +30,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
             session_validator=lambda session, actor, origin, action: (session, actor) in self.sessions,
             max_events=max_events,
             request_origin_provider=lambda: "https://local.autotrade.invalid",
-            now=lambda: "2026-09-24T18:00:00Z",
+            now=lambda: now,
         )
 
     @staticmethod
@@ -55,6 +57,24 @@ class JournalBackedHostApiTests(unittest.TestCase):
             "action": action,
             "payload": payload or {},
         }
+
+    @staticmethod
+    def authority_policy(policy_id, *, protection_only=False):
+        return AuthorityPolicy.create(
+            policy_id=policy_id,
+            account_id="paper-account-1",
+            environments={"PAPER"},
+            instruments={
+                ("11111111-1111-4111-8111-111111111111", 1),
+            },
+            actions={"ORDER.SUBMIT"},
+            max_notional="1000",
+            valid_from="2029-01-01T00:00:00Z",
+            expires_at="2035-01-01T00:00:00Z",
+            autonomous=True,
+            protection_only=protection_only,
+            version=1,
+        )
 
     def test_v2_scope_is_required_canonical_and_matches_active_host(self):
         store = self.store()
@@ -175,10 +195,10 @@ class JournalBackedHostApiTests(unittest.TestCase):
 
     def test_changed_payload_under_same_idempotency_key_conflicts_after_restart(self):
         first = self.store()
-        first.submit(self.command(payload={"scope": "A"}))
+        first.submit(self.command(payload={"reason": "reason-a"}))
 
         restarted = self.store()
-        conflict = restarted.submit(self.command(payload={"scope": "B"}))
+        conflict = restarted.submit(self.command(payload={"reason": "reason-b"}))
         self.assertEqual(conflict.status, "CONFLICT")
         self.assertIn("idempotency_key_conflict", conflict.reason_codes)
         self.assertEqual(restarted.state_version, 1)
@@ -254,9 +274,9 @@ class JournalBackedHostApiTests(unittest.TestCase):
             restarted.snapshot()
 
     def test_restart_rejects_terminal_rewrite_in_journal_history(self):
-        store = self.store()
+        store = self.store(now="2030-01-01T00:00:00Z")
         accepted = store.submit(self.command())
-        store.update_operation(accepted.operation_id, "SUCCEEDED")
+        store.execute_authority_operation(accepted.operation_id)
 
         journal = JournalStore(self.path)
         payload = {
@@ -367,9 +387,9 @@ class JournalBackedHostApiTests(unittest.TestCase):
             self.store().snapshot()
 
     def test_terminal_transition_is_persisted_and_cannot_be_rewritten(self):
-        store = self.store()
+        store = self.store(now="2030-01-01T00:00:00Z")
         accepted = store.submit(self.command())
-        completed = store.update_operation(accepted.operation_id, "SUCCEEDED")
+        completed = store.execute_authority_operation(accepted.operation_id)
         self.assertEqual(completed.phase, "SUCCEEDED")
 
         restarted = self.store()
@@ -402,7 +422,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
                 remaining_uncertainty=("provider_outcome_unresolved",),
             )
 
-        resolved = restarted.update_operation(accepted.operation_id, "SUCCEEDED")
+        resolved = restarted.execute_authority_operation(accepted.operation_id)
         self.assertEqual(resolved.phase, "SUCCEEDED")
         self.assertEqual(resolved.remaining_uncertainty, ())
 
@@ -421,6 +441,219 @@ class JournalBackedHostApiTests(unittest.TestCase):
                 "CANCELLED",
                 remaining_uncertainty=("cancel_ack_not_completion",),
             )
+
+    def test_block_new_exposure_persists_canonical_targets_and_evidence(self):
+        journal = JournalStore(self.path)
+        authority = AuthorityService(journal)
+        authority.register_policy(self.authority_policy("exposure-policy"))
+        authority.register_policy(
+            self.authority_policy("protection-policy", protection_only=True)
+        )
+        store = self.store(now="2030-01-01T00:00:00Z")
+
+        accepted = store.submit(
+            self.command(payload={"reason": "operator emergency block"})
+        )
+        event = store.events_after(0)[0]
+        action_payload = event.payload["action_payload"]
+        self.assertEqual(
+            [item["policy_id"] for item in action_payload["target_policies"]],
+            ["exposure-policy"],
+        )
+        self.assertNotIn("session", action_payload)
+        self.assertNotIn("actor", action_payload)
+        self.assertTrue(
+            str(event.payload["action_payload_hash"]).startswith("sha256:")
+        )
+
+        completed = store.execute_authority_operation(accepted.operation_id)
+        self.assertEqual(completed.phase, "SUCCEEDED")
+        self.assertEqual(
+            completed.affected_refs,
+            ("authority-policy:exposure-policy",),
+        )
+        self.assertEqual(
+            completed.evidence[0]["event_type"],
+            "AuthorityPolicyRevoked",
+        )
+
+        restored = AuthorityService(JournalStore(self.path)).export_state()
+        revoked = {item["policy_id"] for item in restored["revocations"]}
+        self.assertEqual(revoked, {"exposure-policy"})
+        self.assertEqual(
+            self.store(now="2030-01-01T00:00:01Z")
+            .get_operation(accepted.operation_id)
+            .phase,
+            "SUCCEEDED",
+        )
+
+    def test_revoke_authority_includes_protection_policies(self):
+        journal = JournalStore(self.path)
+        authority = AuthorityService(journal)
+        authority.register_policy(self.authority_policy("exposure-policy"))
+        authority.register_policy(
+            self.authority_policy("protection-policy", protection_only=True)
+        )
+        store = self.store(now="2030-01-01T00:00:00Z")
+        accepted = store.submit(self.command(action="REVOKE_AUTHORITY"))
+        event = store.events_after(0)[0]
+        self.assertEqual(
+            [
+                item["policy_id"]
+                for item in event.payload["action_payload"]["target_policies"]
+            ],
+            ["exposure-policy", "protection-policy"],
+        )
+        completed = store.execute_authority_operation(accepted.operation_id)
+        self.assertEqual(completed.phase, "SUCCEEDED")
+        self.assertEqual(len(completed.evidence), 2)
+        restored = AuthorityService(JournalStore(self.path)).export_state()
+        self.assertEqual(
+            {item["policy_id"] for item in restored["revocations"]},
+            {"exposure-policy", "protection-policy"},
+        )
+
+    def test_set_authority_uses_host_scope_and_survives_restart(self):
+        store = self.store(now="2030-01-01T00:00:00Z")
+        payload = {
+            "policy_id": "operator-policy",
+            "environments": ["PAPER"],
+            "instruments": [
+                {
+                    "instrument_id": "11111111-1111-4111-8111-111111111111",
+                    "version": 1,
+                }
+            ],
+            "actions": ["ORDER.SUBMIT"],
+            "max_notional": "250.00",
+            "valid_from": "2030-01-01T00:00:00Z",
+            "expires_at": "2035-01-01T00:00:00Z",
+            "autonomous": False,
+            "protection_only": False,
+            "version": 1,
+        }
+        command = self.command(action="SET_AUTHORITY", payload=payload)
+        accepted = store.submit(command)
+        event = store.events_after(0)[0]
+        canonical = event.payload["action_payload"]["policy"]
+        self.assertEqual(canonical["account_id"], "paper-account-1")
+        self.assertEqual(canonical["max_notional"], "250")
+        self.assertNotIn("session", canonical)
+
+        completed = store.execute_authority_operation(accepted.operation_id)
+        self.assertEqual(completed.phase, "SUCCEEDED")
+        authority = AuthorityService(JournalStore(self.path)).export_state()
+        self.assertEqual(authority["policies"][0], canonical)
+
+        restarted = self.store(now="2030-01-01T00:00:01Z")
+        self.assertEqual(
+            restarted.execute_authority_operation(accepted.operation_id),
+            completed,
+        )
+        self.assertEqual(
+            len(JournalStore(self.path).load_events("authority_state", "canonical")),
+            1,
+        )
+        self.assertEqual(restarted.submit(command), accepted)
+
+    def test_set_authority_cannot_cross_host_environment(self):
+        store = self.store(now="2030-01-01T00:00:00Z")
+        payload = {
+            "policy_id": "cross-environment",
+            "environments": ["PAPER", "LIVE"],
+            "instruments": [
+                {
+                    "instrument_id": "11111111-1111-4111-8111-111111111111",
+                    "version": 1,
+                }
+            ],
+            "actions": ["ORDER.SUBMIT"],
+            "max_notional": "250",
+            "valid_from": "2030-01-01T00:00:00Z",
+            "expires_at": "2035-01-01T00:00:00Z",
+            "autonomous": False,
+            "protection_only": False,
+            "version": 1,
+        }
+        with self.assertRaisesRegex(ValueError, "exactly match"):
+            store.submit(self.command(action="SET_AUTHORITY", payload=payload))
+        self.assertEqual(store.state_version, 0)
+
+    def test_unknown_payload_fields_never_enter_durable_operator_event(self):
+        store = self.store(now="2030-01-01T00:00:00Z")
+        with self.assertRaisesRegex(ValueError, "unsupported fields"):
+            store.submit(
+                self.command(
+                    payload={
+                        "reason": "block",
+                        "session_secret": "must-not-be-persisted",
+                    }
+                )
+            )
+        self.assertEqual(store.state_version, 0)
+        self.assertEqual(store.events_after(0), ())
+
+    def test_authority_change_after_acceptance_fails_closed(self):
+        journal = JournalStore(self.path)
+        authority = AuthorityService(journal)
+        authority.register_policy(self.authority_policy("first-policy"))
+        store = self.store(now="2030-01-01T00:00:00Z")
+        accepted = store.submit(self.command())
+
+        newer = AuthorityService(JournalStore(self.path))
+        newer.register_policy(self.authority_policy("later-policy"))
+        failed = store.execute_authority_operation(accepted.operation_id)
+        self.assertEqual(failed.phase, "FAILED")
+        self.assertEqual(
+            failed.evidence[0]["reason_code"],
+            "authority_state_changed",
+        )
+        restored = AuthorityService(JournalStore(self.path)).export_state()
+        self.assertEqual(restored["revocations"], [])
+
+    def test_authority_commit_then_host_restart_resumes_without_duplicate(self):
+        journal = JournalStore(self.path)
+        AuthorityService(journal).register_policy(
+            self.authority_policy("exposure-policy")
+        )
+        store = self.store(now="2030-01-01T00:00:00Z")
+        accepted = store.submit(self.command())
+        event = store.events_after(0)[0]
+
+        from mvp.autotrade_mvp.operator_authority_commands import (
+            execute_operator_authority_action,
+        )
+
+        execute_operator_authority_action(
+            journal,
+            event.payload["action"],
+            event.payload["action_payload"],
+            event.payload["action_payload_hash"],
+            event.payload["account_id"],
+            event.payload["environment"],
+            event.payload["started_at"],
+        )
+        authority_event_count = len(
+            journal.load_events("authority_state", "canonical")
+        )
+
+        restarted = self.store(now="2030-01-01T00:00:01Z")
+        completed = restarted.execute_authority_operation(accepted.operation_id)
+        self.assertEqual(completed.phase, "SUCCEEDED")
+        self.assertEqual(
+            len(journal.load_events("authority_state", "canonical")),
+            authority_event_count,
+        )
+
+    def test_success_cannot_be_fabricated_without_authority_evidence(self):
+        store = self.store(now="2030-01-01T00:00:00Z")
+        accepted = store.submit(self.command())
+        with self.assertRaisesRegex(ValueError, "evidence"):
+            store.update_operation(accepted.operation_id, "SUCCEEDED")
+        self.assertEqual(
+            store.get_operation(accepted.operation_id).phase,
+            "QUEUED",
+        )
 
     def test_retention_gap_is_explicit_but_full_snapshot_remains_current(self):
         store = self.store(max_events=2)

@@ -21,9 +21,8 @@ from research.autotrade_research.artifacts.store import ArtifactIntegrityError, 
 from .provider_core import PROVIDERS, provider_definition
 from .qualification_attestation import (
     QualificationTrustError,
-    QualificationTrustPolicy,
     SignedQualificationAttestation,
-    verify_qualification_attestation,
+    verify_canonical_qualification_attestation,
 )
 
 
@@ -245,9 +244,6 @@ def qualify_asset_provider_crosswalk(
     exact_adapter_shas: Mapping[tuple[str, str], str],
     evidence_store: ArtifactStore | None = None,
     qualification_receipt: SignedQualificationAttestation | None = None,
-    qualification_policy: QualificationTrustPolicy | None = None,
-    expected_policy_id: str | None = None,
-    expected_policy_version: str | None = None,
 ) -> CrosswalkVerdict:
     """Fail closed unless every advertised combination has exact complete evidence."""
 
@@ -290,17 +286,11 @@ def qualify_asset_provider_crosswalk(
         ):
             invalid.add(item.key)
 
-    trust_inputs = (
-        qualification_receipt,
-        qualification_policy,
-        expected_policy_id,
-        expected_policy_version,
-    )
     if evidence_store is None:
         reasons.append("immutable_evidence_store_unavailable")
-    if all(value is None for value in trust_inputs):
+    if qualification_receipt is None:
         reasons.append("independent_evidence_trust_unavailable")
-    elif any(value is None for value in trust_inputs) or evidence_store is None:
+    elif evidence_store is None:
         reasons.append("independent_evidence_trust_incomplete")
     else:
         expected_refs = {
@@ -326,12 +316,9 @@ def qualify_asset_provider_crosswalk(
         if observed_refs != expected_refs:
             reasons.append("independent_evidence_set_mismatch")
         try:
-            accepted = verify_qualification_attestation(
+            accepted = verify_canonical_qualification_attestation(
                 qualification_receipt,
-                policy=qualification_policy,
                 evidence_store=evidence_store,
-                expected_policy_id=expected_policy_id,
-                expected_policy_version=expected_policy_version,
                 expected_source_sha=source_sha,
                 expected_domain=_QUALIFICATION_DOMAIN,
                 expected_gate=_QUALIFICATION_GATE,

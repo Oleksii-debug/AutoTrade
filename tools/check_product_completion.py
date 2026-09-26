@@ -123,21 +123,38 @@ def _load_text(path: Path, *, name: str) -> str:
 def _section_ids(spec_text: str) -> tuple[str, ...]:
     if not isinstance(spec_text, str) or not spec_text.strip():
         raise ProductCompletionError("canonical product spec must be non-empty text")
-    found: list[str] = []
-    seen: set[int] = set()
+    numbered: list[tuple[int, str]] = []
     for line in spec_text.splitlines():
         match = re.match(r"^\s*(\d+)\.\s+(.+?)\s*$", line)
         if match is None:
             continue
         number = int(match.group(1))
-        if 1 <= number <= 40 and number not in seen:
-            seen.add(number)
-            found.append(f"SECTION-{number:02d}")
-    if tuple(found) != EXPECTED_SECTION_IDS:
+        if 1 <= number <= 40:
+            numbered.append((number, match.group(2)))
+
+    expected_numbers = tuple(range(1, 41))
+    if len(numbered) != 80:
         raise ProductCompletionError(
-            "canonical product spec must expose ordered sections 1..40"
+            "canonical product spec must expose exactly one 1..40 table of "
+            "contents and one 1..40 body heading sequence"
         )
-    return tuple(found)
+    toc = numbered[:40]
+    body = numbered[40:]
+    if (
+        tuple(number for number, _title in toc) != expected_numbers
+        or tuple(number for number, _title in body) != expected_numbers
+    ):
+        raise ProductCompletionError(
+            "canonical product spec table of contents and body must each expose "
+            "ordered sections 1..40"
+        )
+    if tuple(title for _number, title in toc) != tuple(
+        title for _number, title in body
+    ):
+        raise ProductCompletionError(
+            "canonical product spec table of contents does not match body headings"
+        )
+    return EXPECTED_SECTION_IDS
 
 
 def _exact_source(value: object) -> str | None:

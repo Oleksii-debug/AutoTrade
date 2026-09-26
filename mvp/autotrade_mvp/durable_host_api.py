@@ -23,6 +23,13 @@ from .host_api import (
     command_result_payload,
 )
 from .persistence import JournalStore, payload_digest
+from .operator_authority_commands import (
+    OperatorAuthorityConflict,
+    canonical_operator_payload,
+    execute_operator_authority_action,
+    validate_authority_success_evidence,
+    validate_persisted_payload,
+)
 
 
 class JournalBackedHostCommandStore:
@@ -250,6 +257,15 @@ class JournalBackedHostCommandStore:
                 )
             return self._command_result(stored)
 
+        action_payload = canonical_operator_payload(
+            self._journal,
+            action,
+            command["payload"],
+            account_id,
+            environment,
+        )
+        action_payload_hash = payload_digest(action_payload)
+
         operation_id = str(
             uuid5(NAMESPACE_URL, f"https://operations.autotrade.local/{command_id}")
         )
@@ -272,6 +288,8 @@ class JournalBackedHostCommandStore:
                 "command_id": command_id,
                 "operation_id": operation_id,
                 "action": action,
+                "action_payload": action_payload,
+                "action_payload_hash": action_payload_hash,
                 "actor": actor,
                 "account_id": account_id,
                 "environment": environment,
@@ -310,8 +328,57 @@ class JournalBackedHostCommandStore:
         # original durable result, not a newly fabricated stale-state conflict.
         return returned
 
+    @staticmethod
+    def _authority_contract(
+        payload: Mapping[str, object],
+    ) -> tuple[str, dict[str, object], str, str]:
+        action = canonical_host_action(
+            JournalBackedHostCommandStore._required_text(payload, "action")
+        )
+        action_payload = payload.get("action_payload")
+        action_payload_hash = payload.get("action_payload_hash")
+        account_id = JournalBackedHostCommandStore._required_text(
+            payload, "account_id"
+        )
+        environment = JournalBackedHostCommandStore._required_text(
+            payload, "environment"
+        )
+        canonical = validate_persisted_payload(
+            action,
+            action_payload,
+            action_payload_hash,
+            account_id,
+            environment,
+        )
+        accepted_at = JournalBackedHostCommandStore._required_text(
+            payload, "started_at"
+        )
+        return action, canonical, str(action_payload_hash), accepted_at
+
+    def _accepted_authority_contract(
+        self,
+        operation_id: str,
+    ) -> tuple[str, dict[str, object], str, str]:
+        matches: list[Mapping[str, object]] = []
+        for event in self._events():
+            if event["event_type"] != "COMMAND_ACCEPTED":
+                continue
+            payload = event["payload"]
+            if not isinstance(payload, Mapping):
+                raise ValueError("Host journal event payload must be an object")
+            if payload.get("operation_id") == operation_id:
+                matches.append(payload)
+        if len(matches) != 1:
+            raise ValueError(
+                "Host journal must contain exactly one accepted authority operation"
+            )
+        return self._authority_contract(matches[0])
+
     def _operation_projection(self) -> dict[str, OperationResult]:
         operations: dict[str, OperationResult] = {}
+        authority_contracts: dict[
+            str, tuple[str, dict[str, object], str, str]
+        ] = {}
         for event in self._events():
             payload = event["payload"]
             if not isinstance(payload, Mapping):
@@ -324,6 +391,7 @@ class JournalBackedHostCommandStore:
                         "Host journal command scope does not match active host account/environment"
                     )
                 operation_id = self._required_text(payload, "operation_id")
+                authority_contracts[operation_id] = self._authority_contract(payload)
                 if operation_id in operations:
                     raise ValueError(
                         "Host journal contains duplicate COMMAND_ACCEPTED operation identity"
@@ -394,6 +462,23 @@ class JournalBackedHostCommandStore:
                     payload,
                     default=current.evidence,
                 )
+                if phase == "SUCCEEDED":
+                    contract = authority_contracts.get(operation_id)
+                    if contract is None:
+                        raise ValueError(
+                            "SUCCEEDED authority operation is missing accepted contract"
+                        )
+                    action, action_payload, action_hash, accepted_at = contract
+                    validate_authority_success_evidence(
+                        self._journal,
+                        action,
+                        action_payload,
+                        action_hash,
+                        self.account_id,
+                        self.environment,
+                        accepted_at,
+                        evidence,
+                    )
                 operations[operation_id] = OperationResult(
                     operation_id=operation_id,
                     phase=phase,
@@ -440,6 +525,20 @@ class JournalBackedHostCommandStore:
             if evidence is None
             else self._normalize_evidence(evidence)
         )
+        if phase == "SUCCEEDED":
+            action, action_payload, action_hash, accepted_at = (
+                self._accepted_authority_contract(operation_id)
+            )
+            validate_authority_success_evidence(
+                self._journal,
+                action,
+                action_payload,
+                action_hash,
+                self.account_id,
+                self.environment,
+                accepted_at,
+                normalized_evidence,
+            )
         if (
             current.phase == phase
             and current.remaining_uncertainty == normalized_uncertainty
@@ -489,6 +588,52 @@ class JournalBackedHostCommandStore:
             affected_refs=normalized_refs,
             evidence=normalized_evidence,
             remaining_uncertainty=normalized_uncertainty,
+        )
+
+    def execute_authority_operation(self, operation_id: str) -> OperationResult:
+        """Execute or resume an accepted host authority operation safely."""
+
+        current = self.get_operation(operation_id)
+        if current.phase in self.TERMINAL_PHASES:
+            return current
+        action, action_payload, action_hash, accepted_at = (
+            self._accepted_authority_contract(operation_id)
+        )
+        if current.phase == "QUEUED":
+            current = self.update_operation(
+                operation_id,
+                "RUNNING",
+                remaining_uncertainty=("authority_commit_pending",),
+            )
+        try:
+            result = execute_operator_authority_action(
+                self._journal,
+                action,
+                action_payload,
+                action_hash,
+                self.account_id,
+                self.environment,
+                accepted_at,
+            )
+        except OperatorAuthorityConflict:
+            return self.update_operation(
+                operation_id,
+                "FAILED",
+                affected_refs=(),
+                evidence=(
+                    {
+                        "kind": "authority-command-rejected",
+                        "reason_code": "authority_state_changed",
+                    },
+                ),
+                remaining_uncertainty=(),
+            )
+        return self.update_operation(
+            operation_id,
+            "SUCCEEDED",
+            affected_refs=result.affected_refs,
+            evidence=result.evidence,
+            remaining_uncertainty=(),
         )
 
     def get_operation(self, operation_id: str) -> OperationResult:

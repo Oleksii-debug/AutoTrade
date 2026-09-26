@@ -11,6 +11,7 @@ from autotrade_research.artifacts.store import (
     ArtifactConflict,
     ArtifactIntegrityError,
     ArtifactStore,
+    atomic_write_json,
 )
 
 
@@ -379,6 +380,42 @@ class ArtifactStoreTests(unittest.TestCase):
             self.assertFalse(store._manifest_path(artifact_id).exists())
             self.assertEqual(store.audit().objects, 0)
             self.assertEqual(list(store.staging.iterdir()), [])
+
+    def test_crash_after_manifest_commit_recovers_committed_artifact(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            artifact_id = str(uuid4())
+
+            def commit_then_crash(path, value):
+                atomic_write_json(path, value)
+                raise RuntimeError("simulated process death after manifest commit")
+
+            with patch(
+                "autotrade_research.artifacts.store.atomic_write_json",
+                side_effect=commit_then_crash,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "simulated process death after manifest commit",
+                ):
+                    store.publish_bytes(
+                        artifact_id=artifact_id,
+                        data=b"committed-before-crash",
+                        media_type="application/octet-stream",
+                        rights={"storage": True, "export": False},
+                    )
+
+            reopened = ArtifactStore(directory)
+            self.assertEqual(
+                reopened.read_bytes(artifact_id),
+                b"committed-before-crash",
+            )
+            audit = reopened.audit()
+            self.assertEqual(audit.manifests, 1)
+            self.assertEqual(audit.objects, 1)
+            self.assertEqual(audit.unreferenced_objects, ())
+            self.assertEqual(audit.missing_objects, ())
+            self.assertEqual(audit.corrupt_objects, ())
 
     def test_restart_after_manifest_commit_exposes_only_verified_complete_artifact(self):
         with TemporaryDirectory() as directory:

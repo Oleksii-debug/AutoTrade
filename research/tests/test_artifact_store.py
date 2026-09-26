@@ -66,33 +66,174 @@ class ArtifactStoreTests(unittest.TestCase):
             with self.assertRaises(ArtifactIntegrityError):
                 store.read_bytes(artifact_id)
 
-    def test_read_reverifies_object_bytes_after_initial_verification(self):
+    def test_read_rejects_oversized_swap_before_consuming_replacement(self):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(Path(directory) / "store")
             artifact_id = str(uuid4())
-            store.publish_bytes(
+            manifest = store.publish_bytes(
                 artifact_id=artifact_id,
                 data=b"verified",
                 media_type="application/octet-stream",
                 rights={"storage": True, "export": False},
             )
-            original_verify = store._verify_manifest_object
+            canonical = store._object_path(
+                manifest["sha256"].removeprefix("sha256:")
+            )
+            replacement = Path(directory) / "oversized-replacement.bin"
+            replacement.write_bytes(b"x" * 4096)
+            original_validate = store._validate_object_entry
+            swapped = False
 
-            def verify_then_mutate(manifest):
-                object_path = original_verify(manifest)
-                object_path.write_bytes(b"tampered")
-                return object_path
+            def validate_then_swap(path):
+                nonlocal swapped
+                entry = original_validate(path)
+                if not swapped:
+                    swapped = True
+                    os.replace(replacement, canonical)
+                return entry
 
             with patch.object(
                 store,
-                "_verify_manifest_object",
-                side_effect=verify_then_mutate,
+                "_validate_object_entry",
+                side_effect=validate_then_swap,
+            ), patch(
+                "autotrade_research.artifacts.store.os.read"
+            ) as read_call:
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "size mismatch",
+                ):
+                    store.read_bytes(artifact_id)
+                read_call.assert_not_called()
+
+    @unittest.skipIf(
+        os.name == "nt",
+        "open-object replacement semantics differ on Windows",
+    )
+    def test_read_holds_original_descriptor_across_path_replacement(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"verified",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+            canonical = store._object_path(
+                manifest["sha256"].removeprefix("sha256:")
+            )
+            replacement = Path(directory) / "same-size-replacement.bin"
+            replacement.write_bytes(b"attacker")
+            original_open = store._open_object_descriptor
+
+            def open_then_swap(path, *, expected_bytes):
+                descriptor, opened = original_open(
+                    path,
+                    expected_bytes=expected_bytes,
+                )
+                os.replace(replacement, canonical)
+                return descriptor, opened
+
+            with patch.object(
+                store,
+                "_open_object_descriptor",
+                side_effect=open_then_swap,
             ):
                 with self.assertRaisesRegex(
                     ArtifactIntegrityError,
-                    "changed during read",
+                    "path changed during descriptor read",
                 ):
                     store.read_bytes(artifact_id)
+
+    @unittest.skipIf(
+        os.name == "nt",
+        "symlink creation is not reliably available on Windows CI",
+    )
+    def test_symlink_swap_before_open_is_rejected_before_read(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"verified",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+            canonical = store._object_path(
+                manifest["sha256"].removeprefix("sha256:")
+            )
+            external = Path(directory) / "external.bin"
+            external.write_bytes(b"x" * 4096)
+            original_validate = store._validate_object_entry
+            swapped = False
+
+            def validate_then_swap(path):
+                nonlocal swapped
+                entry = original_validate(path)
+                if not swapped:
+                    swapped = True
+                    canonical.unlink()
+                    canonical.symlink_to(external)
+                return entry
+
+            with patch.object(
+                store,
+                "_validate_object_entry",
+                side_effect=validate_then_swap,
+            ), patch(
+                "autotrade_research.artifacts.store.os.read"
+            ) as read_call:
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "opened safely",
+                ):
+                    store.read_bytes(artifact_id)
+                read_call.assert_not_called()
+
+    @unittest.skipUnless(
+        hasattr(os, "mkfifo") and os.name != "nt",
+        "FIFO replacement requires POSIX mkfifo",
+    )
+    def test_fifo_swap_before_open_is_rejected_without_blocking_read(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"verified",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+            canonical = store._object_path(
+                manifest["sha256"].removeprefix("sha256:")
+            )
+            original_validate = store._validate_object_entry
+            swapped = False
+
+            def validate_then_swap(path):
+                nonlocal swapped
+                entry = original_validate(path)
+                if not swapped:
+                    swapped = True
+                    canonical.unlink()
+                    os.mkfifo(canonical)
+                return entry
+
+            with patch.object(
+                store,
+                "_validate_object_entry",
+                side_effect=validate_then_swap,
+            ), patch(
+                "autotrade_research.artifacts.store.os.read"
+            ) as read_call:
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "descriptor must be a regular file",
+                ):
+                    store.read_bytes(artifact_id)
+                read_call.assert_not_called()
+
 
     def test_export_is_rights_aware(self):
         with TemporaryDirectory() as directory:
@@ -125,6 +266,52 @@ class ArtifactStoreTests(unittest.TestCase):
             authorized.add((allowed, allowed_manifest["sha256"]))
             target = store.export(allowed, Path(directory) / "out" / "allowed.txt")
             self.assertEqual(target.read_bytes(), b"public")
+
+    def test_export_rejects_oversized_swap_before_copy(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(
+                Path(directory) / "store",
+                export_authorizer=lambda _artifact_id, _digest: True,
+            )
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"exported",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": True},
+            )
+            canonical = store._object_path(
+                manifest["sha256"].removeprefix("sha256:")
+            )
+            replacement = Path(directory) / "oversized-export-replacement.bin"
+            replacement.write_bytes(b"x" * 4096)
+            target = Path(directory) / "out" / "artifact.bin"
+            original_validate = store._validate_object_entry
+            swapped = False
+
+            def validate_then_swap(path):
+                nonlocal swapped
+                entry = original_validate(path)
+                if not swapped:
+                    swapped = True
+                    os.replace(replacement, canonical)
+                return entry
+
+            with patch.object(
+                store,
+                "_validate_object_entry",
+                side_effect=validate_then_swap,
+            ), patch(
+                "autotrade_research.artifacts.store.os.read"
+            ) as read_call:
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "size mismatch",
+                ):
+                    store.export(artifact_id, target)
+                read_call.assert_not_called()
+            self.assertFalse(target.exists())
+
 
     def test_export_without_independent_authority_fails_closed(self):
         with TemporaryDirectory() as directory:

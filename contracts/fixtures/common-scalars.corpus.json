@@ -1,6 +1,6 @@
 {
-  "corpus_version": "3.0.0",
-  "contract_version": "3.0.0",
+  "corpus_version": "3.0.1",
+  "contract_version": "3.0.1",
   "scope": "common-scalar-subset",
   "cases": [
     {

@@ -2,7 +2,7 @@
 
 This directory documents the release-packaging boundary. It is **not** evidence that AutoTrade has a qualified or signed Windows release.
 
-`tools/build_windows_bundle.py` creates a byte-deterministic ZIP from an already built staging directory. Entries are sorted, timestamps and permissions are fixed, compression is disabled to avoid zlib-version drift, every payload file is SHA-256 listed, the archive is bound to an exact 40-character source SHA, and a sibling SHA-256 file is written. Bundle and SHA-sidecar destinations reject symlinks/special files, and their temporary files are created exclusively before replacement so packaging never follows a pre-positioned output symlink.
+`tools/build_windows_bundle.py` creates a byte-deterministic ZIP from an already built staging directory. Entries are sorted, timestamps and permissions are fixed, compression is disabled to avoid zlib-version drift, every payload file is SHA-256 listed, the archive is bound to an exact 40-character source SHA, and a sibling SHA-256 file is written. Bundle and SHA-sidecar destinations reject symlinks/special files, and their temporary files are created exclusively before replacement so packaging never follows a pre-positioned output symlink. Output and hash destinations are also rejected when they alias the release provenance or composition inputs, preventing the builder from destroying evidence it just consumed.
 
 Two modes exist:
 
@@ -27,7 +27,7 @@ The checkpoint/execution boundary revalidates the nested current/candidate relea
 
 ## Verified installer input
 
-`tools/build_windows_install_manifest.py` is the verified installer-input boundary. It accepts only a release-mode, release-eligible deterministic bundle, re-hashes the complete archive and every payload member, rejects untracked/duplicate/unsafe entries, and emits a deterministic manifest for a future signed installer technology. The manifest records runtime dependency mode, per-user versioned application placement, explicit preservation of durable state on uninstall, and the requirement that update/recovery use the separately verified Windows update plan. It never claims that an MSI/MSIX exists or is signed. Manifest and SHA-256 sidecar publication also fail closed on symlink/special-file destinations and symlinked temporary paths; temporary files are created exclusively before atomic replacement so release tooling does not follow attacker-controlled output redirections.
+`tools/build_windows_install_manifest.py` is the verified installer-input boundary. It accepts only a release-mode, release-eligible deterministic bundle, re-hashes the complete archive and every payload member, rejects untracked/duplicate/unsafe entries, and emits a deterministic manifest for a future signed installer technology. The manifest records runtime dependency mode, per-user versioned application placement, explicit preservation of durable state on uninstall, and the requirement that update/recovery use the separately verified Windows update plan. It never claims that an MSI/MSIX exists or is signed. Manifest and SHA-256 sidecar publication also fail closed on symlink/special-file destinations and symlinked temporary paths; temporary files are created exclusively before atomic replacement so release tooling does not follow attacker-controlled output redirections. The manifest or its digest is also forbidden from aliasing the verified release bundle itself.
 
 ## Remaining terminal WP-50 work
 

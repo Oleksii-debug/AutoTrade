@@ -579,6 +579,277 @@ class KrakenSpotAbsenceEvidence:
         return "INCONCLUSIVE"
 
 
+_KRAKEN_SPOT_PAGINATION_ENDPOINTS = MappingProxyType(
+    {
+        "ORDER_HISTORY": ("/0/private/ClosedOrders", "closed", 50),
+        "EXECUTIONS": ("/0/private/TradesHistory", "trades", 100),
+        "ACTIVITIES": ("/0/private/Ledgers", "ledger", 50),
+    }
+)
+
+
+@dataclass(frozen=True)
+class KrakenSpotPageEvidence:
+    """Exact-response-bound evidence for one Kraken offset page."""
+
+    surface: str
+    offset: int
+    limit: int
+    record_count: int
+    total_count: int
+    evidence_ref: str
+    filter_items: tuple[tuple[str, str], ...]
+
+    def __post_init__(self) -> None:
+        normalized = _text(self.surface, name="surface").upper()
+        if normalized not in _KRAKEN_SPOT_PAGINATION_ENDPOINTS:
+            raise KrakenSpotAdapterError("unsupported Kraken pagination surface")
+        object.__setattr__(self, "surface", normalized)
+        for name in ("offset", "limit", "record_count", "total_count"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise KrakenSpotAdapterError(f"{name} must be an integer")
+        if self.offset < 0:
+            raise KrakenSpotAdapterError("offset cannot be negative")
+        if self.limit < 1:
+            raise KrakenSpotAdapterError("limit must be positive")
+        if self.record_count < 0 or self.record_count > self.limit:
+            raise KrakenSpotAdapterError(
+                "record_count must be between zero and the page limit"
+            )
+        if self.total_count < 0:
+            raise KrakenSpotAdapterError("total_count cannot be negative")
+        if self.offset + self.record_count > self.total_count:
+            raise KrakenSpotAdapterError(
+                "Kraken page extends beyond provider total count"
+            )
+        if (
+            self.record_count < self.limit
+            and self.offset + self.record_count < self.total_count
+        ):
+            raise KrakenSpotAdapterError(
+                "Kraken short page cannot precede remaining provider records"
+            )
+        evidence = _text(self.evidence_ref, name="evidence_ref")
+        if not evidence.startswith("provider-read:sha256:"):
+            raise KrakenSpotAdapterError(
+                "pagination evidence must reference exact provider response bytes"
+            )
+        object.__setattr__(self, "evidence_ref", evidence)
+        if not isinstance(self.filter_items, tuple):
+            raise TypeError("filter_items must be a tuple")
+        normalized_filters: list[tuple[str, str]] = []
+        for item in self.filter_items:
+            if (
+                not isinstance(item, tuple)
+                or len(item) != 2
+                or not all(isinstance(value, str) for value in item)
+            ):
+                raise TypeError(
+                    "filter_items must contain canonical string pairs"
+                )
+            normalized_filters.append(item)
+        if tuple(sorted(normalized_filters)) != tuple(normalized_filters):
+            raise KrakenSpotAdapterError(
+                "filter_items must be sorted canonically"
+            )
+
+    @property
+    def proves_last_page(self) -> bool:
+        return self.offset + self.record_count >= self.total_count
+
+
+class KrakenSpotPaginationCoverage:
+    """Contiguous exact-response offset coverage for one Kraken history surface."""
+
+    def __init__(self, *, surface: str) -> None:
+        normalized = _text(surface, name="surface").upper()
+        if normalized not in _KRAKEN_SPOT_PAGINATION_ENDPOINTS:
+            raise KrakenSpotAdapterError("unsupported Kraken pagination surface")
+        self.surface = normalized
+        self._pages: list[KrakenSpotPageEvidence] = []
+
+    def add_page(self, page: KrakenSpotPageEvidence) -> None:
+        if not isinstance(page, KrakenSpotPageEvidence):
+            raise TypeError("page must be KrakenSpotPageEvidence")
+        if page.surface != self.surface:
+            raise KrakenSpotAdapterError(
+                "Kraken pagination page surface mismatch"
+            )
+        if self.complete:
+            raise KrakenSpotAdapterError(
+                "Kraken pagination coverage is already complete"
+            )
+        expected = 0 if not self._pages else self._pages[-1].offset + self._pages[-1].record_count
+        if page.offset != expected:
+            raise KrakenSpotAdapterError(
+                f"Kraken pagination gap: expected offset {expected}"
+            )
+        if self._pages:
+            first = self._pages[0]
+            if page.total_count != first.total_count:
+                raise KrakenSpotAdapterError(
+                    "Kraken pagination total count changed during coverage"
+                )
+            if page.filter_items != first.filter_items:
+                raise KrakenSpotAdapterError(
+                    "Kraken pagination filters changed during coverage"
+                )
+            if page.evidence_ref in {item.evidence_ref for item in self._pages}:
+                raise KrakenSpotAdapterError(
+                    "Kraken pagination response evidence is duplicated"
+                )
+        self._pages.append(page)
+
+    @property
+    def complete(self) -> bool:
+        return bool(self._pages and self._pages[-1].proves_last_page)
+
+    @property
+    def next_offset(self) -> int:
+        if not self._pages:
+            return 0
+        return self._pages[-1].offset + self._pages[-1].record_count
+
+    @property
+    def pages(self) -> tuple[KrakenSpotPageEvidence, ...]:
+        return tuple(self._pages)
+
+    @property
+    def evidence_refs(self) -> tuple[str, ...]:
+        return tuple(page.evidence_ref for page in self._pages)
+
+
+def pagination_page_from_observation(
+    observation: ProviderResponseObservation,
+    *,
+    surface: str,
+) -> KrakenSpotPageEvidence:
+    """Derive one Kraken history page only from exact authenticated response bytes."""
+
+    if not isinstance(observation, ProviderResponseObservation):
+        raise TypeError("observation must be ProviderResponseObservation")
+    normalized = _text(surface, name="surface").upper()
+    spec = _KRAKEN_SPOT_PAGINATION_ENDPOINTS.get(normalized)
+    if spec is None:
+        raise KrakenSpotAdapterError("unsupported Kraken pagination surface")
+    endpoint, records_key, maximum_limit = spec
+    observation.require_scope(
+        provider_id="KRAKEN",
+        surface=Surface.ACTIVITIES,
+        endpoint=endpoint,
+    )
+    payload = observation.payload
+    if not isinstance(payload, Mapping):
+        raise KrakenSpotAdapterError("Kraken pagination response must be an object")
+    raw_errors = payload.get("error")
+    if isinstance(raw_errors, (str, bytes)) or not isinstance(
+        raw_errors, (list, tuple)
+    ):
+        raise KrakenSpotAdapterError("Kraken error field must be a sequence")
+    if any(str(value) for value in raw_errors):
+        raise KrakenSpotAdapterError(
+            "Kraken pagination response was not successful"
+        )
+    result = payload.get("result")
+    if not isinstance(result, Mapping):
+        raise KrakenSpotAdapterError("Kraken pagination result must be an object")
+    records = result.get(records_key)
+    if not isinstance(records, Mapping):
+        raise KrakenSpotAdapterError(
+            f"Kraken pagination result must contain {records_key} object"
+        )
+    total_count = result.get("count")
+    if (
+        not isinstance(total_count, int)
+        or isinstance(total_count, bool)
+        or total_count < 0
+    ):
+        raise KrakenSpotAdapterError(
+            "Kraken pagination requires non-negative provider count"
+        )
+
+    query = observation.query_binding.query
+    if query.get("without_count") == "true":
+        raise KrakenSpotAdapterError(
+            "without_count response cannot prove Kraken pagination coverage"
+        )
+    raw_offset = query.get("ofs", "0")
+    if not raw_offset.isdigit() or str(int(raw_offset, 10)) != raw_offset:
+        raise KrakenSpotAdapterError("Kraken pagination offset is not canonical")
+    offset = int(raw_offset, 10)
+
+    if endpoint == "/0/private/TradesHistory":
+        raw_limit = query.get("limit", "50")
+        if not raw_limit.isdigit() or str(int(raw_limit, 10)) != raw_limit:
+            raise KrakenSpotAdapterError("Kraken pagination limit is not canonical")
+        limit = int(raw_limit, 10)
+        if limit < 1 or limit > maximum_limit:
+            raise KrakenSpotAdapterError(
+                "Kraken TradesHistory page limit is outside 1..100"
+            )
+    else:
+        limit = maximum_limit
+
+    return KrakenSpotPageEvidence(
+        surface=normalized,
+        offset=offset,
+        limit=limit,
+        record_count=len(records),
+        total_count=total_count,
+        evidence_ref=observation.evidence_ref,
+        filter_items=tuple(
+            sorted(
+                (str(key), str(value))
+                for key, value in query.items()
+                if key != "ofs"
+            )
+        ),
+    )
+
+
+def absence_evidence_from_pagination(
+    *,
+    order_found: bool,
+    open_orders_complete: bool,
+    order_history: KrakenSpotPaginationCoverage,
+    executions: KrakenSpotPaginationCoverage,
+    activities: KrakenSpotPaginationCoverage,
+    consistency_horizon_satisfied: bool,
+    qualified_exclusion_semantics: bool = False,
+) -> KrakenSpotAbsenceEvidence:
+    """Bind Kraken absence inputs to concrete history pagination coverage."""
+
+    for coverage, expected in (
+        (order_history, "ORDER_HISTORY"),
+        (executions, "EXECUTIONS"),
+        (activities, "ACTIVITIES"),
+    ):
+        if not isinstance(coverage, KrakenSpotPaginationCoverage):
+            raise TypeError(f"{expected} coverage has wrong type")
+        if coverage.surface != expected:
+            raise KrakenSpotAdapterError(
+                f"coverage surface mismatch: expected {expected}"
+            )
+    for name, value in (
+        ("order_found", order_found),
+        ("open_orders_complete", open_orders_complete),
+        ("consistency_horizon_satisfied", consistency_horizon_satisfied),
+        ("qualified_exclusion_semantics", qualified_exclusion_semantics),
+    ):
+        if type(value) is not bool:
+            raise TypeError(f"{name} must be boolean")
+    return KrakenSpotAbsenceEvidence(
+        order_found=order_found,
+        open_orders_complete=open_orders_complete,
+        closed_orders_complete=order_history.complete,
+        trades_complete=executions.complete,
+        ledgers_complete=activities.complete,
+        consistency_horizon_satisfied=consistency_horizon_satisfied,
+        qualified_exclusion_semantics=qualified_exclusion_semantics,
+    )
+
+
 def derivatives_supported_by_this_module() -> bool:
     """Make the separation explicit: Kraken Derivatives needs its own adapter."""
 

@@ -32,6 +32,7 @@ from mvp.autotrade_mvp.qualification_attestation import (
 from research.autotrade_research.artifacts.store import ArtifactStore
 from tools.check_nvda_qualification import (
     NvdaQualificationError,
+    validate_release_artifact_binding,
     validate_trusted_nvda_qualification,
 )
 
@@ -90,6 +91,7 @@ class WholeProductEvidenceContext:
     expected_policy_version: str
     nvda_receipt: SignedQualificationAttestation | None = None
     nvda_requirements_json: str | None = None
+    nvda_release_artifact: Path | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.evidence_store, ArtifactStore):
@@ -103,9 +105,17 @@ class WholeProductEvidenceContext:
             or not self.expected_policy_version
         ):
             raise ValueError("expected_policy_version is required")
-        if (self.nvda_receipt is None) != (self.nvda_requirements_json is None):
+        nvda_values = (
+            self.nvda_receipt,
+            self.nvda_requirements_json,
+            self.nvda_release_artifact,
+        )
+        if any(value is not None for value in nvda_values) and not all(
+            value is not None for value in nvda_values
+        ):
             raise ValueError(
-                "NVDA receipt and canonical requirements must be supplied together"
+                "NVDA receipt, canonical requirements, and release artifact "
+                "must be supplied together"
             )
         if self.nvda_receipt is not None and not isinstance(
             self.nvda_receipt,
@@ -121,6 +131,11 @@ class WholeProductEvidenceContext:
                 raise ValueError("NVDA requirements JSON is invalid") from error
             if type(requirements) is not dict:
                 raise ValueError("NVDA requirements must be an object")
+        if self.nvda_release_artifact is not None and not isinstance(
+            self.nvda_release_artifact,
+            Path,
+        ):
+            raise TypeError("nvda_release_artifact must be a Path")
 
 
 class ProductCompletionError(ValueError):
@@ -221,6 +236,7 @@ def _terminal_nvda_status(
         evidence_context is None
         or evidence_context.nvda_receipt is None
         or evidence_context.nvda_requirements_json is None
+        or evidence_context.nvda_release_artifact is None
     ):
         return False
 
@@ -255,6 +271,12 @@ def _terminal_nvda_status(
         if evidence.get("release_artifact_id") != nvda_status["release_artifact_id"]:
             return False
         if evidence.get("artifact_sha256") != nvda_status["artifact_sha256"]:
+            return False
+        actual_release_sha = validate_release_artifact_binding(
+            evidence,
+            evidence_context.nvda_release_artifact,
+        )
+        if actual_release_sha != nvda_status["artifact_sha256"]:
             return False
         verified = validate_trusted_nvda_qualification(
             evidence,
@@ -554,6 +576,7 @@ def main() -> int:
     parser.add_argument("--qualification", type=Path, default=DEFAULT_QUALIFICATION)
     parser.add_argument("--nvda-status", type=Path, default=DEFAULT_NVDA_STATUS)
     parser.add_argument("--nvda-attestation", type=Path)
+    parser.add_argument("--nvda-release-artifact", type=Path)
     parser.add_argument("--source-sha")
     parser.add_argument("--evidence-store", type=Path)
     parser.add_argument("--qualification-policy", type=Path)
@@ -576,11 +599,18 @@ def main() -> int:
             raise ProductCompletionError(
                 "whole-product evidence trust inputs must be supplied together"
             )
-        if args.nvda_attestation is not None and not all(
+        nvda_inputs = (args.nvda_attestation, args.nvda_release_artifact)
+        if any(value is not None for value in nvda_inputs) and not all(
+            value is not None for value in nvda_inputs
+        ):
+            raise ProductCompletionError(
+                "NVDA attestation and release artifact must be supplied together"
+            )
+        if any(value is not None for value in nvda_inputs) and not all(
             value is not None for value in trust_values
         ):
             raise ProductCompletionError(
-                "NVDA attestation requires the pinned qualification trust inputs"
+                "NVDA qualification requires the pinned qualification trust inputs"
             )
         evidence_context = None
         if all(value is not None for value in trust_values):
@@ -614,6 +644,7 @@ def main() -> int:
                     expected_policy_version=args.expected_policy_version,
                     nvda_receipt=nvda_receipt,
                     nvda_requirements_json=nvda_requirements_json,
+                    nvda_release_artifact=args.nvda_release_artifact,
                 )
             except (QualificationTrustError, TypeError, ValueError) as error:
                 raise ProductCompletionError(

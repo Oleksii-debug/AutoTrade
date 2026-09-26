@@ -11,6 +11,14 @@
     getHealth: '/api/v1/health'
   });
 
+  function encodePathSegment(raw) {
+    return encodeURIComponent(raw).replace(
+      /[!'()*]/g,
+      (character) =>
+        "%" + character.charCodeAt(0).toString(16).toUpperCase()
+    );
+  }
+
   function route(operationId, parameters = {}) {
     const template = ROUTES[operationId];
     if (typeof template !== "string") {
@@ -32,7 +40,7 @@
           "Host API route parameter " + name +
           " is required and must be canonical");
       }
-      value = value.replace("{" + name + "}", encodeURIComponent(raw));
+      value = value.replace("{" + name + "}", encodePathSegment(raw));
     }
     if (/\{|\}/.test(value)) {
       throw new Error("Host API route template was not fully resolved");

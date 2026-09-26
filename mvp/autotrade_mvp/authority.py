@@ -1870,8 +1870,9 @@ class AuthorityService:
         """Durably block only new risk for one financial account/environment.
 
         Existing admitted risk-reducing/protective actions remain eligible for
-        their normal checks. A later newly registered non-protection policy is
-        the explicit re-authorization event that clears this scoped block.
+        their normal checks. This safety fact is intentionally not cleared by
+        ordinary policy registration; re-authorization requires a separately
+        specified and qualified authority transition.
         """
 
         if self.store is None:

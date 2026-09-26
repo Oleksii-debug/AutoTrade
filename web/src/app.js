@@ -221,7 +221,14 @@
   ]);
 
   function authorityReviewScopeKey() {
-    return String(state.accountId ?? "") + "\n" + String(state.environment ?? "");
+    const actor = state.sessionIdentity === null ? "" : state.sessionIdentity.actor;
+    const session = state.sessionIdentity === null ? "" : state.sessionIdentity.session;
+    return [
+      actor,
+      session,
+      String(state.accountId ?? ""),
+      String(state.environment ?? "")
+    ].join("\n");
   }
 
   function invalidateAuthorityPolicyReview() {

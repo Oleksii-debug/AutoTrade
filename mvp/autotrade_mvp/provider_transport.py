@@ -1717,8 +1717,10 @@ class WhiteBitHttpTransport:
             raise ProviderTransportScopeError(
                 "nonce allocator account/environment mismatch"
             )
-        if quota_gate is not None and not callable(quota_gate):
-            raise TypeError("quota_gate must be callable or None")
+        if not callable(quota_gate):
+            raise TypeError(
+                "quota_gate must be callable for WhiteBIT LIVE transport"
+            )
         if wire_client is not None and not hasattr(wire_client, "send"):
             raise TypeError("wire_client must implement send")
 
@@ -1796,13 +1798,12 @@ class WhiteBitHttpTransport:
                 "prepared request client order identity mismatch"
             )
 
-        if self.quota_gate is not None:
-            self.quota_gate(
-                "WHITEBIT",
-                self.account_id,
-                "LIVE",
-                "ORDER_WRITE",
-            )
+        self.quota_gate(
+            "WHITEBIT",
+            self.account_id,
+            "LIVE",
+            "ORDER_WRITE",
+        )
 
         with self.nonce_allocator.serialized_send():
             nonce = self.nonce_allocator.allocate()

@@ -358,6 +358,69 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                 manifest_sha256="sha256:" + "0" * 64,
             )
 
+    def test_direct_frozen_decision_rejects_noncanonical_artifact_manifest(self):
+        decision = freeze_with_integrity_store(
+            self.candidate(),
+            with_attestation=True,
+        )
+        body = json.loads(decision.manifest_json)
+        body["artifacts"].append(
+            {
+                **body["artifacts"][0],
+                "role": "ARBITRARY_EXTENSION",
+            }
+        )
+        forged_json = json.dumps(
+            body,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        forged_sha = "sha256:" + sha256(forged_json.encode("utf-8")).hexdigest()
+
+        with self.assertRaisesRegex(
+            ReleaseCandidateError,
+            "artifact role set is not canonical",
+        ):
+            ReleaseCandidateDecision(
+                status="FROZEN",
+                reasons=(),
+                manifest_json=forged_json,
+                manifest_sha256=forged_sha,
+                qualification_attestation_id=decision.qualification_attestation_id,
+                qualification_attestation_digest=decision.qualification_attestation_digest,
+                qualification_policy_id=decision.qualification_policy_id,
+                qualification_trust_root_id=decision.qualification_trust_root_id,
+            )
+
+        body = json.loads(decision.manifest_json)
+        body["artifacts"].reverse()
+        reordered_json = json.dumps(
+            body,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        reordered_sha = (
+            "sha256:" + sha256(reordered_json.encode("utf-8")).hexdigest()
+        )
+        with self.assertRaisesRegex(
+            ReleaseCandidateError,
+            "canonical role order",
+        ):
+            ReleaseCandidateDecision(
+                status="FROZEN",
+                reasons=(),
+                manifest_json=reordered_json,
+                manifest_sha256=reordered_sha,
+                qualification_attestation_id=decision.qualification_attestation_id,
+                qualification_attestation_digest=decision.qualification_attestation_digest,
+                qualification_policy_id=decision.qualification_policy_id,
+                qualification_trust_root_id=decision.qualification_trust_root_id,
+            )
+
     def test_missing_required_artifact_blocks_freeze(self):
         artifacts = tuple(
             item for item in self.candidate().artifacts if item.role != "SBOM"

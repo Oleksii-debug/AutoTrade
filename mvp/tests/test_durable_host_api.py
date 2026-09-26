@@ -270,6 +270,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
         self.assertEqual(store.cursor, 0)
 
     def test_restart_rejects_operation_update_without_accepted_origin(self):
+        store = self.store()
         journal = JournalStore(self.path)
         journal.append_event(
             {
@@ -383,6 +384,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
                     restarted.snapshot()
 
     def test_restart_rejects_non_object_command_acceptance_evidence(self):
+        store = self.store()
         journal = JournalStore(self.path)
         payload = {
             "command_id": "manual-command",

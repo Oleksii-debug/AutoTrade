@@ -335,6 +335,97 @@ class AuthorityCommandExecutionTests(unittest.TestCase):
         ]
         self.assertEqual(len(registered), 1)
 
+    def test_replay_environment_is_rejected_before_host_mutation(self):
+        command = self.command(
+            action="BLOCK_NEW_EXPOSURE",
+            payload={},
+            suffix="replay",
+        )
+        command["environment"] = "REPLAY"
+        with self.assertRaisesRegex(ValueError, "financial"):
+            self.host.submit(command)
+        self.assertEqual(self.host.state_version, 0)
+
+    def test_immutable_policy_conflict_is_terminal_failed_not_waiting(self):
+        self.authority.register_policy(
+            AuthorityPolicy.create(
+                policy_id="policy-conflict",
+                account_id="paper-account-1",
+                environments={"PAPER"},
+                instruments=[(INSTRUMENT_ID, 1)],
+                actions={"ORDER.SUBMIT"},
+                max_notional="10",
+                expires_at="2026-09-27T00:00:00Z",
+                autonomous=True,
+            )
+        )
+        payload = self.policy_payload("policy-conflict")
+        payload["max_notional"] = "20"
+        accepted = self.host.submit(
+            self.command(
+                action="SET_AUTHORITY",
+                payload={"policy": payload},
+                suffix="conflict",
+            )
+        )
+        result = self.executor.execute(accepted.operation_id)
+        self.assertEqual(result.phase, "FAILED")
+        self.assertEqual(result.remaining_uncertainty, ())
+
+    def test_stale_authority_writer_waits_then_restart_resumes_same_operation(self):
+        stale_authority = AuthorityService(self.journal)
+        fresh_writer = AuthorityService(JournalStore(self.path))
+        fresh_writer.register_policy(
+            AuthorityPolicy.create(
+                policy_id="unrelated",
+                account_id="paper-account-1",
+                environments={"PAPER"},
+                instruments=[(INSTRUMENT_ID, 1)],
+                actions={"ORDER.SUBMIT"},
+                max_notional="10",
+                expires_at="2026-09-27T00:00:00Z",
+                autonomous=True,
+            )
+        )
+        accepted = self.host.submit(
+            self.command(
+                action="BLOCK_NEW_EXPOSURE",
+                payload={},
+                suffix="stale",
+            )
+        )
+        waiting = AuthorityCommandExecutor(
+            self.host,
+            stale_authority,
+        ).execute(accepted.operation_id)
+        self.assertEqual(waiting.phase, "WAITING_EXTERNAL")
+        self.assertEqual(
+            waiting.remaining_uncertainty,
+            ("authority_state_reload_required",),
+        )
+
+        restarted_host = JournalBackedHostCommandStore(
+            JournalStore(self.path),
+            account_id="paper-account-1",
+            environment="PAPER",
+            session_validator=lambda *_args: True,
+            request_origin_provider=lambda: "https://local.autotrade.invalid",
+            now=lambda: "2026-09-26T00:40:00Z",
+        )
+        restarted_authority = AuthorityService(JournalStore(self.path))
+        resolved = AuthorityCommandExecutor(
+            restarted_host,
+            restarted_authority,
+        ).execute(accepted.operation_id)
+        self.assertEqual(resolved.phase, "SUCCEEDED")
+        self.assertEqual(resolved.remaining_uncertainty, ())
+        self.assertTrue(
+            restarted_authority.is_new_exposure_blocked(
+                "paper-account-1",
+                "PAPER",
+            )
+        )
+
     def test_revoke_scope_mismatch_fails_without_authority_mutation(self):
         other = AuthorityPolicy.create(
             policy_id="other",

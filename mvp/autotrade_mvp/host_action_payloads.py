@@ -140,6 +140,10 @@ def canonical_authority_action_payload(
     normalized_action = canonical_host_action(action)
     normalized_account = _text(account_id, name="account_id")
     normalized_environment = _text(environment, name="environment")
+    if normalized_environment not in {"SIMULATION", "PAPER", "LIVE"}:
+        raise ValueError(
+            "authority actions require a financial SIMULATION, PAPER, or LIVE environment"
+        )
     item = _object(payload, name=f"{normalized_action} payload")
 
     if normalized_action == "BLOCK_NEW_EXPOSURE":

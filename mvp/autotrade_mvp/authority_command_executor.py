@@ -68,6 +68,14 @@ class AuthorityCommandExecutor:
             )
         return matches[0]
 
+    @staticmethod
+    def _reloadable_conflict(error: AuthorityConflict) -> bool:
+        message = str(error)
+        return (
+            "reload required" in message
+            or "changed concurrently" in message
+        )
+
     def execute(self, operation_id: str):
         operation = self.host.get_operation(operation_id)
         if operation.phase in self.host.TERMINAL_PHASES:
@@ -146,11 +154,17 @@ class AuthorityCommandExecutor:
 
             else:
                 raise ValueError("unsupported durable authority action")
-        except AuthorityConflict:
+        except AuthorityConflict as error:
+            if self._reloadable_conflict(error):
+                return self.host.update_operation(
+                    operation_id,
+                    "WAITING_EXTERNAL",
+                    remaining_uncertainty=("authority_state_reload_required",),
+                )
             return self.host.update_operation(
                 operation_id,
-                "WAITING_EXTERNAL",
-                remaining_uncertainty=("authority_state_reload_required",),
+                "FAILED",
+                remaining_uncertainty=(),
             )
         except (KeyError, TypeError, ValueError):
             return self.host.update_operation(

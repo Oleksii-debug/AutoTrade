@@ -1,6 +1,8 @@
+from dataclasses import replace
 import hashlib
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
@@ -54,6 +56,7 @@ def envelope(**overrides):
         source_sha=SHA,
         account_id="account-1",
         provider_id="provider-1",
+        environment="LIVE",
         policy_id="policy-1",
         allowed_actions={"ORDER.SUBMIT", "ORDER.CANCEL", "FLATTEN"},
         max_capital="1000",
@@ -75,6 +78,7 @@ def ref(label, *, evidence_kind, **overrides):
         envelope_digest=envelope().envelope_digest,
         provider_id="provider-1",
         account_id="account-1",
+        environment="LIVE",
     )
     values.update(overrides)
     return ImmutableEvidenceRef(**values)
@@ -111,6 +115,7 @@ def observation_refs(
     envelope_digest=None,
     provider_id="provider-1",
     account_id="account-1",
+    environment="LIVE",
 ):
     envelope_digest = envelope_digest or envelope().envelope_digest
     return tuple(
@@ -122,6 +127,7 @@ def observation_refs(
             envelope_digest=envelope_digest,
             provider_id=provider_id,
             account_id=account_id,
+            environment=environment,
         )
         for kind in OBSERVATION_KINDS
     )
@@ -136,6 +142,7 @@ def observations(**overrides):
         ),
         "provider_id": overrides.get("provider_id", "provider-1"),
         "account_id": overrides.get("account_id", "account-1"),
+        "environment": overrides.get("environment", "LIVE"),
     }
     values = dict(
         **scope,
@@ -173,6 +180,7 @@ def _publish_ref(store, evidence_ref, *, payload=None, metadata_overrides=None):
         "envelope_digest": evidence_ref.envelope_digest,
         "provider_id": evidence_ref.provider_id,
         "account_id": evidence_ref.account_id,
+        "environment": evidence_ref.environment,
         "outcome": "PASS",
         "producer_id": "qualification-harness",
         "evidence_version": "1",
@@ -206,8 +214,8 @@ def _all_refs(prerequisite_items, observed):
     )
 
 
-def _signed_bounded_receipt(bounded, refs):
-    trust_root = attestation_root(
+def _signed_bounded_receipt(bounded, refs, *, trust_root=None):
+    trust_root = trust_root or attestation_root(
         scopes=(QualificationScope("BOUNDED_REAL", "QUALIFICATION"),)
     )
     trust_policy = attestation_policy(trust_root)
@@ -315,16 +323,18 @@ class BoundedRealQualificationTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)
             _populate_bundle(store, prerequisite_items, observed)
-            result = assess_bounded_real_qualification(
-                envelope=bounded,
-                prerequisite_evidence=prerequisite_items,
-                observations=observed,
-                evidence_verifier=artifact_store_evidence_verifier(store),
-                qualification_receipt=receipt,
-                qualification_policy=trust_policy,
-                expected_policy_id=trust_policy.policy_id,
-                expected_policy_version=trust_policy.policy_version,
-            )
+            with patch(
+                "mvp.autotrade_mvp.qualification_attestation."
+                "load_canonical_qualification_trust_policy",
+                return_value=trust_policy,
+            ):
+                result = assess_bounded_real_qualification(
+                    envelope=bounded,
+                    prerequisite_evidence=prerequisite_items,
+                    observations=observed,
+                    evidence_verifier=artifact_store_evidence_verifier(store),
+                    qualification_receipt=receipt,
+                )
         self.assertTrue(result.complete)
         self.assertEqual(result.reason_codes, ())
         self.assertFalse(result.authorizes_trading)
@@ -337,6 +347,44 @@ class BoundedRealQualificationTests(unittest.TestCase):
             result.qualification_trust_root_id.startswith("sha256:")
         )
 
+    def test_self_selected_root_cannot_close_live_qualification_gate(self):
+        bounded = envelope()
+        prerequisite_items = prerequisites()
+        observed = observations()
+        refs = _all_refs(prerequisite_items, observed)
+        candidate_root = attestation_root(
+            scopes=(QualificationScope("BOUNDED_REAL", "QUALIFICATION"),)
+        )
+        receipt, _ = _signed_bounded_receipt(
+            bounded,
+            refs,
+            trust_root=candidate_root,
+        )
+        canonical_root = replace(
+            candidate_root,
+            producer_id="qualifier.canonical.bounded-real",
+        )
+        canonical_policy = attestation_policy(canonical_root)
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            _populate_bundle(store, prerequisite_items, observed)
+            with patch(
+                "mvp.autotrade_mvp.qualification_attestation."
+                "load_canonical_qualification_trust_policy",
+                return_value=canonical_policy,
+            ):
+                result = assess_bounded_real_qualification(
+                    envelope=bounded,
+                    prerequisite_evidence=prerequisite_items,
+                    observations=observed,
+                    evidence_verifier=artifact_store_evidence_verifier(store),
+                    qualification_receipt=receipt,
+                )
+        self.assertFalse(result.complete)
+        self.assertIn("independent_evidence_trust_invalid", result.reason_codes)
+        self.assertIsNone(result.qualification_policy_id)
+        self.assertFalse(result.authorizes_trading)
+
     def test_signed_bounded_real_receipt_must_cover_exact_evidence_set(self):
         bounded = envelope()
         prerequisite_items = prerequisites()
@@ -346,16 +394,18 @@ class BoundedRealQualificationTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)
             _populate_bundle(store, prerequisite_items, observed)
-            result = assess_bounded_real_qualification(
-                envelope=bounded,
-                prerequisite_evidence=prerequisite_items,
-                observations=observed,
-                evidence_verifier=artifact_store_evidence_verifier(store),
-                qualification_receipt=receipt,
-                qualification_policy=trust_policy,
-                expected_policy_id=trust_policy.policy_id,
-                expected_policy_version=trust_policy.policy_version,
-            )
+            with patch(
+                "mvp.autotrade_mvp.qualification_attestation."
+                "load_canonical_qualification_trust_policy",
+                return_value=trust_policy,
+            ):
+                result = assess_bounded_real_qualification(
+                    envelope=bounded,
+                    prerequisite_evidence=prerequisite_items,
+                    observations=observed,
+                    evidence_verifier=artifact_store_evidence_verifier(store),
+                    qualification_receipt=receipt,
+                )
         self.assertFalse(result.complete)
         self.assertIn(
             "independent_evidence_set_mismatch",
@@ -552,6 +602,7 @@ class BoundedRealQualificationTests(unittest.TestCase):
             envelope_digest=original.envelope_digest,
             provider_id="provider-1",
             account_id="account-1",
+            environment=original.environment,
         )
         items[1] = evidence(
             "SCIENTIFIC_QUALIFICATION",
@@ -576,6 +627,7 @@ class BoundedRealQualificationTests(unittest.TestCase):
             envelope_digest=refs[0].envelope_digest,
             provider_id=refs[0].provider_id,
             account_id=refs[0].account_id,
+            environment=refs[0].environment,
         )
         with self.assertRaisesRegex(ValueError, "digest"):
             assess_bounded_real_qualification(
@@ -674,6 +726,55 @@ class BoundedRealQualificationTests(unittest.TestCase):
             ).envelope_digest,
             original.envelope_digest,
         )
+
+    def test_bounded_real_envelope_is_live_only_and_environment_is_in_digest(self):
+        live = envelope()
+        self.assertEqual(live.environment, "LIVE")
+        self.assertEqual(
+            BoundedRealEnvelope.create(
+                envelope_id="bounded-1",
+                source_sha=SHA,
+                account_id="account-1",
+                provider_id="provider-1",
+                environment="live",
+                policy_id="policy-1",
+                allowed_actions={"ORDER.SUBMIT", "ORDER.CANCEL", "FLATTEN"},
+                max_capital="1000",
+                max_single_notional="100",
+                max_gross_leverage="1.5",
+            ).envelope_digest,
+            live.envelope_digest,
+        )
+        for environment in ("PAPER", "SIMULATION", "REPLAY"):
+            with self.subTest(environment=environment), self.assertRaisesRegex(
+                ValueError, "must be LIVE"
+            ):
+                envelope(environment=environment)
+
+    def test_immutable_bounded_real_evidence_cannot_be_replayed_from_non_live_environment(self):
+        with self.assertRaisesRegex(ValueError, "must be LIVE"):
+            ref(
+                "paper-artifact",
+                evidence_kind="ACTUAL_FILL",
+                environment="PAPER",
+            )
+        with self.assertRaisesRegex(ValueError, "must be LIVE"):
+            observations(environment="PAPER")
+
+    def test_artifact_store_semantics_bind_live_environment(self):
+        evidence_ref = ref("live-environment", evidence_kind="ACTUAL_FILL")
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            _publish_ref(
+                store,
+                evidence_ref,
+                metadata_overrides={"environment": "PAPER"},
+            )
+            verification = artifact_store_evidence_verifier(store).verify(
+                evidence_ref
+            )
+        self.assertFalse(verification.valid)
+        self.assertTrue(verification.conflicted)
 
     def test_single_notional_cannot_exceed_bounded_capital(self):
         with self.assertRaisesRegex(ValueError, "cannot exceed max_capital"):

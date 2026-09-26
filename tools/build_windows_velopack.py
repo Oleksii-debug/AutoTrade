@@ -386,6 +386,8 @@ def _vpk_command(
         str(output_dir),
         "--runtime",
         str(installer["platform"]["runtime_identifier"]),
+        "--instLocation",
+        "PerUser",
         "--noPortable",
         "true",
         "--exclude",

@@ -765,6 +765,7 @@ class AcceptedQualificationAttestation:
     attestation_id: str
     attestation_digest: str
     policy_id: str
+    policy_version: str
     trust_root_id: str
     result: str
     source_sha: str
@@ -1027,6 +1028,7 @@ def verify_qualification_attestation(
         attestation_id=attestation.attestation_id,
         attestation_digest=attestation.content_digest,
         policy_id=policy.policy_id,
+        policy_version=policy.policy_version,
         trust_root_id=root.root_id,
         result=attestation.result,
         source_sha=attestation.source_sha,

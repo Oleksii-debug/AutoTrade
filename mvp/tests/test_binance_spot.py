@@ -451,7 +451,7 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         with self.assertRaisesRegex(BinanceSpotAdapterError, "averaging window"):
             prepare_order_request(
                 intent,
-                client_order_id="at-filter-last-cannot-substitute-average",
+                client_order_id="at-last-cannot-sub-average",
                 capability=capability(),
                 symbol_rules=rules,
                 at=NOW,
@@ -504,7 +504,7 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         with self.assertRaisesRegex(BinanceSpotAdapterError, "averaging window"):
             prepare_order_request(
                 intent,
-                client_order_id="at-filter-average-cannot-substitute-last",
+                client_order_id="at-average-cannot-sub-last",
                 capability=capability(),
                 symbol_rules=rules,
                 at=NOW,

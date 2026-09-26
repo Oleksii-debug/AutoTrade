@@ -29,11 +29,15 @@ from mvp.autotrade_mvp.kraken_spot import (
     KrakenSpotAbsenceEvidence,
     KrakenSpotAdapterError,
     KrakenSpotOrderIntent,
+    KrakenSpotPageEvidence,
+    KrakenSpotPaginationCoverage,
+    absence_evidence_from_pagination,
     KrakenSpotPreparedRequest,
     coverage_evidence,
     derivatives_supported_by_this_module,
     parse_trade_history,
     parse_spot_submission_response,
+    pagination_page_from_observation,
     prepare_spot_order_request,
     validate_spot_client_order_id,
 )
@@ -48,6 +52,7 @@ def trade_history_observation(
     account_id="paper-1",
     environment="PAPER",
     surface=Surface.ACTIVITIES,
+    query=None,
 ):
     query = prepare_authenticated_read_query(
         capability=capability(
@@ -56,7 +61,7 @@ def trade_history_observation(
         ),
         surface=surface,
         endpoint="/0/private/TradesHistory",
-        query={"ofs": "0"},
+        query={"ofs": "0"} if query is None else query,
         at=NOW,
         permission_scope="TRADE.READ",
     )

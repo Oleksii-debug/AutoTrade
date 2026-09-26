@@ -18,10 +18,12 @@ USD-M order preparation now requires a version-bound
 The transport accepts only the explicitly allowlisted Binance USD-M origin,
 endpoint and canonical query for the exact runtime environment, revalidates the
 VERIFIED capability, performs one GET, preserves the HTTP status and exact
-response bytes, and only then promotes the result to a transport-issued
-observation. The resulting rules retain provider, environment, endpoint/query,
+response bytes, parses the exact response inside that composition boundary, and
+passes the resulting rules directly into deterministic order validation. The
+public order-preparation API does not accept caller-supplied rule or mark-price
+objects. The internal rules retain provider, environment, endpoint/query,
 instrument version, response SHA-256, evidence identity, origin, and exact
-request-URL digest before they can authorize an order.
+request-URL digest.
 
 The adapter validates the following provider rules before a LIMIT or MARKET
 request can be prepared:
@@ -40,11 +42,11 @@ Filter increments use Binance USD-M's documented offset semantics:
 `(quantity - minQty) % stepSize == 0`. The adapter deliberately does not use
 `pricePrecision` as tick size or `quantityPrecision` as step size.
 
-Where a rule depends on mark price, order preparation accepts only a
-`BinanceUsdmMarkPrice` promoted from the same shared transport path for
-`/fapi/v1/premiumIndex?symbol=<exact symbol>`. A locally fabricated
-`ProviderResponseObservation`, even with valid exact JSON bytes and capability
-identity, is not an admission authority. The promoted evidence is bound to
+Where a rule depends on mark price, the same shared composition fetches and
+parses `/fapi/v1/premiumIndex?symbol=<exact symbol>` itself before deterministic
+validation. A locally fabricated `ProviderResponseObservation`, rule object, or
+mark-price object cannot be supplied to the public order-preparation entry
+point. The internal evidence is bound to
 provider/environment/origin/endpoint/query/instrument/symbol, exact request URL
 digest and exact response digest; the provider timestamp cannot be after the
 network observation, cannot be from the future at admission, and must satisfy
@@ -102,7 +104,8 @@ Checked 2026-09-26 against Binance Futures (USDⓈ-M) documentation:
 Before this work can be integrated, the exact repaired PR head still requires
 successful `baseline`, `reconvergence-integrity`, and full
 `Verify AutoTrade`. The provenance regression suite must also prove that raw
-caller mappings, locally fabricated exact observations, wrong
+caller mappings, locally fabricated exact observations/rules/mark prices,
+arbitrary production wire-client injection, wrong
 provider/environment/origin/endpoint/query/instrument scope, non-success HTTP
 responses and changed exact response bytes cannot silently authorize
 ORDER_WRITE admission.

@@ -340,6 +340,98 @@ class QualificationAttestationTests(unittest.TestCase):
                     expected_source_sha="a" * 40
                 )
 
+    def test_canonical_policy_git_path_ignores_working_tree_symlink_redirect(self):
+        canonical_root = root()
+        canonical_policy = policy(canonical_root)
+        hostile_root = TrustRoot(
+            producer_id="candidate.self",
+            verifier_id=canonical_root.verifier_id,
+            public_modulus_hex=canonical_root.public_modulus_hex,
+            public_exponent=canonical_root.public_exponent,
+            allowed_scopes=canonical_root.allowed_scopes,
+            valid_from=canonical_root.valid_from,
+        )
+        hostile_policy = policy(hostile_root)
+        with TemporaryDirectory() as directory:
+            source_root = Path(directory) / "source"
+            policy_path = (
+                source_root
+                / "mvp"
+                / "autotrade_mvp"
+                / "qualification_trust_policy.json"
+            )
+            hostile_path = source_root / "provenance" / "hostile-policy.json"
+            policy_path.parent.mkdir(parents=True)
+            hostile_path.parent.mkdir(parents=True)
+            policy_path.write_text(
+                json.dumps(
+                    qualification_trust_policy_payload(canonical_policy),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            hostile_path.write_text(
+                json.dumps(
+                    qualification_trust_policy_payload(hostile_policy),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-q"], cwd=source_root, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "add",
+                    "mvp/autotrade_mvp/qualification_trust_policy.json",
+                    "provenance/hostile-policy.json",
+                ],
+                cwd=source_root,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git", "-c", "user.name=AutoTrade Test",
+                    "-c", "user.email=autotrade-test@example.invalid",
+                    "commit", "-q", "-m", "trusted policy and hostile decoy",
+                ],
+                cwd=source_root,
+                check=True,
+            )
+            source_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=source_root,
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+
+            policy_path.unlink()
+            try:
+                policy_path.symlink_to("../../provenance/hostile-policy.json")
+            except OSError as error:
+                self.skipTest(f"working-tree symlink unavailable: {error}")
+            self.assertIn("candidate.self", policy_path.read_text(encoding="utf-8"))
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_QUALIFICATION_TRUST_SOURCE_ROOT",
+                    source_root,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_CANONICAL_QUALIFICATION_TRUST_POLICY_PATH",
+                    policy_path,
+                ),
+            ):
+                loaded = load_canonical_qualification_trust_policy(
+                    expected_source_sha=source_sha
+                )
+            self.assertEqual(loaded.roots, canonical_policy.roots)
+            self.assertNotEqual(loaded.roots, hostile_policy.roots)
+
     def test_canonical_policy_ignores_git_replace_refs(self):
         canonical_root = root()
         canonical_policy = policy(canonical_root)

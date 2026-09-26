@@ -31,6 +31,9 @@ class QualificationTrustUnavailable(QualificationTrustError):
 _CANONICAL_QUALIFICATION_TRUST_POLICY_PATH = Path(__file__).with_name(
     "qualification_trust_policy.json"
 )
+_CANONICAL_QUALIFICATION_TRUST_POLICY_GIT_PATH = (
+    "mvp/autotrade_mvp/qualification_trust_policy.json"
+)
 
 _QUALIFICATION_TRUST_SOURCE_ROOT = Path(__file__).resolve().parents[2]
 
@@ -679,13 +682,10 @@ def _canonical_qualification_trust_policy_bytes(
 
     source_sha = _git_sha(expected_source_sha, name="expected_source_sha")
     source_root = _QUALIFICATION_TRUST_SOURCE_ROOT.resolve()
-    policy_path = _CANONICAL_QUALIFICATION_TRUST_POLICY_PATH.resolve()
-    try:
-        relative_policy = policy_path.relative_to(source_root).as_posix()
-    except ValueError as error:
-        raise QualificationTrustUnavailable(
-            "canonical qualification trust policy is outside trusted source root"
-        ) from error
+    # The Git object path is a source constant, not a filesystem-derived path.
+    # Resolving the working-tree policy path here would let a mutable symlink
+    # redirect exact-source lookup to a different blob in the same trusted commit.
+    relative_policy = _CANONICAL_QUALIFICATION_TRUST_POLICY_GIT_PATH
     git_executable = _trusted_git_executable(source_root=source_root)
     try:
         head = subprocess.run(

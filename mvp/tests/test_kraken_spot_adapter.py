@@ -918,7 +918,7 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         )
         cases = (
             (
-                {"ofs": "3", "limit": "2", "type": "all"},
+                {"ofs": "1", "limit": "2", "type": "all"},
                 {"trades": {"T-3": {}, "T-4": {}}, "count": 4},
                 "pagination gap",
             ),

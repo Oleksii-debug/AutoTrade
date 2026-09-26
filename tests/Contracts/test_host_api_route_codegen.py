@@ -239,6 +239,27 @@ paths:
                 with self.assertRaisesRegex(ValueError, message):
                     parse_operations(document)
 
+    def test_path_item_ref_cannot_be_silently_ignored(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            r"unsupported OpenAPI Path Item field: \\$ref",
+        ):
+            parse_operations(
+                """openapi: 3.1.0
+paths:
+  /api/v1/state:
+    get:
+      operationId: getState
+  /api/v1/aliased:
+    $ref: '#/components/pathItems/Aliased'
+components:
+  pathItems:
+    Aliased:
+      get:
+        operationId: getAliased
+"""
+            )
+
     def test_path_level_parameter_declarations_fail_closed(self):
         with self.assertRaisesRegex(
             ValueError,

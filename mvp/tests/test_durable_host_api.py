@@ -338,6 +338,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
 
     def test_legacy_accepted_authority_command_remains_visible_but_not_executable(self):
         journal = JournalStore(self.path)
+        aggregate_id = self.store().aggregate_id
         payload = {
             "command_id": "11111111-1111-1111-1111-111111111111",
             "operation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -357,7 +358,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
                 "event_id": "legacy-accepted",
                 "event_type": "COMMAND_ACCEPTED",
                 "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
-                "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
+                "aggregate_id": aggregate_id,
                 "aggregate_version": "1",
                 "payload": payload,
                 "payload_hash": payload_digest(payload),
@@ -375,6 +376,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
 
     def test_legacy_unverifiable_success_is_projected_as_unknown(self):
         journal = JournalStore(self.path)
+        aggregate_id = self.store().aggregate_id
         operation_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
         accepted = {
             "command_id": "11111111-1111-1111-1111-111111111111",
@@ -408,7 +410,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
                     "event_id": event_id,
                     "event_type": event_type,
                     "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
-                    "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
+                    "aggregate_id": aggregate_id,
                     "aggregate_version": str(version),
                     "payload": payload,
                     "payload_hash": payload_digest(payload),
@@ -431,11 +433,12 @@ class JournalBackedHostApiTests(unittest.TestCase):
         )
         self.assertEqual(journal.next_aggregate_version(
             JournalBackedHostCommandStore.AGGREGATE_TYPE,
-            JournalBackedHostCommandStore.AGGREGATE_ID,
+            aggregate_id,
         ), 3)
 
     def test_partial_legacy_authority_payload_binding_is_corruption(self):
         journal = JournalStore(self.path)
+        aggregate_id = self.store().aggregate_id
         payload = {
             "command_id": "11111111-1111-1111-1111-111111111111",
             "operation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -456,7 +459,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
                 "event_id": "partial-binding",
                 "event_type": "COMMAND_ACCEPTED",
                 "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
-                "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
+                "aggregate_id": aggregate_id,
                 "aggregate_version": "1",
                 "payload": payload,
                 "payload_hash": payload_digest(payload),
@@ -468,6 +471,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
 
     def test_restart_rejects_action_payload_bound_to_different_command_identity(self):
         journal = JournalStore(self.path)
+        aggregate_id = self.store().aggregate_id
         action_payload = {
             "schema_version": 1,
             "command_id": "22222222-2222-4222-8222-222222222222",
@@ -499,7 +503,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
                 "event_id": "mismatched-action-command",
                 "event_type": "COMMAND_ACCEPTED",
                 "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
-                "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
+                "aggregate_id": aggregate_id,
                 "aggregate_version": "1",
                 "payload": payload,
                 "payload_hash": payload_digest(payload),
@@ -544,6 +548,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
 
     def test_restart_rejects_terminal_rewrite_in_journal_history(self):
         store = self.store(now="2030-01-01T00:00:00Z")
+        aggregate_id = store.aggregate_id
         accepted = store.submit(self.command())
         store.execute_authority_operation(accepted.operation_id)
 
@@ -562,7 +567,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
                 "aggregate_version": str(
                     journal.next_aggregate_version(
                         JournalBackedHostCommandStore.AGGREGATE_TYPE,
-                        JournalBackedHostCommandStore.AGGREGATE_ID,
+                        aggregate_id,
                     )
                 ),
                 "payload": payload,

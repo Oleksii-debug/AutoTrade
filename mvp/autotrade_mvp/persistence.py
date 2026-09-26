@@ -915,16 +915,50 @@ class JournalStore:
     @staticmethod
     def _journal_sequence_value(connection: sqlite3.Connection) -> int:
         row = connection.execute(
-            "SELECT MAX(journal_sequence) FROM events"
+            """
+            SELECT
+                COUNT(*) AS event_count,
+                MIN(journal_sequence) AS min_sequence,
+                MAX(journal_sequence) AS max_sequence,
+                SUM(
+                    CASE
+                        WHEN typeof(journal_sequence) != 'integer'
+                          OR journal_sequence <= 0
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS invalid_sequence_count,
+                COUNT(DISTINCT journal_sequence) AS distinct_sequence_count
+            FROM events
+            """
         ).fetchone()
-        if row is None or row[0] is None:
+        if row is None:
+            raise ValueError("journal sequence authority query returned no row")
+        event_count = row["event_count"]
+        if type(event_count) is not int or event_count < 0:
+            raise ValueError("journal sequence cardinality is not canonical")
+        if event_count == 0:
             return 0
-        value = row[0]
-        if type(value) is not int or value <= 0:
+
+        minimum = row["min_sequence"]
+        maximum = row["max_sequence"]
+        invalid_count = row["invalid_sequence_count"]
+        distinct_count = row["distinct_sequence_count"]
+        if (
+            type(minimum) is not int
+            or type(maximum) is not int
+            or type(invalid_count) is not int
+            or type(distinct_count) is not int
+            or invalid_count != 0
+            or minimum != 1
+            or maximum != event_count
+            or distinct_count != event_count
+        ):
             raise ValueError(
-                "journal sequence authority is not a canonical positive integer"
+                "journal sequence authority is not a contiguous canonical "
+                "positive integer series"
             )
-        return value
+        return maximum
 
     def current_journal_sequence(self) -> int:
         """Return the explicit durable global journal cursor."""

@@ -1,9 +1,23 @@
+import base64
 from hashlib import sha256
+import json
+from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
+
+from mvp.autotrade_mvp.qualification_attestation import (
+    EvidenceArtifactRef,
+    QualificationAttestation,
+    QualificationScope,
+    QualificationTrustPolicy,
+    SignedQualificationAttestation,
+    TrustRoot,
+    qualification_trust_policy_payload,
+)
 
 from mvp.autotrade_mvp.supply_chain_qualification import (
     ComponentEvidence,
@@ -199,7 +213,309 @@ def qualify(value, *, omit_artifact_ids=(), corrupt_artifact_id=None):
         return qualify_supply_chain(value, evidence_store=store)
 
 
+
+# Non-production RSA fixture shared only by this focused trust-integration test.
+_RSA_N = int(
+    "ae5f6165c50e6af720388e7649c53e3ec1c539b5d6cfea06c10d9895b362fc9f"
+    "ae4d7afc9c4496d4ef3716fd49f8f9321f81e9794be8861f078cd25c702e57a6"
+    "f135cb6e6cc7ee562c5aee6a52eae29a4b61fd6db7a0e0272525888588247d3b"
+    "86f94992b9fe6471da90a6db05bd1108702adadba98e0130a903e1fa3ee58211b"
+    "61c036a81442fb25824cc4b90dd8ae2eeee4112d01f80c5b44898f03bf3e7d278"
+    "6906aa2ea7d3065074c5a6ab72f20926fa34edef80433f64ab60f57e91e22a700"
+    "f09f442796f17b142331d8b6764c8ccc9545320f11a2f52512915a3085e41beaf"
+    "2e3437e1a2f91cd674c49f165fa296a50d1692d78ea3e4bc0fcc9b021f53",
+    16,
+)
+_RSA_D = int(
+    "43e0b631df1923336af40924ebc79fd8df262eb665d60eb42d5f6507d54a51abb"
+    "936c90adfabe589234baf23cf315f940ee6cbe35f54b72d0a0bdbf186ebcb4c1d"
+    "b682a7cc29b1d212b71cfaffa716a9d8715f2d601f7c5250a8013275d23a7bbb2"
+    "97c65e5082dc29241dfe9ff9c5f2e89376d75b7d5a309f5a920c500c9e7ace61"
+    "f85eefc7665f3dff9bab2e28da848e0ea0c5c32a90043fdaf056c3a21431d4aa2"
+    "9eaed6a2d70bbbaff3b78e1bdd9bbd4a617e3f16d5da358864c538408994097358"
+    "54c4cecdadc8f082693679b823270b8d2402102916cb2b94bb92615d480b184a8d"
+    "cd479ac90fd9c18ee4e341b9bee6238f231b672d8715c649e28cdde9",
+    16,
+)
+_DER_SHA256 = bytes.fromhex("3031300d060960864801650304020105000420")
+
+
+def _sign_attestation(value):
+    digest_info = _DER_SHA256 + sha256(value.canonical_bytes()).digest()
+    width = (_RSA_N.bit_length() + 7) // 8
+    encoded = (
+        b"\x00\x01"
+        + b"\xff" * (width - len(digest_info) - 3)
+        + b"\x00"
+        + digest_info
+    )
+    signature = pow(
+        int.from_bytes(encoded, "big"), _RSA_D, _RSA_N
+    ).to_bytes(width, "big")
+    return base64.b64encode(signature).decode("ascii")
+
+
+def _trust_root(*, producer_id="qualifier.supply-chain.service"):
+    return TrustRoot(
+        producer_id=producer_id,
+        verifier_id="autotrade.trust.verifier",
+        public_modulus_hex=format(_RSA_N, "x"),
+        public_exponent=65537,
+        allowed_scopes=(QualificationScope("SUPPLY_CHAIN", "RELEASE"),),
+        valid_from="2026-09-01T00:00:00Z",
+    )
+
+
+def _trust_policy(root):
+    return QualificationTrustPolicy(
+        policy_version="2026.09",
+        roots=(root,),
+    )
+
+
+def _evidence_refs(value):
+    refs = [
+        EvidenceArtifactRef(
+            value.sbom_artifact_id,
+            value.sbom_hash,
+            "application/vnd.autotrade.sbom",
+            "SBOM",
+            value.release_commit_sha,
+        ),
+        EvidenceArtifactRef(
+            value.provenance_artifact_id,
+            value.provenance_hash,
+            "application/vnd.autotrade.provenance",
+            "PROVENANCE",
+            value.release_commit_sha,
+        ),
+        EvidenceArtifactRef(
+            value.dependency_lock_artifact_id,
+            value.dependency_lock_hash,
+            "application/vnd.autotrade.dependency-lock",
+            "DEPENDENCY_LOCK",
+            value.release_commit_sha,
+        ),
+    ]
+    for item in value.components:
+        refs.append(
+            EvidenceArtifactRef(
+                item.artifact_id,
+                item.observed_artifact_hash,
+                "application/vnd.autotrade.distributed-component",
+                "DISTRIBUTED_COMPONENT",
+                value.release_commit_sha,
+            )
+        )
+        if item.advisory_status == "ALLOWLISTED":
+            refs.append(
+                EvidenceArtifactRef(
+                    item.advisory_exception_id,
+                    item.advisory_exception_hash,
+                    "application/vnd.autotrade.advisory-exception",
+                    "ADVISORY_EXCEPTION",
+                    value.release_commit_sha,
+                )
+            )
+    for item in value.model_data_rights:
+        refs.append(
+            EvidenceArtifactRef(
+                item.artifact_id,
+                item.artifact_hash,
+                "application/vnd.autotrade.rights-evidence",
+                "MODEL_DATA_RIGHTS",
+                value.release_commit_sha,
+            )
+        )
+    return tuple(refs)
+
+
+def _signed_review(value, *, refs=None, result="PASS", root=None):
+    root = _trust_root() if root is None else root
+    attestation = QualificationAttestation(
+        attestation_id=artifact_id("wp64-independent-review"),
+        source_sha=value.release_commit_sha,
+        domain="SUPPLY_CHAIN",
+        gate="RELEASE",
+        package_id="WP-64",
+        protocol_id="supply-chain-review-v1",
+        protocol_version="1.0.0",
+        requirement_ids=("independent-supply-chain-review",),
+        evidence_refs=_evidence_refs(value) if refs is None else tuple(refs),
+        producer_id=root.producer_id,
+        verifier_id=root.verifier_id,
+        trust_root_id=root.root_id,
+        runner_id="supply-chain-qualifier-1",
+        harness_version="1.0.0",
+        started_at="2026-09-25T20:00:00Z",
+        completed_at="2026-09-25T20:05:00Z",
+        signed_at="2026-09-25T20:06:00Z",
+        result=result,
+        unresolved_limits=() if result == "PASS" else ("review incomplete",),
+    )
+    return (
+        SignedQualificationAttestation(attestation, _sign_attestation(attestation)),
+        _trust_policy(root),
+    )
+
+
+def qualify_signed(value, *, receipt=None, canonical_policy=None):
+    with TemporaryDirectory() as directory:
+        store = ArtifactStore(directory)
+        entries = [
+            (
+                value.sbom_artifact_id,
+                value.sbom_hash,
+                "application/vnd.autotrade.sbom",
+                {"evidence_kind": "SBOM", "release_sha": value.release_commit_sha},
+            ),
+            (
+                value.provenance_artifact_id,
+                value.provenance_hash,
+                "application/vnd.autotrade.provenance",
+                {
+                    "evidence_kind": "PROVENANCE",
+                    "release_sha": value.release_commit_sha,
+                },
+            ),
+            (
+                value.dependency_lock_artifact_id,
+                value.dependency_lock_hash,
+                "application/vnd.autotrade.dependency-lock",
+                {
+                    "evidence_kind": "DEPENDENCY_LOCK",
+                    "release_sha": value.release_commit_sha,
+                },
+            ),
+        ]
+        for item in value.components:
+            entries.append(
+                (
+                    item.artifact_id,
+                    item.observed_artifact_hash,
+                    "application/vnd.autotrade.distributed-component",
+                    {
+                        "evidence_kind": "DISTRIBUTED_COMPONENT",
+                        "component_id": item.component_id,
+                        "version": item.version,
+                        "release_sha": value.release_commit_sha,
+                    },
+                )
+            )
+        for item in value.model_data_rights:
+            entries.append(
+                (
+                    item.artifact_id,
+                    item.artifact_hash,
+                    "application/vnd.autotrade.rights-evidence",
+                    {
+                        "evidence_kind": "MODEL_DATA_RIGHTS",
+                        "use_scope": item.use_scope,
+                        "release_sha": value.release_commit_sha,
+                    },
+                )
+            )
+        for aid, digest, media_type, metadata in entries:
+            _publish(
+                store,
+                artifact_id_value=aid,
+                artifact_hash=digest,
+                media_type=media_type,
+                release_sha=value.release_commit_sha,
+                metadata=metadata,
+            )
+        if receipt is None:
+            receipt, _ = _signed_review(value)
+        if canonical_policy is None:
+            canonical_policy = _trust_policy(_trust_root())
+        policy_path = Path(directory) / "qualification_trust_policy.json"
+        policy_path.write_text(
+            json.dumps(
+                qualification_trust_policy_payload(canonical_policy),
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        with patch(
+            "mvp.autotrade_mvp.qualification_attestation."
+            "_CANONICAL_QUALIFICATION_TRUST_POLICY_PATH",
+            policy_path,
+        ):
+            return qualify_supply_chain(
+                value,
+                evidence_store=store,
+                trust_receipt=receipt,
+            )
+
 class SupplyChainQualificationTests(unittest.TestCase):
+
+    def test_valid_independent_signed_review_can_close_wp64_trust_gate(self):
+        result = qualify_signed(evidence())
+        self.assertEqual(result.status, "PASS")
+        self.assertFalse(result.release_authority)
+        self.assertIn(("independent_evidence_trust", "PASS"), result.checks)
+        self.assertNotIn(
+            "SUPPLY_CHAIN.TRUST_ANCHOR_UNAVAILABLE",
+            result.reason_codes,
+        )
+
+    def test_self_selected_valid_root_cannot_replace_canonical_policy(self):
+        value = evidence()
+        candidate_root = _trust_root(producer_id="candidate.self")
+        candidate_receipt, candidate_policy = _signed_review(
+            value,
+            root=candidate_root,
+        )
+        canonical_policy = _trust_policy(_trust_root())
+        self.assertNotEqual(candidate_policy.policy_id, canonical_policy.policy_id)
+        result = qualify_signed(
+            value,
+            receipt=candidate_receipt,
+            canonical_policy=canonical_policy,
+        )
+        self.assertEqual(result.status, "FAIL")
+        self.assertIn(
+            "SUPPLY_CHAIN.TRUST_ATTESTATION_INVALID",
+            result.reason_codes,
+        )
+
+
+    def test_signed_review_must_cover_exact_supply_chain_evidence_set(self):
+        value = evidence()
+        refs = _evidence_refs(value)[:-1]
+        receipt, policy = _signed_review(value, refs=refs)
+        result = qualify_signed(value, receipt=receipt, canonical_policy=policy)
+        self.assertEqual(result.status, "FAIL")
+        self.assertIn(
+            "SUPPLY_CHAIN.TRUST_EVIDENCE_SET_MISMATCH",
+            result.reason_codes,
+        )
+
+    def test_invalid_signature_is_terminal_trust_failure_not_self_approval(self):
+        value = evidence()
+        receipt, policy = _signed_review(value)
+        forged = SignedQualificationAttestation(
+            receipt.attestation,
+            base64.b64encode(b"x" * 256).decode("ascii"),
+        )
+        result = qualify_signed(value, receipt=forged, canonical_policy=policy)
+        self.assertEqual(result.status, "FAIL")
+        self.assertIn(
+            "SUPPLY_CHAIN.TRUST_ATTESTATION_INVALID",
+            result.reason_codes,
+        )
+
+    def test_inconclusive_independent_review_cannot_produce_supply_chain_pass(self):
+        value = evidence()
+        receipt, policy = _signed_review(value, result="INCONCLUSIVE")
+        result = qualify_signed(value, receipt=receipt, canonical_policy=policy)
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertIn(
+            "SUPPLY_CHAIN.INDEPENDENT_REVIEW_INCONCLUSIVE",
+            result.reason_codes,
+        )
+
     def test_self_asserted_release_hashes_are_inconclusive_without_external_evidence(self):
         result = qualify_supply_chain(evidence())
         self.assertEqual(result.status, "INCONCLUSIVE")

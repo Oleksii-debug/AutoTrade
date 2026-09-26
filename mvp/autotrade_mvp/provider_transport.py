@@ -421,6 +421,44 @@ BINANCE_SPOT_AUTHENTICATED_READ_ENDPOINTS: Mapping[
 )
 
 
+KRAKEN_SPOT_AUTHENTICATED_READ_ENDPOINTS: Mapping[
+    str, AuthenticatedReadEndpointRule
+] = MappingProxyType(
+    {
+        "/0/private/OpenOrders": AuthenticatedReadEndpointRule(
+            surface=Surface.ACTIVITIES,
+            permission_scope="ORDER.READ",
+            data_entitlement="ORDERS",
+            success_statuses=frozenset({200}),
+        ),
+        "/0/private/ClosedOrders": AuthenticatedReadEndpointRule(
+            surface=Surface.ACTIVITIES,
+            permission_scope="ORDER.READ",
+            data_entitlement="ORDERS",
+            success_statuses=frozenset({200}),
+        ),
+        "/0/private/QueryOrders": AuthenticatedReadEndpointRule(
+            surface=Surface.ACTIVITIES,
+            permission_scope="ORDER.READ",
+            data_entitlement="ORDERS",
+            success_statuses=frozenset({200}),
+        ),
+        "/0/private/TradesHistory": AuthenticatedReadEndpointRule(
+            surface=Surface.ACTIVITIES,
+            permission_scope="TRADE.READ",
+            data_entitlement="TRADES",
+            success_statuses=frozenset({200}),
+        ),
+        "/0/private/Ledgers": AuthenticatedReadEndpointRule(
+            surface=Surface.ACTIVITIES,
+            permission_scope="ACCOUNT.READ",
+            data_entitlement="ACTIVITIES",
+            success_statuses=frozenset({200}),
+        ),
+    }
+)
+
+
 BYBIT_V5_AUTHENTICATED_READ_ENDPOINTS: Mapping[
     str, AuthenticatedReadEndpointRule
 ] = MappingProxyType(
@@ -503,6 +541,270 @@ def _binance_authenticated_read_rule(
     return rule
 
 
+_KRAKEN_SPOT_AUTHENTICATED_READ_QUERY_FIELDS: Mapping[str, frozenset[str]] = (
+    MappingProxyType(
+        {
+            "/0/private/OpenOrders": frozenset(
+                {"trades", "userref", "cl_ord_id", "rebase_multiplier"}
+            ),
+            "/0/private/ClosedOrders": frozenset(
+                {
+                    "trades",
+                    "userref",
+                    "cl_ord_id",
+                    "start",
+                    "end",
+                    "ofs",
+                    "closetime",
+                    "consolidate_taker",
+                    "without_count",
+                    "rebase_multiplier",
+                }
+            ),
+            "/0/private/QueryOrders": frozenset(
+                {
+                    "txid",
+                    "trades",
+                    "userref",
+                    "consolidate_taker",
+                    "rebase_multiplier",
+                }
+            ),
+            "/0/private/TradesHistory": frozenset(
+                {
+                    "type",
+                    "trades",
+                    "start",
+                    "end",
+                    "ofs",
+                    "without_count",
+                    "consolidate_taker",
+                    "ledgers",
+                    "rebase_multiplier",
+                    "aclass",
+                    "pair",
+                    "limit",
+                }
+            ),
+            "/0/private/Ledgers": frozenset(
+                {
+                    "asset",
+                    "aclass",
+                    "type",
+                    "start",
+                    "end",
+                    "ofs",
+                    "without_count",
+                    "rebase_multiplier",
+                }
+            ),
+        }
+    )
+)
+
+_KRAKEN_SPOT_BOOLEAN_QUERY_FIELDS = frozenset(
+    {"trades", "consolidate_taker", "without_count", "ledgers"}
+)
+
+
+def _kraken_spot_canonical_integer(
+    value: str,
+    *,
+    name: str,
+    minimum: int,
+    maximum: int | None = None,
+) -> int:
+    try:
+        parsed = int(value, 10)
+    except ValueError as error:
+        raise ProviderTransportScopeError(
+            f"Kraken Spot {name} must be canonical integer text"
+        ) from error
+    if str(parsed) != value or parsed < minimum:
+        raise ProviderTransportScopeError(
+            f"Kraken Spot {name} must be canonical integer text"
+        )
+    if maximum is not None and parsed > maximum:
+        raise ProviderTransportScopeError(
+            f"Kraken Spot {name} is outside the documented range"
+        )
+    return parsed
+
+
+def _kraken_spot_history_boundary(value: str, *, name: str) -> str:
+    """Validate Kraken history start/end as Unix time or opaque tx/ledger id."""
+
+    if value.isascii() and value.isdigit():
+        _kraken_spot_canonical_integer(
+            value,
+            name=name,
+            minimum=0,
+        )
+        return value
+    parts = value.split("-")
+    if (
+        len(parts) < 2
+        or any(
+            not part
+            or not part.isascii()
+            or not part.isalnum()
+            for part in parts
+        )
+    ):
+        raise ProviderTransportScopeError(
+            f"Kraken Spot {name} must be canonical Unix time or provider id"
+        )
+    return value
+
+
+def _validate_kraken_spot_authenticated_read_query(
+    binding: AuthenticatedReadQueryBinding,
+) -> None:
+    allowed = _KRAKEN_SPOT_AUTHENTICATED_READ_QUERY_FIELDS[binding.endpoint]
+    unsupported = set(binding.query) - allowed
+    if unsupported:
+        raise ProviderTransportScopeError(
+            "Kraken Spot authenticated-read query contains unsupported fields: "
+            + ",".join(sorted(unsupported))
+        )
+
+    for field in _KRAKEN_SPOT_BOOLEAN_QUERY_FIELDS & set(binding.query):
+        if binding.query[field] not in {"true", "false"}:
+            raise ProviderTransportScopeError(
+                f"Kraken Spot {field} must be canonical boolean text"
+            )
+
+    if "ofs" in binding.query:
+        _kraken_spot_canonical_integer(
+            binding.query["ofs"],
+            name="ofs",
+            minimum=0,
+        )
+    if "limit" in binding.query:
+        _kraken_spot_canonical_integer(
+            binding.query["limit"],
+            name="limit",
+            minimum=1,
+            maximum=100,
+        )
+    if "userref" in binding.query:
+        _kraken_spot_canonical_integer(
+            binding.query["userref"],
+            name="userref",
+            minimum=-(1 << 31),
+            maximum=(1 << 31) - 1,
+        )
+    for field in ("start", "end"):
+        if field in binding.query:
+            _kraken_spot_history_boundary(
+                binding.query[field],
+                name=field,
+            )
+    if "cl_ord_id" in binding.query:
+        try:
+            validate_spot_client_order_id(binding.query["cl_ord_id"])
+        except ValueError as error:
+            raise ProviderTransportScopeError(
+                "Kraken Spot cl_ord_id filter is invalid"
+            ) from error
+    if binding.endpoint == "/0/private/QueryOrders":
+        raw_txids = binding.query.get("txid")
+        if raw_txids is None:
+            raise ProviderTransportScopeError(
+                "Kraken Spot QueryOrders requires txid"
+            )
+        txids = tuple(part.strip() for part in raw_txids.split(","))
+        if (
+            raw_txids != ",".join(txids)
+            or not txids
+            or len(txids) > 50
+            or any(not value for value in txids)
+            or len(set(txids)) != len(txids)
+        ):
+            raise ProviderTransportScopeError(
+                "Kraken Spot QueryOrders txid must contain 1..50 unique order ids"
+            )
+        for value in txids:
+            canonical = _canonical_text(
+                value,
+                name="Kraken Spot QueryOrders txid",
+            )
+            if any(character.isspace() for character in canonical):
+                raise ProviderTransportScopeError(
+                    "Kraken Spot QueryOrders txid contains whitespace"
+                )
+
+    enum_fields = {
+        "rebase_multiplier": frozenset({"rebased", "base"}),
+    }
+    if binding.endpoint == "/0/private/ClosedOrders":
+        enum_fields["closetime"] = frozenset({"open", "close", "both"})
+    elif binding.endpoint == "/0/private/TradesHistory":
+        enum_fields["type"] = frozenset(
+            {
+                "all",
+                "any position",
+                "closed position",
+                "closing position",
+                "no position",
+            }
+        )
+        enum_fields["aclass"] = frozenset(
+            {
+                "forex",
+                "equity_pair",
+                "futures_contract",
+                "synthetic_pair",
+                "external_pair",
+            }
+        )
+    elif binding.endpoint == "/0/private/Ledgers":
+        enum_fields["aclass"] = frozenset({"currency"})
+        enum_fields["type"] = frozenset(
+            {
+                "all",
+                "trade",
+                "deposit",
+                "withdrawal",
+                "transfer",
+                "margin",
+                "adjustment",
+                "rollover",
+                "credit",
+                "settled",
+                "staking",
+                "dividend",
+                "sale",
+                "nft_rebate",
+            }
+        )
+    for field, values in enum_fields.items():
+        if field in binding.query and binding.query[field] not in values:
+            raise ProviderTransportScopeError(
+                f"Kraken Spot {field} is outside the documented enum"
+            )
+
+
+def _kraken_spot_authenticated_read_rule(
+    binding: AuthenticatedReadQueryBinding,
+) -> AuthenticatedReadEndpointRule:
+    rule = KRAKEN_SPOT_AUTHENTICATED_READ_ENDPOINTS.get(binding.endpoint)
+    if rule is None:
+        raise ProviderTransportScopeError(
+            "Kraken Spot authenticated-read endpoint is not explicitly allowed"
+        )
+    if binding.surface != rule.surface:
+        raise ProviderTransportScopeError(
+            "authenticated-read endpoint surface does not match Kraken Spot policy"
+        )
+    if binding.permission_scope != rule.permission_scope:
+        raise ProviderTransportScopeError(
+            "authenticated-read permission scope does not match Kraken Spot endpoint policy"
+        )
+    _validate_kraken_spot_authenticated_read_query(binding)
+    return rule
+
+
 @dataclass(frozen=True)
 class SignedHttpRequest:
     method: str
@@ -556,17 +858,26 @@ class SignedHttpRequest:
 
 @dataclass(frozen=True)
 class AuthenticatedReadHttpRequest:
-    """One immutable authenticated provider GET request.
+    """One immutable authenticated provider read request.
 
-    This is intentionally separate from SignedHttpRequest so the write transport
-    cannot accidentally broaden its POST-only contract or final-send semantics.
+    GET keeps the exact signed-query contract used by Binance. POST supports
+    providers such as Kraken whose private read APIs authenticate a form body.
+    The envelope remains separate from SignedHttpRequest so read responses keep
+    their typed observation lifecycle and never acquire write authority.
     """
 
     url: str
     headers: Mapping[str, str]
     timeout_seconds: int
+    method: str = "GET"
+    body: bytes = b""
 
     def __post_init__(self) -> None:
+        method = _text(self.method, name="method").upper()
+        if method not in {"GET", "POST"}:
+            raise ProviderTransportScopeError(
+                "authenticated-read method must be GET or POST"
+            )
         parsed = urlsplit(_text(self.url, name="url"))
         if (
             parsed.scheme != "https"
@@ -574,10 +885,22 @@ class AuthenticatedReadHttpRequest:
             or parsed.username is not None
             or parsed.password is not None
             or parsed.fragment
-            or not parsed.query
         ):
             raise ProviderTransportScopeError(
-                "authenticated-read URL must be HTTPS with an exact signed query"
+                "authenticated-read URL must be canonical HTTPS"
+            )
+        if type(self.body) is not bytes:
+            raise ProviderTransportScopeError(
+                "authenticated-read body must be exact bytes"
+            )
+        if method == "GET":
+            if not parsed.query or self.body:
+                raise ProviderTransportScopeError(
+                    "authenticated GET requires an exact signed query and no body"
+                )
+        elif parsed.query or not self.body:
+            raise ProviderTransportScopeError(
+                "authenticated POST requires an exact body and no URL query"
             )
         if not isinstance(self.headers, Mapping):
             raise ProviderTransportScopeError("headers must be a mapping")
@@ -597,6 +920,7 @@ class AuthenticatedReadHttpRequest:
             or self.timeout_seconds > 120
         ):
             raise ProviderTransportScopeError("invalid request timeout")
+        object.__setattr__(self, "method", method)
         object.__setattr__(
             self,
             "headers",
@@ -670,8 +994,8 @@ class UrllibJsonWireClient:
             data = request.body
             method = request.method
         else:
-            data = None
-            method = "GET"
+            data = request.body or None
+            method = request.method
         outbound = Request(
             request.url,
             data=data,
@@ -805,6 +1129,8 @@ class _DurableProviderNonceAllocator:
         scope_fields: Mapping[str, object] | None = None,
         max_nonce: int | None = None,
         nonce_domain_name: str = "positive integer",
+        aggregate_identity_material: str | None = None,
+        initial_nonce_floor: int = 0,
     ) -> None:
         if not isinstance(journal, JournalStore):
             raise TypeError("journal must be JournalStore")
@@ -836,6 +1162,18 @@ class _DurableProviderNonceAllocator:
         ):
             raise ProviderTransportScopeError(
                 "max_nonce must be a positive integer or None"
+            )
+        if (
+            isinstance(initial_nonce_floor, bool)
+            or not isinstance(initial_nonce_floor, int)
+            or initial_nonce_floor < 0
+            or (
+                max_nonce is not None
+                and initial_nonce_floor > max_nonce
+            )
+        ):
+            raise ProviderTransportScopeError(
+                "initial_nonce_floor must be a non-negative integer within the nonce domain"
             )
         domain_name = _canonical_text(
             nonce_domain_name,
@@ -874,14 +1212,21 @@ class _DurableProviderNonceAllocator:
         self.max_contention_retries = max_contention_retries
         self.max_nonce = max_nonce
         self.nonce_domain_name = domain_name
+        self.initial_nonce_floor = initial_nonce_floor
         self.scope_fields = MappingProxyType(scope)
-        aggregate_material = f"{self.account_id}|{self.environment}"
-        if scope:
-            aggregate_material += "|" + json.dumps(
-                scope,
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=True,
+        if aggregate_identity_material is None:
+            aggregate_material = f"{self.account_id}|{self.environment}"
+            if scope:
+                aggregate_material += "|" + json.dumps(
+                    scope,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                )
+        else:
+            aggregate_material = _canonical_text(
+                aggregate_identity_material,
+                name="aggregate_identity_material",
             )
         self.aggregate_id = (
             self.provider_id
@@ -946,7 +1291,7 @@ class _DurableProviderNonceAllocator:
                 )
             previous_nonce = nonce
             previous_version = version
-        return previous_nonce, previous_version
+        return max(previous_nonce, self.initial_nonce_floor), previous_version
 
     def allocate(self) -> int:
         for _ in range(self.max_contention_retries):
@@ -1058,8 +1403,13 @@ class WhiteBitDurableNonceAllocator(_DurableProviderNonceAllocator):
         )
 
 
-class KrakenSpotDurableNonceAllocator(_DurableProviderNonceAllocator):
-    """Journal-backed Kraken Spot nonce authority scoped to one credential generation."""
+class KrakenSpotDurableNonceAllocator:
+    """Journal-backed Kraken Spot nonce authority keyed by provider API-key identity.
+
+    Local READ/TRADE handles and credential generations are admission metadata,
+    not Kraken nonce domains. The provider API key is fingerprinted in-memory and
+    only that non-secret fingerprint is persisted as nonce scope evidence.
+    """
 
     def __init__(
         self,
@@ -1072,39 +1422,209 @@ class KrakenSpotDurableNonceAllocator(_DurableProviderNonceAllocator):
         clock_utc: ClockUtc | None = None,
         max_contention_retries: int = 32,
     ) -> None:
+        if not isinstance(journal, JournalStore):
+            raise TypeError("journal must be JournalStore")
         if not isinstance(credential_handle, PersistentCredentialHandle):
             raise TypeError(
                 "credential_handle must be PersistentCredentialHandle"
             )
         account = _canonical_text(account_id, name="account_id")
+        env = _canonical_environment(environment)
+        if env != "LIVE":
+            raise ProviderTransportScopeError(
+                "Kraken Spot durable nonce allocation is qualified only for LIVE"
+            )
         if (
             credential_handle.provider != "KRAKEN"
-            or credential_handle.environment != "LIVE"
-            or credential_handle.provider_environment != "LIVE"
-            or credential_handle.purpose != "TRADE"
+            or credential_handle.environment != env
+            or credential_handle.provider_environment != env
+            or credential_handle.purpose not in {"TRADE", "READ"}
             or credential_handle.account_id != account
         ):
             raise ProviderTransportScopeError(
                 "Kraken Spot nonce credential scope mismatch"
             )
+        if not callable(clock_millis):
+            raise TypeError("clock_millis must be callable")
+        if clock_utc is not None and not callable(clock_utc):
+            raise TypeError("clock_utc must be callable or None")
+        if (
+            isinstance(max_contention_retries, bool)
+            or not isinstance(max_contention_retries, int)
+            or max_contention_retries < 1
+            or max_contention_retries > 1024
+        ):
+            raise ProviderTransportScopeError(
+                "max_contention_retries must be an integer from 1 through 1024"
+            )
+
+        self.journal = journal
+        self.account_id = account
+        self.environment = env
         self.credential_handle_id = credential_handle.handle_id
         self.credential_generation = credential_handle.generation
-        super().__init__(
+        self.clock_millis = clock_millis
+        self.clock_utc = clock_utc
+        self.max_contention_retries = max_contention_retries
+        self.legacy_nonce_floor = self._load_legacy_nonce_floor()
+
+    def _load_legacy_nonce_floor(self) -> int:
+        """Carry only integrity-valid pre-provider-key Kraken history forward."""
+
+        highest = 0
+        legacy_state: dict[str, tuple[tuple[str, int], int, int]] = {}
+        for event in self.journal.load_events_by_aggregate_type(
+            _DurableProviderNonceAllocator.AGGREGATE_TYPE
+        ):
+            payload = event.get("payload")
+            if not isinstance(payload, Mapping):
+                raise ProviderTransportError(
+                    "provider nonce journal payload is invalid"
+                )
+            if payload.get("provider_id") != "KRAKEN":
+                continue
+            if (
+                payload.get("account_id") != self.account_id
+                or payload.get("environment") != self.environment
+            ):
+                continue
+            scope_keys = set(payload) - {
+                "provider_id",
+                "account_id",
+                "environment",
+                "nonce",
+            }
+            if scope_keys == {"provider_api_key_fingerprint"}:
+                continue
+            if scope_keys != {
+                "credential_handle_id",
+                "credential_generation",
+            }:
+                raise ProviderTransportError(
+                    "Kraken Spot nonce journal contains an unknown legacy scope"
+                )
+            if (
+                event.get("event_type")
+                != _DurableProviderNonceAllocator.EVENT_TYPE
+            ):
+                raise ProviderTransportError(
+                    "Kraken Spot legacy nonce journal contains an unexpected event type"
+                )
+
+            handle_id = payload.get("credential_handle_id")
+            generation = payload.get("credential_generation")
+            if (
+                not isinstance(handle_id, str)
+                or not handle_id
+                or handle_id != handle_id.strip()
+                or any(ord(character) < 0x20 for character in handle_id)
+                or isinstance(generation, bool)
+                or not isinstance(generation, int)
+                or generation < 1
+            ):
+                raise ProviderTransportError(
+                    "Kraken Spot legacy nonce scope is invalid"
+                )
+            scope = (handle_id, generation)
+            legacy_scope = {
+                "credential_handle_id": handle_id,
+                "credential_generation": generation,
+            }
+            aggregate_material = (
+                f"{self.account_id}|{self.environment}|"
+                + json.dumps(
+                    legacy_scope,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                )
+            )
+            expected_aggregate_id = (
+                "KRAKEN:"
+                + sha256(aggregate_material.encode("utf-8")).hexdigest()
+            )
+            aggregate_id = event.get("aggregate_id")
+            if aggregate_id != expected_aggregate_id:
+                raise ProviderTransportError(
+                    "Kraken Spot legacy nonce aggregate identity is invalid"
+                )
+
+            nonce = payload.get("nonce")
+            version = event.get("aggregate_version")
+            if (
+                isinstance(nonce, bool)
+                or not isinstance(nonce, int)
+                or nonce <= 0
+                or nonce > _UINT64_MAX
+                or isinstance(version, bool)
+                or not isinstance(version, int)
+                or version < 1
+            ):
+                raise ProviderTransportError(
+                    "Kraken Spot legacy nonce journal is invalid"
+                )
+
+            previous = legacy_state.get(aggregate_id)
+            if previous is None:
+                previous_scope = scope
+                previous_version = 0
+                previous_nonce = 0
+            else:
+                previous_scope, previous_version, previous_nonce = previous
+            if scope != previous_scope:
+                raise ProviderTransportError(
+                    "Kraken Spot legacy nonce scope changed within one aggregate"
+                )
+            if version != previous_version + 1:
+                raise ProviderTransportError(
+                    "Kraken Spot legacy nonce aggregate sequence is invalid"
+                )
+            if nonce <= previous_nonce:
+                raise ProviderTransportError(
+                    "Kraken Spot legacy nonce journal is not strictly monotonic"
+                )
+            legacy_state[aggregate_id] = (scope, version, nonce)
+            highest = max(highest, nonce)
+        return highest
+
+    @staticmethod
+    def provider_api_key_fingerprint(provider_api_key: object) -> str:
+        api_key = _canonical_text(
+            provider_api_key,
+            name="Kraken Spot provider API key",
+        )
+        return "sha256:" + sha256(api_key.encode("utf-8")).hexdigest()
+
+    def for_provider_api_key(
+        self,
+        provider_api_key: object,
+    ) -> _DurableProviderNonceAllocator:
+        fingerprint = self.provider_api_key_fingerprint(provider_api_key)
+        return _DurableProviderNonceAllocator(
             provider_id="KRAKEN",
             display_name="Kraken Spot",
-            journal=journal,
-            account_id=account,
-            environment=environment,
-            clock_millis=clock_millis,
-            clock_utc=clock_utc,
-            max_contention_retries=max_contention_retries,
+            journal=self.journal,
+            account_id=self.account_id,
+            environment=self.environment,
+            clock_millis=self.clock_millis,
+            clock_utc=self.clock_utc,
+            max_contention_retries=self.max_contention_retries,
             scope_fields={
-                "credential_handle_id": credential_handle.handle_id,
-                "credential_generation": credential_handle.generation,
+                "provider_api_key_fingerprint": fingerprint,
             },
             max_nonce=_UINT64_MAX,
             nonce_domain_name="unsigned 64-bit",
+            aggregate_identity_material=(
+                f"KRAKEN|{self.environment}|provider-api-key|{fingerprint}"
+            ),
+            initial_nonce_floor=self.legacy_nonce_floor,
         )
+
+    def aggregate_id_for_provider_api_key(self, provider_api_key: object) -> str:
+        return self.for_provider_api_key(provider_api_key).aggregate_id
+
+    def send_lock_path_for_provider_api_key(self, provider_api_key: object):
+        return self.for_provider_api_key(provider_api_key)._send_lock_path
 
 class WhiteBitHttpTransport:
     """GuardedDispatcher-compatible WhiteBIT LIVE order transport.
@@ -1330,8 +1850,85 @@ class KrakenSpotCredential:
         return cls(api_key=api_key, api_secret=api_secret)
 
 
+def _kraken_spot_signed_form_parts(
+    *,
+    policy: ProviderEndpointPolicy,
+    endpoint: object,
+    parameters: Mapping[str, object],
+    credential_plaintext: object,
+    nonce: object,
+) -> tuple[str, bytes, Mapping[str, str]]:
+    """Build exact Kraken private REST form bytes and HMAC headers.
+
+    Endpoint admission remains with the caller-specific write/read policy. This
+    helper owns only the shared Kraken authentication math so writes and
+    authenticated reads cannot drift into competing signer implementations.
+    """
+
+    if not isinstance(policy, ProviderEndpointPolicy):
+        raise TypeError("policy must be ProviderEndpointPolicy")
+    if policy.provider_id != "KRAKEN" or policy.environment != "LIVE":
+        raise ProviderTransportScopeError(
+            "Kraken Spot signing requires KRAKEN LIVE policy"
+        )
+    path = _canonical_text(endpoint, name="endpoint")
+    if not path.startswith("/0/private/"):
+        raise ProviderTransportScopeError(
+            "Kraken Spot private signer requires /0/private/ endpoint"
+        )
+    policy.absolute_url(path)
+    if not isinstance(parameters, Mapping):
+        raise ProviderTransportScopeError(
+            "Kraken Spot signed parameters must be a mapping"
+        )
+    if (
+        isinstance(nonce, bool)
+        or not isinstance(nonce, int)
+        or nonce <= 0
+        or nonce > _UINT64_MAX
+    ):
+        raise ProviderTransportScopeError(
+            "Kraken Spot nonce must be an unsigned 64-bit positive integer"
+        )
+
+    canonical: dict[str, str] = {}
+    for key, value in parameters.items():
+        canonical_key = _canonical_text(key, name="Kraken Spot parameter")
+        if canonical_key in {"nonce", "otp"}:
+            raise ProviderTransportScopeError(
+                "prepared Kraken Spot parameters contain transport-owned authentication fields"
+            )
+        canonical_value = _canonical_text(
+            value,
+            name=f"Kraken Spot parameter {canonical_key}",
+        )
+        canonical[canonical_key] = canonical_value
+    canonical["nonce"] = str(nonce)
+    exact_body = urlencode(sorted(canonical.items())).encode("ascii")
+    credential = KrakenSpotCredential.parse(credential_plaintext)
+    message_digest = sha256(
+        str(nonce).encode("ascii") + exact_body
+    ).digest()
+    message = path.encode("ascii") + message_digest
+    secret = base64.b64decode(credential.api_secret, validate=True)
+    signature = base64.b64encode(
+        hmac.new(secret, message, sha512).digest()
+    ).decode("ascii")
+    return (
+        path,
+        exact_body,
+        MappingProxyType(
+            {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "API-Key": credential.api_key,
+                "API-Sign": signature,
+            }
+        ),
+    )
+
+
 class KrakenSpotSigner:
-    """Pure Kraken Spot REST HMAC-SHA512 signer."""
+    """Pure Kraken Spot AddOrder HMAC-SHA512 signer."""
 
     @staticmethod
     def sign(
@@ -1342,65 +1939,67 @@ class KrakenSpotSigner:
         credential_plaintext: str,
         nonce: int,
     ) -> SignedHttpRequest:
-        if not isinstance(policy, ProviderEndpointPolicy):
-            raise TypeError("policy must be ProviderEndpointPolicy")
-        if policy.provider_id != "KRAKEN" or policy.environment != "LIVE":
-            raise ProviderTransportScopeError(
-                "Kraken Spot signer requires KRAKEN LIVE policy"
-            )
         path = _canonical_text(endpoint, name="endpoint")
         if path != "/0/private/AddOrder":
             raise ProviderTransportScopeError(
                 "Kraken Spot signer permits only the canonical AddOrder path"
             )
-        if not isinstance(body, Mapping):
-            raise ProviderTransportScopeError(
-                "Kraken Spot signer body must be a mapping"
-            )
-        if (
-            isinstance(nonce, bool)
-            or not isinstance(nonce, int)
-            or nonce <= 0
-            or nonce > _UINT64_MAX
-        ):
-            raise ProviderTransportScopeError(
-                "Kraken Spot nonce must be an unsigned 64-bit positive integer"
-            )
-        canonical: dict[str, str] = {}
-        for key, value in body.items():
-            canonical_key = _canonical_text(key, name="Kraken Spot parameter")
-            if canonical_key in {"nonce", "otp"}:
-                raise ProviderTransportScopeError(
-                    "prepared Kraken Spot body contains transport-owned authentication fields"
-                )
-            canonical_value = _canonical_text(
-                value,
-                name=f"Kraken Spot parameter {canonical_key}",
-            )
-            canonical[canonical_key] = canonical_value
-        canonical["nonce"] = str(nonce)
-        exact_body = urlencode(sorted(canonical.items())).encode("ascii")
-        credential = KrakenSpotCredential.parse(credential_plaintext)
-        message_digest = sha256(
-            str(nonce).encode("ascii") + exact_body
-        ).digest()
-        message = path.encode("ascii") + message_digest
-        secret = base64.b64decode(credential.api_secret, validate=True)
-        signature = base64.b64encode(
-            hmac.new(secret, message, sha512).digest()
-        ).decode("ascii")
+        path, exact_body, headers = _kraken_spot_signed_form_parts(
+            policy=policy,
+            endpoint=path,
+            parameters=body,
+            credential_plaintext=credential_plaintext,
+            nonce=nonce,
+        )
         return SignedHttpRequest(
             method="POST",
             url=policy.absolute_url(path),
-            headers=MappingProxyType(
-                {
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "API-Key": credential.api_key,
-                    "API-Sign": signature,
-                }
-            ),
+            headers=headers,
             body=exact_body,
             timeout_seconds=policy.timeout_seconds,
+        )
+
+
+class KrakenSpotAuthenticatedReadSigner:
+    """Pure signer for explicitly admitted Kraken Spot private account reads."""
+
+    @staticmethod
+    def sign(
+        *,
+        policy: ProviderEndpointPolicy,
+        query_binding: AuthenticatedReadQueryBinding,
+        credential_plaintext: object,
+        nonce: object,
+    ) -> AuthenticatedReadHttpRequest:
+        if not isinstance(query_binding, AuthenticatedReadQueryBinding):
+            raise TypeError(
+                "query_binding must be AuthenticatedReadQueryBinding"
+            )
+        if policy.provider_id != "KRAKEN" or policy.environment != "LIVE":
+            raise ProviderTransportScopeError(
+                "Kraken Spot authenticated-read signer requires KRAKEN LIVE policy"
+            )
+        if (
+            query_binding.provider_id != policy.provider_id
+            or query_binding.environment != policy.environment
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read binding provider/environment mismatch"
+            )
+        _kraken_spot_authenticated_read_rule(query_binding)
+        path, exact_body, headers = _kraken_spot_signed_form_parts(
+            policy=policy,
+            endpoint=query_binding.endpoint,
+            parameters=query_binding.query,
+            credential_plaintext=credential_plaintext,
+            nonce=nonce,
+        )
+        return AuthenticatedReadHttpRequest(
+            url=policy.absolute_url(path),
+            headers=headers,
+            timeout_seconds=policy.timeout_seconds,
+            method="POST",
+            body=exact_body,
         )
 
 
@@ -1536,6 +2135,7 @@ class KrakenSpotHttpTransport:
         if (
             credential_handle.provider != "KRAKEN"
             or credential_handle.environment != "LIVE"
+            or credential_handle.provider_environment != "LIVE"
             or credential_handle.purpose != "TRADE"
         ):
             raise ProviderTransportScopeError(
@@ -1646,19 +2246,28 @@ class KrakenSpotHttpTransport:
                 "ORDER_WRITE",
             )
 
-        with self.nonce_allocator.serialized_send():
-            nonce = self.nonce_allocator.allocate()
-            credential_plaintext = self.secret_resolver.resolve_for_execution(
-                self.session_token,
-                origin=self.origin,
-                handle=self.credential_handle,
-                execution_identity=self.execution_identity,
-                account_id=self.account_id,
-                provider="KRAKEN",
-                environment="LIVE",
-                purpose="TRADE",
+        credential_plaintext = self.secret_resolver.resolve_for_execution(
+            self.session_token,
+            origin=self.origin,
+            handle=self.credential_handle,
+            execution_identity=self.execution_identity,
+            account_id=self.account_id,
+            provider="KRAKEN",
+            environment="LIVE",
+            purpose="TRADE",
+            provider_environment="LIVE",
+        )
+        provider_api_key = None
+        try:
+            provider_api_key = KrakenSpotCredential.parse(
+                credential_plaintext
+            ).api_key
+            nonce_domain = self.nonce_allocator.for_provider_api_key(
+                provider_api_key
             )
-            try:
+            provider_api_key = None
+            with nonce_domain.serialized_send():
+                nonce = nonce_domain.allocate()
                 signed = KrakenSpotSigner.sign(
                     policy=self.policy,
                     endpoint=endpoint,
@@ -1666,20 +2275,259 @@ class KrakenSpotHttpTransport:
                     credential_plaintext=credential_plaintext,
                     nonce=nonce,
                 )
-            finally:
-                credential_plaintext = None
 
-            final_guard()
-            wire_response = self.wire_client.send(signed)
-            exact = _exact_trading_response(wire_response)
-            if spot_submission_requires_reconciliation(exact.payload):
-                return ExactJsonTransportResponse(
-                    exact.response_bytes,
-                    http_status=exact.http_status,
-                    requires_reconciliation=True,
-                    ambiguity_reason="kraken_spot_deadline_elapsed",
+                final_guard()
+                wire_response = self.wire_client.send(signed)
+                exact = _exact_trading_response(wire_response)
+                if spot_submission_requires_reconciliation(exact.payload):
+                    return ExactJsonTransportResponse(
+                        exact.response_bytes,
+                        http_status=exact.http_status,
+                        requires_reconciliation=True,
+                        ambiguity_reason="kraken_spot_deadline_elapsed",
+                    )
+                return exact
+        finally:
+            provider_api_key = None
+            credential_plaintext = None
+
+
+
+class KrakenSpotAuthenticatedReadTransport:
+    """One-shot credential-scoped Kraken Spot private REST read.
+
+    Reuses provider-core query/response identity, the canonical capability
+    registry, WP-46 READ credential resolution and the existing Kraken durable
+    nonce authority. It owns no retry, cache, reconciliation or financial
+    authority.
+    """
+
+    def __init__(
+        self,
+        *,
+        policy: ProviderEndpointPolicy,
+        account_id: str,
+        capability_snapshot_id: str,
+        capability_registry: CapabilityRegistry,
+        secret_resolver: ProviderSecretResolver,
+        credential_handle: PersistentCredentialHandle,
+        session_token: str,
+        origin: str,
+        execution_identity: str,
+        nonce_allocator: KrakenSpotDurableNonceAllocator,
+        clock_utc: ClockUtc,
+        quota_gate: QuotaGate | None = None,
+        wire_client: ProviderWireClient | None = None,
+    ) -> None:
+        if not isinstance(policy, ProviderEndpointPolicy):
+            raise TypeError("policy must be ProviderEndpointPolicy")
+        if policy.provider_id != "KRAKEN" or policy.environment != "LIVE":
+            raise ProviderTransportScopeError(
+                "Kraken Spot authenticated-read transport requires KRAKEN LIVE policy"
+            )
+        if not isinstance(credential_handle, PersistentCredentialHandle):
+            raise TypeError(
+                "credential_handle must be PersistentCredentialHandle"
+            )
+        if (
+            credential_handle.provider != "KRAKEN"
+            or credential_handle.environment != "LIVE"
+            or credential_handle.provider_environment != "LIVE"
+            or credential_handle.purpose != "READ"
+        ):
+            raise ProviderTransportScopeError(
+                "READ credential handle provider/environment/purpose mismatch"
+            )
+        account = _canonical_text(account_id, name="account_id")
+        if credential_handle.account_id != account:
+            raise ProviderTransportScopeError(
+                "credential handle account mismatch"
+            )
+        capability = _canonical_text(
+            capability_snapshot_id,
+            name="capability_snapshot_id",
+        )
+        if not isinstance(capability_registry, CapabilityRegistry):
+            raise TypeError("capability_registry must be CapabilityRegistry")
+        if not hasattr(secret_resolver, "resolve_for_execution"):
+            raise TypeError(
+                "secret_resolver must implement resolve_for_execution"
+            )
+        if not isinstance(nonce_allocator, KrakenSpotDurableNonceAllocator):
+            raise TypeError(
+                "nonce_allocator must be KrakenSpotDurableNonceAllocator"
+            )
+        if (
+            nonce_allocator.account_id != account
+            or nonce_allocator.environment != "LIVE"
+            or nonce_allocator.credential_handle_id != credential_handle.handle_id
+            or nonce_allocator.credential_generation != credential_handle.generation
+        ):
+            raise ProviderTransportScopeError(
+                "nonce allocator credential/account/environment scope mismatch"
+            )
+        if not callable(clock_utc):
+            raise TypeError("clock_utc must be callable")
+        if quota_gate is not None and not callable(quota_gate):
+            raise TypeError("quota_gate must be callable or None")
+        if wire_client is not None and not hasattr(wire_client, "send"):
+            raise TypeError("wire_client must implement send")
+
+        self.policy = policy
+        self.account_id = account
+        self.capability_snapshot_id = capability
+        self.capability_registry = capability_registry
+        self.secret_resolver = secret_resolver
+        self.credential_handle = credential_handle
+        self.session_token = _canonical_text(
+            session_token,
+            name="session_token",
+        )
+        self.origin = _canonical_text(origin, name="origin")
+        self.execution_identity = _canonical_text(
+            execution_identity,
+            name="execution_identity",
+        )
+        self.nonce_allocator = nonce_allocator
+        self.clock_utc = clock_utc
+        self.quota_gate = quota_gate
+        self.wire_client = wire_client or UrllibJsonWireClient()
+
+    def _require_current_capability(
+        self,
+        query_binding: AuthenticatedReadQueryBinding,
+        rule: AuthenticatedReadEndpointRule,
+    ) -> CapabilitySnapshot:
+        point = self.clock_utc()
+        if (
+            not isinstance(point, datetime)
+            or point.tzinfo is None
+            or point.utcoffset() is None
+        ):
+            raise ProviderTransportScopeError(
+                "clock_utc must return a timezone-aware datetime"
+            )
+        point = point.astimezone(timezone.utc)
+        try:
+            current = self.capability_registry.require_verified(
+                provider_id="KRAKEN",
+                account_id=self.account_id,
+                entity_id=query_binding.entity_id,
+                environment="LIVE",
+                instrument_version=query_binding.instrument_version,
+                at=point,
+            )
+        except Exception as error:
+            raise ProviderTransportScopeError(
+                "authenticated-read current capability cannot be verified"
+            ) from error
+        if not isinstance(current, CapabilitySnapshot):
+            raise ProviderTransportScopeError(
+                "capability registry must return CapabilitySnapshot"
+            )
+        if (
+            current.snapshot_id != self.capability_snapshot_id
+            or current.provider_id != "KRAKEN"
+            or current.account_id != self.account_id
+            or current.entity_id != query_binding.entity_id
+            or current.environment != "LIVE"
+            or current.instrument_version != query_binding.instrument_version
+            or current.status != "VERIFIED"
+            or not (current.observed_at <= point < current.expires_at)
+            or query_binding.permission_scope not in current.permission_scopes
+            or rule.data_entitlement not in current.data_entitlements
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read capability is no longer valid for exact query binding"
+            )
+        return current
+
+    def __call__(
+        self,
+        query_binding: AuthenticatedReadQueryBinding,
+    ) -> ProviderResponseObservation:
+        if not isinstance(query_binding, AuthenticatedReadQueryBinding):
+            raise TypeError(
+                "query_binding must be AuthenticatedReadQueryBinding"
+            )
+        if (
+            query_binding.provider_id != "KRAKEN"
+            or query_binding.account_id != self.account_id
+            or query_binding.environment != "LIVE"
+            or query_binding.capability_snapshot_id != self.capability_snapshot_id
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read query scope mismatch"
+            )
+        rule = _kraken_spot_authenticated_read_rule(query_binding)
+
+        if self.quota_gate is not None:
+            self.quota_gate(
+                "KRAKEN",
+                self.account_id,
+                "LIVE",
+                "AUTHENTICATED_READ",
+            )
+
+        # Revalidate after quota delay and before READ credential access.
+        self._require_current_capability(query_binding, rule)
+
+        credential_plaintext = self.secret_resolver.resolve_for_execution(
+            self.session_token,
+            origin=self.origin,
+            handle=self.credential_handle,
+            execution_identity=self.execution_identity,
+            account_id=self.account_id,
+            provider="KRAKEN",
+            environment="LIVE",
+            purpose="READ",
+            provider_environment="LIVE",
+        )
+        provider_api_key = None
+        try:
+            provider_api_key = KrakenSpotCredential.parse(
+                credential_plaintext
+            ).api_key
+            nonce_domain = self.nonce_allocator.for_provider_api_key(
+                provider_api_key
+            )
+            provider_api_key = None
+            with nonce_domain.serialized_send():
+                nonce = nonce_domain.allocate()
+                signed = KrakenSpotAuthenticatedReadSigner.sign(
+                    policy=self.policy,
+                    query_binding=query_binding,
+                    credential_plaintext=credential_plaintext,
+                    nonce=nonce,
                 )
-            return exact
+
+                # Resolve authority again immediately before the irreversible read.
+                self._require_current_capability(query_binding, rule)
+                wire_response = self.wire_client.send(signed)
+        finally:
+            provider_api_key = None
+            credential_plaintext = None
+
+        if not isinstance(wire_response, AuthenticatedReadWireResponse):
+            raise ProviderTransportError(
+                "authenticated-read wire client must preserve HTTP status"
+            )
+        if wire_response.http_status not in rule.success_statuses:
+            raise ProviderTransportError(
+                "authenticated provider read returned unexpected HTTP status "
+                + str(wire_response.http_status)
+                + "; allowed="
+                + ",".join(
+                    str(status) for status in sorted(rule.success_statuses)
+                )
+            )
+        observed_at = self.clock_utc()
+        return observe_authenticated_json_response(
+            query_binding=query_binding,
+            http_status=wire_response.http_status,
+            response_bytes=wire_response.body,
+            observed_at=observed_at,
+        )
 
 
 @dataclass(frozen=True)
@@ -2391,7 +3239,7 @@ class BybitV5HttpTransport:
             provider="BYBIT",
             environment=self.policy.environment,
             purpose="TRADE",
-            provider_environment=self.provider_environment,
+            provider_environment=self.policy.environment,
         )
         try:
             signed = BybitV5Signer.sign(
@@ -2687,7 +3535,7 @@ class BybitV5AuthenticatedReadTransport:
             provider="BYBIT",
             environment=self.policy.environment,
             purpose="READ",
-            provider_environment=self.provider_environment,
+            provider_environment=self.policy.environment,
         )
         try:
             signed = BybitV5AuthenticatedReadSigner.sign(
@@ -2998,6 +3846,7 @@ class BinanceSpotHttpTransport:
             provider=self.policy.provider_id,
             environment=self.policy.environment,
             purpose="TRADE",
+            provider_environment=self.policy.environment,
         )
         try:
             timestamp_ms = self.clock_millis()
@@ -3324,5 +4173,4 @@ class BinanceSpotAuthenticatedReadTransport:
             http_status=wire_response.http_status,
             response_bytes=wire_response.body,
             observed_at=observed_at,
-            provider_environment=self.policy.environment,
         )

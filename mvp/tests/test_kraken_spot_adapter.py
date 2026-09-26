@@ -29,11 +29,17 @@ from mvp.autotrade_mvp.kraken_spot import (
     KrakenSpotAbsenceEvidence,
     KrakenSpotAdapterError,
     KrakenSpotOrderIntent,
+    KrakenSpotOpenOrdersSnapshotEvidence,
+    KrakenSpotPageEvidence,
+    KrakenSpotPaginationCoverage,
+    absence_evidence_from_pagination,
     KrakenSpotPreparedRequest,
     coverage_evidence,
     derivatives_supported_by_this_module,
     parse_trade_history,
     parse_spot_submission_response,
+    open_orders_snapshot_from_observation,
+    pagination_page_from_observation,
     prepare_spot_order_request,
     validate_spot_client_order_id,
 )
@@ -47,7 +53,8 @@ def trade_history_observation(
     *,
     account_id="paper-1",
     environment="PAPER",
-    surface=Surface.AUTHENTICATED_READ,
+    surface=Surface.ACTIVITIES,
+    query=None,
 ):
     query = prepare_authenticated_read_query(
         capability=capability(
@@ -56,9 +63,9 @@ def trade_history_observation(
         ),
         surface=surface,
         endpoint="/0/private/TradesHistory",
-        query={"ofs": "0"},
+        query={"ofs": "0"} if query is None else query,
         at=NOW,
-        permission_scope="ORDER.READ",
+        permission_scope="TRADE.READ",
     )
     raw = json.dumps(
         response,
@@ -73,6 +80,41 @@ def trade_history_observation(
         response_bytes=raw,
         observed_at=NOW,
     )
+
+def authenticated_activity_observation(
+    endpoint,
+    response,
+    *,
+    query=None,
+    permission_scope="ORDER.READ",
+    account_id="paper-1",
+    environment="PAPER",
+):
+    binding = prepare_authenticated_read_query(
+        capability=capability(
+            account_id=account_id,
+            environment=environment,
+        ),
+        surface=Surface.ACTIVITIES,
+        endpoint=endpoint,
+        query={} if query is None else query,
+        at=NOW,
+        permission_scope=permission_scope,
+    )
+    raw = json.dumps(
+        response,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return observe_authenticated_json_response(
+        query_binding=binding,
+        http_status=200,
+        response_bytes=raw,
+        observed_at=NOW,
+    )
+
 
 def capability(
     *,
@@ -94,7 +136,7 @@ def capability(
             expires_at=NOW + timedelta(hours=1),
             supported_order_types=frozenset(order_types),
             time_in_force=frozenset(tif),
-            permission_scopes=frozenset({"ORDER_WRITE", "ORDER.READ"}),
+            permission_scopes=frozenset({"ORDER_WRITE", "ORDER.READ", "TRADE.READ", "ACCOUNT.READ"}),
             position_mode="CASH",
             native_protection=frozenset(),
             rate_limit_policy_id="kraken-spot-test",
@@ -807,7 +849,7 @@ class KrakenSpotAdapterTests(unittest.TestCase):
             response,
             account_id="bound-account",
             environment="PAPER",
-            surface=Surface.ACTIVITIES,
+            surface=Surface.AUTHENTICATED_READ,
         )
         with self.assertRaisesRegex(ProviderCoreError, "surface mismatch"):
             parse_trade_history(
@@ -816,6 +858,536 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 client_ids_by_provider_order={"O-SCOPE-1": "at-order-1"},
                 fee_currency_by_pair={"XXBTZUSD": "USD"},
             )
+
+    def test_trade_history_pagination_coverage_binds_exact_pages_and_total(self):
+        first_observation = trade_history_observation(
+            {
+                "error": [],
+                "result": {
+                    "trades": {"T-1": {}, "T-2": {}},
+                    "count": 3,
+                },
+            },
+            query={"ofs": "0", "limit": "2", "type": "all", "end": "1790385000"},
+        )
+        second_observation = trade_history_observation(
+            {
+                "error": [],
+                "result": {
+                    "trades": {"T-3": {}},
+                    "count": 3,
+                },
+            },
+            query={"ofs": "2", "limit": "2", "type": "all", "end": "1790385000"},
+        )
+        coverage = KrakenSpotPaginationCoverage(surface="EXECUTIONS")
+        first = pagination_page_from_observation(
+            first_observation,
+            surface="EXECUTIONS",
+        )
+        second = pagination_page_from_observation(
+            second_observation,
+            surface="EXECUTIONS",
+        )
+
+        coverage.add_page(first)
+        self.assertFalse(coverage.complete)
+        self.assertEqual(coverage.next_offset, 2)
+        coverage.add_page(second)
+        self.assertTrue(coverage.complete)
+        self.assertEqual(coverage.next_offset, 3)
+        self.assertEqual(
+            coverage.evidence_refs,
+            (
+                first_observation.evidence_ref,
+                second_observation.evidence_ref,
+            ),
+        )
+
+    def test_multi_page_kraken_coverage_without_end_boundary_stays_incomplete(self):
+        first = pagination_page_from_observation(
+            trade_history_observation(
+                {
+                    "error": [],
+                    "result": {
+                        "trades": {"T-1": {}, "T-2": {}},
+                        "count": 3,
+                    },
+                },
+                query={"ofs": "0", "limit": "2", "type": "all"},
+            ),
+            surface="EXECUTIONS",
+        )
+        second = pagination_page_from_observation(
+            trade_history_observation(
+                {
+                    "error": [],
+                    "result": {
+                        "trades": {"T-3": {}},
+                        "count": 3,
+                    },
+                },
+                query={"ofs": "2", "limit": "2", "type": "all"},
+            ),
+            surface="EXECUTIONS",
+        )
+        coverage = KrakenSpotPaginationCoverage(surface="EXECUTIONS")
+        coverage.add_page(first)
+        coverage.add_page(second)
+
+        self.assertFalse(coverage.has_stable_end_boundary)
+        self.assertFalse(coverage.complete)
+        self.assertEqual(coverage.next_offset, 3)
+
+    def test_kraken_pagination_rejects_record_overlap_across_pages(self):
+        first = pagination_page_from_observation(
+            trade_history_observation(
+                {
+                    "error": [],
+                    "result": {
+                        "trades": {"T-1": {}, "T-2": {}},
+                        "count": 4,
+                    },
+                },
+                query={
+                    "ofs": "0",
+                    "limit": "2",
+                    "type": "all",
+                    "end": "1790385000",
+                },
+            ),
+            surface="EXECUTIONS",
+        )
+        second = pagination_page_from_observation(
+            trade_history_observation(
+                {
+                    "error": [],
+                    "result": {
+                        "trades": {"T-2": {}, "T-3": {}},
+                        "count": 4,
+                    },
+                },
+                query={
+                    "ofs": "2",
+                    "limit": "2",
+                    "type": "all",
+                    "end": "1790385000",
+                },
+            ),
+            surface="EXECUTIONS",
+        )
+        coverage = KrakenSpotPaginationCoverage(surface="EXECUTIONS")
+        coverage.add_page(first)
+
+        with self.assertRaisesRegex(
+            KrakenSpotAdapterError,
+            "duplicated across pages",
+        ):
+            coverage.add_page(second)
+
+        self.assertEqual(coverage.pages, (first,))
+        self.assertFalse(coverage.complete)
+
+    def test_multi_page_kraken_coverage_rejects_pseudo_end_boundaries(self):
+        for end in ("", "not a boundary", "001", "opaque"):
+            with self.subTest(end=end):
+                first = pagination_page_from_observation(
+                    trade_history_observation(
+                        {
+                            "error": [],
+                            "result": {
+                                "trades": {"T-1": {}, "T-2": {}},
+                                "count": 3,
+                            },
+                        },
+                        query={
+                            "ofs": "0",
+                            "limit": "2",
+                            "type": "all",
+                            "end": end,
+                        },
+                    ),
+                    surface="EXECUTIONS",
+                )
+                second = pagination_page_from_observation(
+                    trade_history_observation(
+                        {
+                            "error": [],
+                            "result": {
+                                "trades": {"T-3": {}},
+                                "count": 3,
+                            },
+                        },
+                        query={
+                            "ofs": "2",
+                            "limit": "2",
+                            "type": "all",
+                            "end": end,
+                        },
+                    ),
+                    surface="EXECUTIONS",
+                )
+                coverage = KrakenSpotPaginationCoverage(surface="EXECUTIONS")
+                coverage.add_page(first)
+                coverage.add_page(second)
+
+                self.assertFalse(coverage.has_stable_end_boundary)
+                self.assertFalse(coverage.complete)
+
+    def test_kraken_pagination_rejects_gap_filter_or_total_drift(self):
+        first = pagination_page_from_observation(
+            trade_history_observation(
+                {
+                    "error": [],
+                    "result": {
+                        "trades": {"T-1": {}, "T-2": {}},
+                        "count": 4,
+                    },
+                },
+                query={"ofs": "0", "limit": "2", "type": "all"},
+            ),
+            surface="EXECUTIONS",
+        )
+        cases = (
+            (
+                {"ofs": "1", "limit": "2", "type": "all"},
+                {"trades": {"T-3": {}, "T-4": {}}, "count": 4},
+                "pagination gap",
+            ),
+            (
+                {"ofs": "2", "limit": "2", "type": "closed position"},
+                {"trades": {"T-3": {}, "T-4": {}}, "count": 4},
+                "filters changed",
+            ),
+            (
+                {"ofs": "2", "limit": "2", "type": "all"},
+                {"trades": {"T-3": {}, "T-4": {}}, "count": 5},
+                "total count changed",
+            ),
+        )
+        for query, result, message in cases:
+            with self.subTest(message=message):
+                coverage = KrakenSpotPaginationCoverage(surface="EXECUTIONS")
+                coverage.add_page(first)
+                page = pagination_page_from_observation(
+                    trade_history_observation(
+                        {"error": [], "result": result},
+                        query=query,
+                    ),
+                    surface="EXECUTIONS",
+                )
+                with self.assertRaisesRegex(KrakenSpotAdapterError, message):
+                    coverage.add_page(page)
+
+    def test_kraken_pagination_rejects_incomplete_or_unbound_evidence(self):
+        with self.assertRaisesRegex(
+            KrakenSpotAdapterError,
+            "short page",
+        ):
+            pagination_page_from_observation(
+                trade_history_observation(
+                    {
+                        "error": [],
+                        "result": {
+                            "trades": {"T-1": {}},
+                            "count": 3,
+                        },
+                    },
+                    query={"ofs": "0", "limit": "2"},
+                ),
+                surface="EXECUTIONS",
+            )
+
+        with self.assertRaisesRegex(
+            KrakenSpotAdapterError,
+            "without_count",
+        ):
+            pagination_page_from_observation(
+                trade_history_observation(
+                    {
+                        "error": [],
+                        "result": {
+                            "trades": {},
+                            "count": 0,
+                        },
+                    },
+                    query={
+                        "ofs": "0",
+                        "limit": "50",
+                        "without_count": "true",
+                    },
+                ),
+                surface="EXECUTIONS",
+            )
+
+        with self.assertRaisesRegex(
+            KrakenSpotAdapterError,
+            "exact response observation",
+        ):
+            KrakenSpotPageEvidence(
+                surface="EXECUTIONS",
+                account_id="paper-1",
+                environment="PAPER",
+                offset=0,
+                limit=50,
+                record_count=0,
+                record_ids=(),
+                total_count=0,
+                evidence_ref="provider-read:sha256:" + "0" * 64,
+                filter_items=(),
+            )
+
+    def test_open_orders_snapshot_requires_unfiltered_exact_observation(self):
+        observation = authenticated_activity_observation(
+            "/0/private/OpenOrders",
+            {
+                "error": [],
+                "result": {"open": {"O-2": {}, "O-1": {}}},
+            },
+            query={"trades": "true"},
+        )
+        snapshot = open_orders_snapshot_from_observation(observation)
+        self.assertEqual(snapshot.account_id, "paper-1")
+        self.assertEqual(snapshot.environment, "PAPER")
+        self.assertEqual(snapshot.order_ids, ("O-1", "O-2"))
+        self.assertTrue(snapshot.complete_for_account)
+        self.assertEqual(snapshot.evidence_ref, observation.evidence_ref)
+
+        for query in (
+            {"userref": "1"},
+            {"cl_ord_id": "client-1"},
+        ):
+            with self.subTest(query=query), self.assertRaisesRegex(
+                KrakenSpotAdapterError,
+                "cannot prove account-wide completeness",
+            ):
+                open_orders_snapshot_from_observation(
+                    authenticated_activity_observation(
+                        "/0/private/OpenOrders",
+                        {"error": [], "result": {"open": {}}},
+                        query=query,
+                    )
+                )
+
+        with self.assertRaisesRegex(
+            KrakenSpotAdapterError,
+            "exact response observation",
+        ):
+            KrakenSpotOpenOrdersSnapshotEvidence(
+                account_id="paper-1",
+                environment="PAPER",
+                evidence_ref="provider-read:sha256:" + "0" * 64,
+                order_ids=(),
+                filter_items=(),
+            )
+
+    def test_kraken_pagination_rejects_cross_account_scope(self):
+        first = pagination_page_from_observation(
+            trade_history_observation(
+                {
+                    "error": [],
+                    "result": {
+                        "trades": {"T-1": {}},
+                        "count": 2,
+                    },
+                },
+                account_id="paper-1",
+                query={"ofs": "0", "limit": "1"},
+            ),
+            surface="EXECUTIONS",
+        )
+        second = pagination_page_from_observation(
+            trade_history_observation(
+                {
+                    "error": [],
+                    "result": {
+                        "trades": {"T-2": {}},
+                        "count": 2,
+                    },
+                },
+                account_id="paper-2",
+                query={"ofs": "1", "limit": "1"},
+            ),
+            surface="EXECUTIONS",
+        )
+        coverage = KrakenSpotPaginationCoverage(surface="EXECUTIONS")
+        coverage.add_page(first)
+        with self.assertRaisesRegex(
+            KrakenSpotAdapterError,
+            "account/environment scope changed",
+        ):
+            coverage.add_page(second)
+
+    def test_absence_evidence_consumes_concrete_kraken_pagination_coverages(self):
+        order_history = KrakenSpotPaginationCoverage(surface="ORDER_HISTORY")
+        order_history.add_page(
+            pagination_page_from_observation(
+                authenticated_activity_observation(
+                    "/0/private/ClosedOrders",
+                    {
+                        "error": [],
+                        "result": {"closed": {}, "count": 0},
+                    },
+                ),
+                surface="ORDER_HISTORY",
+            )
+        )
+        executions = KrakenSpotPaginationCoverage(surface="EXECUTIONS")
+        executions.add_page(
+            pagination_page_from_observation(
+                trade_history_observation(
+                    {
+                        "error": [],
+                        "result": {"trades": {}, "count": 0},
+                    },
+                    query={"ofs": "0", "limit": "50"},
+                ),
+                surface="EXECUTIONS",
+            )
+        )
+        activities = KrakenSpotPaginationCoverage(surface="ACTIVITIES")
+        activities.add_page(
+            pagination_page_from_observation(
+                authenticated_activity_observation(
+                    "/0/private/Ledgers",
+                    {
+                        "error": [],
+                        "result": {"ledger": {}, "count": 0},
+                    },
+                    permission_scope="ACCOUNT.READ",
+                ),
+                surface="ACTIVITIES",
+            )
+        )
+
+        open_orders = open_orders_snapshot_from_observation(
+            authenticated_activity_observation(
+                "/0/private/OpenOrders",
+                {
+                    "error": [],
+                    "result": {"open": {}},
+                },
+            )
+        )
+        evidence = absence_evidence_from_pagination(
+            order_found=False,
+            open_orders=open_orders,
+            order_history=order_history,
+            executions=executions,
+            activities=activities,
+            consistency_horizon_satisfied=True,
+        )
+        self.assertTrue(evidence.open_orders_complete)
+        self.assertTrue(evidence.closed_orders_complete)
+        self.assertTrue(evidence.trades_complete)
+        self.assertTrue(evidence.ledgers_complete)
+        self.assertEqual(evidence.verdict(), "INCONCLUSIVE")
+
+        with self.assertRaisesRegex(
+            KrakenSpotAdapterError,
+            "cannot self-assert provider exclusion semantics",
+        ):
+            absence_evidence_from_pagination(
+                order_found=False,
+                open_orders=open_orders,
+                order_history=order_history,
+                executions=executions,
+                activities=activities,
+                consistency_horizon_satisfied=True,
+                qualified_exclusion_semantics=True,
+            )
+
+    def test_filtered_history_cannot_be_consumed_as_account_wide_absence(self):
+        specs = {
+            "ORDER_HISTORY": (
+                "/0/private/ClosedOrders",
+                "closed",
+                "ORDER.READ",
+                {"userref": "17"},
+            ),
+            "EXECUTIONS": (
+                "/0/private/TradesHistory",
+                "trades",
+                "TRADE.READ",
+                {"pair": "XBT/USD", "limit": "50"},
+            ),
+            "ACTIVITIES": (
+                "/0/private/Ledgers",
+                "ledger",
+                "ACCOUNT.READ",
+                {"asset": "USD"},
+            ),
+        }
+
+        def coverage_for(surface, *, query=None):
+            endpoint, records_key, permission_scope, default_query = specs[surface]
+            observation = authenticated_activity_observation(
+                endpoint,
+                {
+                    "error": [],
+                    "result": {records_key: {}, "count": 0},
+                },
+                query=default_query if query is None else query,
+                permission_scope=permission_scope,
+            )
+            coverage = KrakenSpotPaginationCoverage(surface=surface)
+            coverage.add_page(
+                pagination_page_from_observation(
+                    observation,
+                    surface=surface,
+                )
+            )
+            return coverage
+
+        filtered = {
+            surface: coverage_for(surface)
+            for surface in specs
+        }
+        for surface, coverage in filtered.items():
+            with self.subTest(surface=surface):
+                self.assertTrue(coverage.complete)
+                self.assertFalse(coverage.complete_for_account)
+
+        end_bounded_executions = coverage_for(
+            "EXECUTIONS",
+            query={"end": "1790385000", "limit": "50"},
+        )
+        self.assertTrue(end_bounded_executions.complete_for_account)
+
+        unfiltered = {
+            "ORDER_HISTORY": coverage_for("ORDER_HISTORY", query={}),
+            "EXECUTIONS": coverage_for(
+                "EXECUTIONS",
+                query={"limit": "50"},
+            ),
+            "ACTIVITIES": coverage_for("ACTIVITIES", query={}),
+        }
+        open_orders = open_orders_snapshot_from_observation(
+            authenticated_activity_observation(
+                "/0/private/OpenOrders",
+                {
+                    "error": [],
+                    "result": {"open": {}},
+                },
+            )
+        )
+
+        for surface in specs:
+            coverages = dict(unfiltered)
+            coverages[surface] = filtered[surface]
+            with self.subTest(rejected_surface=surface):
+                with self.assertRaisesRegex(
+                    KrakenSpotAdapterError,
+                    "does not cover account-wide population",
+                ):
+                    absence_evidence_from_pagination(
+                        order_found=False,
+                        open_orders=open_orders,
+                        order_history=coverages["ORDER_HISTORY"],
+                        executions=coverages["EXECUTIONS"],
+                        activities=coverages["ACTIVITIES"],
+                        consistency_horizon_satisfied=True,
+                    )
 
     def test_coverage_defaults_to_non_authoritative_absence(self):
         coverage = coverage_evidence(

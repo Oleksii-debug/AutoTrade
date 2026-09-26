@@ -766,6 +766,8 @@ class _DurableProviderNonceAllocator:
         clock_utc: ClockUtc | None = None,
         max_contention_retries: int = 32,
         scope_fields: Mapping[str, object] | None = None,
+        max_nonce: int | None = None,
+        nonce_domain_name: str = "positive integer",
     ) -> None:
         if not isinstance(journal, JournalStore):
             raise TypeError("journal must be JournalStore")
@@ -790,6 +792,18 @@ class _DurableProviderNonceAllocator:
             raise ProviderTransportScopeError(
                 "max_contention_retries must be an integer from 1 through 1024"
             )
+        if max_nonce is not None and (
+            isinstance(max_nonce, bool)
+            or not isinstance(max_nonce, int)
+            or max_nonce < 1
+        ):
+            raise ProviderTransportScopeError(
+                "max_nonce must be a positive integer or None"
+            )
+        domain_name = _canonical_text(
+            nonce_domain_name,
+            name="nonce_domain_name",
+        )
         scope: dict[str, str | int] = {}
         if scope_fields is not None:
             if not isinstance(scope_fields, Mapping):
@@ -821,6 +835,8 @@ class _DurableProviderNonceAllocator:
         self.clock_millis = clock_millis
         self.clock_utc = clock_utc or (lambda: datetime.now(timezone.utc))
         self.max_contention_retries = max_contention_retries
+        self.max_nonce = max_nonce
+        self.nonce_domain_name = domain_name
         self.scope_fields = MappingProxyType(scope)
         aggregate_material = f"{self.account_id}|{self.environment}"
         if scope:
@@ -868,7 +884,10 @@ class _DurableProviderNonceAllocator:
                 isinstance(nonce, bool)
                 or not isinstance(nonce, int)
                 or nonce <= previous_nonce
-                or nonce > _UINT64_MAX
+                or (
+                    self.max_nonce is not None
+                    and nonce > self.max_nonce
+                )
             ):
                 raise ProviderTransportError(
                     f"{self.display_name} nonce journal is not strictly monotonic"
@@ -894,19 +913,25 @@ class _DurableProviderNonceAllocator:
                 isinstance(candidate, bool)
                 or not isinstance(candidate, int)
                 or candidate <= 0
-                or candidate > _UINT64_MAX
+                or (
+                    self.max_nonce is not None
+                    and candidate > self.max_nonce
+                )
             ):
                 raise ProviderTransportScopeError(
-                    f"{self.display_name} nonce clock must return an unsigned 64-bit positive integer"
+                    f"{self.display_name} nonce clock must return a {self.nonce_domain_name} value"
                 )
-            if previous_nonce >= _UINT64_MAX:
+            if (
+                self.max_nonce is not None
+                and previous_nonce >= self.max_nonce
+            ):
                 raise ProviderTransportScopeError(
-                    f"{self.display_name} nonce authority exhausted unsigned 64-bit domain"
+                    f"{self.display_name} nonce authority exhausted {self.nonce_domain_name} domain"
                 )
             nonce = max(candidate, previous_nonce + 1)
-            if nonce > _UINT64_MAX:
+            if self.max_nonce is not None and nonce > self.max_nonce:
                 raise ProviderTransportScopeError(
-                    f"{self.display_name} nonce authority exhausted unsigned 64-bit domain"
+                    f"{self.display_name} nonce authority exhausted {self.nonce_domain_name} domain"
                 )
             committed_at = self.clock_utc()
             if (
@@ -1030,6 +1055,8 @@ class KrakenSpotDurableNonceAllocator(_DurableProviderNonceAllocator):
                 "credential_handle_id": credential_handle.handle_id,
                 "credential_generation": credential_handle.generation,
             },
+            max_nonce=_UINT64_MAX,
+            nonce_domain_name="unsigned 64-bit",
         )
 
 class WhiteBitHttpTransport:

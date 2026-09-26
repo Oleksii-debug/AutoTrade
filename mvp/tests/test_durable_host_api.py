@@ -144,6 +144,26 @@ class JournalBackedHostApiTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             first.get_operation(second_result.operation_id)
 
+    def test_two_account_scopes_can_reuse_actor_and_idempotency_key(self):
+        first = self.store()
+        second = self.store(account_id="other-account")
+        first_command = self.command(key="shared-account-key")
+        second_command = self.command(
+            command_id="33333333-3333-3333-3333-333333333333",
+            key="shared-account-key",
+            account_id="other-account",
+        )
+
+        first_result = first.submit(first_command)
+        second_result = second.submit(second_command)
+
+        self.assertEqual(first_result.status, "ACCEPTED")
+        self.assertEqual(second_result.status, "ACCEPTED")
+        self.assertEqual(first_result.state_version, "1")
+        self.assertEqual(second_result.state_version, "1")
+        self.assertEqual(first.submit(first_command), first_result)
+        self.assertEqual(second.submit(second_command), second_result)
+
     def test_legacy_unscoped_host_journal_requires_explicit_migration(self):
         journal = JournalStore(self.path)
         payload = {"legacy": True}

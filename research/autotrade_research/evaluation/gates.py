@@ -298,6 +298,7 @@ class EvaluationEvidence:
     untouched_holdout_passed: bool | None = None
     valid_sequential_evaluation_passed: bool | None = None
     walk_forward_passed: bool | None = None
+    evidence_bundle_id: str | None = None
     evidence_refs: Mapping[str, GateEvidenceRef] | None = None
 
     def __post_init__(self) -> None:
@@ -311,6 +312,14 @@ class EvaluationEvidence:
             "registered_profile_id",
             self.registered_profile_id.strip(),
         )
+        if self.evidence_bundle_id is not None:
+            try:
+                bundle_id = str(UUID(self.evidence_bundle_id))
+            except (ValueError, AttributeError, TypeError) as error:
+                raise ValueError("evidence_bundle_id must be a canonical UUID") from error
+            if bundle_id != self.evidence_bundle_id:
+                raise ValueError("evidence_bundle_id must be a canonical UUID")
+            object.__setattr__(self, "evidence_bundle_id", bundle_id)
 
         for name in (
             "dependence_aware_lower_bound",
@@ -649,6 +658,8 @@ def _verify_evidence_bundle(
 
     if artifact_store is None or evidence.evidence_refs is None:
         return None
+    if evidence.evidence_bundle_id is None:
+        return False
     refs = evidence.evidence_refs
     if set(refs) != _REQUIRED_EVIDENCE_KINDS:
         return False
@@ -669,6 +680,8 @@ def _verify_evidence_bundle(
         if metadata.get("evidence_kind") != kind:
             return False
         if metadata.get("profile_id") != profile.profile_id:
+            return False
+        if metadata.get("evidence_bundle_id") != evidence.evidence_bundle_id:
             return False
         rights = manifest.get("rights")
         if not isinstance(rights, dict) or rights.get("storage") is not True:

@@ -30,6 +30,8 @@ def profile():
     )
 
 
+BUNDLE_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
 def evidence(**overrides):
     values = dict(
         registered_profile_id="gate-v1",
@@ -55,6 +57,7 @@ def evidence(**overrides):
         selection_correction_applied="holm-v1",
         trials_attempted=12,
         regime_coverage=frozenset({"normal", "stress"}),
+        evidence_bundle_id=BUNDLE_ID,
     )
     values.update(overrides)
     return EvaluationEvidence.create(**values)
@@ -107,6 +110,7 @@ def evaluate_with_verified_bundle(gate_profile, evaluation_evidence):
                 metadata={
                     "evidence_kind": kind,
                     "profile_id": gate_profile.profile_id,
+                    "evidence_bundle_id": BUNDLE_ID,
                 },
             )
             refs[kind] = GateEvidenceRef(
@@ -154,6 +158,7 @@ class EvaluationGateTests(unittest.TestCase):
             selection_correction_applied="holm-v1",
             trials_attempted=1,
             regime_coverage=frozenset({"normal"}),
+            evidence_bundle_id=BUNDLE_ID,
         )
         with self.assertRaisesRegex(TypeError, "reproducible"):
             EvaluationEvidence(**{**base, "reproducible": 1})
@@ -168,6 +173,64 @@ class EvaluationGateTests(unittest.TestCase):
             "PASS",
         )
 
+
+    def test_opaque_artifact_from_different_run_cannot_join_verified_bundle(self):
+        gate_profile = profile()
+        base_evidence = evidence()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            refs = {}
+            for kind in EVIDENCE_KINDS:
+                artifact_id = str(uuid4())
+                is_report = kind in {
+                    "profile",
+                    "trial_log",
+                    "causal_audit",
+                    "financial_invariants",
+                    "retention",
+                    "locked_evaluation",
+                    "metrics",
+                    "independent_review",
+                }
+                bundle_id = (
+                    "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+                    if kind == "model"
+                    else BUNDLE_ID
+                )
+                manifest = store.publish_bytes(
+                    artifact_id=artifact_id,
+                    data=(
+                        gate_report_payload(kind, gate_profile, base_evidence)
+                        if is_report
+                        else f"{gate_profile.profile_id}:{kind}".encode("utf-8")
+                    ),
+                    media_type=(
+                        "application/json"
+                        if is_report
+                        else "application/octet-stream"
+                    ),
+                    rights={"storage": True, "export": False},
+                    metadata={
+                        "evidence_kind": kind,
+                        "profile_id": gate_profile.profile_id,
+                        "evidence_bundle_id": bundle_id,
+                    },
+                )
+                refs[kind] = GateEvidenceRef(
+                    artifact_id=artifact_id,
+                    sha256=manifest["sha256"],
+                )
+            decision = evaluate_gates(
+                gate_profile,
+                replace(base_evidence, evidence_refs=refs),
+                artifact_store=store,
+            )
+            self.assertEqual(decision.status, "FAIL")
+            self.assertEqual(decision.checks["evidence_bundle"], "FAIL")
+
+    def test_evidence_bundle_id_requires_canonical_uuid(self):
+        with self.assertRaisesRegex(ValueError, "evidence_bundle_id"):
+            evidence(evidence_bundle_id="not-a-uuid")
 
     def test_locked_evaluation_and_walk_forward_are_required_for_terminal_pass(self):
         no_locked_path = evaluate_with_verified_bundle(
@@ -258,6 +321,7 @@ class EvaluationGateTests(unittest.TestCase):
                         metadata={
                             "evidence_kind": kind,
                             "profile_id": gate_profile.profile_id,
+                            "evidence_bundle_id": BUNDLE_ID,
                         },
                     )
                     refs[kind] = GateEvidenceRef(
@@ -292,6 +356,7 @@ class EvaluationGateTests(unittest.TestCase):
                 metadata={
                     "evidence_kind": "code",
                     "profile_id": gate_profile.profile_id,
+                    "evidence_bundle_id": BUNDLE_ID,
                 },
             )
             bound = replace(
@@ -341,6 +406,7 @@ class EvaluationGateTests(unittest.TestCase):
                     metadata={
                         "evidence_kind": kind,
                         "profile_id": gate_profile.profile_id,
+                        "evidence_bundle_id": BUNDLE_ID,
                     },
                 )
                 refs[kind] = GateEvidenceRef(
@@ -389,6 +455,7 @@ class EvaluationGateTests(unittest.TestCase):
                             if kind == "metrics"
                             else gate_profile.profile_id
                         ),
+                        "evidence_bundle_id": BUNDLE_ID,
                     },
                 )
                 refs[kind] = GateEvidenceRef(
@@ -441,6 +508,7 @@ class EvaluationGateTests(unittest.TestCase):
                     metadata={
                         "evidence_kind": kind,
                         "profile_id": gate_profile.profile_id,
+                        "evidence_bundle_id": BUNDLE_ID,
                     },
                 )
                 refs[kind] = GateEvidenceRef(

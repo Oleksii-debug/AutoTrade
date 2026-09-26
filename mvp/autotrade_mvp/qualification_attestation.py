@@ -62,6 +62,23 @@ def canonical_packaged_qualification_trust_policy_digest() -> str | None:
     return _digest(value, name="packaged qualification trust policy digest")
 
 
+def _has_git_metadata_ancestor(source_root: Path) -> bool:
+    """Detect source/worktree metadata without depending on a Git executable."""
+
+    for candidate_root in (source_root, *source_root.parents):
+        marker = candidate_root / ".git"
+        try:
+            os.lstat(marker)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise QualificationTrustUnavailable(
+                "qualification trust source metadata cannot be inspected"
+            ) from error
+        return True
+    return False
+
+
 def _trusted_git_candidate_paths() -> tuple[Path, ...]:
     """Return fail-closed OS-managed Git locations without consulting PATH."""
 
@@ -835,7 +852,7 @@ def _canonical_packaged_qualification_trust_policy_bytes(
 
     source_sha = _git_sha(expected_source_sha, name="expected_source_sha")
     source_root = _QUALIFICATION_TRUST_SOURCE_ROOT.resolve()
-    if (source_root / ".git").exists():
+    if _has_git_metadata_ancestor(source_root):
         raise QualificationTrustUnavailable(
             "packaged qualification trust policy is forbidden in a source checkout"
         )

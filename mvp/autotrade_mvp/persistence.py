@@ -902,15 +902,64 @@ class JournalStore:
             return None
         return self._decode_event_row(row)
 
+    @staticmethod
+    def _aggregate_version_value(
+        connection: sqlite3.Connection,
+        aggregate_type: str,
+        aggregate_id: str,
+    ) -> int:
+        row = connection.execute(
+            """
+            SELECT
+                COUNT(*) AS event_count,
+                MIN(aggregate_version) AS first_version,
+                MAX(aggregate_version) AS last_version,
+                SUM(
+                    CASE
+                        WHEN typeof(aggregate_version) = 'integer' THEN 0
+                        ELSE 1
+                    END
+                ) AS non_integer_count
+            FROM events
+            WHERE aggregate_type = ? AND aggregate_id = ?
+            """,
+            (aggregate_type, aggregate_id),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("aggregate version authority query returned no row")
+        event_count = row["event_count"]
+        if type(event_count) is not int or event_count < 0:
+            raise ValueError(
+                "aggregate version authority count is not a canonical integer"
+            )
+        if event_count == 0:
+            return 0
+        first_version = row["first_version"]
+        last_version = row["last_version"]
+        non_integer_count = row["non_integer_count"]
+        if (
+            type(first_version) is not int
+            or type(last_version) is not int
+            or type(non_integer_count) is not int
+            or non_integer_count != 0
+            or first_version != 1
+            or last_version != event_count
+        ):
+            raise ValueError(
+                "aggregate version authority is not a contiguous positive integer sequence"
+            )
+        return last_version
+
     def next_aggregate_version(self, aggregate_type: str, aggregate_id: str) -> int:
         aggregate_type = self._require_text(aggregate_type, "aggregate_type")
         aggregate_id = self._require_text(aggregate_id, "aggregate_id")
         with self._connect() as connection:
-            current = connection.execute(
-                "SELECT MAX(aggregate_version) FROM events WHERE aggregate_type = ? AND aggregate_id = ?",
-                (aggregate_type, aggregate_id),
-            ).fetchone()[0]
-        return 1 if current is None else int(current) + 1
+            current = self._aggregate_version_value(
+                connection,
+                aggregate_type,
+                aggregate_id,
+            )
+        return current + 1
 
     @staticmethod
     def _journal_sequence_value(connection: sqlite3.Connection) -> int:
@@ -1090,11 +1139,12 @@ class JournalStore:
                 connection.commit()
                 return AppendResult(event_id, aggregate_version, False)
 
-            current = connection.execute(
-                "SELECT MAX(aggregate_version) FROM events WHERE aggregate_type = ? AND aggregate_id = ?",
-                (aggregate_type, aggregate_id),
-            ).fetchone()[0]
-            expected_version = 1 if current is None else int(current) + 1
+            current = self._aggregate_version_value(
+                connection,
+                aggregate_type,
+                aggregate_id,
+            )
+            expected_version = current + 1
             if aggregate_version != expected_version:
                 connection.rollback()
                 raise ValueError(
@@ -1313,12 +1363,11 @@ class JournalStore:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                current = connection.execute(
-                    "SELECT MAX(aggregate_version) FROM events "
-                    "WHERE aggregate_type = ? AND aggregate_id = ?",
-                    (aggregate_type, aggregate_id),
-                ).fetchone()[0]
-                journal_version = 0 if current is None else int(current)
+                journal_version = self._aggregate_version_value(
+                    connection,
+                    aggregate_type,
+                    aggregate_id,
+                )
                 if aggregate_version > journal_version:
                     raise ValueError("projection checkpoint cannot outrun the journal")
 
@@ -1333,7 +1382,11 @@ class JournalStore:
                     (projection_name, aggregate_type, aggregate_id),
                 ).fetchone()
                 if existing is not None:
-                    existing_version = int(existing["aggregate_version"])
+                    existing_version = existing["aggregate_version"]
+                    if type(existing_version) is not int or existing_version < 0:
+                        raise ValueError(
+                            "projection checkpoint aggregate_version is not a canonical integer"
+                        )
                     exact = (
                         existing_version == aggregate_version
                         and existing["state_json"] == state_json
@@ -1403,11 +1456,11 @@ class JournalStore:
             ).fetchone()
             if row is None:
                 return None
-            current = connection.execute(
-                "SELECT MAX(aggregate_version) FROM events "
-                "WHERE aggregate_type = ? AND aggregate_id = ?",
-                (aggregate_type, aggregate_id),
-            ).fetchone()[0]
+            journal_version = self._aggregate_version_value(
+                connection,
+                aggregate_type,
+                aggregate_id,
+            )
 
         try:
             state = json.loads(row["state_json"])
@@ -1439,7 +1492,6 @@ class JournalStore:
             raise ValueError(
                 "projection checkpoint hash does not match identity, version, and state"
             )
-        journal_version = 0 if current is None else int(current)
         if aggregate_version > journal_version:
             raise ValueError("projection checkpoint is ahead of the journal")
         return {
@@ -2092,12 +2144,12 @@ class JournalStore:
                         raise ValueError("event_id already exists for another command")
                     key = (item["aggregate_type"], item["aggregate_id"])
                     if key not in next_versions:
-                        current = connection.execute(
-                            "SELECT MAX(aggregate_version) FROM events "
-                            "WHERE aggregate_type = ? AND aggregate_id = ?",
-                            key,
-                        ).fetchone()[0]
-                        next_versions[key] = 1 if current is None else int(current) + 1
+                        current = self._aggregate_version_value(
+                            connection,
+                            key[0],
+                            key[1],
+                        )
+                        next_versions[key] = current + 1
                     expected_version = next_versions[key]
                     if item["aggregate_version"] != expected_version:
                         raise ValueError(

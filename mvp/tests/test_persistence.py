@@ -1818,6 +1818,54 @@ class JournalStoreTests(unittest.TestCase):
                     aggregate_id="paper-1",
                 )
 
+    def test_fractional_authoritative_aggregate_version_tamper_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+            store.save_projection_checkpoint(
+                projection_name="position",
+                aggregate_type="account",
+                aggregate_id="paper-1",
+                aggregate_version=1,
+                state={"net_quantity": "1"},
+            )
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE events SET aggregate_version = 1.5 "
+                    "WHERE event_id = 'evt-1'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            corrupted = JournalStore(path)
+            expected = (
+                "aggregate version authority is not a contiguous "
+                "positive integer sequence"
+            )
+            with self.assertRaisesRegex(ValueError, expected):
+                corrupted.next_aggregate_version("account", "paper-1")
+            with self.assertRaisesRegex(ValueError, expected):
+                corrupted.load_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                )
+            with self.assertRaisesRegex(ValueError, expected):
+                corrupted.save_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                    aggregate_version=1,
+                    state={"net_quantity": "1"},
+                )
+            with self.assertRaisesRegex(ValueError, expected):
+                corrupted.append_event(
+                    event("evt-2", 2, {"kind": "fill", "quantity": "2"})
+                )
+
     def test_projection_checkpoint_version_tamper_fails_closed(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
@@ -1887,6 +1935,18 @@ class JournalStoreTests(unittest.TestCase):
                     projection_name="position",
                     aggregate_type="account",
                     aggregate_id="paper-1",
+                )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "aggregate_version is not a canonical integer",
+            ):
+                JournalStore(path).save_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                    aggregate_version=2,
+                    state={"net_quantity": "2"},
                 )
 
     def test_projection_checkpoint_identity_tamper_fails_closed(self):

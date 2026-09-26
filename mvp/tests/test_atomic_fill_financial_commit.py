@@ -501,6 +501,91 @@ class ProviderFillBindingEnvironmentTests(unittest.TestCase):
                         )
 
 
+    def test_settlement_rejects_cross_provider_environment_scope_and_fill_binding(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            economics = DurableProviderEconomicBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            reservations = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id="bybit-account",
+            )
+            demo_settlements = DurableSettlementBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="DEMO",
+                evidence_artifact_store=artifact_store_for(store),
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "provider/account/environment scope",
+            ):
+                commit_economic_batch_with_reservation_consumption(
+                    economics,
+                    reservations,
+                    command_id="cross-settlement-provider-environment",
+                    idempotency_key="cross-settlement-provider-environment",
+                    reservation_id="reservation-1",
+                    usage={"CASH:USDT": "1"},
+                    transactions=(),
+                    settlement_book=demo_settlements,
+                    settlement_obligations=(),
+                    committed_at="2026-09-25T09:00:02Z",
+                )
+
+            testnet_settlements = DurableSettlementBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                evidence_artifact_store=artifact_store_for(store),
+            )
+            demo_binding = PreparedProviderFillBinding(
+                aggregate_id="demo-binding",
+                envelope=None,
+                request={
+                    "provider_id": "BYBIT",
+                    "account_id": "bybit-account",
+                    "environment": "PAPER",
+                    "provider_environment": "DEMO",
+                    "reservation_id": "reservation-1",
+                },
+                result={},
+                aggregate_version=1,
+                already_committed=True,
+            )
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "provider_environment does not match settlement book",
+            ):
+                commit_economic_batch_with_reservation_consumption(
+                    economics,
+                    reservations,
+                    command_id="cross-binding-provider-environment",
+                    idempotency_key="cross-binding-provider-environment",
+                    reservation_id="reservation-1",
+                    usage={"CASH:USDT": "1"},
+                    transactions=(),
+                    settlement_book=testnet_settlements,
+                    settlement_obligations=(),
+                    provider_fill_binding=demo_binding,
+                    committed_at="2026-09-25T09:00:02Z",
+                )
+            self.assertEqual(
+                store.load_events_by_aggregate_type("settlement_book"),
+                [],
+            )
+
+
 class AtomicFillFinancialCommitTests(unittest.TestCase):
     def test_fill_economics_and_reservation_consumption_restart_together(self):
         with TemporaryDirectory() as directory:

@@ -14,6 +14,7 @@ from mvp.autotrade_mvp.accounting import (
 )
 from mvp.autotrade_mvp.durable_settlement import (
     DurableSettlementBook,
+    _legacy_scope_id,
     SETTLEMENT_EVIDENCE_MEDIA_TYPE,
     settlement_completion_evidence_metadata,
     settlement_completion_evidence_receipt,
@@ -241,6 +242,144 @@ def bind_evidence(
 
 
 class DurableSettlementBookTests(unittest.TestCase):
+    def test_bybit_provider_environment_is_part_of_durable_settlement_scope(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires explicit provider_environment",
+        ):
+            SettlementAccountScope(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+            )
+
+        testnet_scope = SettlementAccountScope(
+            provider_id="BYBIT",
+            account_id="bybit-account",
+            environment="PAPER",
+            provider_environment="TESTNET",
+        )
+        demo_scope = SettlementAccountScope(
+            provider_id="BYBIT",
+            account_id="bybit-account",
+            environment="PAPER",
+            provider_environment="DEMO",
+        )
+        self.assertNotEqual(testnet_scope, demo_scope)
+
+        testnet_rule = SettlementRuleBinding(
+            rule_id="bybit-equity-cash",
+            rule_version="1",
+            scope=testnet_scope,
+            instrument_version="BTCUSDT",
+            settlement_currency="USDT",
+            effective_from=date(2026, 9, 1),
+            effective_to=None,
+            evidence_refs=("provider-rule:bybit",),
+        )
+        demo_rule = replace(testnet_rule, scope=demo_scope)
+        self.assertNotEqual(testnet_rule.digest, demo_rule.digest)
+        self.assertEqual(
+            settlement_rule_evidence_receipt(
+                testnet_rule,
+                trade_date=date(2026, 9, 25),
+                expected_settlement_date=date(2026, 9, 26),
+            )["observation"]["provider_environment"],
+            "TESTNET",
+        )
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            testnet_book = DurableSettlementBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                evidence_artifact_store=artifact_store_for(store),
+            )
+            demo_book = DurableSettlementBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="DEMO",
+                evidence_artifact_store=artifact_store_for(store),
+            )
+            self.assertNotEqual(testnet_book.scope_id, demo_book.scope_id)
+
+    def test_bybit_legacy_settlement_state_fails_closed_before_rekey(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            legacy_scope_id = _legacy_scope_id(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+            )
+            legacy_payload = {
+                "scope": {
+                    "provider_id": "BYBIT",
+                    "account_id": "bybit-account",
+                    "environment": "PAPER",
+                },
+                "legacy_state": "pending-obligation",
+            }
+            store.append_event(
+                {
+                    "event_id": "legacy-bybit-settlement-register",
+                    "event_type": "SettlementObligationsRegistered",
+                    "aggregate_type": "settlement_book",
+                    "aggregate_id": legacy_scope_id,
+                    "aggregate_version": "1",
+                    "committed_at": "2026-09-25T08:59:59Z",
+                    "payload": legacy_payload,
+                }
+            )
+
+            for provider_environment in ("TESTNET", "DEMO"):
+                with self.subTest(provider_environment=provider_environment):
+                    with self.assertRaisesRegex(
+                        SettlementConflict,
+                        "legacy ambiguous BYBIT settlement state",
+                    ):
+                        DurableSettlementBook(
+                            JournalStore(path),
+                            provider_id="BYBIT",
+                            account_id="bybit-account",
+                            environment="PAPER",
+                            provider_environment=provider_environment,
+                            evidence_artifact_store=artifact_store_for(store),
+                        )
+
+            settled_payload = {
+                "scope": legacy_payload["scope"],
+                "legacy_state": "settled-obligation",
+            }
+            store.append_event(
+                {
+                    "event_id": "legacy-bybit-settlement-settle",
+                    "event_type": "SettlementCompleted",
+                    "aggregate_type": "settlement_book",
+                    "aggregate_id": legacy_scope_id,
+                    "aggregate_version": "2",
+                    "committed_at": "2026-09-25T09:01:00Z",
+                    "payload": settled_payload,
+                }
+            )
+            with self.assertRaisesRegex(
+                SettlementConflict,
+                "legacy ambiguous BYBIT settlement state",
+            ):
+                DurableSettlementBook(
+                    JournalStore(path),
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    evidence_artifact_store=artifact_store_for(store),
+                )
+
     def test_registration_restarts_and_exact_retry_is_noop(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

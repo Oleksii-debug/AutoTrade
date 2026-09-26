@@ -313,6 +313,76 @@ class JournalBackedHostApiTests(unittest.TestCase):
             ):
                 operation()
 
+    def test_restart_fails_closed_on_unknown_fields_in_known_host_events(self):
+        source = self.store()
+        accepted = source.submit(self.command())
+        source.update_operation(
+            accepted.operation_id,
+            "RUNNING",
+            remaining_uncertainty=("provider_response_pending",),
+        )
+        source_events = JournalStore(self.path).load_events(
+            source.AGGREGATE_TYPE,
+            source.aggregate_id,
+        )
+        self.assertEqual(
+            [event["event_type"] for event in source_events],
+            ["COMMAND_ACCEPTED", "OPERATION_UPDATED"],
+        )
+
+        for target_index, event_type in (
+            (0, "COMMAND_ACCEPTED"),
+            (1, "OPERATION_UPDATED"),
+        ):
+            with self.subTest(event_type=event_type), TemporaryDirectory() as directory:
+                forged_path = f"{directory}/journal.sqlite3"
+                journal = JournalStore(forged_path)
+                forged = JournalBackedHostCommandStore(
+                    journal,
+                    account_id="paper-account-1",
+                    environment="PAPER",
+                    session_validator=lambda session, actor, origin, action: (
+                        session,
+                        actor,
+                    )
+                    in self.sessions,
+                    max_events=100,
+                    request_origin_provider=lambda: "https://local.autotrade.invalid",
+                    now=lambda: "2026-09-24T18:00:02Z",
+                )
+
+                for index, event in enumerate(source_events[: target_index + 1]):
+                    payload = dict(event["payload"])
+                    if index == target_index:
+                        payload["future_semantics"] = {
+                            "must_not_be_silently_ignored": True
+                        }
+                    journal.append_event(
+                        {
+                            "event_id": event["event_id"],
+                            "event_type": event["event_type"],
+                            "aggregate_type": event["aggregate_type"],
+                            "aggregate_id": event["aggregate_id"],
+                            "aggregate_version": event["aggregate_version"],
+                            "payload": payload,
+                            "payload_hash": payload_digest(payload),
+                            "committed_at": event["committed_at"],
+                        },
+                        outbox_topic="ui.host-events",
+                    )
+
+                for operation in (
+                    lambda: forged.state_version,
+                    forged.snapshot,
+                    lambda: forged.events_after(0),
+                    lambda: forged.get_operation(accepted.operation_id),
+                ):
+                    with self.subTest(operation=operation), self.assertRaisesRegex(
+                        ValueError,
+                        "unsupported payload fields",
+                    ):
+                        operation()
+
     def test_restart_rejects_noncanonical_operation_identity(self):
         store = self.store()
         payload = {

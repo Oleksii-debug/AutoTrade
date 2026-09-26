@@ -663,7 +663,6 @@ class GuardedDispatcher:
             )
 
         prepared_payload = {
-            "attempt_id": attempt_id,
             "intent_id": intent_id,
             "intent_hash": intent_hash,
             "provider": provider,

@@ -26,6 +26,10 @@ ROOT = Path(__file__).resolve().parents[1]
 AUTHENTICODE_POLICY_PATH = ROOT / "packaging" / "windows" / "authenticode-policy.json"
 MAIN_EXE = "AutoTrade.Desktop.exe"
 UPDATE_EXE = "Update.exe"
+CANONICAL_PACKAGE_PE_PATHS = {
+    MAIN_EXE: PurePosixPath(f"lib/app/{MAIN_EXE}"),
+    UPDATE_EXE: PurePosixPath(f"lib/app/{UPDATE_EXE}"),
+}
 CANONICAL_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 THUMBPRINT = re.compile(r"^[0-9A-F]{40}$")
@@ -358,6 +362,7 @@ def _safe_package_entry(name: str) -> PurePosixPath:
         or not pure.parts
         or any(part in {"", ".", ".."} for part in pure.parts)
         or "\\" in name
+        or pure.as_posix() != name
     ):
         raise AuthenticodeSigningError("signed package contains an unsafe path")
     return pure
@@ -496,23 +501,33 @@ def verify_velopack_authenticode(
             ) from error
         with archive:
             matches: dict[str, zipfile.ZipInfo] = {}
+            canonical_names = {
+                name.casefold(): name for name in CANONICAL_PACKAGE_PE_PATHS
+            }
             for info in archive.infolist():
                 pure = _safe_package_entry(info.filename)
-                if pure.name not in {MAIN_EXE, UPDATE_EXE}:
+                required_name = canonical_names.get(pure.name.casefold())
+                if required_name is None:
                     continue
-                if pure.name in matches:
+                expected_path = CANONICAL_PACKAGE_PE_PATHS[required_name]
+                if pure.name != required_name or pure != expected_path:
                     raise AuthenticodeSigningError(
-                        f"signed package contains duplicate {pure.name}"
+                        "signed package executable must use canonical path "
+                        f"{expected_path.as_posix()}"
+                    )
+                if required_name in matches:
+                    raise AuthenticodeSigningError(
+                        f"signed package contains duplicate {required_name}"
                     )
                 if info.is_dir() or info.flag_bits & 0x1:
                     raise AuthenticodeSigningError(
-                        f"signed package {pure.name} is not a readable regular entry"
+                        f"signed package {required_name} is not a readable regular entry"
                     )
                 if info.file_size < 1 or info.file_size > MAX_VERIFIED_PE_BYTES:
                     raise AuthenticodeSigningError(
-                        f"signed package {pure.name} exceeds the bounded verification size"
+                        f"signed package {required_name} exceeds the bounded verification size"
                     )
-                matches[pure.name] = info
+                matches[required_name] = info
             if set(matches) != {MAIN_EXE, UPDATE_EXE}:
                 raise AuthenticodeSigningError(
                     "signed package must contain exactly one main app and Update.exe"

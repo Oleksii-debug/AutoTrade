@@ -292,12 +292,13 @@ class JournalBackedHostApiTests(unittest.TestCase):
 
     def test_restart_rejects_operation_update_without_accepted_origin(self):
         journal = JournalStore(self.path)
+        aggregate_id = self.store().aggregate_id
         journal.append_event(
             {
                 "event_id": "forged-update",
                 "event_type": "OPERATION_UPDATED",
                 "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
-                "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
+                "aggregate_id": aggregate_id,
                 "aggregate_version": "1",
                 "payload": {
                     "operation_id": "ghost-operation",
@@ -337,7 +338,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
                 "event_id": "forged-terminal-rewrite",
                 "event_type": "OPERATION_UPDATED",
                 "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
-                "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
+                "aggregate_id": store.aggregate_id,
                 "aggregate_version": "3",
                 "payload": payload,
                 "payload_hash": payload_digest(payload),
@@ -382,7 +383,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
                         "event_id": f"malformed-{field}",
                         "event_type": "OPERATION_UPDATED",
                         "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
-                        "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
+                        "aggregate_id": store.aggregate_id,
                         "aggregate_version": "2",
                         "payload": payload,
                         "payload_hash": payload_digest(payload),
@@ -405,6 +406,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
 
     def test_restart_rejects_non_object_command_acceptance_evidence(self):
         journal = JournalStore(self.path)
+        aggregate_id = self.store().aggregate_id
         payload = {
             "command_id": "manual-command",
             "operation_id": "manual-operation",
@@ -424,7 +426,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
                 "event_id": "malformed-command-evidence",
                 "event_type": "COMMAND_ACCEPTED",
                 "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
-                "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
+                "aggregate_id": aggregate_id,
                 "aggregate_version": "1",
                 "payload": payload,
                 "payload_hash": payload_digest(payload),

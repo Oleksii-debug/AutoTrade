@@ -11,6 +11,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
 from .persistence import JournalStore
 
@@ -29,6 +30,11 @@ _REDACTION_MARKERS = (
 
 def _normalized_key(value: object) -> str:
     return "".join(character for character in str(value).lower() if character.isalnum())
+
+
+def _is_sensitive_key(value: object) -> bool:
+    normalized = _normalized_key(value)
+    return any(marker in normalized for marker in _REDACTION_MARKERS)
 
 
 _EMBEDDED_SECRET_PATTERNS = (
@@ -57,10 +63,54 @@ _PRIVATE_KEY_MARKERS = (
 )
 
 
+def _redact_structured_json_text(value: str) -> str | None:
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(decoded, (dict, list)):
+        return None
+    redacted = redact_diagnostic_value(decoded)
+    if redacted == decoded:
+        return None
+    return json.dumps(
+        redacted,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+
+
+def _redact_structured_url_query(value: str) -> str | None:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc or not parsed.query:
+        return None
+
+    changed = False
+    query_parts: list[str] = []
+    for part in parsed.query.split("&"):
+        raw_key, separator, raw_value = part.partition("=")
+        if _is_sensitive_key(unquote_plus(raw_key)):
+            query_parts.append(f"{raw_key}{separator or '='}[REDACTED]")
+            changed = True
+        else:
+            query_parts.append(part)
+    if not changed:
+        return None
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, "&".join(query_parts), parsed.fragment)
+    )
+
+
 def _redact_embedded_secret_text(value: str) -> str:
     if any(marker in value for marker in _PRIVATE_KEY_MARKERS):
         return "[REDACTED]"
-    redacted = value
+    redacted = _redact_structured_json_text(value) or value
+    redacted = _redact_structured_url_query(redacted) or redacted
     for pattern in _EMBEDDED_SECRET_PATTERNS:
         def replacement(match: re.Match[str]) -> str:
             name = match.group(1)
@@ -82,8 +132,7 @@ def redact_diagnostic_value(value: Any) -> Any:
     if isinstance(value, dict):
         result = {}
         for key, child in value.items():
-            normalized = _normalized_key(key)
-            if any(marker in normalized for marker in _REDACTION_MARKERS):
+            if _is_sensitive_key(key):
                 result[key] = "[REDACTED]"
             else:
                 result[key] = redact_diagnostic_value(child)

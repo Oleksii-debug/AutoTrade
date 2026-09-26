@@ -469,6 +469,14 @@ class WindowsVelopackPackagingTests(unittest.TestCase):
         bundle, manifest = self.release_inputs(stem="signing-disabled")
         output = self.root / "signing-disabled-out"
         called = False
+        disabled_policy = AuthenticodePolicy(
+            enabled=False,
+            backend="AZURE_ARTIFACT_SIGNING",
+            endpoint=None,
+            code_signing_account_name=None,
+            certificate_profile_name=None,
+            timestamp_required=True,
+        )
 
         def forbidden_runner(*args, **kwargs):
             nonlocal called
@@ -477,6 +485,11 @@ class WindowsVelopackPackagingTests(unittest.TestCase):
 
         with (
             patch.object(velopack_module, "assert_windows_signing_environment"),
+            patch.object(
+                velopack_module,
+                "load_canonical_authenticode_policy",
+                return_value=(disabled_policy, "sha256:" + "c" * 64),
+            ) as policy_loader,
             self.assertRaisesRegex(
                 VelopackPackagingError,
                 "canonical Authenticode signing policy is disabled",
@@ -490,6 +503,43 @@ class WindowsVelopackPackagingTests(unittest.TestCase):
                 runner=forbidden_runner,
             )
 
+        policy_loader.assert_called_once_with(SOURCE_SHA)
+        self.assertFalse(called)
+        self.assertEqual(list(output.iterdir()), [])
+
+    def test_signing_source_mismatch_fails_before_vpk_execution(self):
+        bundle, manifest = self.release_inputs(stem="signing-source-mismatch")
+        output = self.root / "signing-source-mismatch-out"
+        called = False
+
+        def forbidden_runner(*args, **kwargs):
+            nonlocal called
+            called = True
+            raise AssertionError("vpk must not run after source authority mismatch")
+
+        with (
+            patch.object(velopack_module, "assert_windows_signing_environment"),
+            patch.object(
+                velopack_module,
+                "load_canonical_authenticode_policy",
+                side_effect=AuthenticodeSigningError(
+                    "Authenticode policy source_sha does not match checkout HEAD"
+                ),
+            ) as policy_loader,
+            self.assertRaisesRegex(
+                VelopackPackagingError,
+                "does not match checkout HEAD",
+            ),
+        ):
+            build_velopack_release(
+                bundle=bundle,
+                installer_manifest=manifest,
+                output_dir=output,
+                sign=True,
+                runner=forbidden_runner,
+            )
+
+        policy_loader.assert_called_once_with(SOURCE_SHA)
         self.assertFalse(called)
         self.assertEqual(list(output.iterdir()), [])
 

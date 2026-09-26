@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import subprocess
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -42,12 +43,103 @@ class WindowsAuthenticodeTests(unittest.TestCase):
         path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
         return path
 
+    def init_policy_repo(self, value):
+        repository = self.root / "policy-repo"
+        repository.mkdir()
+        policy_path = repository / "packaging" / "windows" / "authenticode-policy.json"
+        policy_path.parent.mkdir(parents=True)
+        payload = (json.dumps(value, sort_keys=True) + "\n").encode("utf-8")
+        policy_path.write_bytes(payload)
+
+        def git(*arguments):
+            completed = subprocess.run(
+                ["git", *arguments],
+                cwd=repository,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            return completed.stdout.strip()
+
+        git("init")
+        git("add", "packaging/windows/authenticode-policy.json")
+        git(
+            "-c", "user.name=AutoTrade Test",
+            "-c", "user.email=autotrade-test@example.invalid",
+            "commit", "-m", "test signer policy",
+        )
+        return repository, policy_path, git("rev-parse", "HEAD"), payload
+
     def test_committed_policy_is_disabled_and_cannot_select_signer(self):
-        policy, digest = load_canonical_authenticode_policy()
+        source_sha = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=auth.ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        ).stdout.strip()
+        policy, digest = load_canonical_authenticode_policy(source_sha)
         self.assertFalse(policy.enabled)
         self.assertRegex(digest, r"^sha256:[0-9a-f]{64}$")
         with self.assertRaisesRegex(AuthenticodeSigningError, "disabled"):
             azure_metadata_bytes(policy)
+
+    def test_policy_is_loaded_from_exact_committed_source_not_mutable_worktree(self):
+        safe = {
+            "schema_version": "1.0.0",
+            "enabled": False,
+            "backend": "AZURE_ARTIFACT_SIGNING",
+            "endpoint": None,
+            "code_signing_account_name": None,
+            "certificate_profile_name": None,
+            "timestamp_required": True,
+        }
+        repository, path, source_sha, committed_payload = self.init_policy_repo(safe)
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0.0",
+                    "enabled": True,
+                    "backend": "AZURE_ARTIFACT_SIGNING",
+                    "endpoint": "https://evil.codesigning.azure.net/",
+                    "code_signing_account_name": "attacker",
+                    "certificate_profile_name": "attacker",
+                    "timestamp_required": True,
+                },
+                sort_keys=True,
+            ) + "\n",
+            encoding="utf-8",
+        )
+
+        with patch.object(auth, "ROOT", repository):
+            policy, digest = load_canonical_authenticode_policy(source_sha)
+
+        self.assertFalse(policy.enabled)
+        self.assertEqual(digest, "sha256:" + sha256(committed_payload).hexdigest())
+
+    def test_policy_rejects_source_sha_that_is_not_checkout_head(self):
+        safe = {
+            "schema_version": "1.0.0",
+            "enabled": False,
+            "backend": "AZURE_ARTIFACT_SIGNING",
+            "endpoint": None,
+            "code_signing_account_name": None,
+            "certificate_profile_name": None,
+            "timestamp_required": True,
+        }
+        repository, _path, source_sha, _payload = self.init_policy_repo(safe)
+        wrong_sha = ("b" if not source_sha.startswith("b") else "c") * 40
+        with (
+            patch.object(auth, "ROOT", repository),
+            self.assertRaisesRegex(
+                AuthenticodeSigningError,
+                "does not match checkout HEAD",
+            ),
+        ):
+            load_canonical_authenticode_policy(wrong_sha)
 
     def test_enabled_policy_generates_only_canonical_azure_metadata(self):
         policy = self.policy()
@@ -116,11 +208,8 @@ class WindowsAuthenticodeTests(unittest.TestCase):
             '"certificate_profile_name":null,"timestamp_required":true}\n',
             encoding="utf-8",
         )
-        with (
-            patch.object(auth, "AUTHENTICODE_POLICY_PATH", duplicate),
-            self.assertRaisesRegex(AuthenticodeSigningError, "duplicate JSON field"),
-        ):
-            load_canonical_authenticode_policy()
+        with self.assertRaisesRegex(AuthenticodeSigningError, "duplicate JSON field"):
+            auth._parse_authenticode_policy(duplicate.read_bytes())
 
         extra = self.write_policy(
             {
@@ -134,11 +223,46 @@ class WindowsAuthenticodeTests(unittest.TestCase):
                 "sign_params": "/f candidate.pfx",
             }
         )
-        with (
-            patch.object(auth, "AUTHENTICODE_POLICY_PATH", extra),
-            self.assertRaisesRegex(AuthenticodeSigningError, "fields do not match"),
+        with self.assertRaisesRegex(AuthenticodeSigningError, "fields do not match"):
+            auth._parse_authenticode_policy(extra.read_bytes())
+
+    def test_path_and_descriptor_timestamp_representation_can_differ(self):
+        source = self.root / "stable.bin"
+        destination = self.root / "stable-copy.bin"
+        payload = b"stable signed bytes"
+        source.write_bytes(payload)
+        expected_digest = "sha256:" + sha256(payload).hexdigest()
+        real_lstat = auth.os.lstat
+
+        def lstat_with_distinct_timestamp_representation(path):
+            value = real_lstat(path)
+            return SimpleNamespace(
+                st_mode=value.st_mode,
+                st_nlink=value.st_nlink,
+                st_dev=value.st_dev,
+                st_ino=value.st_ino,
+                st_size=value.st_size,
+                st_mtime_ns=value.st_mtime_ns + 101,
+                st_ctime_ns=value.st_ctime_ns + 303,
+            )
+
+        with patch.object(
+            auth.os,
+            "lstat",
+            side_effect=lstat_with_distinct_timestamp_representation,
         ):
-            load_canonical_authenticode_policy()
+            self.assertEqual(
+                auth._stable_regular_bytes(source, name="portable source"),
+                payload,
+            )
+            auth._snapshot_file_to_private_copy(
+                source,
+                destination,
+                expected_digest=expected_digest,
+                expected_size=len(payload),
+            )
+
+        self.assertEqual(destination.read_bytes(), payload)
 
     def make_signed_outputs(
         self,

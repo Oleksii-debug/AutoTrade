@@ -23,7 +23,9 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-AUTHENTICODE_POLICY_PATH = ROOT / "packaging" / "windows" / "authenticode-policy.json"
+AUTHENTICODE_POLICY_GIT_PATH = "packaging/windows/authenticode-policy.json"
+MAX_POLICY_BYTES = 1024 * 1024
+SOURCE_SHA = re.compile(r"^[0-9a-f]{40}$")
 MAIN_EXE = "AutoTrade.Desktop.exe"
 UPDATE_EXE = "Update.exe"
 CANONICAL_PACKAGE_PE_PATHS = {
@@ -131,7 +133,37 @@ def _strict_object(pairs):
     return value
 
 
-def _stable_regular_bytes(path: Path, *, name: str, maximum: int = 1024 * 1024) -> bytes:
+def _path_object_identity(value) -> tuple[int, int, int]:
+    """Fields that must agree between a held descriptor and its pathname.
+
+    Windows can expose different timestamp representations through fstat() and
+    lstat() for the same unchanged file, so timestamps are deliberately not
+    compared across those two API surfaces.
+    """
+
+    return (value.st_dev, value.st_ino, value.st_size)
+
+
+def _descriptor_snapshot(value) -> tuple[int, int, int, int, int, int, int]:
+    """Mutation-sensitive metadata compared only on the same held descriptor."""
+
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _stable_regular_bytes(
+    path: Path,
+    *,
+    name: str,
+    maximum: int = MAX_POLICY_BYTES,
+) -> bytes:
     try:
         before_path = os.lstat(path)
     except OSError as error:
@@ -152,7 +184,7 @@ def _stable_regular_bytes(path: Path, *, name: str, maximum: int = 1024 * 1024) 
         if (
             not stat.S_ISREG(before.st_mode)
             or before.st_nlink != 1
-            or (before.st_dev, before.st_ino) != (before_path.st_dev, before_path.st_ino)
+            or _path_object_identity(before) != _path_object_identity(before_path)
         ):
             raise AuthenticodeSigningError(f"{name} identity changed during admission")
         if before.st_size > maximum:
@@ -166,25 +198,24 @@ def _stable_regular_bytes(path: Path, *, name: str, maximum: int = 1024 * 1024) 
             after_path = os.lstat(path)
         except OSError as error:
             raise AuthenticodeSigningError(f"{name} path changed during read") from error
-        identity = lambda value: (
-            value.st_dev,
-            value.st_ino,
-            value.st_size,
-            value.st_mtime_ns,
-            value.st_ctime_ns,
-        )
-        if identity(before) != identity(after) or identity(after) != identity(after_path):
+        if (
+            not stat.S_ISREG(after_path.st_mode)
+            or after_path.st_nlink != 1
+            or _descriptor_snapshot(before) != _descriptor_snapshot(after)
+            or _path_object_identity(after) != _path_object_identity(after_path)
+            or len(payload) != after.st_size
+        ):
             raise AuthenticodeSigningError(f"{name} changed during read")
         return payload
     finally:
         os.close(descriptor)
 
 
-def load_canonical_authenticode_policy() -> tuple[AuthenticodePolicy, str]:
-    payload = _stable_regular_bytes(
-        AUTHENTICODE_POLICY_PATH,
-        name="canonical Authenticode policy",
-    )
+def _parse_authenticode_policy(payload: bytes) -> AuthenticodePolicy:
+    if not isinstance(payload, bytes) or not payload or len(payload) > MAX_POLICY_BYTES:
+        raise AuthenticodeSigningError(
+            "canonical Authenticode policy bytes are invalid or unbounded"
+        )
     try:
         value = json.loads(
             payload.decode("utf-8"),
@@ -204,7 +235,7 @@ def load_canonical_authenticode_policy() -> tuple[AuthenticodePolicy, str]:
         )
     if value["schema_version"] != "1.0.0":
         raise AuthenticodeSigningError("unsupported Authenticode policy schema")
-    policy = AuthenticodePolicy(
+    return AuthenticodePolicy(
         enabled=value["enabled"],
         backend=value["backend"],
         endpoint=value["endpoint"],
@@ -212,6 +243,86 @@ def load_canonical_authenticode_policy() -> tuple[AuthenticodePolicy, str]:
         certificate_profile_name=value["certificate_profile_name"],
         timestamp_required=value["timestamp_required"],
     )
+
+
+def _git_environment() -> dict[str, str]:
+    environment = dict(os.environ)
+    for key in tuple(environment):
+        if key.upper().startswith("GIT_"):
+            environment.pop(key, None)
+    return environment
+
+
+def _git_output(
+    arguments: list[str],
+    *,
+    text: bool,
+    runner=subprocess.run,
+):
+    try:
+        completed = runner(
+            ["git", *arguments],
+            cwd=ROOT,
+            env=_git_environment(),
+            capture_output=True,
+            text=text,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise AuthenticodeSigningError(
+            "exact-source Authenticode policy lookup failed closed"
+        ) from error
+    if completed.returncode != 0:
+        raise AuthenticodeSigningError(
+            "exact-source Authenticode policy lookup failed closed"
+        )
+    return completed.stdout
+
+
+def _exact_source_policy_bytes(
+    source_sha: str,
+    *,
+    runner=subprocess.run,
+) -> bytes:
+    if not isinstance(source_sha, str) or SOURCE_SHA.fullmatch(source_sha) is None:
+        raise AuthenticodeSigningError(
+            "Authenticode policy source_sha is not a canonical commit SHA"
+        )
+
+    head = _git_output(
+        ["rev-parse", "--verify", "HEAD"],
+        text=True,
+        runner=runner,
+    )
+    if not isinstance(head, str) or head.strip() != source_sha:
+        raise AuthenticodeSigningError(
+            "Authenticode policy source_sha does not match checkout HEAD"
+        )
+
+    payload = _git_output(
+        ["cat-file", "blob", f"{source_sha}:{AUTHENTICODE_POLICY_GIT_PATH}"],
+        text=False,
+        runner=runner,
+    )
+    if not isinstance(payload, bytes) or not payload:
+        raise AuthenticodeSigningError(
+            "exact-source Authenticode policy blob is unavailable"
+        )
+    if len(payload) > MAX_POLICY_BYTES:
+        raise AuthenticodeSigningError(
+            "canonical Authenticode policy exceeds the bounded policy size"
+        )
+    return payload
+
+
+def load_canonical_authenticode_policy(
+    source_sha: str,
+) -> tuple[AuthenticodePolicy, str]:
+    """Load signer authority only from the exact release source Git object."""
+
+    payload = _exact_source_policy_bytes(source_sha)
+    policy = _parse_authenticode_policy(payload)
     return policy, "sha256:" + sha256(payload).hexdigest()
 
 
@@ -423,16 +534,10 @@ def _snapshot_file_to_private_copy(
             raise AuthenticodeSigningError(
                 "signed artifact gained a hard-link alias during verification"
             )
-        identity = lambda value: (
-            value.st_dev,
-            value.st_ino,
-            value.st_size,
-            value.st_mtime_ns,
-            value.st_ctime_ns,
-        )
         if (
-            identity(before) != identity(after)
-            or identity(after) != identity(after_path)
+            not stat.S_ISREG(after_path.st_mode)
+            or _descriptor_snapshot(before) != _descriptor_snapshot(after)
+            or _path_object_identity(after) != _path_object_identity(after_path)
             or size != expected_size
             or "sha256:" + digest.hexdigest() != expected_digest
         ):

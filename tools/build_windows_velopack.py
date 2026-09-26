@@ -673,7 +673,7 @@ def build_velopack_release(
         try:
             assert_windows_signing_environment()
             signing_policy, signing_policy_sha256 = (
-                load_canonical_authenticode_policy()
+                load_canonical_authenticode_policy(str(installer["source_sha"]))
             )
             if not signing_policy.enabled:
                 raise AuthenticodeSigningError(

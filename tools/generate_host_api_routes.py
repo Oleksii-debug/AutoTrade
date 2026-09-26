@@ -25,10 +25,10 @@ _HTTP_METHODS = frozenset(
     {"get", "post", "put", "patch", "delete", "options", "head", "trace"}
 )
 _OPERATION_ID = re.compile(r"^[A-Za-z][A-Za-z0-9]*$")
-_PATH = re.compile(r"^  (/[^\\s:]*):\\s*$")
-_METHOD = re.compile(r"^    ([a-z]+):\\s*$")
-_OPERATION = re.compile(r"^      operationId:\\s*([^\\s#]+)\\s*$")
-_PARAMETER = re.compile(r"\\{([A-Za-z_][A-Za-z0-9_]*)\\}")
+_PATH = re.compile(r"^  (/[^\s:]*):\s*$")
+_METHOD = re.compile(r"^    ([a-z]+):\s*$")
+_OPERATION = re.compile(r"^      operationId:\s*([^\s#]+)\s*$")
+_PARAMETER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 @dataclass(frozen=True)
@@ -244,7 +244,7 @@ def render_csharp(operations: tuple[Operation, ...]) -> str:
 
 
 def render_web(operations: tuple[Operation, ...]) -> str:
-    entries = ",\\n".join(
+    entries = ",\n".join(
         f"    {operation.operation_id}: {operation.path!r}"
         for operation in operations
     )
@@ -254,7 +254,7 @@ def render_web(operations: tuple[Operation, ...]) -> str:
   // AUTO-GENERATED from contracts/openapi/host-api.yaml. DO NOT EDIT.
   // Run python tools/generate_host_api_routes.py to regenerate.
   const ROUTES = Object.freeze({{
-{{entries}}
+{entries}
   }});
 
   function route(operationId, parameters = {{}}) {{
@@ -265,7 +265,7 @@ def render_web(operations: tuple[Operation, ...]) -> str:
     }}
     let value = template;
     const required = [
-      ...template.matchAll(/\\{{([A-Za-z_][A-Za-z0-9_]*)\\}}/g)
+      ...template.matchAll(/\{{([A-Za-z_][A-Za-z0-9_]*)\}}/g)
     ].map((match) => match[1]);
     for (const name of required) {{
       const raw = parameters[name];
@@ -280,7 +280,7 @@ def render_web(operations: tuple[Operation, ...]) -> str:
       }}
       value = value.replace("{{" + name + "}}", encodeURIComponent(raw));
     }}
-    if (/\\{{|\\}}/.test(value)) {{
+    if (/\{{|\}}/.test(value)) {{
       throw new Error("Host API route template was not fully resolved");
     }}
     return value;

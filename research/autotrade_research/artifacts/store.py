@@ -487,12 +487,10 @@ class ArtifactStore:
             )
 
     @staticmethod
-    def _manifest_entry_identity(entry: os.stat_result) -> tuple[int, ...]:
-        """Return the stable manifest identity fields that must not change in-flight."""
+    def _manifest_descriptor_snapshot(entry: os.stat_result) -> tuple[int, ...]:
+        """Return descriptor metadata that must remain stable while bytes are read."""
 
         return (
-            entry.st_dev,
-            entry.st_ino,
             entry.st_mode,
             entry.st_nlink,
             entry.st_size,
@@ -537,10 +535,11 @@ class ArtifactStore:
                     "artifact manifest descriptor must not have hard-link aliases"
                 )
             current = self._validate_manifest_entry(manifest_path)
-            expected_identity = self._manifest_entry_identity(before)
             if (
-                self._manifest_entry_identity(opened) != expected_identity
-                or self._manifest_entry_identity(current) != expected_identity
+                not self._same_filesystem_entry(before, opened)
+                or not self._same_filesystem_entry(opened, current)
+                or before.st_size != opened.st_size
+                or opened.st_size != current.st_size
             ):
                 raise ArtifactIntegrityError(
                     "artifact manifest changed during read"
@@ -562,11 +561,18 @@ class ArtifactStore:
             raise ArtifactIntegrityError(
                 "artifact manifest descriptor could not be revalidated"
             ) from error
-        current = self._validate_manifest_entry(manifest_path)
-        expected_identity = self._manifest_entry_identity(opened)
         if (
-            self._manifest_entry_identity(after_descriptor) != expected_identity
-            or self._manifest_entry_identity(current) != expected_identity
+            not stat.S_ISREG(after_descriptor.st_mode)
+            or after_descriptor.st_nlink != 1
+            or not self._same_filesystem_entry(opened, after_descriptor)
+            or self._manifest_descriptor_snapshot(after_descriptor)
+            != self._manifest_descriptor_snapshot(opened)
+        ):
+            raise ArtifactIntegrityError("artifact manifest changed during read")
+        current = self._validate_manifest_entry(manifest_path)
+        if (
+            not self._same_filesystem_entry(after_descriptor, current)
+            or after_descriptor.st_size != current.st_size
         ):
             raise ArtifactIntegrityError("artifact manifest changed during read")
 

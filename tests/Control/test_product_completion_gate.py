@@ -538,36 +538,33 @@ class ProductCompletionGateTests(unittest.TestCase):
                     source_sha,
                     canonical_paths=(trust_policy, requirements),
                 )
-    def test_exact_source_rejects_git_executable_from_candidate_checkout(self):
+    def test_exact_source_git_resolution_ignores_candidate_path(self):
         with TemporaryDirectory() as directory:
             root = Path(directory) / "source"
             root.mkdir()
-            source_sha, requirements = _initialize_exact_source_test_repo(root)
-            trust_policy = (
-                root
-                / "mvp"
-                / "autotrade_mvp"
-                / "qualification_trust_policy.json"
-            )
-            candidate_git = root / "git.exe"
+            attacker_bin = Path(directory) / "attacker-bin"
+            attacker_bin.mkdir()
+            candidate_git = attacker_bin / ("git.exe" if sys.platform == "win32" else "git")
             candidate_git.write_bytes(b"candidate-controlled executable")
+            trusted_git = Path(directory) / "os-managed-git"
+            trusted_git.write_bytes(b"independently selected executable")
 
             with (
-                patch.object(completion_gate, "ROOT", root),
                 patch.object(
-                    completion_gate.shutil,
-                    "which",
-                    return_value=str(candidate_git),
+                    qualification_trust,
+                    "_trusted_git_candidate_paths",
+                    return_value=(trusted_git,),
                 ),
-                self.assertRaisesRegex(
-                    ProductCompletionError,
-                    "Git executable originates from candidate checkout",
+                patch.dict(
+                    completion_gate.os.environ,
+                    {"PATH": str(attacker_bin)},
+                    clear=False,
                 ),
             ):
-                completion_gate._verify_exact_source_checkout(
-                    source_sha,
-                    canonical_paths=(trust_policy, requirements),
-                )
+                resolved = completion_gate._trusted_git_executable(source_root=root)
+
+            self.assertEqual(Path(resolved).resolve(), trusted_git.resolve())
+            self.assertNotEqual(Path(resolved).resolve(), candidate_git.resolve())
 
     def test_exact_source_git_environment_drops_loader_and_config_authority(self):
         hostile = {

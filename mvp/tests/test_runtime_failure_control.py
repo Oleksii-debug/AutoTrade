@@ -160,6 +160,38 @@ class RuntimeRecoveryTests(unittest.TestCase):
         self.assertEqual(controller.state, HostState.READY)
         return controller, owner
 
+    def test_runtime_overload_blocks_admission_and_send_fail_closed(self):
+        controller, owner = self._ready()
+        controller.set_runtime_overloaded(True)
+
+        self.assertEqual(controller.state, HostState.DEGRADED)
+        self.assertIn("runtime_overload", controller.reason_codes)
+        with self.assertRaises(PermissionError):
+            controller.validate_admission(owner.epoch)
+        with self.assertRaises(PermissionError):
+            controller.validate_sender(owner.owner_id, owner.epoch)
+
+        controller.set_runtime_overloaded(False)
+        self.assertEqual(controller.state, HostState.READY)
+        self.assertNotIn("runtime_overload", controller.reason_codes)
+        controller.validate_admission(owner.epoch)
+        controller.validate_sender(owner.owner_id, owner.epoch)
+
+    def test_runtime_overload_cannot_bypass_stronger_durable_barriers(self):
+        controller, owner = self._ready()
+        controller.set_runtime_overloaded(True)
+        controller.set_storage_writable(False)
+
+        self.assertEqual(controller.state, HostState.BLOCKED)
+        with self.assertRaises(PermissionError):
+            controller.validate_admission(owner.epoch)
+        with self.assertRaises(PermissionError):
+            controller.validate_sender(owner.owner_id, owner.epoch)
+
+    def test_runtime_overload_state_requires_real_boolean(self):
+        controller, _ = self._ready()
+        with self.assertRaises(TypeError):
+            controller.set_runtime_overloaded(1)
     def test_start_never_reports_ready_before_reconciliation(self):
         controller = RecoveryController()
         controller.start("host-a")

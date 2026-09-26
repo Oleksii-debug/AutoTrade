@@ -8,7 +8,7 @@ required evidence belongs to the same source SHA and is explicitly passing.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from hashlib import sha256
 import json
 import re
@@ -64,6 +64,7 @@ _QUALIFICATION_PACKAGE = "WP-54"
 _QUALIFICATION_PROTOCOL = "release-freeze-v1"
 _QUALIFICATION_PROTOCOL_VERSION = "1.0.0"
 _QUALIFICATION_REQUIREMENT = "release-candidate-freeze"
+_FROZEN_DECISION_TOKEN = object()
 
 
 def _text(value: str, *, name: str) -> str:
@@ -338,8 +339,9 @@ class ReleaseCandidateDecision:
     qualification_attestation_digest: str | None = None
     qualification_policy_id: str | None = None
     qualification_trust_root_id: str | None = None
+    _freeze_token: InitVar[object | None] = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _freeze_token: object | None) -> None:
         if self.status not in {"FROZEN", "BLOCKED"}:
             raise ReleaseCandidateError("unsupported release-candidate status")
         if not isinstance(self.reasons, tuple) or any(
@@ -536,6 +538,10 @@ class ReleaseCandidateDecision:
             ):
                 raise ReleaseCandidateError(
                     "frozen release candidate qualification receipt identity mismatch"
+                )
+            if _freeze_token is not _FROZEN_DECISION_TOKEN:
+                raise ReleaseCandidateError(
+                    "frozen release candidate requires verified factory authority"
                 )
         else:
             if not self.reasons:
@@ -818,4 +824,5 @@ def freeze_release_candidate(
         qualification_attestation_digest=accepted.attestation_digest,
         qualification_policy_id=accepted.policy_id,
         qualification_trust_root_id=accepted.trust_root_id,
+        _freeze_token=_FROZEN_DECISION_TOKEN,
     )

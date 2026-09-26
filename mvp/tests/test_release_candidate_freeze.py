@@ -358,6 +358,27 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                 manifest_sha256="sha256:" + "0" * 64,
             )
 
+    def test_direct_frozen_decision_cannot_replay_verified_manifest_as_authority(self):
+        decision = freeze_with_integrity_store(
+            self.candidate(),
+            with_attestation=True,
+        )
+
+        with self.assertRaisesRegex(
+            ReleaseCandidateError,
+            "requires verified factory authority",
+        ):
+            ReleaseCandidateDecision(
+                status="FROZEN",
+                reasons=(),
+                manifest_json=decision.manifest_json,
+                manifest_sha256=decision.manifest_sha256,
+                qualification_attestation_id=decision.qualification_attestation_id,
+                qualification_attestation_digest=decision.qualification_attestation_digest,
+                qualification_policy_id=decision.qualification_policy_id,
+                qualification_trust_root_id=decision.qualification_trust_root_id,
+            )
+
     def test_direct_frozen_decision_rejects_noncanonical_artifact_manifest(self):
         decision = freeze_with_integrity_store(
             self.candidate(),

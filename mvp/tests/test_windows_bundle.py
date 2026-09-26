@@ -632,6 +632,71 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
             {item["path"] for item in result["manifest"]["files"]},
         )
 
+    def test_bundle_outputs_cannot_overwrite_release_evidence_inputs(self):
+        provenance = self.provenance(eligible=False)
+        provenance_bytes = provenance.read_bytes()
+        with self.assertRaisesRegex(
+            BundleError,
+            "output must not overwrite release provenance input",
+        ):
+            build_bundle(
+                staging=self.staging,
+                output=provenance,
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=provenance,
+            )
+        self.assertEqual(provenance.read_bytes(), provenance_bytes)
+
+        composition = self.composition()
+        composition_bytes = composition.read_bytes()
+        with self.assertRaisesRegex(
+            BundleError,
+            "output must not overwrite Windows composition input",
+        ):
+            build_bundle(
+                staging=self.staging,
+                output=composition,
+                version="1.0.0",
+                source_sha=SOURCE_SHA,
+                mode="release",
+                provenance_path=self.provenance(eligible=True),
+                composition_path=composition,
+            )
+        self.assertEqual(composition.read_bytes(), composition_bytes)
+
+    def test_bundle_hash_output_cannot_overwrite_provenance_input(self):
+        output = self.root / "evidence"
+        provenance = output.with_suffix(".sha256")
+        provenance.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0.0",
+                    "release_eligible": False,
+                    "blocking_issues": [{"code": "QUALIFICATION_PENDING"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        before = provenance.read_bytes()
+
+        with self.assertRaisesRegex(
+            BundleError,
+            "hash output must not overwrite release provenance input",
+        ):
+            build_bundle(
+                staging=self.staging,
+                output=output,
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=provenance,
+            )
+
+        self.assertFalse(output.exists())
+        self.assertEqual(provenance.read_bytes(), before)
+
     def test_bundle_output_symlink_is_rejected_without_touching_target(self):
         victim = self.root / "victim-bundle.bin"
         victim.write_bytes(b"do-not-touch")

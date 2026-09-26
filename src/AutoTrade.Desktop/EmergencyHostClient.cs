@@ -13,6 +13,12 @@ public sealed record EmergencyHostStatus(
     DateTimeOffset ObservedAtUtc,
     string Message)
 {
+    /// <summary>
+    /// True only when the authenticated snapshot explicitly reports CURRENT
+    /// host freshness. Connected transport alone is not current state evidence.
+    /// </summary>
+    public bool IsCurrent { get; init; }
+
     public EmergencyHostStatus Validated()
     {
         if (string.IsNullOrWhiteSpace(Message))

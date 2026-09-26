@@ -785,6 +785,19 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         self.assertNotIn("fill", result)
         self.assertNotIn("executed_quantity", result)
 
+    def test_ack_symbol_identity_must_be_canonical_uppercase(self):
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "canonical uppercase"):
+            parse_order_ack(
+                attempt_id=str(uuid4()),
+                client_order_id="at-ack-lower-symbol",
+                response={
+                    "symbol": "btcusdt",
+                    "orderId": 42,
+                    "clientOrderId": "at-ack-lower-symbol",
+                    "transactTime": 1790272800123,
+                },
+            )
+
     def test_account_trade_id_is_economic_identity_and_duplicates_are_idempotent(self):
         rows = [
             {
@@ -848,6 +861,100 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         )
         self.assertEqual(fills[0].side, "SELL")
         self.assertIsNone(fills[0].position_side)
+
+    def test_client_order_identity_map_is_fully_validated_before_fill_mapping(self):
+        row = {
+            "symbol": "BTCUSDT",
+            "id": 8,
+            "orderId": 43,
+            "price": "101.25",
+            "qty": "0.1",
+            "commission": "0.001",
+            "commissionAsset": "BNB",
+            "isBuyer": True,
+            "time": 1790272801123,
+        }
+        observation = execution_observation([row])
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "must be a mapping"):
+            parse_account_trades(
+                observation,
+                instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
+                client_ids_by_order_id=[],
+            )
+
+        for bad_map in (
+            {"43": "at-spot-fill"},
+            {True: "at-spot-fill"},
+            {-1: "at-spot-fill"},
+        ):
+            with self.subTest(bad_map=bad_map), self.assertRaisesRegex(
+                BinanceSpotAdapterError,
+                "non-negative integer order ids",
+            ):
+                parse_account_trades(
+                    observation,
+                    instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
+                    client_ids_by_order_id=bad_map,
+                )
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "client_order_id"):
+            parse_account_trades(
+                observation,
+                instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
+                client_ids_by_order_id={99: "bad client id with spaces"},
+            )
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "multiple provider order ids"):
+            parse_account_trades(
+                observation,
+                instrument_versions={"BTCUSDT": "BTCUSDT:v1"},
+                client_ids_by_order_id={
+                    43: "at-spot-same-client",
+                    44: "at-spot-same-client",
+                },
+            )
+
+    def test_instrument_identity_map_is_fully_validated_before_fill_mapping(self):
+        row = {
+            "symbol": "BTCUSDT",
+            "id": 8,
+            "orderId": 43,
+            "price": "101.25",
+            "qty": "0.1",
+            "commission": "0.001",
+            "commissionAsset": "BNB",
+            "isBuyer": True,
+            "time": 1790272801123,
+        }
+        observation = execution_observation([row])
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "canonical uppercase"):
+            parse_account_trades(
+                observation,
+                instrument_versions={
+                    "BTCUSDT": "BTCUSDT:v1",
+                    "ethusdt": "ETHUSDT:v1",
+                },
+            )
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "instrument_version"):
+            parse_account_trades(
+                observation,
+                instrument_versions={
+                    "BTCUSDT": "BTCUSDT:v1",
+                    "ETHUSDT": "",
+                },
+            )
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "duplicate normalized"):
+            parse_account_trades(
+                observation,
+                instrument_versions={
+                    "BTCUSDT": "BTCUSDT:v1",
+                    " BTCUSDT ": "BTCUSDT:v2",
+                },
+            )
 
     def test_spot_fill_remains_compatible_with_cash_equity_financial_plan(self):
         row = {
@@ -946,17 +1053,20 @@ class BinanceSpotFoundationTests(unittest.TestCase):
             consistency_horizon_satisfied=True,
         )
         self.assertFalse(evidence.provider_semantics_exclude_execution)
-        qualified = coverage_evidence(
-            account_id="paper-1",
-            environment="PAPER",
-            surface="ORDER_HISTORY",
-            coverage_start="2026-09-24T17:00:00Z",
-            coverage_end="2026-09-24T19:00:00Z",
-            pagination_complete=True,
-            consistency_horizon_satisfied=True,
-            qualified_exclusion_semantics=True,
-        )
-        self.assertTrue(qualified.provider_semantics_exclude_execution)
+        with self.assertRaisesRegex(
+            BinanceSpotAdapterError,
+            "cannot self-assert provider exclusion semantics",
+        ):
+            coverage_evidence(
+                account_id="paper-1",
+                environment="PAPER",
+                surface="ORDER_HISTORY",
+                coverage_start="2026-09-24T17:00:00Z",
+                coverage_end="2026-09-24T19:00:00Z",
+                pagination_complete=True,
+                consistency_horizon_satisfied=True,
+                qualified_exclusion_semantics=True,
+            )
 
 
 if __name__ == "__main__":

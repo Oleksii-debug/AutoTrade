@@ -495,6 +495,11 @@ class ArtifactStoreTests(unittest.TestCase):
             external.write_bytes(data)
             os.link(external, canonical)
 
+            object_marker = "object:" + canonical.relative_to(store.root).as_posix()
+            audit = store.audit()
+            self.assertIn(object_marker, audit.corrupt_objects)
+            self.assertNotIn(digest, audit.unreferenced_objects)
+
             with self.assertRaisesRegex(ArtifactIntegrityError, "hard-link aliases"):
                 store.publish_bytes(
                     artifact_id=str(uuid4()),

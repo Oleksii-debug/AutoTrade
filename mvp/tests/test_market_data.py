@@ -77,6 +77,7 @@ def raw(
     ingested=None,
     revision=0,
     stream=None,
+    evidence=None,
 ):
     available = available or (source + timedelta(milliseconds=100))
     ingested = ingested or (available + timedelta(milliseconds=100))
@@ -93,11 +94,59 @@ def raw(
         sequence_stream=stream,
         revision=revision,
         payload=payload,
-        raw_evidence_ref=EVIDENCE,
+        raw_evidence_ref=EVIDENCE if evidence is None else evidence,
     )
 
 
 class MarketNormalizationTests(unittest.TestCase):
+    def test_raw_evidence_cannot_predate_source_event(self):
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "observed before source_event_at",
+        ):
+            raw(
+                "TRADE",
+                {"price": "100", "quantity": "1"},
+                source=at(hour=16, minute=1),
+                evidence={
+                    **EVIDENCE,
+                    "observed_at": "2026-09-24T16:00:59Z",
+                },
+            )
+
+    def test_raw_evidence_cannot_postdate_ingestion(self):
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "observed after ingested_at",
+        ):
+            raw(
+                "TRADE",
+                {"price": "100", "quantity": "1"},
+                source=at(),
+                available=at() + timedelta(seconds=1),
+                ingested=at() + timedelta(seconds=2),
+                evidence={
+                    **EVIDENCE,
+                    "observed_at": "2026-09-24T16:00:03Z",
+                },
+            )
+
+    def test_raw_evidence_at_ingestion_boundary_is_valid_and_preserved(self):
+        evidence = {
+            **EVIDENCE,
+            "observed_at": "2026-09-24T16:00:02Z",
+        }
+        update = raw(
+            "TRADE",
+            {"price": "100", "quantity": "1"},
+            source=at(),
+            available=at() + timedelta(seconds=1),
+            ingested=at() + timedelta(seconds=2),
+            evidence=evidence,
+        )
+        event = MarketNormalizer(registry()).normalize(update)
+        self.assertEqual(event.raw_evidence_ref["observed_at"], evidence["observed_at"])
+
     def test_trade_normalizes_to_contract_without_binary_numbers(self):
         normalizer = MarketNormalizer(registry())
         event = normalizer.normalize(

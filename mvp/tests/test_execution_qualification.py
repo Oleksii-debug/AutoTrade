@@ -27,6 +27,11 @@ PROTOCOL = "b" * 64
 EVIDENCE_BYTES = b"frozen execution qualification evidence v1"
 EVIDENCE = sha256(EVIDENCE_BYTES).hexdigest()
 ARTIFACT_ID = str(uuid5(NAMESPACE_URL, "autotrade:wp13:execution-evidence"))
+DATA_QUALITY_BYTES = b"provider-specific execution data quality profile v1"
+DATA_QUALITY = sha256(DATA_QUALITY_BYTES).hexdigest()
+DATA_QUALITY_ARTIFACT_ID = str(
+    uuid5(NAMESPACE_URL, "autotrade:wp13:data-quality-profile")
+)
 
 
 def model(**overrides):
@@ -87,6 +92,10 @@ def qualification(exec_model, **overrides):
         protocol_sha256=PROTOCOL,
         evidence_artifact_id=ARTIFACT_ID,
         evidence_sha256=EVIDENCE,
+        provider_id="SIMULATED",
+        provider_environment="PAPER",
+        data_quality_artifact_id=DATA_QUALITY_ARTIFACT_ID,
+        data_quality_sha256=DATA_QUALITY,
         instrument_version="ABC@v1",
     )
     values.update(overrides)
@@ -103,7 +112,25 @@ class ExecutionQualificationTests(unittest.TestCase):
             media_type="application/json",
             rights={"storage": True, "export": False},
             source_refs=["protocol:wp13"],
-            metadata={"kind": "execution-qualification-evidence"},
+            metadata={
+                "kind": "execution-qualification-evidence",
+                "provider_id": "SIMULATED",
+                "provider_environment": "PAPER",
+                "data_quality_artifact_id": DATA_QUALITY_ARTIFACT_ID,
+                "data_quality_sha256": DATA_QUALITY,
+            },
+        )
+        self.store.publish_bytes(
+            artifact_id=DATA_QUALITY_ARTIFACT_ID,
+            data=DATA_QUALITY_BYTES,
+            media_type="application/json",
+            rights={"storage": True, "export": False},
+            source_refs=["protocol:wp13:data-quality"],
+            metadata={
+                "kind": "execution-data-quality-profile",
+                "provider_id": "SIMULATED",
+                "provider_environment": "PAPER",
+            },
         )
 
     def tearDown(self):
@@ -118,6 +145,10 @@ class ExecutionQualificationTests(unittest.TestCase):
             protocol_sha256=PROTOCOL,
             artifact_store=self.store,
             evidence_artifact_id=ARTIFACT_ID,
+            provider_id="SIMULATED",
+            provider_environment="PAPER",
+            data_quality_artifact_id=DATA_QUALITY_ARTIFACT_ID,
+            data_quality_sha256=DATA_QUALITY,
             purpose="REPLAY",
         )
         values.update(overrides)
@@ -134,6 +165,10 @@ class ExecutionQualificationTests(unittest.TestCase):
             protocol_sha256=PROTOCOL,
             artifact_store=self.store,
             evidence_artifact_id=ARTIFACT_ID,
+            provider_id="SIMULATED",
+            provider_environment="PAPER",
+            data_quality_artifact_id=DATA_QUALITY_ARTIFACT_ID,
+            data_quality_sha256=DATA_QUALITY,
             purpose="REPLAY",
         )
         self.assertEqual(result.status, "FILLED")
@@ -170,6 +205,197 @@ class ExecutionQualificationTests(unittest.TestCase):
                     qualification=qualification(exec_model, asset_class="SPOT"),
                 )
             )
+
+    def test_provider_identity_is_a_qualification_dimension(self):
+        exec_model = model()
+        with self.assertRaisesRegex(ExecutionQualificationError, "provider_id"):
+            validate_execution_qualification(
+                **self.validation_kwargs(
+                    exec_model,
+                    provider_id="OTHER_PROVIDER",
+                )
+            )
+
+    def test_verified_artifacts_cannot_be_relabelled_to_another_provider_scope(self):
+        exec_model = model()
+        relabelled = qualification(
+            exec_model,
+            provider_id="BYBIT",
+            provider_environment="TESTNET",
+        )
+        with self.assertRaisesRegex(
+            ExecutionQualificationError,
+            "execution_evidence_provider_scope",
+        ):
+            validate_execution_qualification(
+                **self.validation_kwargs(
+                    exec_model,
+                    qualification=relabelled,
+                    provider_id="BYBIT",
+                    provider_environment="TESTNET",
+                )
+            )
+
+    def test_provider_environment_preserves_provider_specific_identity(self):
+        exec_model = model()
+        bybit_evidence_id = str(
+            uuid5(NAMESPACE_URL, "autotrade:wp13:bybit-testnet:evidence")
+        )
+        bybit_quality_id = str(
+            uuid5(NAMESPACE_URL, "autotrade:wp13:bybit-testnet:data-quality")
+        )
+        bybit_testnet = qualification(
+            exec_model,
+            evidence_artifact_id=bybit_evidence_id,
+            provider_id="BYBIT",
+            provider_environment="testnet",
+            data_quality_artifact_id=bybit_quality_id,
+        )
+        self.store.publish_bytes(
+            artifact_id=bybit_evidence_id,
+            data=EVIDENCE_BYTES,
+            media_type="application/json",
+            rights={"storage": True, "export": False},
+            source_refs=["protocol:wp13"],
+            metadata={
+                "kind": "execution-qualification-evidence",
+                "provider_id": "BYBIT",
+                "provider_environment": "TESTNET",
+                "data_quality_artifact_id": bybit_quality_id,
+                "data_quality_sha256": DATA_QUALITY,
+            },
+        )
+        self.store.publish_bytes(
+            artifact_id=bybit_quality_id,
+            data=DATA_QUALITY_BYTES,
+            media_type="application/json",
+            rights={"storage": True, "export": False},
+            source_refs=["protocol:wp13:data-quality"],
+            metadata={
+                "kind": "execution-data-quality-profile",
+                "provider_id": "BYBIT",
+                "provider_environment": "TESTNET",
+            },
+        )
+        self.assertEqual(bybit_testnet.provider_environment, "TESTNET")
+        validate_execution_qualification(
+            **self.validation_kwargs(
+                exec_model,
+                qualification=bybit_testnet,
+                evidence_artifact_id=bybit_evidence_id,
+                provider_id="BYBIT",
+                provider_environment="TESTNET",
+                data_quality_artifact_id=bybit_quality_id,
+            )
+        )
+        with self.assertRaisesRegex(
+            ExecutionQualificationError,
+            "provider_environment",
+        ):
+            validate_execution_qualification(
+                **self.validation_kwargs(
+                    exec_model,
+                    qualification=bybit_testnet,
+                    evidence_artifact_id=bybit_evidence_id,
+                    provider_id="BYBIT",
+                    provider_environment="DEMO",
+                    data_quality_artifact_id=bybit_quality_id,
+                )
+            )
+
+    def test_provider_environment_is_a_qualification_dimension(self):
+        exec_model = model()
+        with self.assertRaisesRegex(
+            ExecutionQualificationError,
+            "provider_environment",
+        ):
+            validate_execution_qualification(
+                **self.validation_kwargs(
+                    exec_model,
+                    provider_environment="LIVE",
+                )
+            )
+
+    def test_data_quality_profile_is_a_qualification_dimension(self):
+        exec_model = model()
+        with self.assertRaisesRegex(
+            ExecutionQualificationError,
+            "data_quality_sha256",
+        ):
+            validate_execution_qualification(
+                **self.validation_kwargs(
+                    exec_model,
+                    data_quality_sha256="c" * 64,
+                )
+            )
+
+    def test_data_quality_artifact_identity_is_a_qualification_dimension(self):
+        exec_model = model()
+        alias_id = str(uuid5(NAMESPACE_URL, "autotrade:wp13:data-quality-alias"))
+        self.store.publish_bytes(
+            artifact_id=alias_id,
+            data=DATA_QUALITY_BYTES,
+            media_type="application/json",
+            rights={"storage": True, "export": False},
+        )
+        with self.assertRaisesRegex(
+            ExecutionQualificationError,
+            "data_quality_artifact_id",
+        ):
+            validate_execution_qualification(
+                **self.validation_kwargs(
+                    exec_model,
+                    data_quality_artifact_id=alias_id,
+                )
+            )
+
+    def test_data_quality_digest_must_match_resolved_profile_bytes(self):
+        exec_model = model()
+        with TemporaryDirectory() as directory:
+            tampered_store = ArtifactStore(Path(directory) / "artifacts")
+            tampered_store.publish_bytes(
+                artifact_id=ARTIFACT_ID,
+                data=EVIDENCE_BYTES,
+                media_type="application/json",
+                rights={"storage": True, "export": False},
+            )
+            tampered_store.publish_bytes(
+                artifact_id=DATA_QUALITY_ARTIFACT_ID,
+                data=b"different execution data quality profile",
+                media_type="application/json",
+                rights={"storage": True, "export": False},
+            )
+            with self.assertRaisesRegex(
+                ExecutionQualificationError,
+                "data_quality_sha256",
+            ):
+                validate_execution_qualification(
+                    **self.validation_kwargs(
+                        exec_model,
+                        artifact_store=tampered_store,
+                    )
+                )
+
+    def test_missing_data_quality_profile_artifact_fails_closed(self):
+        exec_model = model()
+        with TemporaryDirectory() as directory:
+            incomplete_store = ArtifactStore(Path(directory) / "artifacts")
+            incomplete_store.publish_bytes(
+                artifact_id=ARTIFACT_ID,
+                data=EVIDENCE_BYTES,
+                media_type="application/json",
+                rights={"storage": True, "export": False},
+            )
+            with self.assertRaisesRegex(
+                ExecutionQualificationError,
+                "data quality profile artifact cannot be verified",
+            ):
+                validate_execution_qualification(
+                    **self.validation_kwargs(
+                        exec_model,
+                        artifact_store=incomplete_store,
+                    )
+                )
 
     def test_data_fidelity_is_a_qualification_dimension(self):
         qualified_model = model(data_fidelity="TOP_OF_BOOK")
@@ -339,6 +565,10 @@ class ExecutionQualificationTests(unittest.TestCase):
             protocol_sha256=PROTOCOL,
             artifact_store=self.store,
             evidence_artifact_id=ARTIFACT_ID,
+            provider_id="SIMULATED",
+            provider_environment="PAPER",
+            data_quality_artifact_id=DATA_QUALITY_ARTIFACT_ID,
+            data_quality_sha256=DATA_QUALITY,
             purpose="REPLAY",
         )
         forged = replace(valid, fill_price=Decimal("100"))
@@ -356,6 +586,10 @@ class ExecutionQualificationTests(unittest.TestCase):
                     protocol_sha256=PROTOCOL,
                     artifact_store=self.store,
                     evidence_artifact_id=ARTIFACT_ID,
+                    provider_id="SIMULATED",
+                    provider_environment="PAPER",
+                    data_quality_artifact_id=DATA_QUALITY_ARTIFACT_ID,
+                    data_quality_sha256=DATA_QUALITY,
                     purpose="REPLAY",
                 )
 

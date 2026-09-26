@@ -361,11 +361,15 @@ def canonical_operator_payload(
         raise ValueError("reason_code must be a canonical operator reason")
     base["reason_code"] = reason_code
 
-    base["target_policies"] = _active_targets(
-        state,
-        account,
-        env,
-        action_name == "REVOKE_AUTHORITY",
+    base["target_policies"] = (
+        _active_targets(
+            state,
+            account,
+            env,
+            True,
+        )
+        if action_name == "REVOKE_AUTHORITY"
+        else []
     )
     return base
 

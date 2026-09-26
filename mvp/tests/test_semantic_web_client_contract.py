@@ -37,7 +37,8 @@ class SemanticWebClientContractTests(unittest.TestCase):
         ):
             self.assertIn(required, html)
         self.assertIn("function renderProjection(bodyId, record, emptyMessage)", js)
-        self.assertIn('renderProjection(\n      "permissions-body"', js)
+        self.assertIn("function renderPermissionSummary(permissionSummary)", js)
+        self.assertIn("renderPermissionSummary(parsed.permissionSummary)", js)
         self.assertIn('renderProjection(\n      "portfolio-body"', js)
         self.assertIn('renderProjection(\n      "risk-body"', js)
         self.assertIn('renderProjection(\n      "strategy-body"', js)
@@ -50,7 +51,8 @@ class SemanticWebClientContractTests(unittest.TestCase):
         js = APP.read_text(encoding="utf-8")
         self.assertIn("function stableProjectionValue(value)", js)
         self.assertIn("Object.keys(value).sort()", js)
-        self.assertIn("cell.textContent = projectionText(value)", js)
+        self.assertIn("rows.push([path, projectionText(value)])", js)
+        self.assertIn("cell.textContent = value", js)
         self.assertIn('header.scope = "row"', js)
         self.assertNotIn("innerHTML", js)
         for region in (
@@ -633,6 +635,82 @@ class SemanticWebClientContractTests(unittest.TestCase):
             "with its original idempotency identity. No new command is being created.",
             js,
         )
+
+    def test_permission_summary_matches_canonical_host_contract(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("function parsePermissionSummary(value)", js)
+        self.assertIn(
+            'const allowed = new Set(["actor", "session", "role", "capabilities"])',
+            js,
+        )
+        self.assertIn(
+            "permission_summary contains non-canonical field",
+            js,
+        )
+        self.assertIn(
+            "if (!/^sid-[0-9a-f]{64}$/.test(session))",
+            js,
+        )
+        self.assertIn(
+            "permission_summary.session must be a canonical public session reference",
+            js,
+        )
+        self.assertIn(
+            "permission_summary.capabilities must contain unique canonical strings",
+            js,
+        )
+        self.assertIn(
+            "const permissionSummary = parsePermissionSummary(",
+            js,
+        )
+        self.assertNotIn(
+            "if (actor === undefined && session === undefined) return null",
+            js,
+        )
+
+    def test_nested_host_projection_is_exposed_as_stable_semantic_rows(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("function flattenProjectionRows(record)", js)
+        self.assertIn(
+            'visit(item, path + "[" + String(index + 1) + "]")',
+            js,
+        )
+        self.assertIn(
+            'visit(value[key], path ? path + "." + key : key)',
+            js,
+        )
+        self.assertIn("const entries = flattenProjectionRows(record)", js)
+        render = js[js.index("function renderProjection("):]
+        render = render[:render.index("function renderPermissionSummary(")]
+        self.assertNotIn("Object.entries(record)", render)
+        self.assertNotIn("JSON.stringify(value)", render)
+
+    def test_permission_capabilities_are_individual_keyboard_readable_rows(self):
+        html = INDEX.read_text(encoding="utf-8")
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn(
+            'aria-label="Authenticated permission and capability evidence"',
+            html,
+        )
+        self.assertIn("function renderPermissionSummary(permissionSummary)", js)
+        self.assertIn(
+            'appendProjectionRow(body, "Actor", permissionSummary.actor)',
+            js,
+        )
+        self.assertIn(
+            'appendProjectionRow(body, "Session", permissionSummary.session)',
+            js,
+        )
+        self.assertIn(
+            'appendProjectionRow(body, "Role", permissionSummary.role)',
+            js,
+        )
+        self.assertIn(
+            'body, "Capability " + String(index + 1), capability',
+            js,
+        )
+        self.assertIn("renderPermissionSummary(parsed.permissionSummary)", js)
+
 
 if __name__ == "__main__":
     unittest.main()

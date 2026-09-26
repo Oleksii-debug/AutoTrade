@@ -244,6 +244,84 @@ internal static class Program
             "non-current host freshness was not surfaced in status text");
     }
 
+    static async Task StaleFreshnessDoesNotDisableEmergencyBlockTest()
+    {
+        const string token = "session-token-stale-emergency";
+        const string freshnessAsOf = "2026-09-25T09:29:00Z";
+        const string operationId = "23232323-2323-2323-2323-232323232323";
+        MutableSessionProvider sessions =
+            new(PairedSession(token));
+        int posts = 0;
+        DelegateHandler handler = new(async (request, _, cancellationToken) =>
+        {
+            AssertAuth(request, token);
+            if (request.Method == HttpMethod.Get
+                && request.RequestUri!.AbsolutePath == "/api/v1/state")
+            {
+                return Json(
+                    HttpStatusCode.OK,
+                    Snapshot(
+                        token,
+                        "0",
+                        hostFreshness: "STALE",
+                        freshnessAsOf: freshnessAsOf));
+            }
+
+            if (request.Method == HttpMethod.Post
+                && request.RequestUri!.AbsolutePath == "/api/v1/commands")
+            {
+                posts++;
+                string body =
+                    await request.Content!.ReadAsStringAsync(cancellationToken);
+                using JsonDocument parsed = JsonDocument.Parse(body);
+                return Json(
+                    HttpStatusCode.OK,
+                    new
+                    {
+                        command_id =
+                            parsed.RootElement.GetProperty("command_id").GetString(),
+                        status = "ACCEPTED",
+                        state_version = "1",
+                        reason_codes = Array.Empty<string>(),
+                        field_errors = Array.Empty<object>(),
+                        operation_id = operationId,
+                    });
+            }
+
+            if (request.Method == HttpMethod.Get
+                && request.RequestUri!.AbsolutePath
+                    == "/api/v1/operations/" + operationId)
+            {
+                return Json(
+                    HttpStatusCode.OK,
+                    new
+                    {
+                        operation_id = operationId,
+                        phase = "SUCCEEDED",
+                        started_at = NowUtc(),
+                        updated_at = NowUtc(),
+                        affected_refs = Array.Empty<string>(),
+                        evidence = Array.Empty<object>(),
+                        remaining_uncertainty = Array.Empty<string>(),
+                    });
+            }
+
+            throw new InvalidOperationException(
+                "stale-emergency test issued an unexpected request");
+        });
+        AuthenticatedEmergencyHostClient client = new(
+            new HttpClient(handler),
+            HostOrigin,
+            sessions);
+
+        EmergencyCommandResult result =
+            await client.BlockNewExposureAsync(CancellationToken.None);
+        Check.True(
+            result.Accepted && result.DurableBlockConfirmed,
+            "stale display freshness incorrectly disabled the risk-reducing emergency block");
+        Check.True(posts == 1, "emergency block was not submitted exactly once");
+    }
+
     static async Task AmbiguousPostExactRetryTest()
     {
         const string token = "session-token-b";
@@ -767,6 +845,7 @@ internal static class Program
         await PairedOriginMismatchFailsBeforeTransportTest();
         await CanonicalStatusAndOperationTest();
         await NonCurrentFreshnessRemainsExplicitTest();
+        await StaleFreshnessDoesNotDisableEmergencyBlockTest();
         await AmbiguousPostExactRetryTest();
         await UncertainCommandCannotRetargetSessionTest();
         await UncertainCommandSurvivesDesktopRestartTest();

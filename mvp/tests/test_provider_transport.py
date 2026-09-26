@@ -1486,8 +1486,8 @@ with open(path, "a+b") as stream:
             )
             self.assertEqual(binding.response_bytes, raw)
             self.assertEqual(
-                binding.payload,
-                {"error": ["EService:Deadline elapsed"], "result": None},
+                dict(binding.payload),
+                {"error": ("EService:Deadline elapsed",), "result": None},
             )
             terminal = store.load_events(
                 "submission_attempt",

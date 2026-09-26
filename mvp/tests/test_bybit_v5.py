@@ -226,12 +226,18 @@ def bound_order_response(
     account_id="paper-1",
     environment="PAPER",
     provider_environment="TESTNET",
+    capability=None,
 ):
-    query = prepare_order_read_query(
-        capability=read_capability(
+    read_scope = (
+        capability
+        if capability is not None
+        else read_capability(
             account_id=account_id,
             environment=environment,
-        ),
+        )
+    )
+    query = prepare_order_read_query(
+        capability=read_scope,
         at=READ_AT,
         surface=surface,
         category=category,
@@ -1369,6 +1375,7 @@ class BybitV5AdapterTests(unittest.TestCase):
 
 
     def test_next_order_page_preserves_exact_base_query_and_capability_scope(self):
+        capability = read_capability()
         first = bound_order_response(
             {
                 "retCode": 0,
@@ -1381,10 +1388,11 @@ class BybitV5AdapterTests(unittest.TestCase):
             client_order_id="client_123",
             start_time_ms=1790193600000,
             end_time_ms=1790280000000,
+            capability=capability,
         )
         binding = prepare_next_order_read_query(
             observation=first,
-            capability=read_capability(),
+            capability=capability,
             at=READ_AT,
         )
         self.assertIsNotNone(binding)

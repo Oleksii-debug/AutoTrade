@@ -301,6 +301,129 @@ class QualificationAttestationTests(unittest.TestCase):
                             expected_release_artifact_sha256=RELEASE_A_SHA,
                         )
 
+    def test_canonical_policy_ignores_git_replace_refs(self):
+        canonical_root = root()
+        canonical_policy = policy(canonical_root)
+        with TemporaryDirectory() as directory:
+            source_root = Path(directory) / "source"
+            policy_path = (
+                source_root
+                / "mvp"
+                / "autotrade_mvp"
+                / "qualification_trust_policy.json"
+            )
+            policy_path.parent.mkdir(parents=True)
+            policy_path.write_text(
+                json.dumps(
+                    qualification_trust_policy_payload(canonical_policy),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-q"], cwd=source_root, check=True)
+            subprocess.run(
+                ["git", "add", "mvp/autotrade_mvp/qualification_trust_policy.json"],
+                cwd=source_root,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git", "-c", "user.name=AutoTrade Test",
+                    "-c", "user.email=autotrade-test@example.invalid",
+                    "commit", "-q", "-m", "trusted policy",
+                ],
+                cwd=source_root,
+                check=True,
+            )
+            source_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=source_root,
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+
+            hostile_root = TrustRoot(
+                producer_id="candidate.self",
+                verifier_id=canonical_root.verifier_id,
+                public_modulus_hex=canonical_root.public_modulus_hex,
+                public_exponent=canonical_root.public_exponent,
+                allowed_scopes=canonical_root.allowed_scopes,
+                valid_from=canonical_root.valid_from,
+            )
+            hostile_policy = policy(hostile_root)
+            policy_path.write_text(
+                json.dumps(
+                    qualification_trust_policy_payload(hostile_policy),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "add", "mvp/autotrade_mvp/qualification_trust_policy.json"],
+                cwd=source_root,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git", "-c", "user.name=AutoTrade Test",
+                    "-c", "user.email=autotrade-test@example.invalid",
+                    "commit", "-q", "-m", "hostile replacement policy",
+                ],
+                cwd=source_root,
+                check=True,
+            )
+            hostile_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=source_root,
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+            subprocess.run(
+                ["git", "reset", "--hard", source_sha],
+                cwd=source_root,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            subprocess.run(
+                ["git", "replace", source_sha, hostile_sha],
+                cwd=source_root,
+                check=True,
+            )
+
+            replaced_policy = subprocess.run(
+                [
+                    "git",
+                    "show",
+                    f"{source_sha}:mvp/autotrade_mvp/qualification_trust_policy.json",
+                ],
+                cwd=source_root,
+                check=True,
+                stdout=subprocess.PIPE,
+            ).stdout
+            self.assertIn(b"candidate.self", replaced_policy)
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_QUALIFICATION_TRUST_SOURCE_ROOT",
+                    source_root,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_CANONICAL_QUALIFICATION_TRUST_POLICY_PATH",
+                    policy_path,
+                ),
+            ):
+                loaded = load_canonical_qualification_trust_policy(
+                    expected_source_sha=source_sha
+                )
+            self.assertEqual(loaded.roots, canonical_policy.roots)
+            self.assertNotEqual(loaded.roots, hostile_policy.roots)
     def test_canonical_policy_rejects_caller_selected_historical_source(self):
         canonical_policy = policy(root())
         with TemporaryDirectory() as directory:

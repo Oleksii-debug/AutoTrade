@@ -18,6 +18,7 @@ DESKTOP = (
     / "AuthenticatedEmergencyHostClient.cs"
 )
 WEB_APP = ROOT / "web" / "src" / "app.js"
+WEB_INDEX = ROOT / "web" / "src" / "index.html"
 
 
 class HostApiRouteCodegenTests(unittest.TestCase):
@@ -87,6 +88,12 @@ class HostApiRouteCodegenTests(unittest.TestCase):
                 f'HOST_API.route("{operation_id}"',
                 web,
             )
+
+    def test_web_loads_generated_routes_before_consumer(self):
+        html = WEB_INDEX.read_text(encoding="utf-8")
+        generated = html.index('src="/host-api-routes.js"')
+        consumer = html.index('src="/app.js"')
+        self.assertLess(generated, consumer)
 
     def test_missing_operation_id_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "missing operationId"):

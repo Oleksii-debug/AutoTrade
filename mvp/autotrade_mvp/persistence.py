@@ -252,11 +252,152 @@ class JournalStore:
             })
         return required
 
+    @classmethod
+    def _required_column_contracts(
+        cls,
+    ) -> dict[str, dict[str, tuple[str, bool]]]:
+        """Return the exact declared type/nullability contract for this schema version.
+
+        Column names alone are insufficient migration evidence. SQLite will accept
+        a pre-existing CREATE TABLE IF NOT EXISTS target with weaker affinity or
+        nullability, which can otherwise make a partial/corrupt schema look current.
+        Keep this version-aware so the legacy stores used by migration qualification
+        continue to validate the exact schema they actually own.
+        """
+
+        command_columns: dict[str, tuple[str, bool]]
+        if cls.SCHEMA_VERSION >= 3:
+            command_columns = {
+                "command_id": ("TEXT", False),
+                "actor": ("TEXT", True),
+                "environment": ("TEXT", True),
+                "idempotency_key": ("TEXT", True),
+                "request_hash": ("TEXT", True),
+                "result_json": ("TEXT", True),
+                "state_version": ("INTEGER", True),
+                "created_at": ("TEXT", True),
+            }
+        else:
+            command_columns = {
+                "command_id": ("TEXT", False),
+                "idempotency_key": ("TEXT", True),
+                "request_hash": ("TEXT", True),
+                "result_json": ("TEXT", True),
+                "state_version": ("INTEGER", True),
+                "created_at": ("TEXT", True),
+            }
+        if cls.SCHEMA_VERSION >= 5:
+            command_columns["result_hash"] = ("TEXT", False)
+
+        events = {
+            "event_id": ("TEXT", False),
+            "event_type": ("TEXT", True),
+            "aggregate_type": ("TEXT", True),
+            "aggregate_id": ("TEXT", True),
+            "aggregate_version": ("INTEGER", True),
+            "payload_json": ("TEXT", True),
+            "payload_hash": ("TEXT", True),
+            "committed_at": ("TEXT", True),
+        }
+        if cls.SCHEMA_VERSION >= 5:
+            events.update(
+                {
+                    "envelope_json": ("TEXT", False),
+                    "envelope_hash": ("TEXT", False),
+                }
+            )
+        if cls.SCHEMA_VERSION >= 6:
+            events["journal_sequence"] = ("INTEGER", False)
+
+        outbox = {
+            "outbox_id": ("TEXT", False),
+            "event_id": ("TEXT", True),
+            "topic": ("TEXT", True),
+            "payload_json": ("TEXT", True),
+            "created_at": ("TEXT", True),
+            "delivered_at": ("TEXT", False),
+        }
+        if cls.SCHEMA_VERSION >= 4:
+            outbox["envelope_hash"] = ("TEXT", False)
+
+        required = {
+            "schema_migrations": {
+                "version": ("INTEGER", False),
+                "applied_at": ("TEXT", True),
+            },
+            "events": events,
+            "outbox": outbox,
+            "command_dedupe": command_columns,
+        }
+        if cls.SCHEMA_VERSION >= 2:
+            required["projection_checkpoints"] = {
+                "projection_name": ("TEXT", True),
+                "aggregate_type": ("TEXT", True),
+                "aggregate_id": ("TEXT", True),
+                "aggregate_version": ("INTEGER", True),
+                "state_json": ("TEXT", True),
+                "state_hash": ("TEXT", True),
+                "updated_at": ("TEXT", True),
+            }
+        if cls.SCHEMA_VERSION >= 7:
+            required["global_projection_checkpoints"] = {
+                "projection_name": ("TEXT", False),
+                "journal_sequence": ("INTEGER", True),
+                "state_json": ("TEXT", True),
+                "state_hash": ("TEXT", True),
+                "updated_at": ("TEXT", True),
+            }
+        return required
+
+    @classmethod
+    def _validate_column_contracts(cls, connection) -> None:
+        for table_name, expected in cls._required_column_contracts().items():
+            actual = {
+                str(row["name"]): (
+                    str(row["type"]).strip().upper(),
+                    bool(row["notnull"]),
+                )
+                for row in connection.execute(f"PRAGMA table_info({table_name})")
+            }
+            unexpected = set(actual) - set(expected)
+            if unexpected:
+                raise ValueError(
+                    "Journal schema table "
+                    + table_name
+                    + " has unexpected columns: "
+                    + ", ".join(sorted(unexpected))
+                )
+            for column_name, (expected_type, expected_not_null) in expected.items():
+                if column_name not in actual:
+                    # Missing columns are reported by the existing structural
+                    # check with its established diagnostic.
+                    continue
+                declared_type, not_null = actual[column_name]
+                if declared_type != expected_type:
+                    raise ValueError(
+                        "Journal schema table "
+                        + table_name
+                        + " column "
+                        + column_name
+                        + " has invalid declared type"
+                    )
+                if not_null != expected_not_null:
+                    raise ValueError(
+                        "Journal schema table "
+                        + table_name
+                        + " column "
+                        + column_name
+                        + " has invalid NOT NULL contract"
+                    )
+
     @staticmethod
     def _unique_index_columns(connection, table_name: str) -> set[tuple[str, ...]]:
         unique_indexes: set[tuple[str, ...]] = set()
         for index_row in connection.execute(f"PRAGMA index_list({table_name})"):
-            if not bool(index_row["unique"]):
+            # A partial UNIQUE index constrains only rows matching its WHERE
+            # predicate and therefore cannot satisfy a whole-table identity
+            # invariant, even when PRAGMA index_info reports the same columns.
+            if not bool(index_row["unique"]) or bool(index_row["partial"]):
                 continue
             index_name = str(index_row["name"]).replace("'", "''")
             columns = tuple(
@@ -609,6 +750,7 @@ class JournalStore:
                             + " is missing required columns: "
                             + ", ".join(sorted(missing_columns))
                         )
+                self._validate_column_contracts(connection)
                 self._validate_key_contracts(connection)
                 connection.commit()
             except Exception:

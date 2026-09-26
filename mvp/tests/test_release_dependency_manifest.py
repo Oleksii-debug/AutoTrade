@@ -114,6 +114,76 @@ class ReleaseDependencyManifestTests(unittest.TestCase):
             third = _normalized_dotnet_lock(lock)
             self.assertNotEqual(first, third)
 
+    def test_lock_closure_change_invalidates_stale_advisory_evidence(self):
+        base_graph = {
+            "python_development_dependencies": [],
+            "dotnet_package_dependencies": [
+                {"name": "Example.Package", "version": "1.2.3"}
+            ],
+            "dotnet_lock_graph": [
+                {
+                    "project": "src/Example/Example.csproj",
+                    "lock_file": "src/Example/packages.lock.json",
+                    "lock_blob_sha": "a" * 40,
+                    "version": 1,
+                    "dependencies": {
+                        "net10.0": {
+                            "Example.Package": {
+                                "type": "Direct",
+                                "requested": "[1.2.3]",
+                                "resolved": "1.2.3",
+                                "contentHash": "first-hash",
+                            }
+                        }
+                    },
+                }
+            ],
+            "inspected_components": [],
+        }
+        with TemporaryDirectory() as directory:
+            evidence = Path(directory) / "advisories.json"
+            evidence.write_text(
+                json.dumps(
+                    {
+                        "qualified": True,
+                        "schema_version": "1.0.0",
+                        "source_sha": "b" * 40,
+                        "evidence_refs": [{
+                            "artifact_id": "advisories-lock-closure-1",
+                            "sha256": "sha256:" + "c" * 64,
+                            "observed_at": "2026-09-26T16:00:00Z",
+                        }],
+                        "dependency_graph": base_graph,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            qualified, reason = dependency_advisory_evidence_document(
+                evidence,
+                expected_dependency_graph=base_graph,
+                expected_source_sha="b" * 40,
+            )
+            self.assertTrue(qualified)
+            self.assertIsNone(reason)
+
+            for field, changed_value in (
+                ("contentHash", "second-hash"),
+                ("resolved", "1.2.4"),
+            ):
+                with self.subTest(field=field):
+                    changed_graph = json.loads(json.dumps(base_graph))
+                    changed_graph["dotnet_lock_graph"][0]["dependencies"]["net10.0"][
+                        "Example.Package"
+                    ][field] = changed_value
+                    qualified, reason = dependency_advisory_evidence_document(
+                        evidence,
+                        expected_dependency_graph=changed_graph,
+                        expected_source_sha="b" * 40,
+                    )
+                    self.assertFalse(qualified)
+                    self.assertEqual(reason, "dependency_graph_mismatch")
+
     def test_empty_or_assertion_only_release_evidence_cannot_remove_blocker(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

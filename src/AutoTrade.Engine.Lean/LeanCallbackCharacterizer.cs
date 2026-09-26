@@ -23,7 +23,7 @@ public sealed class LeanCallbackCharacterizer
     };
 
     private readonly Dictionary<(int OrderId, int EventId), CallbackFingerprint> _seen = new();
-    private DateTime? _lastArrivalUtc;
+    private DateTime? _arrivalHighWaterUtc;
 
     public LeanCallbackObservation Observe(OrderEvent orderEvent)
     {
@@ -63,8 +63,13 @@ public sealed class LeanCallbackCharacterizer
         }
 
         var timeRegressed =
-            _lastArrivalUtc.HasValue && orderEvent.UtcTime < _lastArrivalUtc.Value;
-        _lastArrivalUtc = orderEvent.UtcTime;
+            _arrivalHighWaterUtc.HasValue &&
+            orderEvent.UtcTime < _arrivalHighWaterUtc.Value;
+        if (!_arrivalHighWaterUtc.HasValue ||
+            orderEvent.UtcTime > _arrivalHighWaterUtc.Value)
+        {
+            _arrivalHighWaterUtc = orderEvent.UtcTime;
+        }
 
         return new LeanCallbackObservation(
             orderEvent.OrderId,
@@ -110,11 +115,11 @@ public sealed class LeanCallbackCharacterizer
 
         var payload = new LeanCallbackCharacterizerStatePayload(
             StateSchemaVersion,
-            _lastArrivalUtc,
+            _arrivalHighWaterUtc,
             callbacks);
         var state = new LeanCallbackCharacterizerState(
             payload.SchemaVersion,
-            payload.LastArrivalUtc,
+            payload.ArrivalHighWaterUtc,
             payload.Callbacks,
             ComputeStateHash(payload));
 
@@ -175,17 +180,17 @@ public sealed class LeanCallbackCharacterizer
                 "LEAN callback restart state integrity hash mismatch.");
         }
 
-        if (state.LastArrivalUtc.HasValue &&
-            state.LastArrivalUtc.Value.Kind != DateTimeKind.Utc)
+        if (state.ArrivalHighWaterUtc.HasValue &&
+            state.ArrivalHighWaterUtc.Value.Kind != DateTimeKind.Utc)
         {
             throw new InvalidDataException(
-                "LEAN callback restart last-arrival time must be explicitly UTC.");
+                "LEAN callback restart arrival high-water must be explicitly UTC.");
         }
 
-        if ((state.Callbacks.Count == 0) != !state.LastArrivalUtc.HasValue)
+        if ((state.Callbacks.Count == 0) != !state.ArrivalHighWaterUtc.HasValue)
         {
             throw new InvalidDataException(
-                "LEAN callback restart state arrival marker is inconsistent.");
+                "LEAN callback restart state arrival high-water is inconsistent.");
         }
 
         var result = new LeanCallbackCharacterizer();
@@ -215,7 +220,14 @@ public sealed class LeanCallbackCharacterizer
             }
         }
 
-        result._lastArrivalUtc = state.LastArrivalUtc;
+        if (state.ArrivalHighWaterUtc.HasValue &&
+            state.Callbacks.Any(entry => entry.UtcTime > state.ArrivalHighWaterUtc.Value))
+        {
+            throw new InvalidDataException(
+                "LEAN callback restart arrival high-water predates a stored callback.");
+        }
+
+        result._arrivalHighWaterUtc = state.ArrivalHighWaterUtc;
         return result;
     }
 
@@ -266,12 +278,12 @@ internal readonly record struct CallbackFingerprint(
 
 internal sealed record LeanCallbackCharacterizerStatePayload(
     string SchemaVersion,
-    DateTime? LastArrivalUtc,
+    DateTime? ArrivalHighWaterUtc,
     IReadOnlyList<LeanCallbackStateEntry> Callbacks);
 
 public sealed record LeanCallbackCharacterizerState(
     string SchemaVersion,
-    DateTime? LastArrivalUtc,
+    DateTime? ArrivalHighWaterUtc,
     IReadOnlyList<LeanCallbackStateEntry> Callbacks,
     string StateHash);
 

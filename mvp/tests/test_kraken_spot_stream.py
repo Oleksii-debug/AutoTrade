@@ -6,6 +6,7 @@ from mvp.autotrade_mvp.kraken_spot_stream import (
     KrakenSpotExecutionStreamRecovery,
     KrakenSpotStreamError,
     parse_execution_frame,
+    parse_executions_subscription_ack,
 )
 
 
@@ -34,6 +35,33 @@ def frame_bytes(
             "data": reports,
             "sequence": sequence,
         },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def ack_bytes(
+    *,
+    success=True,
+    channel="executions",
+    snap_orders=True,
+    snap_trades=False,
+):
+    import json
+
+    payload = {
+        "method": "subscribe",
+        "success": success,
+        "result": {
+            "channel": channel,
+            "snap_orders": snap_orders,
+            "snap_trades": snap_trades,
+        },
+    }
+    if not success:
+        payload["error"] = "subscription rejected"
+    return json.dumps(
+        payload,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
@@ -166,6 +194,37 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
             ):
                 parse_execution_frame(raw, account_id="acct")
 
+    def test_subscription_ack_binds_required_snapshot_profile_to_exact_bytes(self):
+        raw = ack_bytes()
+        acknowledgement = parse_executions_subscription_ack(
+            raw,
+            account_id="spot-live-1",
+        )
+        self.assertEqual(acknowledgement.account_id, "spot-live-1")
+        self.assertEqual(acknowledgement.environment, "LIVE")
+        self.assertEqual(
+            acknowledgement.evidence_ref,
+            "provider-stream:sha256:" + hashlib.sha256(raw).hexdigest(),
+        )
+        self.assertNotIn(b"token", acknowledgement.response_bytes.lower())
+
+    def test_subscription_ack_rejects_wrong_profile_or_failed_subscription(self):
+        cases = (
+            (ack_bytes(success=False), "was not accepted"),
+            (ack_bytes(channel="balances"), "channel must be executions"),
+            (ack_bytes(snap_orders=False), "snap_orders=true"),
+            (ack_bytes(snap_trades=True), "snap_trades=false"),
+        )
+        for raw, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                KrakenSpotStreamError,
+                message,
+            ):
+                parse_executions_subscription_ack(
+                    raw,
+                    account_id="spot-live-1",
+                )
+
     def test_parser_is_live_only_and_scope_text_is_canonical(self):
         raw = frame_bytes()
         with self.assertRaisesRegex(KrakenSpotStreamError, "permits LIVE only"):
@@ -187,6 +246,14 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
             account_id="spot-live-1",
             **kwargs,
         )
+
+    def acknowledge(self, recovery, *, account_id="spot-live-1"):
+        acknowledgement = parse_executions_subscription_ack(
+            ack_bytes(),
+            account_id=account_id,
+        )
+        recovery.apply_subscription_ack(acknowledgement)
+        return acknowledgement
 
     def parse(
         self,
@@ -211,9 +278,26 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
         self.assertEqual(generation, 1)
         self.assertEqual(
             recovery.evidence().phase,
-            recovery.AWAITING_SNAPSHOT,
+            recovery.AWAITING_SUBSCRIPTION_ACK,
         )
 
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "requires subscription acknowledgement",
+        ):
+            recovery.apply_frame(
+                self.parse(frame_type="update", sequence=1)
+            )
+
+        acknowledgement = self.acknowledge(recovery)
+        self.assertEqual(
+            recovery.evidence().phase,
+            recovery.AWAITING_SNAPSHOT,
+        )
+        self.assertEqual(
+            recovery.evidence().subscription_ack_evidence_ref,
+            acknowledgement.evidence_ref,
+        )
         with self.assertRaisesRegex(
             KrakenSpotStreamError,
             "requires snapshot before updates",
@@ -258,6 +342,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
     def test_snapshot_rejects_terminal_orders_under_snap_orders_contract(self):
         recovery = self.make_recovery()
         recovery.begin_connection()
+        self.acknowledge(recovery)
         terminal = self.parse(
             frame_type="snapshot",
             sequence=1,
@@ -278,6 +363,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
     def test_contiguous_updates_are_buffered_as_exact_reconciliation_evidence(self):
         recovery = self.make_recovery()
         recovery.begin_connection()
+        self.acknowledge(recovery)
         recovery.apply_frame(
             self.parse(frame_type="snapshot", sequence=10)
         )
@@ -324,6 +410,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
             with self.subTest(observed=observed):
                 recovery = self.make_recovery()
                 recovery.begin_connection()
+                self.acknowledge(recovery)
                 recovery.apply_frame(
                     self.parse(frame_type="snapshot", sequence=10)
                 )
@@ -364,6 +451,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
     def test_reconnect_discards_stale_generation_and_requires_new_snapshot(self):
         recovery = self.make_recovery()
         self.assertEqual(recovery.begin_connection(), 1)
+        self.acknowledge(recovery)
         recovery.apply_frame(
             self.parse(frame_type="snapshot", sequence=20)
         )
@@ -373,13 +461,24 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
 
         self.assertEqual(recovery.begin_connection(), 2)
         reset = recovery.evidence()
-        self.assertEqual(reset.phase, recovery.AWAITING_SNAPSHOT)
+        self.assertEqual(
+            reset.phase,
+            recovery.AWAITING_SUBSCRIPTION_ACK,
+        )
         self.assertIsNone(reset.snapshot_sequence)
         self.assertIsNone(reset.last_sequence)
         self.assertIsNone(reset.snapshot_evidence_ref)
         self.assertEqual(reset.buffered_update_evidence_refs, ())
         self.assertEqual(reset.provisional_snapshot_order_ids, ())
 
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "requires subscription acknowledgement",
+        ):
+            recovery.apply_frame(
+                self.parse(frame_type="update", sequence=22)
+            )
+        self.acknowledge(recovery)
         with self.assertRaisesRegex(
             KrakenSpotStreamError,
             "requires snapshot before updates",
@@ -402,6 +501,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
     def test_disconnect_invalidates_all_stream_local_state(self):
         recovery = self.make_recovery()
         recovery.begin_connection()
+        self.acknowledge(recovery)
         recovery.apply_frame(
             self.parse(frame_type="snapshot", sequence=2)
         )
@@ -418,9 +518,25 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
                 self.parse(frame_type="snapshot", sequence=3)
             )
 
+    def test_cross_account_subscription_ack_is_rejected_before_state_mutation(self):
+        recovery = self.make_recovery()
+        recovery.begin_connection()
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "acknowledgement scope mismatch",
+        ):
+            self.acknowledge(recovery, account_id="other-account")
+        evidence = recovery.evidence()
+        self.assertEqual(
+            evidence.phase,
+            recovery.AWAITING_SUBSCRIPTION_ACK,
+        )
+        self.assertIsNone(evidence.subscription_ack_evidence_ref)
+
     def test_cross_account_frame_is_rejected_before_state_mutation(self):
         recovery = self.make_recovery()
         recovery.begin_connection()
+        self.acknowledge(recovery)
         wrong = self.parse(
             frame_type="snapshot",
             sequence=1,
@@ -438,6 +554,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
     def test_buffer_bound_fails_closed_instead_of_dropping_updates(self):
         recovery = self.make_recovery(max_buffered_updates=1)
         recovery.begin_connection()
+        self.acknowledge(recovery)
         recovery.apply_frame(
             self.parse(frame_type="snapshot", sequence=100)
         )

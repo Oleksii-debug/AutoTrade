@@ -6,6 +6,7 @@ import base64
 import binascii
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -34,6 +35,21 @@ _QUALIFICATION_TRUST_SOURCE_ROOT = Path(__file__).resolve().parents[2]
 
 
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _trusted_git_environment() -> dict[str, str]:
+    """Run trust-policy Git reads without caller-selected Git authority."""
+
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.upper().startswith("GIT_")
+    }
+    # Git replace refs can make cat-file on a trusted SHA resolve bytes from
+    # a different commit while rev-parse HEAD still reports the trusted SHA.
+    # Replacement-object semantics are forbidden at this trust boundary.
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    return environment
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$")
 _RSA_METHOD = "RSA_PKCS1V15_SHA256"
@@ -653,6 +669,7 @@ def _canonical_qualification_trust_policy_bytes(
             stderr=subprocess.PIPE,
             text=True,
             timeout=10,
+            env=_trusted_git_environment(),
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         raise QualificationTrustUnavailable(
@@ -675,6 +692,7 @@ def _canonical_qualification_trust_policy_bytes(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=10,
+            env=_trusted_git_environment(),
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         raise QualificationTrustUnavailable(

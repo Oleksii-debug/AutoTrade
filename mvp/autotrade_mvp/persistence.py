@@ -917,7 +917,14 @@ class JournalStore:
         row = connection.execute(
             "SELECT MAX(journal_sequence) FROM events"
         ).fetchone()
-        return 0 if row is None or row[0] is None else int(row[0])
+        if row is None or row[0] is None:
+            return 0
+        value = row[0]
+        if type(value) is not int or value <= 0:
+            raise ValueError(
+                "journal sequence authority is not a canonical positive integer"
+            )
+        return value
 
     def current_journal_sequence(self) -> int:
         """Return the explicit durable global journal cursor."""

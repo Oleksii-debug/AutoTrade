@@ -997,7 +997,7 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(legacy.current_schema_version(), 1)
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 7)
+            self.assertEqual(upgraded.current_schema_version(), 8)
             self.assertEqual(
                 upgraded.load_events("account", "paper-1")[0]["event_id"],
                 "evt-1",
@@ -1034,7 +1034,7 @@ class JournalStoreTests(unittest.TestCase):
                 connection.close()
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 7)
+            self.assertEqual(upgraded.current_schema_version(), 8)
             with self.assertRaisesRegex(ValueError, "legacy unscoped"):
                 upgraded.record_command(
                     actor="alice",
@@ -1098,7 +1098,7 @@ class JournalStoreTests(unittest.TestCase):
                 connection.close()
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 7)
+            self.assertEqual(upgraded.current_schema_version(), 8)
             replayed, inserted = upgraded.record_command(
                 actor="alice",
                 environment="PAPER",
@@ -1396,7 +1396,10 @@ class JournalStoreTests(unittest.TestCase):
 
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
-            healthy = JournalStore(path)
+            class V7JournalStore(JournalStore):
+                SCHEMA_VERSION = 7
+
+            healthy = V7JournalStore(path)
             healthy.append_event(event())
             self.assertEqual(healthy.current_schema_version(), 7)
 
@@ -1729,7 +1732,7 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(legacy.current_schema_version(), 6)
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 7)
+            self.assertEqual(upgraded.current_schema_version(), 8)
             self.assertEqual(
                 [item["event_id"] for item in upgraded.load_events_after_journal_sequence(0)],
                 ["evt-1"],

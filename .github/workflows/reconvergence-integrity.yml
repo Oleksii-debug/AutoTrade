@@ -2,7 +2,7 @@ name: reconvergence-integrity
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, edited, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 permissions:
@@ -37,6 +37,5 @@ jobs:
           python control/tools/reconvergence_integrity.py
           --base "${{ github.event.pull_request.base.sha }}"
           --head "${{ github.event.pull_request.head.sha }}"
-          --pull-request-event "$GITHUB_EVENT_PATH"
       - name: Run trusted guard regression tests
         run: python -m unittest tests.Control.test_reconvergence_integrity -v

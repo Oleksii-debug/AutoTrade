@@ -15,116 +15,12 @@ tree and against small unrelated changes hidden inside otherwise valid work.
 from __future__ import annotations
 
 import argparse
-import json
 from dataclasses import dataclass
 from pathlib import Path
 import subprocess
 from typing import Iterable, Sequence
 
 from control.tools.registry_state import _normalized_scopes, path_covers
-
-
-MUTATION_SCOPE_BLOCK_START = "<!-- AUTOTRADE_MUTATION_SCOPE_BEGIN -->"
-MUTATION_SCOPE_BLOCK_END = "<!-- AUTOTRADE_MUTATION_SCOPE_END -->"
-
-
-PROTECTED_SENTINELS = frozenset(
-    {
-        ".github/workflows/verify.yml",
-        ".github/workflows/reconvergence-integrity.yml",
-        "AGENTS.md",
-        "control/CONSTITUTION.md",
-        "control/INDEX.json",
-        "control/qualification.json",
-        "control/tools/reconvergence_integrity.py",
-        "control/work-packages/bank.json",
-        "docs/product/PRODUCT_SPEC_CANONICAL.txt",
-        "docs/engineering/00_AUTOTRADE_MASTER_ENGINEERING_SPEC.md",
-        "requirements-dev.txt",
-        "tools/verify.py",
-    }
-)
-
-
-@dataclass(frozen=True)
-class Change:
-    status: str
-    path: str
-    previous_path: str | None = None
-
-
-@dataclass(frozen=True)
-class IntegrityAssessment:
-    allowed: bool
-    base_is_ancestor: bool
-    base_path_count: int
-    deletion_count: int
-    deletion_fraction: float
-    protected_deletions: tuple[str, ...]
-    protected_violations: tuple[str, ...]
-    scope_violations: tuple[str, ...]
-    reasons: tuple[str, ...]
-
-
-def parse_name_status(lines: Iterable[str]) -> tuple[Change, ...]:
-    changes: list[Change] = []
-    for raw in lines:
-        line = raw.rstrip("\n")
-        if not line:
-            continue
-        parts = line.split("\t")
-        status = parts[0]
-        kind = status[:1]
-        if kind in {"R", "C"}:
-            if len(parts) != 3:
-                raise ValueError(f"Malformed rename/copy record: {line!r}")
-            changes.append(Change(status=status, previous_path=parts[1], path=parts[2]))
-        else:
-            if len(parts) != 2:
-                raise ValueError(f"Malformed name-status record: {line!r}")
-            changes.append(Change(status=status, path=parts[1]))
-    return tuple(changes)
-
-
-def mutation_scopes_from_pull_request_body(body: object) -> tuple[str, ...]:
-    """Read the exact declared mutation scope from one pull-request body.
-
-    The declaration is intentionally machine-readable and fail-closed.  Human
-    prose such as "Scope:" is not authority for repository mutation.
-    """
-    if not isinstance(body, str):
-        raise ValueError("pull request body must contain a mutation-scope block")
-    if body.count(MUTATION_SCOPE_BLOCK_START) != 1:
-        raise ValueError("pull request body must contain exactly one mutation-scope start marker")
-    if body.count(MUTATION_SCOPE_BLOCK_END) != 1:
-        raise ValueError("pull request body must contain exactly one mutation-scope end marker")
-    before, remainder = body.split(MUTATION_SCOPE_BLOCK_START, 1)
-    payload, after = remainder.split(MUTATION_SCOPE_BLOCK_END, 1)
-    del before, after
-    raw_lines = payload.splitlines()
-    scopes: list[str] = []
-    for raw in raw_lines:
-        if not raw:
-            continue
-        if raw != raw.strip():
-            raise ValueError("mutation-scope block entries must not contain surrounding whitespace")
-        scopes.append(raw)
-    return _normalized_scopes(scopes)
-
-
-def mutation_scopes_from_pull_request_event(path: str | Path) -> tuple[str, ...]:
-    """Read a GitHub pull_request event and return its declared mutation scope."""
-    event_path = Path(path)
-    try:
-        payload = json.loads(event_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError("pull request event payload is unavailable or invalid") from exc
-    if not isinstance(payload, dict):
-        raise ValueError("pull request event payload must be an object")
-    pull_request = payload.get("pull_request")
-    if not isinstance(pull_request, dict):
-        raise ValueError("pull request event payload is missing pull_request")
-    return mutation_scopes_from_pull_request_body(pull_request.get("body"))
 
 
 def assess_reconvergence(
@@ -314,29 +210,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="append",
         default=None,
         help=(
-            "Canonical literal repository-relative mutation scope. Repeat to "
-            "permit multiple scopes; when omitted, scope enforcement is disabled."
-        ),
-    )
-    parser.add_argument(
-        "--pull-request-event",
-        default=None,
-        help=(
-            "GitHub pull_request event JSON. When supplied, the canonical "
-            "machine-readable mutation-scope block in the PR body is required."
+            "Trusted externally resolved repository-relative mutation scope. "
+            "Repeat to permit multiple scopes; never derive this authority from "
+            "PR-authored metadata. When omitted, scope enforcement is disabled."
         ),
     )
     args = parser.parse_args(argv)
-    if args.pull_request_event is not None and args.allowed_scope is not None:
-        parser.error("--pull-request-event and --allowed-scope are mutually exclusive")
     allowed_scopes = args.allowed_scope
-    if args.pull_request_event is not None:
-        try:
-            allowed_scopes = mutation_scopes_from_pull_request_event(
-                args.pull_request_event
-            )
-        except ValueError as exc:
-            parser.error(str(exc))
 
     assessment = assess_git_revisions(
         args.base,

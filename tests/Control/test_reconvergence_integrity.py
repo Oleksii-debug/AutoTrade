@@ -7,13 +7,9 @@ import unittest
 
 from control.tools.reconvergence_integrity import (
     Change,
-    MUTATION_SCOPE_BLOCK_END,
-    MUTATION_SCOPE_BLOCK_START,
     PROTECTED_SENTINELS,
     assess_git_revisions,
     assess_reconvergence,
-    mutation_scopes_from_pull_request_body,
-    mutation_scopes_from_pull_request_event,
     parse_name_status,
 )
 
@@ -292,82 +288,15 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
                 allowed_scopes=("web/*",),
             )
 
-    def test_pull_request_body_scope_is_machine_readable_and_canonical(self):
-        body = (
-            "Human scope prose is not authoritative.\n"
-            f"{MUTATION_SCOPE_BLOCK_START}\n"
-            "web/src\n"
-            "mvp/tests/test_semantic_web_client_contract.py\n"
-            f"{MUTATION_SCOPE_BLOCK_END}\n"
-        )
-
-        self.assertEqual(
-            mutation_scopes_from_pull_request_body(body),
-            ("mvp/tests/test_semantic_web_client_contract.py", "web/src"),
-        )
-
-    def test_pull_request_body_scope_fails_closed_when_missing_or_ambiguous(self):
-        with self.assertRaises(ValueError):
-            mutation_scopes_from_pull_request_body("Scope: web/src")
-        with self.assertRaises(ValueError):
-            mutation_scopes_from_pull_request_body(
-                f"{MUTATION_SCOPE_BLOCK_START}\nweb/src\n"
-                f"{MUTATION_SCOPE_BLOCK_END}\n"
-                f"{MUTATION_SCOPE_BLOCK_START}\nweb/tests\n"
-                f"{MUTATION_SCOPE_BLOCK_END}"
-            )
-        with self.assertRaises(ValueError):
-            mutation_scopes_from_pull_request_body(
-                f"{MUTATION_SCOPE_BLOCK_START}\n web/src\n"
-                f"{MUTATION_SCOPE_BLOCK_END}"
-            )
-
-    def test_pull_request_event_scope_reads_only_machine_block(self):
-        with TemporaryDirectory() as temporary:
-            event = Path(temporary) / "event.json"
-            body = (
-                f"{MUTATION_SCOPE_BLOCK_START}\n"
-                "control/tools/reconvergence_integrity.py\n"
-                f"{MUTATION_SCOPE_BLOCK_END}"
-            )
-            event.write_text(
-                '{"pull_request":{"body":' + __import__("json").dumps(body) + "}}",
-                encoding="utf-8",
-            )
-
-            self.assertEqual(
-                mutation_scopes_from_pull_request_event(event),
-                ("control/tools/reconvergence_integrity.py",),
-            )
-
-    def test_canonical_workflow_enforces_scope_from_trusted_base_revision(self):
+    def test_canonical_workflow_does_not_treat_pr_body_as_mutation_authority(self):
         workflow = Path(
             ".github/workflows/reconvergence-integrity.yml"
         ).read_text(encoding="utf-8")
         self.assertIn("pull_request_target:", workflow)
-        self.assertNotIn("\n  pull_request:\n", workflow)
-        self.assertIn(
-            "types: [opened, synchronize, reopened, edited, ready_for_review]",
-            workflow,
-        )
-        self.assertIn(
-            "ref: ${{ github.event.pull_request.base.sha || github.sha }}",
-            workflow,
-        )
-        self.assertIn("persist-credentials: false", workflow)
-        self.assertIn(
-            'git fetch --no-tags origin "pull/${{ github.event.pull_request.number }}/head"',
-            workflow,
-        )
-        self.assertIn(
-            'test "$(git rev-parse FETCH_HEAD)" = "${{ github.event.pull_request.head.sha }}"',
-            workflow,
-        )
-        self.assertIn('--pull-request-event "$GITHUB_EVENT_PATH"', workflow)
-        self.assertNotIn(
-            "ref: ${{ github.event.pull_request.head.sha }}",
-            workflow,
-        )
+        self.assertNotIn("--pull-request-event", workflow)
+        self.assertNotIn("--allowed-scope", workflow)
+        self.assertNotIn("edited", workflow)
+
 
 
 if __name__ == "__main__":

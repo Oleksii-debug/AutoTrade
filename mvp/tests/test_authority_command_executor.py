@@ -126,40 +126,52 @@ class AuthorityCommandExecutionTests(unittest.TestCase):
         )
 
     def test_block_new_exposure_blocks_new_risk_but_not_risk_reducing(self):
-        policy = AuthorityPolicy.create(
-            policy_id="policy-1",
+        journal = JournalStore(f"{self.directory.name}/simulation.sqlite3")
+        host = JournalBackedHostCommandStore(
+            journal,
             account_id="paper-account-1",
-            environments={"PAPER"},
-            instruments=[(INSTRUMENT_ID, 1)],
-            actions={"ORDER.SUBMIT", "ORDER.CANCEL"},
-            max_notional="1000",
-            expires_at="2026-09-27T00:00:00Z",
-            autonomous=True,
-            valid_from="2026-09-25T00:00:00Z",
-            protection_only=False,
+            environment="SIMULATION",
+            session_validator=lambda *_args: True,
+            request_origin_provider=lambda: "https://local.autotrade.invalid",
+            now=lambda: "2026-09-26T00:30:00Z",
         )
-        self.authority.register_policy(policy)
-        accepted = self.host.submit(
-            self.command(
-                action="BLOCK_NEW_EXPOSURE",
-                payload={"reason": "operator emergency stop"},
-                suffix="2",
+        authority = AuthorityService(journal)
+        executor = AuthorityCommandExecutor(host, authority)
+        authority.register_policy(
+            AuthorityPolicy.create(
+                policy_id="policy-1",
+                account_id="paper-account-1",
+                environments={"SIMULATION"},
+                instruments=[(INSTRUMENT_ID, 1)],
+                actions={"ORDER.SUBMIT", "ORDER.CANCEL"},
+                max_notional="1000",
+                expires_at="2026-09-27T00:00:00Z",
+                autonomous=True,
+                valid_from="2026-09-25T00:00:00Z",
+                protection_only=False,
             )
         )
-        completed = self.executor.execute(accepted.operation_id)
+        command = self.command(
+            action="BLOCK_NEW_EXPOSURE",
+            payload={"reason": "operator emergency stop"},
+            suffix="2",
+        )
+        command["environment"] = "SIMULATION"
+        accepted = host.submit(command)
+        completed = executor.execute(accepted.operation_id)
         self.assertEqual(completed.phase, "SUCCEEDED")
         self.assertTrue(
-            self.authority.is_new_exposure_blocked(
+            authority.is_new_exposure_blocked(
                 "paper-account-1",
-                "PAPER",
+                "SIMULATION",
             )
         )
-        new_risk = self.authority._admit_unverified(
+        new_risk = authority._admit_unverified(
             admission_id="admission-new-risk",
             policy_id="policy-1",
             intent_hash="intent-hash-1",
             account_id="paper-account-1",
-            environment="PAPER",
+            environment="SIMULATION",
             instrument_id=INSTRUMENT_ID,
             instrument_version=1,
             action="ORDER.SUBMIT",
@@ -172,12 +184,12 @@ class AuthorityCommandExecutionTests(unittest.TestCase):
         self.assertEqual(new_risk.outcome, "REJECTED")
         self.assertEqual(new_risk.reason, "new_exposure_blocked")
 
-        reducing = self.authority._admit_unverified(
+        reducing = authority._admit_unverified(
             admission_id="admission-reducing",
             policy_id="policy-1",
             intent_hash="intent-hash-2",
             account_id="paper-account-1",
-            environment="PAPER",
+            environment="SIMULATION",
             instrument_id=INSTRUMENT_ID,
             instrument_version=1,
             action="ORDER.CANCEL",
@@ -189,7 +201,7 @@ class AuthorityCommandExecutionTests(unittest.TestCase):
         )
         self.assertEqual(reducing.outcome, "ADMITTED")
 
-    def test_block_survives_authority_restart_and_new_policy_reauthorizes(self):
+    def test_block_survives_restart_and_unrelated_new_policy_registration(self):
         self.authority.register_policy(
             AuthorityPolicy.create(
                 policy_id="policy-1",
@@ -231,11 +243,11 @@ class AuthorityCommandExecutionTests(unittest.TestCase):
                 protection_only=False,
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             restarted.is_new_exposure_blocked("paper-account-1", "PAPER")
         )
         again = AuthorityService(JournalStore(self.path))
-        self.assertFalse(
+        self.assertTrue(
             again.is_new_exposure_blocked("paper-account-1", "PAPER")
         )
 

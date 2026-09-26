@@ -1160,12 +1160,6 @@ class AuthorityService:
                 if existing is None:
                     self._policies[policy.policy_id] = policy
                     self._epoch += 1
-                    if not policy.protection_only:
-                        for policy_environment in policy.environments:
-                            self._new_exposure_blocks.pop(
-                                (policy.account_id, policy_environment),
-                                None,
-                            )
             elif event_type == "AuthorityPolicyRevoked":
                 policy_id = _text(payload.get("policy_id"), name="policy_id")
                 if policy_id not in self._policies:
@@ -1269,6 +1263,11 @@ class AuthorityService:
                         and record.instrument_version in policy.instruments
                         and record.action in policy.actions
                         and record.notional <= policy.max_notional
+                        and (
+                            (record.account_id, record.environment)
+                            not in self._new_exposure_blocks
+                            or record.risk_reducing
+                        )
                         and (not policy.protection_only or record.risk_reducing)
                     )
                     if not scope_valid:
@@ -1839,12 +1838,6 @@ class AuthorityService:
         )
         self._policies[policy.policy_id] = policy
         self._epoch += 1
-        if not policy.protection_only:
-            for policy_environment in policy.environments:
-                self._new_exposure_blocks.pop(
-                    (policy.account_id, policy_environment),
-                    None,
-                )
         return True
 
     def policy(self, policy_id: str) -> AuthorityPolicy:

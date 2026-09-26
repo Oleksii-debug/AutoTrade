@@ -1,7 +1,11 @@
 import base64
 from hashlib import sha256
+import json
+from pathlib import Path
+import subprocess
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
@@ -17,6 +21,7 @@ from mvp.autotrade_mvp.qualification_attestation import (
     parse_qualification_trust_policy,
     parse_signed_qualification_attestation,
     qualification_trust_policy_payload,
+    verify_canonical_qualification_attestation,
     verify_qualification_attestation,
 )
 
@@ -170,6 +175,131 @@ def verify(receipt, store, trust_policy, **overrides):
 
 
 class QualificationAttestationTests(unittest.TestCase):
+    def test_canonical_policy_is_bound_to_exact_source_not_working_tree(self):
+        canonical_root = root()
+        canonical_policy = policy(canonical_root)
+        with TemporaryDirectory() as directory:
+            source_root = Path(directory) / "source"
+            policy_path = source_root / "mvp" / "autotrade_mvp" / "qualification_trust_policy.json"
+            policy_path.parent.mkdir(parents=True)
+            policy_path.write_text(
+                json.dumps(
+                    qualification_trust_policy_payload(canonical_policy),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-q"], cwd=source_root, check=True)
+            subprocess.run(
+                ["git", "add", "mvp/autotrade_mvp/qualification_trust_policy.json"],
+                cwd=source_root,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git", "-c", "user.name=AutoTrade Test",
+                    "-c", "user.email=autotrade-test@example.invalid",
+                    "commit", "-q", "-m", "trusted policy",
+                ],
+                cwd=source_root,
+                check=True,
+            )
+            source_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=source_root,
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+            exact_ref = EvidenceArtifactRef(
+                artifact_id=EVIDENCE_ID,
+                sha256=EVIDENCE_SHA,
+                media_type="application/vnd.autotrade.qualification-evidence",
+                evidence_kind="QUALIFICATION_RUN",
+                source_sha=source_sha,
+            )
+            canonical_value = attestation(
+                canonical_root,
+                source_sha=source_sha,
+                evidence_refs=(exact_ref,),
+            )
+            canonical_receipt = SignedQualificationAttestation(
+                canonical_value, sign(canonical_value)
+            )
+            with TemporaryDirectory() as evidence_directory:
+                store = ArtifactStore(evidence_directory)
+                publish(store, source=source_sha)
+                with (
+                    patch(
+                        "mvp.autotrade_mvp.qualification_attestation."
+                        "_QUALIFICATION_TRUST_SOURCE_ROOT",
+                        source_root,
+                    ),
+                    patch(
+                        "mvp.autotrade_mvp.qualification_attestation."
+                        "_CANONICAL_QUALIFICATION_TRUST_POLICY_PATH",
+                        policy_path,
+                    ),
+                ):
+                    accepted = verify_canonical_qualification_attestation(
+                        canonical_receipt,
+                        evidence_store=store,
+                        expected_source_sha=source_sha,
+                        expected_domain="RELEASE",
+                        expected_gate="FREEZE",
+                        expected_package_id="WP-54",
+                        expected_protocol_id="release-freeze-v1",
+                        expected_protocol_version="1.0.0",
+                        expected_requirement_id="release-candidate-freeze",
+                        expected_release_artifact_id=RELEASE_A,
+                        expected_release_artifact_sha256=RELEASE_A_SHA,
+                    )
+                    self.assertEqual(accepted.policy_id, canonical_policy.policy_id)
+
+                    hostile_root = TrustRoot(
+                        producer_id="candidate.self",
+                        verifier_id=canonical_root.verifier_id,
+                        public_modulus_hex=canonical_root.public_modulus_hex,
+                        public_exponent=canonical_root.public_exponent,
+                        allowed_scopes=canonical_root.allowed_scopes,
+                        valid_from=canonical_root.valid_from,
+                    )
+                    hostile_policy = policy(hostile_root)
+                    policy_path.write_text(
+                        json.dumps(
+                            qualification_trust_policy_payload(hostile_policy),
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        encoding="utf-8",
+                    )
+                    hostile_value = attestation(
+                        hostile_root,
+                        source_sha=source_sha,
+                        evidence_refs=(exact_ref,),
+                    )
+                    hostile_receipt = SignedQualificationAttestation(
+                        hostile_value, sign(hostile_value)
+                    )
+                    with self.assertRaisesRegex(
+                        QualificationTrustError,
+                        "trust root is not authorized",
+                    ):
+                        verify_canonical_qualification_attestation(
+                            hostile_receipt,
+                            evidence_store=store,
+                            expected_source_sha=source_sha,
+                            expected_domain="RELEASE",
+                            expected_gate="FREEZE",
+                            expected_package_id="WP-54",
+                            expected_protocol_id="release-freeze-v1",
+                            expected_protocol_version="1.0.0",
+                            expected_requirement_id="release-candidate-freeze",
+                            expected_release_artifact_id=RELEASE_A,
+                            expected_release_artifact_sha256=RELEASE_A_SHA,
+                        )
+
     def test_valid_signed_receipt_resolves_exact_evidence(self):
         trust_root = root()
         trust_policy = policy(trust_root)

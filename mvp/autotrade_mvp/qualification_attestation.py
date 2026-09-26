@@ -8,6 +8,7 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import re
+import subprocess
 from typing import Iterable, Mapping
 from uuid import UUID
 
@@ -28,6 +29,8 @@ class QualificationTrustUnavailable(QualificationTrustError):
 _CANONICAL_QUALIFICATION_TRUST_POLICY_PATH = Path(__file__).with_name(
     "qualification_trust_policy.json"
 )
+
+_QUALIFICATION_TRUST_SOURCE_ROOT = Path(__file__).resolve().parents[2]
 
 
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -627,25 +630,48 @@ def parse_qualification_trust_policy(
     )
 
 
-def load_canonical_qualification_trust_policy() -> QualificationTrustPolicy:
-    """Load the release-controlled qualification policy from a fixed path.
+def _canonical_qualification_trust_policy_bytes(
+    *, expected_source_sha: str
+) -> bytes:
+    """Read policy bytes from the exact trusted Git source object."""
 
-    The evidence submitter cannot supply or redirect this path through the
-    qualification API. A deployment that has not installed an independently
-    reviewed public trust policy cannot produce terminal signed-trust PASS.
-    """
-
-    path = _CANONICAL_QUALIFICATION_TRUST_POLICY_PATH
+    source_sha = _git_sha(expected_source_sha, name="expected_source_sha")
+    source_root = _QUALIFICATION_TRUST_SOURCE_ROOT.resolve()
+    policy_path = _CANONICAL_QUALIFICATION_TRUST_POLICY_PATH.resolve()
     try:
-        raw = path.read_bytes()
-    except FileNotFoundError as error:
+        relative_policy = policy_path.relative_to(source_root).as_posix()
+    except ValueError as error:
         raise QualificationTrustUnavailable(
-            "canonical qualification trust policy is not configured"
+            "canonical qualification trust policy is outside trusted source root"
         ) from error
-    except OSError as error:
+    try:
+        completed = subprocess.run(
+            ["git", "cat-file", "blob", f"{source_sha}:{relative_policy}"],
+            cwd=source_root,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
         raise QualificationTrustUnavailable(
-            "canonical qualification trust policy is unavailable"
+            "exact-source qualification trust policy is unavailable"
         ) from error
+    if completed.returncode != 0:
+        raise QualificationTrustUnavailable(
+            "canonical qualification trust policy is not present in exact trusted source"
+        )
+    return bytes(completed.stdout)
+
+
+def load_canonical_qualification_trust_policy(
+    *, expected_source_sha: str
+) -> QualificationTrustPolicy:
+    """Load the release-controlled policy from the exact trusted source SHA."""
+
+    raw = _canonical_qualification_trust_policy_bytes(
+        expected_source_sha=expected_source_sha
+    )
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -653,7 +679,6 @@ def load_canonical_qualification_trust_policy() -> QualificationTrustPolicy:
             "canonical qualification trust policy is malformed"
         ) from error
     return parse_qualification_trust_policy(payload)
-
 
 def parse_signed_qualification_attestation(
     value: object,
@@ -1059,11 +1084,13 @@ def verify_canonical_qualification_attestation(
     """Verify a receipt only against the separately controlled canonical policy.
 
     Candidate/evidence callers provide no trust policy and no expected pin.
-    Policy identity/version are derived only after loading the fixed
-    release-controlled policy file.
+    Policy identity/version are derived only after loading policy bytes from
+    the exact expected source commit; mutable working-tree policy bytes are ignored.
     """
 
-    policy = load_canonical_qualification_trust_policy()
+    policy = load_canonical_qualification_trust_policy(
+        expected_source_sha=expected_source_sha
+    )
     return verify_qualification_attestation(
         receipt,
         policy=policy,

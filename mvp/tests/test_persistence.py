@@ -1617,6 +1617,38 @@ class JournalStoreTests(unittest.TestCase):
                     projection_name="portfolio"
                 )
 
+    def test_fractional_authoritative_journal_cursor_tamper_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE events SET journal_sequence = 1.5 "
+                    "WHERE event_id = 'evt-1'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "journal sequence authority is not a canonical positive integer",
+            ):
+                JournalStore(path).current_journal_sequence()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "journal sequence authority is not a canonical positive integer",
+            ):
+                JournalStore(path).save_global_projection_checkpoint(
+                    projection_name="portfolio",
+                    journal_sequence=1,
+                    state={"net": "1"},
+                )
+
     def test_global_projection_checkpoint_fractional_cut_tamper_fails_closed(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

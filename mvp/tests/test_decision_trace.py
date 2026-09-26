@@ -167,6 +167,38 @@ class DecisionTraceStoreTests(unittest.TestCase):
             self.assertGreaterEqual(attrs["repr_message"].count("[REDACTED]"), 2)
             self.assertEqual(attrs["safe"], "symbol=BTC")
 
+    def test_compound_and_quoted_embedded_credentials_are_fully_redacted(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = trace("trace-compound-credentials")
+            item["attributes"] = {
+                "digest_header": (
+                    'Authorization: Digest username="api", realm="trade", '
+                    'response="digest-comma-secret"'
+                ),
+                "json_digest": (
+                    '{"Authorization":"Digest username=\\\"api\\\", '
+                    'response=\\\"json-comma-secret\\\"","safe":"ok"}'
+                ),
+                "quoted_key_with_spaces": (
+                    '{"api_key":"secret value with spaces","safe":"ok"}'
+                ),
+            }
+            store.append(item)
+
+            raw = path.read_text(encoding="utf-8")
+            for leaked in (
+                "digest-comma-secret",
+                "json-comma-secret",
+                "secret value with spaces",
+            ):
+                self.assertNotIn(leaked, raw)
+            persisted = json.loads(raw)["attributes"]
+            self.assertIn("[REDACTED]", persisted["digest_header"])
+            self.assertIn("[REDACTED]", persisted["json_digest"])
+            self.assertIn("[REDACTED]", persisted["quoted_key_with_spaces"])
+
     def test_non_finite_diagnostic_numbers_cannot_enter_durable_trace(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "decision-traces.jsonl"

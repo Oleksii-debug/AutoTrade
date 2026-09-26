@@ -128,5 +128,31 @@ class DiagnosticTraceTests(unittest.TestCase):
         self.assertEqual(redacted["encrypted_pem"], "[REDACTED]")
         self.assertEqual(redacted["safe"], "latency=12ms")
 
+    def test_compound_and_quoted_embedded_credentials_are_fully_redacted(self):
+        payload = {
+            "digest_header": (
+                'Authorization: Digest username="api", realm="trade", '
+                'response="digest-comma-secret"'
+            ),
+            "json_digest": (
+                '{"Authorization":"Digest username=\\\"api\\\", '
+                'response=\\\"json-comma-secret\\\"","safe":"ok"}'
+            ),
+            "quoted_key_with_spaces": (
+                '{"api_key":"secret value with spaces","safe":"ok"}'
+            ),
+        }
+        redacted = redact_diagnostic_value(payload)
+        self.assertNotIn("digest-comma-secret", redacted["digest_header"])
+        self.assertNotIn("json-comma-secret", redacted["json_digest"])
+        self.assertNotIn(
+            "secret value with spaces",
+            redacted["quoted_key_with_spaces"],
+        )
+        self.assertIn("[REDACTED]", redacted["digest_header"])
+        self.assertIn("[REDACTED]", redacted["json_digest"])
+        self.assertIn("[REDACTED]", redacted["quoted_key_with_spaces"])
+
+
 if __name__ == "__main__":
     unittest.main()

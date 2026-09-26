@@ -648,6 +648,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                         prepared.capability_snapshot_ids
                     ),
                     "instrument_versions": list(prepared.instrument_versions),
+                    "provider_environment": provider_environment,
                 },
             )
             self.assertEqual(outcome.status, "SENT")
@@ -664,6 +665,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                 prepared_request_sha256=prepared.body_sha256,
                 capability_snapshot_ids=prepared.capability_snapshot_ids,
                 instrument_versions=prepared.instrument_versions,
+                provider_environment=provider_environment,
             )
         return attempt, prepared, observation
 
@@ -725,6 +727,53 @@ class BybitV5AdapterTests(unittest.TestCase):
                     result["evidence"][0]["source_uri"],
                     source_uri,
                 )
+
+    def test_durable_write_observation_cannot_cross_testnet_and_demo(self):
+        base = {
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {
+                "orderId": "provider-env-fence",
+                "orderLinkId": "__CLIENT__",
+            },
+            "time": 1790280000123,
+        }
+        intent_id = "bybit-provider-environment-fence"
+        attempt, testnet_prepared, testnet_observation = (
+            self._durable_write_observation(
+                base,
+                provider_environment="TESTNET",
+                intent_id=intent_id,
+            )
+        )
+        _other_attempt, demo_prepared, _demo_observation = (
+            self._durable_write_observation(
+                base,
+                provider_environment="DEMO",
+                intent_id=intent_id,
+            )
+        )
+        self.assertEqual(
+            testnet_prepared.body_sha256,
+            demo_prepared.body_sha256,
+        )
+        self.assertEqual(
+            testnet_prepared.environment,
+            demo_prepared.environment,
+        )
+        self.assertNotEqual(
+            testnet_prepared.provider_environment,
+            demo_prepared.provider_environment,
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "provider-environment mismatch",
+        ):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=demo_prepared,
+                observation=testnet_observation,
+            )
 
     def test_journal_observation_time_and_provider_time_are_distinct(self):
         attempt, prepared, observation = self._durable_write_observation(

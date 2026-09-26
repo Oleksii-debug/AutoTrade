@@ -133,3 +133,23 @@ semantics. `provider_semantics_exclude_execution` remains false unless exact
 provider/product/environment qualification separately establishes that stronger
 claim.
 
+## Working-order reconciliation projection — 2026-09-26
+
+The realtime order seam now preserves `leavesQty` as exact decimal state and
+projects only Bybit's documented open order statuses — `New`,
+`PartiallyFilled`, and `Untriggered` — into the existing canonical
+`ProviderWorkingOrderEvidence`. Closed statuses are retained in the provider
+page but are not emitted as working orders. Unknown future provider statuses
+fail closed instead of being silently treated as open or closed.
+
+The realtime request explicitly sends `openOnly=0`; linear realtime reads
+require an uppercase symbol scope in this bounded adapter path. The projection
+requires an explicit provider-symbol to canonical instrument-version mapping,
+so provider symbols cannot silently become canonical instrument identities.
+
+This creates a direct reconciliation path for an UNKNOWN send: a later exact
+realtime read that finds the same `orderLinkId`, combined with the existing
+causal `SnapshotConsistencyEvidence`, can resolve the submission as an
+observed working order without blind retry. It still does not establish provider
+qualification or absence semantics.
+

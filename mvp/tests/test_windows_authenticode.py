@@ -140,15 +140,22 @@ class WindowsAuthenticodeTests(unittest.TestCase):
         ):
             load_canonical_authenticode_policy()
 
-    def make_signed_outputs(self, *, version="1.2.3", duplicate_main=False):
+    def make_signed_outputs(
+        self,
+        *,
+        version="1.2.3",
+        duplicate_main=False,
+        main_path="lib/app/AutoTrade.Desktop.exe",
+        update_path="lib/app/Update.exe",
+    ):
         setup = self.root / "AutoTrade-Setup.exe"
         setup.write_bytes(b"signed setup bytes")
         package = self.root / f"AutoTrade-{version}-full.nupkg"
         with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_STORED) as archive:
-            archive.writestr("lib/app/AutoTrade.Desktop.exe", b"signed desktop")
-            archive.writestr("lib/app/Update.exe", b"signed update")
+            archive.writestr(main_path, b"signed desktop")
+            archive.writestr(update_path, b"signed update")
             if duplicate_main:
-                archive.writestr("other/AutoTrade.Desktop.exe", b"second desktop")
+                archive.writestr(main_path, b"second desktop")
         feed = self.root / "releases.win.json"
         feed.write_text('{"channel":"win"}\n', encoding="utf-8")
         result = []
@@ -191,6 +198,60 @@ class WindowsAuthenticodeTests(unittest.TestCase):
         self.assertTrue(any(path.endswith("!/lib/app/AutoTrade.Desktop.exe") for path in paths))
         self.assertTrue(any(path.endswith("!/lib/app/Update.exe") for path in paths))
         self.assertEqual(verifier.call_count, 3)
+
+    def test_release_verifier_requires_canonical_internal_pe_paths(self):
+        cases = (
+            ("other/AutoTrade.Desktop.exe", "lib/app/Update.exe"),
+            ("lib/app/AutoTrade.Desktop.exe", "tools/Update.exe"),
+            ("lib/app/autotrade.desktop.exe", "lib/app/Update.exe"),
+        )
+        for main_path, update_path in cases:
+            with self.subTest(main_path=main_path, update_path=update_path):
+                generated = self.make_signed_outputs(
+                    main_path=main_path,
+                    update_path=update_path,
+                )
+                with (
+                    patch.object(auth, "assert_windows_signing_environment"),
+                    patch.object(
+                        auth,
+                        "_verify_authenticode_file",
+                        side_effect=self.valid_signature,
+                    ),
+                    self.assertRaisesRegex(
+                        AuthenticodeSigningError,
+                        "must use canonical path",
+                    ),
+                ):
+                    verify_velopack_authenticode(
+                        generated,
+                        version="1.2.3",
+                        policy=self.policy(),
+                        policy_sha256="sha256:" + "c" * 64,
+                    )
+
+    def test_release_verifier_rejects_noncanonical_zip_path_alias(self):
+        generated = self.make_signed_outputs(
+            main_path="lib/app/./AutoTrade.Desktop.exe",
+        )
+        with (
+            patch.object(auth, "assert_windows_signing_environment"),
+            patch.object(
+                auth,
+                "_verify_authenticode_file",
+                side_effect=self.valid_signature,
+            ),
+            self.assertRaisesRegex(
+                AuthenticodeSigningError,
+                "unsafe path",
+            ),
+        ):
+            verify_velopack_authenticode(
+                generated,
+                version="1.2.3",
+                policy=self.policy(),
+                policy_sha256="sha256:" + "c" * 64,
+            )
 
     def test_release_verifier_rejects_duplicate_packaged_main_identity(self):
         generated = self.make_signed_outputs(duplicate_main=True)

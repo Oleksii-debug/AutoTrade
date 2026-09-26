@@ -286,6 +286,49 @@ ExpectFailure<InvalidDataException>(
     () => LeanCallbackCharacterizer.RestoreRestartState(tamperedRestartCheckpoint),
     "tampered LEAN callback restart economics must fail integrity verification");
 
+Require(
+    restartCheckpoint.StartsWith("{", StringComparison.Ordinal),
+    "Restart checkpoint must serialize as a JSON object.");
+var checkpointWithUnknownTopLevel = restartCheckpoint.Insert(
+    1,
+    "\"UnexpectedTopLevel\":\"forbidden\",");
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(checkpointWithUnknownTopLevel),
+    "unknown top-level restart state fields must fail closed");
+
+var checkpointWithUnknownCallbackField = restartCheckpoint.Replace(
+    "\"OrderId\":73",
+    "\"UnexpectedCallbackField\":true,\"OrderId\":73",
+    StringComparison.Ordinal);
+Require(
+    checkpointWithUnknownCallbackField != restartCheckpoint,
+    "Restart schema regression did not mutate the callback object.");
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(checkpointWithUnknownCallbackField),
+    "unknown callback restart state fields must fail closed");
+
+var checkpointWithDuplicateTopLevel = restartCheckpoint.Replace(
+    "\"SchemaVersion\":\"1.0.0\"",
+    "\"SchemaVersion\":\"1.0.0\",\"SchemaVersion\":\"1.0.0\"",
+    StringComparison.Ordinal);
+Require(
+    checkpointWithDuplicateTopLevel != restartCheckpoint,
+    "Restart duplicate-member regression did not mutate the top-level object.");
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(checkpointWithDuplicateTopLevel),
+    "duplicate top-level restart members must fail closed");
+
+var checkpointWithDuplicateCallbackMember = restartCheckpoint.Replace(
+    "\"OrderId\":73",
+    "\"OrderId\":73,\"OrderId\":73",
+    StringComparison.Ordinal);
+Require(
+    checkpointWithDuplicateCallbackMember != restartCheckpoint,
+    "Restart duplicate-member regression did not mutate the callback object.");
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(checkpointWithDuplicateCallbackMember),
+    "duplicate callback restart members must fail closed");
+
 var engineIdentity = LeanEngineAssemblyProbe.GetIdentity();
 Require(
     engineIdentity.TypeName == "QuantConnect.Lean.Engine.Engine",

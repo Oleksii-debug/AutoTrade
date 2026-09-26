@@ -299,6 +299,11 @@ def parse_operations(text: str) -> tuple[Operation, ...]:
                     "method keys must be canonical lowercase unquoted entries "
                     "without inline content"
                 )
+            if current_path is not None and current_method is None:
+                raise ValueError(
+                    "unsupported OpenAPI Path Item field: "
+                    f"{dequoted_key}"
+                )
         if current_method is not None:
             current_operation_lines.append(line)
 

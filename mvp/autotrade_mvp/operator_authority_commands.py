@@ -401,6 +401,8 @@ def _find(
 def _find_new_exposure_block(
     events: list[dict[str, Any]],
     command_id: str,
+    account_id: str,
+    environment: str,
 ) -> dict[str, Any] | None:
     matches = [
         event
@@ -408,6 +410,8 @@ def _find_new_exposure_block(
         if event.get("event_type") == "AuthorityNewExposureBlocked"
         and isinstance(event.get("payload"), Mapping)
         and event["payload"].get("command_id") == command_id
+        and event["payload"].get("account_id") == account_id
+        and event["payload"].get("environment") == environment
     ]
     if len(matches) > 1:
         raise OperatorAuthorityConflict(
@@ -455,7 +459,14 @@ def _validated_new_exposure_block(
     expected_version: int,
 ) -> dict[str, Any] | None:
     command_id = _text(payload.get("command_id"), "command_id")
-    event = _find_new_exposure_block(events, command_id)
+    account_id = _text(payload.get("account_id"), "account_id")
+    environment = _text(payload.get("environment"), "environment")
+    event = _find_new_exposure_block(
+        events,
+        command_id,
+        account_id,
+        environment,
+    )
     if event is None:
         return None
     reason = "host_operator_command:BLOCK_NEW_EXPOSURE:" + _text(

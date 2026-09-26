@@ -679,26 +679,90 @@ def _validated_plan_release(
         raise WindowsUpdateError(f"{name}.manifest_json is required")
     try:
         parsed_manifest = json.loads(manifest_json)
+        if type(parsed_manifest) is not dict or set(parsed_manifest) != {
+            "release_id",
+            "source_sha",
+            "baseline_hash",
+            "schema_contract_hash",
+            "artifacts",
+            "qualification",
+        }:
+            raise ValueError("release manifest structure is not canonical")
         qualification = parsed_manifest["qualification"]
-        if not isinstance(qualification, dict):
-            raise TypeError("qualification must be an object")
-        decision = ReleaseCandidateDecision(
-            status="FROZEN",
-            reasons=(),
-            manifest_json=manifest_json,
-            manifest_sha256=_sha256(
-                value.get("manifest_sha256"),
-                name=f"{name}.manifest_sha256",
-            ),
-            qualification_attestation_id=qualification["attestation_id"],
-            qualification_attestation_digest=qualification["attestation_digest"],
-            qualification_policy_id=qualification["policy_id"],
-            qualification_trust_root_id=qualification["trust_root_id"],
+        if type(qualification) is not dict or set(qualification) != {
+            "attestation_id",
+            "attestation_digest",
+            "policy_id",
+            "trust_root_id",
+            "receipt",
+        }:
+            raise ValueError("release qualification structure is not canonical")
+        artifacts_raw = parsed_manifest["artifacts"]
+        if not isinstance(artifacts_raw, list):
+            raise ValueError("release artifacts must be a list")
+        artifact_fields = {
+            "role",
+            "artifact_id",
+            "artifact_sha256",
+            "source_sha",
+            "signature_status",
+            "evidence_status",
+        }
+        artifacts = []
+        for raw in artifacts_raw:
+            if type(raw) is not dict or set(raw) != artifact_fields:
+                raise ValueError("release artifact structure is not canonical")
+            artifacts.append(ReleaseArtifactEvidence.create(**raw))
+        reconstructed = ReleaseCandidateInput.create(
+            release_id=parsed_manifest["release_id"],
+            source_sha=parsed_manifest["source_sha"],
+            baseline_hash=parsed_manifest["baseline_hash"],
+            schema_contract_hash=parsed_manifest["schema_contract_hash"],
+            artifacts=tuple(artifacts),
+            unresolved_blockers=(),
         )
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        receipt = parse_signed_qualification_attestation(
+            qualification["receipt"]
+        )
+        manifest_sha256 = _sha256(
+            value.get("manifest_sha256"),
+            name=f"{name}.manifest_sha256",
+        )
+        decision = freeze_release_candidate(
+            reconstructed,
+            evidence_store=trust.evidence_store,
+            qualification_receipt=receipt,
+            qualification_policy=trust.qualification_policy,
+            expected_policy_id=trust.expected_policy_id,
+            expected_policy_version=trust.expected_policy_version,
+        )
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+        ReleaseCandidateError,
+        QualificationTrustError,
+    ) as error:
         raise WindowsUpdateError(
             f"{name} frozen release provenance is invalid"
         ) from error
+    if (
+        decision.status != "FROZEN"
+        or decision.manifest_json != manifest_json
+        or decision.manifest_sha256 != manifest_sha256
+        or decision.qualification_attestation_id
+        != qualification["attestation_id"]
+        or decision.qualification_attestation_digest
+        != qualification["attestation_digest"]
+        or decision.qualification_policy_id
+        != qualification["policy_id"]
+        or decision.qualification_trust_root_id
+        != qualification["trust_root_id"]
+    ):
+        raise WindowsUpdateError(
+            f"{name} frozen release provenance is not independently verified"
+        )
     canonical = _release_manifest(
         decision,
         name=name,

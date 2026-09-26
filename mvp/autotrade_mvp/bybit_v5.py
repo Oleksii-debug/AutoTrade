@@ -109,6 +109,7 @@ _BYBIT_KNOWN_ORDER_STATUSES = (
     _BYBIT_OPEN_ORDER_STATUSES | _BYBIT_CLOSED_ORDER_STATUSES
 )
 _MAX_ORDER_HISTORY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+_BYBIT_NO_FILL_ORDER_RETENTION = timedelta(hours=24)
 
 
 def _text(value: object, *, name: str) -> str:
@@ -1417,6 +1418,29 @@ def order_history_coverage_from_pages(
     if pages[-1].next_cursor is not None:
         raise ProviderCoreError(
             "Bybit order history pagination is incomplete"
+        )
+
+    # Bybit currently retains no-fill Cancelled/Rejected/Deactivated order
+    # history for only the most recent 24 hours. A wider/older successfully
+    # paginated history query remains useful positive evidence, but cannot
+    # prove that an older unknown submission never existed. Keep the coverage
+    # fact while demoting exclusion semantics so reconciliation stays UNKNOWN.
+    if qualified_exclusion_semantics:
+        latest_observed_at = max(
+            datetime.fromisoformat(
+                observation.observed_at.replace("Z", "+00:00")
+            ).astimezone(timezone.utc)
+            for observation in observations
+        )
+        coverage_start_at = datetime.fromisoformat(
+            _millis_to_utc(start_ms, name="startTime").replace("Z", "+00:00")
+        )
+        coverage_end_at = datetime.fromisoformat(
+            _millis_to_utc(end_ms, name="endTime").replace("Z", "+00:00")
+        )
+        qualified_exclusion_semantics = (
+            coverage_start_at >= latest_observed_at - _BYBIT_NO_FILL_ORDER_RETENTION
+            and coverage_end_at <= latest_observed_at
         )
 
     return coverage_evidence(

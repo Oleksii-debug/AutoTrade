@@ -2352,6 +2352,11 @@ def parse_position_page(
     for index, value in enumerate(rows):
         row = _mapping(value, name=f"result.list[{index}]")
         symbol = _text(row.get("symbol"), name="symbol")
+        expected_symbol = observation.query_binding.query.get("symbol")
+        if expected_symbol is not None and symbol != expected_symbol:
+            raise ProviderCoreError(
+                "Bybit position response symbol does not match exact query"
+            )
         position_idx = _integer(
             row.get("positionIdx"),
             name="positionIdx",
@@ -2404,6 +2409,8 @@ def prepare_next_position_read_query(
     if page.next_cursor is None:
         return None
     binding = observation.query_binding
+    if not isinstance(capability, CapabilitySnapshot):
+        raise TypeError("capability must be CapabilitySnapshot")
     if (
         capability.snapshot_id != binding.capability_snapshot_id
         or capability.provider_id.upper() != binding.provider_id

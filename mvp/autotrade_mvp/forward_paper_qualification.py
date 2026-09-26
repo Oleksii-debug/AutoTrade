@@ -9,6 +9,7 @@ trading authority nor an economic-edge claim.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
 import json
@@ -70,6 +71,21 @@ def _digest(value: str) -> str:
             "artifact_sha256 must be canonical sha256"
         )
     return value
+
+
+def _instant(value: str, *, name: str) -> datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise ForwardPaperQualificationError(f"{name} is required")
+    text = value.strip()
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ForwardPaperQualificationError(
+            f"{name} must be an ISO timestamp"
+        ) from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ForwardPaperQualificationError(f"{name} must include timezone")
+    return parsed.astimezone(timezone.utc)
 
 
 def _decimal_text(value: Decimal) -> str:
@@ -335,11 +351,27 @@ def qualify_forward_paper(
         reasons.append("independent_forward_paper_trust_unavailable")
         if status == "PASS":
             status = "INCONCLUSIVE"
+    elif not isinstance(qualification_receipt, SignedQualificationAttestation):
+        raise TypeError(
+            "qualification_receipt must be SignedQualificationAttestation"
+        )
     elif evidence_store is None or artifact_id is None or artifact_sha256 is None:
         reasons.append("independent_forward_paper_trust_incomplete")
         if status == "PASS":
             status = "INCONCLUSIVE"
     else:
+        attestation = qualification_receipt.attestation
+        receipt_scope_valid = True
+        if _instant(
+            attestation.completed_at,
+            name="qualification completed_at",
+        ) < _instant(evidence.observed_until, name="evidence observed_until"):
+            reasons.append(
+                "independent_forward_paper_qualification_predates_evidence"
+            )
+            status = "FAIL"
+            receipt_scope_valid = False
+
         signed_refs = {
             (
                 ref.artifact_id,
@@ -348,7 +380,7 @@ def qualify_forward_paper(
                 ref.evidence_kind,
                 ref.source_sha,
             )
-            for ref in qualification_receipt.attestation.evidence_refs
+            for ref in attestation.evidence_refs
         }
         expected_refs = {
             (
@@ -359,38 +391,41 @@ def qualify_forward_paper(
                 protocol.exact_build_sha,
             )
         }
-        signed_requirements = frozenset(
-            qualification_receipt.attestation.requirement_ids
-        )
+        signed_requirements = frozenset(attestation.requirement_ids)
         if signed_refs != expected_refs:
             reasons.append("independent_forward_paper_evidence_set_mismatch")
             status = "FAIL"
+            receipt_scope_valid = False
         if f"protocol/{protocol.protocol_hash}" not in signed_requirements:
             reasons.append("independent_forward_paper_protocol_mismatch")
             status = "FAIL"
-        try:
-            accepted = verify_canonical_qualification_attestation(
-                qualification_receipt,
-                evidence_store=evidence_store,
-                expected_source_sha=protocol.exact_build_sha,
-                expected_domain=_DOMAIN,
-                expected_gate=_GATE,
-                expected_package_id=_PACKAGE_ID,
-                expected_protocol_id=_PROTOCOL_ID,
-                expected_protocol_version=_PROTOCOL_VERSION,
-                expected_requirement_id=_REQUIREMENT_ID,
-            )
-        except (QualificationTrustError, TypeError, ValueError):
-            reasons.append("independent_forward_paper_trust_invalid")
-            status = "FAIL"
-        else:
-            if accepted.result == "FAIL":
-                reasons.append("independent_forward_paper_attestation_failed")
+            receipt_scope_valid = False
+        if receipt_scope_valid:
+            try:
+                accepted = verify_canonical_qualification_attestation(
+                    qualification_receipt,
+                    evidence_store=evidence_store,
+                    expected_source_sha=protocol.exact_build_sha,
+                    expected_domain=_DOMAIN,
+                    expected_gate=_GATE,
+                    expected_package_id=_PACKAGE_ID,
+                    expected_protocol_id=_PROTOCOL_ID,
+                    expected_protocol_version=_PROTOCOL_VERSION,
+                    expected_requirement_id=_REQUIREMENT_ID,
+                )
+            except (QualificationTrustError, TypeError, ValueError):
+                reasons.append("independent_forward_paper_trust_invalid")
                 status = "FAIL"
-            elif accepted.result != "PASS":
-                reasons.append("independent_forward_paper_attestation_inconclusive")
-                if status == "PASS":
-                    status = "INCONCLUSIVE"
+            else:
+                if accepted.result == "FAIL":
+                    reasons.append("independent_forward_paper_attestation_failed")
+                    status = "FAIL"
+                elif accepted.result != "PASS":
+                    reasons.append(
+                        "independent_forward_paper_attestation_inconclusive"
+                    )
+                    if status == "PASS":
+                        status = "INCONCLUSIVE"
 
     return ForwardPaperQualificationResult(
         status=status,

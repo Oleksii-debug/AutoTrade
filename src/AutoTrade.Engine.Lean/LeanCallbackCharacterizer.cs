@@ -115,6 +115,8 @@ public sealed class LeanCallbackCharacterizer
         LeanCallbackCharacterizerState? state;
         try
         {
+            using var document = JsonDocument.Parse(json);
+            EnsureNoDuplicateJsonMembers(document.RootElement);
             state = JsonSerializer.Deserialize<LeanCallbackCharacterizerState>(
                 json,
                 StateJsonOptions);
@@ -191,6 +193,32 @@ public sealed class LeanCallbackCharacterizer
 
         result._lastArrivalUtc = state.LastArrivalUtc;
         return result;
+    }
+
+    private static void EnsureNoDuplicateJsonMembers(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var property in element.EnumerateObject())
+            {
+                if (!names.Add(property.Name))
+                {
+                    throw new InvalidDataException(
+                        $"LEAN callback restart state contains duplicate JSON member: {property.Name}.");
+                }
+                EnsureNoDuplicateJsonMembers(property.Value);
+            }
+            return;
+        }
+
+        if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                EnsureNoDuplicateJsonMembers(item);
+            }
+        }
     }
 
     private static string ComputeStateHash(LeanCallbackCharacterizerStatePayload payload)

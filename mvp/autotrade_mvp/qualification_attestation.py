@@ -6,6 +6,7 @@ import base64
 import binascii
 from hashlib import sha256
 import json
+from pathlib import Path
 import re
 from typing import Iterable, Mapping
 from uuid import UUID
@@ -18,6 +19,15 @@ from research.autotrade_research.artifacts.store import (
 
 class QualificationTrustError(ValueError):
     """Raised when qualification evidence cannot cross the trust boundary."""
+
+
+class QualificationTrustUnavailable(QualificationTrustError):
+    """Raised when the separately controlled canonical trust policy is absent."""
+
+
+_CANONICAL_QUALIFICATION_TRUST_POLICY_PATH = Path(__file__).with_name(
+    "qualification_trust_policy.json"
+)
 
 
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -617,6 +627,34 @@ def parse_qualification_trust_policy(
     )
 
 
+def load_canonical_qualification_trust_policy() -> QualificationTrustPolicy:
+    """Load the release-controlled qualification policy from a fixed path.
+
+    The evidence submitter cannot supply or redirect this path through the
+    qualification API. A deployment that has not installed an independently
+    reviewed public trust policy cannot produce terminal signed-trust PASS.
+    """
+
+    path = _CANONICAL_QUALIFICATION_TRUST_POLICY_PATH
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError as error:
+        raise QualificationTrustUnavailable(
+            "canonical qualification trust policy is not configured"
+        ) from error
+    except OSError as error:
+        raise QualificationTrustUnavailable(
+            "canonical qualification trust policy is unavailable"
+        ) from error
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise QualificationTrustError(
+            "canonical qualification trust policy is malformed"
+        ) from error
+    return parse_qualification_trust_policy(payload)
+
+
 def parse_signed_qualification_attestation(
     value: object,
 ) -> SignedQualificationAttestation:
@@ -727,6 +765,7 @@ class AcceptedQualificationAttestation:
     attestation_id: str
     attestation_digest: str
     policy_id: str
+    policy_version: str
     trust_root_id: str
     result: str
     source_sha: str
@@ -989,6 +1028,7 @@ def verify_qualification_attestation(
         attestation_id=attestation.attestation_id,
         attestation_digest=attestation.content_digest,
         policy_id=policy.policy_id,
+        policy_version=policy.policy_version,
         trust_root_id=root.root_id,
         result=attestation.result,
         source_sha=attestation.source_sha,
@@ -1001,3 +1041,43 @@ def verify_qualification_attestation(
         release_artifact_id=attestation.release_artifact_id,
         release_artifact_sha256=attestation.release_artifact_sha256,
     )
+
+def verify_canonical_qualification_attestation(
+    receipt: SignedQualificationAttestation,
+    *,
+    evidence_store: ArtifactStore,
+    expected_source_sha: str,
+    expected_domain: str,
+    expected_gate: str,
+    expected_package_id: str,
+    expected_protocol_id: str,
+    expected_protocol_version: str,
+    expected_requirement_id: str,
+    expected_release_artifact_id: str | None = None,
+    expected_release_artifact_sha256: str | None = None,
+) -> AcceptedQualificationAttestation:
+    """Verify a receipt only against the separately controlled canonical policy.
+
+    Candidate/evidence callers provide no trust policy and no expected pin.
+    Policy identity/version are derived only after loading the fixed
+    release-controlled policy file.
+    """
+
+    policy = load_canonical_qualification_trust_policy()
+    return verify_qualification_attestation(
+        receipt,
+        policy=policy,
+        evidence_store=evidence_store,
+        expected_policy_id=policy.policy_id,
+        expected_policy_version=policy.policy_version,
+        expected_source_sha=expected_source_sha,
+        expected_domain=expected_domain,
+        expected_gate=expected_gate,
+        expected_package_id=expected_package_id,
+        expected_protocol_id=expected_protocol_id,
+        expected_protocol_version=expected_protocol_version,
+        expected_requirement_id=expected_requirement_id,
+        expected_release_artifact_id=expected_release_artifact_id,
+        expected_release_artifact_sha256=expected_release_artifact_sha256,
+    )
+

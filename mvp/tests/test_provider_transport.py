@@ -230,14 +230,19 @@ def alpaca_prepared_request(client_order_id="at-alpaca-1"):
     )
 
 
-def whitebit_trade_handle(*, account_id="acct-wb"):
+def whitebit_trade_handle(
+    *,
+    account_id="acct-wb",
+    handle_id="cred-whitebit-trade",
+    generation=1,
+):
     return PersistentCredentialHandle(
-        handle_id="cred-whitebit-trade",
+        handle_id=handle_id,
         account_id=account_id,
         provider="WHITEBIT",
         environment="LIVE",
         purpose="TRADE",
-        generation=1,
+        generation=generation,
     )
 
 
@@ -645,6 +650,7 @@ class AlpacaProviderTransportTests(unittest.TestCase):
 class WhiteBitProviderTransportTests(unittest.TestCase):
     def test_durable_nonce_survives_restart_and_clock_regression(self):
         fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+        provider_key = "api-key-SECRET"
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
             first = WhiteBitDurableNonceAllocator(
@@ -654,7 +660,10 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 clock_millis=lambda: 1_700_000_000_000,
                 clock_utc=lambda: fixed,
             )
-            self.assertEqual(first.allocate(), 1_700_000_000_000)
+            self.assertEqual(
+                first.for_provider_api_key(provider_key).allocate(),
+                1_700_000_000_000,
+            )
 
             reopened = WhiteBitDurableNonceAllocator(
                 journal=JournalStore(path),
@@ -663,15 +672,82 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 clock_millis=lambda: 1_699_999_999_000,
                 clock_utc=lambda: fixed + timedelta(seconds=1),
             )
-            self.assertEqual(reopened.allocate(), 1_700_000_000_001)
+            self.assertEqual(
+                reopened.for_provider_api_key(provider_key).allocate(),
+                1_700_000_000_001,
+            )
+            aggregate_id = reopened.aggregate_id_for_provider_api_key(provider_key)
             events = JournalStore(path).load_events(
                 "provider_nonce",
-                reopened.aggregate_id,
+                aggregate_id,
             )
             self.assertEqual(
                 [item["payload"]["nonce"] for item in events],
                 [1_700_000_000_000, 1_700_000_000_001],
             )
+            fingerprint = reopened.provider_api_key_fingerprint(provider_key)
+            self.assertEqual(
+                {item["payload"]["provider_api_key_fingerprint"] for item in events},
+                {fingerprint},
+            )
+            self.assertNotIn(provider_key, json.dumps(events, sort_keys=True))
+
+    def test_provider_key_nonce_domain_inherits_legacy_account_high_water(self):
+        fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal = JournalStore(path)
+            legacy = _DurableProviderNonceAllocator(
+                provider_id="WHITEBIT",
+                display_name="WhiteBIT",
+                journal=journal,
+                account_id="acct-wb",
+                environment="LIVE",
+                clock_millis=lambda: 1_700_000_000_100,
+                clock_utc=lambda: fixed,
+            )
+            self.assertEqual(legacy.allocate(), 1_700_000_000_100)
+
+            migrated = WhiteBitDurableNonceAllocator(
+                journal=JournalStore(path),
+                account_id="acct-wb",
+                environment="LIVE",
+                clock_millis=lambda: 1_699_999_000_000,
+                clock_utc=lambda: fixed + timedelta(seconds=1),
+            )
+            keyed = migrated.for_provider_api_key("api-key-SECRET")
+            self.assertEqual(keyed.allocate(), 1_700_000_000_101)
+            self.assertEqual(migrated.legacy_nonce_floor, 1_700_000_000_100)
+
+    def test_provider_key_nonce_domain_rejects_cross_account_aliasing(self):
+        fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+        provider_key = "shared-provider-key"
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            first = WhiteBitDurableNonceAllocator(
+                journal=JournalStore(path),
+                account_id="acct-wb-a",
+                environment="LIVE",
+                clock_millis=lambda: 1_700_000_000_000,
+                clock_utc=lambda: fixed,
+            )
+            second = WhiteBitDurableNonceAllocator(
+                journal=JournalStore(path),
+                account_id="acct-wb-b",
+                environment="LIVE",
+                clock_millis=lambda: 1_700_000_000_001,
+                clock_utc=lambda: fixed + timedelta(milliseconds=1),
+            )
+            self.assertEqual(
+                first.aggregate_id_for_provider_api_key(provider_key),
+                second.aggregate_id_for_provider_api_key(provider_key),
+            )
+            first.for_provider_api_key(provider_key).allocate()
+            with self.assertRaisesRegex(
+                ProviderTransportError,
+                "scope does not match allocator",
+            ):
+                second.for_provider_api_key(provider_key).allocate()
 
     def test_whitebit_live_transport_requires_quota_gate(self):
         events = []
@@ -703,7 +779,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 )
             self.assertEqual(events, [])
             self.assertEqual(
-                journal.load_events("provider_nonce", allocator.aggregate_id),
+                journal.load_events(\n                    "provider_nonce",\n                    allocator.aggregate_id_for_provider_api_key("api-key-SECRET"),\n                ),
                 [],
             )
 
@@ -743,7 +819,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
 
             self.assertEqual(
                 events,
-                ["quota", "nonce", "resolve", "guard", "wire"],
+                ["quota", "resolve", "nonce", "guard", "wire"],
             )
             self.assertEqual(response.payload, {"orderId": "123"})
             self.assertEqual(len(wire.requests), 1)
@@ -786,6 +862,79 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                     wire_client=RecordingWire(calls),
                 )
             self.assertEqual(calls, [])
+
+    def test_whitebit_same_provider_key_shares_nonce_domain_across_handle_generations(self):
+        fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+        events = []
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            wire = RecordingWire(events, response=b'{"orderId":"123"}')
+            first_allocator = WhiteBitDurableNonceAllocator(
+                journal=JournalStore(path),
+                account_id="acct-wb",
+                environment="LIVE",
+                clock_millis=lambda: 1_700_000_000_000,
+                clock_utc=lambda: fixed,
+            )
+            second_allocator = WhiteBitDurableNonceAllocator(
+                journal=JournalStore(path),
+                account_id="acct-wb",
+                environment="LIVE",
+                clock_millis=lambda: 1_700_000_000_000,
+                clock_utc=lambda: fixed + timedelta(milliseconds=1),
+            )
+            first = WhiteBitHttpTransport(
+                policy=WHITEBIT_ENDPOINT_POLICIES["LIVE"],
+                account_id="acct-wb",
+                capability_snapshot_id="wb-cap-1",
+                secret_resolver=FakeSecretResolver(events),
+                credential_handle=whitebit_trade_handle(
+                    handle_id="cred-whitebit-a",
+                    generation=1,
+                ),
+                session_token="session-1",
+                origin="autotrade://execution",
+                execution_identity="sender-1",
+                nonce_allocator=first_allocator,
+                quota_gate=lambda *_args: None,
+                wire_client=wire,
+            )
+            second = WhiteBitHttpTransport(
+                policy=WHITEBIT_ENDPOINT_POLICIES["LIVE"],
+                account_id="acct-wb",
+                capability_snapshot_id="wb-cap-1",
+                secret_resolver=FakeSecretResolver(events),
+                credential_handle=whitebit_trade_handle(
+                    handle_id="cred-whitebit-b",
+                    generation=2,
+                ),
+                session_token="session-2",
+                origin="autotrade://execution",
+                execution_identity="sender-2",
+                nonce_allocator=second_allocator,
+                quota_gate=lambda *_args: None,
+                wire_client=wire,
+            )
+
+            first(
+                "at-whitebit-generation-one",
+                whitebit_prepared_request("at-whitebit-generation-one"),
+                lambda: None,
+            )
+            second(
+                "at-whitebit-generation-two",
+                whitebit_prepared_request("at-whitebit-generation-two"),
+                lambda: None,
+            )
+            nonces = [json.loads(request.body)["nonce"] for request in wire.requests]
+            self.assertEqual(
+                nonces,
+                [1_700_000_000_000, 1_700_000_000_001],
+            )
+            self.assertEqual(
+                first_allocator.aggregate_id_for_provider_api_key("api-key-SECRET"),
+                second_allocator.aggregate_id_for_provider_api_key("api-key-SECRET"),
+            )
 
     def test_whitebit_concurrent_sends_cannot_overtake_nonce_order(self):
         fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
@@ -917,7 +1066,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
             self.assertEqual(wire.requests, [])
             nonce_events = journal.load_events(
                 "provider_nonce",
-                allocator.aggregate_id,
+                allocator.aggregate_id_for_provider_api_key("api-key-SECRET"),
             )
             self.assertEqual(len(nonce_events), 1)
 
@@ -960,7 +1109,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
             self.assertEqual(
                 JournalStore(f"{directory}/journal.sqlite3").load_events(
                     "provider_nonce",
-                    allocator.aggregate_id,
+                    allocator.aggregate_id_for_provider_api_key("api-key-SECRET"),
                 ),
                 [],
             )
@@ -1108,7 +1257,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
             self.assertEqual(events.count("wire"), 1)
             nonce_events = store.load_events(
                 "provider_nonce",
-                allocator.aggregate_id,
+                allocator.aggregate_id_for_provider_api_key("api-key-SECRET"),
             )
             self.assertEqual(len(nonce_events), 1)
 

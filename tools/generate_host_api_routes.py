@@ -39,6 +39,97 @@ class Operation:
     parameters: tuple[str, ...]
 
 
+def _declared_path_parameters(lines: list[str]) -> tuple[str, ...]:
+    """Parse the conservative direct operation-level parameter subset.
+
+    Route generation must not infer authority from a path template alone. Every
+    placeholder must be backed by one direct OpenAPI in:path declaration with
+    the same name and required:true. References and path-level parameters are
+    deliberately unsupported here instead of being approximated.
+    """
+
+    markers = [
+        index for index, line in enumerate(lines)
+        if line == "      parameters:"
+    ]
+    if len(markers) > 1:
+        raise ValueError("OpenAPI operation contains duplicate parameters blocks")
+    if not markers:
+        return ()
+
+    body: list[str] = []
+    for line in lines[markers[0] + 1:]:
+        if line and not line.startswith("        "):
+            break
+        body.append(line)
+
+    entries: list[list[str]] = []
+    current: list[str] = []
+    for line in body:
+        if not line.strip():
+            continue
+        if line.startswith("        - "):
+            if current:
+                entries.append(current)
+            current = [line]
+            continue
+        if not current:
+            raise ValueError(
+                "unsupported OpenAPI operation parameter syntax"
+            )
+        if not line.startswith("          "):
+            raise ValueError(
+                "unsupported OpenAPI operation parameter indentation"
+            )
+        current.append(line)
+    if current:
+        entries.append(current)
+
+    path_parameters: list[str] = []
+    for entry in entries:
+        kind_match = re.fullmatch(r"        - in: ([a-z]+)", entry[0])
+        if kind_match is None:
+            raise ValueError(
+                "unsupported OpenAPI operation parameter syntax; "
+                "parameter entries must begin with canonical '- in:'"
+            )
+        direct: dict[str, str] = {}
+        for line in entry[1:]:
+            if line.startswith("            "):
+                continue
+            field_match = re.fullmatch(
+                r"          ([A-Za-z_][A-Za-z0-9_]*):\s*([^\s#]+)\s*",
+                line,
+            )
+            if field_match is None:
+                raise ValueError(
+                    "unsupported OpenAPI operation parameter field syntax"
+                )
+            key, value = field_match.groups()
+            if key in direct:
+                raise ValueError(
+                    f"duplicate OpenAPI operation parameter field: {key}"
+                )
+            direct[key] = value
+
+        if kind_match.group(1) != "path":
+            continue
+        name = direct.get("name")
+        if (
+            name is None
+            or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None
+        ):
+            raise ValueError("OpenAPI path parameter has no canonical name")
+        if direct.get("required") != "true":
+            raise ValueError(
+                f"OpenAPI path parameter {name} must be required: true"
+            )
+        if name in path_parameters:
+            raise ValueError(f"duplicate OpenAPI path parameter declaration: {name}")
+        path_parameters.append(name)
+    return tuple(path_parameters)
+
+
 def parse_operations(text: str) -> tuple[Operation, ...]:
     if not isinstance(text, str) or not text.strip():
         raise ValueError("OpenAPI document must be non-empty text")
@@ -65,9 +156,10 @@ def parse_operations(text: str) -> tuple[Operation, ...]:
     current_path: str | None = None
     current_method: str | None = None
     current_operation_id: str | None = None
+    current_operation_lines: list[str] = []
 
     def finish_operation() -> None:
-        nonlocal current_method, current_operation_id
+        nonlocal current_method, current_operation_id, current_operation_lines
         if current_method is None:
             return
         if current_path is None:
@@ -95,6 +187,14 @@ def parse_operations(text: str) -> tuple[Operation, ...]:
         residue = _PARAMETER.sub("", current_path)
         if "{" in residue or "}" in residue:
             raise ValueError(f"unsupported path-template syntax: {current_path}")
+        declared_parameters = _declared_path_parameters(current_operation_lines)
+        if set(parameters) != set(declared_parameters):
+            raise ValueError(
+                "OpenAPI path template parameters do not match direct required "
+                f"path parameter declarations for {current_method.upper()} "
+                f"{current_path}: template={sorted(parameters)} "
+                f"declared={sorted(declared_parameters)}"
+            )
         if not current_path.startswith("/api/v1/"):
             raise ValueError(
                 "host route must use canonical /api/v1/ prefix: "
@@ -112,6 +212,7 @@ def parse_operations(text: str) -> tuple[Operation, ...]:
         )
         current_method = None
         current_operation_id = None
+        current_operation_lines = []
 
     for line in lines[start:end]:
         if not line.strip() or line.lstrip().startswith("#"):
@@ -139,7 +240,16 @@ def parse_operations(text: str) -> tuple[Operation, ...]:
                 raise ValueError("OpenAPI method appeared before a path")
             current_method = method_match.group(1)
             current_operation_id = None
+            current_operation_lines = []
             continue
+        if (
+            current_path is not None
+            and current_method is None
+            and line == "    parameters:"
+        ):
+            raise ValueError(
+                "path-level OpenAPI parameters are unsupported by route generation"
+            )
         if line.startswith("    ") and not line.startswith("      "):
             candidate = line.strip()
             raw_key = candidate.split(":", 1)[0].strip()
@@ -156,6 +266,9 @@ def parse_operations(text: str) -> tuple[Operation, ...]:
                     "method keys must be canonical lowercase unquoted entries "
                     "without inline content"
                 )
+        if current_method is not None:
+            current_operation_lines.append(line)
+
         operation_match = _OPERATION.fullmatch(line)
         if operation_match:
             if current_method is None:

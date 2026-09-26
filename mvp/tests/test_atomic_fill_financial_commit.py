@@ -25,6 +25,7 @@ from mvp.autotrade_mvp.persistence import (
 )
 from mvp.autotrade_mvp.fill_accounting import (
     ProjectedFillEvidence,
+    build_provider_fill_correction_transactions,
     build_provider_fill_financial_plan,
     build_provider_fill_transaction,
 )
@@ -32,8 +33,10 @@ from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
     PreparedProviderFillBinding,
     _legacy_book_id,
+    _prepare_provider_fill_correction_binding,
     _provider_fill_binding_aggregate_id,
     _provider_fill_binding_payload,
+    _provider_fill_correction_binding_aggregate_id,
     commit_economic_batch_with_reservation_consumption,
     commit_provider_fill_with_reservation_consumption,
 )
@@ -197,6 +200,165 @@ def commit_fill(
 
 
 class ProviderFillBindingEnvironmentTests(unittest.TestCase):
+    def test_bybit_correction_binding_identity_is_provider_environment_scoped(self):
+        testnet_id = _provider_fill_correction_binding_aggregate_id(
+            provider_id="BYBIT",
+            account_id="bybit-account",
+            environment="PAPER",
+            provider_environment="TESTNET",
+            provider_execution_id="execution-1",
+        )
+        demo_id = _provider_fill_correction_binding_aggregate_id(
+            provider_id="BYBIT",
+            account_id="bybit-account",
+            environment="PAPER",
+            provider_environment="DEMO",
+            provider_execution_id="execution-1",
+        )
+        self.assertNotEqual(testnet_id, demo_id)
+        with self.assertRaisesRegex(
+            AccountingConflict,
+            "explicit provider_environment",
+        ):
+            _provider_fill_correction_binding_aggregate_id(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_execution_id="execution-1",
+            )
+
+    def test_bybit_testnet_correction_recovers_exact_initial_binding(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            economics = DurableProviderEconomicBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            reservations = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id="bybit-account",
+            )
+            reservations.reserve(
+                command_id="reserve-bybit-testnet",
+                idempotency_key="reserve-bybit-testnet",
+                reservation_id="bybit-reservation",
+                intent_id="bybit-intent",
+                requirements={"CASH:USDT": "150"},
+                available={"CASH:USDT": "1000"},
+            )
+            original_projected = ProjectedFillEvidence.create(
+                fill_id="bybit-fill-1",
+                provider_execution_id="bybit-execution-1",
+                intent_id="bybit-intent",
+                client_order_id="bybit-client-1",
+                side="BUY",
+                quantity="1",
+                price="100",
+            )
+            original_provider = ProviderFillEvidence.create(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                provider_execution_id="bybit-execution-1",
+                client_order_id="bybit-client-1",
+                instrument="BTCUSDT",
+                quantity="1",
+                price="100",
+                fee_amount="0",
+                fee_currency="USDT",
+                trade_time="2026-09-25T09:00:00Z",
+                side="BUY",
+            )
+            self.assertTrue(
+                commit_provider_fill_with_reservation_consumption(
+                    economics,
+                    reservations,
+                    command_id="initial-bybit-fill",
+                    idempotency_key="initial-bybit-fill",
+                    reservation_id="bybit-reservation",
+                    projected_fill=original_projected,
+                    provider_fill=original_provider,
+                    expected_instrument="BTCUSDT",
+                    settlement_currency="USDT",
+                    committed_at="2026-09-25T09:00:01Z",
+                )
+            )
+            corrected_projected = ProjectedFillEvidence.create(
+                fill_id="bybit-fill-1-r2",
+                provider_execution_id="bybit-execution-1",
+                intent_id="bybit-intent",
+                client_order_id="bybit-client-1",
+                side="BUY",
+                quantity="1",
+                price="110",
+                provider_revision="r2",
+                correction_of="bybit-fill-1",
+            )
+            corrected_provider = ProviderFillEvidence.create(
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                provider_execution_id="bybit-execution-1",
+                client_order_id="bybit-client-1",
+                instrument="BTCUSDT",
+                quantity="1",
+                price="110",
+                fee_amount="0",
+                fee_currency="USDT",
+                trade_time="2026-09-25T09:00:00Z",
+                side="BUY",
+            )
+            _, replacement = build_provider_fill_correction_transactions(
+                book=economics,
+                provider_id="BYBIT",
+                original_projected_fill=original_projected,
+                original_provider_fill=original_provider,
+                corrected_projected_fill=corrected_projected,
+                corrected_provider_fill=corrected_provider,
+                expected_instrument="BTCUSDT",
+                settlement_currency="USDT",
+                correction_observed_at="2026-09-25T09:00:02Z",
+            )
+            binding = _prepare_provider_fill_correction_binding(
+                economics,
+                reservations,
+                reservation_id="bybit-reservation",
+                original_projected_fill=original_projected,
+                original_provider_fill=original_provider,
+                corrected_projected_fill=corrected_projected,
+                corrected_provider_fill=corrected_provider,
+                replacement=replacement,
+                asset_family="CASH_EQUITY",
+                committed_at="2026-09-25T09:00:03Z",
+            )
+            self.assertEqual(binding.request["provider_environment"], "TESTNET")
+            self.assertEqual(
+                binding.aggregate_id,
+                _provider_fill_correction_binding_aggregate_id(
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    provider_execution_id="bybit-execution-1",
+                ),
+            )
+            self.assertNotEqual(
+                binding.aggregate_id,
+                _provider_fill_correction_binding_aggregate_id(
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="DEMO",
+                    provider_execution_id="bybit-execution-1",
+                ),
+            )
+
     def test_bybit_binding_preserves_exact_provider_environment(self):
         testnet_fill = ProviderFillEvidence.create(
             provider_id="BYBIT",

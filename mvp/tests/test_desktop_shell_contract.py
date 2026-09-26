@@ -75,7 +75,7 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertNotIn("UpdateManager", main_body)
         self.assertNotIn("ApplyUpdates", main_body)
         self.assertNotIn("WaitExitThenApplyUpdates", main_body)
-        self.assertNotIn("OnStartup(", main_body)
+        self.assertNotRegex(main_body, r"\\bOnStartup\\s*\\(")
 
     def test_native_surface_exposes_copyable_host_account_environment_and_evidence(self):
         text = XAML.read_text(encoding="utf-8")

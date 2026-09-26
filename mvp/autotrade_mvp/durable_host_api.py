@@ -477,6 +477,7 @@ class JournalBackedHostCommandStore:
                         self.account_id,
                         self.environment,
                         accepted_at,
+                        affected_refs,
                         evidence,
                     )
                 operations[operation_id] = OperationResult(
@@ -537,6 +538,7 @@ class JournalBackedHostCommandStore:
                 self.account_id,
                 self.environment,
                 accepted_at,
+                normalized_refs,
                 normalized_evidence,
             )
         if (

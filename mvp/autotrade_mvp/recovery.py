@@ -916,28 +916,13 @@ class RecoveryController:
         self.state = HostState.RECOVERING
         return self.owner
 
-    def _runtime_pressure_only(self) -> bool:
-        return (
-            self.state is HostState.DEGRADED
-            and self.runtime_overloaded
-            and self.reason_codes == {"runtime_overload"}
-            and self.provider_reconciled
-            and not self.unresolved_attempts
-            and self.storage_writable
-            and self.clock_trusted
-        )
-
     def validate_sender(
         self,
         owner_id: str,
         owner_epoch: int,
-        *,
-        risk_reducing: bool = False,
     ) -> None:
         if not isinstance(owner_epoch, int) or isinstance(owner_epoch, bool) or owner_epoch < 1:
             raise ValueError("owner_epoch must be a positive integer")
-        if type(risk_reducing) is not bool:
-            raise TypeError("risk_reducing must be a boolean")
         if self.owner is None:
             raise PermissionError("No active sender")
         self._require_current_durable_owner()
@@ -945,20 +930,17 @@ class RecoveryController:
             raise PermissionError("Sender fence mismatch")
         if self.state is HostState.READY:
             return
-        if risk_reducing and self._runtime_pressure_only():
-            return
+        # Runtime overload is fail-closed here. A protective-action exception
+        # must be bound to durable financial admission evidence, not a caller-
+        # supplied boolean at the recovery fence.
         raise PermissionError("Host is not ready for new sends")
 
     def validate_admission(
         self,
         owner_epoch: int,
-        *,
-        risk_reducing: bool = False,
     ) -> None:
         if not isinstance(owner_epoch, int) or isinstance(owner_epoch, bool) or owner_epoch < 1:
             raise ValueError("owner_epoch must be a positive integer")
-        if type(risk_reducing) is not bool:
-            raise TypeError("risk_reducing must be a boolean")
         if self.owner is not None:
             self._require_current_durable_owner()
         if self.owner is None or owner_epoch != self.owner.epoch:
@@ -970,8 +952,6 @@ class RecoveryController:
         if self.unresolved_attempts:
             raise PermissionError("External uncertainty is unresolved")
         if self.state is HostState.READY:
-            return
-        if risk_reducing and self._runtime_pressure_only():
             return
         raise PermissionError("Host is not ready")
 

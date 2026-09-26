@@ -1006,6 +1006,87 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 filter_items=(),
             )
 
+    def test_open_orders_snapshot_requires_unfiltered_exact_observation(self):
+        observation = authenticated_activity_observation(
+            "/0/private/OpenOrders",
+            {
+                "error": [],
+                "result": {"open": {"O-2": {}, "O-1": {}}},
+            },
+            query={"trades": "true"},
+        )
+        snapshot = open_orders_snapshot_from_observation(observation)
+        self.assertEqual(snapshot.account_id, "paper-1")
+        self.assertEqual(snapshot.environment, "PAPER")
+        self.assertEqual(snapshot.order_ids, ("O-1", "O-2"))
+        self.assertTrue(snapshot.complete_for_account)
+        self.assertEqual(snapshot.evidence_ref, observation.evidence_ref)
+
+        for query in (
+            {"userref": "1"},
+            {"cl_ord_id": "client-1"},
+        ):
+            with self.subTest(query=query), self.assertRaisesRegex(
+                KrakenSpotAdapterError,
+                "cannot prove account-wide completeness",
+            ):
+                open_orders_snapshot_from_observation(
+                    authenticated_activity_observation(
+                        "/0/private/OpenOrders",
+                        {"error": [], "result": {"open": {}}},
+                        query=query,
+                    )
+                )
+
+        with self.assertRaisesRegex(
+            KrakenSpotAdapterError,
+            "exact response observation",
+        ):
+            KrakenSpotOpenOrdersSnapshotEvidence(
+                account_id="paper-1",
+                environment="PAPER",
+                evidence_ref="provider-read:sha256:" + "0" * 64,
+                order_ids=(),
+                filter_items=(),
+            )
+
+    def test_kraken_pagination_rejects_cross_account_scope(self):
+        first = pagination_page_from_observation(
+            trade_history_observation(
+                {
+                    "error": [],
+                    "result": {
+                        "trades": {"T-1": {}},
+                        "count": 2,
+                    },
+                },
+                account_id="paper-1",
+                query={"ofs": "0", "limit": "1"},
+            ),
+            surface="EXECUTIONS",
+        )
+        second = pagination_page_from_observation(
+            trade_history_observation(
+                {
+                    "error": [],
+                    "result": {
+                        "trades": {"T-2": {}},
+                        "count": 2,
+                    },
+                },
+                account_id="paper-2",
+                query={"ofs": "1", "limit": "1"},
+            ),
+            surface="EXECUTIONS",
+        )
+        coverage = KrakenSpotPaginationCoverage(surface="EXECUTIONS")
+        coverage.add_page(first)
+        with self.assertRaisesRegex(
+            KrakenSpotAdapterError,
+            "account/environment scope changed",
+        ):
+            coverage.add_page(second)
+
     def test_absence_evidence_consumes_concrete_kraken_pagination_coverages(self):
         order_history = KrakenSpotPaginationCoverage(surface="ORDER_HISTORY")
         order_history.add_page(

@@ -25,6 +25,12 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def _symlink_or_skip(self, link: Path, target: Path):
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError) as error:
+            self.skipTest(f"symlink creation unavailable: {error}")
+
     def provenance(self, *, eligible=False, source_sha=None):
         path = self.root / "provenance.json"
         blockers = [] if eligible else [
@@ -625,6 +631,97 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
             "runtime.bin",
             {item["path"] for item in result["manifest"]["files"]},
         )
+
+    def test_bundle_output_symlink_is_rejected_without_touching_target(self):
+        victim = self.root / "victim-bundle.bin"
+        victim.write_bytes(b"do-not-touch")
+        output = self.root / "diagnostics.zip"
+        self._symlink_or_skip(output, victim)
+
+        with self.assertRaisesRegex(BundleError, "bundle output cannot be a symlink"):
+            build_bundle(
+                staging=self.staging,
+                output=output,
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+
+        self.assertEqual(victim.read_bytes(), b"do-not-touch")
+
+    def test_bundle_temp_symlink_is_rejected_without_touching_target(self):
+        victim = self.root / "victim-bundle-temp.bin"
+        victim.write_bytes(b"do-not-touch")
+        output = self.root / "diagnostics.zip"
+        self._symlink_or_skip(output.with_name(output.name + ".tmp"), victim)
+
+        with self.assertRaisesRegex(
+            BundleError,
+            "bundle output temporary path cannot be a symlink",
+        ):
+            build_bundle(
+                staging=self.staging,
+                output=output,
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+
+        self.assertFalse(output.exists())
+        self.assertEqual(victim.read_bytes(), b"do-not-touch")
+
+    def test_bundle_hash_symlink_is_rejected_before_bundle_mutation(self):
+        output = self.root / "diagnostics.zip"
+        output.write_bytes(b"old-bundle")
+        victim = self.root / "victim-bundle-hash.txt"
+        victim.write_text("do-not-touch", encoding="utf-8")
+        hash_path = output.with_suffix(output.suffix + ".sha256")
+        self._symlink_or_skip(hash_path, victim)
+
+        with self.assertRaisesRegex(
+            BundleError,
+            "bundle hash output cannot be a symlink",
+        ):
+            build_bundle(
+                staging=self.staging,
+                output=output,
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+
+        self.assertEqual(output.read_bytes(), b"old-bundle")
+        self.assertEqual(victim.read_text(encoding="utf-8"), "do-not-touch")
+
+    def test_bundle_hash_temp_symlink_is_rejected_before_bundle_mutation(self):
+        output = self.root / "diagnostics.zip"
+        output.write_bytes(b"old-bundle")
+        victim = self.root / "victim-bundle-hash-temp.txt"
+        victim.write_text("do-not-touch", encoding="utf-8")
+        hash_path = output.with_suffix(output.suffix + ".sha256")
+        self._symlink_or_skip(
+            hash_path.with_name(hash_path.name + ".tmp"),
+            victim,
+        )
+
+        with self.assertRaisesRegex(
+            BundleError,
+            "bundle hash output temporary path cannot be a symlink",
+        ):
+            build_bundle(
+                staging=self.staging,
+                output=output,
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+
+        self.assertEqual(output.read_bytes(), b"old-bundle")
+        self.assertEqual(victim.read_text(encoding="utf-8"), "do-not-touch")
 
     def test_hash_sidecar_publish_removes_stale_temporary_file(self):
         provenance = self.provenance(eligible=False)

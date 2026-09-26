@@ -495,6 +495,49 @@ class ProductCompletionGateTests(unittest.TestCase):
                         canonical_paths=(trust_policy, requirements),
                     )
 
+    def test_exact_source_ignores_inherited_git_work_tree_redirect(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "source"
+            root.mkdir()
+            source_sha, requirements = _initialize_exact_source_test_repo(root)
+            trust_policy = (
+                root
+                / "mvp"
+                / "autotrade_mvp"
+                / "qualification_trust_policy.json"
+            )
+
+            clean_tree = Path(directory) / "decoy-work-tree"
+            clean_requirements = (
+                clean_tree / "qualification" / "nvda" / "requirements.json"
+            )
+            clean_requirements.parent.mkdir(parents=True)
+            clean_requirements.write_text(
+                requirements.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+
+            requirements.write_text(
+                '{"schema_version":"weakened-real-work-tree"}\n',
+                encoding="utf-8",
+            )
+
+            with (
+                patch.object(completion_gate, "ROOT", root),
+                patch.dict(
+                    completion_gate.os.environ,
+                    {"GIT_WORK_TREE": str(clean_tree)},
+                    clear=False,
+                ),
+                self.assertRaisesRegex(
+                    ProductCompletionError,
+                    "canonical completion inputs differ from exact source checkout",
+                ),
+            ):
+                completion_gate._verify_exact_source_checkout(
+                    source_sha,
+                    canonical_paths=(trust_policy, requirements),
+                )
     def test_exact_source_rejects_dirty_nvda_requirements(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

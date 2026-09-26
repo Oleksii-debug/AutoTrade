@@ -222,6 +222,19 @@ class UntrustedResearchBoundaryTests(unittest.TestCase):
                 evidence_refs=("evidence:1",),
             )
 
+    def test_aggregate_text_budget_blocks_many_individually_valid_strings(self):
+        chunk = "x" * 1_048_576
+        with self.assertRaisesRegex(
+            ResearchBoundaryError,
+            "aggregate UTF-8 text budget",
+        ):
+            ResearchToolRequest(
+                request_id="aggregate-text-bomb",
+                tool_name="statistics",
+                requested_capabilities=("COMPUTE_STATISTICS",),
+                arguments={f"chunk-{index}": chunk for index in range(9)},
+            )
+
     def test_hostile_giant_text_and_integer_scalars_are_rejected(self):
         with self.assertRaisesRegex(ResearchBoundaryError, "text value exceeds"):
             ResearchModelResult(

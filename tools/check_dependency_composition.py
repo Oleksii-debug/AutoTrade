@@ -11,6 +11,7 @@ import json
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 import re
+import tomllib
 import xml.etree.ElementTree as ET
 
 
@@ -44,50 +45,125 @@ def is_exact_python_requirement(value: str) -> bool:
     ) is not None
 
 
-def _meaningful_requirements(path: Path) -> list[str]:
-    result: list[str] = []
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
+def _hashed_requirements(path: Path) -> list[tuple[str, tuple[str, ...]]]:
+    """Parse canonical pip requirement entries with SHA-256 artifact hashes."""
+
+    entries: list[tuple[str, tuple[str, ...]]] = []
+    logical = ""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as error:
+        raise ValueError("requirements file is unreadable") from error
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
             continue
-        result.append(line)
-    return result
+        continued = stripped.endswith("\\")
+        fragment = stripped[:-1].rstrip() if continued else stripped
+        logical = f"{logical} {fragment}".strip()
+        if continued:
+            continue
+
+        tokens = logical.split()
+        requirement = tokens[0]
+        hashes: list[str] = []
+        for token in tokens[1:]:
+            match = re.fullmatch(r"--hash=sha256:([0-9a-f]{64})", token)
+            if match is None:
+                raise ValueError(f"invalid requirement option: {token}")
+            hashes.append(match.group(1))
+        entries.append((requirement, tuple(hashes)))
+        logical = ""
+    if logical:
+        raise ValueError("unterminated requirement continuation")
+    return entries
 
 
 def _python_blockers(root: Path) -> tuple[list[str], list[str]]:
     blockers: list[str] = []
+    try:
+        entries = _hashed_requirements(root / "requirements-dev.txt")
+    except ValueError:
+        return ["UNREADABLE_PYTHON_HASH_LOCK"], []
+
     exact: list[str] = []
-    for requirement in _meaningful_requirements(root / "requirements-dev.txt"):
+    dev_requirements: list[str] = []
+    seen_requirements: set[str] = set()
+    for requirement, hashes in entries:
+        dev_requirements.append(requirement)
+        if requirement in seen_requirements:
+            blockers.append(f"DUPLICATE_PYTHON_REQUIREMENT:{requirement}")
+        seen_requirements.add(requirement)
         if is_exact_python_requirement(requirement):
             exact.append(requirement)
         else:
             blockers.append(f"NON_EXACT_PYTHON_REQUIREMENT:{requirement}")
+        if not hashes:
+            blockers.append(f"MISSING_PYTHON_REQUIREMENT_HASH:{requirement}")
+        elif len(hashes) != len(set(hashes)):
+            blockers.append(f"DUPLICATE_PYTHON_REQUIREMENT_HASH:{requirement}")
 
     pyproject = root / "research" / "pyproject.toml"
-    text = pyproject.read_text(encoding="utf-8")
-    in_build_requires = False
-    build_requires_found = False
-    for raw in text.splitlines():
-        stripped = raw.strip()
-        if stripped.startswith("["):
-            in_build_requires = stripped == "[build-system]"
-            continue
-        if in_build_requires and stripped.startswith("requires"):
-            build_requires_found = True
-            value = stripped.split("=", 1)[1].strip()
-            try:
-                items = json.loads(value)
-            except json.JSONDecodeError:
-                blockers.append("UNREADABLE_RESEARCH_BUILD_REQUIREMENTS")
-                break
-            for requirement in items:
-                if not is_exact_python_requirement(requirement):
-                    blockers.append(f"NON_EXACT_RESEARCH_BUILD_REQUIREMENT:{requirement}")
-            break
-    if not build_requires_found:
-        blockers.append("MISSING_RESEARCH_BUILD_REQUIREMENTS")
-    return blockers, exact
+    try:
+        document = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        blockers.append("UNREADABLE_RESEARCH_PYPROJECT")
+        return blockers, exact
 
+    build_requires_raw = document.get("build-system", {}).get("requires")
+    build_requires: list[str] = []
+    if not isinstance(build_requires_raw, list) or not build_requires_raw:
+        blockers.append("MISSING_RESEARCH_BUILD_REQUIREMENTS")
+    else:
+        build_requires = list(build_requires_raw)
+        for requirement in build_requires:
+            if not is_exact_python_requirement(requirement):
+                blockers.append(
+                    f"NON_EXACT_RESEARCH_BUILD_REQUIREMENT:{requirement}"
+                )
+        if not set(build_requires).issubset(set(dev_requirements)):
+            blockers.append("RESEARCH_BUILD_REQUIREMENTS_DRIFT")
+
+    test_requires_raw = (
+        document.get("project", {})
+        .get("optional-dependencies", {})
+        .get("test")
+    )
+    if not isinstance(test_requires_raw, list) or not test_requires_raw:
+        blockers.append("MISSING_RESEARCH_TEST_REQUIREMENTS")
+    else:
+        test_requires = list(test_requires_raw)
+        for requirement in test_requires:
+            if not is_exact_python_requirement(requirement):
+                blockers.append(
+                    f"NON_EXACT_RESEARCH_TEST_REQUIREMENT:{requirement}"
+                )
+        expected_tests = set(dev_requirements) - set(build_requires)
+        if set(test_requires) != expected_tests:
+            blockers.append("RESEARCH_TEST_REQUIREMENTS_DRIFT")
+
+    workflow = root / ".github" / "workflows" / "research-primitives.yml"
+    try:
+        workflow_text = workflow.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        blockers.append("UNREADABLE_RESEARCH_INSTALL_WORKFLOW")
+    else:
+        if '- "requirements-dev.txt"' not in workflow_text:
+            blockers.append("RESEARCH_HASH_LOCK_WORKFLOW_PATH_MISSING")
+        expected_hash_install = (
+            'run: "python -m pip install --disable-pip-version-check '
+            "--force-reinstall --no-deps --only-binary=:all: --require-hashes "
+            '-r requirements-dev.txt"'
+        )
+        if expected_hash_install not in workflow_text:
+            blockers.append("RESEARCH_HASHED_INSTALL_COMMAND_MISSING")
+        expected_editable_install = (
+            "run: python -m pip install --no-deps --no-build-isolation -e research"
+        )
+        if expected_editable_install not in workflow_text:
+            blockers.append("RESEARCH_EDITABLE_NO_BUILD_ISOLATION_MISSING")
+
+    return blockers, exact
 
 def _dotnet_dependency_lock_blockers(
     root: Path,

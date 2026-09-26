@@ -1494,8 +1494,8 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(order.provider_order_id, "provider-order-1")
         self.assertEqual(order.client_order_id, "client_123")
         self.assertEqual(order.order_status, "Filled")
-        self.assertEqual(order.created_at, "2026-09-24T19:59:59.000Z")
-        self.assertEqual(order.updated_at, "2026-09-24T20:00:00.000Z")
+        self.assertEqual(order.created_at, "2026-09-24T19:59:59Z")
+        self.assertEqual(order.updated_at, "2026-09-24T20:00:00Z")
         self.assertEqual(order.evidence_ref, observation.evidence_ref)
 
     def test_order_page_empty_cursor_is_terminal_but_not_absence_proof(self):

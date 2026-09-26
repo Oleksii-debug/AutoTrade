@@ -81,6 +81,26 @@ class HostCommandStateTests(unittest.TestCase):
         self.assertEqual(second.status, "ACCEPTED")
         self.assertEqual(self.store.state_version, 2)
 
+    def test_operation_identity_is_scoped_by_host_account(self):
+        first = self.store.submit(self.command())
+
+        other = HostCommandStore(
+            account_id="paper-account-2",
+            environment="PAPER",
+            session_validator=lambda session, actor, origin, action: (
+                session,
+                actor,
+            )
+            in self.sessions,
+            request_origin_provider=lambda: "https://local.autotrade.invalid",
+            max_events=3,
+        )
+        second = other.submit(
+            self.command(account_id="paper-account-2")
+        )
+
+        self.assertNotEqual(first.operation_id, second.operation_id)
+
     def test_acceptance_is_not_reported_as_financial_completion(self):
         result = self.store.submit(self.command())
         self.assertEqual(result.status, "ACCEPTED")

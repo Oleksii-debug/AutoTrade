@@ -503,7 +503,7 @@ class QualificationAttestationTests(unittest.TestCase):
 
             policy_path.unlink()
             try:
-                policy_path.symlink_to("../../provenance/hostile-policy.json")
+                policy_path.symlink_to("../../../provenance/hostile-policy.json")
             except OSError as error:
                 self.skipTest(f"working-tree symlink unavailable: {error}")
             self.assertIn("candidate.self", policy_path.read_text(encoding="utf-8"))

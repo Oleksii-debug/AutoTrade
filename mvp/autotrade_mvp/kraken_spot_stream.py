@@ -423,6 +423,25 @@ def parse_execution_frame(
 
 
 @dataclass(frozen=True)
+class KrakenSpotRestCrosscheckPlan:
+    """Deterministic REST work required before stream recovery can be trusted."""
+
+    account_id: str
+    environment: str
+    connection_generation: int
+    recovery_reason: str
+    required_endpoints: tuple[str, ...]
+    query_order_chunks: tuple[tuple[str, ...], ...]
+    evidence_refs: tuple[str, ...]
+
+    @property
+    def trading_ready(self) -> bool:
+        """Planning reconciliation never grants trading readiness."""
+
+        return False
+
+
+@dataclass(frozen=True)
 class KrakenSpotStreamRecoveryEvidence:
     """Non-authoritative handoff to the canonical reconciliation coordinator."""
 
@@ -499,6 +518,8 @@ class KrakenSpotExecutionStreamRecovery:
         self._gap_observed_sequence: int | None = None
         self._gap_evidence_ref: str | None = None
         self._recovery_reason: str | None = None
+        self._crosscheck_order_ids: set[str] = set()
+        self._crosscheck_evidence_refs: list[str] = []
 
     def begin_connection(self) -> int:
         """Start/restart a stream generation and require a fresh snapshot."""
@@ -515,6 +536,8 @@ class KrakenSpotExecutionStreamRecovery:
         self._gap_observed_sequence = None
         self._gap_evidence_ref = None
         self._recovery_reason = "fresh_subscription_required"
+        self._crosscheck_order_ids.clear()
+        self._crosscheck_evidence_refs.clear()
         return self.connection_generation
 
     def disconnect(self) -> None:
@@ -531,6 +554,8 @@ class KrakenSpotExecutionStreamRecovery:
         self._gap_observed_sequence = None
         self._gap_evidence_ref = None
         self._recovery_reason = None
+        self._crosscheck_order_ids.clear()
+        self._crosscheck_evidence_refs.clear()
 
     def apply_subscription_ack(
         self,
@@ -557,6 +582,7 @@ class KrakenSpotExecutionStreamRecovery:
                 "Kraken subscription acknowledgement scope mismatch"
             )
         self._subscription_ack_evidence_ref = acknowledgement.evidence_ref
+        self._crosscheck_evidence_refs.append(acknowledgement.evidence_ref)
         self._recovery_reason = "fresh_snapshot_required"
         self.phase = self.AWAITING_SNAPSHOT
 
@@ -578,11 +604,15 @@ class KrakenSpotExecutionStreamRecovery:
         observed: int,
         evidence_ref: str,
         reason: str,
+        order_ids: tuple[str, ...],
     ) -> None:
         self.phase = self.GAP_RECONCILIATION_REQUIRED
         self._gap_expected_sequence = expected
         self._gap_observed_sequence = observed
         self._gap_evidence_ref = evidence_ref
+        self._crosscheck_order_ids.update(order_ids)
+        if evidence_ref not in self._crosscheck_evidence_refs:
+            self._crosscheck_evidence_refs.append(evidence_ref)
         self._recovery_reason = _canonical_text(
             reason,
             name="recovery_reason",
@@ -629,6 +659,9 @@ class KrakenSpotExecutionStreamRecovery:
             self._snapshot_order_ids = tuple(
                 sorted({report.order_id for report in frame.reports})
             )
+            self._crosscheck_order_ids.update(self._snapshot_order_ids)
+            if frame.evidence_ref not in self._crosscheck_evidence_refs:
+                self._crosscheck_evidence_refs.append(frame.evidence_ref)
             self._recovery_reason = "snapshot_requires_rest_crosscheck"
             self.phase = self.REST_RECONCILIATION_REQUIRED
             return
@@ -648,6 +681,9 @@ class KrakenSpotExecutionStreamRecovery:
                 observed=frame.sequence,
                 evidence_ref=frame.evidence_ref,
                 reason="sequence_gap",
+                order_ids=tuple(
+                    sorted({report.order_id for report in frame.reports})
+                ),
             )
             return
         if len(self._buffered_updates) >= self.max_buffered_updates:
@@ -656,10 +692,54 @@ class KrakenSpotExecutionStreamRecovery:
                 observed=frame.sequence,
                 evidence_ref=frame.evidence_ref,
                 reason="buffer_exhausted",
+                order_ids=tuple(
+                    sorted({report.order_id for report in frame.reports})
+                ),
             )
             return
         self._buffered_updates.append(frame)
         self._last_sequence = frame.sequence
+        self._crosscheck_order_ids.update(
+            report.order_id for report in frame.reports
+        )
+        if frame.evidence_ref not in self._crosscheck_evidence_refs:
+            self._crosscheck_evidence_refs.append(frame.evidence_ref)
+
+    def rest_crosscheck_plan(self) -> KrakenSpotRestCrosscheckPlan:
+        """Describe exact REST cross-check work without executing or approving it."""
+
+        if self.phase not in {
+            self.REST_RECONCILIATION_REQUIRED,
+            self.GAP_RECONCILIATION_REQUIRED,
+        }:
+            raise KrakenSpotStreamError(
+                "Kraken REST cross-check plan requires stream recovery evidence"
+            )
+        if self._recovery_reason is None:
+            raise KrakenSpotStreamError(
+                "Kraken REST cross-check reason is unavailable"
+            )
+        order_ids = tuple(sorted(self._crosscheck_order_ids))
+        chunks = tuple(
+            order_ids[index : index + 50]
+            for index in range(0, len(order_ids), 50)
+        )
+        endpoints = [
+            "/0/private/OpenOrders",
+            "/0/private/ClosedOrders",
+            "/0/private/TradesHistory",
+        ]
+        if chunks:
+            endpoints.append("/0/private/QueryOrders")
+        return KrakenSpotRestCrosscheckPlan(
+            account_id=self.account_id,
+            environment=self.environment,
+            connection_generation=self.connection_generation,
+            recovery_reason=self._recovery_reason,
+            required_endpoints=tuple(endpoints),
+            query_order_chunks=chunks,
+            evidence_refs=tuple(self._crosscheck_evidence_refs),
+        )
 
     def evidence(self) -> KrakenSpotStreamRecoveryEvidence:
         """Return an immutable, explicitly non-READY reconciliation handoff."""

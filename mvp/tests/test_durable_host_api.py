@@ -242,6 +242,136 @@ class JournalBackedHostApiTests(unittest.TestCase):
         self.assertEqual(store.state_version, 0)
         self.assertEqual(store.cursor, 0)
 
+    def test_legacy_accepted_authority_command_remains_visible_but_not_executable(self):
+        journal = JournalStore(self.path)
+        payload = {
+            "command_id": "11111111-1111-1111-1111-111111111111",
+            "operation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "action": "BLOCK_NEW_EXPOSURE",
+            "actor": "alice",
+            "account_id": "paper-account-1",
+            "environment": "PAPER",
+            "phase": "QUEUED",
+            "started_at": "2026-09-24T18:00:00Z",
+            "updated_at": "2026-09-24T18:00:00Z",
+            "affected_refs": [],
+            "evidence": [],
+            "remaining_uncertainty": ["financial_outcome_not_completed"],
+        }
+        journal.append_event(
+            {
+                "event_id": "legacy-accepted",
+                "event_type": "COMMAND_ACCEPTED",
+                "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
+                "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
+                "aggregate_version": "1",
+                "payload": payload,
+                "payload_hash": payload_digest(payload),
+                "committed_at": "2026-09-24T18:00:00Z",
+            }
+        )
+
+        restarted = self.store()
+        operation = restarted.get_operation(payload["operation_id"])
+        self.assertEqual(operation.phase, "QUEUED")
+        self.assertEqual(restarted.snapshot()["operations"][payload["operation_id"]], "QUEUED")
+        with self.assertRaisesRegex(ValueError, "predates durable action payload"):
+            restarted.execute_authority_operation(payload["operation_id"])
+        self.assertEqual(restarted.state_version, 1)
+
+    def test_legacy_unverifiable_success_is_projected_as_unknown(self):
+        journal = JournalStore(self.path)
+        operation_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        accepted = {
+            "command_id": "11111111-1111-1111-1111-111111111111",
+            "operation_id": operation_id,
+            "action": "BLOCK_NEW_EXPOSURE",
+            "actor": "alice",
+            "account_id": "paper-account-1",
+            "environment": "PAPER",
+            "phase": "QUEUED",
+            "started_at": "2026-09-24T18:00:00Z",
+            "updated_at": "2026-09-24T18:00:00Z",
+            "affected_refs": [],
+            "evidence": [],
+            "remaining_uncertainty": ["financial_outcome_not_completed"],
+        }
+        succeeded = {
+            "operation_id": operation_id,
+            "phase": "SUCCEEDED",
+            "started_at": "2026-09-24T18:00:00Z",
+            "updated_at": "2026-09-24T18:00:01Z",
+            "affected_refs": ["legacy:unverified"],
+            "evidence": [{"kind": "legacy-unverified"}],
+            "remaining_uncertainty": [],
+        }
+        for version, event_id, event_type, payload in (
+            (1, "legacy-accepted", "COMMAND_ACCEPTED", accepted),
+            (2, "legacy-succeeded", "OPERATION_UPDATED", succeeded),
+        ):
+            journal.append_event(
+                {
+                    "event_id": event_id,
+                    "event_type": event_type,
+                    "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
+                    "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
+                    "aggregate_version": str(version),
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                    "committed_at": f"2026-09-24T18:00:0{version - 1}Z",
+                }
+            )
+
+        restarted = self.store()
+        operation = restarted.get_operation(operation_id)
+        self.assertEqual(operation.phase, "UNKNOWN")
+        self.assertEqual(
+            operation.remaining_uncertainty,
+            (JournalBackedHostCommandStore.LEGACY_AUTHORITY_UNCERTAINTY,),
+        )
+        events = restarted.events_after(0)
+        self.assertEqual(events[1].payload["phase"], "UNKNOWN")
+        self.assertEqual(
+            events[1].payload["remaining_uncertainty"],
+            [JournalBackedHostCommandStore.LEGACY_AUTHORITY_UNCERTAINTY],
+        )
+        self.assertEqual(journal.next_aggregate_version(
+            JournalBackedHostCommandStore.AGGREGATE_TYPE,
+            JournalBackedHostCommandStore.AGGREGATE_ID,
+        ), 3)
+
+    def test_partial_legacy_authority_payload_binding_is_corruption(self):
+        journal = JournalStore(self.path)
+        payload = {
+            "command_id": "11111111-1111-1111-1111-111111111111",
+            "operation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "action": "BLOCK_NEW_EXPOSURE",
+            "action_payload": {},
+            "actor": "alice",
+            "account_id": "paper-account-1",
+            "environment": "PAPER",
+            "phase": "QUEUED",
+            "started_at": "2026-09-24T18:00:00Z",
+            "updated_at": "2026-09-24T18:00:00Z",
+            "affected_refs": [],
+            "evidence": [],
+            "remaining_uncertainty": ["financial_outcome_not_completed"],
+        }
+        journal.append_event(
+            {
+                "event_id": "partial-binding",
+                "event_type": "COMMAND_ACCEPTED",
+                "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
+                "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
+                "aggregate_version": "1",
+                "payload": payload,
+                "payload_hash": payload_digest(payload),
+                "committed_at": "2026-09-24T18:00:00Z",
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "binding is incomplete"):
+            self.store().snapshot()
+
     def test_restart_rejects_operation_update_without_accepted_origin(self):
         journal = JournalStore(self.path)
         journal.append_event(

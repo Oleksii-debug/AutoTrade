@@ -497,6 +497,72 @@ def _ensure_empty_output_directory(output_dir: Path) -> None:
         )
 
 
+def _stage_validated_vpk_output(
+    source: Path,
+    destination: Path,
+    *,
+    expected_digest: str,
+    expected_size: int,
+) -> None:
+    """Freeze one validated vpk artifact before touching final output paths."""
+
+    name = f"Velopack output {source.name}"
+    try:
+        input_stream = _open_stable_regular_file(source, name=name)
+    except InstallerManifestError as error:
+        raise VelopackPackagingError(str(error)) from error
+
+    staged = False
+    try:
+        before = os.fstat(input_stream.fileno())
+        if before.st_size != expected_size:
+            raise VelopackPackagingError(
+                f"Velopack output changed after validation: {source.name}"
+            )
+        observed_digest = sha256()
+        observed_size = 0
+        try:
+            with destination.open("xb") as target:
+                for chunk in iter(lambda: input_stream.read(1024 * 1024), b""):
+                    target.write(chunk)
+                    observed_digest.update(chunk)
+                    observed_size += len(chunk)
+
+                try:
+                    after = _assert_open_file_identity(
+                        source,
+                        input_stream,
+                        name=name,
+                    )
+                except InstallerManifestError as error:
+                    raise VelopackPackagingError(str(error)) from error
+                if (
+                    (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+                    or before.st_size != after.st_size
+                    or before.st_mtime_ns != after.st_mtime_ns
+                    or before.st_ctime_ns != after.st_ctime_ns
+                    or observed_size != expected_size
+                    or "sha256:" + observed_digest.hexdigest() != expected_digest
+                ):
+                    raise VelopackPackagingError(
+                        f"Velopack output changed after validation: {source.name}"
+                    )
+                target.flush()
+                os.fsync(target.fileno())
+            staged = True
+        except OSError as error:
+            raise VelopackPackagingError(
+                f"Velopack output staging failed closed: {source.name}"
+            ) from error
+    finally:
+        input_stream.close()
+        if not staged:
+            try:
+                destination.unlink()
+            except FileNotFoundError:
+                pass
+
+
 def _publish_file(
     source: Path,
     destination: Path,
@@ -585,9 +651,12 @@ def build_velopack_release(
 
     with TemporaryDirectory(prefix="autotrade-velopack-pack-") as pack_root_raw, TemporaryDirectory(
         prefix="autotrade-velopack-output-"
-    ) as vpk_output_raw:
+    ) as vpk_output_raw, TemporaryDirectory(
+        prefix="autotrade-velopack-stage-"
+    ) as publication_stage_raw:
         pack_root = Path(pack_root_raw)
         vpk_output = Path(vpk_output_raw)
+        publication_stage = Path(publication_stage_raw)
         verified = _verify_and_extract_bundle(bundle, installer, pack_root)
         command = _vpk_command(
             pack_dir=pack_root,
@@ -615,8 +684,21 @@ def build_velopack_release(
             vpk_output,
             version=str(installer["version"]),
         )
-        artifacts: list[dict[str, object]] = []
+        staged_outputs: list[tuple[Path, str, int]] = []
         for source, expected_digest, expected_size in generated:
+            staged_source = publication_stage / source.name
+            _stage_validated_vpk_output(
+                source,
+                staged_source,
+                expected_digest=expected_digest,
+                expected_size=expected_size,
+            )
+            staged_outputs.append(
+                (staged_source, expected_digest, expected_size)
+            )
+
+        artifacts: list[dict[str, object]] = []
+        for source, expected_digest, expected_size in staged_outputs:
             digest, size = _publish_file(
                 source,
                 output_dir / source.name,

@@ -72,6 +72,9 @@ TERMINAL_OVERALL_STATUS = "FULL_PRODUCT_QUALIFIED"
 TERMINAL_GATE_STATUS = "QUALIFIED"
 _BANK_SCHEMA_VERSION = "1.0.0"
 _QUALIFICATION_SCHEMA_VERSION = "2.0.0"
+_SUPPORTED_QUALIFICATION_SCHEMA_VERSIONS = frozenset(
+    {"1.0.0", _QUALIFICATION_SCHEMA_VERSION}
+)
 _NVDA_STATUS_SCHEMA_VERSION = "1.0.0"
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_TEXT = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -447,10 +450,19 @@ def evaluate_completion(
         raise ProductCompletionError(
             f"unsupported work-package bank schema_version: {bank.get('schema_version')!r}"
         )
-    if qualification.get("schema_version") != _QUALIFICATION_SCHEMA_VERSION:
+    qualification_schema_version = qualification.get("schema_version")
+    if qualification_schema_version not in _SUPPORTED_QUALIFICATION_SCHEMA_VERSIONS:
         raise ProductCompletionError(
             "unsupported qualification schema_version: "
-            f"{qualification.get('schema_version')!r}"
+            f"{qualification_schema_version!r}"
+        )
+    if (
+        qualification.get("overall_status") == TERMINAL_OVERALL_STATUS
+        and qualification_schema_version != _QUALIFICATION_SCHEMA_VERSION
+    ):
+        raise ProductCompletionError(
+            "FULL_PRODUCT_QUALIFIED requires qualification schema_version "
+            f"{_QUALIFICATION_SCHEMA_VERSION!r}"
         )
     sections = _section_ids(spec_text)
     packages = bank.get("packages")

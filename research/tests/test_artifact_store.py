@@ -66,6 +66,34 @@ class ArtifactStoreTests(unittest.TestCase):
             with self.assertRaises(ArtifactIntegrityError):
                 store.read_bytes(artifact_id)
 
+    def test_read_reverifies_object_bytes_after_initial_verification(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"verified",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+            original_verify = store._verify_manifest_object
+
+            def verify_then_mutate(manifest):
+                object_path = original_verify(manifest)
+                object_path.write_bytes(b"tampered")
+                return object_path
+
+            with patch.object(
+                store,
+                "_verify_manifest_object",
+                side_effect=verify_then_mutate,
+            ):
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "changed during read",
+                ):
+                    store.read_bytes(artifact_id)
+
     def test_export_is_rights_aware(self):
         with TemporaryDirectory() as directory:
             authorized: set[tuple[str, str]] = set()

@@ -107,6 +107,98 @@ class DecisionTraceStoreTests(unittest.TestCase):
             ):
                 self.assertNotIn(leaked, raw)
 
+    def test_embedded_secrets_in_safe_named_strings_are_redacted(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = trace("trace-embedded-secrets")
+            item["attributes"] = {
+                "url": "https://provider.test/orders?api_key=abc123&symbol=BTC",
+                "message": "Authorization: CustomScheme bearer-secret",
+                "userinfo_url": "https://api-user:url-password@provider.test/orders",
+                "dsn": "host=db;password=hunter2;database=autotrade",
+                "key_material": "-----BEGIN PRIVATE KEY-----\\nsecret\\n-----END PRIVATE KEY-----",
+                "encrypted_key_material": "-----BEGIN ENCRYPTED PRIVATE KEY-----\\nencrypted-secret\\n-----END ENCRYPTED PRIVATE KEY-----",
+                "token_text": "token=plain-token-secret",
+                "session_text": "session: plain-session-secret",
+                "json_message": (
+                    '{"Authorization":"Digest json-auth-secret",'
+                    '"api_key":"json-key-secret"}'
+                ),
+                "repr_message": (
+                    "{'Authorization': 'Custom repr-auth-secret', "
+                    "'api_key': 'repr-key-secret'}"
+                ),
+                "safe": "symbol=BTC",
+            }
+            store.append(item)
+
+            raw = path.read_text(encoding="utf-8")
+            for leaked in (
+                "abc123",
+                "bearer-secret",
+                "url-password",
+                "hunter2",
+                "plain-token-secret",
+                "plain-session-secret",
+                "\\nsecret\\n",
+                "encrypted-secret",
+                "json-auth-secret",
+                "json-key-secret",
+                "repr-auth-secret",
+                "repr-key-secret",
+            ):
+                self.assertNotIn(leaked, raw)
+            persisted = json.loads(raw)
+            attrs = persisted["attributes"]
+            self.assertIn("api_key=[REDACTED]", attrs["url"])
+            self.assertIn("Authorization: [REDACTED]", attrs["message"])
+            self.assertEqual(attrs["userinfo_url"], "https://[REDACTED]@provider.test/orders")
+            self.assertIn("password=[REDACTED]", attrs["dsn"])
+            self.assertEqual(attrs["key_material"], "[REDACTED]")
+            self.assertEqual(attrs["encrypted_key_material"], "[REDACTED]")
+            self.assertIn("token=[REDACTED]", attrs["token_text"])
+            self.assertIn("session:[REDACTED]", attrs["session_text"])
+            self.assertNotIn("json-auth-secret", attrs["json_message"])
+            self.assertNotIn("json-key-secret", attrs["json_message"])
+            self.assertGreaterEqual(attrs["json_message"].count("[REDACTED]"), 2)
+            self.assertNotIn("repr-auth-secret", attrs["repr_message"])
+            self.assertNotIn("repr-key-secret", attrs["repr_message"])
+            self.assertGreaterEqual(attrs["repr_message"].count("[REDACTED]"), 2)
+            self.assertEqual(attrs["safe"], "symbol=BTC")
+
+    def test_compound_and_quoted_embedded_credentials_are_fully_redacted(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = trace("trace-compound-credentials")
+            item["attributes"] = {
+                "digest_header": (
+                    'Authorization: Digest username="api", realm="trade", '
+                    'response="digest-comma-secret"'
+                ),
+                "json_digest": (
+                    '{"Authorization":"Digest username=\\\"api\\\", '
+                    'response=\\\"json-comma-secret\\\"","safe":"ok"}'
+                ),
+                "quoted_key_with_spaces": (
+                    '{"api_key":"secret value with spaces","safe":"ok"}'
+                ),
+            }
+            store.append(item)
+
+            raw = path.read_text(encoding="utf-8")
+            for leaked in (
+                "digest-comma-secret",
+                "json-comma-secret",
+                "secret value with spaces",
+            ):
+                self.assertNotIn(leaked, raw)
+            persisted = json.loads(raw)["attributes"]
+            self.assertIn("[REDACTED]", persisted["digest_header"])
+            self.assertIn("[REDACTED]", persisted["json_digest"])
+            self.assertIn("[REDACTED]", persisted["quoted_key_with_spaces"])
+
     def test_non_finite_diagnostic_numbers_cannot_enter_durable_trace(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "decision-traces.jsonl"
@@ -125,6 +217,39 @@ class DecisionTraceStoreTests(unittest.TestCase):
             path.write_text(path.read_text(encoding="utf-8").replace('"risk_outcome":"admitted"', '"risk_outcome":"rejected"'), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "chain is corrupt"):
                 store.append(trace("trace-2"))
+
+
+    def test_whitebit_api_secret_aliases_are_redacted_without_benign_overreach(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = trace("trace-whitebit-api-secret")
+            item["attributes"] = {
+                "api_secret": "WHITEBIT-DIRECT-SECRET",
+                "api-secret": "WHITEBIT-HYPHEN-SECRET",
+                "api_secret_rotation_count": 4,
+                "token_budget": 8,
+                "message": '{"api_secret":"WHITEBIT-JSON-SECRET","safe":"ok"}',
+                "repr_message": "{'api-secret': 'WHITEBIT-REPR-SECRET', 'safe': 'ok'}",
+            }
+            store.append(item)
+
+            raw = path.read_text(encoding="utf-8")
+            for leaked in (
+                "WHITEBIT-DIRECT-SECRET",
+                "WHITEBIT-HYPHEN-SECRET",
+                "WHITEBIT-JSON-SECRET",
+                "WHITEBIT-REPR-SECRET",
+            ):
+                self.assertNotIn(leaked, raw)
+
+            attributes = json.loads(raw)["attributes"]
+            self.assertEqual(attributes["api_secret"], "[REDACTED]")
+            self.assertEqual(attributes["api-secret"], "[REDACTED]")
+            self.assertEqual(attributes["api_secret_rotation_count"], 4)
+            self.assertEqual(attributes["token_budget"], 8)
+            self.assertIn("[REDACTED]", attributes["message"])
+            self.assertIn("[REDACTED]", attributes["repr_message"])
 
 
 if __name__ == "__main__":

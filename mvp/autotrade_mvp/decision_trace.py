@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -39,6 +40,7 @@ _SENSITIVE_KEYS = {
     "refresh_token",
     "id_token",
     "api_key",
+    "api_secret",
     "x_api_key",
     "private_key",
     "private_key_pem",
@@ -56,7 +58,52 @@ def _normalized_key(value: object) -> str:
     )
 
 
+_EMBEDDED_SECRET_PATTERNS = (
+    re.compile(
+        r"""(?i)(?:["'])?\b(authorization|proxy-authorization)\b"""
+        r"""(?:["'])?\s*[:=]\s*"""
+        r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]+)"""
+    ),
+    re.compile(
+        r"(?i)\b(https?://)[^/@\s]+@"
+    ),
+    re.compile(
+        r"""(?i)(?:["'])?\b(api[_-]?key|token|access[_-]?token|refresh[_-]?token|session|session[_-]?token|"""
+        r"""secret|credential|api[_-]?secret|client[_-]?secret|private[_-]?key|password)\b(?:["'])?\s*[:=]\s*"""
+        r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^&\s;,}\]]+)"""
+    ),
+)
+
+_PRIVATE_KEY_MARKERS = (
+    "-----BEGIN PRIVATE KEY-----",
+    "-----BEGIN ENCRYPTED PRIVATE KEY-----",
+    "-----BEGIN RSA PRIVATE KEY-----",
+    "-----BEGIN DSA PRIVATE KEY-----",
+    "-----BEGIN EC PRIVATE KEY-----",
+    "-----BEGIN OPENSSH PRIVATE KEY-----",
+)
+
+
+def _redact_embedded_secret_text(value: str) -> str:
+    if any(marker in value for marker in _PRIVATE_KEY_MARKERS):
+        return "[REDACTED]"
+    redacted = value
+    for pattern in _EMBEDDED_SECRET_PATTERNS:
+        def replacement(match: re.Match[str]) -> str:
+            name = match.group(1)
+            if name.lower() in {"authorization", "proxy-authorization"}:
+                return f"{name}: [REDACTED]"
+            if name.lower().startswith("http"):
+                return f"{name}[REDACTED]@"
+            separator = "=" if "=" in match.group(0) else ":"
+            return f"{name}{separator}[REDACTED]"
+        redacted = pattern.sub(replacement, redacted)
+    return redacted
+
+
 def _redact(value: Any) -> Any:
+    if isinstance(value, str):
+        return _redact_embedded_secret_text(value)
     if isinstance(value, Mapping):
         result: dict[str, Any] = {}
         for key, item in value.items():

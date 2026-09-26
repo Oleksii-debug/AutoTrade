@@ -144,7 +144,6 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 execution_fill={
                     "fill_id": "fill-1",
                     "provider_execution_id": "exec-1",
-                    "order_ref": "c1",
                     "provider_revision": "rev-1",
                     "order_ref": "c1",
                     "intent_ref": "intent-1",
@@ -186,7 +185,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
             base_fill = {
                 "fill_id": "fill-1",
                 "provider_execution_id": "exec-1",
-                    "order_ref": "c1",
+                "order_ref": "c1",
                 "instrument_version": "instrument-v1",
                 "side": "BUY",
                 "last_quantity": {"value": "1", "unit": "unit"},
@@ -366,7 +365,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
             fill = {
                 "fill_id": "fill-1",
                 "provider_execution_id": "exec-1",
-                    "order_ref": "c1",
+                "order_ref": "c1",
                 "instrument_version": "instrument-v1",
                 "side": "BUY",
                 "last_quantity": {"value": "1", "unit": "unit"},

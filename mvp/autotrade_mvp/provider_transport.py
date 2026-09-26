@@ -15,6 +15,7 @@ another dispatcher.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -23,6 +24,7 @@ import base64
 import binascii
 import hmac
 import json
+import os
 from threading import Lock
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Protocol
@@ -37,7 +39,10 @@ from urllib.request import (
 from .capabilities import CapabilityRegistry, CapabilitySnapshot
 from .dispatch import ExactJsonTransportResponse
 from .persistence import JournalStore, payload_digest
-from .kraken_spot import validate_spot_client_order_id
+from .kraken_spot import (
+    spot_submission_requires_reconciliation,
+    validate_spot_client_order_id,
+)
 from .whitebit import sign_private_request, validate_client_order_id
 from .provider_core import (
     AuthenticatedReadQueryBinding,
@@ -93,6 +98,37 @@ def _serialized_nonce_send_lock(aggregate_id: str):
             lock = Lock()
             _NONCE_SEND_LOCKS[aggregate_id] = lock
         return lock
+
+
+@contextmanager
+def _exclusive_nonce_send_lock(thread_lock, lock_path):
+    """Fence one credential's nonce allocation through wire send across processes."""
+
+    with thread_lock:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+b") as stream:
+            stream.seek(0, os.SEEK_END)
+            if stream.tell() == 0:
+                stream.write(b"0")
+                stream.flush()
+            stream.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+                try:
+                    yield
+                finally:
+                    stream.seek(0)
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 def _text(value: object, *, name: str) -> str:
@@ -851,7 +887,13 @@ class _DurableProviderNonceAllocator:
             + ":"
             + sha256(aggregate_material.encode("utf-8")).hexdigest()
         )
-        self._send_lock = _serialized_nonce_send_lock(self.aggregate_id)
+        self._send_thread_lock = _serialized_nonce_send_lock(self.aggregate_id)
+        self._send_lock_path = self.journal.path.with_name(
+            self.journal.path.name
+            + ".nonce-send-"
+            + sha256(self.aggregate_id.encode("utf-8")).hexdigest()[:24]
+            + ".lock"
+        )
 
     def _history(self) -> tuple[int, int]:
         events = self.journal.load_events(self.AGGREGATE_TYPE, self.aggregate_id)
@@ -981,7 +1023,10 @@ class _DurableProviderNonceAllocator:
         )
 
     def serialized_send(self):
-        return self._send_lock
+        return _exclusive_nonce_send_lock(
+            self._send_thread_lock,
+            self._send_lock_path,
+        )
 
     def __call__(self) -> int:
         return self.allocate()
@@ -1623,7 +1668,15 @@ class KrakenSpotHttpTransport:
 
             final_guard()
             wire_response = self.wire_client.send(signed)
-            return _exact_trading_response(wire_response)
+            exact = _exact_trading_response(wire_response)
+            if spot_submission_requires_reconciliation(exact.payload):
+                return ExactJsonTransportResponse(
+                    exact.response_bytes,
+                    http_status=exact.http_status,
+                    requires_reconciliation=True,
+                    ambiguity_reason="kraken_spot_deadline_elapsed",
+                )
+            return exact
 
 
 @dataclass(frozen=True)

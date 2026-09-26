@@ -1210,6 +1210,41 @@ class KrakenSpotProviderTransportTests(unittest.TestCase):
             self.assertEqual(resolver.calls, [])
             self.assertEqual(wire.requests, [])
 
+    def test_nonce_send_lock_identity_is_stable_across_allocator_instances(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            handle = kraken_trade_handle()
+            first = KrakenSpotDurableNonceAllocator(
+                journal=JournalStore(path),
+                account_id="acct-kraken",
+                environment="LIVE",
+                credential_handle=handle,
+                clock_millis=lambda: 100,
+            )
+            second = KrakenSpotDurableNonceAllocator(
+                journal=JournalStore(path),
+                account_id="acct-kraken",
+                environment="LIVE",
+                credential_handle=handle,
+                clock_millis=lambda: 100,
+            )
+            rotated = KrakenSpotDurableNonceAllocator(
+                journal=JournalStore(path),
+                account_id="acct-kraken",
+                environment="LIVE",
+                credential_handle=PersistentCredentialHandle(
+                    handle_id=handle.handle_id,
+                    account_id=handle.account_id,
+                    provider=handle.provider,
+                    environment=handle.environment,
+                    purpose=handle.purpose,
+                    generation=2,
+                ),
+                clock_millis=lambda: 100,
+            )
+            self.assertEqual(first._send_lock_path, second._send_lock_path)
+            self.assertNotEqual(first._send_lock_path, rotated._send_lock_path)
+
     def test_same_credential_concurrent_sends_serialize_nonce_through_wire(self):
         events = []
         first_wire_entered = Event()
@@ -1313,6 +1348,95 @@ class KrakenSpotProviderTransportTests(unittest.TestCase):
                     self.assertEqual(events, [])
                     self.assertEqual(resolver.calls, [])
                     self.assertEqual(wire.requests, [])
+
+    def test_deadline_elapsed_exact_response_is_durable_unknown_without_resend(self):
+        events = []
+        now = "2026-09-26T00:00:00Z"
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            raw = b'{"error":["EService:Deadline elapsed"],"result":null}'
+            wire = RecordingWire(events, response=raw)
+            transport, resolver, allocator = self.make_transport(
+                journal=store,
+                events=events,
+                wire=wire,
+            )
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="LIVE",
+                account_id="acct-kraken",
+            )
+            intent_id = "kraken-live-deadline-intent"
+            client_id = stable_client_order_id(
+                "KRAKEN",
+                intent_id,
+                environment="LIVE",
+                account_id="acct-kraken",
+                max_length=36,
+                client_id_format="UUID",
+            )
+            kwargs = {
+                "attempt_id": "22222222-2222-4222-8222-222222222222",
+                "intent_id": intent_id,
+                "intent_hash": "sha256:" + "2" * 64,
+                "provider": "KRAKEN",
+                "request": kraken_prepared_request(client_id),
+                "now": now,
+                "authority_check": lambda _provider, _environment: (
+                    True,
+                    "allowed",
+                ),
+                "transport_send": transport,
+                "client_id_max_length": 36,
+                "client_id_format": "UUID",
+                "final_barrier_clock": lambda: now,
+            }
+
+            outcome = dispatcher.dispatch(**kwargs)
+            self.assertEqual(outcome.status, "UNKNOWN")
+            self.assertEqual(outcome.reason, "kraken_spot_deadline_elapsed")
+            self.assertEqual(len(wire.requests), 1)
+
+            binding = load_submission_response_binding(
+                store,
+                environment="LIVE",
+                account_id="acct-kraken",
+                attempt_id=kwargs["attempt_id"],
+            )
+            self.assertEqual(binding.response_bytes, raw)
+            self.assertEqual(
+                binding.payload,
+                {"error": ["EService:Deadline elapsed"], "result": None},
+            )
+            terminal = store.load_events(
+                "submission_attempt",
+                binding.aggregate_id,
+            )[-1]
+            self.assertEqual(terminal["event_type"], "SubmissionUnknown")
+            self.assertEqual(
+                terminal["payload"]["response_sha256"],
+                binding.response_sha256,
+            )
+
+            events_before_restart = list(events)
+            repeated = dispatcher.dispatch(**kwargs)
+            self.assertEqual(repeated.status, "UNKNOWN")
+            self.assertEqual(
+                repeated.reason,
+                "kraken_spot_deadline_elapsed",
+            )
+            self.assertEqual(events, events_before_restart)
+            self.assertEqual(len(wire.requests), 1)
+            self.assertEqual(len(resolver.calls), 1)
+            self.assertEqual(
+                len(
+                    store.load_events(
+                        "provider_nonce",
+                        allocator.aggregate_id,
+                    )
+                ),
+                1,
+            )
 
     def test_post_barrier_wire_failure_is_unknown_without_retry(self):
         events = []

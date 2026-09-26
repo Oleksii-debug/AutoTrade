@@ -25,6 +25,7 @@ from mvp.autotrade_mvp.provider_core import (
     prepare_authenticated_read_query,
 )
 from mvp.autotrade_mvp.kraken_spot import (
+    KRAKEN_SPOT_DOCS,
     KrakenSpotAbsenceEvidence,
     KrakenSpotAdapterError,
     KrakenSpotOrderIntent,
@@ -163,6 +164,37 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         self.assertNotIn("nonce", request.body)
         self.assertNotIn("deadline", request.body)
 
+    def test_prepared_request_provenance_is_rest_only(self):
+        request = prepare_spot_order_request(
+            KrakenSpotOrderIntent.create(
+                instrument_version="XBTUSD:v1",
+                pair="XBTUSD",
+                side="BUY",
+                order_type="MARKET",
+                volume="0.01",
+            ),
+            client_order_id="at-rest-proof",
+            account_id="spot-account",
+            environment="PAPER",
+            capability=capability(),
+            at=NOW,
+        )
+        self.assertEqual(
+            tuple(request.documentation_refs),
+            tuple(KRAKEN_SPOT_DOCS.values()),
+        )
+        self.assertIn(
+            "https://docs.kraken.com/api-reference/trading/add-order",
+            request.documentation_refs,
+        )
+        self.assertIn(
+            "https://docs.kraken.com/exchange/guides/rest/authentication",
+            request.documentation_refs,
+        )
+        self.assertFalse(
+            any("websocket" in ref.lower() for ref in request.documentation_refs)
+        )
+
     def test_dispatcher_style_client_id_must_fit_free_text_limit(self):
         self.assertEqual(validate_spot_client_order_id("at-0123456789abcd"), "at-0123456789abcd")
         with self.assertRaises(KrakenSpotAdapterError):
@@ -171,6 +203,19 @@ class KrakenSpotAdapterTests(unittest.TestCase):
     def test_uuid_client_id_is_supported(self):
         value = "6d1b345e-2821-40e2-ad83-4ecb18a06876"
         self.assertEqual(validate_spot_client_order_id(value), value)
+
+    def test_client_order_id_documented_shape_boundaries(self):
+        long_uuid = "6d1b345e-2821-40e2-ad83-4ecb18a06876"
+        short_uuid = "da8e4ad59b78481c93e589746b0cf91f"
+        free_text = "arb-20240509-00010"
+        self.assertEqual(validate_spot_client_order_id(long_uuid), long_uuid)
+        self.assertEqual(validate_spot_client_order_id(short_uuid), short_uuid)
+        self.assertEqual(validate_spot_client_order_id(free_text), free_text)
+        self.assertEqual(validate_spot_client_order_id("a" * 18), "a" * 18)
+        for invalid in ("a" * 19, "z" * 36, "замовлення"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(KrakenSpotAdapterError):
+                    validate_spot_client_order_id(invalid)
 
     def test_binary_float_money_is_rejected(self):
         with self.assertRaises(KrakenSpotAdapterError):

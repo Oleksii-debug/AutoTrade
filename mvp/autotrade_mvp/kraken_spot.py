@@ -1,8 +1,9 @@
-"""Kraken Spot non-live adapter contract foundation.
+"""Kraken Spot adapter contract and guarded REST-order projection.
 
 The Spot and Derivatives API families are intentionally not merged. This module
-only translates already-admitted cash-spot intents. It performs no HTTP request,
-holds no credential and grants no financial authority.
+owns deterministic cash-spot request/response semantics only. Credential
+resolution, nonce allocation and network I/O stay in the shared guarded
+provider transport; financial authority remains outside this module.
 """
 
 from __future__ import annotations
@@ -28,8 +29,8 @@ class KrakenSpotAdapterError(ValueError):
 
 KRAKEN_SPOT_DOCS = MappingProxyType(
     {
-        "api": "https://www.kraken.com/features/trading-api",
         "order_contract": "https://docs.kraken.com/api-reference/trading/add-order",
+        "authentication": "https://docs.kraken.com/exchange/guides/rest/authentication",
     }
 )
 
@@ -431,6 +432,20 @@ def _submission_evidence(
     }
 
 
+def spot_submission_requires_reconciliation(payload: object) -> bool:
+    """Return whether exact AddOrder bytes require reconcile-before-retry."""
+
+    if not isinstance(payload, Mapping):
+        return False
+    errors = payload.get("error")
+    if isinstance(errors, (str, bytes)) or not isinstance(errors, (list, tuple)):
+        return False
+    return any(
+        isinstance(item, str) and item == "EService:Deadline elapsed"
+        for item in errors
+    )
+
+
 def parse_spot_submission_response(
     *,
     attempt_id: str,
@@ -491,7 +506,7 @@ def parse_spot_submission_response(
     if isinstance(errors, (str, bytes)) or not isinstance(errors, (list, tuple)):
         raise KrakenSpotAdapterError("Kraken error field must be a sequence")
     nonempty_errors = tuple(str(item) for item in errors if str(item))
-    if "EService:Deadline elapsed" in nonempty_errors:
+    if spot_submission_requires_reconciliation(payload):
         return {
             "attempt_id": aid,
             "outcome": "UNKNOWN",

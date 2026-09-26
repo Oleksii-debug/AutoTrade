@@ -153,7 +153,15 @@ def point_in_time_market_events(
             )
         if evidence_observed > ingested:
             raise HistoricalDataError("raw evidence cannot be observed after event ingestion")
-        if available > point:
+        # Replay visibility is bounded by what the system could actually have
+        # known at the cutoff, not merely by external publication availability.
+        # An event published before the cutoff but ingested/evidenced later is
+        # future information from the perspective of that replay.
+        if (
+            available > point
+            or ingested > point
+            or evidence_observed > point
+        ):
             continue
 
         canonical = _canonical_bytes(event)

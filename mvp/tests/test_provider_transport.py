@@ -35,6 +35,7 @@ from mvp.autotrade_mvp.provider_core import (
 from mvp.autotrade_mvp.provider_transport import (
     ALPACA_ENDPOINT_POLICIES,
     BINANCE_SPOT_ENDPOINT_POLICIES,
+    BINANCE_USDM_ENDPOINT_POLICIES,
     AuthenticatedReadHttpRequest,
     AuthenticatedReadWireResponse,
     AlpacaTradingHttpTransport,
@@ -42,10 +43,13 @@ from mvp.autotrade_mvp.provider_transport import (
     BinanceSpotAuthenticatedReadTransport,
     BinanceSpotHttpTransport,
     BinanceSpotSigner,
+    BinanceUsdmPublicDataTransport,
     ProviderEndpointPolicy,
     ProviderTransportError,
     ProviderTransportScopeError,
+    PublicDataHttpRequest,
     TradingWireResponse,
+    TransportedProviderResponseObservation,
     KRAKEN_SPOT_ENDPOINT_POLICIES,
     KrakenSpotAuthenticatedReadSigner,
     KrakenSpotAuthenticatedReadTransport,
@@ -130,7 +134,10 @@ class RecordingWire:
         self.requests.append(request)
         if self.error is not None:
             raise self.error
-        if isinstance(request, AuthenticatedReadHttpRequest):
+        if isinstance(
+            request,
+            (AuthenticatedReadHttpRequest, PublicDataHttpRequest),
+        ):
             return AuthenticatedReadWireResponse(
                 http_status=self.http_status,
                 body=self.response,
@@ -386,6 +393,178 @@ def authenticated_read_binding(
         at=READ_NOW,
         permission_scope=permission_scope,
     )
+
+
+
+def public_data_binding(
+    *,
+    endpoint="/fapi/v1/exchangeInfo",
+    query=None,
+    capability=None,
+):
+    final_capability = capability or verified_read_capability(
+        permission_scopes=frozenset({"ORDER_WRITE"}),
+    )
+    return prepare_authenticated_read_query(
+        capability=final_capability,
+        surface=Surface.PUBLIC_DATA,
+        endpoint=endpoint,
+        query={} if query is None else query,
+        at=READ_NOW,
+        permission_scope="ORDER_WRITE",
+    )
+
+
+class BinanceUsdmPublicDataTransportTests(unittest.TestCase):
+    def make_transport(
+        self,
+        *,
+        events,
+        capability=None,
+        policy=None,
+        wire=None,
+        clock_utc=None,
+    ):
+        final_capability = capability or verified_read_capability(
+            permission_scopes=frozenset({"ORDER_WRITE"}),
+        )
+        registry = RecordingCapabilityRegistry(events)
+        registry.add(final_capability)
+        selected_policy = policy or BINANCE_USDM_ENDPOINT_POLICIES["PAPER"]
+        selected_wire = wire or RecordingWire(
+            events,
+            response=b'{"symbols":[]}',
+        )
+        transport = BinanceUsdmPublicDataTransport(
+            policy=selected_policy,
+            account_id="acct-1",
+            capability_snapshot_id=final_capability.snapshot_id,
+            capability_registry=registry,
+            clock_utc=clock_utc or (lambda: READ_NOW + timedelta(seconds=1)),
+            wire_client=selected_wire,
+        )
+        return transport, selected_wire
+
+    def test_public_data_transport_binds_exact_origin_query_status_and_bytes(self):
+        events = []
+        body = b'{"symbol":"BTCUSDT","markPrice":"40000","time":1789773600000}'
+        wire = RecordingWire(events, response=body)
+        capability = verified_read_capability(
+            permission_scopes=frozenset({"ORDER_WRITE"}),
+        )
+        transport, wire = self.make_transport(
+            events=events,
+            capability=capability,
+            wire=wire,
+        )
+        observation = transport(
+            public_data_binding(
+                endpoint="/fapi/v1/premiumIndex",
+                query={"symbol": "BTCUSDT"},
+                capability=capability,
+            )
+        )
+        self.assertIsInstance(
+            observation,
+            TransportedProviderResponseObservation,
+        )
+        self.assertEqual(events, ["capability", "wire"])
+        self.assertEqual(len(wire.requests), 1)
+        request = wire.requests[0]
+        self.assertIsInstance(request, PublicDataHttpRequest)
+        self.assertEqual(
+            request.url,
+            "https://demo-fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT",
+        )
+        self.assertEqual(
+            observation.origin,
+            "https://demo-fapi.binance.com",
+        )
+        self.assertEqual(observation.observation.http_status, 200)
+        self.assertEqual(observation.observation.response_bytes, body)
+        self.assertEqual(
+            observation.observation.query_binding.query,
+            {"symbol": "BTCUSDT"},
+        )
+
+    def test_public_data_wrong_environment_fails_before_wire(self):
+        events = []
+        capability = verified_read_capability(
+            permission_scopes=frozenset({"ORDER_WRITE"}),
+        )
+        wire = RecordingWire(events, response=b'{"symbols":[]}')
+        transport, wire = self.make_transport(
+            events=events,
+            capability=capability,
+            policy=BINANCE_USDM_ENDPOINT_POLICIES["LIVE"],
+            wire=wire,
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "query scope mismatch",
+        ):
+            transport(public_data_binding(capability=capability))
+        self.assertEqual(events, [])
+        self.assertEqual(wire.requests, [])
+
+    def test_public_data_endpoint_and_query_are_allowlisted_before_wire(self):
+        events = []
+        capability = verified_read_capability(
+            permission_scopes=frozenset({"ORDER_WRITE"}),
+        )
+        transport, wire = self.make_transport(
+            events=events,
+            capability=capability,
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "not explicitly allowed",
+        ):
+            transport(
+                public_data_binding(
+                    endpoint="/fapi/v1/order",
+                    capability=capability,
+                )
+            )
+        self.assertEqual(events, [])
+        self.assertEqual(wire.requests, [])
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "query does not match endpoint policy",
+        ):
+            transport(
+                public_data_binding(
+                    endpoint="/fapi/v1/exchangeInfo",
+                    query={"symbol": "BTCUSDT"},
+                    capability=capability,
+                )
+            )
+        self.assertEqual(events, [])
+        self.assertEqual(wire.requests, [])
+
+    def test_public_data_non_success_status_never_becomes_observation(self):
+        events = []
+        capability = verified_read_capability(
+            permission_scopes=frozenset({"ORDER_WRITE"}),
+        )
+        wire = RecordingWire(
+            events,
+            response=b'{"code":-1000,"msg":"error"}',
+            http_status=400,
+        )
+        transport, wire = self.make_transport(
+            events=events,
+            capability=capability,
+            wire=wire,
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "unexpected HTTP status 400",
+        ):
+            transport(public_data_binding(capability=capability))
+        self.assertEqual(events, ["capability", "wire"])
+        self.assertEqual(len(wire.requests), 1)
 
 
 KRAKEN_READ_NOW = datetime(2026, 9, 26, 1, 0, tzinfo=timezone.utc)

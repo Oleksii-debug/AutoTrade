@@ -61,6 +61,12 @@
     <section id="opportunities" aria-labelledby="opportunities-heading">
       <h2 id="opportunities-heading">Opportunities and decisions</h2>
       <p>This is the canonical strategy projection from the host snapshot; it is not an instruction to trade.</p>
+      <div class="table-tools" aria-label="Strategy and decision table tools">
+        <label for="strategy-filter">Filter strategy and decision rows</label>
+        <input id="strategy-filter" type="search" autocomplete="off" spellcheck="false">
+        <button id="strategy-copy" type="button">Copy visible rows</button>
+        <output id="strategy-filter-status" for="strategy-filter" role="status" aria-live="polite">No host rows are available to filter.</output>
+      </div>
       <div id="strategy-region" class="table-scroll" role="region" aria-label="Strategy and decision projection" tabindex="0">
         <table>
           <caption>Strategy and decision projection</caption>

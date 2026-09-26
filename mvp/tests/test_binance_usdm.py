@@ -1039,8 +1039,8 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             )
 
         with self.assertRaisesRegex(
-            ProviderTransportScopeError,
-            "query does not match endpoint policy",
+            BinanceUsdmAdapterError,
+            "exact requested symbol",
         ):
             mark_price(query_symbol="ETHUSDT")
 

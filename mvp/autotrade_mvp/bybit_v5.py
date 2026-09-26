@@ -3035,6 +3035,17 @@ def activity_coverage_from_pages(
         for key, value in first_binding.query.items()
         if key != "cursor"
     }
+    binding_scope = (
+        first_binding.provider_id,
+        first_binding.account_id,
+        first_binding.entity_id,
+        first_binding.environment,
+        first_binding.capability_snapshot_id,
+        first_binding.instrument_version,
+        first_binding.surface,
+        first_binding.endpoint,
+        first_binding.permission_scope,
+    )
     first = pages[0]
     scope = (
         first.account_id,
@@ -3052,9 +3063,24 @@ def activity_coverage_from_pages(
             raise ProviderCoreError(
                 "Bybit activity pagination crossed provider/account scope"
             )
+        current_binding = observation.query_binding
+        if (
+            current_binding.provider_id,
+            current_binding.account_id,
+            current_binding.entity_id,
+            current_binding.environment,
+            current_binding.capability_snapshot_id,
+            current_binding.instrument_version,
+            current_binding.surface,
+            current_binding.endpoint,
+            current_binding.permission_scope,
+        ) != binding_scope:
+            raise ProviderCoreError(
+                "Bybit activity pagination crossed authenticated-read capability scope"
+            )
         current_base = {
             key: value
-            for key, value in observation.query_binding.query.items()
+            for key, value in current_binding.query.items()
             if key != "cursor"
         }
         if current_base != base_query:

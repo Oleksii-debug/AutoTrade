@@ -57,5 +57,21 @@ class CommonScalarConformanceTests(unittest.TestCase):
                 self.assertEqual(binding_result, case["expected"])
 
 
+    def test_shared_corpus_covers_terminal_lf_and_crlf_for_every_regex_scalar(self):
+        cases = {case["name"]: case for case in self.corpus["cases"]}
+        for prefix in ("decimal", "sequence", "digest", "currency", "unit"):
+            for suffix in ("lf", "crlf"):
+                name = f"{prefix}-terminal-{suffix}"
+                with self.subTest(case=name):
+                    self.assertIn(name, cases)
+                    self.assertFalse(cases[name]["expected"])
+                    self.assertTrue(
+                        isinstance(cases[name]["value"], str)
+                        and cases[name]["value"].endswith(
+                            "\n" if suffix == "lf" else "\r\n"
+                        )
+                    )
+
+
 if __name__ == "__main__":
     unittest.main()

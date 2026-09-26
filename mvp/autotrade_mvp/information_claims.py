@@ -539,6 +539,125 @@ class ClaimStore:
             )
         )
 
+    def effective_at(self, cutoff: datetime) -> tuple[InformationClaim, ...]:
+        """Return causally visible claims after source-revision supersession.
+
+        Provenance history is never deleted. For decision inputs, however, a later
+        causally visible revision of the same source/subject/predicate/locator
+        supersedes the earlier revision. Syndicated duplicates are then collapsed
+        deterministically across the effective source views.
+        """
+
+        time = _time(cutoff, name="cutoff")
+        visible_history = [
+            item
+            for item in self._history_by_id.values()
+            if item.available_at <= time and item.ingested_at <= time
+        ]
+
+        chains: dict[
+            tuple[str, str, str, str],
+            list[InformationClaim],
+        ] = {}
+        for item in visible_history:
+            key = (
+                item.source_id,
+                item.subject,
+                item.predicate,
+                item.locator,
+            )
+            chains.setdefault(key, []).append(item)
+
+        effective_per_source: list[InformationClaim] = []
+        for chain in chains.values():
+            by_revision: dict[str, list[InformationClaim]] = {}
+            for item in chain:
+                by_revision.setdefault(item.source_revision, []).append(item)
+            for revision_claims in by_revision.values():
+                if len({item.value for item in revision_claims}) > 1:
+                    raise ValueError(
+                        "one source revision contains contradictory extracted values"
+                    )
+
+            latest = max(
+                chain,
+                key=lambda item: (
+                    # Once revisions are causally visible at the cutoff, source
+                    # publication order is the supersession authority. A delayed
+                    # ingest of an older revision must not roll back a newer
+                    # already-visible source fact.
+                    item.published_at,
+                    item.available_at,
+                    item.ingested_at,
+                    item.source_revision,
+                    item.claim_id,
+                ),
+            )
+            effective_per_source.append(latest)
+
+        representatives: dict[str, InformationClaim] = {}
+        for item in effective_per_source:
+            existing = representatives.get(item.syndication_key)
+            if existing is None:
+                representatives[item.syndication_key] = item
+                continue
+            existing_key = (
+                max(existing.available_at, existing.ingested_at),
+                existing.published_at,
+                existing.claim_id,
+            )
+            candidate_key = (
+                max(item.available_at, item.ingested_at),
+                item.published_at,
+                item.claim_id,
+            )
+            if candidate_key < existing_key:
+                representatives[item.syndication_key] = item
+
+        return tuple(
+            sorted(
+                representatives.values(),
+                key=lambda item: (
+                    max(item.available_at, item.ingested_at),
+                    item.published_at,
+                    item.claim_id,
+                ),
+            )
+        )
+
+    def contradiction_groups_at(
+        self,
+        cutoff: datetime,
+    ) -> tuple[tuple[InformationClaim, ...], ...]:
+        """Return current cross-source contradictions without resolving truth.
+
+        A contradiction group contains effective claims for one subject/predicate
+        with at least two distinct asserted values. The store reports disagreement;
+        it does not choose which source is correct.
+        """
+
+        effective = self.effective_at(cutoff)
+        groups: dict[tuple[str, str], list[InformationClaim]] = {}
+        for item in effective:
+            groups.setdefault((item.subject, item.predicate), []).append(item)
+        contradictions = [
+            tuple(items)
+            for _, items in sorted(groups.items())
+            if len({item.value for item in items}) > 1
+        ]
+        return tuple(contradictions)
+
+    def decision_snapshot_at(self, cutoff: datetime) -> InformationSnapshot:
+        """Build a causal snapshot suitable for decision/research inputs.
+
+        Historical snapshot_at() intentionally preserves every visible canonical
+        claim for provenance/replay. This method applies revision supersession
+        first, while still preserving unresolved cross-source contradictions.
+        """
+
+        time = _time(cutoff, name="cutoff")
+        return InformationSnapshot(cutoff=time, claims=self.effective_at(time))
+
     def snapshot_at(self, cutoff: datetime) -> InformationSnapshot:
         time = _time(cutoff, name="cutoff")
         return InformationSnapshot(cutoff=time, claims=self.available_at(time))

@@ -700,6 +700,14 @@ class BinanceSpotSymbolRules:
             self.min_notional_applies_to_market
             or self.max_notional_applies_to_market
         ):
+            if not isinstance(
+                reference_price_observation,
+                BinanceSpotReferencePrice,
+            ):
+                raise BinanceSpotAdapterError(
+                    "market notional filter requires provider "
+                    "reference-price observation evidence"
+                )
             if (
                 isinstance(maximum_market_reference_age_seconds, bool)
                 or not isinstance(maximum_market_reference_age_seconds, int)

@@ -18,6 +18,11 @@ from research.autotrade_research.artifacts.durable_publish import (
     validate_publication_destination,
 )
 
+from mvp.autotrade_mvp.qualification_attestation import (
+    QualificationTrustError,
+    canonical_packaged_qualification_trust_policy_digest,
+)
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PROVENANCE = ROOT / "provenance" / "release-dependency-manifest.json"
@@ -469,6 +474,33 @@ def _load_composition(
         if matching[0]["sha256"] != expected_digest:
             raise BundleError(
                 f"composition {kind} digest does not match declared component"
+            )
+
+    # The qualification verifier has two authorities: exact Git objects for
+    # checkout/CI, and a source-controlled digest pin for a delivered non-Git
+    # runtime.  When that production pin exists, release composition must carry
+    # the exact same policy bytes.  The installer-input boundary subsequently
+    # preserves the full component inventory, so a signed installer binds the
+    # policy without allowing a packager/caller-selected trust root or digest.
+    try:
+        qualification_policy_digest = (
+            canonical_packaged_qualification_trust_policy_digest()
+        )
+    except QualificationTrustError as error:
+        raise BundleError(
+            "source-controlled qualification trust policy digest is invalid"
+        ) from error
+    if qualification_policy_digest is not None:
+        matching = by_kind.get("qualification-trust-policy", [])
+        if len(matching) != 1:
+            raise BundleError(
+                "composition requires exactly one qualification-trust-policy "
+                "component for the configured release trust pin"
+            )
+        if matching[0]["sha256"] != qualification_policy_digest:
+            raise BundleError(
+                "composition qualification-trust-policy digest does not match "
+                "the source-controlled release trust pin"
             )
 
     normalized = {

@@ -168,6 +168,8 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
                 {
                     "Authorization-Header": "Bearer hidden",
                     "client.secret": "hidden-client",
+                    "credential_id": "hidden-credential-id",
+                    "proxy authorization": "Basic hidden-proxy-auth",
                     "refresh-token": "hidden-refresh",
                     "private key pem": "hidden-key",
                 }
@@ -177,6 +179,8 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             attrs = persisted["attributes"]
             self.assertEqual(attrs["Authorization-Header"], "[REDACTED]")
             self.assertEqual(attrs["client.secret"], "[REDACTED]")
+            self.assertEqual(attrs["credential_id"], "[REDACTED]")
+            self.assertEqual(attrs["proxy authorization"], "[REDACTED]")
             self.assertEqual(attrs["refresh-token"], "[REDACTED]")
             self.assertEqual(attrs["private key pem"], "[REDACTED]")
 
@@ -207,6 +211,16 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
         snapshot = backlog.snapshot()
         self.assertEqual(len(snapshot), 2)
         self.assertEqual(snapshot[-1]["labels"]["password"], "[REDACTED]")
+
+    def test_metric_backlog_rejects_unbounded_or_non_json_labels(self):
+        backlog = BoundedMetricBacklog(max_items=2, max_label_bytes=32)
+        with self.assertRaisesRegex(ValueError, "bounded size"):
+            backlog.record("queue.delay", 1.0, detail="x" * 100)
+        with self.assertRaisesRegex(ValueError, "finite JSON values"):
+            backlog.record("queue.delay", 1.0, score=float("nan"))
+        with self.assertRaisesRegex(ValueError, "finite JSON values"):
+            backlog.record("queue.delay", 1.0, marker=object())
+        self.assertEqual(backlog.snapshot(), ())
 
 
 if __name__ == "__main__":

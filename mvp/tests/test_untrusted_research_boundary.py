@@ -143,6 +143,13 @@ class UntrustedResearchBoundaryTests(unittest.TestCase):
             {"owner_token": "durable-sender-token"},
             {"client_secret": "provider-secret"},
             {"secret_ref": "vault:trade"},
+            {"headers": {"X-API-Key": "provider-secret"}},
+            {"headers": {"X-TXC-APIKEY": "whitebit-key"}},
+            {"headers": {"X-TXC-PAYLOAD": "signed-payload"}},
+            {"headers": {"X-TXC-SIGNATURE": "signed-secret"}},
+            {"headers": {"Proxy-Authorization": "Basic secret"}},
+            {"headers": {"Authorization-Header": "Bearer injected"}},
+            {"headers": {"Cookie": "session=secret"}},
         ):
             with self.subTest(arguments=arguments), self.assertRaisesRegex(
                 PermissionError,

@@ -2,6 +2,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
+import subprocess
+import sys
 from threading import Event
 from tempfile import TemporaryDirectory
 import unittest
@@ -1332,6 +1334,84 @@ class KrakenSpotProviderTransportTests(unittest.TestCase):
             )
             self.assertEqual(first._send_lock_path, second._send_lock_path)
             self.assertNotEqual(first._send_lock_path, rotated._send_lock_path)
+
+    def test_nonce_send_lock_is_enforced_across_process_boundary(self):
+        probe = r"""
+import os
+import sys
+
+path = sys.argv[1]
+with open(path, "a+b") as stream:
+    stream.seek(0, os.SEEK_END)
+    if stream.tell() == 0:
+        stream.write(b"0")
+        stream.flush()
+    stream.seek(0)
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(
+                stream.fileno(),
+                fcntl.LOCK_EX | fcntl.LOCK_NB,
+            )
+    except OSError:
+        print("BUSY")
+    else:
+        stream.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        print("FREE")
+"""
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            allocator = KrakenSpotDurableNonceAllocator(
+                journal=JournalStore(path),
+                account_id="acct-kraken",
+                environment="LIVE",
+                credential_handle=kraken_trade_handle(),
+                clock_millis=lambda: 100,
+            )
+
+            with allocator.serialized_send():
+                blocked = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        probe,
+                        str(allocator._send_lock_path),
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                self.assertEqual(blocked.stdout.strip(), "BUSY")
+
+            released = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    probe,
+                    str(allocator._send_lock_path),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            self.assertEqual(released.stdout.strip(), "FREE")
 
     def test_same_credential_concurrent_sends_serialize_nonce_through_wire(self):
         events = []

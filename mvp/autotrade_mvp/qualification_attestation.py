@@ -8,6 +8,7 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import re
+import subprocess
 from typing import Iterable, Mapping
 from uuid import UUID
 
@@ -27,6 +28,10 @@ class QualificationTrustUnavailable(QualificationTrustError):
 
 _CANONICAL_QUALIFICATION_TRUST_POLICY_PATH = Path(__file__).with_name(
     "qualification_trust_policy.json"
+)
+_QUALIFICATION_TRUST_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+_CANONICAL_QUALIFICATION_TRUST_POLICY_REPOSITORY_PATH = (
+    "mvp/autotrade_mvp/qualification_trust_policy.json"
 )
 
 
@@ -627,25 +632,63 @@ def parse_qualification_trust_policy(
     )
 
 
-def load_canonical_qualification_trust_policy() -> QualificationTrustPolicy:
-    """Load the release-controlled qualification policy from a fixed path.
+def _load_exact_source_qualification_trust_policy_bytes(
+    expected_source_sha: str,
+) -> bytes:
+    """Read the canonical policy from the exact immutable Git source object.
 
-    The evidence submitter cannot supply or redirect this path through the
-    qualification API. A deployment that has not installed an independently
-    reviewed public trust policy cannot produce terminal signed-trust PASS.
+    Terminal qualification must not trust bytes merely because they occupy a
+    well-known working-tree path. The candidate source SHA is already part of
+    every signed qualification contract, so resolve the policy from that Git
+    object directly. A dirty, untracked or replaced working-tree file cannot
+    substitute a different public trust root.
     """
 
-    path = _CANONICAL_QUALIFICATION_TRUST_POLICY_PATH
+    source_sha = _git_sha(
+        expected_source_sha,
+        name="expected_source_sha",
+    )
     try:
-        raw = path.read_bytes()
-    except FileNotFoundError as error:
-        raise QualificationTrustUnavailable(
-            "canonical qualification trust policy is not configured"
-        ) from error
+        result = subprocess.run(
+            [
+                "git",
+                "show",
+                f"{source_sha}:{_CANONICAL_QUALIFICATION_TRUST_POLICY_REPOSITORY_PATH}",
+            ],
+            cwd=_QUALIFICATION_TRUST_REPOSITORY_ROOT,
+            capture_output=True,
+            check=False,
+        )
     except OSError as error:
         raise QualificationTrustUnavailable(
-            "canonical qualification trust policy is unavailable"
+            "exact-source qualification trust policy verification is unavailable"
         ) from error
+    if result.returncode != 0:
+        raise QualificationTrustUnavailable(
+            "canonical qualification trust policy is absent from exact source"
+        )
+    if not result.stdout:
+        raise QualificationTrustError(
+            "canonical qualification trust policy is empty in exact source"
+        )
+    return result.stdout
+
+
+def load_canonical_qualification_trust_policy(
+    *,
+    expected_source_sha: str,
+) -> QualificationTrustPolicy:
+    """Load the release-controlled policy from the exact source revision.
+
+    The evidence submitter cannot redirect the repository path or replace the
+    working-tree file. Until the independently reviewed public policy is
+    committed in the exact qualified source revision, terminal signed-trust
+    verification remains unavailable and therefore fail-closed.
+    """
+
+    raw = _load_exact_source_qualification_trust_policy_bytes(
+        expected_source_sha
+    )
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -1059,11 +1102,13 @@ def verify_canonical_qualification_attestation(
     """Verify a receipt only against the separately controlled canonical policy.
 
     Candidate/evidence callers provide no trust policy and no expected pin.
-    Policy identity/version are derived only after loading the fixed
-    release-controlled policy file.
+    Policy identity/version are derived only after resolving the policy from
+    the exact immutable source revision named by expected_source_sha.
     """
 
-    policy = load_canonical_qualification_trust_policy()
+    policy = load_canonical_qualification_trust_policy(
+        expected_source_sha=expected_source_sha,
+    )
     return verify_qualification_attestation(
         receipt,
         policy=policy,

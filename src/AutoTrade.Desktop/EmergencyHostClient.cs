@@ -53,6 +53,35 @@ public sealed record EmergencyHostStatus(
 
     public EmergencyHostStatus ValidateSuccessorOf(EmergencyHostStatus previous)
     {
+        EmergencyHostStatus current = ValidateAuthorityStateSuccessorOf(previous);
+        if (current.ObservedAtUtc < previous.ObservedAtUtc)
+        {
+            throw new InvalidOperationException(
+                "Connected host evidence time cannot regress.");
+        }
+
+        return current;
+    }
+
+    public EmergencyHostStatus ValidateStaleSuccessorOf(
+        EmergencyHostStatus previous)
+    {
+        EmergencyHostStatus current = ValidateAuthorityStateSuccessorOf(previous);
+        if (current.IsCurrent)
+        {
+            throw new InvalidOperationException(
+                "Stale host succession requires explicitly non-current evidence.");
+        }
+
+        // A stale observation may legitimately report an older evidence timestamp:
+        // that age is precisely why the snapshot is non-current. Authority identity
+        // and durable state version must still remain monotone.
+        return current;
+    }
+
+    private EmergencyHostStatus ValidateAuthorityStateSuccessorOf(
+        EmergencyHostStatus previous)
+    {
         if (previous is null)
         {
             throw new ArgumentNullException(nameof(previous));
@@ -78,12 +107,6 @@ public sealed record EmergencyHostStatus(
         {
             throw new InvalidOperationException(
                 "Connected host state version cannot regress.");
-        }
-
-        if (current.ObservedAtUtc < prior.ObservedAtUtc)
-        {
-            throw new InvalidOperationException(
-                "Connected host evidence time cannot regress.");
         }
 
         return current;

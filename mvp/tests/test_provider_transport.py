@@ -673,6 +673,40 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 [1_700_000_000_000, 1_700_000_000_001],
             )
 
+    def test_whitebit_live_transport_requires_quota_gate(self):
+        events = []
+        fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            allocator = WhiteBitDurableNonceAllocator(
+                journal=journal,
+                account_id="acct-wb",
+                environment="LIVE",
+                clock_millis=lambda: events.append("nonce") or 1_700_000_000_000,
+                clock_utc=lambda: fixed,
+            )
+            with self.assertRaisesRegex(
+                TypeError,
+                "quota_gate must be callable for WhiteBIT LIVE transport",
+            ):
+                WhiteBitHttpTransport(
+                    policy=WHITEBIT_ENDPOINT_POLICIES["LIVE"],
+                    account_id="acct-wb",
+                    capability_snapshot_id="wb-cap-1",
+                    secret_resolver=FakeSecretResolver(events),
+                    credential_handle=whitebit_trade_handle(),
+                    session_token="session-1",
+                    origin="autotrade://execution",
+                    execution_identity="sender-1",
+                    nonce_allocator=allocator,
+                    wire_client=RecordingWire(events),
+                )
+            self.assertEqual(events, [])
+            self.assertEqual(
+                journal.load_events("provider_nonce", allocator.aggregate_id),
+                [],
+            )
+
     def test_whitebit_transport_has_one_guarded_send_after_durable_nonce(self):
         events = []
         fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
@@ -748,6 +782,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                     origin="autotrade://execution",
                     execution_identity="sender-1",
                     nonce_allocator=allocator,
+                    quota_gate=lambda *_args: None,
                     wire_client=RecordingWire(calls),
                 )
             self.assertEqual(calls, [])
@@ -806,6 +841,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                     origin="autotrade://execution",
                     execution_identity=sender,
                     nonce_allocator=allocator,
+                    quota_gate=lambda *_args: None,
                     wire_client=wire,
                 )
 
@@ -867,6 +903,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 origin="autotrade://execution",
                 execution_identity="sender-1",
                 nonce_allocator=allocator,
+                quota_gate=lambda *_args: None,
                 wire_client=wire,
             )
             client_id = "at-whitebit-guard"
@@ -949,6 +986,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 origin="autotrade://execution",
                 execution_identity="sender-1",
                 nonce_allocator=allocator,
+                quota_gate=lambda *_args: None,
                 wire_client=RecordingWire(calls),
             )
             request = whitebit_prepared_request("at-whitebit-auth")
@@ -991,6 +1029,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 origin="autotrade://execution",
                 execution_identity="sender-1",
                 nonce_allocator=allocator,
+                quota_gate=lambda *_args: None,
                 wire_client=wire,
             )
             dispatcher = GuardedDispatcher(
@@ -1109,6 +1148,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                     origin="autotrade://execution",
                     execution_identity="sender-1",
                     nonce_allocator=allocator,
+                    quota_gate=lambda *_args: None,
                     wire_client=wire,
                 )
                 response = transport(
@@ -1158,6 +1198,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                     origin="autotrade://execution",
                     execution_identity="sender-1",
                     nonce_allocator=allocator,
+                    quota_gate=lambda *_args: None,
                     wire_client=wire,
                 )
                 dispatcher = GuardedDispatcher(
@@ -1261,6 +1302,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 origin="autotrade://execution",
                 execution_identity="sender-1",
                 nonce_allocator=allocator,
+                quota_gate=lambda *_args: None,
                 wire_client=RecordingWire(
                     events,
                     response=b'{"code":400,"message":"validation failed"}',

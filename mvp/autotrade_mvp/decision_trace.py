@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime, timezone
 from hashlib import sha256
+from math import isfinite
 import json
 import os
 import re
@@ -43,6 +44,9 @@ _SENSITIVE_KEYS = {
     "api_key",
     "api_secret",
     "x_api_key",
+    "x_txc_apikey",
+    "x_txc_payload",
+    "x_txc_signature",
     "private_key",
     "private_key_pem",
 }
@@ -62,15 +66,16 @@ def _normalized_key(value: object) -> str:
 _EMBEDDED_SECRET_PATTERNS = (
     re.compile(
         r"""(?i)(?:["'])?\b(authorization|proxy-authorization)\b"""
-        r"""(?:["'])?\s*[:=]\s*"""
+        r"""(?:["'])?\s*[:=]\s*(?!\[REDACTED\])"""
         r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]+)"""
     ),
     re.compile(
         r"(?i)\b(https?://)[^/@\s]+@"
     ),
     re.compile(
-        r"""(?i)(?:["'])?\b(api[_-]?key|token|access[_-]?token|refresh[_-]?token|session|session[_-]?token|"""
-        r"""secret|credential|api[_-]?secret|client[_-]?secret|private[_-]?key|password)\b(?:["'])?\s*[:=]\s*"""
+        r"""(?i)(?:["'])?\b(api[_-]?key|x[_-]?txc[_-]?apikey|x[_-]?txc[_-]?payload|x[_-]?txc[_-]?signature|"""
+        r"""token|access[_-]?token|refresh[_-]?token|session|session[_-]?token|secret|credential|api[_-]?secret|"""
+        r"""client[_-]?secret|private[_-]?key|password)\b(?:["'])?\s*[:=]\s*(?!\[REDACTED\])"""
         r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^&\s;,}\]]+)"""
     ),
 )
@@ -435,6 +440,12 @@ class BoundedMetricBacklog:
     def record(self, name: str, value: float, **labels: Any) -> None:
         if not isinstance(name, str) or not name.strip():
             raise ValueError("metric name is required")
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not isfinite(value)
+        ):
+            raise ValueError("metric value must be a finite number")
         if len(self._items) == self._items.maxlen:
             self._dropped += 1
         self._items.append(

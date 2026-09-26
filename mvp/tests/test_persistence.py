@@ -1679,6 +1679,71 @@ class JournalStoreTests(unittest.TestCase):
             ):
                 JournalStore(path).current_journal_sequence()
 
+    def test_global_projection_checkpoint_tamper_cannot_be_overwritten(self):
+        for tamper_sql in (
+            (
+                "UPDATE global_projection_checkpoints "
+                "SET state_json = '{\"net\":\"999\"}' "
+                "WHERE projection_name = 'portfolio'"
+            ),
+            (
+                "UPDATE global_projection_checkpoints "
+                "SET state_hash = 'sha256:"
+                + "0" * 64
+                + "' WHERE projection_name = 'portfolio'"
+            ),
+        ):
+            with self.subTest(tamper_sql=tamper_sql):
+                with TemporaryDirectory() as directory:
+                    path = f"{directory}/journal.sqlite3"
+                    store = JournalStore(path)
+                    store.append_event(event())
+                    self.assertTrue(
+                        store.save_global_projection_checkpoint(
+                            projection_name="portfolio",
+                            journal_sequence=1,
+                            state={"net": "1"},
+                        )
+                    )
+                    store.append_event(
+                        event(
+                            "evt-2",
+                            2,
+                            {"kind": "fill", "quantity": "2"},
+                        )
+                    )
+
+                    connection = sqlite3.connect(path)
+                    try:
+                        connection.execute(tamper_sql)
+                        connection.commit()
+                    finally:
+                        connection.close()
+
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "hash does not match identity, cut, and state",
+                    ):
+                        store.save_global_projection_checkpoint(
+                            projection_name="portfolio",
+                            journal_sequence=2,
+                            state={"net": "3"},
+                        )
+
+                    connection = sqlite3.connect(path)
+                    try:
+                        row = connection.execute(
+                            "SELECT journal_sequence FROM global_projection_checkpoints "
+                            "WHERE projection_name = 'portfolio'"
+                        ).fetchone()
+                    finally:
+                        connection.close()
+                    self.assertEqual(
+                        row[0],
+                        1,
+                        "tampered predecessor was overwritten by a later global cut",
+                    )
+
     def test_global_projection_checkpoint_fractional_cut_tamper_fails_closed(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

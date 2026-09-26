@@ -123,6 +123,23 @@ paths:
 """
             )
 
+    def test_quoted_path_key_cannot_be_silently_ignored(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "unsupported OpenAPI path entry syntax",
+        ):
+            parse_operations(
+                """openapi: 3.1.0
+paths:
+  /api/v1/state:
+    get:
+      operationId: getState
+  "/api/v1/new-route":
+    get:
+      operationId: getNewRoute
+"""
+            )
+
     def test_noncanonical_prefix_and_ambiguous_templates_fail_closed(self):
         with self.assertRaisesRegex(
             ValueError,

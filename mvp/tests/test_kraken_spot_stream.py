@@ -3,6 +3,7 @@ import unittest
 
 from mvp.autotrade_mvp.kraken_spot_stream import (
     KRAKEN_SPOT_EXECUTIONS_SUBSCRIPTION,
+    KrakenSpotExecutionsSubscriptionBinding,
     KrakenSpotExecutionStreamRecovery,
     KrakenSpotStreamError,
     parse_execution_frame,
@@ -46,11 +47,13 @@ def ack_bytes(
     channel="executions",
     snap_orders=True,
     snap_trades=False,
+    req_id=7,
 ):
     import json
 
     payload = {
         "method": "subscribe",
+        "req_id": req_id,
         "success": success,
         "result": {
             "channel": channel,
@@ -65,6 +68,13 @@ def ack_bytes(
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def subscription_binding(*, account_id="spot-live-1", req_id=7):
+    return KrakenSpotExecutionsSubscriptionBinding.create(
+        account_id=account_id,
+        req_id=req_id,
+    )
 
 
 class KrakenSpotExecutionFrameTests(unittest.TestCase):
@@ -194,26 +204,54 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
             ):
                 parse_execution_frame(raw, account_id="acct")
 
-    def test_subscription_ack_binds_required_snapshot_profile_to_exact_bytes(self):
-        raw = ack_bytes()
+    def test_subscription_ack_binds_canonical_request_profile_and_exact_bytes(self):
+        binding = subscription_binding()
+        raw = ack_bytes(req_id=binding.req_id)
         acknowledgement = parse_executions_subscription_ack(
             raw,
-            account_id="spot-live-1",
+            subscription_binding=binding,
         )
         self.assertEqual(acknowledgement.account_id, "spot-live-1")
         self.assertEqual(acknowledgement.environment, "LIVE")
+        self.assertIs(acknowledgement.subscription_binding, binding)
+        self.assertEqual(
+            acknowledgement.subscription_binding.evidence_ref,
+            binding.evidence_ref,
+        )
         self.assertEqual(
             acknowledgement.evidence_ref,
             "provider-stream:sha256:" + hashlib.sha256(raw).hexdigest(),
         )
         self.assertNotIn(b"token", acknowledgement.response_bytes.lower())
+        self.assertNotIn("token", binding.evidence_ref)
 
-    def test_subscription_ack_rejects_wrong_profile_or_failed_subscription(self):
+    def test_subscription_binding_rejects_noncanonical_profile(self):
+        valid = subscription_binding()
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "profile is not canonical",
+        ):
+            KrakenSpotExecutionsSubscriptionBinding(
+                account_id=valid.account_id,
+                environment=valid.environment,
+                req_id=valid.req_id,
+                profile_items=(
+                    ("channel", "executions"),
+                    ("order_status", False),
+                    ("snap_orders", True),
+                    ("snap_trades", False),
+                ),
+                evidence_ref=valid.evidence_ref,
+            )
+
+    def test_subscription_ack_rejects_wrong_profile_failed_or_wrong_request(self):
+        binding = subscription_binding()
         cases = (
             (ack_bytes(success=False), "was not accepted"),
             (ack_bytes(channel="balances"), "channel must be executions"),
             (ack_bytes(snap_orders=False), "snap_orders=true"),
             (ack_bytes(snap_trades=True), "snap_trades=false"),
+            (ack_bytes(req_id=binding.req_id + 1), "req_id does not match"),
         )
         for raw, message in cases:
             with self.subTest(message=message), self.assertRaisesRegex(
@@ -222,7 +260,7 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
             ):
                 parse_executions_subscription_ack(
                     raw,
-                    account_id="spot-live-1",
+                    subscription_binding=binding,
                 )
 
     def test_parser_is_live_only_and_scope_text_is_canonical(self):
@@ -247,10 +285,11 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
             **kwargs,
         )
 
-    def acknowledge(self, recovery, *, account_id="spot-live-1"):
+    def acknowledge(self, recovery, *, account_id="spot-live-1", req_id=7):
+        binding = subscription_binding(account_id=account_id, req_id=req_id)
         acknowledgement = parse_executions_subscription_ack(
-            ack_bytes(),
-            account_id=account_id,
+            ack_bytes(req_id=req_id),
+            subscription_binding=binding,
         )
         recovery.apply_subscription_ack(acknowledgement)
         return acknowledgement
@@ -297,6 +336,10 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
         self.assertEqual(
             recovery.evidence().phase,
             recovery.AWAITING_SNAPSHOT,
+        )
+        self.assertEqual(
+            recovery.evidence().subscription_binding_evidence_ref,
+            acknowledgement.subscription_binding.evidence_ref,
         )
         self.assertEqual(
             recovery.evidence().subscription_ack_evidence_ref,
@@ -549,6 +592,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
             evidence.phase,
             recovery.AWAITING_SUBSCRIPTION_ACK,
         )
+        self.assertIsNone(evidence.subscription_binding_evidence_ref)
         self.assertIsNone(evidence.subscription_ack_evidence_ref)
 
     def test_cross_account_frame_is_rejected_before_state_mutation(self):
@@ -612,6 +656,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
         self.assertEqual(
             plan.evidence_refs,
             (
+                acknowledgement.subscription_binding.evidence_ref,
                 acknowledgement.evidence_ref,
                 snapshot.evidence_ref,
             ),
@@ -672,6 +717,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
         self.assertEqual(
             plan.evidence_refs,
             (
+                acknowledgement.subscription_binding.evidence_ref,
                 acknowledgement.evidence_ref,
                 snapshot.evidence_ref,
                 update.evidence_ref,

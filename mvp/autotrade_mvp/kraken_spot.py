@@ -588,6 +588,9 @@ _KRAKEN_SPOT_PAGINATION_ENDPOINTS = MappingProxyType(
 )
 
 
+_KRAKEN_SPOT_PAGE_EVIDENCE_FACTORY_TOKEN = object()
+
+
 @dataclass(frozen=True)
 class KrakenSpotPageEvidence:
     """Exact-response-bound evidence for one Kraken offset page."""
@@ -599,8 +602,13 @@ class KrakenSpotPageEvidence:
     total_count: int
     evidence_ref: str
     filter_items: tuple[tuple[str, str], ...]
+    _factory_token: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        if self._factory_token is not _KRAKEN_SPOT_PAGE_EVIDENCE_FACTORY_TOKEN:
+            raise KrakenSpotAdapterError(
+                "Kraken page evidence must come from exact response observation"
+            )
         normalized = _text(self.surface, name="surface").upper()
         if normalized not in _KRAKEN_SPOT_PAGINATION_ENDPOINTS:
             raise KrakenSpotAdapterError("unsupported Kraken pagination surface")
@@ -805,6 +813,7 @@ def pagination_page_from_observation(
                 if key != "ofs"
             )
         ),
+        _factory_token=_KRAKEN_SPOT_PAGE_EVIDENCE_FACTORY_TOKEN,
     )
 
 

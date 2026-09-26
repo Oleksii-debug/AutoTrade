@@ -113,6 +113,12 @@ def _client_order_id(value: object) -> str:
     )
 
 
+def validate_futures_client_order_id(value: object) -> str:
+    """Public transport-safe wrapper around the canonical Futures client-id rule."""
+
+    return _client_order_id(value)
+
+
 def _uuid_text(value: object, *, name: str) -> str:
     text = _text(value, name=name)
     try:
@@ -249,6 +255,7 @@ class KrakenFuturesPreparedRequest:
     environment: str
     provider_environment: str
     capability_snapshot_id: str
+    entity_id: str
     instrument_version: str
     body_sha256: str = field(init=False)
     _factory_token: object = field(default=None, repr=False, compare=False)
@@ -313,6 +320,11 @@ class KrakenFuturesPreparedRequest:
         )
         object.__setattr__(
             self,
+            "entity_id",
+            _text(self.entity_id, name="entity_id"),
+        )
+        object.__setattr__(
+            self,
             "instrument_version",
             _text(self.instrument_version, name="instrument_version"),
         )
@@ -321,6 +333,39 @@ class KrakenFuturesPreparedRequest:
             "body_sha256",
             "sha256:" + sha256(encoded).hexdigest(),
         )
+
+    @property
+    def capability_snapshot_ids(self) -> tuple[str, ...]:
+        return (self.capability_snapshot_id,)
+
+    @property
+    def instrument_versions(self) -> tuple[str, ...]:
+        return (self.instrument_version,)
+
+
+def guarded_order_projection(
+    prepared_request: KrakenFuturesPreparedRequest,
+) -> Mapping[str, object]:
+    """Project one canonical Futures order into the shared guarded transport seam."""
+
+    if not isinstance(prepared_request, KrakenFuturesPreparedRequest):
+        raise TypeError("prepared_request must be KrakenFuturesPreparedRequest")
+    return MappingProxyType(
+        {
+            "endpoint": prepared_request.endpoint,
+            "body": dict(prepared_request.body),
+            "account_id": prepared_request.account_id,
+            "environment": prepared_request.environment,
+            "provider_environment": prepared_request.provider_environment,
+            "capability_snapshot_id": prepared_request.capability_snapshot_id,
+            "entity_id": prepared_request.entity_id,
+            "capability_snapshot_ids": list(
+                prepared_request.capability_snapshot_ids
+            ),
+            "instrument_versions": list(prepared_request.instrument_versions),
+            "body_sha256": prepared_request.body_sha256,
+        }
+    )
 
 
 def prepare_order_request(
@@ -391,6 +436,7 @@ def prepare_order_request(
         environment=runtime_env,
         provider_environment=provider_env,
         capability_snapshot_id=capability.snapshot_id,
+        entity_id=capability.entity_id,
         instrument_version=instrument,
         _factory_token=_KRAKEN_FUTURES_PREPARED_REQUEST_FACTORY_TOKEN,
     )

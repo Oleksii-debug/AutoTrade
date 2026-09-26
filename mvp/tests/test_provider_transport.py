@@ -41,6 +41,10 @@ from mvp.autotrade_mvp.provider_transport import (
     ProviderTransportError,
     ProviderTransportScopeError,
     TradingWireResponse,
+    KRAKEN_SPOT_ENDPOINT_POLICIES,
+    KrakenSpotDurableNonceAllocator,
+    KrakenSpotHttpTransport,
+    KrakenSpotSigner,
     WHITEBIT_ENDPOINT_POLICIES,
     WhiteBitDurableNonceAllocator,
     WhiteBitHttpTransport,
@@ -50,10 +54,17 @@ from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
 
 
 class FakeSecretResolver:
-    def __init__(self, events, *, on_resolve=None):
+    def __init__(
+        self,
+        events,
+        *,
+        on_resolve=None,
+        credential_plaintext=None,
+    ):
         self.events = events
         self.calls = []
         self.on_resolve = on_resolve
+        self.credential_plaintext = credential_plaintext
 
     def resolve_for_execution(
         self,
@@ -82,6 +93,8 @@ class FakeSecretResolver:
         )
         if self.on_resolve is not None:
             self.on_resolve()
+        if self.credential_plaintext is not None:
+            return self.credential_plaintext
         return json.dumps(
             {"api_key": "api-key-SECRET", "api_secret": "signing-SECRET"},
             sort_keys=True,
@@ -234,6 +247,37 @@ def whitebit_prepared_request(
             "price": "50000",
             "clientOrderId": client_order_id,
             "postOnly": False,
+        },
+        "capability_snapshot_id": capability_snapshot_id,
+    }
+
+
+def kraken_trade_handle(*, account_id="acct-kraken"):
+    return PersistentCredentialHandle(
+        handle_id="cred-kraken-trade",
+        account_id=account_id,
+        provider="KRAKEN",
+        environment="LIVE",
+        purpose="TRADE",
+        generation=1,
+    )
+
+
+def kraken_prepared_request(
+    client_order_id,
+    *,
+    capability_snapshot_id="kraken-cap-1",
+):
+    return {
+        "endpoint": "/0/private/AddOrder",
+        "body": {
+            "pair": "XBTUSD",
+            "type": "buy",
+            "ordertype": "limit",
+            "volume": "1.25",
+            "price": "37500",
+            "cl_ord_id": client_order_id,
+            "timeinforce": "gtc",
         },
         "capability_snapshot_id": capability_snapshot_id,
     }
@@ -809,6 +853,258 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 allocator.aggregate_id,
             )
             self.assertEqual(len(nonce_events), 1)
+
+
+class KrakenSpotProviderTransportTests(unittest.TestCase):
+    SYNTHETIC_SECRET = "bm90LWEtcmVhbC1zZWNyZXQtdGVzdC12ZWN0b3I="
+
+    def credential_plaintext(self):
+        return json.dumps(
+            {
+                "api_key": "kraken-test-key",
+                "api_secret": self.SYNTHETIC_SECRET,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def make_transport(
+        self,
+        *,
+        journal,
+        events,
+        wire=None,
+        quota_gate=None,
+        nonce_clock=None,
+    ):
+        allocator = KrakenSpotDurableNonceAllocator(
+            journal=journal,
+            account_id="acct-kraken",
+            environment="LIVE",
+            clock_millis=nonce_clock
+            or (lambda: events.append("nonce") or 1_700_000_000_000),
+            clock_utc=lambda: datetime(
+                2026,
+                9,
+                26,
+                0,
+                0,
+                tzinfo=timezone.utc,
+            ),
+        )
+        resolver = FakeSecretResolver(
+            events,
+            credential_plaintext=self.credential_plaintext(),
+        )
+        transport = KrakenSpotHttpTransport(
+            policy=KRAKEN_SPOT_ENDPOINT_POLICIES["LIVE"],
+            account_id="acct-kraken",
+            capability_snapshot_id="kraken-cap-1",
+            secret_resolver=resolver,
+            credential_handle=kraken_trade_handle(),
+            session_token="session-kraken",
+            origin="autotrade://execution",
+            execution_identity="sender-kraken",
+            nonce_allocator=allocator,
+            quota_gate=quota_gate,
+            wire_client=wire or RecordingWire(events),
+        )
+        return transport, resolver, allocator
+
+    def test_signer_matches_independent_synthetic_auth_vector(self):
+        request = KrakenSpotSigner.sign(
+            policy=KRAKEN_SPOT_ENDPOINT_POLICIES["LIVE"],
+            endpoint="/0/private/AddOrder",
+            body={
+                "ordertype": "limit",
+                "pair": "XBTUSD",
+                "price": "37500",
+                "type": "buy",
+                "volume": "1.25",
+            },
+            credential_plaintext=self.credential_plaintext(),
+            nonce=1_616_492_376_594,
+        )
+
+        self.assertEqual(
+            request.body,
+            b"nonce=1616492376594&ordertype=limit&pair=XBTUSD&price=37500&type=buy&volume=1.25",
+        )
+        self.assertEqual(
+            request.headers["API-Sign"],
+            "MFLsFjtEUp8B8kVw9TYV/03VU9NoOHPX9lc5tMErSJMSsg7aOZlo0JC6IdO+tqoZGc8yyti21qakVVdxPla/Bw==",
+        )
+        self.assertEqual(
+            request.url,
+            "https://api.kraken.com/0/private/AddOrder",
+        )
+
+    def test_durable_nonce_survives_restart_and_clock_regression(self):
+        fixed = datetime(2026, 9, 26, 0, 0, tzinfo=timezone.utc)
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            first = KrakenSpotDurableNonceAllocator(
+                journal=JournalStore(path),
+                account_id="acct-kraken",
+                environment="LIVE",
+                clock_millis=lambda: 1_700_000_000_000,
+                clock_utc=lambda: fixed,
+            )
+            self.assertEqual(first.allocate(), 1_700_000_000_000)
+
+            reopened = KrakenSpotDurableNonceAllocator(
+                journal=JournalStore(path),
+                account_id="acct-kraken",
+                environment="LIVE",
+                clock_millis=lambda: 1_699_999_999_000,
+                clock_utc=lambda: fixed + timedelta(seconds=1),
+            )
+            self.assertEqual(reopened.allocate(), 1_700_000_000_001)
+            events = JournalStore(path).load_events(
+                "provider_nonce",
+                reopened.aggregate_id,
+            )
+            self.assertEqual(
+                [item["payload"]["provider_id"] for item in events],
+                ["KRAKEN", "KRAKEN"],
+            )
+            self.assertEqual(
+                [item["payload"]["nonce"] for item in events],
+                [1_700_000_000_000, 1_700_000_000_001],
+            )
+
+    def test_transport_orders_quota_nonce_secret_guard_and_one_wire_send(self):
+        events = []
+        with TemporaryDirectory() as directory:
+            wire = RecordingWire(
+                events,
+                response=b'{"error":[],"result":{"txid":["O-1"]}}',
+            )
+            transport, resolver, _allocator = self.make_transport(
+                journal=JournalStore(f"{directory}/journal.sqlite3"),
+                events=events,
+                wire=wire,
+                quota_gate=lambda provider, account, environment, purpose: (
+                    events.append("quota"),
+                    self.assertEqual(
+                        (provider, account, environment, purpose),
+                        ("KRAKEN", "acct-kraken", "LIVE", "ORDER_WRITE"),
+                    ),
+                )[-1],
+            )
+            client_id = "at-kraken-1"
+            response = transport(
+                client_id,
+                kraken_prepared_request(client_id),
+                lambda: events.append("guard"),
+            )
+
+            self.assertEqual(
+                events,
+                ["quota", "nonce", "resolve", "guard", "wire"],
+            )
+            self.assertEqual(
+                response.payload,
+                {"error": [], "result": {"txid": ["O-1"]}},
+            )
+            self.assertEqual(len(resolver.calls), 1)
+            self.assertEqual(len(wire.requests), 1)
+            signed = wire.requests[0]
+            self.assertEqual(
+                signed.url,
+                "https://api.kraken.com/0/private/AddOrder",
+            )
+            self.assertEqual(signed.headers["API-Key"], "kraken-test-key")
+            self.assertNotIn("not-a-real-secret-test-vector", repr(signed))
+            self.assertIn(b"nonce=1700000000000", signed.body)
+            self.assertIn(b"cl_ord_id=at-kraken-1", signed.body)
+
+    def test_scope_or_forged_auth_fields_fail_before_secret_and_wire(self):
+        for mutation, message in (
+            (("capability_snapshot_id", "wrong-cap"), "capability snapshot mismatch"),
+            (("cl_ord_id", "other-id"), "client order identity mismatch"),
+            (("nonce", "1"), "not canonical"),
+        ):
+            with self.subTest(mutation=mutation[0]):
+                events = []
+                with TemporaryDirectory() as directory:
+                    wire = RecordingWire(events)
+                    transport, resolver, _allocator = self.make_transport(
+                        journal=JournalStore(f"{directory}/journal.sqlite3"),
+                        events=events,
+                        wire=wire,
+                    )
+                    request = kraken_prepared_request("at-kraken-1")
+                    request = {
+                        "endpoint": request["endpoint"],
+                        "body": dict(request["body"]),
+                        "capability_snapshot_id": request["capability_snapshot_id"],
+                    }
+                    field, value = mutation
+                    if field == "capability_snapshot_id":
+                        request[field] = value
+                    else:
+                        request["body"][field] = value
+                    with self.assertRaisesRegex(
+                        ProviderTransportScopeError,
+                        message,
+                    ):
+                        transport(
+                            "at-kraken-1",
+                            request,
+                            lambda: events.append("guard"),
+                        )
+                    self.assertEqual(events, [])
+                    self.assertEqual(resolver.calls, [])
+                    self.assertEqual(wire.requests, [])
+
+    def test_post_barrier_wire_failure_is_unknown_without_retry(self):
+        events = []
+        now = "2026-09-26T00:00:00Z"
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            wire = RecordingWire(
+                events,
+                error=TimeoutError("ambiguous provider timeout"),
+            )
+            transport, resolver, _allocator = self.make_transport(
+                journal=store,
+                events=events,
+                wire=wire,
+            )
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="LIVE",
+                account_id="acct-kraken",
+            )
+            intent_id = "kraken-live-intent-1"
+            client_id = stable_client_order_id(
+                "KRAKEN",
+                intent_id,
+                environment="LIVE",
+                account_id="acct-kraken",
+                max_length=36,
+                client_id_format="UUID",
+            )
+            outcome = dispatcher.dispatch(
+                attempt_id="11111111-1111-4111-8111-111111111111",
+                intent_id=intent_id,
+                intent_hash="sha256:" + "1" * 64,
+                provider="KRAKEN",
+                request=kraken_prepared_request(client_id),
+                now=now,
+                authority_check=lambda _provider, _environment: (True, "allowed"),
+                transport_send=transport,
+                client_id_max_length=36,
+                client_id_format="UUID",
+                final_barrier_clock=lambda: now,
+            )
+
+            self.assertEqual(outcome.status, "UNKNOWN")
+            self.assertEqual(outcome.reason, "transport_result_ambiguous")
+            self.assertEqual(events, ["nonce", "resolve", "wire"])
+            self.assertEqual(len(resolver.calls), 1)
+            self.assertEqual(len(wire.requests), 1)
 
 
 class ProviderTransportTests(unittest.TestCase):

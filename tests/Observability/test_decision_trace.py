@@ -168,6 +168,8 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
                 {
                     "Authorization-Header": "Bearer hidden",
                     "client.secret": "hidden-client",
+                    "credential_id": "hidden-credential-id",
+                    "proxy authorization": "Basic hidden-proxy-auth",
                     "refresh-token": "hidden-refresh",
                     "private key pem": "hidden-key",
                 }
@@ -177,6 +179,8 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             attrs = persisted["attributes"]
             self.assertEqual(attrs["Authorization-Header"], "[REDACTED]")
             self.assertEqual(attrs["client.secret"], "[REDACTED]")
+            self.assertEqual(attrs["credential_id"], "[REDACTED]")
+            self.assertEqual(attrs["proxy authorization"], "[REDACTED]")
             self.assertEqual(attrs["refresh-token"], "[REDACTED]")
             self.assertEqual(attrs["private key pem"], "[REDACTED]")
 

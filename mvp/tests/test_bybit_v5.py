@@ -14,6 +14,13 @@ from mvp.autotrade_mvp.bybit_v5 import (
     prepare_execution_read_query,
     prepare_next_execution_read_query,
     execution_history_coverage_from_pages,
+    prepare_wallet_read_query,
+    parse_wallet_snapshot,
+    provider_wallet_cash,
+    prepare_position_read_query,
+    parse_position_page,
+    prepare_next_position_read_query,
+    provider_position_quantities_from_pages,
     coverage_evidence,
     parse_execution_page,
     parse_executions,
@@ -52,7 +59,13 @@ from mvp.autotrade_mvp.reconciliation import (
 READ_AT = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 
 
-def read_capability(*, account_id="paper-1", environment="PAPER", instrument_version="BTCUSDT@v1"):
+def read_capability(
+    *,
+    account_id="paper-1",
+    environment="PAPER",
+    instrument_version="BTCUSDT@v1",
+    permission_scopes=("ORDER.READ",),
+):
     observed_at = READ_AT - timedelta(hours=1)
     claims = tuple(
         CapabilityClaim(
@@ -66,7 +79,7 @@ def read_capability(*, account_id="paper-1", environment="PAPER", instrument_ver
             expires_at=READ_AT + timedelta(hours=1),
             supported_order_types=frozenset({"LIMIT", "MARKET"}),
             time_in_force=frozenset({"GTC", "IOC"}),
-            permission_scopes=frozenset({"ORDER.READ"}),
+            permission_scopes=frozenset(permission_scopes),
             position_mode="NET",
             native_protection=frozenset(),
             rate_limit_policy_id="bybit-read-test",
@@ -308,6 +321,94 @@ def bound_order_response(
         limit=limit,
         start_time_ms=start_time_ms,
         end_time_ms=end_time_ms,
+    )
+    raw = json.dumps(
+        response,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return observe_authenticated_json_response(
+        query_binding=query,
+        http_status=200,
+        response_bytes=raw,
+        observed_at=READ_AT,
+        provider_environment=provider_environment,
+    )
+
+
+def bound_wallet_response(
+    response,
+    *,
+    coins=(),
+    account_id="paper-1",
+    environment="PAPER",
+    provider_environment="TESTNET",
+    capability=None,
+):
+    read_scope = (
+        capability
+        if capability is not None
+        else read_capability(
+            account_id=account_id,
+            environment=environment,
+            permission_scopes=("ACCOUNT.READ",),
+        )
+    )
+    query = prepare_wallet_read_query(
+        capability=read_scope,
+        at=READ_AT,
+        coins=coins,
+    )
+    raw = json.dumps(
+        response,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return observe_authenticated_json_response(
+        query_binding=query,
+        http_status=200,
+        response_bytes=raw,
+        observed_at=READ_AT,
+        provider_environment=provider_environment,
+    )
+
+
+def bound_position_response(
+    response,
+    *,
+    category="linear",
+    symbol="BTCUSDT",
+    settle_coin=None,
+    base_coin=None,
+    cursor=None,
+    limit=200,
+    account_id="paper-1",
+    environment="PAPER",
+    provider_environment="TESTNET",
+    capability=None,
+):
+    read_scope = (
+        capability
+        if capability is not None
+        else read_capability(
+            account_id=account_id,
+            environment=environment,
+            permission_scopes=("ACCOUNT.READ",),
+        )
+    )
+    query = prepare_position_read_query(
+        capability=read_scope,
+        at=READ_AT,
+        category=category,
+        symbol=symbol,
+        settle_coin=settle_coin,
+        base_coin=base_coin,
+        cursor=cursor,
+        limit=limit,
     )
     raw = json.dumps(
         response,
@@ -2073,6 +2174,464 @@ class BybitV5AdapterTests(unittest.TestCase):
         )
         self.assertTrue(result.complete)
         self.assertFalse(result.blocks_new_risk)
+
+
+    def test_wallet_query_and_snapshot_preserve_unified_scope(self):
+        capability = read_capability(permission_scopes=("ACCOUNT.READ",))
+        binding = prepare_wallet_read_query(
+            capability=capability,
+            at=READ_AT,
+            coins=("USDT", "BTC"),
+        )
+        self.assertEqual(binding.endpoint, "/v5/account/wallet-balance")
+        self.assertEqual(binding.permission_scope, "ACCOUNT.READ")
+        self.assertEqual(binding.query["accountType"], "UNIFIED")
+        self.assertEqual(binding.query["coin"], "USDT,BTC")
+
+        snapshot = parse_wallet_snapshot(
+            bound_wallet_response(
+                {
+                    "retCode": 0,
+                    "result": {
+                        "list": [
+                            {
+                                "accountType": "UNIFIED",
+                                "coin": [
+                                    {
+                                        "coin": "USDT",
+                                        "walletBalance": "100.25",
+                                        "equity": "100.25",
+                                        "borrowAmount": "0",
+                                        "spotBorrow": "0",
+                                        "locked": "2.5",
+                                        "unrealisedPnl": "0",
+                                    },
+                                    {
+                                        "coin": "BTC",
+                                        "walletBalance": "0.01",
+                                        "equity": "0.01",
+                                        "borrowAmount": "0",
+                                        "spotBorrow": "0",
+                                        "locked": "0",
+                                        "unrealisedPnl": "0",
+                                    },
+                                ],
+                            }
+                        ]
+                    },
+                },
+                coins=("USDT", "BTC"),
+                capability=capability,
+            )
+        )
+        self.assertEqual(snapshot.account_type, "UNIFIED")
+        self.assertEqual(snapshot.provider_environment, "TESTNET")
+        self.assertEqual(
+            dict(provider_wallet_cash(snapshot)),
+            {"BTC": Decimal("0.01"), "USDT": Decimal("100.25")},
+        )
+        self.assertEqual(snapshot.coins[1].locked, Decimal("2.5"))
+
+    def test_wallet_snapshot_rejects_out_of_scope_coin_and_unrepresented_liability(self):
+        with self.assertRaisesRegex(ProviderCoreError, "outside exact query scope"):
+            parse_wallet_snapshot(
+                bound_wallet_response(
+                    {
+                        "retCode": 0,
+                        "result": {
+                            "list": [
+                                {
+                                    "accountType": "UNIFIED",
+                                    "coin": [
+                                        {
+                                            "coin": "BTC",
+                                            "walletBalance": "1",
+                                            "equity": "1",
+                                            "borrowAmount": "0",
+                                            "spotBorrow": "0",
+                                            "locked": "0",
+                                            "unrealisedPnl": "0",
+                                        }
+                                    ],
+                                }
+                            ]
+                        },
+                    },
+                    coins=("USDT",),
+                )
+            )
+
+        borrowed = parse_wallet_snapshot(
+            bound_wallet_response(
+                {
+                    "retCode": 0,
+                    "result": {
+                        "list": [
+                            {
+                                "accountType": "UNIFIED",
+                                "coin": [
+                                    {
+                                        "coin": "USDT",
+                                        "walletBalance": "100",
+                                        "equity": "90",
+                                        "borrowAmount": "10",
+                                        "spotBorrow": "4",
+                                        "locked": "0",
+                                        "unrealisedPnl": "0",
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                }
+            )
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "liabilities"):
+            provider_wallet_cash(borrowed)
+
+        with self.assertRaisesRegex(ProviderCoreError, "spotBorrow"):
+            parse_wallet_snapshot(
+                bound_wallet_response(
+                    {
+                        "retCode": 0,
+                        "result": {
+                            "list": [
+                                {
+                                    "accountType": "UNIFIED",
+                                    "coin": [
+                                        {
+                                            "coin": "USDT",
+                                            "walletBalance": "100",
+                                            "equity": "100",
+                                            "borrowAmount": "1",
+                                            "spotBorrow": "2",
+                                            "locked": "0",
+                                            "unrealisedPnl": "0",
+                                        }
+                                    ],
+                                }
+                            ]
+                        },
+                    }
+                )
+            )
+
+    def test_position_query_requires_bounded_documented_scope(self):
+        account_capability = read_capability(
+            permission_scopes=("ACCOUNT.READ",)
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "symbol or settleCoin"):
+            prepare_position_read_query(
+                capability=account_capability,
+                at=READ_AT,
+                category="linear",
+                symbol=None,
+                settle_coin=None,
+            )
+        with self.assertRaisesRegex(ProviderCoreError, "cannot exceed 200"):
+            prepare_position_read_query(
+                capability=account_capability,
+                at=READ_AT,
+                category="linear",
+                symbol="BTCUSDT",
+                limit=201,
+            )
+        option = prepare_position_read_query(
+            capability=account_capability,
+            at=READ_AT,
+            category="option",
+            symbol=None,
+            base_coin="BTC",
+        )
+        self.assertEqual(option.query["baseCoin"], "BTC")
+
+    def test_position_page_enforces_exact_symbol_and_provider_environment(self):
+        page = parse_position_page(
+            bound_position_response(
+                {
+                    "retCode": 0,
+                    "result": {
+                        "category": "linear",
+                        "nextPageCursor": "",
+                        "list": [
+                            {
+                                "symbol": "BTCUSDT",
+                                "positionIdx": 0,
+                                "side": "Buy",
+                                "size": "2",
+                                "positionStatus": "Normal",
+                                "updatedTime": "1790280000000",
+                                "seq": "42",
+                            }
+                        ],
+                    },
+                }
+            )
+        )
+        self.assertTrue(page.pagination_complete)
+        self.assertEqual(page.positions[0].side, "BUY")
+        self.assertEqual(page.positions[0].size, Decimal("2"))
+        self.assertEqual(page.positions[0].sequence, 42)
+        self.assertEqual(
+            page.positions[0].updated_at,
+            "2026-09-24T20:00:00.000Z",
+        )
+
+        with self.assertRaisesRegex(ProviderCoreError, "symbol does not match"):
+            parse_position_page(
+                bound_position_response(
+                    {
+                        "retCode": 0,
+                        "result": {
+                            "category": "linear",
+                            "nextPageCursor": "",
+                            "list": [
+                                {
+                                    "symbol": "ETHUSDT",
+                                    "positionIdx": 0,
+                                    "side": "Buy",
+                                    "size": "1",
+                                    "positionStatus": "Normal",
+                                    "updatedTime": "1790280000000",
+                                    "seq": "43",
+                                }
+                            ],
+                        },
+                    },
+                    symbol="BTCUSDT",
+                )
+            )
+
+    def test_position_projection_requires_complete_one_way_cursor_chain(self):
+        common = dict(
+            category="linear",
+            symbol=None,
+            settle_coin="USDT",
+        )
+        first = bound_position_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "linear",
+                    "nextPageCursor": "position-page-2",
+                    "list": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "positionIdx": 0,
+                            "side": "Buy",
+                            "size": "2",
+                            "positionStatus": "Normal",
+                            "updatedTime": "1790279999000",
+                            "seq": "50",
+                        }
+                    ],
+                },
+            },
+            **common,
+        )
+        second = bound_position_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "linear",
+                    "nextPageCursor": "",
+                    "list": [
+                        {
+                            "symbol": "ETHUSDT",
+                            "positionIdx": 0,
+                            "side": "Sell",
+                            "size": "3",
+                            "positionStatus": "Normal",
+                            "updatedTime": "1790280000000",
+                            "seq": "51",
+                        }
+                    ],
+                },
+            },
+            cursor="position-page-2",
+            **common,
+        )
+        positions = provider_position_quantities_from_pages(
+            (first, second),
+            instrument_versions={
+                "BTCUSDT": "BTCUSDT@v1",
+                "ETHUSDT": "ETHUSDT@v1",
+            },
+        )
+        self.assertEqual(
+            dict(positions),
+            {
+                "BTCUSDT@v1": Decimal("2"),
+                "ETHUSDT@v1": Decimal("-3"),
+            },
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "incomplete"):
+            provider_position_quantities_from_pages(
+                (first,),
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+
+    def test_position_projection_fails_closed_for_hedge_or_liquidation_state(self):
+        hedge = bound_position_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "linear",
+                    "nextPageCursor": "",
+                    "list": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "positionIdx": 1,
+                            "side": "Buy",
+                            "size": "2",
+                            "positionStatus": "Normal",
+                            "updatedTime": "1790280000000",
+                            "seq": "60",
+                        }
+                    ],
+                },
+            }
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "hedge-mode"):
+            provider_position_quantities_from_pages(
+                (hedge,),
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+
+        liquidation = bound_position_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "linear",
+                    "nextPageCursor": "",
+                    "list": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "positionIdx": 0,
+                            "side": "Buy",
+                            "size": "2",
+                            "positionStatus": "Liq",
+                            "updatedTime": "1790280000000",
+                            "seq": "61",
+                        }
+                    ],
+                },
+            }
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "Liq/Adl"):
+            provider_position_quantities_from_pages(
+                (liquidation,),
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+
+    def test_position_next_page_preserves_exact_capability_and_query(self):
+        capability = read_capability(permission_scopes=("ACCOUNT.READ",))
+        first = bound_position_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "linear",
+                    "nextPageCursor": "position-next",
+                    "list": [],
+                },
+            },
+            symbol=None,
+            settle_coin="USDT",
+            capability=capability,
+        )
+        binding = prepare_next_position_read_query(
+            observation=first,
+            capability=capability,
+            at=READ_AT,
+        )
+        self.assertIsNotNone(binding)
+        self.assertEqual(binding.query["cursor"], "position-next")
+        self.assertEqual(binding.query["settleCoin"], "USDT")
+
+    def test_bybit_account_surfaces_feed_existing_reconciliation_without_new_authority(self):
+        wallet = parse_wallet_snapshot(
+            bound_wallet_response(
+                {
+                    "retCode": 0,
+                    "result": {
+                        "list": [
+                            {
+                                "accountType": "UNIFIED",
+                                "coin": [
+                                    {
+                                        "coin": "USDT",
+                                        "walletBalance": "100",
+                                        "equity": "100",
+                                        "borrowAmount": "0",
+                                        "spotBorrow": "0",
+                                        "locked": "0",
+                                        "unrealisedPnl": "0",
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                }
+            )
+        )
+        position_observation = bound_position_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "linear",
+                    "nextPageCursor": "",
+                    "list": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "positionIdx": 0,
+                            "side": "Buy",
+                            "size": "2",
+                            "positionStatus": "Normal",
+                            "updatedTime": "1790280000000",
+                            "seq": "70",
+                        }
+                    ],
+                },
+            }
+        )
+        provider_positions = provider_position_quantities_from_pages(
+            (position_observation,),
+            instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+        )
+        result = reconcile_account(
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+            provider_environment="TESTNET",
+            local_cash={"USDT": "100"},
+            provider_cash=provider_wallet_cash(wallet),
+            local_positions={"BTCUSDT@v1": "2"},
+            provider_positions=provider_positions,
+            local_execution_ids=(),
+            provider_fills=(),
+            snapshot_consistency=SnapshotConsistencyEvidence(
+                provider_id="BYBIT",
+                account_id="paper-1",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                mode="COMPOSED",
+                query_started_at="2026-09-24T19:59:59Z",
+                query_completed_at="2026-09-24T20:00:01Z",
+                buffered_stream_events=True,
+                replay_complete=True,
+                sequence_gap_detected=False,
+            ),
+            coverage_start="2026-09-24T19:59:00Z",
+            coverage_end="2026-09-24T20:01:00Z",
+            pagination_complete=True,
+        )
+        self.assertTrue(result.complete)
+        self.assertTrue(result.snapshot_consistent)
+        self.assertEqual(dict(result.provider_cash), {"USDT": Decimal("100")})
+        self.assertEqual(
+            dict(result.provider_positions),
+            {"BTCUSDT@v1": Decimal("2")},
+        )
 
 
 if __name__ == "__main__":

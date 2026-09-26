@@ -21,6 +21,7 @@ from research.autotrade_research.artifacts.durable_publish import (
 from mvp.autotrade_mvp.qualification_attestation import (
     QualificationTrustError,
     canonical_packaged_qualification_trust_policy_digest,
+    canonical_packaged_qualification_trust_source_sha,
 )
 
 
@@ -483,19 +484,29 @@ def _load_composition(
     # preserves the full component inventory, so a signed installer binds the
     # policy without allowing a packager/caller-selected trust root or digest.
     try:
+        qualification_source_sha = canonical_packaged_qualification_trust_source_sha()
         qualification_policy_digest = (
             canonical_packaged_qualification_trust_policy_digest()
         )
     except QualificationTrustError as error:
         raise BundleError(
-            "source-controlled qualification trust policy digest is invalid"
+            "source-controlled qualification trust release pins are invalid"
         ) from error
-    if qualification_policy_digest is not None:
+    if (qualification_source_sha is None) != (qualification_policy_digest is None):
+        raise BundleError(
+            "source-controlled qualification trust release pins are incomplete"
+        )
+    if qualification_source_sha is not None:
+        if qualification_source_sha != composition_sha:
+            raise BundleError(
+                "composition source_sha does not match the source-controlled "
+                "qualification trust release pin"
+            )
         matching = by_kind.get("qualification-trust-policy", [])
         if len(matching) != 1:
             raise BundleError(
                 "composition requires exactly one qualification-trust-policy "
-                "component for the configured release trust pin"
+                "component for the configured release trust pins"
             )
         if matching[0]["sha256"] != qualification_policy_digest:
             raise BundleError(

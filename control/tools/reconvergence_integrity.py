@@ -22,6 +22,65 @@ from typing import Iterable, Sequence
 
 from control.tools.registry_state import _normalized_scopes, path_covers
 
+PROTECTED_SENTINELS = frozenset(
+    {
+        ".github/workflows/reconvergence-integrity.yml",
+        ".github/workflows/verify.yml",
+        "AGENTS.md",
+        "control/CONSTITUTION.md",
+        "control/INDEX.json",
+        "control/qualification.json",
+        "control/work-packages/bank.json",
+        "control/tools/reconvergence_integrity.py",
+        "docs/product/PRODUCT_SPEC_CANONICAL.txt",
+        "docs/engineering/00_AUTOTRADE_MASTER_ENGINEERING_SPEC.md",
+        "requirements-dev.txt",
+        "tools/verify.py",
+    }
+)
+
+
+@dataclass(frozen=True)
+class Change:
+    status: str
+    path: str
+    previous_path: str | None = None
+
+
+@dataclass(frozen=True)
+class IntegrityAssessment:
+    allowed: bool
+    base_is_ancestor: bool
+    base_path_count: int
+    deletion_count: int
+    deletion_fraction: float
+    protected_deletions: tuple[str, ...]
+    protected_violations: tuple[str, ...]
+    scope_violations: tuple[str, ...]
+    reasons: tuple[str, ...]
+
+
+def parse_name_status(lines: Iterable[str]) -> tuple[Change, ...]:
+    changes: list[Change] = []
+    for raw in lines:
+        line = raw.rstrip("\n")
+        if not line:
+            continue
+        parts = line.split("\t")
+        status = parts[0]
+        kind = status[:1]
+        if kind in {"R", "C"}:
+            if len(parts) != 3:
+                raise ValueError(f"Malformed rename/copy record: {line!r}")
+            changes.append(
+                Change(status=status, previous_path=parts[1], path=parts[2])
+            )
+        else:
+            if len(parts) != 2:
+                raise ValueError(f"Malformed name-status record: {line!r}")
+            changes.append(Change(status=status, path=parts[1]))
+    return tuple(changes)
+
 
 def assess_reconvergence(
     *,

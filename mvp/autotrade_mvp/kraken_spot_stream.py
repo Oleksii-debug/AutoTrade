@@ -35,6 +35,7 @@ class KrakenSpotExecutionsSubscriptionBinding:
 
     account_id: str
     environment: str
+    connection_generation: int
     req_id: int
     profile_items: tuple[tuple[str, object], ...]
     evidence_ref: str
@@ -44,6 +45,7 @@ class KrakenSpotExecutionsSubscriptionBinding:
         cls,
         *,
         account_id: str,
+        connection_generation: int,
         req_id: int,
         environment: str = "LIVE",
     ) -> "KrakenSpotExecutionsSubscriptionBinding":
@@ -56,6 +58,14 @@ class KrakenSpotExecutionsSubscriptionBinding:
             raise KrakenSpotStreamError(
                 "Kraken Spot stream foundation permits LIVE only"
             )
+        if (
+            isinstance(connection_generation, bool)
+            or not isinstance(connection_generation, int)
+            or connection_generation < 1
+        ):
+            raise KrakenSpotStreamError(
+                "Kraken connection_generation must be a positive integer"
+            )
         if isinstance(req_id, bool) or not isinstance(req_id, int):
             raise KrakenSpotStreamError(
                 "Kraken executions subscription req_id must be an integer"
@@ -67,6 +77,7 @@ class KrakenSpotExecutionsSubscriptionBinding:
             {
                 "account_id": account,
                 "environment": normalized_environment,
+                "connection_generation": connection_generation,
                 "req_id": req_id,
                 "profile": dict(profile_items),
             },
@@ -78,6 +89,7 @@ class KrakenSpotExecutionsSubscriptionBinding:
         return cls(
             account_id=account,
             environment=normalized_environment,
+            connection_generation=connection_generation,
             req_id=req_id,
             profile_items=profile_items,
             evidence_ref=(
@@ -98,6 +110,14 @@ class KrakenSpotExecutionsSubscriptionBinding:
                 "Kraken Spot stream foundation permits LIVE only"
             )
         object.__setattr__(self, "environment", environment)
+        if (
+            isinstance(self.connection_generation, bool)
+            or not isinstance(self.connection_generation, int)
+            or self.connection_generation < 1
+        ):
+            raise KrakenSpotStreamError(
+                "Kraken connection_generation must be a positive integer"
+            )
         if isinstance(self.req_id, bool) or not isinstance(self.req_id, int):
             raise KrakenSpotStreamError(
                 "Kraken executions subscription req_id must be an integer"
@@ -113,6 +133,7 @@ class KrakenSpotExecutionsSubscriptionBinding:
             {
                 "account_id": account,
                 "environment": environment,
+                "connection_generation": self.connection_generation,
                 "req_id": self.req_id,
                 "profile": dict(expected_profile),
             },
@@ -233,6 +254,7 @@ class KrakenSpotExecutionsSubscriptionAck:
 
     account_id: str
     environment: str
+    connection_generation: int
     subscription_binding: KrakenSpotExecutionsSubscriptionBinding
     evidence_ref: str
     response_bytes: bytes = field(repr=False, compare=False)
@@ -252,6 +274,14 @@ class KrakenSpotExecutionsSubscriptionAck:
                 "Kraken Spot stream foundation permits LIVE only"
             )
         object.__setattr__(self, "environment", environment)
+        if (
+            isinstance(self.connection_generation, bool)
+            or not isinstance(self.connection_generation, int)
+            or self.connection_generation < 1
+        ):
+            raise KrakenSpotStreamError(
+                "Kraken connection_generation must be a positive integer"
+            )
         if not isinstance(
             self.subscription_binding,
             KrakenSpotExecutionsSubscriptionBinding,
@@ -263,6 +293,8 @@ class KrakenSpotExecutionsSubscriptionAck:
         if (
             self.subscription_binding.account_id != self.account_id
             or self.subscription_binding.environment != self.environment
+            or self.subscription_binding.connection_generation
+            != self.connection_generation
         ):
             raise KrakenSpotStreamError(
                 "Kraken subscription binding scope mismatch"
@@ -363,6 +395,7 @@ def parse_executions_subscription_ack(
     return KrakenSpotExecutionsSubscriptionAck(
         account_id=subscription_binding.account_id,
         environment=subscription_binding.environment,
+        connection_generation=subscription_binding.connection_generation,
         subscription_binding=subscription_binding,
         evidence_ref=(
             "provider-stream:sha256:" + sha256(exact).hexdigest()
@@ -419,6 +452,7 @@ class KrakenSpotExecutionFrame:
 
     account_id: str
     environment: str
+    connection_generation: int
     frame_type: str
     sequence: int
     reports: tuple[KrakenSpotExecutionReport, ...]
@@ -440,6 +474,14 @@ class KrakenSpotExecutionFrame:
                 "Kraken Spot stream foundation permits LIVE only"
             )
         object.__setattr__(self, "environment", environment)
+        if (
+            isinstance(self.connection_generation, bool)
+            or not isinstance(self.connection_generation, int)
+            or self.connection_generation < 1
+        ):
+            raise KrakenSpotStreamError(
+                "Kraken connection_generation must be a positive integer"
+            )
 
         frame_type = _canonical_text(
             self.frame_type,
@@ -486,6 +528,7 @@ def parse_execution_frame(
     response_bytes: object,
     *,
     account_id: str,
+    connection_generation: int,
     environment: str = "LIVE",
 ) -> KrakenSpotExecutionFrame:
     """Parse one exact WebSocket v2 executions frame without socket authority."""
@@ -548,6 +591,7 @@ def parse_execution_frame(
     return KrakenSpotExecutionFrame(
         account_id=account_id,
         environment=environment,
+        connection_generation=connection_generation,
         frame_type=frame_type,
         sequence=sequence,
         reports=tuple(reports),
@@ -721,6 +765,10 @@ class KrakenSpotExecutionStreamRecovery:
             raise KrakenSpotStreamError(
                 "Kraken subscription acknowledgement scope mismatch"
             )
+        if acknowledgement.connection_generation != self.connection_generation:
+            raise KrakenSpotStreamError(
+                "Kraken subscription acknowledgement generation mismatch"
+            )
         self._subscription_binding_evidence_ref = (
             acknowledgement.subscription_binding.evidence_ref
         )
@@ -741,6 +789,10 @@ class KrakenSpotExecutionStreamRecovery:
         ):
             raise KrakenSpotStreamError(
                 "Kraken stream frame account/environment scope mismatch"
+            )
+        if frame.connection_generation != self.connection_generation:
+            raise KrakenSpotStreamError(
+                "Kraken stream frame connection generation mismatch"
             )
 
     def _enter_gap(

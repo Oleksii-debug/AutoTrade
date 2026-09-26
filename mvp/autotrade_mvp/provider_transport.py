@@ -1949,6 +1949,551 @@ class WhiteBitHttpTransport:
 
 
 @dataclass(frozen=True)
+class KrakenFuturesCredential:
+    api_key: str
+    api_secret: str
+
+    @classmethod
+    def parse(cls, plaintext: object) -> "KrakenFuturesCredential":
+        if not isinstance(plaintext, str) or not plaintext:
+            raise ProviderTransportScopeError(
+                "Kraken Futures credential material is unavailable"
+            )
+        try:
+            value = json.loads(plaintext)
+        except json.JSONDecodeError as error:
+            raise ProviderTransportScopeError(
+                "Kraken Futures credential material has invalid format"
+            ) from error
+        if not isinstance(value, dict) or set(value) != {
+            "api_key",
+            "api_secret",
+        }:
+            raise ProviderTransportScopeError(
+                "Kraken Futures credential material must contain exact api_key/api_secret fields"
+            )
+        api_key = _canonical_text(value["api_key"], name="api_key")
+        api_secret = _canonical_text(value["api_secret"], name="api_secret")
+        try:
+            decoded = base64.b64decode(api_secret, validate=True)
+        except (ValueError, binascii.Error, UnicodeEncodeError) as error:
+            raise ProviderTransportScopeError(
+                "Kraken Futures api_secret must be canonical base64"
+            ) from error
+        if not decoded:
+            raise ProviderTransportScopeError(
+                "Kraken Futures api_secret must decode to non-empty bytes"
+            )
+        return cls(api_key=api_key, api_secret=api_secret)
+
+
+def _kraken_futures_decimal_text(value: object, *, name: str) -> str:
+    text = _canonical_text(value, name=name)
+    try:
+        number = Decimal(text)
+    except (InvalidOperation, ValueError) as error:
+        raise ProviderTransportScopeError(
+            f"Kraken Futures {name} must be an exact decimal"
+        ) from error
+    if not number.is_finite() or number <= 0:
+        raise ProviderTransportScopeError(
+            f"Kraken Futures {name} must be positive and finite"
+        )
+    rendered = format(number, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    if rendered != text:
+        raise ProviderTransportScopeError(
+            f"Kraken Futures {name} must be canonical decimal text"
+        )
+    return text
+
+
+def _kraken_futures_prepared_body(body: object) -> Mapping[str, str]:
+    if not isinstance(body, Mapping):
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures request body must be a mapping"
+        )
+    normalized = dict(body)
+    required = {"orderType", "symbol", "side", "size", "cliOrdId"}
+    optional = {"limitPrice", "reduceOnly"}
+    if not required <= set(normalized) or set(normalized) - required - optional:
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures order body is not canonical"
+        )
+    if any(not isinstance(value, str) for value in normalized.values()):
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures order values must be exact text"
+        )
+    order_type = _canonical_text(normalized["orderType"], name="orderType")
+    if order_type not in {"mkt", "lmt"}:
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures orderType must be mkt or lmt"
+        )
+    symbol = _canonical_text(normalized["symbol"], name="symbol")
+    side = _canonical_text(normalized["side"], name="side")
+    if side not in {"buy", "sell"}:
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures side must be buy or sell"
+        )
+    size = _kraken_futures_decimal_text(normalized["size"], name="size")
+    try:
+        client_id = validate_futures_client_order_id(
+            normalized["cliOrdId"]
+        )
+    except ValueError as error:
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures client order id is invalid"
+        ) from error
+    except Exception as error:
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures client order id is invalid"
+        ) from error
+
+    price = normalized.get("limitPrice")
+    if order_type == "mkt":
+        if price is not None:
+            raise ProviderTransportScopeError(
+                "prepared Kraken Futures market order must omit limitPrice"
+            )
+    elif price is None:
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures limit order requires limitPrice"
+        )
+    else:
+        normalized["limitPrice"] = _kraken_futures_decimal_text(
+            price,
+            name="limitPrice",
+        )
+    if "reduceOnly" in normalized and normalized["reduceOnly"] != "true":
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures reduceOnly must be literal true when present"
+        )
+    normalized["orderType"] = order_type
+    normalized["symbol"] = symbol
+    normalized["side"] = side
+    normalized["size"] = size
+    normalized["cliOrdId"] = client_id
+    return MappingProxyType(normalized)
+
+
+class KrakenFuturesSigner:
+    """Pure Kraken Derivatives v3 signer over exact URL-encoded form bytes."""
+
+    PLACE_ORDER_ENDPOINT = "/derivatives/api/v3/sendorder"
+    SIGNING_PATH = "/api/v3/sendorder"
+
+    @staticmethod
+    def sign(
+        *,
+        policy: ProviderEndpointPolicy,
+        provider_environment: object,
+        endpoint: object,
+        body: object,
+        credential_plaintext: object,
+        nonce: object,
+    ) -> SignedHttpRequest:
+        provider_env = _canonical_text(
+            provider_environment,
+            name="provider_environment",
+        ).upper()
+        canonical_policy = KRAKEN_FUTURES_ENDPOINT_POLICIES.get(provider_env)
+        if canonical_policy is None or policy != canonical_policy:
+            raise ProviderTransportScopeError(
+                "Kraken Futures policy does not match exact provider environment"
+            )
+        path = _canonical_text(endpoint, name="endpoint")
+        if path != KrakenFuturesSigner.PLACE_ORDER_ENDPOINT:
+            raise ProviderTransportScopeError(
+                "Kraken Futures signer permits only the canonical sendorder path"
+            )
+        parameters = _kraken_futures_prepared_body(body)
+        if (
+            isinstance(nonce, bool)
+            or not isinstance(nonce, int)
+            or nonce <= 0
+            or nonce > _UINT64_MAX
+        ):
+            raise ProviderTransportScopeError(
+                "Kraken Futures nonce must be an unsigned 64-bit positive integer"
+            )
+        credential = KrakenFuturesCredential.parse(credential_plaintext)
+        exact_body = urlencode(sorted(parameters.items())).encode("ascii")
+        digest = sha256(
+            exact_body
+            + str(nonce).encode("ascii")
+            + KrakenFuturesSigner.SIGNING_PATH.encode("ascii")
+        ).digest()
+        secret = base64.b64decode(credential.api_secret, validate=True)
+        signature = base64.b64encode(
+            hmac.new(secret, digest, sha512).digest()
+        ).decode("ascii")
+        return SignedHttpRequest(
+            method="POST",
+            url=policy.absolute_url(path),
+            headers=MappingProxyType(
+                {
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "APIKey": credential.api_key,
+                    "Nonce": str(nonce),
+                    "Authent": signature,
+                }
+            ),
+            body=exact_body,
+            timeout_seconds=policy.timeout_seconds,
+        )
+
+
+class KrakenFuturesHttpTransport:
+    """GuardedDispatcher-compatible Kraken Futures LIVE/DEMO sendorder transport."""
+
+    def __init__(
+        self,
+        *,
+        policy: ProviderEndpointPolicy,
+        provider_environment: str,
+        account_id: str,
+        capability_snapshot_id: str,
+        capability_registry: CapabilityRegistry,
+        secret_resolver: ProviderSecretResolver,
+        credential_handle: PersistentCredentialHandle,
+        session_token: str,
+        origin: str,
+        execution_identity: str,
+        nonce_allocator: KrakenFuturesDurableNonceAllocator,
+        clock_utc: ClockUtc,
+        quota_gate: QuotaGate | None = None,
+        wire_client: ProviderWireClient | None = None,
+    ) -> None:
+        if not isinstance(policy, ProviderEndpointPolicy):
+            raise TypeError("policy must be ProviderEndpointPolicy")
+        provider_env = _canonical_text(
+            provider_environment,
+            name="provider_environment",
+        ).upper()
+        canonical_policy = KRAKEN_FUTURES_ENDPOINT_POLICIES.get(provider_env)
+        if canonical_policy is None or policy != canonical_policy:
+            raise ProviderTransportScopeError(
+                "Kraken Futures policy does not match exact provider environment"
+            )
+        if not isinstance(credential_handle, PersistentCredentialHandle):
+            raise TypeError(
+                "credential_handle must be PersistentCredentialHandle"
+            )
+        if (
+            credential_handle.provider != "KRAKEN"
+            or credential_handle.environment != policy.environment
+            or credential_handle.purpose != "TRADE"
+        ):
+            raise ProviderTransportScopeError(
+                "credential handle provider/environment/purpose mismatch"
+            )
+        account = _canonical_text(account_id, name="account_id")
+        if credential_handle.account_id != account:
+            raise ProviderTransportScopeError(
+                "credential handle account mismatch"
+            )
+        if not isinstance(capability_registry, CapabilityRegistry):
+            raise TypeError("capability_registry must be CapabilityRegistry")
+        if not hasattr(secret_resolver, "resolve_for_execution"):
+            raise TypeError(
+                "secret_resolver must implement resolve_for_execution"
+            )
+        if not isinstance(nonce_allocator, KrakenFuturesDurableNonceAllocator):
+            raise TypeError(
+                "nonce_allocator must be KrakenFuturesDurableNonceAllocator"
+            )
+        if (
+            nonce_allocator.account_id != account
+            or nonce_allocator.environment != policy.environment
+            or nonce_allocator.provider_environment != provider_env
+            or nonce_allocator.credential_handle_id != credential_handle.handle_id
+            or nonce_allocator.credential_generation != credential_handle.generation
+        ):
+            raise ProviderTransportScopeError(
+                "Kraken Futures nonce allocator scope mismatch"
+            )
+        if not callable(clock_utc):
+            raise TypeError("clock_utc must be callable")
+        if quota_gate is not None and not callable(quota_gate):
+            raise TypeError("quota_gate must be callable or None")
+        if wire_client is not None and not hasattr(wire_client, "send"):
+            raise TypeError("wire_client must implement send")
+
+        self.policy = policy
+        self.provider_environment = provider_env
+        self.account_id = account
+        self.capability_snapshot_id = _canonical_text(
+            capability_snapshot_id,
+            name="capability_snapshot_id",
+        )
+        self.capability_registry = capability_registry
+        self.secret_resolver = secret_resolver
+        self.credential_handle = credential_handle
+        self.session_token = _canonical_text(
+            session_token,
+            name="session_token",
+        )
+        self.origin = _canonical_text(origin, name="origin")
+        self.execution_identity = _canonical_text(
+            execution_identity,
+            name="execution_identity",
+        )
+        self.nonce_allocator = nonce_allocator
+        self.clock_utc = clock_utc
+        self.quota_gate = quota_gate
+        self.wire_client = wire_client or UrllibJsonWireClient()
+
+    @staticmethod
+    def _prepared_fields(
+        request: Mapping[str, Any],
+    ) -> tuple[
+        str,
+        Mapping[str, str],
+        str,
+        str,
+        str,
+        str,
+        str,
+        str,
+        str,
+    ]:
+        if not isinstance(request, Mapping):
+            raise ProviderTransportScopeError(
+                "prepared provider request must be a mapping"
+            )
+        expected = {
+            "endpoint",
+            "body",
+            "account_id",
+            "environment",
+            "provider_environment",
+            "capability_snapshot_id",
+            "entity_id",
+            "capability_snapshot_ids",
+            "instrument_versions",
+            "body_sha256",
+        }
+        if set(request) != expected:
+            raise ProviderTransportScopeError(
+                "prepared Kraken Futures request fields are not canonical"
+            )
+        endpoint = _canonical_text(request["endpoint"], name="endpoint")
+        if endpoint != KrakenFuturesSigner.PLACE_ORDER_ENDPOINT:
+            raise ProviderTransportScopeError(
+                "Kraken Futures transport received an unsupported endpoint"
+            )
+        body = _kraken_futures_prepared_body(request["body"])
+        account = _canonical_text(request["account_id"], name="account_id")
+        environment = _canonical_environment(request["environment"])
+        provider_environment = _canonical_text(
+            request["provider_environment"],
+            name="provider_environment",
+        ).upper()
+        capability = _canonical_text(
+            request["capability_snapshot_id"],
+            name="capability_snapshot_id",
+        )
+        entity_id = _canonical_text(request["entity_id"], name="entity_id")
+        raw_capabilities = request["capability_snapshot_ids"]
+        raw_instruments = request["instrument_versions"]
+        if (
+            not isinstance(raw_capabilities, (list, tuple))
+            or len(raw_capabilities) != 1
+            or not isinstance(raw_instruments, (list, tuple))
+            or len(raw_instruments) != 1
+        ):
+            raise ProviderTransportScopeError(
+                "Kraken Futures capability and instrument bindings must contain exactly one identity"
+            )
+        if (
+            _canonical_text(
+                raw_capabilities[0],
+                name="capability_snapshot_id",
+            )
+            != capability
+        ):
+            raise ProviderTransportScopeError(
+                "Kraken Futures capability snapshot binding is inconsistent"
+            )
+        instrument_version = _canonical_text(
+            raw_instruments[0],
+            name="instrument_version",
+        )
+        rendered = json.dumps(
+            dict(body),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        digest = _canonical_text(request["body_sha256"], name="body_sha256")
+        actual_digest = "sha256:" + sha256(rendered).hexdigest()
+        if digest != actual_digest:
+            raise ProviderTransportScopeError(
+                "prepared Kraken Futures request body digest mismatch"
+            )
+        return (
+            endpoint,
+            body,
+            account,
+            environment,
+            provider_environment,
+            capability,
+            entity_id,
+            instrument_version,
+            actual_digest,
+        )
+
+    def _require_current_capability(
+        self,
+        *,
+        entity_id: str,
+        instrument_version: str,
+    ) -> CapabilitySnapshot:
+        point = self.clock_utc()
+        if (
+            not isinstance(point, datetime)
+            or point.tzinfo is None
+            or point.utcoffset() is None
+        ):
+            raise ProviderTransportScopeError(
+                "clock_utc must return a timezone-aware datetime"
+            )
+        point = point.astimezone(timezone.utc)
+        try:
+            current = self.capability_registry.require_verified(
+                provider_id="KRAKEN",
+                account_id=self.account_id,
+                entity_id=entity_id,
+                environment=self.policy.environment,
+                instrument_version=instrument_version,
+                at=point,
+            )
+        except Exception as error:
+            raise ProviderTransportScopeError(
+                "Kraken Futures current capability cannot be verified"
+            ) from error
+        if (
+            not isinstance(current, CapabilitySnapshot)
+            or current.snapshot_id != self.capability_snapshot_id
+            or current.provider_id != "KRAKEN"
+            or current.account_id != self.account_id
+            or current.entity_id != entity_id
+            or current.environment != self.policy.environment
+            or current.instrument_version != instrument_version
+            or current.status != "VERIFIED"
+            or not (current.observed_at <= point < current.expires_at)
+            or "ORDER_WRITE" not in current.permission_scopes
+        ):
+            raise ProviderTransportScopeError(
+                "Kraken Futures capability is no longer valid for exact prepared request"
+            )
+        return current
+
+    def __call__(
+        self,
+        client_order_id: str,
+        request: Mapping[str, Any],
+        final_guard: Callable[[], None],
+    ) -> ExactJsonTransportResponse:
+        if not callable(final_guard):
+            raise TypeError("final_guard must be callable")
+        try:
+            client_id = validate_futures_client_order_id(client_order_id)
+        except Exception as error:
+            raise ProviderTransportScopeError(
+                "Kraken Futures client order id is invalid"
+            ) from error
+        (
+            endpoint,
+            body,
+            account,
+            environment,
+            provider_environment,
+            capability,
+            entity_id,
+            instrument_version,
+            _digest,
+        ) = self._prepared_fields(request)
+        if account != self.account_id:
+            raise ProviderTransportScopeError(
+                "prepared request account mismatch"
+            )
+        if environment != self.policy.environment:
+            raise ProviderTransportScopeError(
+                "prepared request environment mismatch"
+            )
+        if provider_environment != self.provider_environment:
+            raise ProviderTransportScopeError(
+                "prepared request provider environment mismatch"
+            )
+        if capability != self.capability_snapshot_id:
+            raise ProviderTransportScopeError(
+                "prepared request capability snapshot mismatch"
+            )
+        if body.get("cliOrdId") != client_id:
+            raise ProviderTransportScopeError(
+                "prepared request client order identity mismatch"
+            )
+
+        if self.quota_gate is not None:
+            self.quota_gate(
+                "KRAKEN",
+                self.account_id,
+                self.policy.environment,
+                "ORDER_WRITE",
+            )
+
+        self._require_current_capability(
+            entity_id=entity_id,
+            instrument_version=instrument_version,
+        )
+
+        credential_plaintext = self.secret_resolver.resolve_for_execution(
+            self.session_token,
+            origin=self.origin,
+            handle=self.credential_handle,
+            execution_identity=self.execution_identity,
+            account_id=self.account_id,
+            provider="KRAKEN",
+            environment=self.policy.environment,
+            purpose="TRADE",
+        )
+        provider_api_key = None
+        try:
+            provider_api_key = KrakenFuturesCredential.parse(
+                credential_plaintext
+            ).api_key
+            nonce_domain = self.nonce_allocator.for_provider_api_key(
+                provider_api_key
+            )
+            provider_api_key = None
+            with nonce_domain.serialized_send():
+                nonce = nonce_domain.allocate()
+                signed = KrakenFuturesSigner.sign(
+                    policy=self.policy,
+                    provider_environment=self.provider_environment,
+                    endpoint=endpoint,
+                    body=body,
+                    credential_plaintext=credential_plaintext,
+                    nonce=nonce,
+                )
+                credential_plaintext = None
+
+                self._require_current_capability(
+                    entity_id=entity_id,
+                    instrument_version=instrument_version,
+                )
+                final_guard()
+                wire_response = self.wire_client.send(signed)
+                return _exact_trading_response(wire_response)
+        finally:
+            provider_api_key = None
+            credential_plaintext = None
+
+
+@dataclass(frozen=True)
 class KrakenSpotCredential:
     api_key: str
     api_secret: str

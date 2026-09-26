@@ -222,10 +222,20 @@ class JournalBackedHostApiTests(unittest.TestCase):
 
     def test_changed_payload_under_same_idempotency_key_conflicts_after_restart(self):
         first = self.store()
-        first.submit(self.command(payload={"reason": "A"}))
+        first.submit(
+            self.command(
+                action="REVOKE_AUTHORITY",
+                payload={"policy_id": "policy-A"},
+            )
+        )
 
         restarted = self.store()
-        conflict = restarted.submit(self.command(payload={"reason": "B"}))
+        conflict = restarted.submit(
+            self.command(
+                action="REVOKE_AUTHORITY",
+                payload={"policy_id": "policy-B"},
+            )
+        )
         self.assertEqual(conflict.status, "CONFLICT")
         self.assertIn("idempotency_key_conflict", conflict.reason_codes)
         self.assertEqual(restarted.state_version, 1)
@@ -236,7 +246,11 @@ class JournalBackedHostApiTests(unittest.TestCase):
 
         restarted = self.store()
         conflict = restarted.submit(
-            self.command(key="key-b", payload={"reason": "different"})
+            self.command(
+                key="key-b",
+                action="REVOKE_AUTHORITY",
+                payload={"policy_id": "policy-B"},
+            )
         )
         self.assertEqual(conflict.status, "CONFLICT")
         self.assertIn("command_id_conflict", conflict.reason_codes)

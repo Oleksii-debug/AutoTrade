@@ -146,26 +146,22 @@ def canonical_authority_action_payload(
         _keys(
             item,
             required=frozenset(),
-            optional=frozenset({"reason"}),
             name="BLOCK_NEW_EXPOSURE payload",
         )
-        reason = item.get("reason", "operator_requested_block_new_exposure")
-        return {"reason": _text(reason, name="BLOCK_NEW_EXPOSURE reason")}
+        return {"reason": "operator_requested_block_new_exposure"}
 
     if normalized_action == "REVOKE_AUTHORITY":
         _keys(
             item,
             required=frozenset({"policy_id"}),
-            optional=frozenset({"reason"}),
             name="REVOKE_AUTHORITY payload",
         )
-        reason = item.get("reason", "operator_requested_authority_revocation")
         return {
             "policy_id": _text(
                 item["policy_id"],
                 name="REVOKE_AUTHORITY policy_id",
             ),
-            "reason": _text(reason, name="REVOKE_AUTHORITY reason"),
+            "reason": "operator_requested_authority_revocation",
         }
 
     if normalized_action == "SET_AUTHORITY":

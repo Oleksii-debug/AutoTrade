@@ -30,9 +30,17 @@ class AuthorityCommandExecutor:
 
     @staticmethod
     def _evidence(event: Mapping[str, object]) -> dict[str, object]:
+        event_id = str(event["event_id"])
+        version = str(event["aggregate_version"])
         return {
-            "artifact_id": str(event["event_id"]),
+            "artifact_id": event_id,
             "sha256": str(event["payload_hash"]),
+            "source_uri": (
+                "autotrade://journal/authority_state/canonical/"
+                + event_id
+                + "?version="
+                + version
+            ),
             "observed_at": str(event["committed_at"]),
         }
 

@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 from mvp.autotrade_mvp.authority import AuthorityPolicy, AuthorityService
 from mvp.autotrade_mvp.authority_command_executor import AuthorityCommandExecutor
 from mvp.autotrade_mvp.durable_host_api import JournalBackedHostCommandStore
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 
 INSTRUMENT_ID = "11111111-2222-4333-8444-555555555555"
 
@@ -89,6 +89,52 @@ class AuthorityCommandExecutionTests(unittest.TestCase):
             accepted["action_payload"],
         )
 
+    def test_free_text_or_secret_like_block_fields_are_rejected_before_journal(self):
+        with self.assertRaisesRegex(ValueError, "unsupported fields"):
+            self.host.submit(
+                self.command(
+                    action="BLOCK_NEW_EXPOSURE",
+                    payload={"token": "must-not-persist"},
+                    suffix="secret",
+                )
+            )
+        self.assertEqual(self.host.state_version, 0)
+
+    def test_tampered_durable_action_payload_digest_fails_closed(self):
+        action_payload = {
+            "reason": "operator_requested_block_new_exposure",
+        }
+        payload = {
+            "command_id": "tampered-command",
+            "operation_id": "11111111-1111-4111-8111-111111111111",
+            "action": "BLOCK_NEW_EXPOSURE",
+            "actor": "owner",
+            "account_id": "paper-account-1",
+            "environment": "PAPER",
+            "action_payload": action_payload,
+            "action_payload_hash": "sha256:" + ("0" * 64),
+            "phase": "QUEUED",
+            "started_at": "2026-09-26T00:30:00Z",
+            "updated_at": "2026-09-26T00:30:00Z",
+            "affected_refs": [],
+            "evidence": [],
+            "remaining_uncertainty": ["financial_outcome_not_completed"],
+        }
+        self.journal.append_event(
+            {
+                "event_id": "tampered-host-command",
+                "event_type": "COMMAND_ACCEPTED",
+                "aggregate_type": self.host.AGGREGATE_TYPE,
+                "aggregate_id": self.host.aggregate_id,
+                "aggregate_version": "1",
+                "payload": payload,
+                "payload_hash": payload_digest(payload),
+                "committed_at": "2026-09-26T00:30:00Z",
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "integrity failure"):
+            self.host.get_accepted_command(payload["operation_id"])
+
     def test_revoke_requires_policy_id_before_durable_mutation(self):
         with self.assertRaisesRegex(ValueError, "policy_id"):
             self.host.submit(
@@ -124,6 +170,11 @@ class AuthorityCommandExecutionTests(unittest.TestCase):
             completed.evidence[0]["sha256"],
             event["payload_hash"],
         )
+        self.assertTrue(
+            completed.evidence[0]["source_uri"].endswith(
+                "?version=" + str(event["aggregate_version"])
+            )
+        )
 
     def test_block_new_exposure_blocks_new_risk_but_not_risk_reducing(self):
         journal = JournalStore(f"{self.directory.name}/simulation.sqlite3")
@@ -153,7 +204,7 @@ class AuthorityCommandExecutionTests(unittest.TestCase):
         )
         command = self.command(
             action="BLOCK_NEW_EXPOSURE",
-            payload={"reason": "operator emergency stop"},
+            payload={},
             suffix="2",
         )
         command["environment"] = "SIMULATION"

@@ -6,6 +6,7 @@ import base64
 import binascii
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -36,6 +37,18 @@ _CANONICAL_QUALIFICATION_TRUST_POLICY_REPOSITORY_PATH = (
 
 
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _trusted_git_environment() -> dict[str, str]:
+    """Read qualification authority without caller-selected Git semantics."""
+
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.upper().startswith("GIT_")
+    }
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    return environment
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$")
 _RSA_METHOD = "RSA_PKCS1V15_SHA256"
@@ -655,6 +668,7 @@ def _load_exact_source_qualification_trust_policy_bytes(
             capture_output=True,
             text=True,
             check=False,
+            env=_trusted_git_environment(),
         )
     except OSError as error:
         raise QualificationTrustUnavailable(
@@ -673,12 +687,14 @@ def _load_exact_source_qualification_trust_policy_bytes(
         result = subprocess.run(
             [
                 "git",
-                "show",
+                "cat-file",
+                "blob",
                 f"{source_sha}:{_CANONICAL_QUALIFICATION_TRUST_POLICY_REPOSITORY_PATH}",
             ],
             cwd=_QUALIFICATION_TRUST_REPOSITORY_ROOT,
             capture_output=True,
             check=False,
+            env=_trusted_git_environment(),
         )
     except OSError as error:
         raise QualificationTrustUnavailable(

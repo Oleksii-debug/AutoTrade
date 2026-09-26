@@ -947,6 +947,119 @@ class JournalBackedHostApiTests(unittest.TestCase):
         )
 
 
+    def test_accepted_set_restore_cannot_clear_newer_block_generation(self):
+        host = self.store(
+            environment="SIMULATION",
+            now="2030-01-01T00:00:00Z",
+        )
+        blocked = host.submit(
+            self.command(
+                environment="SIMULATION",
+                payload={"reason_code": "EMERGENCY_STOP"},
+            )
+        )
+        self.assertEqual(
+            host.execute_authority_operation(blocked.operation_id).phase,
+            "SUCCEEDED",
+        )
+
+        policy_payload = {
+            "policy_id": "stale-restore-policy",
+            "environments": ["SIMULATION"],
+            "instruments": [
+                {
+                    "instrument_id": "11111111-1111-4111-8111-111111111111",
+                    "version": 1,
+                }
+            ],
+            "actions": ["ORDER.SUBMIT"],
+            "max_notional": "1000",
+            "valid_from": "2029-01-01T00:00:00Z",
+            "expires_at": "2035-01-01T00:00:00Z",
+            "autonomous": True,
+            "protection_only": False,
+            "version": 1,
+        }
+        set_host = self.store(
+            environment="SIMULATION",
+            now="2030-01-01T00:00:01Z",
+        )
+        registered = set_host.submit(
+            self.command(
+                command_id="22222222-2222-2222-2222-222222222222",
+                key="register-before-stale-restore",
+                version=set_host.snapshot()["state_version"],
+                environment="SIMULATION",
+                action="SET_AUTHORITY",
+                payload=policy_payload,
+            )
+        )
+        self.assertEqual(
+            set_host.execute_authority_operation(registered.operation_id).phase,
+            "SUCCEEDED",
+        )
+
+        restore_host = self.store(
+            environment="SIMULATION",
+            now="2030-01-01T00:00:02Z",
+        )
+        restore_payload = {
+            **policy_payload,
+            "restore_new_exposure": True,
+            "reason_code": "POLICY_REVIEW",
+        }
+        accepted = restore_host.submit(
+            self.command(
+                command_id="33333333-3333-3333-3333-333333333333",
+                key="stale-explicit-restore",
+                version=restore_host.snapshot()["state_version"],
+                environment="SIMULATION",
+                action="SET_AUTHORITY",
+                payload=restore_payload,
+            )
+        )
+        accepted_event = next(
+            item
+            for item in restore_host.events_after(0)
+            if item.payload.get("operation_id") == accepted.operation_id
+            and item.kind == "COMMAND_ACCEPTED"
+        )
+        captured = accepted_event.payload["action_payload"]["expected_block"]
+
+        authority = AuthorityService(JournalStore(self.path))
+        authority.restore_new_exposure(
+            account_id="paper-account-1",
+            environment="SIMULATION",
+            reason="test-reconciliation-completed",
+            restored_at="2030-01-01T00:00:03Z",
+            command_id="44444444-4444-4444-4444-444444444444",
+            expected_block_command_id=captured["command_id"],
+            expected_block_reason=captured["reason"],
+            expected_blocked_at=captured["blocked_at"],
+        )
+        authority.block_new_exposure(
+            account_id="paper-account-1",
+            environment="SIMULATION",
+            reason="newer-emergency-generation",
+            blocked_at="2030-01-01T00:00:04Z",
+            command_id="55555555-5555-4555-8555-555555555555",
+        )
+
+        failed = restore_host.execute_authority_operation(accepted.operation_id)
+        self.assertEqual(failed.phase, "FAILED")
+        self.assertEqual(failed.affected_refs, ())
+        replayed = AuthorityService(JournalStore(self.path))
+        self.assertTrue(
+            replayed.is_new_exposure_blocked(
+                "paper-account-1",
+                "SIMULATION",
+            )
+        )
+        self.assertEqual(
+            replayed.export_state()["new_exposure_blocks"][0]["command_id"],
+            "55555555-5555-4555-8555-555555555555",
+        )
+
     def test_stale_restore_cannot_clear_newer_new_exposure_block(self):
         journal = JournalStore(self.path)
         service = AuthorityService(journal)

@@ -358,6 +358,32 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("field_errors must be an array", js)
         self.assertIn("response.status !== 200 && response.status !== 409", js)
 
+    def test_operation_identity_is_canonical_uuid_before_route_use(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("function canonicalId(value, name)", js)
+        self.assertIn(
+            "/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/",
+            js,
+        )
+        self.assertIn(
+            'const commandId = canonicalId(result.command_id, "command_id")',
+            js,
+        )
+        self.assertIn(
+            ': canonicalId(result.operation_id, "operation_id")',
+            js,
+        )
+        self.assertIn(
+            'const operationId = canonicalId(result.operation_id, "operation_id")',
+            js,
+        )
+        parse_command = js.index("function parseCommandResult(value, expectedCommandId)")
+        command_route = js.index('HOST_API.route("getOperation"', parse_command)
+        self.assertLess(
+            js.index('canonicalId(result.operation_id, "operation_id")', parse_command),
+            command_route,
+        )
+
     def test_accepted_command_requires_durable_operation_identity(self):
         js = APP.read_text(encoding="utf-8")
         self.assertIn(

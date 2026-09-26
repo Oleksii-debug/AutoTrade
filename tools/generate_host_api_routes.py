@@ -121,6 +121,17 @@ def parse_operations(text: str) -> tuple[Operation, ...]:
             finish_operation()
             current_path = path_match.group(1)
             continue
+        if line.startswith("  ") and not line.startswith("    "):
+            candidate = line.strip()
+            if (
+                candidate.startswith("/")
+                or candidate.startswith('"/')
+                or candidate.startswith("'/")
+            ):
+                raise ValueError(
+                    "unsupported OpenAPI path entry syntax; "
+                    "path keys must use canonical unquoted form"
+                )
         method_match = _METHOD.fullmatch(line)
         if method_match and method_match.group(1) in _HTTP_METHODS:
             finish_operation()

@@ -630,6 +630,32 @@ def _kraken_spot_canonical_integer(
     return parsed
 
 
+def _kraken_spot_history_boundary(value: str, *, name: str) -> str:
+    """Validate Kraken history start/end as Unix time or opaque tx/ledger id."""
+
+    if value.isascii() and value.isdigit():
+        _kraken_spot_canonical_integer(
+            value,
+            name=name,
+            minimum=0,
+        )
+        return value
+    parts = value.split("-")
+    if (
+        len(parts) < 2
+        or any(
+            not part
+            or not part.isascii()
+            or not part.isalnum()
+            for part in parts
+        )
+    ):
+        raise ProviderTransportScopeError(
+            f"Kraken Spot {name} must be canonical Unix time or provider id"
+        )
+    return value
+
+
 def _validate_kraken_spot_authenticated_read_query(
     binding: AuthenticatedReadQueryBinding,
 ) -> None:
@@ -667,6 +693,12 @@ def _validate_kraken_spot_authenticated_read_query(
             minimum=-(1 << 31),
             maximum=(1 << 31) - 1,
         )
+    for field in ("start", "end"):
+        if field in binding.query:
+            _kraken_spot_history_boundary(
+                binding.query[field],
+                name=field,
+            )
     if "cl_ord_id" in binding.query:
         try:
             validate_spot_client_order_id(binding.query["cl_ord_id"])
@@ -682,7 +714,8 @@ def _validate_kraken_spot_authenticated_read_query(
             )
         txids = tuple(part.strip() for part in raw_txids.split(","))
         if (
-            not txids
+            raw_txids != ",".join(txids)
+            or not txids
             or len(txids) > 50
             or any(not value for value in txids)
             or len(set(txids)) != len(txids)

@@ -474,6 +474,32 @@ class RuntimeRecoveryTests(unittest.TestCase):
             self.assertEqual(owner_three.epoch, 3)
             self.assertEqual(third.state, HostState.RECOVERING)
 
+    def test_restart_with_same_owner_id_is_fenced_by_new_epoch(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            first = RecoveryController(
+                owner_store=JournalStore(path),
+                owner_scope="PAPER:acct",
+            )
+            owner_one = first.start("stable-host")
+            self._record_durable_ready(first)
+
+            restarted = RecoveryController(
+                owner_store=JournalStore(path),
+                owner_scope="PAPER:acct",
+            )
+            owner_two = restarted.start("stable-host")
+            self.assertEqual(owner_two.owner_id, owner_one.owner_id)
+            self.assertEqual(owner_two.epoch, owner_one.epoch + 1)
+            proof = restarted.durable_sender_fence_proof(owner_two.epoch)
+            self.assertEqual(proof["old_owner_id"], "stable-host")
+            self.assertEqual(proof["new_owner_id"], "stable-host")
+            self.assertEqual(proof["old_owner_epoch"], 1)
+            self.assertEqual(proof["new_owner_epoch"], 2)
+
+            with self.assertRaisesRegex(PermissionError, "Durable sender fence"):
+                first.validate_sender(owner_one.owner_id, owner_one.epoch)
+
     def test_durable_owner_scopes_are_independent(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"
@@ -494,8 +520,6 @@ class RuntimeRecoveryTests(unittest.TestCase):
             self._record_durable_ready(paper)
             transferred = paper.transfer_owner(
                 new_owner_id="paper-host-2",
-                old_sender_fenced=True,
-                reconciled=True,
             )
             self.assertEqual(transferred.epoch, 2)
             self._record_durable_ready(live)
@@ -520,12 +544,41 @@ class RuntimeRecoveryTests(unittest.TestCase):
             stale.reason_codes.clear()
             stale.state = HostState.READY
 
+            with self.assertRaisesRegex(
+                PermissionError,
+                "rejects caller authority flags",
+            ):
+                first.transfer_owner(
+                    new_owner_id="host-b",
+                    old_sender_fenced=True,
+                    reconciled=True,
+                )
+
             transferred = first.transfer_owner(
                 new_owner_id="host-b",
-                old_sender_fenced=True,
-                reconciled=True,
             )
             self.assertEqual(transferred.epoch, 2)
+            proof = first.durable_sender_fence_proof(transferred.epoch)
+            self.assertEqual(proof["old_owner_id"], "host-a")
+            self.assertEqual(proof["old_owner_epoch"], 1)
+            self.assertEqual(proof["new_owner_id"], "host-b")
+            self.assertEqual(proof["new_owner_epoch"], 2)
+            self.assertEqual(
+                proof["fence_method"],
+                "DURABLE_OWNER_EPOCH_ADVANCE",
+            )
+            self.assertGreater(proof["journal_sequence"], 0)
+            self.assertTrue(str(proof["event_id"]))
+            self.assertTrue(str(proof["payload_hash"]))
+
+            restarted = RecoveryController(
+                owner_store=JournalStore(path),
+                owner_scope="PAPER:acct",
+            )
+            self.assertEqual(
+                restarted.durable_sender_fence_proof(transferred.epoch),
+                proof,
+            )
             with self.assertRaisesRegex(PermissionError, "Durable sender fence"):
                 stale.validate_sender(owner.owner_id, owner.epoch)
 

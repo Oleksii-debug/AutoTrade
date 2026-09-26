@@ -115,6 +115,36 @@ class ArtifactStoreTests(unittest.TestCase):
             ):
                 store.export(artifact_id, Path(directory) / "out.txt")
 
+    def test_export_reverifies_object_bytes_after_authorization(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "store"
+            artifact_id = str(uuid4())
+            store: ArtifactStore
+
+            def mutate_then_authorize(_artifact_id: str, _digest: str) -> bool:
+                manifest = store.load_manifest(artifact_id)
+                object_path = store._object_path(
+                    manifest["sha256"].removeprefix("sha256:")
+                )
+                object_path.write_bytes(b"tampered")
+                return True
+
+            store = ArtifactStore(root, export_authorizer=mutate_then_authorize)
+            store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"verified",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": True},
+            )
+            target = Path(directory) / "out.bin"
+
+            with self.assertRaisesRegex(
+                ArtifactIntegrityError,
+                "changed during export copy",
+            ):
+                store.export(artifact_id, target)
+            self.assertFalse(target.exists())
+
     def test_tampered_manifest_cannot_escalate_export_rights(self):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(Path(directory) / "store")

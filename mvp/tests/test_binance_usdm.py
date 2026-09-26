@@ -507,6 +507,15 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
                 },
             )
 
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "duplicate normalized"):
+            parse_account_trades(
+                observation,
+                instrument_versions={
+                    "BTCUSDT": "BTCUSDT-PERP:v1",
+                    " BTCUSDT ": "BTCUSDT-PERP:v2",
+                },
+            )
+
     def test_conflicting_trade_identity_fails_closed(self):
         first = {
             "commission": "0.01",

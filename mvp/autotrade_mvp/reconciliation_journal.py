@@ -15,7 +15,11 @@ from research.autotrade_research.artifacts.store import ArtifactStore
 
 from .dispatch import submission_attempt_aggregate_id
 from .persistence import JournalStore, canonical_json, payload_digest
-from .reconciliation import ReconciliationResult, UnknownSubmission
+from .reconciliation import (
+    ReconciliationResult,
+    UnknownSubmission,
+    provider_fill_identity_payload,
+)
 from .securities_borrow import (
     BorrowAvailabilityEvidence,
     verify_provider_borrow_evidence,
@@ -123,6 +127,41 @@ def reconciliation_payload(
     if not isinstance(result, ReconciliationResult):
         raise TypeError("result must be ReconciliationResult")
     timestamp = _instant(observed_at, name="observed_at")
+
+    unexpected_fill_bindings: list[dict[str, Any]] = []
+    unexpected_fill_ids: list[str] = []
+    for fill in result.unexpected_provider_fills:
+        identity = provider_fill_identity_payload(fill)
+        if (
+            identity["provider_id"] != result.provider_id
+            or identity["account_id"] != result.account_id
+            or identity["environment"] != result.environment
+        ):
+            raise ValueError(
+                "unexpected provider fill identity scope must match reconciliation result"
+            )
+        execution_id = str(identity["provider_execution_id"])
+        if execution_id in unexpected_fill_ids:
+            raise ValueError(
+                "unexpected provider fill identities must be unique"
+            )
+        unexpected_fill_ids.append(execution_id)
+        unexpected_fill_bindings.append(
+            {
+                "provider_execution_id": execution_id,
+                "identity_digest": payload_digest(identity),
+                "identity": identity,
+            }
+        )
+    expected_unexpected_ids = tuple(sorted(result.unexpected_execution_ids))
+    if unexpected_fill_bindings and tuple(sorted(unexpected_fill_ids)) != expected_unexpected_ids:
+        raise ValueError(
+            "unexpected provider fill identities must exactly match unexpected execution ids"
+        )
+    unexpected_fill_bindings.sort(
+        key=lambda item: str(item["provider_execution_id"])
+    )
+
     return {
         "provider_id": result.provider_id,
         "account_id": result.account_id,
@@ -143,6 +182,7 @@ def reconciliation_payload(
         ),
         "matched_execution_ids": list(result.matched_execution_ids),
         "unexpected_execution_ids": list(result.unexpected_execution_ids),
+        "unexpected_provider_fill_bindings": unexpected_fill_bindings,
         "missing_local_execution_ids": list(result.missing_local_execution_ids),
         "matched_working_client_order_ids": list(
             result.matched_working_client_order_ids

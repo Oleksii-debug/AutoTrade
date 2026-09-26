@@ -547,6 +547,47 @@ class ProviderFillEvidence:
         )
 
 
+def provider_fill_identity_payload(fill: ProviderFillEvidence) -> dict[str, object]:
+    """Return the canonical normalized identity of one provider-observed fill.
+
+    This payload is safe to persist in reconciliation evidence and is deliberately
+    independent of any local order projection.  It includes every field that may
+    change the signed/economic meaning of an unexpected execution plus immutable
+    provider-evidence references.
+    """
+    if not isinstance(fill, ProviderFillEvidence):
+        raise TypeError("fill must be ProviderFillEvidence")
+
+    def decimal_text(value: Decimal) -> str:
+        if value == 0:
+            return "0"
+        return format(value.normalize(), "f")
+
+    trade_time = (
+        _instant(fill.trade_time, name="provider_fill.trade_time")
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    return {
+        "schema_version": "1.0.0",
+        "provider_id": fill.provider_id,
+        "account_id": fill.account_id,
+        "environment": fill.environment,
+        "provider_execution_id": fill.provider_execution_id,
+        "client_order_id": fill.client_order_id,
+        "instrument": fill.instrument,
+        "side": fill.side,
+        "position_side": fill.position_side,
+        "position_effect": fill.position_effect,
+        "quantity": decimal_text(fill.quantity),
+        "price": decimal_text(fill.price),
+        "fee_amount": decimal_text(fill.fee_amount),
+        "fee_currency": fill.fee_currency,
+        "trade_time": trade_time,
+        "evidence_refs": sorted(fill.evidence_refs),
+    }
+
+
 @dataclass(frozen=True)
 class ProviderActivityEvidence:
     provider_id: str
@@ -764,6 +805,7 @@ class ReconciliationResult:
     borrow_differences: Mapping[str, Decimal] | None = None
     settlement_differences: Mapping[str, Decimal] | None = None
     settlement_activity_complete: bool = True
+    unexpected_provider_fills: tuple[ProviderFillEvidence, ...] = ()
 
     @property
     def blocks_new_risk(self) -> bool:
@@ -926,7 +968,12 @@ def reconcile_account(
         if fill.environment != environment_scope:
             raise ValueError("provider fill evidence environment mismatch")
         if fill.provider_execution_id in provider_by_id:
-            if provider_by_id[fill.provider_execution_id] != fill:
+            if (
+                provider_fill_identity_payload(
+                    provider_by_id[fill.provider_execution_id]
+                )
+                != provider_fill_identity_payload(fill)
+            ):
                 raise ValueError("provider execution id has conflicting observations")
             continue
         provider_by_id[fill.provider_execution_id] = fill
@@ -1573,5 +1620,8 @@ def reconcile_account(
         settlement_differences=MappingProxyType(settlement_differences),
         settlement_activity_complete=(
             True if not settlement_requested else bool(settlement_activity_complete)
+        ),
+        unexpected_provider_fills=tuple(
+            provider_by_id[execution_id] for execution_id in unexpected
         ),
     )

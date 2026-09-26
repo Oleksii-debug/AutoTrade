@@ -1,3 +1,4 @@
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -194,7 +195,7 @@ class DurableCapabilityRegistryTests(unittest.TestCase):
                     NOW,
                 )
             )
-            with sqlite3.connect(path) as connection:
+            with closing(sqlite3.connect(path)) as connection:
                 connection.execute(
                     "UPDATE events SET payload_json=? "
                     "WHERE aggregate_type='capability_history'",

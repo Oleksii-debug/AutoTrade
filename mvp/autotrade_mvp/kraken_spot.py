@@ -730,11 +730,28 @@ class KrakenSpotPaginationCoverage:
 
     @property
     def has_stable_end_boundary(self) -> bool:
-        """Whether offset pagination is protected from a moving newest-first head."""
+        """Whether offset pagination is protected from a proven fixed upper bound."""
 
         if len(self._pages) <= 1:
             return True
-        return "end" in dict(self._pages[0].filter_items)
+        end = dict(self._pages[0].filter_items).get("end")
+        if end is None or not end or any(
+            character.isspace() or ord(character) < 0x20
+            for character in end
+        ):
+            return False
+        if end.isascii() and end.isdigit():
+            return str(int(end, 10)) == end
+        parts = end.split("-")
+        return (
+            len(parts) >= 2
+            and all(
+                part
+                and part.isascii()
+                and part.isalnum()
+                for part in parts
+            )
+        )
 
     @property
     def complete(self) -> bool:

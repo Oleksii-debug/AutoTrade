@@ -138,6 +138,12 @@
     <section id="research" aria-labelledby="research-heading">
       <h2 id="research-heading">Research and replay</h2>
       <p>Background job evidence is read-only here until canonical research control contracts are exposed.</p>
+      <div class="table-tools" aria-label="Research and replay job table tools">
+        <label for="jobs-filter">Filter background research and replay jobs</label>
+        <input id="jobs-filter" type="search" autocomplete="off" spellcheck="false">
+        <button id="jobs-copy" type="button">Copy visible rows</button>
+        <output id="jobs-filter-status" for="jobs-filter" role="status" aria-live="polite">No host rows are available to filter.</output>
+      </div>
       <div id="jobs-region" class="table-scroll" role="region" aria-label="Background research and replay jobs" tabindex="0">
         <table>
           <caption>Background research and replay jobs</caption>

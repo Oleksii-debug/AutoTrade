@@ -1,13 +1,21 @@
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from hashlib import sha256
+from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
+from uuid import NAMESPACE_URL, uuid5
+
+from research.autotrade_research.artifacts.store import ArtifactStore
 
 from mvp.autotrade_mvp.asset_provider_crosswalk import (
     CrosswalkError,
     Lifecycle,
     LifecycleEvidence,
     advertised_lifecycle_keys,
+    lifecycle_evidence_bytes,
+    lifecycle_evidence_payload,
     qualify_asset_provider_crosswalk,
     required_cases,
 )
@@ -28,6 +36,17 @@ from mvp.autotrade_mvp.perpetuals import (
     PerpetualContract,
     funding_cashflow,
 )
+from mvp.autotrade_mvp.qualification_attestation import (
+    EvidenceArtifactRef,
+    QualificationScope,
+    SignedQualificationAttestation,
+)
+from mvp.tests.test_qualification_attestation import (
+    attestation,
+    policy as attestation_policy,
+    root as attestation_root,
+    sign,
+)
 
 
 SOURCE = "1" * 40
@@ -36,13 +55,31 @@ NOW = datetime(2026, 9, 25, tzinfo=timezone.utc)
 
 
 def complete_evidence(key):
-    return LifecycleEvidence(
+    artifact_id = str(
+        uuid5(
+            NAMESPACE_URL,
+            "autotrade:wp61:"
+            + key.provider_id
+            + ":"
+            + key.product_family
+            + ":"
+            + key.lifecycle.value,
+        )
+    )
+    provisional = LifecycleEvidence(
         key=key,
         source_sha=SOURCE,
         adapter_sha=ADAPTER,
         cases=required_cases(key.lifecycle),
         reconciliation_complete=True,
         economic_units_exact=True,
+        artifact_id=artifact_id,
+        artifact_sha256="sha256:" + "0" * 64,
+    )
+    return replace(
+        provisional,
+        artifact_sha256="sha256:"
+        + sha256(lifecycle_evidence_bytes(provisional)).hexdigest(),
     )
 
 
@@ -51,6 +88,67 @@ def adapter_map():
         (key.provider_id, key.product_family): ADAPTER
         for key in advertised_lifecycle_keys()
     }
+
+
+def trusted_qualify(evidence, *, signing_root=None, canonical_policy=None):
+    evidence = tuple(evidence)
+    with TemporaryDirectory() as directory:
+        store = ArtifactStore(directory)
+        for item in evidence:
+            store.publish_bytes(
+                artifact_id=item.artifact_id,
+                data=lifecycle_evidence_bytes(item),
+                media_type="application/vnd.autotrade.asset-provider-lifecycle",
+                rights={"storage": True, "export": False},
+                source_refs=[f"git:{item.source_sha}"],
+                metadata=lifecycle_evidence_payload(item),
+            )
+        trust_root = signing_root or attestation_root(
+            scopes=(
+                QualificationScope(
+                    "ASSET_PROVIDER_CROSSWALK",
+                    "INTEGRATION",
+                ),
+            )
+        )
+        trust_policy = attestation_policy(trust_root)
+        canonical_policy = canonical_policy or trust_policy
+        signed = attestation(
+            trust_root,
+            source_sha=SOURCE,
+            domain="ASSET_PROVIDER_CROSSWALK",
+            gate="INTEGRATION",
+            package_id="WP-61",
+            protocol_id="asset-provider-crosswalk-v1",
+            protocol_version="1.0.0",
+            requirement_ids=("complete-advertised-lifecycle-matrix",),
+            evidence_refs=tuple(
+                EvidenceArtifactRef(
+                    artifact_id=item.artifact_id,
+                    sha256=item.artifact_sha256,
+                    media_type="application/vnd.autotrade.asset-provider-lifecycle",
+                    evidence_kind="ASSET_PROVIDER_LIFECYCLE",
+                    source_sha=item.source_sha,
+                )
+                for item in evidence
+            ),
+            result="PASS",
+        )
+        with patch(
+            "mvp.autotrade_mvp.qualification_attestation."
+            "load_canonical_qualification_trust_policy",
+            return_value=canonical_policy,
+        ):
+            return qualify_asset_provider_crosswalk(
+                evidence,
+                exact_source_sha=SOURCE,
+                exact_adapter_shas=adapter_map(),
+                evidence_store=store,
+                qualification_receipt=SignedQualificationAttestation(
+                    signed,
+                    sign(signed),
+                ),
+            )
 
 
 class AssetProviderCrosswalkTests(unittest.TestCase):
@@ -72,15 +170,81 @@ class AssetProviderCrosswalkTests(unittest.TestCase):
 
     def test_complete_exact_build_matrix_passes_without_granting_trade_authority(self):
         evidence = [complete_evidence(key) for key in advertised_lifecycle_keys()]
+        verdict = trusted_qualify(evidence)
+        self.assertEqual(verdict.status, "PASS")
+        self.assertEqual(verdict.missing_keys, ())
+        self.assertEqual(verdict.invalid_keys, ())
+        self.assertFalse(verdict.trading_authority_granted)
+
+    def test_self_selected_root_cannot_authorize_crosswalk_pass(self):
+        evidence = [complete_evidence(key) for key in advertised_lifecycle_keys()]
+        candidate_root = attestation_root(
+            scopes=(
+                QualificationScope(
+                    "ASSET_PROVIDER_CROSSWALK",
+                    "INTEGRATION",
+                ),
+            )
+        )
+        canonical_root = replace(
+            candidate_root,
+            producer_id="qualifier.canonical.crosswalk",
+        )
+        verdict = trusted_qualify(
+            evidence,
+            signing_root=candidate_root,
+            canonical_policy=attestation_policy(canonical_root),
+        )
+        self.assertEqual(verdict.status, "INCOMPLETE")
+        self.assertIn(
+            "independent_evidence_trust_invalid",
+            verdict.reason_codes,
+        )
+        self.assertFalse(verdict.trading_authority_granted)
+
+    def test_self_asserted_complete_matrix_is_not_terminal_pass(self):
+        evidence = [complete_evidence(key) for key in advertised_lifecycle_keys()]
         verdict = qualify_asset_provider_crosswalk(
             evidence,
             exact_source_sha=SOURCE,
             exact_adapter_shas=adapter_map(),
         )
-        self.assertEqual(verdict.status, "PASS")
-        self.assertEqual(verdict.missing_keys, ())
-        self.assertEqual(verdict.invalid_keys, ())
+        self.assertEqual(verdict.status, "INCOMPLETE")
+        self.assertIn(
+            "immutable_evidence_store_unavailable",
+            verdict.reason_codes,
+        )
+        self.assertIn(
+            "independent_evidence_trust_unavailable",
+            verdict.reason_codes,
+        )
         self.assertFalse(verdict.trading_authority_granted)
+
+    def test_mutated_lifecycle_facts_do_not_match_immutable_receipt(self):
+        key = advertised_lifecycle_keys()[0]
+        item = complete_evidence(key)
+        mutated = replace(
+            item,
+            cases=item.cases | {"caller-invented-case"},
+        )
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            store.publish_bytes(
+                artifact_id=item.artifact_id,
+                data=lifecycle_evidence_bytes(item),
+                media_type="application/vnd.autotrade.asset-provider-lifecycle",
+                rights={"storage": True, "export": False},
+                source_refs=[f"git:{item.source_sha}"],
+                metadata=lifecycle_evidence_payload(item),
+            )
+            verdict = qualify_asset_provider_crosswalk(
+                [mutated],
+                exact_source_sha=SOURCE,
+                exact_adapter_shas=adapter_map(),
+                evidence_store=store,
+            )
+        self.assertIn(key, verdict.invalid_keys)
+        self.assertEqual(verdict.status, "INCOMPLETE")
 
     def test_missing_combination_fails_closed(self):
         keys = advertised_lifecycle_keys()

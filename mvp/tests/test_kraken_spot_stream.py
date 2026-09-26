@@ -70,9 +70,15 @@ def ack_bytes(
     ).encode("utf-8")
 
 
-def subscription_binding(*, account_id="spot-live-1", req_id=7):
+def subscription_binding(
+    *,
+    account_id="spot-live-1",
+    connection_generation=1,
+    req_id=7,
+):
     return KrakenSpotExecutionsSubscriptionBinding.create(
         account_id=account_id,
+        connection_generation=connection_generation,
         req_id=req_id,
     )
 
@@ -107,6 +113,7 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
         frame = parse_execution_frame(
             raw,
             account_id="spot-live-1",
+            connection_generation=1,
         )
 
         self.assertEqual(frame.account_id, "spot-live-1")
@@ -133,8 +140,16 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
         spaced = (
             b'{"channel": "executions", "type":"snapshot","data":[],"sequence":1}'
         )
-        first = parse_execution_frame(compact, account_id="acct")
-        second = parse_execution_frame(spaced, account_id="acct")
+        first = parse_execution_frame(
+            compact,
+            account_id="acct",
+            connection_generation=1,
+        )
+        second = parse_execution_frame(
+            spaced,
+            account_id="acct",
+            connection_generation=1,
+        )
         self.assertNotEqual(first.evidence_ref, second.evidence_ref)
         self.assertNotEqual(first.response_bytes, second.response_bytes)
 
@@ -202,7 +217,11 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
                 KrakenSpotStreamError,
                 message,
             ):
-                parse_execution_frame(raw, account_id="acct")
+                parse_execution_frame(
+                    raw,
+                    account_id="acct",
+                    connection_generation=1,
+                )
 
     def test_subscription_ack_binds_canonical_request_profile_and_exact_bytes(self):
         binding = subscription_binding()
@@ -269,12 +288,14 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
             parse_execution_frame(
                 raw,
                 account_id="acct",
+                connection_generation=1,
                 environment="PAPER",
             )
         with self.assertRaisesRegex(KrakenSpotStreamError, "canonical text"):
             parse_execution_frame(
                 raw,
                 account_id=" acct ",
+                connection_generation=1,
             )
 
 
@@ -285,8 +306,21 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
             **kwargs,
         )
 
-    def acknowledge(self, recovery, *, account_id="spot-live-1", req_id=7):
-        binding = subscription_binding(account_id=account_id, req_id=req_id)
+    def acknowledge(
+        self,
+        recovery,
+        *,
+        account_id="spot-live-1",
+        connection_generation=None,
+        req_id=7,
+    ):
+        if connection_generation is None:
+            connection_generation = recovery.connection_generation
+        binding = subscription_binding(
+            account_id=account_id,
+            connection_generation=connection_generation,
+            req_id=req_id,
+        )
         acknowledgement = parse_executions_subscription_ack(
             ack_bytes(req_id=req_id),
             subscription_binding=binding,
@@ -301,6 +335,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
         sequence,
         reports=None,
         account_id="spot-live-1",
+        connection_generation=1,
     ):
         return parse_execution_frame(
             frame_bytes(
@@ -309,6 +344,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
                 reports=reports,
             ),
             account_id=account_id,
+            connection_generation=connection_generation,
         )
 
     def test_generation_requires_fresh_snapshot_and_never_grants_ready(self):
@@ -550,6 +586,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
             frame_type="snapshot",
             sequence=1,
             reports=[],
+            connection_generation=2,
         )
         recovery.apply_frame(fresh)
         self.assertEqual(
@@ -557,6 +594,70 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
             recovery.REST_RECONCILIATION_REQUIRED,
         )
         self.assertEqual(recovery.evidence().connection_generation, 2)
+
+    def test_reconnect_rejects_stale_generation_ack_snapshot_and_expected_update(self):
+        recovery = self.make_recovery()
+        self.assertEqual(recovery.begin_connection(), 1)
+
+        stale_binding = subscription_binding(connection_generation=1, req_id=91)
+        stale_ack = parse_executions_subscription_ack(
+            ack_bytes(req_id=91),
+            subscription_binding=stale_binding,
+        )
+        stale_snapshot = self.parse(
+            frame_type="snapshot",
+            sequence=10,
+            connection_generation=1,
+        )
+        stale_update = self.parse(
+            frame_type="update",
+            sequence=11,
+            reports=[
+                {
+                    "order_id": "O-STALE",
+                    "exec_type": "trade",
+                    "order_status": "partially_filled",
+                    "exec_id": "E-STALE",
+                }
+            ],
+            connection_generation=1,
+        )
+
+        self.assertEqual(recovery.begin_connection(), 2)
+        before = recovery.evidence()
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "acknowledgement generation mismatch",
+        ):
+            recovery.apply_subscription_ack(stale_ack)
+        self.assertEqual(recovery.evidence(), before)
+
+        self.acknowledge(recovery, req_id=92)
+        awaiting_snapshot = recovery.evidence()
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "connection generation mismatch",
+        ):
+            recovery.apply_frame(stale_snapshot)
+        self.assertEqual(recovery.evidence(), awaiting_snapshot)
+
+        fresh_snapshot = self.parse(
+            frame_type="snapshot",
+            sequence=10,
+            connection_generation=2,
+        )
+        recovery.apply_frame(fresh_snapshot)
+        before_expected_stale_update = recovery.evidence()
+        self.assertEqual(before_expected_stale_update.last_sequence, 10)
+        with self.assertRaisesRegex(
+            KrakenSpotStreamError,
+            "connection generation mismatch",
+        ):
+            recovery.apply_frame(stale_update)
+        self.assertEqual(
+            recovery.evidence(),
+            before_expected_stale_update,
+        )
 
     def test_disconnect_invalidates_all_stream_local_state(self):
         recovery = self.make_recovery()

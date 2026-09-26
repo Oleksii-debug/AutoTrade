@@ -271,7 +271,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
     def test_unresolved_command_cannot_be_retargeted_after_scope_or_session_change(self):
         js = APP.read_text(encoding="utf-8")
         submit = js.index("async function submitCommand(event)")
-        build = js.index("const payload = commandForSubmission(action)", submit)
+        build = js.index("payload = commandForSubmission(action)", submit)
         fence = js.index("if (recovering && (", submit)
         self.assertLess(fence, build)
         for required in (
@@ -683,7 +683,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
             js,
         )
         self.assertIn(
-            "roleCanSubmitAction(state.sessionIdentity.role, effectiveAction)",
+            "actionCanSubmitInCurrentScope(state.sessionIdentity.role, effectiveAction)",
             js,
         )
         self.assertIn(
@@ -836,14 +836,14 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("if (state.pendingCommand !== null)", js)
         self.assertIn("return state.pendingCommand", js)
         self.assertIn("state.pendingCommand = payload", js)
-        self.assertIn("const payload = commandForSubmission(action)", js)
+        self.assertIn("payload = commandForSubmission(action)", js)
         self.assertIn("clearConfirmedCommand(payload)", js)
         self.assertIn(
             "Its original command_id and idempotency_key are retained for exact retry",
             js,
         )
         submit = js.index("async function submitCommand(event)")
-        construct = js.index("const payload = commandForSubmission(action)", submit)
+        construct = js.index("payload = commandForSubmission(action)", submit)
         post = js.index("await submitCanonicalCommand(payload)", construct)
         clear = js.index("clearConfirmedCommand(payload)", post)
         ambiguous = js.index("could not be confirmed", clear)

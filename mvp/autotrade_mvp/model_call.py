@@ -1424,6 +1424,7 @@ class DurableModelCallOrchestrator:
                 request=request,
             )
             pricing_evidence_digest = pricing.evidence_digest
+            pricing_valid_until = pricing.valid_until
             self._append(
                 attempt_id=attempt_id,
                 event_type="ModelCallPrepared",
@@ -1503,6 +1504,38 @@ class DurableModelCallOrchestrator:
             return self._recover_existing(
                 attempt_id=attempt_id,
                 decision=decision,
+            )
+
+        # Cancellation/ownership work happens after the first temporal gate and
+        # may itself consume enough time to invalidate the prepared authority.
+        # Re-check at the last durable point before invoking the adapter.
+        final_boundary_now = datetime.fromisoformat(
+            self._now().replace("Z", "+00:00")
+        )
+        final_pricing_deadline = datetime.fromisoformat(
+            pricing_valid_until.replace("Z", "+00:00")
+        )
+        final_temporal_reason = None
+        if final_boundary_now > final_pricing_deadline:
+            final_temporal_reason = "pricing_evidence_expired_before_call_boundary"
+        elif final_boundary_now >= request.deadline_utc:
+            final_temporal_reason = "request_deadline_expired_before_call_boundary"
+        if final_temporal_reason is not None:
+            payload = {
+                "attempt_id": attempt_id,
+                "reason": final_temporal_reason,
+                "released": str(decision.reserved_cost),
+            }
+            self._append(
+                attempt_id=attempt_id,
+                event_type="ModelCallNotSent",
+                version=3,
+                payload=payload,
+            )
+            self.budget.release(attempt_id)
+            return self._outcome_from_terminal(
+                self._events(attempt_id)[-1],
+                route=decision,
             )
 
         binding = self._binding(

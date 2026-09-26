@@ -707,6 +707,47 @@ class AllocationTests(unittest.TestCase):
         self.assertLessEqual(abs(result.targets[0].notional), Decimal("50"))
         self.assertLess(result.targets[0].quantity, Decimal("0"))
 
+    def test_bounded_search_probes_portfolio_net_zero_interior(self):
+        result = allocate_targets(
+            [
+                self.candidate(
+                    symbol="AAA",
+                    desired="-1000",
+                    price="10",
+                    current_quantity="100",
+                    turnover_cost_rate="0",
+                    holding_cost_rate="0",
+                ),
+                self.candidate(
+                    symbol="BBB",
+                    desired="-900",
+                    price="10",
+                    current_quantity="-20",
+                    turnover_cost_rate="0",
+                    holding_cost_rate="0",
+                ),
+            ],
+            self.policy(
+                cash_available="5000",
+                max_gross_notional="5000",
+                max_net_notional="50",
+                max_symbol_notional="5000",
+                max_turnover_notional="5000",
+            ),
+        )
+
+        # Continuous portfolio net is 800 - 2700*scale, whose zero is 8/27.
+        # Scale 0, 0.25, 0.5 and 1 are all net-infeasible after lot rounding,
+        # but the interior around 8/27 is feasible (roughly +410 / -400).
+        self.assertEqual(result.status, "ALLOCATED")
+        self.assertGreater(result.scale, Decimal("0.25"))
+        self.assertLess(result.scale, Decimal("0.5"))
+        self.assertLessEqual(result.net_notional, Decimal("50"))
+        self.assertGreater(result.turnover_notional, Decimal("0"))
+        by_symbol = {target.symbol: target for target in result.targets}
+        self.assertGreater(by_symbol["AAA"].notional, Decimal("0"))
+        self.assertLess(by_symbol["BBB"].notional, Decimal("0"))
+
     def test_order_lot_rounding_preserves_odd_lot_current_position(self):
         result = allocate_targets(
             [

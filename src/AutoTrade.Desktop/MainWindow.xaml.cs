@@ -90,21 +90,45 @@ public partial class MainWindow : Window
         {
             if (_lastKnownConnectedStatus is { } previous)
             {
-                status = status.ValidateSuccessorOf(previous);
+                status = status.IsCurrent
+                    ? status.ValidateSuccessorOf(previous)
+                    : status.ValidateStaleSuccessorOf(previous);
             }
 
+            // Preserve the newest validated connected authority snapshot even
+            // when its freshness is non-current.  Freshness may make evidence
+            // older, but it must never erase durable host/account/environment
+            // identity or state-version monotonicity from the successor chain.
             _lastKnownConnectedStatus = status;
-            HostValue.Text = status.HostId;
-            AccountValue.Text = status.AccountId;
-            EnvironmentValue.Text = status.Environment;
-            StateVersionValue.Text = status.StateVersion;
-            LastEvidenceValue.Text = status.ObservedAtUtc.ToString("O");
-            ConnectionStatus.Text = status.Message;
+
+            if (status.IsCurrent)
+            {
+                HostValue.Text = status.HostId;
+                AccountValue.Text = status.AccountId;
+                EnvironmentValue.Text = status.Environment;
+                StateVersionValue.Text = status.StateVersion;
+                LastEvidenceValue.Text = status.ObservedAtUtc.ToString("O");
+                ConnectionStatus.Text = status.Message;
+            }
+            else
+            {
+                HostValue.Text = $"{status.HostId} (stale)";
+                AccountValue.Text = $"{status.AccountId} (stale)";
+                EnvironmentValue.Text = $"{status.Environment} (stale)";
+                StateVersionValue.Text = $"{status.StateVersion} (stale)";
+                LastEvidenceValue.Text = $"{status.ObservedAtUtc:O} (stale)";
+                ConnectionStatus.Text =
+                    $"{status.Message} Snapshot values are stale and are not current evidence.";
+            }
+
             if (announce)
             {
+                string prefix = status.IsCurrent
+                    ? "Host status refreshed."
+                    : "Host status is stale.";
                 SetLiveRegionText(
                     HostStatusAnnouncement,
-                    $"Host status refreshed. {status.Message} State version {status.StateVersion}.");
+                    $"{prefix} {ConnectionStatus.Text} State version {status.StateVersion}. No cancellation, flattening, or provider outcome is implied.");
             }
 
             return;

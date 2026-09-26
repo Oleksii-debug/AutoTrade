@@ -1299,5 +1299,225 @@ class ResearchJobStoreTests(unittest.TestCase):
 
 
 
+    def test_pause_queued_job_blocks_claim_until_explicit_resume(self):
+        with TemporaryDirectory() as directory:
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            job, _ = self._enqueue(store, "pause-queued")
+
+            self.assertTrue(store.pause(job["job_id"], now=self.now))
+            paused = store.get(job["job_id"])
+            self.assertEqual(paused["state"], "PAUSED")
+            self.assertIsNone(store.claim("worker-a", now=self.now, lease_seconds=30))
+            self.assertFalse(store.pause(job["job_id"], now=self.now))
+
+            self.assertTrue(
+                store.resume(job["job_id"], now=self.now + timedelta(seconds=1))
+            )
+            resumed = store.claim(
+                "worker-a",
+                now=self.now + timedelta(seconds=1),
+                lease_seconds=30,
+            )
+            self.assertEqual(resumed["state"], "RUNNING")
+            self.assertEqual(resumed["generation"], "1")
+            self.assertFalse(store.resume(job["job_id"], now=self.now))
+
+    def test_pause_running_replay_fences_stale_worker_generation(self):
+        with TemporaryDirectory() as directory:
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            job, _ = self._enqueue(store, "pause-running")
+            claimed = store.claim("worker-a", now=self.now, lease_seconds=30)
+            old_generation = int(claimed["generation"])
+
+            self.assertTrue(
+                store.pause(
+                    job["job_id"],
+                    now=self.now + timedelta(seconds=1),
+                )
+            )
+            paused = store.get(job["job_id"])
+            self.assertEqual(paused["state"], "PAUSED")
+            self.assertEqual(int(paused["generation"]), old_generation + 1)
+            self.assertNotIn("owner", paused)
+            self.assertNotIn("lease_until", paused)
+
+            with self.assertRaises(JobLeaseError):
+                store.renew(
+                    job["job_id"],
+                    worker_id="worker-a",
+                    generation=old_generation,
+                    now=self.now + timedelta(seconds=2),
+                )
+
+            self.assertTrue(
+                store.resume(
+                    job["job_id"],
+                    now=self.now + timedelta(seconds=3),
+                )
+            )
+            reclaimed = store.claim(
+                "worker-b",
+                now=self.now + timedelta(seconds=3),
+                lease_seconds=30,
+            )
+            self.assertEqual(
+                int(reclaimed["generation"]),
+                old_generation + 1,
+            )
+            self.assertEqual(reclaimed["owner"], "worker-b")
+
+    def test_pause_rejects_non_requeueable_running_or_ambiguous_work(self):
+        with TemporaryDirectory() as directory:
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            job, _ = store.enqueue(
+                kind="research.external",
+                dedupe_key="non-requeueable",
+                input_hashes=[digest("dataset")],
+                resource_budget={"wall_seconds": 60},
+                lease_requeueable=False,
+                now=self.now,
+            )
+            claimed = store.claim("worker-a", now=self.now, lease_seconds=1)
+            self.assertEqual(claimed["state"], "RUNNING")
+            with self.assertRaisesRegex(JobConflictError, "retry-safe"):
+                store.pause(
+                    job["job_id"],
+                    now=self.now + timedelta(milliseconds=500),
+                )
+            self.assertEqual(store.get(job["job_id"])["state"], "RUNNING")
+
+            self.assertEqual(
+                store.requeue_expired(now=self.now + timedelta(seconds=2)),
+                0,
+            )
+            self.assertEqual(store.get(job["job_id"])["state"], "WAITING_EXTERNAL")
+            with self.assertRaisesRegex(JobConflictError, "retry-safe"):
+                store.pause(
+                    job["job_id"],
+                    now=self.now + timedelta(seconds=3),
+                )
+
+
+
+    def test_submitter_is_durable_and_part_of_dedupe_identity(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "jobs.sqlite3"
+            store = ResearchJobStore(path)
+            created, inserted = store.enqueue(
+                kind="research.replay",
+                dedupe_key="owned-replay",
+                input_hashes=[digest("dataset")],
+                resource_budget={"wall_seconds": 60},
+                lease_requeueable=True,
+                submitted_by="researcher",
+                now=self.now,
+            )
+            self.assertTrue(inserted)
+            self.assertEqual(created["submitted_by"], "researcher")
+            self.assertEqual(
+                ResearchJobStore(path).get(created["job_id"])["submitted_by"],
+                "researcher",
+            )
+            replayed, inserted_again = store.enqueue(
+                kind="research.replay",
+                dedupe_key="owned-replay",
+                input_hashes=[digest("dataset")],
+                resource_budget={"wall_seconds": 60},
+                lease_requeueable=True,
+                submitted_by="researcher",
+                now=self.now,
+            )
+            self.assertFalse(inserted_again)
+            self.assertEqual(replayed["job_id"], created["job_id"])
+            with self.assertRaises(JobConflictError):
+                store.enqueue(
+                    kind="research.replay",
+                    dedupe_key="owned-replay",
+                    input_hashes=[digest("dataset")],
+                    resource_budget={"wall_seconds": 60},
+                    lease_requeueable=True,
+                    submitted_by="researcher-two",
+                    now=self.now,
+                )
+
+    def test_v4_migration_preserves_legacy_job_without_inventing_submitter(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "jobs.sqlite3"
+            legacy = ResearchJobStore(path)
+            job, _ = self._enqueue(legacy, "legacy-ownerless")
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute(
+                    "DELETE FROM schema_migrations WHERE version = 5"
+                )
+                connection.execute(
+                    "ALTER TABLE jobs RENAME TO jobs_with_submitter"
+                )
+                connection.executescript(
+                    """
+                    DROP INDEX idx_jobs_claim;
+                    CREATE TABLE jobs (
+                        job_id TEXT PRIMARY KEY,
+                        kind TEXT NOT NULL,
+                        dedupe_key TEXT NOT NULL UNIQUE,
+                        input_hashes_json TEXT NOT NULL,
+                        state TEXT NOT NULL,
+                        generation INTEGER NOT NULL CHECK (generation > 0),
+                        attempt INTEGER NOT NULL CHECK (attempt >= 0),
+                        owner TEXT,
+                        lease_until TEXT,
+                        checkpoint_ref TEXT,
+                        resource_budget_json TEXT NOT NULL,
+                        resource_usage_json TEXT NOT NULL,
+                        output_refs_json TEXT NOT NULL,
+                        error_json TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        lease_requeueable INTEGER NOT NULL DEFAULT 0
+                            CHECK (lease_requeueable IN (0, 1)),
+                        external_resolution_json TEXT,
+                        cancel_requested INTEGER NOT NULL DEFAULT 0
+                            CHECK (cancel_requested IN (0, 1))
+                    );
+                    INSERT INTO jobs(
+                        job_id, kind, dedupe_key, input_hashes_json, state,
+                        generation, attempt, owner, lease_until, checkpoint_ref,
+                        resource_budget_json, resource_usage_json,
+                        output_refs_json, error_json, created_at, updated_at,
+                        lease_requeueable, external_resolution_json,
+                        cancel_requested
+                    )
+                    SELECT
+                        job_id, kind, dedupe_key, input_hashes_json, state,
+                        generation, attempt, owner, lease_until, checkpoint_ref,
+                        resource_budget_json, resource_usage_json,
+                        output_refs_json, error_json, created_at, updated_at,
+                        lease_requeueable, external_resolution_json,
+                        cancel_requested
+                    FROM jobs_with_submitter;
+                    DROP TABLE jobs_with_submitter;
+                    CREATE INDEX idx_jobs_claim
+                        ON jobs(state, lease_until, created_at, job_id);
+                    """
+                )
+
+            reopened = ResearchJobStore(path)
+            migrated = reopened.get(job["job_id"])
+            self.assertNotIn("submitted_by", migrated)
+            with closing(sqlite3.connect(path)) as connection:
+                versions = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT version FROM schema_migrations"
+                    )
+                }
+                columns = {
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info(jobs)")
+                }
+            self.assertIn(5, versions)
+            self.assertIn("submitted_by", columns)
+
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -91,3 +91,130 @@ REST `/v5/execution/list` не вважається повним економі�
 ## Environment-bound response provenance
 
 Recorded order-submission evidence is not environment-neutral. The adapter now requires an explicit `MAINNET`, `TESTNET` or `DEMO` environment for every parsed create-order response and binds the evidence URI to the corresponding documented REST service (`api.bybit.com`, `api-testnet.bybit.com`, or `api-demo.bybit.com`). Unknown environments fail closed. This prevents testnet/demo observations from being mislabeled as mainnet evidence; regional/entity-specific production endpoints remain outside this bounded foundation until separately qualified.
+
+## Order reconciliation page foundation — 2026-09-26
+
+The adapter now has a network-free, capability-bound request/parser seam for
+Bybit V5 `/v5/order/realtime` and `/v5/order/history`. The implementation
+preserves the provider's opaque `nextPageCursor`, binds every response to the
+exact authenticated query evidence, and requires the response `category` and
+an exact queried `orderLinkId` to match before order-state evidence is
+accepted.
+
+For order history, caller-supplied start/end windows are fail-closed at the
+documented maximum of seven days and page limits are bounded to 1..50.
+Realtime-order reads reject history-only time-window parameters. Order status is
+preserved as provider state and is deliberately **not** promoted to canonical
+fill evidence; execution economics still require `/v5/execution/list` and
+reconciliation.
+
+An empty final cursor proves only that this exact read finished pagination. It
+does not by itself resolve an UNKNOWN send. Bybit documents a narrower retention
+contract for no-fill terminal outcomes: `Cancelled`, `Rejected` and
+`Deactivated` are queryable only for the last 24 hours, while older history
+progressively excludes such outcomes. Therefore order-history exclusion
+authority is accepted only under the exact built-in contract identifier
+`BYBIT_V5_ORDER_HISTORY_NO_FILL_24H_2026_09_26`, and only when the complete
+requested window is no older than 24 hours at the latest exact response
+observation and does not extend beyond that observation cut. A complete older
+cursor chain remains positive/history evidence, but its
+`provider_semantics_exclude_execution` flag is demoted to false. This keeps
+offline/restart recovery UNKNOWN instead of manufacturing PROVEN_ABSENT after
+provider retention has discarded a possible no-fill terminal order.
+
+The realtime closed-order cache is not treated as historical absence authority:
+Bybit documents that this cache may be cleared after a service release/restart
+and older records must then be queried through order history. The independent
+`consistency_horizon_satisfied` fact is still required because order-history
+creation/cancellation data may lag. None of this qualifies
+MAINNET/TESTNET/DEMO behavior without recorded exact-build provider evidence.
+
+Current official references:
+- https://bybit-exchange.github.io/docs/v5/order/open-order
+- https://bybit-exchange.github.io/docs/v5/order/order-list
+
+## Execution pagination foundation — 2026-09-26
+
+The execution-history seam now prepares bounded `/v5/execution/list` queries,
+preserves the opaque provider cursor, validates response category and exact
+queried `orderLinkId`, and derives `EXECUTIONS` pagination coverage only
+from a contiguous first-page-to-terminal-page chain with an explicit
+`startTime`/`endTime` window. The explicit window is limited to the
+documented seven-day maximum and each page remains economically fail-closed
+through the existing fee-currency and `extraFees` checks.
+
+A complete cursor chain still does not, by itself, assert provider exclusion
+semantics. `provider_semantics_exclude_execution` remains false unless exact
+provider/product/environment qualification separately establishes that stronger
+claim.
+
+## Working-order reconciliation projection — 2026-09-26
+
+The realtime order seam now preserves `leavesQty` as exact decimal state and
+projects only Bybit's documented open order statuses — `New`,
+`PartiallyFilled`, and `Untriggered` — into the existing canonical
+`ProviderWorkingOrderEvidence`. Closed statuses are retained in the provider
+page but are not emitted as working orders. Unknown future provider statuses
+fail closed instead of being silently treated as open or closed.
+
+The realtime request explicitly sends `openOnly=0`; linear realtime reads
+require an uppercase symbol scope in this bounded adapter path. The projection
+requires an explicit provider-symbol to canonical instrument-version mapping,
+so provider symbols cannot silently become canonical instrument identities.
+
+This creates a direct reconciliation path for an UNKNOWN send: a later exact
+realtime read that finds the same `orderLinkId`, combined with the existing
+causal `SnapshotConsistencyEvidence`, can resolve the submission as an
+observed working order without blind retry. It still does not establish provider
+qualification or absence semantics.
+
+## Account snapshot and activity reconciliation foundation — 2026-09-26
+
+The adapter now has exact-byte authenticated read seams for the remaining
+account-reconciliation surfaces required by the canonical provider contract:
+
+- `/v5/account/wallet-balance` is bound to `accountType=UNIFIED`, optional
+  exact coin scope, the verified account/environment capability, and explicit
+  Bybit provider environment. Wallet liabilities (`borrowAmount` and
+  `spotBorrow`) are preserved. Generic cash reconciliation is deliberately
+  refused whenever either liability is non-zero; borrowed buying power is not
+  re-labelled as owned cash.
+- `/v5/position/list` preserves category, `positionIdx`, side, positive
+  provider size, lifecycle status, update time, sequence, opaque cursor and
+  exact response evidence. Complete one-way (`positionIdx=0`) cursor chains
+  can project to canonical signed position quantities using an explicit
+  provider-symbol to instrument-version mapping. Hedge-mode legs are not netted
+  away, and `Liq`/`Adl` states fail closed rather than being treated as a
+  READY account snapshot.
+- `/v5/account/transaction-log` is bounded to explicit seven-day windows,
+  page size 1..50 and opaque cursor continuation. Each row is projected into
+  the existing `ProviderActivityEvidence` using the provider transaction id,
+  time, currency, exact `change`, order/client/trade identities and canonical
+  instrument mapping where a symbol is present. Provider transaction types are
+  preserved as data rather than frozen into a stale allowlist.
+- Transaction-log origin is intentionally `UNKNOWN`. The adapter does not
+  infer that an event was generated by AutoTrade from its shape. Existing
+  reconciliation can match a durable local activity id; unmatched
+  MANUAL/EXTERNAL/UNKNOWN activity blocks new risk.
+
+These REST components do **not** manufacture
+`SnapshotConsistencyEvidence`. A multi-call Bybit account snapshot is only
+usable as a coherent canonical snapshot when the existing reconciliation
+authority is separately given an atomic or composed snapshot proof. For
+COMPOSED mode that proof requires buffered account-stream events, completed
+replay and no detected sequence gap. This follows the canonical rule that
+several successful REST calls are not, by themselves, evidence of a consistent
+account cut.
+
+No Bybit TESTNET, DEMO or MAINNET account is qualified by these fixtures.
+Recorded exact-build provider evidence, credential-scope evidence, retention /
+history-lag characterization, stream-gap recovery and the remaining WP-22
+qualification matrix are still required before the provider can be promoted
+from implementation foundation to qualified execution support.
+
+Official contract references consulted for this foundation:
+- https://bybit-exchange.github.io/docs/v5/account/wallet-balance
+- https://bybit-exchange.github.io/docs/v5/position
+- https://bybit-exchange.github.io/docs/v5/account/transaction-log
+- https://bybit-exchange.github.io/docs/v5/enum
+

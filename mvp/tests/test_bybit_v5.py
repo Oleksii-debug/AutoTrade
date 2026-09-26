@@ -6,10 +6,31 @@ import unittest
 from uuid import uuid4
 
 from mvp.autotrade_mvp.bybit_v5 import (
+    BYBIT_ORDER_HISTORY_NO_FILL_RETENTION_POLICY_ID,
     build_order_payload,
     prepare_order_submission,
+    prepare_order_read_query,
+    prepare_next_order_read_query,
+    order_history_coverage_from_pages,
+    prepare_execution_read_query,
+    prepare_next_execution_read_query,
+    execution_history_coverage_from_pages,
+    prepare_wallet_read_query,
+    parse_wallet_snapshot,
+    provider_wallet_cash,
+    prepare_position_read_query,
+    parse_position_page,
+    prepare_next_position_read_query,
+    provider_position_quantities_from_pages,
+    prepare_activity_read_query,
+    parse_activity_page,
+    prepare_next_activity_read_query,
+    activity_coverage_from_pages,
     coverage_evidence,
+    parse_execution_page,
     parse_executions,
+    parse_order_page,
+    working_orders_from_page,
     parse_submission_response,
     server_time_from_response,
     validate_auth_timestamp,
@@ -33,12 +54,23 @@ from mvp.autotrade_mvp.provider_core import (
     observe_submission_json_response,
     prepare_authenticated_read_query,
 )
+from mvp.autotrade_mvp.reconciliation import (
+    SnapshotConsistencyEvidence,
+    UnknownSubmission,
+    reconcile_account,
+)
 
 
 READ_AT = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 
 
-def read_capability(*, account_id="paper-1", environment="PAPER", instrument_version="BTCUSDT@v1"):
+def read_capability(
+    *,
+    account_id="paper-1",
+    environment="PAPER",
+    instrument_version="BTCUSDT@v1",
+    permission_scopes=("ORDER.READ",),
+):
     observed_at = READ_AT - timedelta(hours=1)
     claims = tuple(
         CapabilityClaim(
@@ -52,7 +84,7 @@ def read_capability(*, account_id="paper-1", environment="PAPER", instrument_ver
             expires_at=READ_AT + timedelta(hours=1),
             supported_order_types=frozenset({"LIMIT", "MARKET"}),
             time_in_force=frozenset({"GTC", "IOC"}),
-            permission_scopes=frozenset({"ORDER.READ"}),
+            permission_scopes=frozenset(permission_scopes),
             position_mode="NET",
             native_protection=frozenset(),
             rate_limit_policy_id="bybit-read-test",
@@ -206,6 +238,247 @@ def parse_test_executions(observation, **kwargs):
         observation,
         provider_environment="TESTNET",
         **kwargs,
+    )
+
+
+def bound_execution_page_response(
+    response,
+    *,
+    category="spot",
+    client_order_id=None,
+    symbol=None,
+    cursor=None,
+    limit=100,
+    start_time_ms=None,
+    end_time_ms=None,
+    account_id="paper-1",
+    environment="PAPER",
+    provider_environment="TESTNET",
+    capability=None,
+):
+    read_scope = (
+        capability
+        if capability is not None
+        else read_capability(
+            account_id=account_id,
+            environment=environment,
+        )
+    )
+    query = prepare_execution_read_query(
+        capability=read_scope,
+        at=READ_AT,
+        category=category,
+        client_order_id=client_order_id,
+        symbol=symbol,
+        cursor=cursor,
+        limit=limit,
+        start_time_ms=start_time_ms,
+        end_time_ms=end_time_ms,
+    )
+    raw = json.dumps(
+        response,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return observe_authenticated_json_response(
+        query_binding=query,
+        http_status=200,
+        response_bytes=raw,
+        observed_at=READ_AT,
+        provider_environment=provider_environment,
+    )
+
+
+def bound_order_response(
+    response,
+    *,
+    surface="ORDER_HISTORY",
+    category="spot",
+    client_order_id=None,
+    symbol=None,
+    cursor=None,
+    limit=50,
+    start_time_ms=None,
+    end_time_ms=None,
+    account_id="paper-1",
+    environment="PAPER",
+    provider_environment="TESTNET",
+    capability=None,
+):
+    read_scope = (
+        capability
+        if capability is not None
+        else read_capability(
+            account_id=account_id,
+            environment=environment,
+        )
+    )
+    query = prepare_order_read_query(
+        capability=read_scope,
+        at=READ_AT,
+        surface=surface,
+        category=category,
+        client_order_id=client_order_id,
+        symbol=symbol,
+        cursor=cursor,
+        limit=limit,
+        start_time_ms=start_time_ms,
+        end_time_ms=end_time_ms,
+    )
+    raw = json.dumps(
+        response,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return observe_authenticated_json_response(
+        query_binding=query,
+        http_status=200,
+        response_bytes=raw,
+        observed_at=READ_AT,
+        provider_environment=provider_environment,
+    )
+
+
+def bound_wallet_response(
+    response,
+    *,
+    coins=(),
+    account_id="paper-1",
+    environment="PAPER",
+    provider_environment="TESTNET",
+    capability=None,
+):
+    read_scope = (
+        capability
+        if capability is not None
+        else read_capability(
+            account_id=account_id,
+            environment=environment,
+            permission_scopes=("ACCOUNT.READ",),
+        )
+    )
+    query = prepare_wallet_read_query(
+        capability=read_scope,
+        at=READ_AT,
+        coins=coins,
+    )
+    raw = json.dumps(
+        response,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return observe_authenticated_json_response(
+        query_binding=query,
+        http_status=200,
+        response_bytes=raw,
+        observed_at=READ_AT,
+        provider_environment=provider_environment,
+    )
+
+
+def bound_position_response(
+    response,
+    *,
+    category="linear",
+    symbol="BTCUSDT",
+    settle_coin=None,
+    base_coin=None,
+    cursor=None,
+    limit=200,
+    account_id="paper-1",
+    environment="PAPER",
+    provider_environment="TESTNET",
+    capability=None,
+):
+    read_scope = (
+        capability
+        if capability is not None
+        else read_capability(
+            account_id=account_id,
+            environment=environment,
+            permission_scopes=("ACCOUNT.READ",),
+        )
+    )
+    query = prepare_position_read_query(
+        capability=read_scope,
+        at=READ_AT,
+        category=category,
+        symbol=symbol,
+        settle_coin=settle_coin,
+        base_coin=base_coin,
+        cursor=cursor,
+        limit=limit,
+    )
+    raw = json.dumps(
+        response,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return observe_authenticated_json_response(
+        query_binding=query,
+        http_status=200,
+        response_bytes=raw,
+        observed_at=READ_AT,
+        provider_environment=provider_environment,
+    )
+
+
+def bound_activity_response(
+    response,
+    *,
+    category=None,
+    currency=None,
+    activity_type=None,
+    cursor=None,
+    limit=50,
+    start_time_ms=None,
+    end_time_ms=None,
+    account_id="paper-1",
+    environment="PAPER",
+    provider_environment="TESTNET",
+    capability=None,
+):
+    read_scope = (
+        capability
+        if capability is not None
+        else read_capability(
+            account_id=account_id,
+            environment=environment,
+            permission_scopes=("ACCOUNT.READ",),
+        )
+    )
+    query = prepare_activity_read_query(
+        capability=read_scope,
+        at=READ_AT,
+        category=category,
+        currency=currency,
+        activity_type=activity_type,
+        cursor=cursor,
+        limit=limit,
+        start_time_ms=start_time_ms,
+        end_time_ms=end_time_ms,
+    )
+    raw = json.dumps(
+        response,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return observe_authenticated_json_response(
+        query_binding=query,
+        http_status=200,
+        response_bytes=raw,
+        observed_at=READ_AT,
+        provider_environment=provider_environment,
     )
 
 
@@ -1142,6 +1415,2023 @@ class BybitV5AdapterTests(unittest.TestCase):
                 datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
             )
         )
+
+
+    def test_order_history_query_binds_exact_cursor_client_id_and_window(self):
+        binding = prepare_order_read_query(
+            capability=read_capability(),
+            at=READ_AT,
+            surface="ORDER_HISTORY",
+            category="SPOT",
+            client_order_id="client_123",
+            cursor="opaque%3Dcursor",
+            limit=50,
+            start_time_ms=1790193600000,
+            end_time_ms=1790280000000,
+        )
+        self.assertEqual(binding.endpoint, "/v5/order/history")
+        self.assertEqual(binding.query["category"], "spot")
+        self.assertEqual(binding.query["orderLinkId"], "client_123")
+        self.assertEqual(binding.query["cursor"], "opaque%3Dcursor")
+        self.assertEqual(binding.query["limit"], "50")
+        self.assertEqual(binding.query["startTime"], "1790193600000")
+        self.assertEqual(binding.query["endTime"], "1790280000000")
+
+    def test_order_history_rejects_provider_window_over_seven_days(self):
+        with self.assertRaisesRegex(ProviderCoreError, "seven days"):
+            prepare_order_read_query(
+                capability=read_capability(),
+                at=READ_AT,
+                surface="ORDER_HISTORY",
+                category="spot",
+                start_time_ms=0,
+                end_time_ms=(7 * 24 * 60 * 60 * 1000) + 1,
+            )
+
+    def test_realtime_order_query_rejects_history_window(self):
+        with self.assertRaisesRegex(ProviderCoreError, "does not accept history"):
+            prepare_order_read_query(
+                capability=read_capability(),
+                at=READ_AT,
+                surface="OPEN_ORDERS",
+                category="spot",
+                start_time_ms=1790193600000,
+            )
+
+    def test_order_page_preserves_exact_scope_state_and_cursor(self):
+        observation = bound_order_response(
+            {
+                "retCode": 0,
+                "retMsg": "OK",
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "cursor%3Dnext%26page%3D2",
+                    "list": [
+                        {
+                            "orderId": "provider-order-1",
+                            "orderLinkId": "client_123",
+                            "symbol": "BTCUSDT",
+                            "orderStatus": "Filled",
+                            "leavesQty": "0",
+                            "createdTime": "1790279999000",
+                            "updatedTime": "1790280000000",
+                        }
+                    ],
+                },
+                "time": 1790280000000,
+            },
+            client_order_id="client_123",
+        )
+        page = parse_order_page(observation)
+        self.assertEqual(page.surface, "ORDER_HISTORY")
+        self.assertEqual(page.category, "spot")
+        self.assertEqual(page.environment, "PAPER")
+        self.assertEqual(page.provider_environment, "TESTNET")
+        self.assertEqual(page.next_cursor, "cursor%3Dnext%26page%3D2")
+        self.assertFalse(page.pagination_complete)
+        self.assertEqual(len(page.orders), 1)
+        order = page.orders[0]
+        self.assertEqual(order.provider_order_id, "provider-order-1")
+        self.assertEqual(order.client_order_id, "client_123")
+        self.assertEqual(order.order_status, "Filled")
+        self.assertEqual(order.created_at, "2026-09-24T19:59:59Z")
+        self.assertEqual(order.updated_at, "2026-09-24T20:00:00Z")
+        self.assertEqual(order.evidence_ref, observation.evidence_ref)
+
+    def test_order_page_empty_cursor_is_terminal_but_not_absence_proof(self):
+        page = parse_order_page(
+            bound_order_response(
+                {
+                    "retCode": 0,
+                    "result": {
+                        "category": "spot",
+                        "nextPageCursor": "",
+                        "list": [],
+                    },
+                }
+            )
+        )
+        self.assertTrue(page.pagination_complete)
+        self.assertEqual(page.orders, ())
+
+    def test_order_page_rejects_category_or_client_identity_mismatch(self):
+        with self.assertRaisesRegex(ProviderCoreError, "category"):
+            parse_order_page(
+                bound_order_response(
+                    {
+                        "retCode": 0,
+                        "result": {
+                            "category": "linear",
+                            "nextPageCursor": "",
+                            "list": [],
+                        },
+                    }
+                )
+            )
+
+        with self.assertRaisesRegex(ProviderCoreError, "orderLinkId"):
+            parse_order_page(
+                bound_order_response(
+                    {
+                        "retCode": 0,
+                        "result": {
+                            "category": "spot",
+                            "nextPageCursor": "",
+                            "list": [
+                                {
+                                    "orderId": "provider-order-wrong-link",
+                                    "orderLinkId": "other_client",
+                                    "symbol": "BTCUSDT",
+                                    "orderStatus": "New",
+                                    "leavesQty": "1",
+                                    "createdTime": "1790279999000",
+                                    "updatedTime": "1790280000000",
+                                }
+                            ],
+                        },
+                    },
+                    client_order_id="expected_client",
+                )
+            )
+
+    def test_order_pages_enforce_effective_symbol_filter(self):
+        row = {
+            "orderId": "provider-order-symbol",
+            "orderLinkId": "",
+            "symbol": "ETHUSDT",
+            "orderStatus": "New",
+            "leavesQty": "1",
+            "createdTime": "1790279999000",
+            "updatedTime": "1790280000000",
+        }
+        for surface in ("OPEN_ORDERS", "ORDER_HISTORY"):
+            with self.subTest(surface=surface), self.assertRaisesRegex(
+                ProviderCoreError,
+                "symbol response does not match",
+            ):
+                parse_order_page(
+                    bound_order_response(
+                        {
+                            "retCode": 0,
+                            "result": {
+                                "category": "spot",
+                                "nextPageCursor": "",
+                                "list": [row],
+                            },
+                        },
+                        surface=surface,
+                        symbol="BTCUSDT",
+                    )
+                )
+
+        identity_row = dict(row)
+        identity_row["orderLinkId"] = "client_effective"
+        page = parse_order_page(
+            bound_order_response(
+                {
+                    "retCode": 0,
+                    "result": {
+                        "category": "spot",
+                        "nextPageCursor": "",
+                        "list": [identity_row],
+                    },
+                },
+                client_order_id="client_effective",
+                symbol="BTCUSDT",
+            )
+        )
+        self.assertEqual(page.orders[0].symbol, "ETHUSDT")
+
+    def test_order_page_rejects_conflicting_duplicate_order_identity(self):
+        with self.assertRaisesRegex(ProviderCoreError, "conflicting state"):
+            parse_order_page(
+                bound_order_response(
+                    {
+                        "retCode": 0,
+                        "result": {
+                            "category": "spot",
+                            "nextPageCursor": "",
+                            "list": [
+                                {
+                                    "orderId": "same-order",
+                                    "orderLinkId": "",
+                                    "symbol": "BTCUSDT",
+                                    "orderStatus": "New",
+                                    "leavesQty": "1",
+                                    "createdTime": "1790279999000",
+                                    "updatedTime": "1790280000000",
+                                },
+                                {
+                                    "orderId": "same-order",
+                                    "orderLinkId": "",
+                                    "symbol": "BTCUSDT",
+                                    "orderStatus": "Cancelled",
+                                    "leavesQty": "1",
+                                    "createdTime": "1790279999000",
+                                    "updatedTime": "1790280000000",
+                                },
+                            ],
+                        },
+                    }
+                )
+            )
+
+    def test_order_page_rejects_non_order_endpoint_provenance(self):
+        with self.assertRaisesRegex(ProviderCoreError, "unsupported exact"):
+            parse_order_page(
+                bound_execution_response(
+                    {"retCode": 0, "result": {"list": []}}
+                )
+            )
+
+
+    def test_next_order_page_preserves_exact_base_query_and_capability_scope(self):
+        capability = read_capability()
+        first = bound_order_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "cursor-next",
+                    "list": [],
+                },
+            },
+            client_order_id="client_123",
+            start_time_ms=1790193600000,
+            end_time_ms=1790280000000,
+            capability=capability,
+        )
+        binding = prepare_next_order_read_query(
+            observation=first,
+            capability=capability,
+            at=READ_AT,
+        )
+        self.assertIsNotNone(binding)
+        self.assertEqual(binding.query["cursor"], "cursor-next")
+        self.assertEqual(binding.query["orderLinkId"], "client_123")
+        self.assertEqual(binding.query["startTime"], "1790193600000")
+        self.assertEqual(binding.query["endTime"], "1790280000000")
+
+        terminal = bound_order_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "",
+                    "list": [],
+                },
+            },
+            start_time_ms=1790193600000,
+            end_time_ms=1790280000000,
+        )
+        self.assertIsNone(
+            prepare_next_order_read_query(
+                observation=terminal,
+                capability=read_capability(),
+                at=READ_AT,
+            )
+        )
+
+    def test_order_history_coverage_requires_contiguous_complete_cursor_chain(self):
+        common = {
+            "start_time_ms": 1790193600000,
+            "end_time_ms": 1790280000000,
+        }
+        capability = read_capability()
+        first = bound_order_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "page-2",
+                    "list": [],
+                },
+            },
+            capability=capability,
+            **common,
+        )
+        second = bound_order_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "",
+                    "list": [],
+                },
+            },
+            cursor="page-2",
+            capability=capability,
+            **common,
+        )
+        coverage = order_history_coverage_from_pages(
+            (first, second),
+            consistency_horizon_satisfied=True,
+        )
+        self.assertTrue(coverage.pagination_complete)
+        self.assertTrue(coverage.consistency_horizon_satisfied)
+        self.assertFalse(coverage.provider_semantics_exclude_execution)
+        self.assertEqual(coverage.surface, "ORDER_HISTORY")
+        self.assertEqual(coverage.provider_environment, "TESTNET")
+        self.assertEqual(coverage.coverage_start, "2026-09-23T20:00:00.000Z")
+        self.assertEqual(coverage.coverage_end, "2026-09-24T20:00:00.000Z")
+
+    def test_order_history_exclusion_requires_exact_retention_policy(self):
+        observation = bound_order_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "",
+                    "list": [],
+                },
+            },
+            start_time_ms=1790193600000,
+            end_time_ms=1790280000000,
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "require the exact qualified retention policy",
+        ):
+            order_history_coverage_from_pages(
+                (observation,),
+                consistency_horizon_satisfied=True,
+                qualified_exclusion_semantics=True,
+            )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "unknown Bybit order-history retention qualification policy",
+        ):
+            order_history_coverage_from_pages(
+                (observation,),
+                consistency_horizon_satisfied=True,
+                qualified_exclusion_semantics=True,
+                retention_policy_id="BYBIT_V5_ORDER_HISTORY_UNVERSIONED",
+            )
+
+    def test_order_history_absence_semantics_stop_at_no_fill_retention_boundary(self):
+        def terminal_history(*, start_time_ms, end_time_ms):
+            observation = bound_order_response(
+                {
+                    "retCode": 0,
+                    "result": {
+                        "category": "spot",
+                        "nextPageCursor": "",
+                        "list": [],
+                    },
+                },
+                start_time_ms=start_time_ms,
+                end_time_ms=end_time_ms,
+            )
+            return order_history_coverage_from_pages(
+                (observation,),
+                consistency_horizon_satisfied=True,
+                qualified_exclusion_semantics=True,
+                retention_policy_id=(
+                    BYBIT_ORDER_HISTORY_NO_FILL_RETENTION_POLICY_ID
+                ),
+            )
+
+        exact_boundary = terminal_history(
+            start_time_ms=1790193600000,
+            end_time_ms=1790280000000,
+        )
+        self.assertTrue(exact_boundary.pagination_complete)
+        self.assertTrue(exact_boundary.provider_semantics_exclude_execution)
+
+        one_millisecond_too_old = terminal_history(
+            start_time_ms=1790193599999,
+            end_time_ms=1790280000000,
+        )
+        self.assertTrue(one_millisecond_too_old.pagination_complete)
+        self.assertFalse(
+            one_millisecond_too_old.provider_semantics_exclude_execution
+        )
+
+        older_than_seven_days = terminal_history(
+            start_time_ms=1789588800000,
+            end_time_ms=1789675200000,
+        )
+        self.assertTrue(older_than_seven_days.pagination_complete)
+        self.assertFalse(
+            older_than_seven_days.provider_semantics_exclude_execution
+        )
+
+        future_end = terminal_history(
+            start_time_ms=1790276400000,
+            end_time_ms=1790280000001,
+        )
+        self.assertTrue(future_end.pagination_complete)
+        self.assertFalse(future_end.provider_semantics_exclude_execution)
+
+    def test_offline_recovery_past_no_fill_retention_stays_unknown(self):
+        observation = bound_order_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "",
+                    "list": [],
+                },
+            },
+            start_time_ms=1790190000000,
+            end_time_ms=1790280000000,
+            client_order_id="client_retention_expired",
+        )
+        order_history = order_history_coverage_from_pages(
+            (observation,),
+            consistency_horizon_satisfied=True,
+            qualified_exclusion_semantics=True,
+            retention_policy_id=BYBIT_ORDER_HISTORY_NO_FILL_RETENTION_POLICY_ID,
+        )
+        self.assertFalse(order_history.provider_semantics_exclude_execution)
+
+        common = {
+            "account_id": "paper-1",
+            "environment": "PAPER",
+            "provider_environment": "TESTNET",
+            "coverage_start": "2026-09-23T19:00:00Z",
+            "coverage_end": "2026-09-24T20:00:00Z",
+            "pagination_complete": True,
+            "consistency_horizon_satisfied": True,
+            "qualified_exclusion_semantics": True,
+        }
+        absence_coverage = (
+            coverage_evidence(surface="OPEN_ORDERS", **common),
+            order_history,
+            coverage_evidence(surface="EXECUTIONS", **common),
+            coverage_evidence(surface="ACTIVITIES", **common),
+        )
+        unknown = UnknownSubmission.create(
+            attempt_id="attempt-retention-expired",
+            intent_id="intent-retention-expired",
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+            provider_environment="TESTNET",
+            client_order_id="client_retention_expired",
+            started_at="2026-09-23T19:00:00Z",
+        )
+        result = reconcile_account(
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+            provider_environment="TESTNET",
+            local_cash={},
+            provider_cash={},
+            local_positions={},
+            provider_positions={},
+            local_execution_ids=(),
+            provider_fills=(),
+            snapshot_consistency=SnapshotConsistencyEvidence(
+                provider_id="BYBIT",
+                account_id="paper-1",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                mode="ATOMIC",
+                query_started_at="2026-09-24T19:59:00Z",
+                query_completed_at="2026-09-24T20:00:00Z",
+            ),
+            unknown_submissions=(unknown,),
+            searched_client_order_ids=("client_retention_expired",),
+            coverage_start="2026-09-23T19:00:00Z",
+            coverage_end="2026-09-24T20:00:00Z",
+            pagination_complete=True,
+            absence_coverage=absence_coverage,
+        )
+        resolution = result.submission_resolutions[0]
+        self.assertEqual(resolution.outcome, "UNKNOWN")
+        self.assertEqual(
+            resolution.evidence_reason,
+            "absence_surface_evidence_incomplete",
+        )
+        self.assertTrue(result.blocks_new_risk)
+
+    def test_order_history_coverage_rejects_mixed_capability_snapshots(self):
+        first_capability = read_capability()
+        second_capability = read_capability()
+        self.assertNotEqual(
+            first_capability.snapshot_id,
+            second_capability.snapshot_id,
+        )
+        common = {
+            "start_time_ms": 1790193600000,
+            "end_time_ms": 1790280000000,
+        }
+        first = bound_order_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "page-2",
+                    "list": [],
+                },
+            },
+            capability=first_capability,
+            **common,
+        )
+        second = bound_order_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "",
+                    "list": [],
+                },
+            },
+            cursor="page-2",
+            capability=second_capability,
+            **common,
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "authenticated-read capability scope",
+        ):
+            order_history_coverage_from_pages(
+                (first, second),
+                consistency_horizon_satisfied=True,
+            )
+
+    def test_order_history_coverage_rejects_skipped_or_partial_cursor_chain(self):
+        common = {
+            "start_time_ms": 1790193600000,
+            "end_time_ms": 1790280000000,
+        }
+        capability = read_capability()
+        first = bound_order_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "page-2",
+                    "list": [],
+                },
+            },
+            capability=capability,
+            **common,
+        )
+        wrong_second = bound_order_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "",
+                    "list": [],
+                },
+            },
+            cursor="page-3",
+            capability=capability,
+            **common,
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "cursor chain"):
+            order_history_coverage_from_pages(
+                (first, wrong_second),
+                consistency_horizon_satisfied=True,
+            )
+
+        with self.assertRaisesRegex(ProviderCoreError, "incomplete"):
+            order_history_coverage_from_pages(
+                (first,),
+                consistency_horizon_satisfied=True,
+            )
+
+    def test_order_history_coverage_rejects_mid_chain_start_and_implicit_window(self):
+        mid_chain = bound_order_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "",
+                    "list": [],
+                },
+            },
+            cursor="page-2",
+            start_time_ms=1790193600000,
+            end_time_ms=1790280000000,
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "first page"):
+            order_history_coverage_from_pages(
+                (mid_chain,),
+                consistency_horizon_satisfied=True,
+            )
+
+        implicit = bound_order_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "",
+                    "list": [],
+                },
+            }
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "explicit startTime"):
+            order_history_coverage_from_pages(
+                (implicit,),
+                consistency_horizon_satisfied=True,
+            )
+
+
+    def test_execution_read_query_binds_exact_identity_window_and_cursor(self):
+        binding = prepare_execution_read_query(
+            capability=read_capability(),
+            at=READ_AT,
+            category="SPOT",
+            client_order_id="client_exec",
+            symbol="BTCUSDT",
+            cursor="exec%3Acursor",
+            limit=100,
+            start_time_ms=1790193600000,
+            end_time_ms=1790280000000,
+        )
+        self.assertEqual(binding.endpoint, "/v5/execution/list")
+        self.assertEqual(binding.query["category"], "spot")
+        self.assertEqual(binding.query["orderLinkId"], "client_exec")
+        self.assertEqual(binding.query["symbol"], "BTCUSDT")
+        self.assertEqual(binding.query["cursor"], "exec%3Acursor")
+        self.assertEqual(binding.query["limit"], "100")
+        with self.assertRaisesRegex(ProviderCoreError, "seven days"):
+            prepare_execution_read_query(
+                capability=read_capability(),
+                at=READ_AT,
+                category="spot",
+                start_time_ms=0,
+                end_time_ms=(7 * 24 * 60 * 60 * 1000) + 1,
+            )
+
+    def test_execution_page_preserves_fill_provenance_and_exact_cursor(self):
+        observation = bound_execution_page_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "exec-next",
+                    "list": [
+                        {
+                            "execId": "exec-page-1",
+                            "orderLinkId": "client_exec",
+                            "symbol": "BTCUSDT",
+                            "side": "Buy",
+                            "execQty": "0.5",
+                            "execPrice": "65000",
+                            "execFee": "1.25",
+                            "feeCurrency": "USDT",
+                            "execTime": "1790280000000",
+                        }
+                    ],
+                },
+            },
+            client_order_id="client_exec",
+            start_time_ms=1790193600000,
+            end_time_ms=1790280000000,
+        )
+        page = parse_execution_page(
+            observation,
+            provider_environment="TESTNET",
+            instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+        )
+        self.assertEqual(page.category, "spot")
+        self.assertEqual(page.provider_environment, "TESTNET")
+        self.assertEqual(page.next_cursor, "exec-next")
+        self.assertFalse(page.pagination_complete)
+        self.assertEqual(len(page.fills), 1)
+        self.assertEqual(page.fills[0].provider_execution_id, "exec-page-1")
+        self.assertEqual(page.fills[0].evidence_refs, (observation.evidence_ref,))
+
+    def test_execution_page_rejects_category_or_client_identity_mismatch(self):
+        base_row = {
+            "execId": "exec-mismatch",
+            "orderLinkId": "wrong_client",
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "execQty": "1",
+            "execPrice": "10",
+            "execFee": "0",
+            "feeCurrency": "USDT",
+            "execTime": "1790280000000",
+        }
+        with self.assertRaisesRegex(ProviderCoreError, "category"):
+            parse_execution_page(
+                bound_execution_page_response(
+                    {
+                        "retCode": 0,
+                        "result": {
+                            "category": "linear",
+                            "nextPageCursor": "",
+                            "list": [],
+                        },
+                    }
+                ),
+                provider_environment="TESTNET",
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+        with self.assertRaisesRegex(ProviderCoreError, "orderLinkId"):
+            parse_execution_page(
+                bound_execution_page_response(
+                    {
+                        "retCode": 0,
+                        "result": {
+                            "category": "spot",
+                            "nextPageCursor": "",
+                            "list": [base_row],
+                        },
+                    },
+                    client_order_id="expected_client",
+                ),
+                provider_environment="TESTNET",
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+
+    def test_execution_page_enforces_effective_symbol_filter(self):
+        row = {
+            "execId": "exec-symbol-filter",
+            "orderLinkId": "",
+            "symbol": "ETHUSDT",
+            "side": "Buy",
+            "execQty": "1",
+            "execPrice": "10",
+            "execFee": "0",
+            "feeCurrency": "USDT",
+            "execTime": "1790280000000",
+        }
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "symbol response does not match",
+        ):
+            parse_execution_page(
+                bound_execution_page_response(
+                    {
+                        "retCode": 0,
+                        "result": {
+                            "category": "spot",
+                            "nextPageCursor": "",
+                            "list": [row],
+                        },
+                    },
+                    symbol="BTCUSDT",
+                ),
+                provider_environment="TESTNET",
+                instrument_versions={"ETHUSDT": "ETHUSDT@v1"},
+            )
+
+        identity_row = dict(row)
+        identity_row["orderLinkId"] = "client_exec_effective"
+        page = parse_execution_page(
+            bound_execution_page_response(
+                {
+                    "retCode": 0,
+                    "result": {
+                        "category": "spot",
+                        "nextPageCursor": "",
+                        "list": [identity_row],
+                    },
+                },
+                client_order_id="client_exec_effective",
+                symbol="BTCUSDT",
+            ),
+            provider_environment="TESTNET",
+            instrument_versions={"ETHUSDT": "ETHUSDT@v1"},
+        )
+        self.assertEqual(page.fills[0].instrument, "ETHUSDT@v1")
+
+    def test_next_execution_page_preserves_exact_capability_and_query(self):
+        capability = read_capability()
+        first = bound_execution_page_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "exec-page-2",
+                    "list": [],
+                },
+            },
+            client_order_id="client_exec",
+            start_time_ms=1790193600000,
+            end_time_ms=1790280000000,
+            capability=capability,
+        )
+        next_binding = prepare_next_execution_read_query(
+            observation=first,
+            capability=capability,
+            provider_environment="TESTNET",
+            instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            at=READ_AT,
+        )
+        self.assertIsNotNone(next_binding)
+        self.assertEqual(next_binding.query["cursor"], "exec-page-2")
+        self.assertEqual(next_binding.query["orderLinkId"], "client_exec")
+        self.assertEqual(next_binding.query["startTime"], "1790193600000")
+        self.assertEqual(next_binding.query["endTime"], "1790280000000")
+
+    def test_execution_history_coverage_is_derived_from_complete_cursor_chain(self):
+        common = {
+            "start_time_ms": 1790193600000,
+            "end_time_ms": 1790280000000,
+        }
+        capability = read_capability()
+        first = bound_execution_page_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "exec-page-2",
+                    "list": [
+                        {
+                            "execId": "exec-cover-1",
+                            "orderLinkId": "",
+                            "symbol": "BTCUSDT",
+                            "side": "Buy",
+                            "execQty": "1",
+                            "execPrice": "10",
+                            "execFee": "0",
+                            "feeCurrency": "USDT",
+                            "execTime": "1790279999000",
+                        }
+                    ],
+                },
+            },
+            capability=capability,
+            **common,
+        )
+        second = bound_execution_page_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "",
+                    "list": [
+                        {
+                            "execId": "exec-cover-2",
+                            "orderLinkId": "",
+                            "symbol": "BTCUSDT",
+                            "side": "Sell",
+                            "execQty": "1",
+                            "execPrice": "11",
+                            "execFee": "0",
+                            "feeCurrency": "USDT",
+                            "execTime": "1790279998000",
+                        }
+                    ],
+                },
+            },
+            cursor="exec-page-2",
+            capability=capability,
+            **common,
+        )
+        coverage = execution_history_coverage_from_pages(
+            (first, second),
+            provider_environment="TESTNET",
+            instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            consistency_horizon_satisfied=True,
+        )
+        self.assertTrue(coverage.pagination_complete)
+        self.assertFalse(coverage.provider_semantics_exclude_execution)
+        self.assertEqual(coverage.provider_environment, "TESTNET")
+        self.assertEqual(coverage.coverage_start, "2026-09-23T20:00:00.000Z")
+        self.assertEqual(coverage.coverage_end, "2026-09-24T20:00:00.000Z")
+
+        with self.assertRaisesRegex(ProviderCoreError, "incomplete"):
+            execution_history_coverage_from_pages(
+                (first,),
+                provider_environment="TESTNET",
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                consistency_horizon_satisfied=True,
+            )
+
+    def test_execution_history_coverage_rejects_mixed_capability_snapshots(self):
+        first_capability = read_capability()
+        second_capability = read_capability()
+        self.assertNotEqual(
+            first_capability.snapshot_id,
+            second_capability.snapshot_id,
+        )
+        common = {
+            "start_time_ms": 1790193600000,
+            "end_time_ms": 1790280000000,
+        }
+        first = bound_execution_page_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "exec-page-2",
+                    "list": [],
+                },
+            },
+            capability=first_capability,
+            **common,
+        )
+        second = bound_execution_page_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "",
+                    "list": [],
+                },
+            },
+            cursor="exec-page-2",
+            capability=second_capability,
+            **common,
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "authenticated-read capability scope",
+        ):
+            execution_history_coverage_from_pages(
+                (first, second),
+                provider_environment="TESTNET",
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                consistency_horizon_satisfied=True,
+            )
+
+
+    def test_realtime_linear_query_requires_documented_symbol_scope(self):
+        with self.assertRaisesRegex(ProviderCoreError, "requires symbol"):
+            prepare_order_read_query(
+                capability=read_capability(),
+                at=READ_AT,
+                surface="OPEN_ORDERS",
+                category="linear",
+            )
+        binding = prepare_order_read_query(
+            capability=read_capability(),
+            at=READ_AT,
+            surface="OPEN_ORDERS",
+            category="linear",
+            symbol="BTCUSDT",
+        )
+        self.assertEqual(binding.query["symbol"], "BTCUSDT")
+        self.assertEqual(binding.query["openOnly"], "0")
+
+    def test_open_order_page_projects_documented_working_states_into_reconciliation(self):
+        page = parse_order_page(
+            bound_order_response(
+                {
+                    "retCode": 0,
+                    "result": {
+                        "category": "spot",
+                        "nextPageCursor": "",
+                        "list": [
+                            {
+                                "orderId": "working-new",
+                                "orderLinkId": "client-new",
+                                "symbol": "BTCUSDT",
+                                "orderStatus": "New",
+                                "leavesQty": "2.5",
+                                "createdTime": "1790279999000",
+                                "updatedTime": "1790280000000",
+                            },
+                            {
+                                "orderId": "working-partial",
+                                "orderLinkId": "client-partial",
+                                "symbol": "BTCUSDT",
+                                "orderStatus": "PartiallyFilled",
+                                "leavesQty": "0.25",
+                                "createdTime": "1790279999000",
+                                "updatedTime": "1790280000000",
+                            },
+                            {
+                                "orderId": "working-trigger",
+                                "orderLinkId": "",
+                                "symbol": "BTCUSDT",
+                                "orderStatus": "Untriggered",
+                                "leavesQty": "1",
+                                "createdTime": "1790279999000",
+                                "updatedTime": "1790280000000",
+                            },
+                            {
+                                "orderId": "terminal-filled",
+                                "orderLinkId": "client-filled",
+                                "symbol": "BTCUSDT",
+                                "orderStatus": "Filled",
+                                "leavesQty": "0",
+                                "createdTime": "1790279999000",
+                                "updatedTime": "1790280000000",
+                            },
+                        ],
+                    },
+                },
+                surface="OPEN_ORDERS",
+            )
+        )
+        working = working_orders_from_page(
+            page,
+            instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+        )
+        self.assertEqual(
+            tuple(item.provider_order_id for item in working),
+            ("working-new", "working-partial", "working-trigger"),
+        )
+        self.assertEqual(
+            tuple(item.remaining_quantity for item in working),
+            (Decimal("2.5"), Decimal("0.25"), Decimal("1")),
+        )
+        self.assertTrue(all(item.provider_id == "BYBIT" for item in working))
+        self.assertTrue(all(item.provider_environment == "TESTNET" for item in working))
+        self.assertTrue(all(item.instrument == "BTCUSDT@v1" for item in working))
+
+    def test_working_order_projection_rejects_history_unknown_symbol_and_invalid_open_remainder(self):
+        history = parse_order_page(
+            bound_order_response(
+                {
+                    "retCode": 0,
+                    "result": {
+                        "category": "spot",
+                        "nextPageCursor": "",
+                        "list": [],
+                    },
+                }
+            )
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "OPEN_ORDERS"):
+            working_orders_from_page(
+                history,
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+
+        open_page = parse_order_page(
+            bound_order_response(
+                {
+                    "retCode": 0,
+                    "result": {
+                        "category": "spot",
+                        "nextPageCursor": "",
+                        "list": [
+                            {
+                                "orderId": "working-unmapped",
+                                "orderLinkId": "",
+                                "symbol": "UNKNOWN",
+                                "orderStatus": "New",
+                                "leavesQty": "1",
+                                "createdTime": "1790279999000",
+                                "updatedTime": "1790280000000",
+                            }
+                        ],
+                    },
+                },
+                surface="OPEN_ORDERS",
+            )
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "unmapped"):
+            working_orders_from_page(open_page, instrument_versions={})
+
+        with self.assertRaisesRegex(ProviderCoreError, "positive remaining"):
+            parse_order_page(
+                bound_order_response(
+                    {
+                        "retCode": 0,
+                        "result": {
+                            "category": "spot",
+                            "nextPageCursor": "",
+                            "list": [
+                                {
+                                    "orderId": "invalid-open-zero",
+                                    "orderLinkId": "",
+                                    "symbol": "BTCUSDT",
+                                    "orderStatus": "New",
+                                    "leavesQty": "0",
+                                    "createdTime": "1790279999000",
+                                    "updatedTime": "1790280000000",
+                                }
+                            ],
+                        },
+                    },
+                    surface="OPEN_ORDERS",
+                )
+            )
+
+    def test_unknown_future_order_status_fails_closed(self):
+        with self.assertRaisesRegex(ProviderCoreError, "unsupported Bybit order status"):
+            parse_order_page(
+                bound_order_response(
+                    {
+                        "retCode": 0,
+                        "result": {
+                            "category": "spot",
+                            "nextPageCursor": "",
+                            "list": [
+                                {
+                                    "orderId": "future-status",
+                                    "orderLinkId": "",
+                                    "symbol": "BTCUSDT",
+                                    "orderStatus": "FutureProviderStatus",
+                                    "leavesQty": "1",
+                                    "createdTime": "1790279999000",
+                                    "updatedTime": "1790280000000",
+                                }
+                            ],
+                        },
+                    },
+                    surface="OPEN_ORDERS",
+                )
+            )
+
+
+    def test_exact_bybit_working_page_resolves_unknown_send_without_retry(self):
+        page = parse_order_page(
+            bound_order_response(
+                {
+                    "retCode": 0,
+                    "result": {
+                        "category": "spot",
+                        "nextPageCursor": "",
+                        "list": [
+                            {
+                                "orderId": "provider-unknown-resolved",
+                                "orderLinkId": "client_unknown_resolved",
+                                "symbol": "BTCUSDT",
+                                "orderStatus": "New",
+                                "leavesQty": "0.4",
+                                "createdTime": "1790279999000",
+                                "updatedTime": "1790280000000",
+                            }
+                        ],
+                    },
+                },
+                surface="OPEN_ORDERS",
+                client_order_id="client_unknown_resolved",
+            )
+        )
+        working = working_orders_from_page(
+            page,
+            instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+        )
+        unknown = UnknownSubmission.create(
+            attempt_id="attempt-bybit-unknown",
+            intent_id="intent-bybit-unknown",
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+            provider_environment="TESTNET",
+            client_order_id="client_unknown_resolved",
+            started_at="2026-09-24T19:59:00Z",
+        )
+        result = reconcile_account(
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+            provider_environment="TESTNET",
+            local_cash={},
+            provider_cash={},
+            local_positions={},
+            provider_positions={},
+            local_execution_ids=(),
+            provider_fills=(),
+            local_working_client_order_ids=("client_unknown_resolved",),
+            provider_working_orders=working,
+            snapshot_consistency=SnapshotConsistencyEvidence(
+                provider_id="BYBIT",
+                account_id="paper-1",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                mode="ATOMIC",
+                query_started_at="2026-09-24T20:00:00Z",
+                query_completed_at="2026-09-24T20:00:00Z",
+            ),
+            unknown_submissions=(unknown,),
+            searched_client_order_ids=("client_unknown_resolved",),
+            coverage_start="2026-09-24T19:59:00Z",
+            coverage_end="2026-09-24T20:01:00Z",
+            pagination_complete=True,
+        )
+        resolution = result.submission_resolutions[0]
+        self.assertEqual(resolution.outcome, "OBSERVED_WORKING_ORDER")
+        self.assertEqual(
+            resolution.provider_order_ids,
+            ("provider-unknown-resolved",),
+        )
+        self.assertTrue(result.complete)
+        self.assertFalse(result.blocks_new_risk)
+
+
+    def test_wallet_query_and_snapshot_preserve_unified_scope(self):
+        capability = read_capability(permission_scopes=("ACCOUNT.READ",))
+        binding = prepare_wallet_read_query(
+            capability=capability,
+            at=READ_AT,
+            coins=("USDT", "BTC"),
+        )
+        self.assertEqual(binding.endpoint, "/v5/account/wallet-balance")
+        self.assertEqual(binding.permission_scope, "ACCOUNT.READ")
+        self.assertEqual(binding.query["accountType"], "UNIFIED")
+        self.assertEqual(binding.query["coin"], "USDT,BTC")
+
+        snapshot = parse_wallet_snapshot(
+            bound_wallet_response(
+                {
+                    "retCode": 0,
+                    "result": {
+                        "list": [
+                            {
+                                "accountType": "UNIFIED",
+                                "coin": [
+                                    {
+                                        "coin": "USDT",
+                                        "walletBalance": "100.25",
+                                        "equity": "100.25",
+                                        "borrowAmount": "0",
+                                        "spotBorrow": "0",
+                                        "locked": "2.5",
+                                        "unrealisedPnl": "0",
+                                    },
+                                    {
+                                        "coin": "BTC",
+                                        "walletBalance": "0.01",
+                                        "equity": "0.01",
+                                        "borrowAmount": "0",
+                                        "spotBorrow": "0",
+                                        "locked": "0",
+                                        "unrealisedPnl": "0",
+                                    },
+                                ],
+                            }
+                        ]
+                    },
+                },
+                coins=("USDT", "BTC"),
+                capability=capability,
+            )
+        )
+        self.assertEqual(snapshot.account_type, "UNIFIED")
+        self.assertEqual(snapshot.provider_environment, "TESTNET")
+        self.assertEqual(
+            dict(provider_wallet_cash(snapshot)),
+            {"BTC": Decimal("0.01"), "USDT": Decimal("100.25")},
+        )
+        self.assertEqual(snapshot.coins[1].locked, Decimal("2.5"))
+
+    def test_wallet_snapshot_rejects_out_of_scope_coin_and_unrepresented_liability(self):
+        with self.assertRaisesRegex(ProviderCoreError, "outside exact query scope"):
+            parse_wallet_snapshot(
+                bound_wallet_response(
+                    {
+                        "retCode": 0,
+                        "result": {
+                            "list": [
+                                {
+                                    "accountType": "UNIFIED",
+                                    "coin": [
+                                        {
+                                            "coin": "BTC",
+                                            "walletBalance": "1",
+                                            "equity": "1",
+                                            "borrowAmount": "0",
+                                            "spotBorrow": "0",
+                                            "locked": "0",
+                                            "unrealisedPnl": "0",
+                                        }
+                                    ],
+                                }
+                            ]
+                        },
+                    },
+                    coins=("USDT",),
+                )
+            )
+
+        borrowed = parse_wallet_snapshot(
+            bound_wallet_response(
+                {
+                    "retCode": 0,
+                    "result": {
+                        "list": [
+                            {
+                                "accountType": "UNIFIED",
+                                "coin": [
+                                    {
+                                        "coin": "USDT",
+                                        "walletBalance": "100",
+                                        "equity": "90",
+                                        "borrowAmount": "10",
+                                        "spotBorrow": "4",
+                                        "locked": "0",
+                                        "unrealisedPnl": "0",
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                }
+            )
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "liabilities"):
+            provider_wallet_cash(borrowed)
+
+        with self.assertRaisesRegex(ProviderCoreError, "spotBorrow"):
+            parse_wallet_snapshot(
+                bound_wallet_response(
+                    {
+                        "retCode": 0,
+                        "result": {
+                            "list": [
+                                {
+                                    "accountType": "UNIFIED",
+                                    "coin": [
+                                        {
+                                            "coin": "USDT",
+                                            "walletBalance": "100",
+                                            "equity": "100",
+                                            "borrowAmount": "1",
+                                            "spotBorrow": "2",
+                                            "locked": "0",
+                                            "unrealisedPnl": "0",
+                                        }
+                                    ],
+                                }
+                            ]
+                        },
+                    }
+                )
+            )
+
+    def test_position_query_requires_bounded_documented_scope(self):
+        account_capability = read_capability(
+            permission_scopes=("ACCOUNT.READ",)
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "symbol or settleCoin"):
+            prepare_position_read_query(
+                capability=account_capability,
+                at=READ_AT,
+                category="linear",
+                symbol=None,
+                settle_coin=None,
+            )
+        with self.assertRaisesRegex(ProviderCoreError, "cannot exceed 200"):
+            prepare_position_read_query(
+                capability=account_capability,
+                at=READ_AT,
+                category="linear",
+                symbol="BTCUSDT",
+                limit=201,
+            )
+        option = prepare_position_read_query(
+            capability=account_capability,
+            at=READ_AT,
+            category="option",
+            symbol=None,
+            base_coin="BTC",
+        )
+        self.assertEqual(option.query["baseCoin"], "BTC")
+
+    def test_position_page_enforces_exact_symbol_and_provider_environment(self):
+        page = parse_position_page(
+            bound_position_response(
+                {
+                    "retCode": 0,
+                    "result": {
+                        "category": "linear",
+                        "nextPageCursor": "",
+                        "list": [
+                            {
+                                "symbol": "BTCUSDT",
+                                "positionIdx": 0,
+                                "side": "Buy",
+                                "size": "2",
+                                "positionStatus": "Normal",
+                                "updatedTime": "1790280000000",
+                                "seq": "42",
+                            }
+                        ],
+                    },
+                }
+            )
+        )
+        self.assertTrue(page.pagination_complete)
+        self.assertEqual(page.positions[0].side, "BUY")
+        self.assertEqual(page.positions[0].size, Decimal("2"))
+        self.assertEqual(page.positions[0].sequence, 42)
+        self.assertEqual(
+            page.positions[0].updated_at,
+            "2026-09-24T20:00:00.000Z",
+        )
+
+        with self.assertRaisesRegex(ProviderCoreError, "symbol does not match"):
+            parse_position_page(
+                bound_position_response(
+                    {
+                        "retCode": 0,
+                        "result": {
+                            "category": "linear",
+                            "nextPageCursor": "",
+                            "list": [
+                                {
+                                    "symbol": "ETHUSDT",
+                                    "positionIdx": 0,
+                                    "side": "Buy",
+                                    "size": "1",
+                                    "positionStatus": "Normal",
+                                    "updatedTime": "1790280000000",
+                                    "seq": "43",
+                                }
+                            ],
+                        },
+                    },
+                    symbol="BTCUSDT",
+                )
+            )
+
+    def test_position_projection_requires_complete_one_way_cursor_chain(self):
+        capability = read_capability(permission_scopes=("ACCOUNT.READ",))
+        common = dict(
+            category="linear",
+            symbol=None,
+            settle_coin="USDT",
+            capability=capability,
+        )
+        first = bound_position_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "linear",
+                    "nextPageCursor": "position-page-2",
+                    "list": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "positionIdx": 0,
+                            "side": "Buy",
+                            "size": "2",
+                            "positionStatus": "Normal",
+                            "updatedTime": "1790279999000",
+                            "seq": "50",
+                        }
+                    ],
+                },
+            },
+            **common,
+        )
+        second = bound_position_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "linear",
+                    "nextPageCursor": "",
+                    "list": [
+                        {
+                            "symbol": "ETHUSDT",
+                            "positionIdx": 0,
+                            "side": "Sell",
+                            "size": "3",
+                            "positionStatus": "Normal",
+                            "updatedTime": "1790280000000",
+                            "seq": "51",
+                        }
+                    ],
+                },
+            },
+            cursor="position-page-2",
+            **common,
+        )
+        positions = provider_position_quantities_from_pages(
+            (first, second),
+            instrument_versions={
+                "BTCUSDT": "BTCUSDT@v1",
+                "ETHUSDT": "ETHUSDT@v1",
+            },
+        )
+        self.assertEqual(
+            dict(positions),
+            {
+                "BTCUSDT@v1": Decimal("2"),
+                "ETHUSDT@v1": Decimal("-3"),
+            },
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "incomplete"):
+            provider_position_quantities_from_pages(
+                (first,),
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+
+    def test_position_projection_rejects_mixed_capability_snapshots(self):
+        first_capability = read_capability(permission_scopes=("ACCOUNT.READ",))
+        second_capability = read_capability(permission_scopes=("ACCOUNT.READ",))
+        first = bound_position_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "linear",
+                    "nextPageCursor": "position-page-2",
+                    "list": [],
+                },
+            },
+            capability=first_capability,
+        )
+        second = bound_position_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "linear",
+                    "nextPageCursor": "",
+                    "list": [],
+                },
+            },
+            cursor="position-page-2",
+            capability=second_capability,
+        )
+
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "authenticated-read capability scope",
+        ):
+            provider_position_quantities_from_pages(
+                (first, second),
+                instrument_versions={},
+            )
+
+    def test_position_projection_fails_closed_for_hedge_or_liquidation_state(self):
+        hedge = bound_position_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "linear",
+                    "nextPageCursor": "",
+                    "list": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "positionIdx": 1,
+                            "side": "Buy",
+                            "size": "2",
+                            "positionStatus": "Normal",
+                            "updatedTime": "1790280000000",
+                            "seq": "60",
+                        }
+                    ],
+                },
+            }
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "hedge-mode"):
+            provider_position_quantities_from_pages(
+                (hedge,),
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+
+        liquidation = bound_position_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "linear",
+                    "nextPageCursor": "",
+                    "list": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "positionIdx": 0,
+                            "side": "Buy",
+                            "size": "2",
+                            "positionStatus": "Liq",
+                            "updatedTime": "1790280000000",
+                            "seq": "61",
+                        }
+                    ],
+                },
+            }
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "Liq/Adl"):
+            provider_position_quantities_from_pages(
+                (liquidation,),
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+
+    def test_position_next_page_preserves_exact_capability_and_query(self):
+        capability = read_capability(permission_scopes=("ACCOUNT.READ",))
+        first = bound_position_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "linear",
+                    "nextPageCursor": "position-next",
+                    "list": [],
+                },
+            },
+            symbol=None,
+            settle_coin="USDT",
+            capability=capability,
+        )
+        binding = prepare_next_position_read_query(
+            observation=first,
+            capability=capability,
+            at=READ_AT,
+        )
+        self.assertIsNotNone(binding)
+        self.assertEqual(binding.query["cursor"], "position-next")
+        self.assertEqual(binding.query["settleCoin"], "USDT")
+
+    def test_bybit_account_surfaces_feed_existing_reconciliation_without_new_authority(self):
+        wallet = parse_wallet_snapshot(
+            bound_wallet_response(
+                {
+                    "retCode": 0,
+                    "result": {
+                        "list": [
+                            {
+                                "accountType": "UNIFIED",
+                                "coin": [
+                                    {
+                                        "coin": "USDT",
+                                        "walletBalance": "100",
+                                        "equity": "100",
+                                        "borrowAmount": "0",
+                                        "spotBorrow": "0",
+                                        "locked": "0",
+                                        "unrealisedPnl": "0",
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                }
+            )
+        )
+        position_observation = bound_position_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "linear",
+                    "nextPageCursor": "",
+                    "list": [
+                        {
+                            "symbol": "BTCUSDT",
+                            "positionIdx": 0,
+                            "side": "Buy",
+                            "size": "2",
+                            "positionStatus": "Normal",
+                            "updatedTime": "1790280000000",
+                            "seq": "70",
+                        }
+                    ],
+                },
+            }
+        )
+        provider_positions = provider_position_quantities_from_pages(
+            (position_observation,),
+            instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+        )
+        result = reconcile_account(
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+            provider_environment="TESTNET",
+            local_cash={"USDT": "100"},
+            provider_cash=provider_wallet_cash(wallet),
+            local_positions={"BTCUSDT@v1": "2"},
+            provider_positions=provider_positions,
+            local_execution_ids=(),
+            provider_fills=(),
+            snapshot_consistency=SnapshotConsistencyEvidence(
+                provider_id="BYBIT",
+                account_id="paper-1",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                mode="COMPOSED",
+                query_started_at="2026-09-24T19:59:59Z",
+                query_completed_at="2026-09-24T20:00:01Z",
+                buffered_stream_events=True,
+                replay_complete=True,
+                sequence_gap_detected=False,
+            ),
+            coverage_start="2026-09-24T19:59:00Z",
+            coverage_end="2026-09-24T20:01:00Z",
+            pagination_complete=True,
+        )
+        self.assertTrue(result.complete)
+        self.assertTrue(result.snapshot_consistent)
+        self.assertEqual(dict(result.provider_cash), {"USDT": Decimal("100")})
+        self.assertEqual(
+            dict(result.provider_positions),
+            {"BTCUSDT@v1": Decimal("2")},
+        )
+
+
+    def test_activity_query_binds_unified_scope_window_filter_and_cursor(self):
+        binding = prepare_activity_read_query(
+            capability=read_capability(permission_scopes=("ACCOUNT.READ",)),
+            at=READ_AT,
+            category="linear",
+            currency="USDT",
+            activity_type="SETTLEMENT",
+            cursor="activity%3A2",
+            limit=50,
+            start_time_ms=1790193600000,
+            end_time_ms=1790280000000,
+        )
+        self.assertEqual(binding.endpoint, "/v5/account/transaction-log")
+        self.assertEqual(binding.permission_scope, "ACCOUNT.READ")
+        self.assertEqual(binding.query["accountType"], "UNIFIED")
+        self.assertEqual(binding.query["category"], "linear")
+        self.assertEqual(binding.query["currency"], "USDT")
+        self.assertEqual(binding.query["type"], "SETTLEMENT")
+        self.assertEqual(binding.query["cursor"], "activity%3A2")
+        with self.assertRaisesRegex(ProviderCoreError, "seven days"):
+            prepare_activity_read_query(
+                capability=read_capability(
+                    permission_scopes=("ACCOUNT.READ",)
+                ),
+                at=READ_AT,
+                start_time_ms=0,
+                end_time_ms=(7 * 24 * 60 * 60 * 1000) + 1,
+            )
+
+    def test_activity_page_preserves_cash_delta_and_unknown_origin(self):
+        page = parse_activity_page(
+            bound_activity_response(
+                {
+                    "retCode": 0,
+                    "result": {
+                        "nextPageCursor": "activity-next",
+                        "list": [
+                            {
+                                "id": "activity-1",
+                                "symbol": "BTCUSDT",
+                                "category": "linear",
+                                "side": "Buy",
+                                "transactionTime": "1790280000000",
+                                "type": "SETTLEMENT",
+                                "qty": "1",
+                                "size": "1",
+                                "currency": "USDT",
+                                "tradePrice": "65000",
+                                "funding": "-0.25",
+                                "fee": "0",
+                                "cashFlow": "0",
+                                "change": "-0.25",
+                                "cashBalance": "99.75",
+                                "feeRate": "0.0001",
+                                "bonusChange": "",
+                                "tradeId": "trade-1",
+                                "orderId": "provider-order-1",
+                                "orderLinkId": "client-1",
+                                "extraFees": "",
+                                "displayType": "funding",
+                            }
+                        ],
+                    },
+                },
+                category="linear",
+                currency="USDT",
+                activity_type="SETTLEMENT",
+            ),
+            instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+        )
+        self.assertFalse(page.pagination_complete)
+        self.assertEqual(page.next_cursor, "activity-next")
+        self.assertEqual(len(page.activities), 1)
+        activity = page.activities[0]
+        self.assertEqual(activity.activity_id, "activity-1")
+        self.assertEqual(activity.activity_type, "SETTLEMENT")
+        self.assertEqual(activity.origin, "UNKNOWN")
+        self.assertEqual(activity.instrument, "BTCUSDT@v1")
+        self.assertEqual(activity.currency, "USDT")
+        self.assertEqual(activity.client_order_id, "client-1")
+        self.assertEqual(activity.provider_order_id, "provider-order-1")
+        self.assertEqual(activity.provider_execution_id, "trade-1")
+        self.assertEqual(activity.signed_amount, Decimal("-0.25"))
+        self.assertEqual(activity.occurred_at, "2026-09-24T20:00:00Z")
+
+    def test_activity_page_rejects_exact_filter_or_instrument_mismatch(self):
+        base_row = {
+            "id": "activity-mismatch",
+            "symbol": "BTCUSDT",
+            "category": "linear",
+            "side": "None",
+            "transactionTime": "1790280000000",
+            "type": "SETTLEMENT",
+            "qty": "0",
+            "size": "0",
+            "currency": "USDT",
+            "tradePrice": "0",
+            "funding": "0",
+            "fee": "0",
+            "cashFlow": "1",
+            "change": "1",
+            "cashBalance": "101",
+            "feeRate": "0",
+            "bonusChange": "",
+            "tradeId": "",
+            "orderId": "",
+            "orderLinkId": "",
+            "extraFees": "",
+            "displayType": "",
+        }
+        with self.assertRaisesRegex(ProviderCoreError, "currency"):
+            parse_activity_page(
+                bound_activity_response(
+                    {
+                        "retCode": 0,
+                        "result": {
+                            "nextPageCursor": "",
+                            "list": [base_row],
+                        },
+                    },
+                    currency="BTC",
+                ),
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+        with self.assertRaisesRegex(ProviderCoreError, "unmapped"):
+            parse_activity_page(
+                bound_activity_response(
+                    {
+                        "retCode": 0,
+                        "result": {
+                            "nextPageCursor": "",
+                            "list": [base_row],
+                        },
+                    }
+                ),
+                instrument_versions={},
+            )
+
+    def test_activity_coverage_requires_complete_contiguous_explicit_window(self):
+        common = {
+            "start_time_ms": 1790193600000,
+            "end_time_ms": 1790280000000,
+        }
+        capability = read_capability(permission_scopes=("ACCOUNT.READ",))
+        first = bound_activity_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "nextPageCursor": "activity-page-2",
+                    "list": [],
+                },
+            },
+            capability=capability,
+            **common,
+        )
+        second = bound_activity_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "nextPageCursor": "",
+                    "list": [],
+                },
+            },
+            cursor="activity-page-2",
+            capability=capability,
+            **common,
+        )
+        coverage = activity_coverage_from_pages(
+            (first, second),
+            instrument_versions={},
+            consistency_horizon_satisfied=True,
+        )
+        self.assertEqual(coverage.surface, "ACTIVITIES")
+        self.assertTrue(coverage.pagination_complete)
+        self.assertFalse(coverage.provider_semantics_exclude_execution)
+        self.assertEqual(coverage.coverage_start, "2026-09-23T20:00:00.000Z")
+        self.assertEqual(coverage.coverage_end, "2026-09-24T20:00:00.000Z")
+
+        with self.assertRaisesRegex(ProviderCoreError, "incomplete"):
+            activity_coverage_from_pages(
+                (first,),
+                instrument_versions={},
+                consistency_horizon_satisfied=True,
+            )
+
+    def test_activity_coverage_rejects_mixed_capability_snapshots(self):
+        first_capability = read_capability(
+            permission_scopes=("ACCOUNT.READ",)
+        )
+        second_capability = read_capability(
+            permission_scopes=("ACCOUNT.READ",)
+        )
+        self.assertNotEqual(
+            first_capability.snapshot_id,
+            second_capability.snapshot_id,
+        )
+        common = {
+            "start_time_ms": 1790193600000,
+            "end_time_ms": 1790280000000,
+        }
+        first = bound_activity_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "nextPageCursor": "activity-page-2",
+                    "list": [],
+                },
+            },
+            capability=first_capability,
+            **common,
+        )
+        second = bound_activity_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "nextPageCursor": "",
+                    "list": [],
+                },
+            },
+            cursor="activity-page-2",
+            capability=second_capability,
+            **common,
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "authenticated-read capability scope",
+        ):
+            activity_coverage_from_pages(
+                (first, second),
+                instrument_versions={},
+                consistency_horizon_satisfied=True,
+            )
+
+    def test_activity_next_page_preserves_exact_capability_scope(self):
+        capability = read_capability(permission_scopes=("ACCOUNT.READ",))
+        first = bound_activity_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "nextPageCursor": "activity-next",
+                    "list": [],
+                },
+            },
+            start_time_ms=1790193600000,
+            end_time_ms=1790280000000,
+            capability=capability,
+        )
+        binding = prepare_next_activity_read_query(
+            observation=first,
+            capability=capability,
+            instrument_versions={},
+            at=READ_AT,
+        )
+        self.assertIsNotNone(binding)
+        self.assertEqual(binding.query["cursor"], "activity-next")
+        self.assertEqual(binding.query["accountType"], "UNIFIED")
+        self.assertEqual(binding.query["startTime"], "1790193600000")
+        self.assertEqual(binding.query["endTime"], "1790280000000")
+
+    def test_unmatched_bybit_activity_blocks_reconciliation_as_unknown_origin(self):
+        page = parse_activity_page(
+            bound_activity_response(
+                {
+                    "retCode": 0,
+                    "result": {
+                        "nextPageCursor": "",
+                        "list": [
+                            {
+                                "id": "manual-or-external-cash-change",
+                                "symbol": "",
+                                "category": "spot",
+                                "side": "None",
+                                "transactionTime": "1790280000000",
+                                "type": "TRANSFER_IN",
+                                "qty": "0",
+                                "size": "0",
+                                "currency": "USDT",
+                                "tradePrice": "0",
+                                "funding": "0",
+                                "fee": "0",
+                                "cashFlow": "10",
+                                "change": "10",
+                                "cashBalance": "110",
+                                "feeRate": "0",
+                                "bonusChange": "",
+                                "tradeId": "",
+                                "orderId": "",
+                                "orderLinkId": "",
+                                "extraFees": "",
+                                "displayType": "",
+                            }
+                        ],
+                    },
+                }
+            ),
+            instrument_versions={},
+        )
+        coverage = coverage_evidence(
+            account_id="paper-1",
+            environment="PAPER",
+            provider_environment="TESTNET",
+            surface="ACTIVITIES",
+            coverage_start="2026-09-24T19:59:00Z",
+            coverage_end="2026-09-24T20:01:00Z",
+            pagination_complete=True,
+            consistency_horizon_satisfied=True,
+        )
+        result = reconcile_account(
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+            provider_environment="TESTNET",
+            local_cash={"USDT": "110"},
+            provider_cash={"USDT": "110"},
+            local_positions={},
+            provider_positions={},
+            local_execution_ids=(),
+            provider_fills=(),
+            provider_activities=page.activities,
+            provider_activity_provider_id="BYBIT",
+            provider_activity_account_id="paper-1",
+            activity_coverage=coverage,
+            require_activity_reconciliation=True,
+            coverage_start="2026-09-24T19:59:00Z",
+            coverage_end="2026-09-24T20:01:00Z",
+            pagination_complete=True,
+        )
+        self.assertIn(
+            "manual-or-external-cash-change",
+            result.manual_or_external_activity_ids,
+        )
+        self.assertTrue(result.blocks_new_risk)
 
 
 if __name__ == "__main__":

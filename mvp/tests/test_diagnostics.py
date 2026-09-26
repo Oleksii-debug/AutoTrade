@@ -166,11 +166,11 @@ class DiagnosticTraceTests(unittest.TestCase):
             "sentinel_prefixed": "X-TXC-SIGNATURE=[REDACTED]WHITEBIT-SENTINEL-BYPASS",
             "sentinel_spaced": "api_secret=[REDACTED] WHITEBIT-SPACED-SENTINEL-BYPASS",
             "sentinel_bracket_suffix": "api_secret=[REDACTED]ABC]WHITEBIT-BRACKET-SUFFIX",
-            "plain_bracket_secret": "api_secret=ABC]WHITEBIT-PLAIN-BRACKET-SECRET",
+            "plain_bracket_value": "api_secret=ABC]WHITEBIT-PLAIN-BRACKET-SECRET",
             "sentinel_brace_suffix": "api_secret=[REDACTED]ABC}WHITEBIT-BRACE-SUFFIX",
-            "plain_brace_secret": "api_secret=ABC}WHITEBIT-PLAIN-BRACE-SECRET",
-            "password_spaced": "password=TOP SECRET",
-            "api_secret_spaced": "api_secret=ABC DEF",
+            "plain_brace_value": "api_secret=ABC}WHITEBIT-PLAIN-BRACE-SECRET",
+            "pass_value_spaced": "password=TOP SECRET",
+            "api_value_spaced": "api_secret=ABC DEF",
             "alias_case_one": "id_token=ID-TOKEN-EMBEDDED-SECRET",
             "alias_case_two": "session_id=SESSION-ID-EMBEDDED-SECRET",
             "alias_case_three": "x_api_key=X-API-KEY-EMBEDDED-SECRET",
@@ -210,17 +210,17 @@ class DiagnosticTraceTests(unittest.TestCase):
             "WHITEBIT-SPACED-SENTINEL-BYPASS", redacted["sentinel_spaced"]
         )
         self.assertEqual(redacted["sentinel_bracket_suffix"], "api_secret=[REDACTED]")
-        self.assertEqual(redacted["plain_bracket_secret"], "api_secret=[REDACTED]")
+        self.assertEqual(redacted["plain_bracket_value"], "api_secret=[REDACTED]")
         self.assertEqual(redacted["sentinel_brace_suffix"], "api_secret=[REDACTED]")
-        self.assertEqual(redacted["plain_brace_secret"], "api_secret=[REDACTED]")
+        self.assertEqual(redacted["plain_brace_value"], "api_secret=[REDACTED]")
         self.assertNotIn("WHITEBIT-BRACKET-SUFFIX", redacted["sentinel_bracket_suffix"])
-        self.assertNotIn("WHITEBIT-PLAIN-BRACKET-SECRET", redacted["plain_bracket_secret"])
+        self.assertNotIn("WHITEBIT-PLAIN-BRACKET-SECRET", redacted["plain_bracket_value"])
         self.assertNotIn("WHITEBIT-BRACE-SUFFIX", redacted["sentinel_brace_suffix"])
-        self.assertNotIn("WHITEBIT-PLAIN-BRACE-SECRET", redacted["plain_brace_secret"])
-        self.assertEqual(redacted["password_spaced"], "password=[REDACTED]")
-        self.assertEqual(redacted["api_secret_spaced"], "api_secret=[REDACTED]")
-        self.assertNotIn("TOP SECRET", redacted["password_spaced"])
-        self.assertNotIn("ABC DEF", redacted["api_secret_spaced"])
+        self.assertNotIn("WHITEBIT-PLAIN-BRACE-SECRET", redacted["plain_brace_value"])
+        self.assertEqual(redacted["pass_value_spaced"], "password=[REDACTED]")
+        self.assertEqual(redacted["api_value_spaced"], "api_secret=[REDACTED]")
+        self.assertNotIn("TOP SECRET", redacted["pass_value_spaced"])
+        self.assertNotIn("ABC DEF", redacted["api_value_spaced"])
         for key, leaked in (
             ("alias_case_one", "ID-TOKEN-EMBEDDED-SECRET"),
             ("alias_case_two", "SESSION-ID-EMBEDDED-SECRET"),

@@ -238,11 +238,11 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 "sentinel_prefixed": "X-TXC-SIGNATURE=[REDACTED]WHITEBIT-SENTINEL-BYPASS",
                 "sentinel_spaced": "api_secret=[REDACTED] WHITEBIT-SPACED-SENTINEL-BYPASS",
                 "sentinel_bracket_suffix": "api_secret=[REDACTED]ABC]WHITEBIT-BRACKET-SUFFIX",
-                "plain_bracket_secret": "api_secret=ABC]WHITEBIT-PLAIN-BRACKET-SECRET",
+                "plain_bracket_value": "api_secret=ABC]WHITEBIT-PLAIN-BRACKET-SECRET",
                 "sentinel_brace_suffix": "api_secret=[REDACTED]ABC}WHITEBIT-BRACE-SUFFIX",
-                "plain_brace_secret": "api_secret=ABC}WHITEBIT-PLAIN-BRACE-SECRET",
-                "password_spaced": "password=TOP SECRET",
-                "api_secret_spaced": "api_secret=ABC DEF",
+                "plain_brace_value": "api_secret=ABC}WHITEBIT-PLAIN-BRACE-SECRET",
+                "pass_value_spaced": "password=TOP SECRET",
+                "api_value_spaced": "api_secret=ABC DEF",
                 "alias_case_one": "id_token=ID-TOKEN-EMBEDDED-SECRET",
                 "alias_case_two": "session_id=SESSION-ID-EMBEDDED-SECRET",
                 "alias_case_three": "x_api_key=X-API-KEY-EMBEDDED-SECRET",
@@ -313,15 +313,15 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 "api_secret=[REDACTED]",
             )
             self.assertEqual(attributes["sentinel_bracket_suffix"], "api_secret=[REDACTED]")
-            self.assertEqual(attributes["plain_bracket_secret"], "api_secret=[REDACTED]")
+            self.assertEqual(attributes["plain_bracket_value"], "api_secret=[REDACTED]")
             self.assertEqual(attributes["sentinel_brace_suffix"], "api_secret=[REDACTED]")
-            self.assertEqual(attributes["plain_brace_secret"], "api_secret=[REDACTED]")
+            self.assertEqual(attributes["plain_brace_value"], "api_secret=[REDACTED]")
             self.assertEqual(
-                attributes["password_spaced"],
+                attributes["pass_value_spaced"],
                 "password=[REDACTED]",
             )
             self.assertEqual(
-                attributes["api_secret_spaced"],
+                attributes["api_value_spaced"],
                 "api_secret=[REDACTED]",
             )
             for key in (

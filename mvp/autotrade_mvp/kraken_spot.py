@@ -1,8 +1,9 @@
-"""Kraken Spot non-live adapter contract foundation.
+"""Kraken Spot adapter contract and guarded REST-order projection.
 
 The Spot and Derivatives API families are intentionally not merged. This module
-only translates already-admitted cash-spot intents. It performs no HTTP request,
-holds no credential and grants no financial authority.
+owns deterministic cash-spot request/response semantics only. Credential
+resolution, nonce allocation and network I/O stay in the shared guarded
+provider transport; financial authority remains outside this module.
 """
 
 from __future__ import annotations
@@ -28,8 +29,8 @@ class KrakenSpotAdapterError(ValueError):
 
 KRAKEN_SPOT_DOCS = MappingProxyType(
     {
-        "api": "https://www.kraken.com/features/trading-api",
-        "order_contract": "https://docs.kraken.com/api/docs/websocket-v2/add_order/",
+        "order_contract": "https://docs.kraken.com/api-reference/trading/add-order",
+        "authentication": "https://docs.kraken.com/exchange/guides/rest/authentication",
     }
 )
 
@@ -213,8 +214,8 @@ class KrakenSpotPreparedRequest:
         if order_type not in {"market", "limit"}:
             raise KrakenSpotAdapterError("prepared ordertype must be market or limit")
         tif = _text(body.get("timeinforce"), name="timeinforce")
-        if tif not in {"gtc", "ioc"}:
-            raise KrakenSpotAdapterError("prepared timeinforce must be gtc or ioc")
+        if tif not in {"GTC", "IOC"}:
+            raise KrakenSpotAdapterError("prepared timeinforce must be GTC or IOC")
         volume_text = _text(body.get("volume"), name="volume")
         if _decimal_text(_decimal(volume_text, name="volume", positive=True)) != volume_text:
             raise KrakenSpotAdapterError("prepared volume must be exact canonical decimal text")
@@ -228,7 +229,7 @@ class KrakenSpotPreparedRequest:
         flags = body.get("oflags")
         if flags is not None and flags != "post":
             raise KrakenSpotAdapterError("unsupported prepared AddOrder flags")
-        if flags == "post" and (order_type != "limit" or tif == "ioc"):
+        if flags == "post" and (order_type != "limit" or tif == "IOC"):
             raise KrakenSpotAdapterError("prepared post-only order shape is invalid")
         try:
             rendered_body = json.dumps(
@@ -272,6 +273,16 @@ class KrakenSpotPreparedRequest:
             self,
             "body_sha256",
             "sha256:" + sha256(rendered_body.encode("utf-8")).hexdigest(),
+        )
+
+    def to_guarded_dispatch_request(self) -> Mapping[str, object]:
+        """Project canonical Kraken preparation into GuardedDispatcher payload."""
+        return MappingProxyType(
+            {
+                "endpoint": self.endpoint,
+                "body": dict(self.body),
+                "capability_snapshot_id": self.capability_snapshot_id,
+            }
         )
 
 
@@ -323,7 +334,7 @@ def prepare_spot_order_request(
         "ordertype": intent.order_type.lower(),
         "volume": _decimal_text(intent.volume),
         "cl_ord_id": client_id,
-        "timeinforce": intent.time_in_force.lower(),
+        "timeinforce": intent.time_in_force,
     }
     if intent.price is not None:
         body["price"] = _decimal_text(intent.price)
@@ -421,6 +432,20 @@ def _submission_evidence(
     }
 
 
+def spot_submission_requires_reconciliation(payload: object) -> bool:
+    """Return whether exact AddOrder bytes require reconcile-before-retry."""
+
+    if not isinstance(payload, Mapping):
+        return False
+    errors = payload.get("error")
+    if isinstance(errors, (str, bytes)) or not isinstance(errors, (list, tuple)):
+        return False
+    return any(
+        isinstance(item, str) and item == "EService:Deadline elapsed"
+        for item in errors
+    )
+
+
 def parse_spot_submission_response(
     *,
     attempt_id: str,
@@ -481,6 +506,15 @@ def parse_spot_submission_response(
     if isinstance(errors, (str, bytes)) or not isinstance(errors, (list, tuple)):
         raise KrakenSpotAdapterError("Kraken error field must be a sequence")
     nonempty_errors = tuple(str(item) for item in errors if str(item))
+    if spot_submission_requires_reconciliation(payload):
+        return {
+            "attempt_id": aid,
+            "outcome": "UNKNOWN",
+            "client_order_id": cid,
+            "reason_code": "KRAKEN_SPOT_DEADLINE_ELAPSED_AMBIGUOUS",
+            "evidence": evidence,
+            "retry_disposition": "RECONCILE_FIRST",
+        }
     if nonempty_errors:
         return {
             "attempt_id": aid,

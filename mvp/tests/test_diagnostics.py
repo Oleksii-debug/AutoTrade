@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import MagicMock, patch
 
 from mvp.autotrade_mvp.diagnostics import (
     build_diagnostic_snapshot,
@@ -28,9 +29,71 @@ class DiagnosticTraceTests(unittest.TestCase):
             self.assertEqual(snapshot.evidence_count, 3)
             self.assertEqual(snapshot.pending_outbox_sample_count, 3)
             text = snapshot.to_text()
+            first = snapshot.traces[0]
             self.assertIn("Step 1", text)
+            self.assertIn(f"event {first.event_id}", text)
+            self.assertIn(f"evidence {first.evidence_id}", text)
             self.assertIn("decision BUY", text)
+            self.assertIn(f"reason {first.decision_reason}", text)
+            self.assertIn(f"cash {first.cash}", text)
+            self.assertIn(f"position {first.position}", text)
+            self.assertIn(f"equity {first.equity}", text)
             self.assertNotIn("{", text)
+
+    def test_pending_outbox_truncation_uses_authoritative_durable_count(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence = {
+                "evidence_id": "evidence-1",
+                "decision": "HOLD",
+                "decision_reason": "no_edge",
+                "risk_outcome": "not_applicable",
+                "order_id": None,
+                "fill_id": None,
+                "cash": "100",
+                "position": "0",
+                "equity": "100",
+                "reconciled": True,
+            }
+            (root / "checkpoint.json").write_text(
+                json.dumps(
+                    {
+                        "symbol": "TEST",
+                        "evidence_ids": ["evidence-1"],
+                        "evidence_records": {"evidence-1": evidence},
+                    }
+                ) + "\n",
+                encoding="utf-8",
+            )
+            (root / "learning-evidence.jsonl").write_text(
+                json.dumps(evidence) + "\n", encoding="utf-8"
+            )
+            (root / "journal.sqlite3").touch()
+
+            store = MagicMock()
+            store.load_events.return_value = [
+                {
+                    "event_type": "SimulationEpisodeRecorded",
+                    "aggregate_version": 1,
+                    "event_id": "event-1",
+                    "payload": evidence,
+                }
+            ]
+            store.pending_outbox.return_value = [{}] * 1000
+
+            with patch("mvp.autotrade_mvp.diagnostics.JournalStore", return_value=store):
+                store.pending_outbox_count.return_value = 1000
+                exact = build_diagnostic_snapshot(root)
+                self.assertEqual(exact.pending_outbox_sample_count, 1000)
+                self.assertFalse(exact.pending_outbox_sample_truncated)
+
+                store.pending_outbox_count.return_value = 1001
+                truncated = build_diagnostic_snapshot(root)
+                self.assertTrue(truncated.pending_outbox_sample_truncated)
+
+                store.pending_outbox_count.return_value = 999
+                with self.assertRaisesRegex(ValueError, "smaller than"):
+                    build_diagnostic_snapshot(root)
 
     def test_missing_journal_linkage_fails_closed(self):
         with TemporaryDirectory() as directory:
@@ -70,6 +133,16 @@ class DiagnosticTraceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Duplicate"):
                 build_diagnostic_snapshot(directory)
 
+    def test_duplicate_checkpoint_evidence_identifier_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 102, 103], directory)
+            checkpoint_path = Path(directory) / "checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            checkpoint["evidence_ids"].append(checkpoint["evidence_ids"][0])
+            checkpoint_path.write_text(json.dumps(checkpoint) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "same episodes"):
+                build_diagnostic_snapshot(directory)
+
     def test_credential_shaped_fields_are_redacted_recursively(self):
         payload = {
             "account": "demo",
@@ -77,8 +150,10 @@ class DiagnosticTraceTests(unittest.TestCase):
             "nested": {
                 "Authorization": "Bearer value",
                 "accessToken": "token-value",
+                "session_id": "session-identifier-secret",
                 "safe": "visible",
             },
+            "session": "top-level-session-secret",
             "rows": [{"password": "secret-value", "value": 3}],
         }
         redacted = redact_diagnostic_value(payload)
@@ -86,6 +161,8 @@ class DiagnosticTraceTests(unittest.TestCase):
         self.assertEqual(redacted["api_key"], "[REDACTED]")
         self.assertEqual(redacted["nested"]["Authorization"], "[REDACTED]")
         self.assertEqual(redacted["nested"]["accessToken"], "[REDACTED]")
+        self.assertEqual(redacted["nested"]["session_id"], "[REDACTED]")
+        self.assertEqual(redacted["session"], "[REDACTED]")
         self.assertEqual(redacted["nested"]["safe"], "visible")
         self.assertEqual(redacted["rows"][0]["password"], "[REDACTED]")
 

@@ -24,6 +24,7 @@ _REDACTION_MARKERS = (
     "authorization",
     "credential",
     "cookie",
+    "session",
     "privatekey",
     "xtxcpayload",
     "xtxcsignature",
@@ -204,15 +205,22 @@ class DiagnosticSnapshot:
         if self.pending_outbox_sample_truncated:
             lines.append("Pending outbox sample is truncated.")
         for trace in self.traces:
+            safe = redact_diagnostic_value(asdict(trace))
             lines.append(
                 " | ".join(
                     [
-                        f"Step {trace.aggregate_version}",
-                        f"decision {trace.decision}",
-                        f"risk {trace.risk_outcome}",
-                        f"order {trace.order_id or 'none'}",
-                        f"fill {trace.fill_id or 'none'}",
-                        f"reconciled {str(trace.reconciled).lower()}",
+                        f"Step {safe['aggregate_version']}",
+                        f"event {safe['event_id']}",
+                        f"evidence {safe['evidence_id']}",
+                        f"decision {safe['decision']}",
+                        f"reason {safe['decision_reason']}",
+                        f"risk {safe['risk_outcome']}",
+                        f"order {safe['order_id'] or 'none'}",
+                        f"fill {safe['fill_id'] or 'none'}",
+                        f"cash {safe['cash']}",
+                        f"position {safe['position']}",
+                        f"equity {safe['equity']}",
+                        f"reconciled {str(safe['reconciled']).lower()}",
                     ]
                 )
             )
@@ -284,7 +292,17 @@ def build_diagnostic_snapshot(state_dir: str | Path) -> DiagnosticSnapshot:
     evidence = _read_evidence(root / "learning-evidence.jsonl")
     evidence_by_id = {row["evidence_id"]: row for row in evidence}
     checkpoint_ids = checkpoint.get("evidence_ids")
-    if not isinstance(checkpoint_ids, list) or set(checkpoint_ids) != set(evidence_by_id):
+    if (
+        not isinstance(checkpoint_ids, list)
+        or any(
+            not isinstance(item, str)
+            or not item.strip()
+            or item != item.strip()
+            for item in checkpoint_ids
+        )
+        or len(checkpoint_ids) != len(set(checkpoint_ids))
+        or set(checkpoint_ids) != set(evidence_by_id)
+    ):
         raise ValueError("Checkpoint and learning evidence do not describe the same episodes")
     checkpoint_records = checkpoint.get("evidence_records")
     if not isinstance(checkpoint_records, dict) or checkpoint_records != evidence_by_id:
@@ -339,11 +357,14 @@ def build_diagnostic_snapshot(state_dir: str | Path) -> DiagnosticSnapshot:
     if observed_evidence_ids != set(evidence_by_id):
         raise ValueError("Learning evidence is missing durable journal trace linkage")
 
+    pending_total = store.pending_outbox_count()
     pending_sample = store.pending_outbox(limit=1000)
+    if pending_total < len(pending_sample):
+        raise ValueError("Pending outbox count is smaller than the diagnostic sample")
     return DiagnosticSnapshot(
         symbol=symbol,
         traces=tuple(traces),
         evidence_count=len(evidence),
         pending_outbox_sample_count=len(pending_sample),
-        pending_outbox_sample_truncated=len(pending_sample) == 1000,
+        pending_outbox_sample_truncated=pending_total > len(pending_sample),
     )

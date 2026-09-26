@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 import zipfile
 
 from tools.build_windows_bundle import build_bundle
@@ -151,6 +152,67 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
             os.link(target, link)
         except (OSError, NotImplementedError) as error:
             self.skipTest(f"hardlink creation unavailable: {error}")
+
+    def test_release_bundle_path_swap_during_open_fails_closed(self):
+        bundle = self.release_bundle("stable-release.zip")
+        original_bytes = bundle.read_bytes()
+
+        (self.staging / "AutoTrade.Desktop.exe").write_bytes(b"replacement-desktop")
+        replacement = self.release_bundle("replacement-release.zip")
+        self.assertNotEqual(original_bytes, replacement.read_bytes())
+
+        original_open = Path.open
+        swapped = False
+
+        def open_then_swap(path_obj, *args, **kwargs):
+            nonlocal swapped
+            handle = original_open(path_obj, *args, **kwargs)
+            mode = args[0] if args else kwargs.get("mode", "r")
+            if Path(path_obj) == bundle and mode == "rb" and not swapped:
+                try:
+                    os.replace(replacement, bundle)
+                except OSError as error:
+                    handle.close()
+                    self.skipTest(f"open-file replacement unavailable: {error}")
+                swapped = True
+            return handle
+
+        with patch.object(
+            Path,
+            "open",
+            autospec=True,
+            side_effect=open_then_swap,
+        ):
+            with self.assertRaisesRegex(
+                InstallerManifestError,
+                "release bundle changed during verification",
+            ):
+                verify_release_bundle(bundle)
+
+        self.assertTrue(swapped)
+
+    def test_compressed_payload_is_rejected_as_noncanonical_bundle(self):
+        source = self.release_bundle()
+        tampered = self.root / "compressed.zip"
+
+        with zipfile.ZipFile(source, "r") as original:
+            entries = [
+                (info.filename, original.read(info))
+                for info in original.infolist()
+            ]
+        with zipfile.ZipFile(
+            tampered,
+            "w",
+            compression=zipfile.ZIP_DEFLATED,
+        ) as archive:
+            for name, payload in entries:
+                archive.writestr(name, payload)
+
+        with self.assertRaisesRegex(
+            InstallerManifestError,
+            "compression is not canonical",
+        ):
+            verify_release_bundle(tampered)
 
     def test_installer_manifest_cannot_overwrite_verified_bundle(self):
         bundle = self.release_bundle()

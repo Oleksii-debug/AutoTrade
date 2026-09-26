@@ -234,7 +234,11 @@ def canonical_operator_payload(
             "protection_only",
             "version",
         }
-        _keys(raw_payload, required)
+        _keys(
+            raw_payload,
+            required,
+            {"restore_new_exposure", "reason_code"},
+        )
         raw_instruments = raw_payload.get("instruments")
         if not isinstance(raw_instruments, list):
             raise ValueError("SET_AUTHORITY instruments must be an array")
@@ -287,18 +291,35 @@ def canonical_operator_payload(
                 )
         base["policy"] = canonical
         base["policy_hash"] = payload_digest(canonical)
-        return base
 
-    _keys(raw_payload, set(), {"reason_code"})
-    reason_code = _text(
-        raw_payload.get("reason_code", "OPERATOR_REQUEST"),
-        "reason_code",
-    )
-    if reason_code not in REASON_CODES:
-        raise ValueError("reason_code must be a canonical operator reason")
-    base["reason_code"] = reason_code
+        restore_requested = raw_payload.get("restore_new_exposure")
+        if restore_requested is None:
+            if "reason_code" in raw_payload:
+                raise ValueError(
+                    "SET_AUTHORITY reason_code requires restore_new_exposure=true"
+                )
+            return base
+        if restore_requested is not True:
+            raise ValueError("SET_AUTHORITY restore_new_exposure must be true")
+        if "reason_code" not in raw_payload:
+            raise ValueError(
+                "SET_AUTHORITY restore_new_exposure requires reason_code"
+            )
+        reason_code = _text(raw_payload.get("reason_code"), "reason_code")
+        if reason_code not in REASON_CODES:
+            raise ValueError("reason_code must be a canonical operator reason")
 
-    if action_name == "RESTORE_NEW_EXPOSURE":
+        exact_policy_registered = any(
+            isinstance(item, Mapping)
+            and item.get("policy_id") == policy.policy_id
+            and dict(item) == canonical
+            for item in current
+        )
+        if not exact_policy_registered:
+            raise OperatorAuthorityConflict(
+                "SET_AUTHORITY restore requires the exact policy to be already registered"
+            )
+
         raw_blocks = state.get("new_exposure_blocks")
         if not isinstance(raw_blocks, list):
             raise OperatorAuthorityConflict(
@@ -313,9 +334,11 @@ def canonical_operator_payload(
         ]
         if len(matching) != 1:
             raise OperatorAuthorityConflict(
-                "RESTORE_NEW_EXPOSURE requires exactly one active scope block"
+                "SET_AUTHORITY restore requires exactly one active scope block"
             )
         active = matching[0]
+        base["restore_new_exposure"] = True
+        base["reason_code"] = reason_code
         base["expected_block"] = {
             "command_id": _text(
                 active.get("command_id"),
@@ -328,6 +351,15 @@ def canonical_operator_payload(
             ),
         }
         return base
+
+    _keys(raw_payload, set(), {"reason_code"})
+    reason_code = _text(
+        raw_payload.get("reason_code", "OPERATOR_REQUEST"),
+        "reason_code",
+    )
+    if reason_code not in REASON_CODES:
+        raise ValueError("reason_code must be a canonical operator reason")
+    base["reason_code"] = reason_code
 
     base["target_policies"] = _active_targets(
         state,
@@ -375,7 +407,11 @@ def validate_persisted_payload(
         "expected_authority_version",
     }
     if action_name == "SET_AUTHORITY":
-        _keys(value, common | {"policy", "policy_hash"})
+        _keys(
+            value,
+            common | {"policy", "policy_hash"},
+            {"restore_new_exposure", "reason_code", "expected_block"},
+        )
         policy_raw = value.get("policy")
         if not isinstance(policy_raw, Mapping):
             raise ValueError("persisted SET_AUTHORITY policy must be an object")
@@ -384,10 +420,25 @@ def validate_persisted_payload(
             raise ValueError("persisted SET_AUTHORITY scope mismatch")
         if value.get("policy_hash") != payload_digest(dict(policy_raw)):
             raise ValueError("persisted SET_AUTHORITY policy hash mismatch")
-        return value
 
-    if action_name == "RESTORE_NEW_EXPOSURE":
-        _keys(value, common | {"reason_code", "expected_block"})
+        restore_present = "restore_new_exposure" in value
+        restore_fields_present = {
+            name for name in ("reason_code", "expected_block") if name in value
+        }
+        if not restore_present:
+            if restore_fields_present:
+                raise ValueError(
+                    "persisted SET_AUTHORITY restore fields require restore_new_exposure"
+                )
+            return value
+        if value.get("restore_new_exposure") is not True:
+            raise ValueError(
+                "persisted SET_AUTHORITY restore_new_exposure must be true"
+            )
+        if restore_fields_present != {"reason_code", "expected_block"}:
+            raise ValueError(
+                "persisted SET_AUTHORITY restore requires reason_code and expected_block"
+            )
         reason_code = _text(value.get("reason_code"), "reason_code")
         if reason_code not in REASON_CODES:
             raise ValueError("persisted reason_code is not canonical")
@@ -599,7 +650,7 @@ def _validated_new_exposure_restore(
         return None
     expected_block = payload.get("expected_block")
     assert isinstance(expected_block, Mapping)
-    reason = "host_operator_command:RESTORE_NEW_EXPOSURE:" + _text(
+    reason = "host_operator_command:SET_AUTHORITY:RESTORE_NEW_EXPOSURE:" + _text(
         payload.get("reason_code"), "reason_code"
     )
     expected_payload = {
@@ -705,23 +756,25 @@ def _resolved(
             return None
         if event.get("payload") != dict(raw_policy):
             raise OperatorAuthorityConflict("SET_AUTHORITY event content mismatch")
+        if payload.get("restore_new_exposure") is True:
+            restored = _validated_new_exposure_restore(
+                events,
+                payload,
+                accepted_at,
+                expected_version,
+            )
+            if restored is None:
+                return None
+            return AuthorityExecutionResult(
+                (
+                    "authority-policy:" + policy.policy_id,
+                    _new_exposure_block_ref(payload),
+                ),
+                (_evidence(event), _evidence(restored)),
+            )
         return AuthorityExecutionResult(
             (("authority-policy:" + policy.policy_id),),
             (_evidence(event),),
-        )
-
-    if action == "RESTORE_NEW_EXPOSURE":
-        restored = _validated_new_exposure_restore(
-            events,
-            payload,
-            accepted_at,
-            expected_version,
-        )
-        if restored is None:
-            return None
-        return AuthorityExecutionResult(
-            (_new_exposure_block_ref(payload),),
-            (_evidence(restored),),
         )
 
     targets = payload.get("target_policies")
@@ -830,62 +883,61 @@ def execute_operator_authority_action(
             raise OperatorAuthorityConflict(
                 "AuthorityService rejected SET_AUTHORITY"
             ) from error
-    elif action_name == "RESTORE_NEW_EXPOSURE":
-        if state.get("epoch") != expected_epoch or current_version != expected_version:
-            raise OperatorAuthorityConflict("authority changed after acceptance")
-        expected_block = payload.get("expected_block")
-        assert isinstance(expected_block, Mapping)
-        raw_blocks = state.get("new_exposure_blocks")
-        if not isinstance(raw_blocks, list):
-            raise OperatorAuthorityConflict(
-                "authority new-exposure block snapshot is malformed"
+
+        if payload.get("restore_new_exposure") is True:
+            expected_block = payload.get("expected_block")
+            assert isinstance(expected_block, Mapping)
+            raw_blocks = state.get("new_exposure_blocks")
+            if not isinstance(raw_blocks, list):
+                raise OperatorAuthorityConflict(
+                    "authority new-exposure block snapshot is malformed"
+                )
+            active = [
+                item
+                for item in raw_blocks
+                if isinstance(item, Mapping)
+                and item.get("account_id") == payload.get("account_id")
+                and item.get("environment") == payload.get("environment")
+            ]
+            expected_active = {
+                "account_id": payload.get("account_id"),
+                "environment": payload.get("environment"),
+                "command_id": expected_block.get("command_id"),
+                "reason": expected_block.get("reason"),
+                "blocked_at": expected_block.get("blocked_at"),
+            }
+            if len(active) != 1 or dict(active[0]) != expected_active:
+                raise OperatorAuthorityConflict(
+                    "accepted restore no longer matches the active new-exposure block"
+                )
+            reason = (
+                "host_operator_command:SET_AUTHORITY:RESTORE_NEW_EXPOSURE:"
+                + _text(payload["reason_code"], "reason_code")
             )
-        active = [
-            item
-            for item in raw_blocks
-            if isinstance(item, Mapping)
-            and item.get("account_id") == payload.get("account_id")
-            and item.get("environment") == payload.get("environment")
-        ]
-        expected_active = {
-            "account_id": payload.get("account_id"),
-            "environment": payload.get("environment"),
-            "command_id": expected_block.get("command_id"),
-            "reason": expected_block.get("reason"),
-            "blocked_at": expected_block.get("blocked_at"),
-        }
-        if len(active) != 1 or dict(active[0]) != expected_active:
-            raise OperatorAuthorityConflict(
-                "accepted restore no longer matches the active new-exposure block"
-            )
-        reason = (
-            "host_operator_command:RESTORE_NEW_EXPOSURE:"
-            + _text(payload["reason_code"], "reason_code")
-        )
-        try:
-            service.restore_new_exposure(
-                account_id=_text(payload["account_id"], "account_id"),
-                environment=_text(payload["environment"], "environment"),
-                reason=reason,
-                restored_at=accepted,
-                command_id=_text(payload["command_id"], "command_id"),
-                expected_block_command_id=_text(
-                    expected_block["command_id"],
-                    "blocked command_id",
-                ),
-                expected_block_reason=_text(
-                    expected_block["reason"],
-                    "blocked reason",
-                ),
-                expected_blocked_at=_text(
-                    expected_block["blocked_at"],
-                    "blocked blocked_at",
-                ),
-            )
-        except AuthorityConflict as error:
-            raise OperatorAuthorityConflict(
-                "AuthorityService rejected new-exposure restore"
-            ) from error
+            try:
+                service.restore_new_exposure(
+                    account_id=_text(payload["account_id"], "account_id"),
+                    environment=_text(payload["environment"], "environment"),
+                    reason=reason,
+                    restored_at=accepted,
+                    command_id=_text(payload["command_id"], "command_id"),
+                    expected_block_command_id=_text(
+                        expected_block["command_id"],
+                        "blocked command_id",
+                    ),
+                    expected_block_reason=_text(
+                        expected_block["reason"],
+                        "blocked reason",
+                    ),
+                    expected_blocked_at=_text(
+                        expected_block["blocked_at"],
+                        "blocked blocked_at",
+                    ),
+                )
+            except AuthorityConflict as error:
+                raise OperatorAuthorityConflict(
+                    "AuthorityService rejected new-exposure restore"
+                ) from error
     else:
         targets = payload["target_policies"]
         assert isinstance(targets, list)
@@ -1053,29 +1105,26 @@ def observed_authority_operation_effects(
         assert isinstance(raw_policy, Mapping)
         policy = _policy_from_mapping(raw_policy)
         event = _find(events, "AuthorityPolicyRegistered", policy.policy_id)
-        if (
-            event is None
-            or event.get("payload") != dict(raw_policy)
-            or int(event["aggregate_version"]) <= expected_version
-        ):
+        if event is None or event.get("payload") != dict(raw_policy):
+            return AuthorityExecutionResult((), ())
+        if payload.get("restore_new_exposure") is True:
+            restored = _validated_new_exposure_restore(
+                events,
+                payload,
+                accepted,
+                expected_version,
+            )
+            if restored is None:
+                return AuthorityExecutionResult((), ())
+            return AuthorityExecutionResult(
+                (_new_exposure_block_ref(payload),),
+                (_evidence(restored),),
+            )
+        if int(event["aggregate_version"]) <= expected_version:
             return AuthorityExecutionResult((), ())
         return AuthorityExecutionResult(
             ("authority-policy:" + policy.policy_id,),
             (_evidence(event),),
-        )
-
-    if action_name == "RESTORE_NEW_EXPOSURE":
-        restored = _validated_new_exposure_restore(
-            events,
-            payload,
-            accepted,
-            expected_version,
-        )
-        if restored is None:
-            return AuthorityExecutionResult((), ())
-        return AuthorityExecutionResult(
-            (_new_exposure_block_ref(payload),),
-            (_evidence(restored),),
         )
 
     targets = payload.get("target_policies")

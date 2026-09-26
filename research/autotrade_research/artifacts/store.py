@@ -6,6 +6,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
 from typing import Any, Callable
 from uuid import UUID
@@ -141,6 +142,38 @@ class ArtifactStore:
 
     def _manifest_path(self, artifact_id: str) -> Path:
         return self.manifests / f"{self._artifact_id(artifact_id)}.json"
+
+    def _validate_object_namespace(self, object_path: Path) -> None:
+        try:
+            resolved_root = self.root.resolve(strict=False)
+            expected_objects = resolved_root / "objects" / "sha256"
+            resolved_objects = self.objects.resolve(strict=False)
+            resolved_parent = object_path.parent.resolve(strict=False)
+        except OSError as error:
+            raise ArtifactIntegrityError(
+                "content-addressed object namespace cannot be resolved"
+            ) from error
+        expected_parent = expected_objects / object_path.name[:2]
+        if resolved_objects != expected_objects or resolved_parent != expected_parent:
+            raise ArtifactIntegrityError(
+                "content-addressed object path escapes store namespace"
+            )
+
+    def _validate_object_entry(self, object_path: Path) -> os.stat_result:
+        self._validate_object_namespace(object_path)
+        try:
+            entry = os.stat(object_path, follow_symlinks=False)
+        except FileNotFoundError:
+            raise ArtifactIntegrityError("artifact object is missing")
+        except OSError as error:
+            raise ArtifactIntegrityError("artifact object cannot be inspected") from error
+        if stat.S_ISLNK(entry.st_mode):
+            raise ArtifactIntegrityError("artifact object must not be a symlink")
+        if not stat.S_ISREG(entry.st_mode):
+            raise ArtifactIntegrityError("artifact object must be a regular file")
+        if entry.st_nlink != 1:
+            raise ArtifactIntegrityError("artifact object must not have hard-link aliases")
+        return entry
 
     @classmethod
     def _validate_manifest_contract(
@@ -348,12 +381,10 @@ class ArtifactStore:
                 return existing
 
             object_path.parent.mkdir(parents=True, exist_ok=True)
-            if object_path.is_symlink():
-                raise ArtifactIntegrityError(
-                    "content-addressed object path must not be a symlink"
-                )
-            if object_path.exists():
-                if object_path.stat().st_size != len(data) or sha256_file(object_path) != digest:
+            self._validate_object_namespace(object_path)
+            if object_path.exists() or object_path.is_symlink():
+                entry = self._validate_object_entry(object_path)
+                if entry.st_size != len(data) or sha256_file(object_path) != digest:
                     raise ArtifactIntegrityError("content-addressed object path is corrupt")
             else:
                 temporary: Path | None = None
@@ -402,11 +433,8 @@ class ArtifactStore:
             raise ArtifactIntegrityError("manifest digest is invalid")
         digest = digest_value.removeprefix("sha256:")
         object_path = self._object_path(digest)
-        if object_path.is_symlink():
-            raise ArtifactIntegrityError("artifact object must not be a symlink")
-        if not object_path.is_file():
-            raise ArtifactIntegrityError("artifact object is missing")
-        if object_path.stat().st_size != manifest.get("bytes"):
+        entry = self._validate_object_entry(object_path)
+        if entry.st_size != manifest.get("bytes"):
             raise ArtifactIntegrityError("artifact object size mismatch")
         if sha256_file(object_path) != digest:
             raise ArtifactIntegrityError("artifact object hash mismatch")

@@ -1378,7 +1378,11 @@ class JournalStore:
             raise ValueError(
                 "projection checkpoint state is not canonical JSON"
             )
-        aggregate_version = int(row["aggregate_version"])
+        aggregate_version = row["aggregate_version"]
+        if type(aggregate_version) is not int or aggregate_version < 0:
+            raise ValueError(
+                "projection checkpoint aggregate_version is not a canonical integer"
+            )
         expected_hash = (
             _projection_checkpoint_digest(
                 projection_name=projection_name,

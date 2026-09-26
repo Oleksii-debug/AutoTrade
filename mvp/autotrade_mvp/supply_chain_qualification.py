@@ -17,6 +17,13 @@ from research.autotrade_research.artifacts.store import (
     ArtifactStore,
 )
 
+from mvp.autotrade_mvp.qualification_attestation import (
+    QualificationTrustError,
+    QualificationTrustUnavailable,
+    SignedQualificationAttestation,
+    verify_canonical_qualification_attestation,
+)
+
 
 _PASS = "PASS"
 _FAIL = "FAIL"
@@ -233,11 +240,16 @@ def qualify_supply_chain(
     evidence: SupplyChainEvidence,
     *,
     evidence_store: ArtifactStore | None = None,
+    trust_receipt: SignedQualificationAttestation | None = None,
 ) -> SupplyChainQualification:
     if not isinstance(evidence, SupplyChainEvidence):
         raise TypeError("evidence must be SupplyChainEvidence")
     if evidence_store is not None and not isinstance(evidence_store, ArtifactStore):
         raise TypeError("evidence_store must be ArtifactStore")
+    if trust_receipt is not None and not isinstance(
+        trust_receipt, SignedQualificationAttestation
+    ):
+        raise TypeError("trust_receipt must be SignedQualificationAttestation")
     checks: list[tuple[str, str]] = []
     reasons: list[str] = []
 
@@ -372,16 +384,127 @@ def qualify_supply_chain(
             "SUPPLY_CHAIN.EVIDENCE_UNVERIFIED",
         )
 
-    # Content-addressed storage can prove that exact bytes and metadata exist and
-    # have not changed. It cannot prove who produced or independently verified
-    # those assertions because the caller may populate an ArtifactStore itself.
-    # Until WP-64 has a qualified authenticated/signed attestation boundary,
-    # integrity evidence alone must never elevate supply-chain qualification to PASS.
-    record(
-        "independent_evidence_trust",
-        _INCONCLUSIVE,
-        "SUPPLY_CHAIN.TRUST_ANCHOR_UNAVAILABLE",
-    )
+    # Content-addressed storage proves immutable bytes, not independent authorship.
+    # Reuse the canonical signed qualification-attestation boundary for terminal
+    # WP-64 trust rather than introducing a second signature or reviewer authority.
+    accepted_trust = None
+    if trust_receipt is None:
+        record(
+            "independent_evidence_trust",
+            _INCONCLUSIVE,
+            "SUPPLY_CHAIN.TRUST_ANCHOR_UNAVAILABLE",
+        )
+    elif evidence_store is None:
+        record(
+            "independent_evidence_trust",
+            _INCONCLUSIVE,
+            "SUPPLY_CHAIN.TRUST_EVIDENCE_STORE_MISSING",
+        )
+    else:
+        try:
+            accepted_trust = verify_canonical_qualification_attestation(
+                trust_receipt,
+                evidence_store=evidence_store,
+                expected_source_sha=evidence.release_commit_sha,
+                expected_domain="SUPPLY_CHAIN",
+                expected_gate="RELEASE",
+                expected_package_id="WP-64",
+                expected_protocol_id="supply-chain-review-v1",
+                expected_protocol_version="1.0.0",
+                expected_requirement_id="independent-supply-chain-review",
+            )
+
+            expected_refs = {
+                (
+                    evidence.sbom_artifact_id,
+                    evidence.sbom_hash,
+                    _SBOM_MEDIA_TYPE,
+                    "SBOM",
+                ),
+                (
+                    evidence.provenance_artifact_id,
+                    evidence.provenance_hash,
+                    _PROVENANCE_MEDIA_TYPE,
+                    "PROVENANCE",
+                ),
+                (
+                    evidence.dependency_lock_artifact_id,
+                    evidence.dependency_lock_hash,
+                    _DEPENDENCY_LOCK_MEDIA_TYPE,
+                    "DEPENDENCY_LOCK",
+                ),
+            }
+            for item in evidence.components:
+                expected_refs.add(
+                    (
+                        item.artifact_id,
+                        item.observed_artifact_hash,
+                        _COMPONENT_MEDIA_TYPE,
+                        "DISTRIBUTED_COMPONENT",
+                    )
+                )
+                if item.advisory_status == "ALLOWLISTED":
+                    assert item.advisory_exception_id is not None
+                    assert item.advisory_exception_hash is not None
+                    expected_refs.add(
+                        (
+                            item.advisory_exception_id,
+                            item.advisory_exception_hash,
+                            _ADVISORY_EXCEPTION_MEDIA_TYPE,
+                            "ADVISORY_EXCEPTION",
+                        )
+                    )
+            for item in evidence.model_data_rights:
+                expected_refs.add(
+                    (
+                        item.artifact_id,
+                        item.artifact_hash,
+                        _RIGHTS_MEDIA_TYPE,
+                        "MODEL_DATA_RIGHTS",
+                    )
+                )
+
+            attested_refs = {
+                (
+                    ref.artifact_id,
+                    ref.sha256,
+                    ref.media_type,
+                    ref.evidence_kind,
+                )
+                for ref in trust_receipt.attestation.evidence_refs
+            }
+            if attested_refs != expected_refs:
+                record(
+                    "independent_evidence_trust",
+                    _FAIL,
+                    "SUPPLY_CHAIN.TRUST_EVIDENCE_SET_MISMATCH",
+                )
+            elif accepted_trust.result == _PASS:
+                record("independent_evidence_trust", _PASS)
+            elif accepted_trust.result == _FAIL:
+                record(
+                    "independent_evidence_trust",
+                    _FAIL,
+                    "SUPPLY_CHAIN.INDEPENDENT_REVIEW_FAILED",
+                )
+            else:
+                record(
+                    "independent_evidence_trust",
+                    _INCONCLUSIVE,
+                    "SUPPLY_CHAIN.INDEPENDENT_REVIEW_INCONCLUSIVE",
+                )
+        except QualificationTrustUnavailable:
+            record(
+                "independent_evidence_trust",
+                _INCONCLUSIVE,
+                "SUPPLY_CHAIN.TRUST_ANCHOR_UNAVAILABLE",
+            )
+        except QualificationTrustError:
+            record(
+                "independent_evidence_trust",
+                _FAIL,
+                "SUPPLY_CHAIN.TRUST_ATTESTATION_INVALID",
+            )
 
     exact_head = evidence.release_commit_sha == evidence.built_from_commit_sha
     record("exact_release_head", _PASS if exact_head else _FAIL, "SUPPLY_CHAIN.BUILD_SHA_MISMATCH")
@@ -492,6 +615,22 @@ def qualify_supply_chain(
             ],
             "checks": checks,
             "reasons": sorted(set(reasons)),
+            "trust": None
+            if trust_receipt is None
+            else {
+                "attestation_digest": trust_receipt.attestation.content_digest,
+                "signature_sha256": "sha256:"
+                + sha256(trust_receipt.signature_b64.encode("ascii")).hexdigest(),
+                "policy_id": (
+                    accepted_trust.policy_id if accepted_trust is not None else None
+                ),
+                "policy_version": (
+                    accepted_trust.policy_version if accepted_trust is not None else None
+                ),
+                "accepted_attestation_id": (
+                    accepted_trust.attestation_id if accepted_trust is not None else None
+                ),
+            },
         },
         sort_keys=True,
         separators=(",", ":"),

@@ -1,7 +1,9 @@
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 from tools.check_dependency_composition import (
+    _dotnet_dependency_lock_blockers,
     audit_composition,
     is_exact_python_requirement,
     qualification_exit_code,
@@ -62,6 +64,92 @@ class DependencyCompositionGateTests(unittest.TestCase):
             Path(__file__).resolve().parents[2] / "research" / "pyproject.toml"
         ).read_text(encoding="utf-8")
         self.assertIn('requires = ["setuptools==84.0.0"]', pyproject)
+
+    def test_current_tree_has_no_nuget_lock_protocol_gap(self):
+        lock_blockers = {
+            blocker
+            for blocker in self.report.blockers
+            if blocker.startswith("DOTNET_PROJECT_LOCK_MISSING:")
+            or blocker.startswith("DOTNET_RESTORE_NOT_LOCKED:")
+            or blocker in {
+                "DOTNET_LOCKED_RESTORE_WORKFLOW_MISSING",
+                "DOTNET_LOCKED_RESTORE_COMMAND_MISSING",
+                "DOTNET_LOCK_WORKFLOW_PATH_MISSING",
+            }
+        }
+        self.assertEqual(lock_blockers, set())
+
+    def test_nuget_lock_is_per_project_and_restore_is_locked(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "src" / "ReleaseApp" / "ReleaseApp.csproj"
+            project.parent.mkdir(parents=True)
+            project.write_text("<Project />\n", encoding="utf-8")
+            unrelated = root / "src" / "Other" / "packages.lock.json"
+            unrelated.parent.mkdir(parents=True)
+            unrelated.write_text("{}\n", encoding="utf-8")
+
+            workflow = root / ".github" / "workflows" / "dotnet-foundation.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                'paths:\n'
+                '  - "src/**/packages.lock.json"\n'
+                "steps:\n"
+                "  - run: dotnet restore src/ReleaseApp/ReleaseApp.csproj --locked-mode\n",
+                encoding="utf-8",
+            )
+
+            blockers = _dotnet_dependency_lock_blockers(root, [project])
+            self.assertEqual(
+                blockers,
+                ["DOTNET_PROJECT_LOCK_MISSING:src/ReleaseApp/ReleaseApp.csproj"],
+            )
+
+            (project.parent / "packages.lock.json").write_text(
+                "{}\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _dotnet_dependency_lock_blockers(root, [project]),
+                [],
+            )
+
+            workflow.write_text(
+                'paths:\n'
+                '  - "src/**/packages.lock.json"\n'
+                "steps:\n"
+                "  - run: dotnet restore src/ReleaseApp/ReleaseApp.csproj\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _dotnet_dependency_lock_blockers(root, [project]),
+                [
+                    "DOTNET_RESTORE_NOT_LOCKED:"
+                    ".github/workflows/dotnet-foundation.yml:1"
+                ],
+            )
+
+    def test_nuget_lock_changes_must_trigger_dotnet_workflow(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "src" / "ReleaseApp" / "ReleaseApp.csproj"
+            project.parent.mkdir(parents=True)
+            project.write_text("<Project />\n", encoding="utf-8")
+            (project.parent / "packages.lock.json").write_text(
+                "{}\n",
+                encoding="utf-8",
+            )
+            workflow = root / ".github" / "workflows" / "dotnet-foundation.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                "steps:\n"
+                "  - run: dotnet restore src/ReleaseApp/ReleaseApp.csproj --locked-mode\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _dotnet_dependency_lock_blockers(root, [project]),
+                ["DOTNET_LOCK_WORKFLOW_PATH_MISSING"],
+            )
 
     def test_dotnet_sdk_is_exact_and_roll_forward_is_disabled(self):
         self.assertEqual(self.report.dotnet_sdk, "10.0.100")

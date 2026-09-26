@@ -1,7 +1,9 @@
-export declare const CONTRACT_VERSION: "3.0.0";
+// AUTO-GENERATED from contracts/jsonschema/common.schema.json. DO NOT EDIT.
+// Run python tools/generate_common_scalar_bindings.py to regenerate.
+export declare const CONTRACT_VERSION: "3.0.1";
 
 export type CommonScalarKind =
-  | "Decimal"
+    "Decimal"
   | "Sequence"
   | "Digest"
   | "CurrencyId"

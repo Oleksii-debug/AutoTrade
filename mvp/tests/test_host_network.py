@@ -485,7 +485,7 @@ class HostNetworkTests(unittest.TestCase):
     def test_changed_payload_under_same_idempotency_key_conflicts(self):
         accepted = self.post(self.command())
         self.assertEqual(accepted.status, 200)
-        changed = self.post(self.command(payload={"different": True}))
+        changed = self.post(self.command(payload={"reason": "different"}))
         self.assertEqual(changed.status, 409)
         result = self.body(changed)
         self.assertEqual(result["status"], "CONFLICT")

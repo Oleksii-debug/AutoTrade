@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import base64
@@ -16,11 +17,15 @@ from mvp.autotrade_mvp.whitebit import (
     WhiteBitAbsenceEvidence,
     WhiteBitAdapterError,
     WhiteBitMarketRules,
+    WhiteBitNonceAllocator,
+    WhiteBitNonceState,
     WhiteBitOrderIntent,
     WhiteBitPreparedRequest,
     WhiteBitPageEvidence,
     WhiteBitRecoveryCheckpoint,
+    WhiteBitRateLimitBudget,
     absence_evidence_from_coverages,
+    classify_whitebit_http_retry,
     collateral_balance_request,
     decode_whitebit_json,
     execution_history_coverage,
@@ -1671,6 +1676,195 @@ class WhiteBitAdapterTests(unittest.TestCase):
                 api_key="key",
                 api_secret="secret",
             )
+
+    def test_nonce_allocator_is_unique_under_concurrency_and_restart(self):
+        clock_ms = 1_790_280_000_000
+        allocator = WhiteBitNonceAllocator(
+            WhiteBitNonceState(
+                scope_id="credential-binding:whitebit:account-1",
+                owner_id="sender-a",
+                owner_generation=4,
+                last_nonce=0,
+            )
+        )
+
+        def reserve(_index):
+            return allocator.reserve(
+                clock_ms=clock_ms,
+                owner_id="sender-a",
+                owner_generation=4,
+            )
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            nonces = list(executor.map(reserve, range(64)))
+
+        self.assertEqual(len(set(nonces)), 64)
+        self.assertEqual(
+            sorted(nonces),
+            list(range(clock_ms, clock_ms + 64)),
+        )
+
+        checkpoint = dict(allocator.state.to_record())
+        restored = WhiteBitNonceAllocator(
+            WhiteBitNonceState.from_record(checkpoint)
+        )
+        self.assertEqual(
+            restored.reserve(
+                clock_ms=clock_ms,
+                owner_id="sender-a",
+                owner_generation=4,
+            ),
+            clock_ms + 64,
+        )
+
+    def test_nonce_owner_generation_fences_stale_sender(self):
+        allocator = WhiteBitNonceAllocator(
+            WhiteBitNonceState(
+                scope_id="credential-binding:whitebit:account-1",
+                owner_id="sender-a",
+                owner_generation=7,
+                last_nonce=1_790_280_000_010,
+            )
+        )
+        transferred = allocator.transfer_owner(
+            owner_id="sender-b",
+            new_generation=8,
+            expected_generation=7,
+        )
+        self.assertEqual(transferred.owner_id, "sender-b")
+        self.assertEqual(transferred.owner_generation, 8)
+        self.assertEqual(transferred.last_nonce, 1_790_280_000_010)
+
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "stale or foreign",
+        ):
+            allocator.reserve(
+                clock_ms=1_790_280_000_011,
+                owner_id="sender-a",
+                owner_generation=7,
+            )
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "stale nonce owner generation",
+        ):
+            allocator.transfer_owner(
+                owner_id="sender-c",
+                new_generation=9,
+                expected_generation=7,
+            )
+
+        self.assertEqual(
+            allocator.reserve(
+                clock_ms=1_790_280_000_011,
+                owner_id="sender-b",
+                owner_generation=8,
+            ),
+            1_790_280_000_011,
+        )
+
+    def test_nonce_allocator_fails_closed_on_restored_window_drift(self):
+        server_time_ms = 1_790_280_000_000
+        allocator = WhiteBitNonceAllocator(
+            WhiteBitNonceState(
+                scope_id="credential-binding:whitebit:account-1",
+                owner_id="sender-a",
+                owner_generation=2,
+                last_nonce=server_time_ms + 5_000,
+            )
+        )
+        before = allocator.state
+        with self.assertRaisesRegex(WhiteBitAdapterError, "5 second"):
+            allocator.reserve(
+                clock_ms=server_time_ms,
+                owner_id="sender-a",
+                owner_generation=2,
+                nonce_window=True,
+                server_time_ms=server_time_ms,
+            )
+        self.assertEqual(allocator.state, before)
+
+    def test_nonce_checkpoint_contract_rejects_unknown_fields(self):
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "exactly the canonical fields",
+        ):
+            WhiteBitNonceState.from_record(
+                {
+                    "scope_id": "binding",
+                    "owner_id": "sender",
+                    "owner_generation": 1,
+                    "last_nonce": 10,
+                    "api_secret": "must-never-be-admitted",
+                }
+            )
+
+    def test_rate_budget_preserves_recovery_and_cancel_capacity(self):
+        budget = WhiteBitRateLimitBudget(
+            capacity=10,
+            reserved_recovery=2,
+            reserved_cancel=2,
+        )
+        for _ in range(6):
+            budget = budget.consume("NORMAL")
+        self.assertEqual(budget.remaining, 4)
+        with self.assertRaisesRegex(WhiteBitAdapterError, "reserved"):
+            budget.consume("NORMAL")
+
+        budget = budget.consume("RECOVERY")
+        budget = budget.consume("RECOVERY")
+        self.assertEqual(budget.remaining, 2)
+        with self.assertRaisesRegex(WhiteBitAdapterError, "reserved"):
+            budget.consume("RECOVERY")
+
+        budget = budget.consume("CANCEL")
+        budget = budget.consume("CANCEL")
+        self.assertEqual(budget.remaining, 0)
+        self.assertFalse(budget.can_admit("CANCEL"))
+
+    def test_retry_policy_backs_off_429_without_blind_5xx_write_retry(self):
+        first = classify_whitebit_http_retry(
+            status_code=429,
+            attempt=1,
+            request_class="WRITE",
+        )
+        self.assertTrue(first.automatic_retry)
+        self.assertEqual(first.base_delay_seconds, 1)
+        self.assertTrue(first.jitter_required)
+        self.assertFalse(first.requires_reconciliation)
+
+        capped = classify_whitebit_http_retry(
+            status_code=429,
+            attempt=20,
+            request_class="READ",
+        )
+        self.assertEqual(capped.base_delay_seconds, 30)
+
+        ambiguous = classify_whitebit_http_retry(
+            status_code=503,
+            attempt=1,
+            request_class="WRITE",
+        )
+        self.assertFalse(ambiguous.automatic_retry)
+        self.assertTrue(ambiguous.requires_reconciliation)
+        self.assertEqual(ambiguous.classification, "AMBIGUOUS_WRITE")
+
+        read_retry = classify_whitebit_http_retry(
+            status_code=503,
+            attempt=2,
+            request_class="READ",
+        )
+        self.assertTrue(read_retry.automatic_retry)
+        self.assertEqual(read_retry.base_delay_seconds, 2)
+        self.assertFalse(read_retry.requires_reconciliation)
+
+        auth = classify_whitebit_http_retry(
+            status_code=401,
+            attempt=1,
+            request_class="READ",
+        )
+        self.assertFalse(auth.automatic_retry)
+        self.assertEqual(auth.classification, "AUTHENTICATION")
 
     def test_recursive_debug_redaction_covers_nested_auth_fields(self):
         redacted = redact_whitebit_debug(

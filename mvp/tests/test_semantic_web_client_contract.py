@@ -214,7 +214,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
     def test_poll_auto_recovers_snapshot_when_previous_refresh_failed(self):
         js = APP.read_text(encoding="utf-8")
         poll = js.index("async function pollEvents()")
-        event_fetch = js.index("${API}/events?after=", poll)
+        event_fetch = js.index('HOST_API.route("streamEvents") + "?after="', poll)
         recovery = js.index("if (!state.snapshotReady)", poll)
         snapshot = js.index("await refreshSnapshot();", recovery)
         self.assertLess(recovery, event_fetch)
@@ -386,7 +386,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("Remaining uncertainty", html)
         self.assertIn("function parseOperationResult(value, expectedOperationId)", js)
         self.assertIn(
-            "${API}/operations/${encodeURIComponent(operationId)}",
+            'HOST_API.route("getOperation", {operation_id: operationId})',
             js,
         )
         self.assertIn("OperationResult operation_id does not match", js)

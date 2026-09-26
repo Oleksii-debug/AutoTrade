@@ -108,12 +108,59 @@ class JournalBackedHostApiTests(unittest.TestCase):
         )
         self.assertEqual(memory.submit(command), self.store().submit(command))
 
-    def test_restart_rejects_journal_from_another_active_account_scope(self):
+    def test_whitespace_only_account_scope_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "account_id must be a non-empty string"):
+            self.store(account_id="   ")
+
+    def test_account_scope_is_canonicalized_before_aggregate_identity(self):
+        canonical = self.store(account_id="paper-account")
+        padded = self.store(account_id="  paper-account  ")
+
+        self.assertEqual(padded.account_id, "paper-account")
+        self.assertEqual(padded.aggregate_id, canonical.aggregate_id)
+        result = padded.submit(self.command(account_id="paper-account"))
+        self.assertEqual(result.state_version, "1")
+        self.assertEqual(canonical.snapshot()["state_version"], "1")
+
+    def test_two_account_scopes_share_one_journal_without_state_collision(self):
         first = self.store()
-        accepted = first.submit(self.command())
-        wrong_scope = self.store(account_id="other-account")
-        with self.assertRaisesRegex(ValueError, "journal command scope"):
-            wrong_scope.get_operation(accepted.operation_id)
+        first_result = first.submit(self.command())
+        second = self.store(account_id="other-account")
+        second_result = second.submit(
+            self.command(
+                command_id="22222222-2222-2222-2222-222222222222",
+                key="other-account-key",
+                account_id="other-account",
+            )
+        )
+
+        self.assertEqual(first_result.state_version, "1")
+        self.assertEqual(second_result.state_version, "1")
+        self.assertNotEqual(first.aggregate_id, second.aggregate_id)
+        self.assertEqual(first.snapshot()["state_version"], "1")
+        self.assertEqual(second.snapshot()["state_version"], "1")
+        with self.assertRaises(KeyError):
+            second.get_operation(first_result.operation_id)
+        with self.assertRaises(KeyError):
+            first.get_operation(second_result.operation_id)
+
+    def test_legacy_unscoped_host_journal_requires_explicit_migration(self):
+        journal = JournalStore(self.path)
+        payload = {"legacy": True}
+        journal.append_event(
+            {
+                "event_id": "legacy-host-event",
+                "event_type": "LEGACY_HOST_EVENT",
+                "aggregate_type": "HOST_CONTROL",
+                "aggregate_id": "host",
+                "aggregate_version": "1",
+                "payload": payload,
+                "payload_hash": payload_digest(payload),
+                "committed_at": "2026-09-24T17:59:00Z",
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "legacy unscoped host journal"):
+            self.store()
 
     def test_durable_idempotency_scope_includes_actor_and_environment(self):
         store = self.store()
@@ -229,7 +276,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
                 "event_id": "forged-update",
                 "event_type": "OPERATION_UPDATED",
                 "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
-                "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
+                "aggregate_id": store.aggregate_id,
                 "aggregate_version": "1",
                 "payload": {
                     "operation_id": "ghost-operation",
@@ -269,7 +316,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
                 "event_id": "forged-terminal-rewrite",
                 "event_type": "OPERATION_UPDATED",
                 "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
-                "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
+                "aggregate_id": store.aggregate_id,
                 "aggregate_version": "3",
                 "payload": payload,
                 "payload_hash": payload_digest(payload),
@@ -314,7 +361,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
                         "event_id": f"malformed-{field}",
                         "event_type": "OPERATION_UPDATED",
                         "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
-                        "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
+                        "aggregate_id": store.aggregate_id,
                         "aggregate_version": "2",
                         "payload": payload,
                         "payload_hash": payload_digest(payload),
@@ -356,7 +403,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
                 "event_id": "malformed-command-evidence",
                 "event_type": "COMMAND_ACCEPTED",
                 "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
-                "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
+                "aggregate_id": store.aggregate_id,
                 "aggregate_version": "1",
                 "payload": payload,
                 "payload_hash": payload_digest(payload),

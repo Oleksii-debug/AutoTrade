@@ -252,17 +252,54 @@ def git_blob_sha(path: Path) -> str:
     return object_id
 
 
-def python_dev_dependencies() -> list[dict[str, str]]:
-    result: list[dict[str, str]] = []
+def python_dev_dependencies() -> list[dict[str, object]]:
+    result: list[dict[str, object]] = []
+    logical = ""
     for raw in (ROOT / "requirements-dev.txt").read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
             continue
-        match = PIN.fullmatch(line)
+        continued = stripped.endswith("\\")
+        fragment = stripped[:-1].rstrip() if continued else stripped
+        logical = f"{logical} {fragment}".strip()
+        if continued:
+            continue
+
+        tokens = logical.split()
+        match = PIN.fullmatch(tokens[0])
         if match is None:
-            raise ValueError(f"requirements-dev entry is not exactly pinned: {line}")
-        result.append({"name": match.group(1), "version": match.group(2)})
-    return sorted(result, key=lambda item: item["name"].lower())
+            raise ValueError(
+                f"requirements-dev entry is not exactly pinned: {tokens[0]}"
+            )
+        hashes: list[str] = []
+        for token in tokens[1:]:
+            if not token.startswith("--hash="):
+                raise ValueError(f"requirements-dev option is unsupported: {token}")
+            digest = token.removeprefix("--hash=")
+            if SHA256_ID.fullmatch(digest) is None:
+                raise ValueError(
+                    f"requirements-dev hash is not canonical SHA-256: {token}"
+                )
+            hashes.append(digest)
+        if not hashes:
+            raise ValueError(
+                f"requirements-dev entry has no artifact hash: {tokens[0]}"
+            )
+        if len(hashes) != len(set(hashes)):
+            raise ValueError(
+                f"requirements-dev entry repeats an artifact hash: {tokens[0]}"
+            )
+        result.append(
+            {
+                "name": match.group(1),
+                "version": match.group(2),
+                "hashes": sorted(hashes),
+            }
+        )
+        logical = ""
+    if logical:
+        raise ValueError("requirements-dev has an unterminated continuation")
+    return sorted(result, key=lambda item: str(item["name"]).lower())
 
 
 def dotnet_package_dependencies() -> list[dict[str, str]]:

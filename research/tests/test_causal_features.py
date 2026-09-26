@@ -2,9 +2,11 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import unittest
 
+from research.autotrade_research.features import causal as causal_module
 from research.autotrade_research.features.causal import (
     CausalFold,
     FeaturePoint,
+    FoldNormalizer,
     LabelPoint,
     Normalizer,
     SourceValue,
@@ -255,6 +257,40 @@ class CausalFeatureTests(unittest.TestCase):
                 fit_cutoff=BASE,
                 fit_input_ids=("feature-1",),
                 provenance_hash="sha256:" + "a" * 64,
+            )
+
+    def test_imported_fit_token_cannot_forge_canonical_fold_fit(self):
+        fold = self.fold()
+        training = [self.point(0, "1"), self.point(1, "3")]
+        fitted = fit_fold_normalizer(
+            training,
+            fold=fold,
+            feature_name="x",
+        )
+        forged_normalizer = Normalizer(
+            mean=Decimal("999"),
+            scale=Decimal("1"),
+            fit_cutoff=fitted.normalizer.fit_cutoff,
+            fit_input_ids=fitted.normalizer.fit_input_ids,
+            provenance_hash="sha256:" + "f" * 64,
+            _fit_token=causal_module._NORMALIZER_FIT_TOKEN,
+        )
+        forged = FoldNormalizer(
+            fold_id=fitted.fold_id,
+            fold_fingerprint=fitted.fold_fingerprint,
+            feature_name=fitted.feature_name,
+            normalizer=forged_normalizer,
+            training_point_count=fitted.training_point_count,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "does not match canonical training population",
+        ):
+            forged.transform_validation(
+                self.point(4, "5"),
+                fold=fold,
+                feature_points=training,
             )
 
     def test_normalizer_fit_rejects_duck_typed_feature_population(self):
@@ -597,14 +633,19 @@ class CausalFoldTests(unittest.TestCase):
 
     def test_normalizer_is_bound_to_exact_fold_and_feature(self):
         fold = self.fold()
+        training = [self.point(0, "1"), self.point(1, "3")]
         fitted = fit_fold_normalizer(
-            [self.point(0, "1"), self.point(1, "3")],
+            training,
             fold=fold,
             feature_name="x",
         )
         validation = self.point(4, "5")
         self.assertIsInstance(
-            fitted.transform_validation(validation, fold=fold),
+            fitted.transform_validation(
+                validation,
+                fold=fold,
+                feature_points=training,
+            ),
             Decimal,
         )
         other = CausalFold.create(
@@ -616,22 +657,32 @@ class CausalFoldTests(unittest.TestCase):
             purge_seconds=0,
         )
         with self.assertRaisesRegex(ValueError, "different fold"):
-            fitted.transform_validation(validation, fold=other)
+            fitted.transform_validation(
+                validation,
+                fold=other,
+                feature_points=training,
+            )
         with self.assertRaisesRegex(ValueError, "feature_name"):
             fitted.transform_validation(
                 self.point(4, "5", name="other"),
                 fold=fold,
+                feature_points=training,
             )
 
     def test_validation_point_outside_frozen_window_is_rejected(self):
         fold = self.fold()
+        training = [self.point(0, "1"), self.point(1, "3")]
         fitted = fit_fold_normalizer(
-            [self.point(0, "1"), self.point(1, "3")],
+            training,
             fold=fold,
             feature_name="x",
         )
         with self.assertRaisesRegex(ValueError, "outside"):
-            fitted.transform_validation(self.point(3, "5"), fold=fold)
+            fitted.transform_validation(
+                self.point(3, "5"),
+                fold=fold,
+                feature_points=training,
+            )
 
     def test_training_rows_exclude_labels_not_available_before_fold_cutoff(self):
         fold = self.fold(purge_seconds=24 * 60 * 60)

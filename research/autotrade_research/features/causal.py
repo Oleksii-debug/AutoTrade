@@ -716,6 +716,32 @@ class CausalFold:
         ).hexdigest()
 
 
+def _fold_training_feature_points(
+    feature_points: Sequence[FeaturePoint],
+    *,
+    fold: CausalFold,
+    feature_name: str,
+) -> tuple[FeaturePoint, ...]:
+    if not isinstance(fold, CausalFold):
+        raise TypeError("fold must be CausalFold")
+    if any(not isinstance(point, FeaturePoint) for point in feature_points):
+        raise TypeError("feature_points must contain FeaturePoint values")
+    name = _text(feature_name, name="feature_name")
+    selected = tuple(
+        point
+        for point in feature_points
+        if point.feature_name == name
+        and fold.train_start
+        <= point.decision_time
+        <= fold.training_information_cutoff
+    )
+    if len(selected) < 2:
+        raise ValueError(
+            "at least two purged training feature points are required"
+        )
+    return selected
+
+
 @dataclass(frozen=True)
 class FoldNormalizer:
     fold_id: str
@@ -729,6 +755,7 @@ class FoldNormalizer:
         point: FeaturePoint,
         *,
         fold: CausalFold,
+        feature_points: Sequence[FeaturePoint],
     ) -> Decimal:
         if fold.fold_id != self.fold_id or fold.fingerprint != self.fold_fingerprint:
             raise ValueError("normalizer was fitted for a different fold")
@@ -740,7 +767,29 @@ class FoldNormalizer:
             <= fold.validation_end
         ):
             raise ValueError("validation feature lies outside the frozen fold")
-        return self.normalizer.transform(point.value)
+
+        # A Python construction sentinel is only an accidental-misuse guard.
+        # It is not scientific authority: an in-process caller can import it.
+        # Re-derive the fit from the canonical population at the downstream use
+        # boundary and require every fitted field/lineage digest to match.
+        selected = _fold_training_feature_points(
+            feature_points,
+            fold=fold,
+            feature_name=self.feature_name,
+        )
+        if len(selected) != self.training_point_count:
+            raise ValueError(
+                "normalizer training_point_count does not match canonical training population"
+            )
+        canonical = fit_normalizer(
+            selected,
+            fit_cutoff=fold.training_information_cutoff,
+        )
+        if canonical != self.normalizer:
+            raise ValueError(
+                "normalizer does not match canonical training population"
+            )
+        return canonical.transform(point.value)
 
 
 def fit_fold_normalizer(
@@ -756,21 +805,12 @@ def fit_fold_normalizer(
     the fitted mean/scale.
     """
 
-    if not isinstance(fold, CausalFold):
-        raise TypeError("fold must be CausalFold")
     name = _text(feature_name, name="feature_name")
-    selected = [
-        point
-        for point in feature_points
-        if point.feature_name == name
-        and fold.train_start
-        <= point.decision_time
-        <= fold.training_information_cutoff
-    ]
-    if len(selected) < 2:
-        raise ValueError(
-            "at least two purged training feature points are required"
-        )
+    selected = _fold_training_feature_points(
+        feature_points,
+        fold=fold,
+        feature_name=name,
+    )
     normalizer = fit_normalizer(
         selected,
         fit_cutoff=fold.training_information_cutoff,

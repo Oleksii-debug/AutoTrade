@@ -359,6 +359,17 @@ ExpectFailure<InvalidDataException>(
 Require(
     restartCheckpoint.StartsWith("{", StringComparison.Ordinal),
     "Restart checkpoint must serialize as a JSON object.");
+var oldSchemaRestartCheckpoint = restartCheckpoint.Replace(
+    "\"SchemaVersion\":\"1.1.0\"",
+    "\"SchemaVersion\":\"1.0.0\"",
+    StringComparison.Ordinal);
+Require(
+    oldSchemaRestartCheckpoint != restartCheckpoint,
+    "Restart schema regression did not change the schema version.");
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(oldSchemaRestartCheckpoint),
+    "old callback state schema must fail closed after fee identity becomes authoritative");
+
 var checkpointWithUnknownTopLevel = restartCheckpoint.Insert(
     1,
     "\"UnexpectedTopLevel\":\"forbidden\",");

@@ -63,6 +63,11 @@ TERMINAL_PACKAGE_STATUS = "DONE"
 TERMINAL_OVERALL_STATUS = "FULL_PRODUCT_QUALIFIED"
 TERMINAL_GATE_STATUS = "QUALIFIED"
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+_SHA256_TEXT = re.compile(r"^sha256:[0-9a-f]{64}$")
+_UUID_TEXT = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
+_NVDA_TERMINAL_REASON = "QUALIFIED_SIGNED_REAL_NVDA_RELEASE"
 _WHOLE_PRODUCT_DOMAIN = "WHOLE_PRODUCT"
 _WHOLE_PRODUCT_GATE = "COMPLETION"
 _WHOLE_PRODUCT_PACKAGE = "WP-60"
@@ -139,6 +144,34 @@ def _exact_source(value: object) -> str | None:
     if isinstance(value, str) and _GIT_SHA.fullmatch(value):
         return value
     return None
+
+
+def _terminal_nvda_status(
+    nvda_status: dict[str, Any],
+    *,
+    exact_source_sha: str | None,
+) -> bool:
+    if nvda_status.get("qualified") is not True:
+        return False
+    if nvda_status.get("reason") != _NVDA_TERMINAL_REASON:
+        return False
+    if exact_source_sha is None or nvda_status.get("source_sha") != exact_source_sha:
+        return False
+    for field in ("release_artifact_id", "attestation_id"):
+        value = nvda_status.get(field)
+        if not isinstance(value, str) or _UUID_TEXT.fullmatch(value) is None:
+            return False
+    for field in (
+        "artifact_sha256",
+        "evidence_sha256",
+        "attestation_digest",
+        "policy_id",
+        "trust_root_id",
+    ):
+        value = nvda_status.get(field)
+        if not isinstance(value, str) or _SHA256_TEXT.fullmatch(value) is None:
+            return False
+    return True
 
 
 def _independently_verified_evidence(
@@ -298,6 +331,12 @@ def evaluate_completion(
     if type(gates) is not dict or not gates:
         raise ProductCompletionError("qualification gates must be a non-empty object")
     missing_gates = sorted(EXPECTED_GATE_NAMES - set(gates))
+    unknown_gates = [name for name in gates if name not in EXPECTED_GATE_NAMES]
+    if unknown_gates:
+        raise ProductCompletionError(
+            "qualification gates contain unknown entries: "
+            + ", ".join(sorted(repr(name) for name in unknown_gates))
+        )
     nonterminal_gates = {
         str(name): value
         for name, value in sorted(gates.items())
@@ -315,9 +354,12 @@ def evaluate_completion(
         evidence_context=evidence_context,
     )
     overall_status = qualification.get("overall_status")
-    nvda_qualified = nvda_status.get("qualified") is True
     nvda_source_matches = (
         source_sha is not None and nvda_status.get("source_sha") == source_sha
+    )
+    nvda_qualified = _terminal_nvda_status(
+        nvda_status,
+        exact_source_sha=source_sha,
     )
 
     blockers: list[str] = []

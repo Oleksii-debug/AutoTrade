@@ -2,7 +2,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from mvp.autotrade_mvp.dispatch import GuardedDispatcher
+from mvp.autotrade_mvp.dispatch import DispatchBlocked, GuardedDispatcher
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.recovery import HostState, RecoveryController
 
@@ -253,7 +253,7 @@ class DurableUnknownRestartTests(unittest.TestCase):
             def swallow_block(_client_id, _request, final_guard):
                 try:
                     final_guard()
-                except Exception:
+                except DispatchBlocked:
                     return {"provider_order_id": "unsafe-wrapper-result"}
                 raise AssertionError("final guard should have blocked")
 

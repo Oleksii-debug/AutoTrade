@@ -339,6 +339,13 @@
         state.pendingCommand.action !== "SET_AUTHORITY") {
       return;
     }
+    const confirmation = byId("authority-policy-confirm");
+    if (confirmation && (
+        confirmation.dataset.reviewCommandId !== state.pendingCommand.command_id ||
+        confirmation.dataset.reviewStateVersion !== state.version.toString() ||
+        confirmation.dataset.reviewScope !== authorityReviewScopeKey())) {
+      invalidateAuthorityPolicyReview();
+    }
     const policy = requiredObject(
       state.pendingCommand.payload, "pending SET_AUTHORITY payload");
     if (!Array.isArray(policy.environments) ||

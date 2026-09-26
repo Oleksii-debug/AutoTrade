@@ -615,6 +615,23 @@ class SemanticWebClientContractTests(unittest.TestCase):
             "confirmation.dataset.reviewCommandId !== reviewCommandId",
             js,
         )
+        render = js[
+            js.index("function renderPendingAuthorityPolicyForRetry()"):
+            js.index("function parseCanonicalSnapshot(value)")
+        ]
+        self.assertIn(
+            "confirmation.dataset.reviewCommandId !== state.pendingCommand.command_id",
+            render,
+        )
+        self.assertIn(
+            "confirmation.dataset.reviewStateVersion !== state.version.toString()",
+            render,
+        )
+        self.assertIn(
+            "confirmation.dataset.reviewScope !== authorityReviewScopeKey()",
+            render,
+        )
+        self.assertIn("invalidateAuthorityPolicyReview();", render)
         self.assertIn(
             'state.pendingCommand.action === "SET_AUTHORITY"',
             js,

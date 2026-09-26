@@ -259,8 +259,17 @@ def canonical_operator_payload(
             )
         canonical = _policy_payload(policy)
         current = state.get("policies")
-        if not isinstance(current, list):
+        revocations = state.get("revocations")
+        if not isinstance(current, list) or not isinstance(revocations, list):
             raise OperatorAuthorityConflict("authority policy snapshot is malformed")
+        if any(
+            isinstance(item, Mapping)
+            and item.get("policy_id") == policy.policy_id
+            for item in revocations
+        ):
+            raise OperatorAuthorityConflict(
+                "revoked policy_id cannot be reactivated; use a new policy identity"
+            )
         for existing in current:
             if (
                 isinstance(existing, Mapping)

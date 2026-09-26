@@ -21,6 +21,7 @@ def evidence_trace(trace_id: str = "decision-1") -> dict:
             "strategy": "baseline",
             "token": "super-secret",
             "nested": {"api_key": "hidden", "safe": "ok"},
+            "note": "credential_id=durable-embedded-credential-secret",
         },
     }
 
@@ -37,6 +38,10 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             self.assertEqual(persisted["attributes"]["token"], "[REDACTED]")
             self.assertEqual(persisted["attributes"]["nested"]["api_key"], "[REDACTED]")
             self.assertEqual(persisted["attributes"]["nested"]["safe"], "ok")
+            self.assertNotIn(
+                "durable-embedded-credential-secret",
+                persisted["attributes"]["note"],
+            )
             self.assertNotIn("super-secret", path.read_text(encoding="utf-8"))
             self.assertTrue(store.verify())
 

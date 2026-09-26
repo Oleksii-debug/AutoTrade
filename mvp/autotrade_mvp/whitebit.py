@@ -333,6 +333,7 @@ class WhiteBitPreparedRequest:
 class WhiteBitMarketRules:
     market: str
     market_type: str
+    is_tradfi_futures: bool
     is_collateral: bool
     trades_enabled: bool
     step_size: Decimal
@@ -349,6 +350,7 @@ class WhiteBitMarketRules:
         required = {
             "name",
             "type",
+            "isTradFiFutures",
             "isCollateral",
             "tradesEnabled",
             "stepSize",
@@ -363,6 +365,8 @@ class WhiteBitMarketRules:
             raise WhiteBitAdapterError(
                 "market metadata missing required fields: " + ", ".join(missing)
             )
+        if type(payload["isTradFiFutures"]) is not bool:
+            raise WhiteBitAdapterError("isTradFiFutures must be boolean")
         if type(payload["isCollateral"]) is not bool:
             raise WhiteBitAdapterError("isCollateral must be boolean")
         if type(payload["tradesEnabled"]) is not bool:
@@ -384,9 +388,15 @@ class WhiteBitMarketRules:
         market_type = _text(str(payload["type"]), name="type").upper()
         if market_type not in {"SPOT", "FUTURES", "TRADFIFUTURES"}:
             raise WhiteBitAdapterError("unsupported WhiteBIT market type")
+        is_tradfi_futures = payload["isTradFiFutures"]
+        if (market_type == "TRADFIFUTURES") != is_tradfi_futures:
+            raise WhiteBitAdapterError(
+                "isTradFiFutures must be true exactly for type=tradfiFutures"
+            )
         return cls(
             market=_text(str(payload["name"]), name="name").upper(),
             market_type=market_type,
+            is_tradfi_futures=is_tradfi_futures,
             is_collateral=payload["isCollateral"],
             trades_enabled=payload["tradesEnabled"],
             step_size=step,
@@ -509,6 +519,11 @@ def prepare_order_request(
         raise WhiteBitAdapterError("exact capability evidence does not admit this order")
 
     validate_intent_market_rules(intent, market_rules, at=point)
+    if market_rules.market_type == "TRADFIFUTURES":
+        raise WhiteBitAdapterError(
+            "TradFi futures execution is not qualified: WhiteBIT documents "
+            "the product as coming soon and not returned by public markets"
+        )
     if (
         intent.product_family == "SPOT"
         and intent.order_type == "STOP_MARKET"

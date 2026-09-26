@@ -45,6 +45,16 @@ class DependencyCompositionGateTests(unittest.TestCase):
             )
         )
 
+    def test_python_development_graph_is_hash_locked(self):
+        self.assertFalse(
+            any(
+                blocker.startswith("MISSING_PYTHON_REQUIREMENT_HASH:")
+                or blocker.startswith("DUPLICATE_PYTHON_REQUIREMENT_HASH:")
+                or blocker == "UNREADABLE_PYTHON_HASH_LOCK"
+                for blocker in self.report.blockers
+            )
+        )
+
     def test_exact_python_pin_rejects_wildcards_markers_and_ranges(self):
         self.assertTrue(is_exact_python_requirement("attrs==26.1.0"))
         for value in (
@@ -101,6 +111,14 @@ class DependencyCompositionGateTests(unittest.TestCase):
                 blockers,
             )
             self.assertIn("RESEARCH_TEST_REQUIREMENTS_DRIFT", blockers)
+            self.assertIn(
+                "MISSING_PYTHON_REQUIREMENT_HASH:jsonschema==4.26.0",
+                blockers,
+            )
+            self.assertIn(
+                "MISSING_PYTHON_REQUIREMENT_HASH:referencing==0.36.2",
+                blockers,
+            )
 
     def test_current_tree_has_no_nuget_lock_protocol_gap(self):
         lock_blockers = {

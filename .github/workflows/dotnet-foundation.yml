@@ -59,6 +59,9 @@ jobs:
         with:
           dotnet-version: "10.0.100"
       - run: dotnet restore src/AutoTrade.Desktop/AutoTrade.Desktop.csproj
+      - name: Emit generated Desktop NuGet lock
+        shell: pwsh
+        run: Get-Content -Raw src/AutoTrade.Desktop/packages.lock.json
       - run: dotnet build src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --configuration Release --no-restore
       - run: dotnet restore tests/Desktop.Client/Desktop.Client.csproj
       - run: dotnet run --project tests/Desktop.Client/Desktop.Client.csproj --configuration Release --no-restore

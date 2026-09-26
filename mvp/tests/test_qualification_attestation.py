@@ -414,6 +414,26 @@ class QualificationAttestationTests(unittest.TestCase):
 
             self.assertEqual(after, before)
 
+    def test_canonical_policy_rejects_git_executable_from_source_checkout(self):
+        with TemporaryDirectory() as directory:
+            source_root = Path(directory) / "source"
+            source_root.mkdir()
+            candidate_git = source_root / ("git.exe" if os.name == "nt" else "git")
+            candidate_git.write_bytes(b"candidate-controlled executable")
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_trusted_git_candidate_paths",
+                    return_value=(candidate_git,),
+                ),
+                self.assertRaisesRegex(
+                    QualificationTrustUnavailable,
+                    "Git executable originates from trusted source checkout",
+                ),
+            ):
+                _trusted_git_executable(source_root=source_root)
+
     def test_canonical_policy_git_path_ignores_working_tree_symlink_redirect(self):
         canonical_root = root()
         canonical_policy = policy(canonical_root)

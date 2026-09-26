@@ -587,6 +587,14 @@ _KRAKEN_SPOT_PAGINATION_ENDPOINTS = MappingProxyType(
     }
 )
 
+_KRAKEN_SPOT_ACCOUNT_WIDE_RESTRICTING_FILTERS = MappingProxyType(
+    {
+        "ORDER_HISTORY": frozenset({"userref", "cl_ord_id", "start"}),
+        "EXECUTIONS": frozenset({"pair", "type", "start"}),
+        "ACTIVITIES": frozenset({"asset", "type", "start"}),
+    }
+)
+
 
 _KRAKEN_SPOT_PAGE_EVIDENCE_FACTORY_TOKEN = object()
 
@@ -789,6 +797,18 @@ class KrakenSpotPaginationCoverage:
             and self._pages[-1].proves_last_page
             and self.has_stable_end_boundary
         )
+
+    @property
+    def complete_for_account(self) -> bool:
+        """Whether complete pagination covers the account-wide surface population."""
+
+        if not self.complete:
+            return False
+        filters = set(dict(self._pages[0].filter_items))
+        restricting = _KRAKEN_SPOT_ACCOUNT_WIDE_RESTRICTING_FILTERS[
+            self.surface
+        ]
+        return not bool(filters & restricting)
 
     @property
     def next_offset(self) -> int:
@@ -1056,6 +1076,10 @@ def absence_evidence_from_pagination(
             raise KrakenSpotAdapterError(
                 f"{expected} pagination coverage is incomplete"
             )
+        if not coverage.complete_for_account:
+            raise KrakenSpotAdapterError(
+                f"{expected} pagination does not cover account-wide population"
+            )
         if coverage.scope != (
             open_orders.account_id,
             open_orders.environment,
@@ -1073,9 +1097,9 @@ def absence_evidence_from_pagination(
     return KrakenSpotAbsenceEvidence(
         order_found=order_found,
         open_orders_complete=open_orders.complete_for_account,
-        closed_orders_complete=order_history.complete,
-        trades_complete=executions.complete,
-        ledgers_complete=activities.complete,
+        closed_orders_complete=order_history.complete_for_account,
+        trades_complete=executions.complete_for_account,
+        ledgers_complete=activities.complete_for_account,
         consistency_horizon_satisfied=consistency_horizon_satisfied,
         qualified_exclusion_semantics=qualified_exclusion_semantics,
     )

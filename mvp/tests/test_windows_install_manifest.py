@@ -190,7 +190,7 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             InstallerManifestError,
-            "installer manifest output cannot be a symlink",
+            "installer manifest output is unsafe",
         ):
             build_installer_input_manifest(
                 bundle=bundle,
@@ -201,29 +201,28 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
 
         self.assertEqual(victim.read_text(encoding="utf-8"), "do-not-touch")
 
-    def test_manifest_temp_symlink_is_rejected_without_touching_target(self):
+    def test_legacy_manifest_temp_symlink_is_ignored_without_touching_target(self):
         bundle = self.release_bundle()
         victim = self.root / "victim-temp.txt"
         victim.write_text("do-not-touch", encoding="utf-8")
         output = self.root / "installer-input.json"
-        self._symlink_or_skip(
-            output.with_name(output.name + ".tmp"),
-            victim,
+        legacy_temp = output.with_name(output.name + ".tmp")
+        self._symlink_or_skip(legacy_temp, victim)
+
+        built = build_installer_input_manifest(
+            bundle=bundle,
+            output=output,
+            target_framework="net10.0-windows",
+            runtime_mode="SELF_CONTAINED",
         )
 
-        with self.assertRaisesRegex(
-            InstallerManifestError,
-            "installer manifest output temporary path cannot be a symlink",
-        ):
-            build_installer_input_manifest(
-                bundle=bundle,
-                output=output,
-                target_framework="net10.0-windows",
-                runtime_mode="SELF_CONTAINED",
-            )
-
-        self.assertFalse(output.exists())
+        self.assertTrue(output.exists())
+        self.assertTrue(legacy_temp.is_symlink())
         self.assertEqual(victim.read_text(encoding="utf-8"), "do-not-touch")
+        self.assertEqual(
+            Path(built["hash_file"]).read_text(encoding="utf-8").split()[0],
+            built["sha256"],
+        )
 
     def test_digest_symlink_is_rejected_before_primary_manifest_mutation(self):
         bundle = self.release_bundle()
@@ -236,7 +235,7 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             InstallerManifestError,
-            "installer manifest digest output cannot be a symlink",
+            "installer manifest digest output is unsafe",
         ):
             build_installer_input_manifest(
                 bundle=bundle,

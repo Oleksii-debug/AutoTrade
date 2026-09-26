@@ -88,6 +88,55 @@ def _python_blockers(root: Path) -> tuple[list[str], list[str]]:
     return blockers, exact
 
 
+def _dotnet_dependency_lock_blockers(
+    root: Path,
+    package_projects: list[Path],
+) -> list[str]:
+    projects = sorted(set(package_projects))
+    if not projects:
+        return []
+
+    blockers: list[str] = []
+    for project in projects:
+        if not (project.parent / "packages.lock.json").is_file():
+            blockers.append(
+                "DOTNET_PROJECT_LOCK_MISSING:"
+                f"{project.relative_to(root).as_posix()}"
+            )
+
+    workflow = root / ".github" / "workflows" / "dotnet-foundation.yml"
+    if not workflow.is_file():
+        blockers.append("DOTNET_LOCKED_RESTORE_WORKFLOW_MISSING")
+        return blockers
+
+    workflow_text = workflow.read_text(encoding="utf-8")
+    if '"src/**/packages.lock.json"' not in workflow_text:
+        blockers.append("DOTNET_LOCK_WORKFLOW_PATH_MISSING")
+
+    restore_commands: list[str] = []
+    for raw in workflow_text.splitlines():
+        command = raw.strip()
+        if command.startswith("- "):
+            command = command[2:].strip()
+        if command.startswith("run: dotnet restore "):
+            restore_commands.append(command)
+
+    if not restore_commands:
+        blockers.append("DOTNET_LOCKED_RESTORE_COMMAND_MISSING")
+        return blockers
+
+    for index, command in enumerate(restore_commands, start=1):
+        if (
+            "--locked-mode" not in command
+            and "RestoreLockedMode=true" not in command
+        ):
+            blockers.append(
+                "DOTNET_RESTORE_NOT_LOCKED:"
+                f".github/workflows/dotnet-foundation.yml:{index}"
+            )
+    return blockers
+
+
 def _dotnet_blockers(root: Path) -> tuple[list[str], list[str], str]:
     blockers: list[str] = []
     references: list[str] = []
@@ -101,9 +150,13 @@ def _dotnet_blockers(root: Path) -> tuple[list[str], list[str], str]:
     if sdk.get("rollForward") not in (None, "disable"):
         blockers.append(f"DOTNET_ROLL_FORWARD_NOT_DISABLED:{sdk.get('rollForward')}")
 
+    package_projects: list[Path] = []
     for project in sorted((root / "src").rglob("*.csproj")):
         tree = ET.parse(project)
-        for node in tree.findall(".//PackageReference"):
+        package_nodes = tree.findall(".//PackageReference")
+        if package_nodes:
+            package_projects.append(project)
+        for node in package_nodes:
             name = node.attrib.get("Include") or node.attrib.get("Update") or ""
             value = node.attrib.get("Version")
             if value is None:
@@ -114,6 +167,7 @@ def _dotnet_blockers(root: Path) -> tuple[list[str], list[str], str]:
                 blockers.append(f"NON_EXACT_NUGET_REFERENCE:{project.relative_to(root)}:{identity}")
             else:
                 references.append(identity)
+    blockers.extend(_dotnet_dependency_lock_blockers(root, package_projects))
     return blockers, references, version
 
 

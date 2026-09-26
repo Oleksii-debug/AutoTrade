@@ -157,17 +157,37 @@ class DiagnosticTraceTests(unittest.TestCase):
     def test_whitebit_api_secret_is_redacted_directly_and_inside_safe_strings(self):
         payload = {
             "api_secret": "WHITEBIT-DIRECT-SECRET",
+            "X-TXC-APIKEY": "WHITEBIT-TXC-APIKEY",
+            "X-TXC-PAYLOAD": "WHITEBIT-TXC-PAYLOAD",
+            "X-TXC-SIGNATURE": "WHITEBIT-TXC-SIGNATURE",
             "message": '{"api_secret":"WHITEBIT-JSON-SECRET","safe":"ok"}',
             "repr_message": "{'api-secret': 'WHITEBIT-REPR-SECRET', 'safe': 'ok'}",
+            "header_text": "X-TXC-SIGNATURE: WHITEBIT-TEXT-SIGNATURE",
+            "signed_url": (
+                "https://provider.test/private?"
+                "X-TXC-PAYLOAD=WHITEBIT-URL-PAYLOAD&symbol=BTC"
+            ),
             "safe": "visible",
         }
         redacted = redact_diagnostic_value(payload)
         self.assertEqual(redacted["api_secret"], "[REDACTED]")
+        self.assertEqual(redacted["X-TXC-APIKEY"], "[REDACTED]")
+        self.assertEqual(redacted["X-TXC-PAYLOAD"], "[REDACTED]")
+        self.assertEqual(redacted["X-TXC-SIGNATURE"], "[REDACTED]")
         self.assertEqual(redacted["safe"], "visible")
         self.assertNotIn("WHITEBIT-JSON-SECRET", redacted["message"])
         self.assertNotIn("WHITEBIT-REPR-SECRET", redacted["repr_message"])
         self.assertIn("[REDACTED]", redacted["message"])
         self.assertIn("[REDACTED]", redacted["repr_message"])
+        self.assertEqual(
+            redacted["header_text"],
+            "X-TXC-SIGNATURE:[REDACTED]",
+        )
+        self.assertEqual(
+            redacted["signed_url"],
+            "https://provider.test/private?"
+            "X-TXC-PAYLOAD=[REDACTED]&symbol=BTC",
+        )
 
 
     def test_escaped_json_and_encoded_query_secret_keys_are_redacted(self):

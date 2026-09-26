@@ -319,6 +319,29 @@ class ArtifactStoreTests(unittest.TestCase):
             self.assertEqual(list(outside.iterdir()), [])
             self.assertEqual(list(store.objects.glob("*/*")), [])
 
+    @unittest.skipIf(os.name == "nt", "symlink creation is not reliably available on Windows CI")
+    def test_staging_directory_alias_cannot_escape_store_namespace(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            store.staging.rmdir()
+            outside = Path(directory) / "outside-staging"
+            outside.mkdir()
+            store.staging.symlink_to(outside, target_is_directory=True)
+
+            with self.assertRaisesRegex(
+                ArtifactIntegrityError,
+                "staging path escapes store namespace",
+            ):
+                store.publish_bytes(
+                    artifact_id=str(uuid4()),
+                    data=b"must-stay-inside-store",
+                    media_type="application/octet-stream",
+                    rights={"storage": True, "export": False},
+                )
+
+            self.assertEqual(list(outside.iterdir()), [])
+            self.assertEqual(list(store.objects.glob("*/*")), [])
+
     def test_publish_preserves_canonical_rights_identity_and_rejects_extensions(self):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(Path(directory) / "store")

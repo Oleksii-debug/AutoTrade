@@ -558,17 +558,20 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
         )
         self.assertFalse(evidence.provider_semantics_exclude_execution)
 
-        qualified = coverage_evidence(
-            account_id="paper-1",
-            environment="PAPER",
-            surface="ORDER_HISTORY",
-            coverage_start="2026-09-24T20:00:00Z",
-            coverage_end="2026-09-25T00:00:00Z",
-            pagination_complete=True,
-            consistency_horizon_satisfied=True,
-            qualified_exclusion_semantics=True,
-        )
-        self.assertTrue(qualified.provider_semantics_exclude_execution)
+        with self.assertRaisesRegex(
+            BinanceUsdmAdapterError,
+            "cannot self-assert provider exclusion semantics",
+        ):
+            coverage_evidence(
+                account_id="paper-1",
+                environment="PAPER",
+                surface="ORDER_HISTORY",
+                coverage_start="2026-09-24T20:00:00Z",
+                coverage_end="2026-09-25T00:00:00Z",
+                pagination_complete=True,
+                consistency_horizon_satisfied=True,
+                qualified_exclusion_semantics=True,
+            )
 
     def test_bad_position_mode_and_bad_trade_position_side_fail_closed(self):
         intent = BinanceUsdmOrderIntent.create(

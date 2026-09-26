@@ -328,7 +328,7 @@ class RuntimeRecoveryTests(unittest.TestCase):
         controller, owner = self._ready()
         controller.set_storage_writable(False)
         self.assertEqual(controller.state, HostState.BLOCKED)
-        with self.assertRaisesRegex(PermissionError, "ready"):
+        with self.assertRaisesRegex(PermissionError, "Durable journal is unavailable"):
             controller.validate_admission(owner.epoch)
         with self.assertRaisesRegex(PermissionError, "durable journal"):
             controller.record_reconciliation(consistent=True)
@@ -361,7 +361,7 @@ class RuntimeRecoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "trusted"):
             controller.set_clock_trusted("false")
         self.assertEqual(controller.state, HostState.BLOCKED)
-        with self.assertRaisesRegex(PermissionError, "ready"):
+        with self.assertRaisesRegex(PermissionError, "Clock is not trusted"):
             controller.validate_admission(owner.epoch)
 
     def test_owner_transfer_authority_flags_require_real_booleans(self):

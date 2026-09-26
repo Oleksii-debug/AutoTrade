@@ -64,12 +64,14 @@ The branch includes a machine-checked `WhiteBitCredentialBoundary` policy model 
 - IP allowlisting required by AutoTrade policy;
 - secrets never enter this evidence model.
 
-The guarded WhiteBIT transport now requires this boundary and rejects unsafe,
-stale-generation, or cross-account evidence before secret resolution, nonce
-allocation, or wire I/O. This is still **not proof** that any configured real
-WhiteBIT credential currently satisfies those restrictions: the evidence object
-must come from the trusted qualification path, and endpoint/account capability
-still requires provider/account evidence.
+This is a **qualification/diagnostic model only**. It is deliberately not
+accepted by the LIVE transport as financial-authority evidence because the object
+is caller-constructible and therefore cannot prove provider-side permissions or
+IP restrictions. The transport rejects any attempted `credential_boundary`
+argument. Terminal WhiteBIT provider qualification remains blocked until these
+credential facts are carried by independently issued, canonically verified
+evidence bound to the exact credential handle generation, account, environment
+and source qualification.
 
 ## Capability matrix
 

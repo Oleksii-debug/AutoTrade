@@ -131,6 +131,38 @@ class JournalBackedHostCommandStore:
         return value.strip()
 
     @staticmethod
+    def _replay_instant(
+        payload: Mapping[str, object],
+        field: str,
+        *,
+        default: object | None = None,
+    ) -> str:
+        value = payload.get(field, default)
+        if (
+            not isinstance(value, str)
+            or not value
+            or "T" not in value
+            or not value.endswith("Z")
+        ):
+            raise ValueError(
+                f"Host journal {field} must be a canonical UTC instant"
+            )
+        try:
+            parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+        except ValueError as error:
+            raise ValueError(
+                f"Host journal {field} must be a canonical UTC instant"
+            ) from error
+        if (
+            parsed.tzinfo is None
+            or parsed.utcoffset() != timezone.utc.utcoffset(None)
+        ):
+            raise ValueError(
+                f"Host journal {field} must be a canonical UTC instant"
+            )
+        return value
+
+    @staticmethod
     def _command_result(value: Mapping[str, object]) -> CommandResult:
         return CommandResult(
             command_id=str(value["command_id"]),
@@ -552,8 +584,28 @@ class JournalBackedHostCommandStore:
                     raise ValueError(
                         "Queued operation must preserve financial uncertainty"
                     )
-                started_at = str(payload.get("started_at") or event["committed_at"])
-                updated_at = str(payload.get("updated_at") or started_at)
+                started_at = self._replay_instant(
+                    payload,
+                    "started_at",
+                    default=event["committed_at"],
+                )
+                updated_at = self._replay_instant(
+                    payload,
+                    "updated_at",
+                    default=started_at,
+                )
+                if datetime.fromisoformat(
+                    updated_at[:-1] + "+00:00"
+                ) < datetime.fromisoformat(started_at[:-1] + "+00:00"):
+                    raise ValueError(
+                        "Host journal updated_at cannot precede started_at"
+                    )
+                actor = payload.get("actor")
+                if actor is not None:
+                    self._required_text(payload, "actor")
+                action_value = payload.get("action")
+                if action_value is not None:
+                    canonical_host_action(action_value)
                 affected_refs = self._replay_text_array(payload, "affected_refs")
                 evidence = self._replay_evidence(payload)
 
@@ -639,11 +691,34 @@ class JournalBackedHostCommandStore:
                             affected_refs,
                             evidence,
                         )
+                persisted_started_at = payload.get("started_at")
+                if persisted_started_at is not None:
+                    validated_started_at = self._replay_instant(
+                        payload,
+                        "started_at",
+                    )
+                    if validated_started_at != current.started_at:
+                        raise ValueError(
+                            "Host journal operation started_at changed"
+                        )
+                updated_at = self._replay_instant(
+                    payload,
+                    "updated_at",
+                    default=event["committed_at"],
+                )
+                if datetime.fromisoformat(
+                    updated_at[:-1] + "+00:00"
+                ) < datetime.fromisoformat(
+                    current.updated_at[:-1] + "+00:00"
+                ):
+                    raise ValueError(
+                        "Host journal operation updated_at moved backwards"
+                    )
                 operations[operation_id] = OperationResult(
                     operation_id=operation_id,
                     phase=phase,
                     started_at=current.started_at,
-                    updated_at=str(payload.get("updated_at") or event["committed_at"]),
+                    updated_at=updated_at,
                     state_version=str(event["aggregate_version"]),
                     affected_refs=affected_refs,
                     evidence=evidence,

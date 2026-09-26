@@ -205,15 +205,22 @@ class DiagnosticSnapshot:
         if self.pending_outbox_sample_truncated:
             lines.append("Pending outbox sample is truncated.")
         for trace in self.traces:
+            safe = redact_diagnostic_value(asdict(trace))
             lines.append(
                 " | ".join(
                     [
-                        f"Step {trace.aggregate_version}",
-                        f"decision {trace.decision}",
-                        f"risk {trace.risk_outcome}",
-                        f"order {trace.order_id or 'none'}",
-                        f"fill {trace.fill_id or 'none'}",
-                        f"reconciled {str(trace.reconciled).lower()}",
+                        f"Step {safe['aggregate_version']}",
+                        f"event {safe['event_id']}",
+                        f"evidence {safe['evidence_id']}",
+                        f"decision {safe['decision']}",
+                        f"reason {safe['decision_reason']}",
+                        f"risk {safe['risk_outcome']}",
+                        f"order {safe['order_id'] or 'none'}",
+                        f"fill {safe['fill_id'] or 'none'}",
+                        f"cash {safe['cash']}",
+                        f"position {safe['position']}",
+                        f"equity {safe['equity']}",
+                        f"reconciled {str(safe['reconciled']).lower()}",
                     ]
                 )
             )

@@ -9,7 +9,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import subprocess
 from typing import Iterable, Mapping
 from uuid import UUID
@@ -38,26 +37,37 @@ _CANONICAL_QUALIFICATION_TRUST_POLICY_GIT_PATH = (
 _QUALIFICATION_TRUST_SOURCE_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _trusted_git_executable(*, source_root: Path) -> str:
-    """Resolve Git outside the candidate-controlled source checkout."""
+def _trusted_git_candidate_paths() -> tuple[Path, ...]:
+    """Return fail-closed OS-managed Git locations without consulting PATH."""
 
-    candidate = shutil.which("git")
-    if candidate is None:
-        raise QualificationTrustUnavailable(
-            "qualification trust Git executable is unavailable"
+    if os.name == "nt":
+        return (
+            Path(r"C:\\Program Files\\Git\\cmd\\git.exe"),
+            Path(r"C:\\Program Files\\Git\\bin\\git.exe"),
         )
-    try:
-        executable = Path(candidate).resolve(strict=True)
-    except OSError as error:
+    return (Path("/usr/bin/git"), Path("/bin/git"))
+
+
+def _trusted_git_executable(*, source_root: Path) -> str:
+    """Resolve Git without caller-controlled PATH or source-checkout authority."""
+
+    resolved_source_root = source_root.resolve()
+    for candidate in _trusted_git_candidate_paths():
+        try:
+            executable = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if not executable.is_file():
+            continue
+        try:
+            executable.relative_to(resolved_source_root)
+        except ValueError:
+            return os.fspath(executable)
         raise QualificationTrustUnavailable(
-            "qualification trust Git executable could not be resolved"
-        ) from error
-    try:
-        executable.relative_to(source_root)
-    except ValueError:
-        return os.fspath(executable)
+            "qualification trust Git executable originates from trusted source checkout"
+        )
     raise QualificationTrustUnavailable(
-        "qualification trust Git executable originates from trusted source checkout"
+        "qualification trust Git executable is unavailable at an OS-managed location"
     )
 
 

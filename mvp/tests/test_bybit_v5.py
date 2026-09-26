@@ -1734,6 +1734,49 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(coverage.coverage_start, "2026-09-23T20:00:00.000Z")
         self.assertEqual(coverage.coverage_end, "2026-09-24T20:00:00.000Z")
 
+    def test_order_history_absence_semantics_stop_at_no_fill_retention_boundary(self):
+        def terminal_history(*, start_time_ms, end_time_ms):
+            observation = bound_order_response(
+                {
+                    "retCode": 0,
+                    "result": {
+                        "category": "spot",
+                        "nextPageCursor": "",
+                        "list": [],
+                    },
+                },
+                start_time_ms=start_time_ms,
+                end_time_ms=end_time_ms,
+            )
+            return order_history_coverage_from_pages(
+                (observation,),
+                consistency_horizon_satisfied=True,
+                qualified_exclusion_semantics=True,
+            )
+
+        exact_boundary = terminal_history(
+            start_time_ms=1790193600000,
+            end_time_ms=1790280000000,
+        )
+        self.assertTrue(exact_boundary.pagination_complete)
+        self.assertTrue(exact_boundary.provider_semantics_exclude_execution)
+
+        one_millisecond_too_old = terminal_history(
+            start_time_ms=1790193599999,
+            end_time_ms=1790280000000,
+        )
+        self.assertTrue(one_millisecond_too_old.pagination_complete)
+        self.assertFalse(
+            one_millisecond_too_old.provider_semantics_exclude_execution
+        )
+
+        future_end = terminal_history(
+            start_time_ms=1790276400000,
+            end_time_ms=1790280000001,
+        )
+        self.assertTrue(future_end.pagination_complete)
+        self.assertFalse(future_end.provider_semantics_exclude_execution)
+
     def test_order_history_coverage_rejects_mixed_capability_snapshots(self):
         first_capability = read_capability()
         second_capability = read_capability()

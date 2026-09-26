@@ -302,6 +302,7 @@ def dotnet_package_projects() -> list[Path]:
 def build_manifest() -> dict[str, object]:
     components_path = ROOT / "provenance" / "components.json"
     requirements_path = ROOT / "requirements-dev.txt"
+    research_pyproject_path = ROOT / "research" / "pyproject.toml"
     global_path = ROOT / "global.json"
     components_doc = json.loads(components_path.read_text(encoding="utf-8"))
     global_doc = json.loads(global_path.read_text(encoding="utf-8"))
@@ -486,6 +487,7 @@ def build_manifest() -> dict[str, object]:
         "source_inventory": {
             "components_blob_sha": git_blob_sha(components_path),
             "requirements_dev_blob_sha": git_blob_sha(requirements_path),
+            "research_pyproject_blob_sha": git_blob_sha(research_pyproject_path),
             "global_json_blob_sha": git_blob_sha(global_path),
         },
         "dotnet_sdk": str(global_doc["sdk"]["version"]),

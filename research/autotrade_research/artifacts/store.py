@@ -411,6 +411,8 @@ class ArtifactStore:
         target = Path(destination)
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary: Path | None = None
+        expected_digest = manifest["sha256"].removeprefix("sha256:")
+        expected_bytes = manifest["bytes"]
         try:
             with tempfile.NamedTemporaryFile(
                 "wb",
@@ -420,9 +422,22 @@ class ArtifactStore:
                 delete=False,
             ) as handle:
                 temporary = Path(handle.name)
-                handle.write(source.read_bytes())
+                copied = 0
+                copied_hash = sha256()
+                with source.open("rb") as source_handle:
+                    while True:
+                        chunk = source_handle.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        handle.write(chunk)
+                        copied += len(chunk)
+                        copied_hash.update(chunk)
                 handle.flush()
                 os.fsync(handle.fileno())
+            if copied != expected_bytes or copied_hash.hexdigest() != expected_digest:
+                raise ArtifactIntegrityError(
+                    "artifact object changed during export copy"
+                )
             os.replace(temporary, target)
             temporary = None
             sync_parent_directory(target)

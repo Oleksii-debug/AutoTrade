@@ -27,6 +27,7 @@ from mvp.autotrade_mvp.qualification_attestation import (
     verify_canonical_qualification_attestation,
     verify_qualification_attestation,
     _trusted_git_environment,
+    _trusted_git_executable,
 )
 
 
@@ -397,43 +398,21 @@ class QualificationAttestationTests(unittest.TestCase):
                             expected_release_artifact_sha256=RELEASE_A_SHA,
                         )
 
-    def test_canonical_policy_rejects_git_executable_from_source_checkout(self):
+    def test_canonical_policy_git_resolution_ignores_ambient_path(self):
         with TemporaryDirectory() as directory:
             source_root = Path(directory) / "source"
-            policy_path = (
-                source_root
-                / "mvp"
-                / "autotrade_mvp"
-                / "qualification_trust_policy.json"
-            )
-            policy_path.parent.mkdir(parents=True)
-            policy_path.write_text("{}", encoding="utf-8")
-            candidate_git = source_root / "git.exe"
-            candidate_git.write_bytes(b"candidate-controlled executable")
+            isolated_path = Path(directory) / "isolated-path"
+            isolated_path.mkdir(parents=True)
+            before = _trusted_git_executable(source_root=source_root)
 
-            with (
-                patch(
-                    "mvp.autotrade_mvp.qualification_attestation."
-                    "_QUALIFICATION_TRUST_SOURCE_ROOT",
-                    source_root,
-                ),
-                patch(
-                    "mvp.autotrade_mvp.qualification_attestation."
-                    "_CANONICAL_QUALIFICATION_TRUST_POLICY_PATH",
-                    policy_path,
-                ),
-                patch(
-                    "mvp.autotrade_mvp.qualification_attestation.shutil.which",
-                    return_value=str(candidate_git),
-                ),
-                self.assertRaisesRegex(
-                    QualificationTrustUnavailable,
-                    "Git executable originates from trusted source checkout",
-                ),
+            with patch.dict(
+                os.environ,
+                {"PATH": os.fspath(isolated_path)},
+                clear=False,
             ):
-                load_canonical_qualification_trust_policy(
-                    expected_source_sha="a" * 40
-                )
+                after = _trusted_git_executable(source_root=source_root)
+
+            self.assertEqual(after, before)
 
     def test_canonical_policy_git_path_ignores_working_tree_symlink_redirect(self):
         canonical_root = root()

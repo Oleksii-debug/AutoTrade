@@ -579,6 +579,41 @@ class ArtifactStoreTests(unittest.TestCase):
             )
             self.assertEqual(store.read_bytes(artifact_id), b"legacy-evidence")
 
+    def test_recovery_preserves_all_objects_when_manifest_reference_is_unreadable(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"referenced-but-manifest-will-break",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+            referenced_digest = manifest["sha256"].removeprefix("sha256:")
+            referenced_object = store._object_path(referenced_digest)
+
+            orphan_data = b"otherwise-deletable-orphan"
+            orphan_digest = hashlib.sha256(orphan_data).hexdigest()
+            orphan = store._object_path(orphan_digest)
+            orphan.parent.mkdir(parents=True, exist_ok=True)
+            orphan.write_bytes(orphan_data)
+
+            manifest_path = store._manifest_path(artifact_id)
+            manifest_path.write_text("{not-valid-json", encoding="utf-8")
+
+            before = store.audit()
+            self.assertIn(manifest_path.name, before.corrupt_objects)
+            self.assertIn(referenced_digest, before.unreferenced_objects)
+            self.assertIn(orphan_digest, before.unreferenced_objects)
+
+            after = store.recover_orphans()
+
+            self.assertTrue(referenced_object.exists())
+            self.assertTrue(orphan.exists())
+            self.assertIn(manifest_path.name, after.corrupt_objects)
+            self.assertIn(referenced_digest, after.unreferenced_objects)
+            self.assertIn(orphan_digest, after.unreferenced_objects)
+
     def test_recovery_removes_only_unreferenced_objects(self):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)

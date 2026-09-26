@@ -146,6 +146,20 @@ if (args.Length > 0)
             regressedAfterRestart.HasEconomicFill,
             "Restart characterization lost the economic fill.");
 
+        var stillBelowRestartHighWater = resumedCallbacks.Observe(new OrderEvent
+        {
+            OrderId = 84,
+            Id = 4,
+            Symbol = restartSymbol,
+            UtcTime = instant.AddTicks(5000),
+            Status = OrderStatus.Submitted,
+            FillQuantity = decimal.Zero,
+            FillPrice = decimal.Zero
+        });
+        Require(
+            stillBelowRestartHighWater.TimeRegressed,
+            "Restart forgot the callback arrival high-water after one regressed event.");
+
         Console.WriteLine("WP02_LEAN_RESTART_RESUME_PASS");
         return;
     }
@@ -313,6 +327,20 @@ var regressed = callbacks.Observe(new OrderEvent
 });
 Require(regressed.TimeRegressed, "Arrival-time regression was silently hidden.");
 Require(regressed.HasEconomicFill, "Final non-zero fill was not characterized.");
+
+var stillBelowHighWater = callbacks.Observe(new OrderEvent
+{
+    OrderId = 42,
+    Id = 4,
+    Symbol = symbol,
+    UtcTime = instant.AddTicks(5000),
+    Status = OrderStatus.Submitted,
+    FillQuantity = decimal.Zero,
+    FillPrice = decimal.Zero
+});
+Require(
+    stillBelowHighWater.TimeRegressed,
+    "A second callback below the prior arrival high-water was silently accepted.");
 
 var restartIntegrity = new LeanCallbackCharacterizer();
 restartIntegrity.Observe(new OrderEvent

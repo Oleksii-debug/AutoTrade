@@ -97,6 +97,16 @@ class ArtifactStore:
             path.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
+    def _is_windows_reparse_point(entry: os.stat_result) -> bool:
+        """Reject Windows reparse points even when mode bits look regular."""
+
+        attributes = getattr(entry, "st_file_attributes", None)
+        if attributes is None:
+            return False
+        flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        return bool(attributes & flag)
+
+    @staticmethod
     def _artifact_id(value: str) -> str:
         try:
             parsed = UUID(value)
@@ -185,6 +195,10 @@ class ArtifactStore:
             raise ArtifactIntegrityError(
                 "artifact manifest cannot be inspected"
             ) from error
+        if self._is_windows_reparse_point(entry):
+            raise ArtifactIntegrityError(
+                "artifact manifest must not be a Windows reparse point"
+            )
         if stat.S_ISLNK(entry.st_mode):
             raise ArtifactIntegrityError("artifact manifest must not be a symlink")
         if not stat.S_ISREG(entry.st_mode):
@@ -221,6 +235,10 @@ class ArtifactStore:
             raise ArtifactIntegrityError("artifact object is missing")
         except OSError as error:
             raise ArtifactIntegrityError("artifact object cannot be inspected") from error
+        if self._is_windows_reparse_point(entry):
+            raise ArtifactIntegrityError(
+                "artifact object must not be a Windows reparse point"
+            )
         if stat.S_ISLNK(entry.st_mode):
             raise ArtifactIntegrityError("artifact object must not be a symlink")
         if not stat.S_ISREG(entry.st_mode):
@@ -284,6 +302,10 @@ class ArtifactStore:
 
         try:
             opened = os.fstat(descriptor)
+            if self._is_windows_reparse_point(opened):
+                raise ArtifactIntegrityError(
+                    "artifact object descriptor must not be a Windows reparse point"
+                )
             if not stat.S_ISREG(opened.st_mode):
                 raise ArtifactIntegrityError(
                     "artifact object descriptor must be a regular file"
@@ -322,7 +344,8 @@ class ArtifactStore:
                 "artifact object descriptor could not be revalidated"
             ) from error
         if (
-            not stat.S_ISREG(after_descriptor.st_mode)
+            self._is_windows_reparse_point(after_descriptor)
+            or not stat.S_ISREG(after_descriptor.st_mode)
             or after_descriptor.st_nlink != 1
             or after_descriptor.st_size != expected_bytes
             or not self._same_filesystem_entry(opened, after_descriptor)

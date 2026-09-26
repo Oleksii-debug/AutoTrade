@@ -596,6 +596,8 @@ class KrakenSpotPageEvidence:
     """Exact-response-bound evidence for one Kraken offset page."""
 
     surface: str
+    account_id: str
+    environment: str
     offset: int
     limit: int
     record_count: int
@@ -613,6 +615,16 @@ class KrakenSpotPageEvidence:
         if normalized not in _KRAKEN_SPOT_PAGINATION_ENDPOINTS:
             raise KrakenSpotAdapterError("unsupported Kraken pagination surface")
         object.__setattr__(self, "surface", normalized)
+        object.__setattr__(
+            self,
+            "account_id",
+            _text(self.account_id, name="account_id"),
+        )
+        object.__setattr__(
+            self,
+            "environment",
+            _environment(self.environment),
+        )
         for name in ("offset", "limit", "record_count", "total_count"):
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool):
@@ -695,6 +707,13 @@ class KrakenSpotPaginationCoverage:
             )
         if self._pages:
             first = self._pages[0]
+            if (
+                page.account_id != first.account_id
+                or page.environment != first.environment
+            ):
+                raise KrakenSpotAdapterError(
+                    "Kraken pagination account/environment scope changed during coverage"
+                )
             if page.total_count != first.total_count:
                 raise KrakenSpotAdapterError(
                     "Kraken pagination total count changed during coverage"
@@ -726,6 +745,15 @@ class KrakenSpotPaginationCoverage:
     @property
     def evidence_refs(self) -> tuple[str, ...]:
         return tuple(page.evidence_ref for page in self._pages)
+
+    @property
+    def scope(self) -> tuple[str, str]:
+        if not self._pages:
+            raise KrakenSpotAdapterError(
+                "Kraken pagination coverage has no evidenced scope"
+            )
+        first = self._pages[0]
+        return first.account_id, first.environment
 
 
 def pagination_page_from_observation(
@@ -801,6 +829,8 @@ def pagination_page_from_observation(
 
     return KrakenSpotPageEvidence(
         surface=normalized,
+        account_id=observation.account_id,
+        environment=observation.environment,
         offset=offset,
         limit=limit,
         record_count=len(records),
@@ -817,10 +847,124 @@ def pagination_page_from_observation(
     )
 
 
+_KRAKEN_SPOT_OPEN_ORDERS_FACTORY_TOKEN = object()
+
+
+@dataclass(frozen=True)
+class KrakenSpotOpenOrdersSnapshotEvidence:
+    """Exact unfiltered OpenOrders snapshot for one Kraken account/environment."""
+
+    account_id: str
+    environment: str
+    evidence_ref: str
+    order_ids: tuple[str, ...]
+    filter_items: tuple[tuple[str, str], ...]
+    _factory_token: object = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._factory_token is not _KRAKEN_SPOT_OPEN_ORDERS_FACTORY_TOKEN:
+            raise KrakenSpotAdapterError(
+                "Kraken open-orders evidence must come from exact response observation"
+            )
+        object.__setattr__(
+            self,
+            "account_id",
+            _text(self.account_id, name="account_id"),
+        )
+        object.__setattr__(
+            self,
+            "environment",
+            _environment(self.environment),
+        )
+        evidence = _text(self.evidence_ref, name="evidence_ref")
+        if not evidence.startswith("provider-read:sha256:"):
+            raise KrakenSpotAdapterError(
+                "open-orders evidence must reference exact provider response bytes"
+            )
+        object.__setattr__(self, "evidence_ref", evidence)
+        if not isinstance(self.order_ids, tuple):
+            raise TypeError("order_ids must be a tuple")
+        normalized_ids = tuple(
+            _text(value, name="provider_order_id")
+            for value in self.order_ids
+        )
+        if len(set(normalized_ids)) != len(normalized_ids):
+            raise KrakenSpotAdapterError(
+                "open-orders provider order ids must be unique"
+            )
+        if tuple(sorted(normalized_ids)) != normalized_ids:
+            raise KrakenSpotAdapterError(
+                "open-orders provider order ids must be sorted canonically"
+            )
+        object.__setattr__(self, "order_ids", normalized_ids)
+        if not isinstance(self.filter_items, tuple):
+            raise TypeError("filter_items must be a tuple")
+        if tuple(sorted(self.filter_items)) != self.filter_items:
+            raise KrakenSpotAdapterError(
+                "open-orders filter_items must be sorted canonically"
+            )
+
+    @property
+    def complete_for_account(self) -> bool:
+        return True
+
+
+def open_orders_snapshot_from_observation(
+    observation: ProviderResponseObservation,
+) -> KrakenSpotOpenOrdersSnapshotEvidence:
+    """Bind account-wide OpenOrders completeness to one exact provider response."""
+
+    if not isinstance(observation, ProviderResponseObservation):
+        raise TypeError("observation must be ProviderResponseObservation")
+    observation.require_scope(
+        provider_id="KRAKEN",
+        surface=Surface.ACTIVITIES,
+        endpoint="/0/private/OpenOrders",
+    )
+    payload = observation.payload
+    if not isinstance(payload, Mapping):
+        raise KrakenSpotAdapterError(
+            "Kraken open-orders response must be an object"
+        )
+    raw_errors = payload.get("error")
+    if isinstance(raw_errors, (str, bytes)) or not isinstance(
+        raw_errors, (list, tuple)
+    ):
+        raise KrakenSpotAdapterError("Kraken error field must be a sequence")
+    if any(str(value) for value in raw_errors):
+        raise KrakenSpotAdapterError(
+            "Kraken open-orders response was not successful"
+        )
+    result = payload.get("result")
+    if not isinstance(result, Mapping):
+        raise KrakenSpotAdapterError(
+            "Kraken open-orders result must be an object"
+        )
+    orders = result.get("open")
+    if not isinstance(orders, Mapping):
+        raise KrakenSpotAdapterError(
+            "Kraken open-orders result must contain open object"
+        )
+    query = observation.query_binding.query
+    restricting = {"userref", "cl_ord_id"} & set(query)
+    if restricting:
+        raise KrakenSpotAdapterError(
+            "filtered Kraken OpenOrders cannot prove account-wide completeness"
+        )
+    return KrakenSpotOpenOrdersSnapshotEvidence(
+        account_id=observation.account_id,
+        environment=observation.environment,
+        evidence_ref=observation.evidence_ref,
+        order_ids=tuple(sorted(_text(str(value), name="provider_order_id") for value in orders)),
+        filter_items=tuple(sorted((str(key), str(value)) for key, value in query.items())),
+        _factory_token=_KRAKEN_SPOT_OPEN_ORDERS_FACTORY_TOKEN,
+    )
+
+
 def absence_evidence_from_pagination(
     *,
     order_found: bool,
-    open_orders_complete: bool,
+    open_orders: KrakenSpotOpenOrdersSnapshotEvidence,
     order_history: KrakenSpotPaginationCoverage,
     executions: KrakenSpotPaginationCoverage,
     activities: KrakenSpotPaginationCoverage,
@@ -829,6 +973,10 @@ def absence_evidence_from_pagination(
 ) -> KrakenSpotAbsenceEvidence:
     """Bind Kraken absence inputs to concrete history pagination coverage."""
 
+    if not isinstance(open_orders, KrakenSpotOpenOrdersSnapshotEvidence):
+        raise TypeError(
+            "open_orders must be KrakenSpotOpenOrdersSnapshotEvidence"
+        )
     for coverage, expected in (
         (order_history, "ORDER_HISTORY"),
         (executions, "EXECUTIONS"),
@@ -840,9 +988,19 @@ def absence_evidence_from_pagination(
             raise KrakenSpotAdapterError(
                 f"coverage surface mismatch: expected {expected}"
             )
+        if not coverage.complete:
+            raise KrakenSpotAdapterError(
+                f"{expected} pagination coverage is incomplete"
+            )
+        if coverage.scope != (
+            open_orders.account_id,
+            open_orders.environment,
+        ):
+            raise KrakenSpotAdapterError(
+                "Kraken absence evidence account/environment scope mismatch"
+            )
     for name, value in (
         ("order_found", order_found),
-        ("open_orders_complete", open_orders_complete),
         ("consistency_horizon_satisfied", consistency_horizon_satisfied),
         ("qualified_exclusion_semantics", qualified_exclusion_semantics),
     ):
@@ -850,7 +1008,7 @@ def absence_evidence_from_pagination(
             raise TypeError(f"{name} must be boolean")
     return KrakenSpotAbsenceEvidence(
         order_found=order_found,
-        open_orders_complete=open_orders_complete,
+        open_orders_complete=open_orders.complete_for_account,
         closed_orders_complete=order_history.complete,
         trades_complete=executions.complete,
         ledgers_complete=activities.complete,

@@ -672,7 +672,11 @@ class ClaimStore:
                     if item.source_id == identifier
                 ),
                 key=lambda item: (
-                    max(item.available_at, item.ingested_at),
+                    # This is provenance/source history, not causal visibility.
+                    # A late ingest of an older source revision must keep source
+                    # chronology rather than reorder history by arrival time.
+                    item.published_at,
+                    item.available_at,
                     item.source_revision,
                     item.claim_id,
                 ),

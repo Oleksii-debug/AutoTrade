@@ -516,6 +516,10 @@ def parse_execution_events(
         raise ProviderCoreError("qualified_fee_currencies must be a mapping")
 
     envelope = _mapping(observation.payload, name="response")
+    provider_account_uid = _text(
+        envelope.get("accountUid"),
+        name="response.accountUid",
+    )
     elements = envelope.get("elements")
     if not isinstance(elements, (list, tuple)):
         raise ProviderCoreError("Futures execution history elements must be an array")
@@ -525,15 +529,23 @@ def parse_execution_events(
         row = _mapping(value, name=f"elements[{index}]")
         event = _mapping(row.get("event"), name=f"elements[{index}].event")
         execution_event = _mapping(
-            event.get("execution"),
-            name=f"elements[{index}].event.execution",
+            event.get("Execution"),
+            name=f"elements[{index}].event.Execution",
         )
         execution = _mapping(
             execution_event.get("execution"),
-            name=f"elements[{index}].event.execution.execution",
+            name=f"elements[{index}].event.Execution.execution",
         )
         execution_id = _text(execution.get("uid"), name="execution.uid")
         order = _mapping(execution.get("order"), name="execution.order")
+        order_account_uid = _text(
+            order.get("accountUid"),
+            name="order.accountUid",
+        )
+        if order_account_uid != provider_account_uid:
+            raise ProviderCoreError(
+                "Kraken Futures execution order accountUid does not match response accountUid"
+            )
 
         symbol = _text(order.get("tradeable"), name="order.tradeable")
         try:

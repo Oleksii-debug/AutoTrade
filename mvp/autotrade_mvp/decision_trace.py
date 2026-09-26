@@ -431,10 +431,17 @@ class DecisionTraceStore:
 class BoundedMetricBacklog:
     """Bounded diagnostic queue; unlike durable traces, metrics may be dropped."""
 
-    def __init__(self, max_items: int = 256) -> None:
+    def __init__(self, max_items: int = 256, max_label_bytes: int = 4096) -> None:
         if not isinstance(max_items, int) or isinstance(max_items, bool) or max_items <= 0:
             raise ValueError("max_items must be a positive integer")
+        if (
+            not isinstance(max_label_bytes, int)
+            or isinstance(max_label_bytes, bool)
+            or max_label_bytes <= 0
+        ):
+            raise ValueError("max_label_bytes must be a positive integer")
         self._items: deque[dict[str, Any]] = deque(maxlen=max_items)
+        self._max_label_bytes = max_label_bytes
         self._dropped = 0
 
     @property
@@ -450,10 +457,17 @@ class BoundedMetricBacklog:
             or not isfinite(value)
         ):
             raise ValueError("metric value must be a finite number")
+        redacted_labels = _redact(dict(labels))
+        try:
+            encoded_labels = canonical_json(redacted_labels).encode("utf-8")
+        except (TypeError, ValueError) as error:
+            raise ValueError("metric labels must be finite JSON values") from error
+        if len(encoded_labels) > self._max_label_bytes:
+            raise ValueError("metric labels exceed bounded size")
         if len(self._items) == self._items.maxlen:
             self._dropped += 1
         self._items.append(
-            {"name": name.strip(), "value": value, "labels": _redact(dict(labels))}
+            {"name": name.strip(), "value": value, "labels": redacted_labels}
         )
 
     def snapshot(self) -> tuple[dict[str, Any], ...]:

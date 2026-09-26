@@ -129,7 +129,7 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                     "ordertype": "market",
                     "volume": "0.01",
                     "cl_ord_id": "at-direct",
-                    "timeinforce": "gtc",
+                    "timeinforce": "GTC",
                 },
                 account_id="spot-account",
                 environment="LIVE",
@@ -159,6 +159,7 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         self.assertEqual(request.body["volume"], "0.0100")
         self.assertEqual(request.body["price"], "60000.25")
         self.assertEqual(request.body["cl_ord_id"], "at-0123456789abcd")
+        self.assertEqual(request.body["timeinforce"], "GTC")
         self.assertNotIn("nonce", request.body)
         self.assertNotIn("deadline", request.body)
 
@@ -377,6 +378,19 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         )
         self.assertEqual(result["outcome"], "REJECTED")
         self.assertEqual(result["retry_disposition"], "NEVER")
+
+    def test_deadline_elapsed_is_unknown_after_durable_response_binding(self):
+        result = self._parse_submission(
+            {"error": ["EService:Deadline elapsed"], "result": None}
+        )
+        self.assertEqual(result["outcome"], "UNKNOWN")
+        self.assertEqual(
+            result["reason_code"],
+            "KRAKEN_SPOT_DEADLINE_ELAPSED_AMBIGUOUS",
+        )
+        self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
+        self.assertEqual(len(result["evidence"]), 1)
+        self.assertTrue(result["evidence"][0]["sha256"].startswith("sha256:"))
 
     def test_transport_ambiguity_is_unknown_and_reconcile_first(self):
         result = self._parse_submission(

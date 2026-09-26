@@ -93,26 +93,45 @@
   ],
   "python_development_dependencies": [
     {
+      "hashes": [
+        "sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309"
+      ],
       "name": "attrs",
       "version": "26.1.0"
     },
     {
+      "hashes": [
+        "sha256:d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce"
+      ],
       "name": "jsonschema",
       "version": "4.26.0"
     },
     {
+      "hashes": [
+        "sha256:98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe"
+      ],
       "name": "jsonschema-specifications",
       "version": "2025.9.1"
     },
     {
+      "hashes": [
+        "sha256:e8699adbbf8b5c7de96d8ffa0eb5c158b3beafce084968e2ea8bb08c6794dcd0"
+      ],
       "name": "referencing",
       "version": "0.36.2"
     },
     {
+      "hashes": [
+        "sha256:2c958bf94822e9290a40aaf2a822d4bc5c88099093e3948ad6c571eca9272e5f",
+        "sha256:ecabd69db66de867690f9797f2f8fa27ba501bbc24540cbdbdc649cd15888ba6"
+      ],
       "name": "rpds-py",
       "version": "2026.6.3"
     },
     {
+      "hashes": [
+        "sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8"
+      ],
       "name": "typing-extensions",
       "version": "4.16.0"
     }
@@ -122,6 +141,7 @@
   "source_inventory": {
     "components_blob_sha": "cba907e56f9442e2be0073955d97c5b52fbeac60",
     "global_json_blob_sha": "b4ffa1877d371d285f4a7ddf850071845a8dfe27",
-    "requirements_dev_blob_sha": "e0a5663bec1c2618986eeb27e91a72c6e3b2d054"
+    "requirements_dev_blob_sha": "9281eb241f95e76b1fc7a1902e891e5367acccb7",
+    "research_pyproject_blob_sha": "9c587c43b3082ab14d062922f27713e828647157"
   }
 }

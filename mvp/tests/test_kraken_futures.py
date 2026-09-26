@@ -490,7 +490,7 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
             "uid": "event-1",
             "timestamp": 1790280000123,
             "event": {
-                "execution": {
+                "Execution": {
                     "execution": {
                         "uid": execution_id,
                         "order": {
@@ -566,7 +566,7 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
         base = self._execution_event()
 
         missing_direction = json.loads(json.dumps(base))
-        del missing_direction["event"]["execution"]["execution"]["order"]["direction"]
+        del missing_direction["event"]["Execution"]["execution"]["order"]["direction"]
         with self.assertRaisesRegex(ProviderCoreError, "order.direction"):
             parse_execution_events(
                 futures_execution_observation(
@@ -594,7 +594,7 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                     )
 
         missing_fee = json.loads(json.dumps(base))
-        del missing_fee["event"]["execution"]["execution"]["orderData"]["fee"]
+        del missing_fee["event"]["Execution"]["execution"]["orderData"]["fee"]
         with self.assertRaisesRegex(ProviderCoreError, "missing provider fee amount"):
             parse_execution_events(
                 futures_execution_observation(
@@ -613,6 +613,33 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                 provider_environment="DEMO",
                 instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
                 qualified_fee_currencies={},
+            )
+
+    def test_execution_history_requires_documented_event_case_and_account_uid_consistency(self):
+        lower_case = self._execution_event()
+        lower_case["event"]["execution"] = lower_case["event"].pop("Execution")
+        with self.assertRaisesRegex(ProviderCoreError, "event.Execution"):
+            parse_execution_events(
+                futures_execution_observation(
+                    {"accountUid": "provider-account-1", "len": 1, "elements": [lower_case]}
+                ),
+                provider_environment="DEMO",
+                instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
+                qualified_fee_currencies={"PI_XBTUSD": "USD"},
+            )
+
+        wrong_account = self._execution_event()
+        wrong_account["event"]["Execution"]["execution"]["order"]["accountUid"] = (
+            "provider-account-2"
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "accountUid does not match"):
+            parse_execution_events(
+                futures_execution_observation(
+                    {"accountUid": "provider-account-1", "len": 1, "elements": [wrong_account]}
+                ),
+                provider_environment="DEMO",
+                instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
+                qualified_fee_currencies={"PI_XBTUSD": "USD"},
             )
 
     def test_execution_history_requires_exact_bound_endpoint(self):

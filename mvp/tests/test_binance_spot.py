@@ -785,6 +785,19 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         self.assertNotIn("fill", result)
         self.assertNotIn("executed_quantity", result)
 
+    def test_ack_symbol_identity_must_be_canonical_uppercase(self):
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "canonical uppercase"):
+            parse_order_ack(
+                attempt_id=str(uuid4()),
+                client_order_id="at-ack-lower-symbol",
+                response={
+                    "symbol": "btcusdt",
+                    "orderId": 42,
+                    "clientOrderId": "at-ack-lower-symbol",
+                    "transactTime": 1790272800123,
+                },
+            )
+
     def test_account_trade_id_is_economic_identity_and_duplicates_are_idempotent(self):
         rows = [
             {

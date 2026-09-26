@@ -151,9 +151,9 @@ def _python_blockers(root: Path) -> tuple[list[str], list[str]]:
         if '- "requirements-dev.txt"' not in workflow_text:
             blockers.append("RESEARCH_HASH_LOCK_WORKFLOW_PATH_MISSING")
         expected_hash_install = (
-            "run: python -m pip install --disable-pip-version-check "
+            'run: "python -m pip install --disable-pip-version-check '
             "--force-reinstall --no-deps --only-binary=:all: --require-hashes "
-            "-r requirements-dev.txt"
+            '-r requirements-dev.txt"'
         )
         if expected_hash_install not in workflow_text:
             blockers.append("RESEARCH_HASHED_INSTALL_COMMAND_MISSING")

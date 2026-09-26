@@ -1,9 +1,12 @@
+import json
+from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
 from tools.check_dependency_composition import (
     _dotnet_dependency_lock_blockers,
+    _rights_blockers,
     audit_composition,
     is_exact_python_requirement,
     qualification_exit_code,
@@ -225,6 +228,243 @@ class DependencyCompositionGateTests(unittest.TestCase):
             "UNQUALIFIED_SOURCE_COMPOSITION:Alpaca official C# SDK",
             pending,
         )
+
+
+    def test_machine_release_state_blocks_free_text_bypass(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            provenance = root / "provenance"
+            provenance.mkdir()
+            (provenance / "components.json").write_text(
+                json.dumps(
+                    {
+                        "components": [
+                            {
+                                "name": "Candidate",
+                                "repository": "owner/repo",
+                                "revision": "a" * 40,
+                                "license": "MIT",
+                                "source_import_allowed": "QUALIFIED",
+                                "release_distribution_state": "BLOCKED",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            blockers = _rights_blockers(root)
+            self.assertIn(
+                "COMPONENT_RELEASE_DISTRIBUTION_NOT_APPROVED:Candidate",
+                blockers,
+            )
+            self.assertNotIn(
+                "UNQUALIFIED_SOURCE_COMPOSITION:Candidate",
+                blockers,
+            )
+
+    def test_approved_component_requires_resolvable_composition_evidence(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            provenance = root / "provenance"
+            evidence_dir = provenance / "evidence"
+            evidence_dir.mkdir(parents=True)
+            payloads = {
+                "dependency-graph.json": b'{"dependencies":[]}',
+                "NOTICE.txt": b"Apache-2.0 notice evidence\n",
+                "advisory-review.json": b'{"advisories":[]}',
+            }
+            for filename, payload in payloads.items():
+                (evidence_dir / filename).write_bytes(payload)
+
+            base = {
+                "name": "ApprovedCandidate",
+                "repository": "owner/repo",
+                "revision": "b" * 40,
+                "license": "Apache-2.0",
+                "source_import_allowed": "QUALIFIED",
+                "release_distribution_state": "APPROVED",
+            }
+            (provenance / "components.json").write_text(
+                json.dumps({"components": [base]}),
+                encoding="utf-8",
+            )
+
+            blockers = _rights_blockers(root)
+            self.assertEqual(
+                {
+                    blocker
+                    for blocker in blockers
+                    if blocker.startswith("APPROVED_COMPONENT_EVIDENCE_INVALID:")
+                },
+                {
+                    "APPROVED_COMPONENT_EVIDENCE_INVALID:ApprovedCandidate:"
+                    "dependency_graph_sha256",
+                    "APPROVED_COMPONENT_EVIDENCE_INVALID:ApprovedCandidate:"
+                    "notice_sha256",
+                    "APPROVED_COMPONENT_EVIDENCE_INVALID:ApprovedCandidate:"
+                    "advisory_review_sha256",
+                },
+            )
+
+            qualified = dict(base)
+            qualified.update(
+                {
+                    "dependency_graph_sha256": "sha256:"
+                    + sha256(payloads["dependency-graph.json"]).hexdigest(),
+                    "dependency_graph_evidence_path": (
+                        "provenance/evidence/dependency-graph.json"
+                    ),
+                    "notice_sha256": "sha256:"
+                    + sha256(payloads["NOTICE.txt"]).hexdigest(),
+                    "notice_evidence_path": "provenance/evidence/NOTICE.txt",
+                    "advisory_review_sha256": "sha256:"
+                    + sha256(payloads["advisory-review.json"]).hexdigest(),
+                    "advisory_review_evidence_path": (
+                        "provenance/evidence/advisory-review.json"
+                    ),
+                }
+            )
+            (provenance / "components.json").write_text(
+                json.dumps({"components": [qualified]}),
+                encoding="utf-8",
+            )
+            self.assertEqual(_rights_blockers(root), [])
+
+            forged = dict(qualified)
+            forged["notice_sha256"] = "sha256:" + "2" * 64
+            (provenance / "components.json").write_text(
+                json.dumps({"components": [forged]}),
+                encoding="utf-8",
+            )
+            self.assertIn(
+                "APPROVED_COMPONENT_EVIDENCE_DIGEST_MISMATCH:"
+                "ApprovedCandidate:notice_sha256",
+                _rights_blockers(root),
+            )
+
+    def test_approved_component_evidence_path_cannot_escape_provenance(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            provenance = root / "provenance"
+            provenance.mkdir()
+            outside = root / "outside.txt"
+            outside.write_bytes(b"outside")
+            digest = "sha256:" + sha256(outside.read_bytes()).hexdigest()
+            candidate = {
+                "name": "ApprovedCandidate",
+                "repository": "owner/repo",
+                "revision": "d" * 40,
+                "license": "MIT",
+                "source_import_allowed": "QUALIFIED",
+                "release_distribution_state": "APPROVED",
+                "dependency_graph_sha256": digest,
+                "dependency_graph_evidence_path": "../outside.txt",
+                "notice_sha256": digest,
+                "notice_evidence_path": "../outside.txt",
+                "advisory_review_sha256": digest,
+                "advisory_review_evidence_path": "../outside.txt",
+            }
+            (provenance / "components.json").write_text(
+                json.dumps({"components": [candidate]}),
+                encoding="utf-8",
+            )
+            blockers = _rights_blockers(root)
+            self.assertEqual(
+                {
+                    blocker
+                    for blocker in blockers
+                    if "EVIDENCE_PATH_INVALID" in blocker
+                },
+                {
+                    "APPROVED_COMPONENT_EVIDENCE_PATH_INVALID:ApprovedCandidate:"
+                    "dependency_graph_evidence_path",
+                    "APPROVED_COMPONENT_EVIDENCE_PATH_INVALID:ApprovedCandidate:"
+                    "notice_evidence_path",
+                    "APPROVED_COMPONENT_EVIDENCE_PATH_INVALID:ApprovedCandidate:"
+                    "advisory_review_evidence_path",
+                },
+            )
+
+    def test_duplicate_machine_release_state_is_rejected_as_ambiguous_json(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            provenance = root / "provenance"
+            provenance.mkdir()
+            (provenance / "components.json").write_text(
+                """{
+  "components": [
+    {
+      "name": "Candidate",
+      "repository": "owner/repo",
+      "revision": "cccccccccccccccccccccccccccccccccccccccc",
+      "license": "MIT",
+      "source_import_allowed": "QUALIFIED",
+      "release_distribution_state": "BLOCKED",
+      "release_distribution_state": "APPROVED",
+      "dependency_graph_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "notice_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "advisory_review_sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+    }
+  ]
+}""",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _rights_blockers(root),
+                ["COMPONENT_INVENTORY_INVALID_JSON"],
+            )
+
+    def test_non_object_component_inventory_root_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            provenance = root / "provenance"
+            provenance.mkdir()
+            (provenance / "components.json").write_text(
+                "[]",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _rights_blockers(root),
+                ["COMPONENT_INVENTORY_INVALID_ROOT"],
+            )
+
+    def test_component_inventory_and_source_identity_fail_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            provenance = root / "provenance"
+            provenance.mkdir()
+
+            (provenance / "components.json").write_text(
+                json.dumps({"components": []}),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _rights_blockers(root),
+                ["COMPONENT_INVENTORY_MISSING_OR_EMPTY"],
+            )
+
+            invalid = {
+                "name": " Component ",
+                "repository": "owner-only",
+                "revision": "main",
+                "license": "MIT",
+                "source_import_allowed": "QUALIFIED",
+                "release_distribution_state": "APPROVED",
+                "dependency_graph_sha256": "sha256:" + "1" * 64,
+                "notice_sha256": "sha256:" + "2" * 64,
+                "advisory_review_sha256": "sha256:" + "3" * 64,
+            }
+            (provenance / "components.json").write_text(
+                json.dumps({"components": [invalid]}),
+                encoding="utf-8",
+            )
+            blockers = _rights_blockers(root)
+            self.assertIn("INVALID_COMPONENT_NAME:0", blockers)
+            self.assertIn(
+                "INVALID_COMPONENT_SOURCE_IDENTITY: Component ",
+                blockers,
+            )
 
 
 if __name__ == "__main__":

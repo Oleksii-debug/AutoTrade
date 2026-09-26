@@ -1,6 +1,7 @@
 import base64
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import subprocess
 from tempfile import TemporaryDirectory
@@ -25,6 +26,7 @@ from mvp.autotrade_mvp.qualification_attestation import (
     load_canonical_qualification_trust_policy,
     verify_canonical_qualification_attestation,
     verify_qualification_attestation,
+    _trusted_git_environment,
 )
 
 
@@ -177,6 +179,42 @@ def verify(receipt, store, trust_policy, **overrides):
 
 
 class QualificationAttestationTests(unittest.TestCase):
+    def test_trusted_git_environment_drops_caller_loader_and_config_authority(self):
+        hostile = {
+            "PATH": "/attacker/bin",
+            "HOME": "/attacker/home",
+            "XDG_CONFIG_HOME": "/attacker/config",
+            "LD_PRELOAD": "/attacker/libinject.so",
+            "LD_LIBRARY_PATH": "/attacker/lib",
+            "DYLD_INSERT_LIBRARIES": "/attacker/libinject.dylib",
+            "PYTHONPATH": "/attacker/python",
+            "GIT_OBJECT_DIRECTORY": "/attacker/objects",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES": "/attacker/alternates",
+            "GIT_CONFIG_GLOBAL": "/attacker/gitconfig",
+            "SYSTEMROOT": r"C:\\Windows",
+        }
+        with patch.dict(os.environ, hostile, clear=True):
+            environment = _trusted_git_environment()
+
+        self.assertEqual(environment["SYSTEMROOT"], r"C:\\Windows")
+        self.assertEqual(environment["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(environment["GIT_CONFIG_GLOBAL"], os.devnull)
+        self.assertEqual(environment["GIT_NO_REPLACE_OBJECTS"], "1")
+        self.assertEqual(environment["LC_ALL"], "C")
+        self.assertEqual(environment["LANG"], "C")
+        for key in (
+            "PATH",
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "DYLD_INSERT_LIBRARIES",
+            "PYTHONPATH",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        ):
+            self.assertNotIn(key, environment)
+
     def test_canonical_policy_is_bound_to_exact_source_not_working_tree(self):
         canonical_root = root()
         canonical_policy = policy(canonical_root)

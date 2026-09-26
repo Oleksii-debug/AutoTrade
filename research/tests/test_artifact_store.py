@@ -247,6 +247,46 @@ class ArtifactStoreTests(unittest.TestCase):
             ):
                 store.load_manifest(artifact_id)
 
+    def test_manifest_replacement_during_read_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"manifest-read-boundary",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+                metadata={"kind": "before"},
+            )
+            manifest_path = store._manifest_path(artifact_id)
+            replacement = dict(manifest)
+            replacement["metadata"] = {"kind": "after"}
+            replacement["manifest_hash"] = _manifest_integrity_hash(replacement)
+            replacement_path = Path(directory) / "replacement-manifest.json"
+            atomic_write_json(replacement_path, replacement)
+
+            original_validate = store._validate_manifest_entry
+            validation_count = 0
+
+            def validate_then_replace(path):
+                nonlocal validation_count
+                entry = original_validate(path)
+                validation_count += 1
+                if validation_count == 1:
+                    os.replace(replacement_path, manifest_path)
+                return entry
+
+            with patch.object(
+                store,
+                "_validate_manifest_entry",
+                side_effect=validate_then_replace,
+            ):
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "manifest changed during read",
+                ):
+                    store.load_manifest(artifact_id)
+
     def test_manifest_hard_link_alias_is_rejected_and_audited(self):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(Path(directory) / "store")

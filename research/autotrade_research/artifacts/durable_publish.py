@@ -8,7 +8,7 @@ import stat
 import tempfile
 import threading
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, BinaryIO, Callable, Iterator
 
 from .resource_lock import ResourceLock, ResourceLockError
 
@@ -63,6 +63,14 @@ def _validate_publication_destination(path: Path) -> None:
         raise DurablePublishLockError(
             "publication destination must not have hard-link aliases"
         )
+
+
+def validate_publication_destination(path: str | Path) -> None:
+    """Validate the final publication entry without following aliases."""
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    _validate_publication_destination(destination)
 
 
 def _thread_lock_for(path: Path) -> threading.RLock:
@@ -195,6 +203,57 @@ def _sync_parent_directory(path: Path) -> None:
     """Compatibility fault-injection seam for atomic_write_json."""
 
     sync_parent_directory(path)
+
+
+def atomic_write_stream(
+    path: str | Path,
+    writer: Callable[[BinaryIO], None],
+) -> None:
+    """Durably publish one file from a caller-supplied binary stream writer."""
+
+    if not callable(writer):
+        raise TypeError("writer must be callable")
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    _validate_publication_destination(destination)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w+b",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            writer(handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        with durable_path_lock(destination):
+            _validate_publication_destination(destination)
+            os.replace(temporary, destination)
+            temporary = None
+            _sync_parent_directory(destination)
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def atomic_write_bytes(path: str | Path, payload: bytes) -> None:
+    """Durably publish exact bytes through the canonical publication boundary."""
+
+    if type(payload) is not bytes:
+        raise TypeError("payload must be bytes")
+
+    def write_payload(handle: BinaryIO) -> None:
+        handle.write(payload)
+
+    atomic_write_stream(path, write_payload)
 
 
 def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:

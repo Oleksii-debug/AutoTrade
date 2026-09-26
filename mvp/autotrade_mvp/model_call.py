@@ -990,6 +990,98 @@ class DurableModelCallOrchestrator:
             )
         return evidence
 
+    def _validate_fallback_lineage(self, spec: ModelCallSpec) -> None:
+        """Require fallback to descend from one durable, safely terminal attempt."""
+
+        if spec.fallback_index == 0:
+            return
+        parent_attempt_id = _canonical_text(
+            spec.fallback_parent_attempt_id,
+            name="fallback_parent_attempt_id",
+        )
+        parent_events = self._events(parent_attempt_id)
+        if not parent_events:
+            raise ModelCallError(
+                "fallback parent attempt does not exist in this durable model-call scope"
+            )
+
+        prepared = parent_events[0]
+        if prepared.get("event_type") != "ModelCallPrepared":
+            raise ModelCallError(
+                "fallback parent lacks durable prepared model-call identity"
+            )
+        prepared_payload = prepared.get("payload")
+        if not isinstance(prepared_payload, Mapping):
+            raise ModelCallError("fallback parent prepared payload is invalid")
+        if (
+            prepared_payload.get("attempt_id") != parent_attempt_id
+            or prepared_payload.get("request_id") != parent_attempt_id
+        ):
+            raise ModelCallError("fallback parent durable identity is inconsistent")
+
+        expected_parent_scope = {
+            "job_id": spec.job_id,
+            "input_digest": spec.input_digest,
+            "policy_id": spec.policy_id,
+            "cost_currency": spec.cost_currency,
+            "result_schema_id": spec.result_schema_id,
+        }
+        if any(
+            prepared_payload.get(key) != value
+            for key, value in expected_parent_scope.items()
+        ):
+            raise ModelCallError(
+                "fallback parent does not match the same semantic request scope"
+            )
+        parent_index = prepared_payload.get("fallback_index")
+        if (
+            type(parent_index) is not int
+            or parent_index + 1 != spec.fallback_index
+        ):
+            raise ModelCallError(
+                "fallback index must directly follow the durable parent attempt"
+            )
+
+        terminal = next(
+            (
+                event
+                for event in reversed(parent_events)
+                if event.get("event_type")
+                in {"ModelCallNotSent", "ModelCallUnknown", "ModelCallObserved"}
+            ),
+            None,
+        )
+        if terminal is None:
+            raise ModelCallError(
+                "fallback parent has not reached a durable terminal outcome"
+            )
+        terminal_payload = terminal.get("payload")
+        if (
+            not isinstance(terminal_payload, Mapping)
+            or terminal_payload.get("attempt_id") != parent_attempt_id
+        ):
+            raise ModelCallError("fallback parent terminal evidence is invalid")
+
+        event_type = terminal.get("event_type")
+        if event_type == "ModelCallNotSent":
+            return
+        if event_type == "ModelCallUnknown":
+            raise ModelCallError(
+                "fallback parent outcome is uncertain; blind retry/fallback is forbidden"
+            )
+        if event_type == "ModelCallObserved":
+            schema_valid = terminal_payload.get("schema_valid")
+            if type(schema_valid) is not bool:
+                raise ModelCallError(
+                    "fallback parent observed schema state is invalid"
+                )
+            if not schema_valid:
+                return
+            raise ModelCallError(
+                "fallback parent already produced a valid observed result"
+            )
+        raise ModelCallError("fallback parent terminal outcome is unsupported")
+
     def execute(
         self,
         *,
@@ -1019,6 +1111,7 @@ class DurableModelCallOrchestrator:
                 "ModelRequest.request_id must equal the deterministic model attempt id"
             )
 
+        self._validate_fallback_lineage(spec)
         existing = self._events(attempt_id)
         if existing and existing[-1].get("event_type") in {
             "ModelCallNotSent",

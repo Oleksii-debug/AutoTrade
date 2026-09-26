@@ -1149,6 +1149,161 @@ def parse_order_page(observation: ProviderResponseObservation) -> BybitOrderPage
     )
 
 
+def prepare_next_order_read_query(
+    *,
+    observation: ProviderResponseObservation,
+    capability: CapabilitySnapshot,
+    at: datetime,
+) -> AuthenticatedReadQueryBinding | None:
+    """Continue an exact Bybit order cursor chain without re-authoring its scope."""
+
+    page = parse_order_page(observation)
+    if page.next_cursor is None:
+        return None
+    binding = observation.query_binding
+    if not isinstance(capability, CapabilitySnapshot):
+        raise TypeError("capability must be CapabilitySnapshot")
+    if (
+        capability.snapshot_id != binding.capability_snapshot_id
+        or capability.provider_id.upper() != binding.provider_id
+        or capability.account_id != binding.account_id
+        or capability.entity_id != binding.entity_id
+        or capability.environment != binding.environment
+        or capability.instrument_version != binding.instrument_version
+    ):
+        raise ProviderCoreError(
+            "Bybit pagination must retain the exact verified capability scope"
+        )
+
+    query = dict(binding.query)
+    query["cursor"] = page.next_cursor
+    return prepare_authenticated_read_query(
+        capability=capability,
+        surface=binding.surface,
+        endpoint=binding.endpoint,
+        query=query,
+        at=at,
+        permission_scope=binding.permission_scope,
+    )
+
+
+def order_history_coverage_from_pages(
+    observations: tuple[ProviderResponseObservation, ...],
+    *,
+    consistency_horizon_satisfied: bool,
+    qualified_exclusion_semantics: bool = False,
+) -> CoverageSurfaceEvidence:
+    """Derive bounded history coverage only from a contiguous exact cursor chain.
+
+    This helper intentionally requires explicit startTime and endTime. Provider
+    default windows are not converted into absence coverage because doing so
+    would require additional qualified clock/retention semantics.
+    """
+
+    if not isinstance(observations, tuple) or not observations:
+        raise ProviderCoreError(
+            "Bybit order history coverage requires a non-empty immutable page tuple"
+        )
+    for name, value in (
+        ("consistency_horizon_satisfied", consistency_horizon_satisfied),
+        ("qualified_exclusion_semantics", qualified_exclusion_semantics),
+    ):
+        if type(value) is not bool:
+            raise ProviderCoreError(f"{name} must be boolean")
+
+    pages = tuple(parse_order_page(observation) for observation in observations)
+    if any(page.surface != "ORDER_HISTORY" for page in pages):
+        raise ProviderCoreError(
+            "Bybit order history coverage accepts ORDER_HISTORY pages only"
+        )
+
+    first_observation = observations[0]
+    first_binding = first_observation.query_binding
+    if "cursor" in first_binding.query:
+        raise ProviderCoreError(
+            "Bybit order history coverage must begin at the first page"
+        )
+    raw_start = first_binding.query.get("startTime")
+    raw_end = first_binding.query.get("endTime")
+    if raw_start is None or raw_end is None:
+        raise ProviderCoreError(
+            "Bybit order history coverage requires explicit startTime and endTime"
+        )
+    start_ms = _integer(raw_start, name="startTime", minimum=0)
+    end_ms = _integer(raw_end, name="endTime", minimum=0)
+    if end_ms < start_ms:
+        raise ProviderCoreError("Bybit order history end precedes start")
+    if end_ms - start_ms > _MAX_ORDER_HISTORY_WINDOW_MS:
+        raise ProviderCoreError(
+            "Bybit order history window cannot exceed seven days"
+        )
+
+    base_query = {
+        key: value
+        for key, value in first_binding.query.items()
+        if key != "cursor"
+    }
+    first_page = pages[0]
+    scope = (
+        first_page.account_id,
+        first_page.environment,
+        first_page.provider_environment,
+        first_page.category,
+    )
+    evidence_refs: set[str] = set()
+    for index, (observation, page) in enumerate(zip(observations, pages)):
+        if (
+            page.account_id,
+            page.environment,
+            page.provider_environment,
+            page.category,
+        ) != scope:
+            raise ProviderCoreError(
+                "Bybit order history pagination crossed provider/account/category scope"
+            )
+        current_base = {
+            key: value
+            for key, value in observation.query_binding.query.items()
+            if key != "cursor"
+        }
+        if current_base != base_query:
+            raise ProviderCoreError(
+                "Bybit order history pagination changed the base query"
+            )
+        expected_cursor = None if index == 0 else pages[index - 1].next_cursor
+        actual_cursor = observation.query_binding.query.get("cursor")
+        if actual_cursor != expected_cursor:
+            raise ProviderCoreError(
+                "Bybit order history pagination cursor chain is not contiguous"
+            )
+        if observation.evidence_ref in evidence_refs:
+            raise ProviderCoreError(
+                "Bybit order history pagination repeats exact page evidence"
+            )
+        evidence_refs.add(observation.evidence_ref)
+        if index < len(pages) - 1 and page.next_cursor is None:
+            raise ProviderCoreError(
+                "Bybit order history pagination continues after a terminal page"
+            )
+
+    if pages[-1].next_cursor is not None:
+        raise ProviderCoreError(
+            "Bybit order history pagination is incomplete"
+        )
+
+    return coverage_evidence(
+        account_id=first_page.account_id,
+        environment=first_page.environment,
+        provider_environment=first_page.provider_environment,
+        surface="ORDER_HISTORY",
+        coverage_start=_millis_to_utc(start_ms, name="startTime"),
+        coverage_end=_millis_to_utc(end_ms, name="endTime"),
+        pagination_complete=True,
+        consistency_horizon_satisfied=consistency_horizon_satisfied,
+        qualified_exclusion_semantics=qualified_exclusion_semantics,
+    )
+
+
 def parse_executions(
     observation: ProviderResponseObservation,
     *,

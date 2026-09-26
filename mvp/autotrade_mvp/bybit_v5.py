@@ -1138,6 +1138,13 @@ def parse_order_page(observation: ProviderResponseObservation) -> BybitOrderPage
         else _opaque_cursor(raw_cursor, name="nextPageCursor")
     )
     expected_client_id = observation.query_binding.query.get("orderLinkId")
+    expected_symbol = (
+        None
+        if expected_client_id is not None
+        else observation.query_binding.query.get("symbol")
+    )
+    if expected_symbol is not None:
+        expected_symbol = _text(expected_symbol, name="query symbol")
 
     by_order: dict[str, BybitOrderSnapshot] = {}
     for index, value in enumerate(rows):
@@ -1154,6 +1161,11 @@ def parse_order_page(observation: ProviderResponseObservation) -> BybitOrderPage
             raise ProviderCoreError(
                 "Bybit orderLinkId response does not match exact reconciliation query"
             )
+        row_symbol = _text(row.get("symbol"), name="symbol")
+        if expected_symbol is not None and row_symbol != expected_symbol:
+            raise ProviderCoreError(
+                "Bybit order symbol response does not match exact reconciliation query"
+            )
 
         created_ms = _integer(row.get("createdTime"), name="createdTime", minimum=0)
         updated_ms = _integer(row.get("updatedTime"), name="updatedTime", minimum=0)
@@ -1167,7 +1179,7 @@ def parse_order_page(observation: ProviderResponseObservation) -> BybitOrderPage
             category=query_category,
             provider_order_id=provider_order_id,
             client_order_id=client_order_id,
-            symbol=_text(row.get("symbol"), name="symbol"),
+            symbol=row_symbol,
             order_status=_text(row.get("orderStatus"), name="orderStatus"),
             remaining_quantity=_decimal(
                 row.get("leavesQty"),
@@ -1333,6 +1345,17 @@ def order_history_coverage_from_pages(
         for key, value in first_binding.query.items()
         if key != "cursor"
     }
+    binding_scope = (
+        first_binding.provider_id,
+        first_binding.account_id,
+        first_binding.entity_id,
+        first_binding.environment,
+        first_binding.capability_snapshot_id,
+        first_binding.instrument_version,
+        first_binding.surface,
+        first_binding.endpoint,
+        first_binding.permission_scope,
+    )
     first_page = pages[0]
     scope = (
         first_page.account_id,
@@ -1351,9 +1374,24 @@ def order_history_coverage_from_pages(
             raise ProviderCoreError(
                 "Bybit order history pagination crossed provider/account/category scope"
             )
+        current_binding = observation.query_binding
+        if (
+            current_binding.provider_id,
+            current_binding.account_id,
+            current_binding.entity_id,
+            current_binding.environment,
+            current_binding.capability_snapshot_id,
+            current_binding.instrument_version,
+            current_binding.surface,
+            current_binding.endpoint,
+            current_binding.permission_scope,
+        ) != binding_scope:
+            raise ProviderCoreError(
+                "Bybit order history pagination crossed authenticated-read capability scope"
+            )
         current_base = {
             key: value
-            for key, value in observation.query_binding.query.items()
+            for key, value in current_binding.query.items()
             if key != "cursor"
         }
         if current_base != base_query:
@@ -1693,6 +1731,17 @@ def execution_history_coverage_from_pages(
         for key, value in first_binding.query.items()
         if key != "cursor"
     }
+    binding_scope = (
+        first_binding.provider_id,
+        first_binding.account_id,
+        first_binding.entity_id,
+        first_binding.environment,
+        first_binding.capability_snapshot_id,
+        first_binding.instrument_version,
+        first_binding.surface,
+        first_binding.endpoint,
+        first_binding.permission_scope,
+    )
     first_page = pages[0]
     scope = (
         first_page.account_id,
@@ -1711,9 +1760,24 @@ def execution_history_coverage_from_pages(
             raise ProviderCoreError(
                 "Bybit execution pagination crossed provider/account/category scope"
             )
+        current_binding = observation.query_binding
+        if (
+            current_binding.provider_id,
+            current_binding.account_id,
+            current_binding.entity_id,
+            current_binding.environment,
+            current_binding.capability_snapshot_id,
+            current_binding.instrument_version,
+            current_binding.surface,
+            current_binding.endpoint,
+            current_binding.permission_scope,
+        ) != binding_scope:
+            raise ProviderCoreError(
+                "Bybit execution pagination crossed authenticated-read capability scope"
+            )
         current_base = {
             key: value
-            for key, value in observation.query_binding.query.items()
+            for key, value in current_binding.query.items()
             if key != "cursor"
         }
         if current_base != base_query:
@@ -1797,11 +1861,24 @@ def parse_executions(
     ):
         raise ProviderCoreError("qualified_fee_currencies must be a mapping")
 
+    expected_client_id = observation.query_binding.query.get("orderLinkId")
+    expected_symbol = (
+        None
+        if expected_client_id is not None
+        else observation.query_binding.query.get("symbol")
+    )
+    if expected_symbol is not None:
+        expected_symbol = _text(expected_symbol, name="query symbol")
+
     by_execution: dict[str, ProviderFillEvidence] = {}
     for index, value in enumerate(rows):
         row = _mapping(value, name=f"result.list[{index}]")
         execution_id = _text(row.get("execId"), name="execId")
         symbol = _text(row.get("symbol"), name="symbol")
+        if expected_symbol is not None and symbol != expected_symbol:
+            raise ProviderCoreError(
+                "Bybit execution symbol response does not match exact query"
+            )
         try:
             instrument = instrument_versions[symbol]
         except KeyError as error:

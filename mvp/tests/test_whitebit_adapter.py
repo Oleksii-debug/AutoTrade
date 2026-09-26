@@ -108,6 +108,7 @@ def capability(
 def market_rules(
     *,
     market_type="spot",
+    is_tradfi_futures=False,
     is_collateral=True,
     step_size="0.001",
     tick_size="0.01",
@@ -120,6 +121,7 @@ def market_rules(
         {
             "name": "BTC_USDT",
             "type": market_type,
+            "isTradFiFutures": is_tradfi_futures,
             "isCollateral": is_collateral,
             "tradesEnabled": True,
             "stepSize": step_size,
@@ -461,7 +463,60 @@ class WhiteBitAdapterTests(unittest.TestCase):
                 reduce_only=True,
             )
 
-    def test_tradfi_futures_market_type_uses_guarded_collateral_route(self):
+    def test_tradfi_futures_complete_provider_shape_is_classified_forward_compatibly(self):
+        rules = WhiteBitMarketRules.from_provider(
+            {
+                "name": "RIVN_PERP",
+                "type": "tradfiFutures",
+                "isTradFiFutures": True,
+                "isCollateral": False,
+                "tradesEnabled": True,
+                "stepSize": "1",
+                "tickSize": "0.01",
+                "minAmount": "1",
+                "minTotal": "1",
+                "maxTotal": "0",
+                "delistedAt": None,
+            }
+        )
+        self.assertEqual(rules.market_type, "TRADFIFUTURES")
+        self.assertTrue(rules.is_tradfi_futures)
+
+    def test_tradfi_futures_provider_flag_is_required_and_must_match_type(self):
+        base = {
+            "name": "RIVN_PERP",
+            "type": "tradfiFutures",
+            "isCollateral": False,
+            "tradesEnabled": True,
+            "stepSize": "1",
+            "tickSize": "0.01",
+            "minAmount": "1",
+            "minTotal": "1",
+            "maxTotal": "0",
+            "delistedAt": None,
+        }
+        with self.assertRaisesRegex(WhiteBitAdapterError, "isTradFiFutures"):
+            WhiteBitMarketRules.from_provider(base)
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "true exactly for type=tradfiFutures",
+        ):
+            WhiteBitMarketRules.from_provider(
+                {**base, "isTradFiFutures": False}
+            )
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "true exactly for type=tradfiFutures",
+        ):
+            WhiteBitMarketRules.from_provider(
+                {
+                    **base,
+                    "type": "futures",
+                    "isTradFiFutures": True,
+                }
+            )
+
+    def test_generic_capability_cannot_manufacture_tradfi_futures_execution_authority(self):
         intent = WhiteBitOrderIntent.create(
             instrument_version="RIVN_PERP:v1",
             product_family="FUTURES",
@@ -474,6 +529,7 @@ class WhiteBitAdapterTests(unittest.TestCase):
             {
                 "name": "RIVN_PERP",
                 "type": "tradfiFutures",
+                "isTradFiFutures": True,
                 "isCollateral": False,
                 "tradesEnabled": True,
                 "stepSize": "1",
@@ -484,20 +540,22 @@ class WhiteBitAdapterTests(unittest.TestCase):
                 "delistedAt": None,
             }
         )
-        request = prepare_order_request(
-            intent,
-            client_order_id="at-tradfi-1",
-            account_id="account-1",
-            environment="PAPER",
-            capability=capability(
-                instrument_version="RIVN_PERP:v1",
-                order_types=("MARKET",),
-            ),
-            market_rules=rules,
-            at=NOW,
-        )
-        self.assertEqual(request.endpoint, "/api/v4/order/collateral/market")
-        self.assertEqual(request.body["market"], "RIVN_PERP")
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "TradFi futures execution is not qualified",
+        ):
+            prepare_order_request(
+                intent,
+                client_order_id="at-tradfi-1",
+                account_id="account-1",
+                environment="PAPER",
+                capability=capability(
+                    instrument_version="RIVN_PERP:v1",
+                    order_types=("MARKET",),
+                ),
+                market_rules=rules,
+                at=NOW,
+            )
 
     def test_ioc_and_post_only_conflict_fails_before_send(self):
         with self.assertRaisesRegex(WhiteBitAdapterError, "mutually exclusive"):

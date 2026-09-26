@@ -1,24 +1,32 @@
-# WP-24 — WhiteBIT TradFi futures market classification
+# WP-24 — WhiteBIT TradFi Futures forward-compatible classification
 
-Date: 2026-09-25  
-Base: `main@7b8bd88aa09d32d3295b1f38465ec7fa7c73920b`.
+Date: 2026-09-26  
+Lineage: `wp24/whitebit-tradfi-futures-market-type-20260925-sol`.
 
-## Finding
+## Provider contract
 
-The WhiteBIT market metadata parser already recognized `tradfiFutures` as a provider market type, but the execution-side market-rule validator accepted only `FUTURES` for an AutoTrade `FUTURES` intent. That created an internal contradiction: metadata could be parsed successfully and then be rejected solely because its futures subtype was `TRADFIFUTURES`.
+The canonical market parser accepts the documented future
+`type=tradfiFutures` enum only when the provider record also contains the
+required `isTradFiFutures=true` flag. Missing, non-boolean, or inconsistent
+type/flag combinations fail closed.
 
-Current WhiteBIT documentation describes collateral order endpoints as the route for margin and futures orders, and the provider's current market schema includes `spot`, `futures`, and `tradfiFutures` market types. This change therefore keeps the existing collateral execution route and classifies both provider futures types as futures for the local market-rule check.
-
-Official references inspected:
-- https://docs.whitebit.com/concepts/order-types
-- https://docs.whitebit.com/api-reference/overview
-
-## Safety boundary
-
-This does **not** advertise or authorize TradFi futures on an account. `prepare_order_request` still requires exact, unexpired, provider/account/environment/instrument capability evidence admitting the requested order type and permission scope. Region/account/product restrictions remain capability-discovery facts; they are not inferred from geography or from this market-type classification.
+Classification and execution authority are intentionally separate. Current
+WhiteBIT documentation describes TradFi Futures as coming soon rather than a
+currently returned/executable public-market product. AutoTrade may therefore
+parse a complete future provider shape as `TRADFIFUTURES`, but
+`prepare_order_request()` rejects that subtype before a collateral order
+request can be produced. A generic `ORDER_WRITE` capability fixture cannot
+manufacture current product availability or route qualification.
 
 ## Regression
 
-The focused fixture proves that a `tradfiFutures` market can pass the same guarded FUTURES preparation path only when matching exact capability evidence is supplied, and that the request still uses the canonical collateral order endpoint.
+The focused tests now prove:
+- ordinary SPOT/FUTURES fixtures include the required provider flag;
+- a complete `tradfiFutures + isTradFiFutures=true` record is classified as
+  the forward-compatible futures subtype;
+- missing/false/inconsistent `isTradFiFutures` is rejected;
+- even a synthetically matching generic capability cannot turn the
+  not-currently-qualified TradFi subtype into an executable collateral request.
 
-No live credentials, network send, real order, or economic-edge claim is involved.
+This does not authenticate WhiteBIT, submit a live order, infer regional
+availability, or claim provider/product qualification.

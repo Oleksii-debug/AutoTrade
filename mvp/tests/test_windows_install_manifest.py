@@ -1,5 +1,6 @@
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -145,6 +146,12 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
         except (OSError, NotImplementedError) as error:
             self.skipTest(f"symlink creation unavailable: {error}")
 
+    def _hardlink_or_skip(self, link: Path, target: Path):
+        try:
+            os.link(target, link)
+        except (OSError, NotImplementedError) as error:
+            self.skipTest(f"hardlink creation unavailable: {error}")
+
     def test_installer_manifest_cannot_overwrite_verified_bundle(self):
         bundle = self.release_bundle()
         before = bundle.read_bytes()
@@ -180,6 +187,27 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
 
         self.assertFalse(output.exists())
         self.assertEqual(bundle.read_bytes(), before)
+
+    def test_manifest_output_hardlink_is_rejected_without_touching_alias(self):
+        bundle = self.release_bundle()
+        victim = self.root / "victim-output-hardlink.txt"
+        victim.write_text("do-not-touch", encoding="utf-8")
+        output = self.root / "installer-input.json"
+        self._hardlink_or_skip(output, victim)
+
+        with self.assertRaisesRegex(
+            InstallerManifestError,
+            "installer manifest output is unsafe",
+        ):
+            build_installer_input_manifest(
+                bundle=bundle,
+                output=output,
+                target_framework="net10.0-windows",
+                runtime_mode="SELF_CONTAINED",
+            )
+
+        self.assertEqual(victim.read_text(encoding="utf-8"), "do-not-touch")
+        self.assertEqual(output.read_text(encoding="utf-8"), "do-not-touch")
 
     def test_manifest_output_symlink_is_rejected_without_touching_target(self):
         bundle = self.release_bundle()
@@ -223,6 +251,30 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
             Path(built["hash_file"]).read_text(encoding="utf-8").split()[0],
             built["sha256"],
         )
+
+    def test_digest_hardlink_is_rejected_before_primary_manifest_mutation(self):
+        bundle = self.release_bundle()
+        output = self.root / "installer-input.json"
+        output.write_text("old-manifest", encoding="utf-8")
+        victim = self.root / "victim-digest-hardlink.txt"
+        victim.write_text("do-not-touch", encoding="utf-8")
+        digest_path = output.with_suffix(output.suffix + ".sha256")
+        self._hardlink_or_skip(digest_path, victim)
+
+        with self.assertRaisesRegex(
+            InstallerManifestError,
+            "installer manifest digest output is unsafe",
+        ):
+            build_installer_input_manifest(
+                bundle=bundle,
+                output=output,
+                target_framework="net10.0-windows",
+                runtime_mode="SELF_CONTAINED",
+            )
+
+        self.assertEqual(output.read_text(encoding="utf-8"), "old-manifest")
+        self.assertEqual(victim.read_text(encoding="utf-8"), "do-not-touch")
+        self.assertEqual(digest_path.read_text(encoding="utf-8"), "do-not-touch")
 
     def test_digest_symlink_is_rejected_before_primary_manifest_mutation(self):
         bundle = self.release_bundle()

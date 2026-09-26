@@ -6,7 +6,10 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from tools.build_provenance_manifest import (
+    _normalized_dotnet_lock,
     dependency_advisory_evidence_document,
+    dotnet_lock_graph,
+    dotnet_package_dependencies,
     normalize_inspected_components,
     release_evidence_document,
 )
@@ -43,6 +46,73 @@ class ReleaseDependencyManifestTests(unittest.TestCase):
             self.assertTrue(item["name"])
             self.assertRegex(item["version"], r"^[0-9][A-Za-z0-9.+-]*$")
             self.assertNotIn("*", item["version"])
+
+    def test_dotnet_package_reference_is_exact_and_lock_graph_is_canonical(self):
+        self.assertEqual(
+            dotnet_package_dependencies(),
+            [{"name": "Velopack", "version": "1.2.158"}],
+        )
+        project = (
+            ROOT / "src" / "AutoTrade.Desktop" / "AutoTrade.Desktop.csproj"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            '<PackageReference Include="Velopack" Version="[1.2.158]" />',
+            project,
+        )
+
+        graph = dotnet_lock_graph()
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["dotnet_lock_graph"], graph)
+        self.assertEqual(
+            manifest["source_inventory"]["dotnet_lock_blob_shas"],
+            {item["lock_file"]: item["lock_blob_sha"] for item in graph},
+        )
+
+        desktop = next(
+            item
+            for item in graph
+            if item["project"]
+            == "src/AutoTrade.Desktop/AutoTrade.Desktop.csproj"
+        )
+        velopack = desktop["dependencies"]["net10.0-windows7.0"]["Velopack"]
+        self.assertEqual(velopack["requested"], "[1.2.158]")
+        self.assertEqual(velopack["resolved"], "1.2.158")
+        self.assertTrue(velopack["contentHash"])
+
+    def test_lock_resolution_or_content_hash_change_changes_dependency_graph_identity(self):
+        with TemporaryDirectory() as directory:
+            lock = Path(directory) / "packages.lock.json"
+            base = {
+                "version": 1,
+                "dependencies": {
+                    "net10.0": {
+                        "Example.Package": {
+                            "type": "Direct",
+                            "requested": "[1.2.3]",
+                            "resolved": "1.2.3",
+                            "contentHash": "first-hash",
+                        }
+                    }
+                },
+            }
+            lock.write_text(json.dumps(base), encoding="utf-8")
+            first = _normalized_dotnet_lock(lock)
+
+            changed_hash = json.loads(json.dumps(base))
+            changed_hash["dependencies"]["net10.0"]["Example.Package"][
+                "contentHash"
+            ] = "second-hash"
+            lock.write_text(json.dumps(changed_hash), encoding="utf-8")
+            second = _normalized_dotnet_lock(lock)
+            self.assertNotEqual(first, second)
+
+            changed_resolution = json.loads(json.dumps(base))
+            changed_resolution["dependencies"]["net10.0"]["Example.Package"][
+                "resolved"
+            ] = "1.2.4"
+            lock.write_text(json.dumps(changed_resolution), encoding="utf-8")
+            third = _normalized_dotnet_lock(lock)
+            self.assertNotEqual(first, third)
 
     def test_empty_or_assertion_only_release_evidence_cannot_remove_blocker(self):
         with TemporaryDirectory() as directory:

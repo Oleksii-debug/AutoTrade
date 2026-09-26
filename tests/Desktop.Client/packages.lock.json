@@ -14,7 +14,7 @@
         "type": "Project",
         "dependencies": {
           "AutoTrade.Contracts": "[1.0.0, )",
-          "Velopack": "[1.2.158, )"
+          "Velopack": "[1.2.158]"
         }
       }
     }

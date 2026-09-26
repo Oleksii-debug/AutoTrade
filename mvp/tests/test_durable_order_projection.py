@@ -154,6 +154,119 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 )
             self.assertEqual(book.order("c1").instrument, "ABC")
 
+    def test_rejected_cancel_resolution_survives_restart_and_retry(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store)
+            book.create_order(
+                event_key="create-cancel-reject",
+                client_order_id="c-reject",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="2",
+                committed_at=T0,
+            )
+            book.request_cancel(
+                event_key="request-cancel-reject",
+                client_order_id="c-reject",
+                command_id="cancel-command-1",
+                committed_at=T1,
+            )
+            filled = book.record_fill(
+                event_key="fill-cancel-reject",
+                client_order_id="c-reject",
+                fill_id="fill-before-reject",
+                provider_execution_id="exec-before-reject",
+                quantity="1",
+                price="100",
+                committed_at=T2,
+            )
+            self.assertEqual(
+                filled.snapshot.state,
+                "PARTIALLY_FILLED_CANCEL_REQUESTED",
+            )
+            rejected = book.reject_cancel(
+                event_key="reject-cancel",
+                client_order_id="c-reject",
+                command_id="cancel-command-1",
+                reason_code="TOO_LATE_TO_CANCEL",
+                committed_at=T3,
+            )
+            self.assertTrue(rejected.inserted)
+            self.assertEqual(rejected.snapshot.state, "PARTIALLY_FILLED")
+            self.assertFalse(rejected.snapshot.cancel_requested)
+            self.assertIsNone(rejected.snapshot.cancel_command_id)
+
+            retry = book.reject_cancel(
+                event_key="reject-cancel",
+                client_order_id="c-reject",
+                command_id="cancel-command-1",
+                reason_code="TOO_LATE_TO_CANCEL",
+                committed_at=T3,
+            )
+            self.assertFalse(retry.inserted)
+            self.assertEqual(retry.event_id, rejected.event_id)
+
+            restarted = durable(store)
+            snapshot = restarted.order("c-reject").snapshot()
+            self.assertEqual(snapshot.state, "PARTIALLY_FILLED")
+            self.assertEqual(snapshot.filled_quantity, Decimal("1"))
+            self.assertFalse(snapshot.cancel_requested)
+            self.assertIsNone(snapshot.cancel_command_id)
+
+            second = restarted.request_cancel(
+                event_key="request-cancel-second",
+                client_order_id="c-reject",
+                command_id="cancel-command-2",
+                committed_at=T4,
+            )
+            self.assertEqual(
+                second.snapshot.state,
+                "PARTIALLY_FILLED_CANCEL_REQUESTED",
+            )
+            self.assertEqual(
+                second.snapshot.cancel_command_id,
+                "cancel-command-2",
+            )
+
+    def test_rejected_cancel_event_key_conflict_preserves_pending_action(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store)
+            book.create_order(
+                event_key="create",
+                client_order_id="c1",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="2",
+                committed_at=T0,
+            )
+            book.request_cancel(
+                event_key="request-cancel",
+                client_order_id="c1",
+                command_id="cancel-command",
+                committed_at=T1,
+            )
+            book.reject_cancel(
+                event_key="reject-cancel",
+                client_order_id="c1",
+                command_id="cancel-command",
+                reason_code="NOT_FOUND",
+                committed_at=T2,
+            )
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "different order request",
+            ):
+                book.reject_cancel(
+                    event_key="reject-cancel",
+                    client_order_id="c1",
+                    command_id="cancel-command",
+                    reason_code="DIFFERENT_REASON",
+                    committed_at=T2,
+                )
+            self.assertFalse(book.order("c1").cancel_requested)
+
     def test_unknown_submission_resolution_survives_restart(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
@@ -547,6 +660,73 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 "cancel-command-durable",
             )
 
+
+    def test_paper_cancel_rejection_requires_scoped_immutable_evidence(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            book = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            book.create_order(
+                event_key="create-paper-reject",
+                client_order_id="paper-reject",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                committed_at=T0,
+            )
+            book.request_cancel(
+                event_key="request-paper-reject",
+                client_order_id="paper-reject",
+                command_id="cancel-paper-1",
+                committed_at=T1,
+            )
+            request = {
+                "client_order_id": "paper-reject",
+                "command_id": "cancel-paper-1",
+                "reason_code": "ALREADY_FILLED",
+            }
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "requires immutable evidence",
+            ):
+                book.reject_cancel(
+                    event_key="reject-without-evidence",
+                    client_order_id="paper-reject",
+                    command_id="cancel-paper-1",
+                    reason_code="ALREADY_FILLED",
+                    committed_at=T2,
+                )
+
+            ref = provider_evidence(
+                artifacts,
+                operation="REJECT_CANCEL",
+                request=request,
+                observed_at=T2,
+            )
+            rejected = book.reject_cancel(
+                event_key="reject-with-evidence",
+                client_order_id="paper-reject",
+                command_id="cancel-paper-1",
+                reason_code="ALREADY_FILLED",
+                committed_at=T2,
+                evidence_refs=[ref],
+            )
+            self.assertFalse(rejected.snapshot.cancel_requested)
+            self.assertFalse(rejected.snapshot.cancel_confirmed)
+            self.assertEqual(rejected.snapshot.state, "PENDING")
+
+            restarted = durable(
+                store,
+                environment="PAPER",
+                evidence_artifact_store=artifacts,
+            )
+            self.assertFalse(
+                restarted.order("paper-reject").snapshot().cancel_requested
+            )
 
     def test_paper_provider_fact_requires_immutable_evidence(self):
         with TemporaryDirectory() as directory:

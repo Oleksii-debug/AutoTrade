@@ -516,6 +516,120 @@ class HostNetworkTests(unittest.TestCase):
         )
         self.assertEqual(restarted.store.state_version, 1)
 
+    def test_server_executes_authority_after_accepted_response(self):
+        origin, session, app, port = self._network_fixture()
+        command_body = json.dumps(self._wire_command(session)).encode("utf-8")
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        self.addCleanup(conn.close)
+
+        conn.request(
+            "POST",
+            "/api/v1/commands",
+            body=command_body,
+            headers=self._wire_headers(session, origin=origin, json_body=True),
+        )
+        accepted_response = conn.getresponse()
+        accepted = json.loads(accepted_response.read().decode("utf-8"))
+        self.assertEqual(accepted_response.status, 200)
+        self.assertEqual(accepted["status"], "ACCEPTED")
+        operation_id = accepted["operation_id"]
+
+        # Reuse the same HTTP connection.  The server cannot read this request
+        # until the first request handler has emitted ACCEPTED and completed
+        # its separate authority-operation pump.
+        conn.request(
+            "GET",
+            "/api/v1/operations/" + operation_id,
+            headers=self._wire_headers(session, origin=origin),
+        )
+        operation_response = conn.getresponse()
+        operation = json.loads(operation_response.read().decode("utf-8"))
+        self.assertEqual(operation_response.status, 200)
+        self.assertEqual(operation["phase"], "SUCCEEDED")
+        self.assertEqual(operation["remaining_uncertainty"], [])
+        self.assertEqual(
+            operation["affected_refs"],
+            ["authority-new-exposure-block:paper-account-1:PAPER"],
+        )
+
+        authority_events = JournalStore(
+            str(Path(self.directory.name) / f"network-{port}.sqlite3")
+        ).load_events("authority_state", "canonical")
+        self.assertEqual(
+            [event["event_type"] for event in authority_events],
+            ["AuthorityNewExposureBlocked"],
+        )
+        self.assertEqual(app.store.get_operation(operation_id).phase, "SUCCEEDED")
+
+    def test_server_startup_resumes_running_authority_without_duplicate_mutation(self):
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        origin = f"http://127.0.0.1:{port}"
+        boundary = self._boundary(origin, f"restart-{port}-credentials.json")
+        session = boundary.create_session(
+            subject="owner",
+            role="OWNER",
+            origin=origin,
+            ttl_seconds=600,
+        )
+        path = str(Path(self.directory.name) / f"restart-{port}.sqlite3")
+        initial = self._application(
+            origin=origin,
+            boundary=boundary,
+            session=session,
+            path=path,
+        )
+        accepted_response = initial.dispatch(
+            method="POST",
+            target="/api/v1/commands",
+            headers=self._wire_headers(session, origin=origin, json_body=True),
+            body=json.dumps(self._wire_command(session)).encode("utf-8"),
+        )
+        accepted = self.body(accepted_response)
+        operation_id = accepted["operation_id"]
+        initial.store.update_operation(
+            operation_id,
+            "RUNNING",
+            remaining_uncertainty=("authority_commit_pending",),
+        )
+        self.assertEqual(initial.store.get_operation(operation_id).phase, "RUNNING")
+
+        restarted = self._application(
+            origin=origin,
+            boundary=boundary,
+            session=session,
+            path=path,
+        )
+        server = AuthenticatedHostServer(("127.0.0.1", port), restarted)
+        self.addCleanup(server.server_close)
+
+        completed = restarted.store.get_operation(operation_id)
+        self.assertEqual(completed.phase, "SUCCEEDED")
+        authority_events = JournalStore(path).load_events(
+            "authority_state",
+            "canonical",
+        )
+        self.assertEqual(
+            [event["event_type"] for event in authority_events],
+            ["AuthorityNewExposureBlocked"],
+        )
+
+        self.assertEqual(
+            restarted.resume_authority_operations(),
+            (),
+        )
+        self.assertEqual(
+            len(
+                JournalStore(path).load_events(
+                    "authority_state",
+                    "canonical",
+                )
+            ),
+            1,
+        )
+
     def test_event_cursor_gap_requires_canonical_resnapshot(self):
         app = self._application(
             origin=self.origin,

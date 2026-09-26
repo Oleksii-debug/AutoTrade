@@ -8,8 +8,10 @@ from uuid import uuid4
 from mvp.autotrade_mvp.bybit_v5 import (
     build_order_payload,
     prepare_order_submission,
+    prepare_order_read_query,
     coverage_evidence,
     parse_executions,
+    parse_order_page,
     parse_submission_response,
     server_time_from_response,
     validate_auth_timestamp,
@@ -206,6 +208,50 @@ def parse_test_executions(observation, **kwargs):
         observation,
         provider_environment="TESTNET",
         **kwargs,
+    )
+
+
+def bound_order_response(
+    response,
+    *,
+    surface="ORDER_HISTORY",
+    category="spot",
+    client_order_id=None,
+    cursor=None,
+    limit=50,
+    start_time_ms=None,
+    end_time_ms=None,
+    account_id="paper-1",
+    environment="PAPER",
+    provider_environment="TESTNET",
+):
+    query = prepare_order_read_query(
+        capability=read_capability(
+            account_id=account_id,
+            environment=environment,
+        ),
+        at=READ_AT,
+        surface=surface,
+        category=category,
+        client_order_id=client_order_id,
+        cursor=cursor,
+        limit=limit,
+        start_time_ms=start_time_ms,
+        end_time_ms=end_time_ms,
+    )
+    raw = json.dumps(
+        response,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return observe_authenticated_json_response(
+        query_binding=query,
+        http_status=200,
+        response_bytes=raw,
+        observed_at=READ_AT,
+        provider_environment=provider_environment,
     )
 
 
@@ -1142,6 +1188,182 @@ class BybitV5AdapterTests(unittest.TestCase):
                 datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
             )
         )
+
+
+    def test_order_history_query_binds_exact_cursor_client_id_and_window(self):
+        binding = prepare_order_read_query(
+            capability=read_capability(),
+            at=READ_AT,
+            surface="ORDER_HISTORY",
+            category="SPOT",
+            client_order_id="client_123",
+            cursor="opaque%3Dcursor",
+            limit=50,
+            start_time_ms=1790193600000,
+            end_time_ms=1790280000000,
+        )
+        self.assertEqual(binding.endpoint, "/v5/order/history")
+        self.assertEqual(binding.query["category"], "spot")
+        self.assertEqual(binding.query["orderLinkId"], "client_123")
+        self.assertEqual(binding.query["cursor"], "opaque%3Dcursor")
+        self.assertEqual(binding.query["limit"], "50")
+        self.assertEqual(binding.query["startTime"], "1790193600000")
+        self.assertEqual(binding.query["endTime"], "1790280000000")
+
+    def test_order_history_rejects_provider_window_over_seven_days(self):
+        with self.assertRaisesRegex(ProviderCoreError, "seven days"):
+            prepare_order_read_query(
+                capability=read_capability(),
+                at=READ_AT,
+                surface="ORDER_HISTORY",
+                category="spot",
+                start_time_ms=0,
+                end_time_ms=(7 * 24 * 60 * 60 * 1000) + 1,
+            )
+
+    def test_realtime_order_query_rejects_history_window(self):
+        with self.assertRaisesRegex(ProviderCoreError, "does not accept history"):
+            prepare_order_read_query(
+                capability=read_capability(),
+                at=READ_AT,
+                surface="OPEN_ORDERS",
+                category="spot",
+                start_time_ms=1790193600000,
+            )
+
+    def test_order_page_preserves_exact_scope_state_and_cursor(self):
+        observation = bound_order_response(
+            {
+                "retCode": 0,
+                "retMsg": "OK",
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "cursor%3Dnext%26page%3D2",
+                    "list": [
+                        {
+                            "orderId": "provider-order-1",
+                            "orderLinkId": "client_123",
+                            "symbol": "BTCUSDT",
+                            "orderStatus": "Filled",
+                            "createdTime": "1790279999000",
+                            "updatedTime": "1790280000000",
+                        }
+                    ],
+                },
+                "time": 1790280000000,
+            },
+            client_order_id="client_123",
+        )
+        page = parse_order_page(observation)
+        self.assertEqual(page.surface, "ORDER_HISTORY")
+        self.assertEqual(page.category, "spot")
+        self.assertEqual(page.environment, "PAPER")
+        self.assertEqual(page.provider_environment, "TESTNET")
+        self.assertEqual(page.next_cursor, "cursor%3Dnext%26page%3D2")
+        self.assertFalse(page.pagination_complete)
+        self.assertEqual(len(page.orders), 1)
+        order = page.orders[0]
+        self.assertEqual(order.provider_order_id, "provider-order-1")
+        self.assertEqual(order.client_order_id, "client_123")
+        self.assertEqual(order.order_status, "Filled")
+        self.assertEqual(order.created_at, "2026-09-24T19:59:59.000Z")
+        self.assertEqual(order.updated_at, "2026-09-24T20:00:00.000Z")
+        self.assertEqual(order.evidence_ref, observation.evidence_ref)
+
+    def test_order_page_empty_cursor_is_terminal_but_not_absence_proof(self):
+        page = parse_order_page(
+            bound_order_response(
+                {
+                    "retCode": 0,
+                    "result": {
+                        "category": "spot",
+                        "nextPageCursor": "",
+                        "list": [],
+                    },
+                }
+            )
+        )
+        self.assertTrue(page.pagination_complete)
+        self.assertEqual(page.orders, ())
+
+    def test_order_page_rejects_category_or_client_identity_mismatch(self):
+        with self.assertRaisesRegex(ProviderCoreError, "category"):
+            parse_order_page(
+                bound_order_response(
+                    {
+                        "retCode": 0,
+                        "result": {
+                            "category": "linear",
+                            "nextPageCursor": "",
+                            "list": [],
+                        },
+                    }
+                )
+            )
+
+        with self.assertRaisesRegex(ProviderCoreError, "orderLinkId"):
+            parse_order_page(
+                bound_order_response(
+                    {
+                        "retCode": 0,
+                        "result": {
+                            "category": "spot",
+                            "nextPageCursor": "",
+                            "list": [
+                                {
+                                    "orderId": "provider-order-wrong-link",
+                                    "orderLinkId": "other_client",
+                                    "symbol": "BTCUSDT",
+                                    "orderStatus": "New",
+                                    "createdTime": "1790279999000",
+                                    "updatedTime": "1790280000000",
+                                }
+                            ],
+                        },
+                    },
+                    client_order_id="expected_client",
+                )
+            )
+
+    def test_order_page_rejects_conflicting_duplicate_order_identity(self):
+        with self.assertRaisesRegex(ProviderCoreError, "conflicting state"):
+            parse_order_page(
+                bound_order_response(
+                    {
+                        "retCode": 0,
+                        "result": {
+                            "category": "spot",
+                            "nextPageCursor": "",
+                            "list": [
+                                {
+                                    "orderId": "same-order",
+                                    "orderLinkId": "",
+                                    "symbol": "BTCUSDT",
+                                    "orderStatus": "New",
+                                    "createdTime": "1790279999000",
+                                    "updatedTime": "1790280000000",
+                                },
+                                {
+                                    "orderId": "same-order",
+                                    "orderLinkId": "",
+                                    "symbol": "BTCUSDT",
+                                    "orderStatus": "Cancelled",
+                                    "createdTime": "1790279999000",
+                                    "updatedTime": "1790280000000",
+                                },
+                            ],
+                        },
+                    }
+                )
+            )
+
+    def test_order_page_rejects_non_order_endpoint_provenance(self):
+        with self.assertRaisesRegex(ProviderCoreError, "unsupported exact"):
+            parse_order_page(
+                bound_execution_response(
+                    {"retCode": 0, "result": {"list": []}}
+                )
+            )
 
 
 if __name__ == "__main__":

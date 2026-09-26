@@ -280,7 +280,12 @@ def _open_stable_regular_file(path: Path, *, name: str):
     return stream
 
 
-def _assert_open_file_identity(path: Path, stream, *, name: str) -> None:
+def _assert_open_file_identity(
+    path: Path,
+    stream,
+    *,
+    name: str,
+) -> os.stat_result:
     try:
         opened = os.fstat(stream.fileno())
         current = os.stat(path, follow_symlinks=False)
@@ -290,10 +295,13 @@ def _assert_open_file_identity(path: Path, stream, *, name: str) -> None:
         ) from error
     if not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(current.st_mode):
         raise InstallerManifestError(f"{name} must be a regular non-symlink file")
-    if opened.st_nlink != 1 or current.st_nlink != 1:
-        raise InstallerManifestError(f"{name} must not have hard-link aliases")
     if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
         raise InstallerManifestError(f"{name} changed during verification")
+    if opened.st_nlink > 1 or current.st_nlink > 1:
+        raise InstallerManifestError(f"{name} must not have hard-link aliases")
+    if opened.st_nlink != 1 or current.st_nlink != 1:
+        raise InstallerManifestError(f"{name} changed during verification")
+    return opened
 
 
 def _sha256_stream(stream) -> str:
@@ -322,14 +330,24 @@ def _zip_member_is_regular(info: zipfile.ZipInfo) -> bool:
 
 def verify_release_bundle(bundle: Path) -> dict[str, object]:
     with _open_stable_regular_file(bundle, name="release bundle") as bundle_stream:
+        before = os.fstat(bundle_stream.fileno())
         bundle_digest = "sha256:" + _sha256_stream(bundle_stream)
         bundle_stream.seek(0)
         verified = _verify_release_bundle_stream(bundle_stream, bundle_digest)
-        _assert_open_file_identity(
+        after = _assert_open_file_identity(
             bundle,
             bundle_stream,
             name="release bundle",
         )
+        if (
+            (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+            or before.st_size != after.st_size
+            or before.st_mtime_ns != after.st_mtime_ns
+            or before.st_ctime_ns != after.st_ctime_ns
+        ):
+            raise InstallerManifestError(
+                "release bundle changed during verification"
+            )
         return verified
 
 

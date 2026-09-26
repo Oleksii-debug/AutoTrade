@@ -165,8 +165,6 @@ def _assert_staged_file_identity(
     for observed in (opened, current, resolved_current):
         if not stat.S_ISREG(observed.st_mode):
             raise BundleError(f"staged entry must remain a regular file: {path}")
-        if observed.st_nlink != 1:
-            raise BundleError(f"hardlinked staged files are forbidden: {path}")
 
     try:
         resolved_path.relative_to(staging_resolved)
@@ -177,6 +175,16 @@ def _assert_staged_file_identity(
     if identity != (current.st_dev, current.st_ino) or identity != (
         resolved_current.st_dev,
         resolved_current.st_ino,
+    ):
+        raise BundleError(f"staged file changed during collection: {path}")
+    if any(
+        observed.st_nlink > 1
+        for observed in (opened, current, resolved_current)
+    ):
+        raise BundleError(f"hardlinked staged files are forbidden: {path}")
+    if any(
+        observed.st_nlink != 1
+        for observed in (opened, current, resolved_current)
     ):
         raise BundleError(f"staged file changed during collection: {path}")
     return opened

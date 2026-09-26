@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
+import tools.build_windows_install_manifest as installer_manifest_module
 from tools.build_windows_bundle import build_bundle
 from tools.build_windows_install_manifest import (
     InstallerManifestError,
@@ -190,6 +191,41 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
                 verify_release_bundle(bundle)
 
         self.assertTrue(swapped)
+
+    def test_same_inode_mutation_during_verification_fails_closed(self):
+        bundle = self.release_bundle("same-inode-release.zip")
+        original_verify = installer_manifest_module._verify_release_bundle_stream
+        mutated = False
+
+        def verify_then_mutate(stream, digest):
+            nonlocal mutated
+            result = original_verify(stream, digest)
+            try:
+                with bundle.open("r+b") as writer:
+                    first = writer.read(1)
+                    if not first:
+                        self.fail("release bundle unexpectedly empty")
+                    writer.seek(0)
+                    writer.write(bytes([first[0] ^ 0x01]))
+                    writer.flush()
+                    os.fsync(writer.fileno())
+            except OSError as error:
+                self.skipTest(f"in-place mutation unavailable: {error}")
+            mutated = True
+            return result
+
+        with patch.object(
+            installer_manifest_module,
+            "_verify_release_bundle_stream",
+            side_effect=verify_then_mutate,
+        ):
+            with self.assertRaisesRegex(
+                InstallerManifestError,
+                "release bundle changed during verification",
+            ):
+                verify_release_bundle(bundle)
+
+        self.assertTrue(mutated)
 
     def test_compressed_payload_is_rejected_as_noncanonical_bundle(self):
         source = self.release_bundle()
@@ -422,7 +458,7 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
             return [
                 (
                     name,
-                    b"tampered"
+                    b"DESKTOP"
                     if name == "payload/AutoTrade.Desktop.exe"
                     else payload,
                 )

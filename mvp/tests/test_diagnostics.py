@@ -28,8 +28,15 @@ class DiagnosticTraceTests(unittest.TestCase):
             self.assertEqual(snapshot.evidence_count, 3)
             self.assertEqual(snapshot.pending_outbox_sample_count, 3)
             text = snapshot.to_text()
+            first = snapshot.traces[0]
             self.assertIn("Step 1", text)
+            self.assertIn(f"event {first.event_id}", text)
+            self.assertIn(f"evidence {first.evidence_id}", text)
             self.assertIn("decision BUY", text)
+            self.assertIn(f"reason {first.decision_reason}", text)
+            self.assertIn(f"cash {first.cash}", text)
+            self.assertIn(f"position {first.position}", text)
+            self.assertIn(f"equity {first.equity}", text)
             self.assertNotIn("{", text)
 
     def test_missing_journal_linkage_fails_closed(self):

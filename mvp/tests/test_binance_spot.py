@@ -366,7 +366,7 @@ class BinanceSpotFoundationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(
             BinanceSpotAdapterError,
-            "reference-price evidence",
+            "provider reference-price observation evidence",
         ):
             prepare_order_request(
                 intent,

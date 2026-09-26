@@ -59,14 +59,14 @@ def _normalized_key(value: object) -> str:
 
 _EMBEDDED_SECRET_PATTERNS = (
     re.compile(
-        r"(?i)\b(authorization|proxy-authorization)\s*[:=]\s*[^,;\r\n]+"
+        r"(?i)(?:[\"'])?\b(authorization|proxy-authorization)\b(?:[\"'])?\s*[:=]\s*[^,;\r\n}\]]+"
     ),
     re.compile(
         r"(?i)\b(https?://)[^/@\s]+@"
     ),
     re.compile(
-        r"(?i)\b(api[_-]?key|token|access[_-]?token|refresh[_-]?token|session|session[_-]?token|"
-        r"secret|credential|client[_-]?secret|private[_-]?key|password)\s*[:=]\s*([^&\s;,]+)"
+        r"(?i)(?:[\"'])?\b(api[_-]?key|token|access[_-]?token|refresh[_-]?token|session|session[_-]?token|"
+        r"secret|credential|client[_-]?secret|private[_-]?key|password)\b(?:[\"'])?\s*[:=]\s*([^&\s;,}\]]+)"
     ),
 )
 _PRIVATE_KEY_MARKERS = (

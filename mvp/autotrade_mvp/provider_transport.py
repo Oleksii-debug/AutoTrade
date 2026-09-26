@@ -1433,6 +1433,115 @@ class WhiteBitDurableNonceAllocator(_DurableProviderNonceAllocator):
         )
 
 
+class KrakenFuturesDurableNonceAllocator:
+    """Durable Kraken Futures nonce authority keyed by provider API-key identity."""
+
+    def __init__(
+        self,
+        *,
+        journal: JournalStore,
+        account_id: str,
+        environment: str,
+        provider_environment: str,
+        credential_handle: PersistentCredentialHandle,
+        clock_millis: ClockMillis,
+        clock_utc: ClockUtc | None = None,
+        max_contention_retries: int = 32,
+    ) -> None:
+        if not isinstance(journal, JournalStore):
+            raise TypeError("journal must be JournalStore")
+        if not isinstance(credential_handle, PersistentCredentialHandle):
+            raise TypeError(
+                "credential_handle must be PersistentCredentialHandle"
+            )
+        account = _canonical_text(account_id, name="account_id")
+        env = _canonical_environment(environment)
+        provider_env = _canonical_text(
+            provider_environment,
+            name="provider_environment",
+        ).upper()
+        policy = KRAKEN_FUTURES_ENDPOINT_POLICIES.get(provider_env)
+        if policy is None or policy.environment != env:
+            raise ProviderTransportScopeError(
+                "Kraken Futures provider/runtime environment mismatch"
+            )
+        if (
+            credential_handle.provider != "KRAKEN"
+            or credential_handle.environment != env
+            or credential_handle.purpose != "TRADE"
+            or credential_handle.account_id != account
+        ):
+            raise ProviderTransportScopeError(
+                "Kraken Futures nonce credential scope mismatch"
+            )
+        if not callable(clock_millis):
+            raise TypeError("clock_millis must be callable")
+        if clock_utc is not None and not callable(clock_utc):
+            raise TypeError("clock_utc must be callable or None")
+        if (
+            isinstance(max_contention_retries, bool)
+            or not isinstance(max_contention_retries, int)
+            or max_contention_retries < 1
+            or max_contention_retries > 1024
+        ):
+            raise ProviderTransportScopeError(
+                "max_contention_retries must be an integer from 1 through 1024"
+            )
+
+        self.journal = journal
+        self.account_id = account
+        self.environment = env
+        self.provider_environment = provider_env
+        self.credential_handle_id = credential_handle.handle_id
+        self.credential_generation = credential_handle.generation
+        self.clock_millis = clock_millis
+        self.clock_utc = clock_utc
+        self.max_contention_retries = max_contention_retries
+
+    @staticmethod
+    def provider_api_key_fingerprint(provider_api_key: object) -> str:
+        api_key = _canonical_text(
+            provider_api_key,
+            name="Kraken Futures provider API key",
+        )
+        return "sha256:" + sha256(api_key.encode("utf-8")).hexdigest()
+
+    def for_provider_api_key(
+        self,
+        provider_api_key: object,
+    ) -> _DurableProviderNonceAllocator:
+        fingerprint = self.provider_api_key_fingerprint(provider_api_key)
+        return _DurableProviderNonceAllocator(
+            provider_id="KRAKEN",
+            display_name="Kraken Futures",
+            journal=self.journal,
+            account_id=self.account_id,
+            environment=self.environment,
+            clock_millis=self.clock_millis,
+            clock_utc=self.clock_utc,
+            max_contention_retries=self.max_contention_retries,
+            scope_fields={
+                "provider_environment": self.provider_environment,
+                "provider_api_key_fingerprint": fingerprint,
+            },
+            max_nonce=_UINT64_MAX,
+            nonce_domain_name="unsigned 64-bit",
+            aggregate_identity_material=(
+                "KRAKEN_FUTURES|"
+                + self.provider_environment
+                + "|provider-api-key|"
+                + fingerprint
+            ),
+            allowed_environments=frozenset({"PAPER", "LIVE"}),
+        )
+
+    def aggregate_id_for_provider_api_key(self, provider_api_key: object) -> str:
+        return self.for_provider_api_key(provider_api_key).aggregate_id
+
+    def send_lock_path_for_provider_api_key(self, provider_api_key: object):
+        return self.for_provider_api_key(provider_api_key)._send_lock_path
+
+
 class KrakenSpotDurableNonceAllocator:
     """Journal-backed Kraken Spot nonce authority keyed by provider API-key identity.
 

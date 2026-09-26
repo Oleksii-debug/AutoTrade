@@ -779,6 +779,28 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
                 measured_downtime_ms=measured,
             )
 
+    def test_direct_pass_with_fabricated_trust_identity_still_requires_canonical_evidence(self):
+        measured = {scenario: 10 for scenario in RecoveryScenario}
+        with self.assertRaisesRegex(
+            ValueError,
+            "independently verifiable qualification evidence",
+        ):
+            RecoveryQualificationDecision(
+                status=RecoveryEvidenceStatus.PASS,
+                source_sha=SOURCE_SHA,
+                release_artifact_id=RELEASE_ARTIFACT_ID,
+                release_artifact_sha256=ARTIFACT_SHA,
+                evidence_schema_version=EVIDENCE_SCHEMA,
+                protocol_id=PROTOCOL_ID,
+                evidence_set_sha256=DECISION_EVIDENCE_SET_SHA,
+                blockers=(),
+                measured_downtime_ms=measured,
+                qualification_attestation_id=RELEASE_ARTIFACT_ID,
+                qualification_attestation_digest=ARTIFACT_SHA,
+                qualification_policy_id=ARTIFACT_SHA,
+                qualification_trust_root_id=ARTIFACT_SHA,
+            )
+
     def test_decision_copies_measured_mapping_and_rejects_boolean_downtime(self):
         decision = qualify(
             policy=policy(),

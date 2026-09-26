@@ -12,7 +12,7 @@ from typing import Any, Callable
 from uuid import UUID
 
 from .durable_publish import atomic_write_json, sha256_file, sync_parent_directory
-from .resource_lock import ResourceLock
+from .resource_lock import ResourceLock, _open_read_only_descriptor
 from ..io.strict_json import strict_json_loads
 
 
@@ -268,15 +268,22 @@ class ArtifactStore:
         if before.st_size != expected_bytes:
             raise ArtifactIntegrityError("artifact object size mismatch")
 
-        flags = (
-            os.O_RDONLY
-            | getattr(os, "O_BINARY", 0)
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_NONBLOCK", 0)
-        )
         try:
-            descriptor = os.open(object_path, flags)
+            if os.name == "nt":
+                descriptor = _open_read_only_descriptor(object_path)
+            else:
+                no_follow = getattr(os, "O_NOFOLLOW", 0)
+                if not no_follow:
+                    raise OSError(
+                        "platform lacks no-follow artifact object open support"
+                    )
+                flags = (
+                    os.O_RDONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | no_follow
+                    | getattr(os, "O_NONBLOCK", 0)
+                )
+                descriptor = os.open(object_path, flags)
         except OSError as error:
             raise ArtifactIntegrityError(
                 "artifact object could not be opened safely"

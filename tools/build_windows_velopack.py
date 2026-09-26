@@ -463,13 +463,14 @@ def _validate_vpk_outputs(
         raise VelopackPackagingError(
             "Velopack output is missing the required Setup/full-package/release-index family"
         )
-    if version not in full_packages[0]:
+    expected_full_package = f"{PACK_ID}-{version}-full.nupkg"
+    if full_packages[0] != expected_full_package:
         raise VelopackPackagingError(
-            "Velopack full-package filename does not bind the requested version"
+            "Velopack full-package filename does not exactly bind the requested version"
         )
 
     allowed = required | {
-        full_packages[0],
+        expected_full_package,
         "assets.win.json",
         "RELEASES",
     }

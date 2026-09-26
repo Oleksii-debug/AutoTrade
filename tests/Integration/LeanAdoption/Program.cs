@@ -131,6 +131,20 @@ if (args.Length > 0)
             regressedAfterRestart.HasEconomicFill,
             "Restart characterization lost the economic fill.");
 
+        var stillBelowRestartHighWater = resumedCallbacks.Observe(new OrderEvent
+        {
+            OrderId = 84,
+            Id = 4,
+            Symbol = restartSymbol,
+            UtcTime = instant.AddTicks(5000),
+            Status = OrderStatus.Submitted,
+            FillQuantity = decimal.Zero,
+            FillPrice = decimal.Zero
+        });
+        Require(
+            stillBelowRestartHighWater.TimeRegressed,
+            "Restart forgot the callback arrival high-water after one regressed event.");
+
         Console.WriteLine("WP02_LEAN_RESTART_RESUME_PASS");
         return;
     }
@@ -326,6 +340,20 @@ var regressed = callbacks.Observe(new OrderEvent
 Require(regressed.TimeRegressed, "Arrival-time regression was silently hidden.");
 Require(regressed.HasEconomicFill, "Final non-zero fill was not characterized.");
 
+var stillBelowHighWater = callbacks.Observe(new OrderEvent
+{
+    OrderId = 42,
+    Id = 4,
+    Symbol = symbol,
+    UtcTime = instant.AddTicks(5000),
+    Status = OrderStatus.Submitted,
+    FillQuantity = decimal.Zero,
+    FillPrice = decimal.Zero
+});
+Require(
+    stillBelowHighWater.TimeRegressed,
+    "A second callback below the prior arrival high-water was silently accepted.");
+
 var restartIntegrity = new LeanCallbackCharacterizer();
 restartIntegrity.Observe(new OrderEvent
 {
@@ -373,15 +401,15 @@ ExpectFailure<InvalidDataException>(
     "tampered LEAN callback restart economics must fail integrity verification");
 
 var oldSchemaCheckpoint = restartCheckpoint.Replace(
+    "\"SchemaVersion\":\"2.1.0\"",
     "\"SchemaVersion\":\"2.0.0\"",
-    "\"SchemaVersion\":\"1.0.0\"",
     StringComparison.Ordinal);
 Require(
     oldSchemaCheckpoint != restartCheckpoint,
     "Restart schema regression did not mutate the schema version.");
 ExpectFailure<InvalidDataException>(
     () => LeanCallbackCharacterizer.RestoreRestartState(oldSchemaCheckpoint),
-    "v1 restart state lacking fee/currency/direction identity must fail closed");
+    "v2.0 restart state lacking monotonic arrival-high-water semantics must fail closed");
 
 Require(
     restartCheckpoint.StartsWith("{", StringComparison.Ordinal),
@@ -405,8 +433,8 @@ ExpectFailure<InvalidDataException>(
     "unknown callback restart state fields must fail closed");
 
 var checkpointWithDuplicateTopLevel = restartCheckpoint.Replace(
-    "\"SchemaVersion\":\"2.0.0\"",
-    "\"SchemaVersion\":\"1.0.0\",\"SchemaVersion\":\"1.0.0\"",
+    "\"SchemaVersion\":\"2.1.0\"",
+    "\"SchemaVersion\":\"2.1.0\",\"SchemaVersion\":\"2.1.0\"",
     StringComparison.Ordinal);
 Require(
     checkpointWithDuplicateTopLevel != restartCheckpoint,

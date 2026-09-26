@@ -271,7 +271,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
     def test_unresolved_command_cannot_be_retargeted_after_scope_or_session_change(self):
         js = APP.read_text(encoding="utf-8")
         submit = js.index("async function submitCommand(event)")
-        build = js.index("const payload = commandForSubmission(action)", submit)
+        build = js.index("payload = commandForSubmission(action)", submit)
         fence = js.index("if (recovering && (", submit)
         self.assertLess(fence, build)
         for required in (
@@ -415,7 +415,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("await refreshSnapshot();", js)
         self.assertNotIn('action: "REFRESH_STATE"', js)
 
-    def test_host_safety_commands_fail_closed_by_authenticated_role(self):
+    def test_host_authority_commands_fail_closed_by_authenticated_role(self):
         html = INDEX.read_text(encoding="utf-8")
         js = APP.read_text(encoding="utf-8")
         self.assertIn(
@@ -427,10 +427,15 @@ class SemanticWebClientContractTests(unittest.TestCase):
             js,
         )
         self.assertIn(
+            'SET_AUTHORITY: new Set(["OWNER"])',
+            js,
+        )
+        self.assertIn(
             'role: requiredText(permissionSummary.role, "permission_summary.role")',
             js,
         )
         self.assertIn("function roleCanSubmitAction(role, action)", js)
+        self.assertIn("function actionCanSubmitInCurrentScope(role, action)", js)
         self.assertIn("function syncHostActionOptions(role)", js)
         self.assertIn("option.disabled = !allowed", js)
         self.assertIn(
@@ -440,7 +445,232 @@ class SemanticWebClientContractTests(unittest.TestCase):
         )
         self.assertIn('value="BLOCK_NEW_EXPOSURE"', html)
         self.assertIn('value="REVOKE_AUTHORITY"', html)
-        self.assertNotIn('value="SET_AUTHORITY"', html)
+        self.assertIn('value="SET_AUTHORITY"', html)
+        self.assertIn(
+            'if (action === "SET_AUTHORITY" && state.environment === "REPLAY")',
+            js,
+        )
+
+    def test_owner_authority_policy_workflow_is_structured_and_scope_bound(self):
+        html = INDEX.read_text(encoding="utf-8")
+        js = APP.read_text(encoding="utf-8")
+        for field_id in (
+            "authority-policy-fields",
+            "authority-policy-account",
+            "authority-policy-environment",
+            "authority-policy-id",
+            "authority-instrument-id",
+            "authority-instrument-version",
+            "authority-actions",
+            "authority-max-notional",
+            "authority-valid-from",
+            "authority-expires-at",
+            "authority-policy-version",
+            "authority-autonomous",
+            "authority-protection-only",
+            "authority-policy-confirm",
+        ):
+            self.assertIn(f'id="{field_id}"', html)
+        self.assertNotIn("<textarea", html.lower())
+        self.assertIn("function authorityPolicyPayload()", js)
+        self.assertIn("environments: Object.freeze([state.environment])", js)
+        self.assertIn("policy_id: requiredPolicyInput", js)
+        self.assertIn("instrument_id: instrumentId.toLowerCase()", js)
+        self.assertIn("actions: Object.freeze(authorityPolicyActions())", js)
+        self.assertIn("max_notional: positiveDecimalPolicyInput", js)
+        self.assertIn("autonomous: byId(\"authority-autonomous\").checked", js)
+        self.assertIn(
+            "protection_only: byId(\"authority-protection-only\").checked",
+            js,
+        )
+        self.assertIn(
+            "review confirmation is required before authority policy submission",
+            js,
+        )
+        self.assertIn(
+            'if (action === "SET_AUTHORITY") return authorityPolicyPayload()',
+            js,
+        )
+        self.assertNotIn('name="account_id"', html)
+        self.assertNotIn('name="environment"', html)
+
+    def test_policy_form_uses_exact_integer_and_decimal_guards_before_host_submit(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("function positiveSafeIntegerPolicyInput(id, name)", js)
+        self.assertIn("Number.isSafeInteger(value)", js)
+        self.assertIn("function positiveDecimalPolicyInput(id, name)", js)
+        self.assertIn(
+            'throw new Error(name + " must be a positive canonical decimal")',
+            js,
+        )
+        self.assertIn("utcInstant(validFrom, \"valid from\")", js)
+        self.assertIn("utcInstant(expiresAt, \"expires at\")", js)
+        self.assertIn(
+            'throw new Error("authority policy expiry must be after valid from")',
+            js,
+        )
+
+    def test_invalid_policy_form_does_not_invalidate_fresh_host_snapshot(self):
+        js = APP.read_text(encoding="utf-8")
+        submit = js.index("async function submitCommand(event)")
+        build = js.index("payload = commandForSubmission(action)", submit)
+        local_catch = js.index("} catch (error) {", build)
+        network_submit = js.index("await submitCanonicalCommand(payload)", local_catch)
+        local_slice = js[local_catch:network_submit]
+        self.assertIn("Command was not submitted:", local_slice)
+        self.assertNotIn("state.snapshotReady = false", local_slice)
+        self.assertNotIn("state.sessionIdentity = null", local_slice)
+
+    def test_policy_review_confirmation_is_bound_to_exact_fields_and_snapshot_context(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("function authorityReviewScopeKey()", js)
+        self.assertIn(
+            'state.sessionIdentity === null ? "" : state.sessionIdentity.actor',
+            js,
+        )
+        self.assertIn(
+            'state.sessionIdentity === null ? "" : state.sessionIdentity.session',
+            js,
+        )
+        self.assertIn("function invalidateAuthorityPolicyReview()", js)
+        self.assertIn("function bindAuthorityPolicyReviewInvalidation()", js)
+        self.assertIn(
+            'input.addEventListener("input", invalidateAuthorityPolicyReview)',
+            js,
+        )
+        self.assertIn(
+            'input.addEventListener("change", invalidateAuthorityPolicyReview)',
+            js,
+        )
+        self.assertIn(
+            "confirmation.dataset.reviewStateVersion = state.version.toString()",
+            js,
+        )
+        self.assertIn(
+            "confirmation.dataset.reviewScope = authorityReviewScopeKey()",
+            js,
+        )
+        self.assertIn(
+            "confirmation.dataset.reviewStateVersion !== state.version.toString()",
+            js,
+        )
+        self.assertIn(
+            "confirmation.dataset.reviewScope !== authorityReviewScopeKey()",
+            js,
+        )
+        self.assertIn(
+            "review confirmation must be renewed after host state or policy scope changes",
+            js,
+        )
+        self.assertIn(
+            "priorScopeKey !== \"\" && priorScopeKey !== scopeKey",
+            js,
+        )
+        self.assertIn("bindAuthorityPolicyReviewInvalidation();", js)
+
+    def test_pending_privileged_retry_is_disabled_when_snapshot_scope_changes(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("function pendingCommandMatchesCurrentScope()", js)
+        self.assertIn(
+            "state.pendingCommand.account_id === state.accountId",
+            js,
+        )
+        self.assertIn(
+            "state.pendingCommand.environment === state.environment",
+            js,
+        )
+        self.assertIn(
+            "state.pendingCommand.actor === state.sessionIdentity.actor",
+            js,
+        )
+        self.assertIn(
+            "state.pendingCommand.session === state.sessionIdentity.session",
+            js,
+        )
+        availability = js[
+            js.index("function setCommandAvailability(enabled)"):
+            js.index("function freshnessText", js.index("function setCommandAvailability(enabled)"))
+        ]
+        self.assertIn(
+            "const pendingScopeMatches = pendingCommandMatchesCurrentScope();",
+            availability,
+        )
+        self.assertIn("!pendingScopeMatches", availability)
+
+    def test_pending_authority_retry_restores_locks_and_reconfirms_exact_payload(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("function renderPendingAuthorityPolicyForRetry()", js)
+        self.assertIn("select.value = state.pendingCommand.action", js)
+        self.assertIn("select.disabled = true", js)
+        self.assertIn("input.disabled = !active || lockedForRetry", js)
+        self.assertIn(
+            'input.disabled = !active || (lockedForRetry && id !== "authority-policy-confirm")',
+            js,
+        )
+        self.assertIn(
+            "confirmation.dataset.reviewCommandId =",
+            js,
+        )
+        self.assertIn(
+            "confirmation.dataset.reviewCommandId !== reviewCommandId",
+            js,
+        )
+        render = js[
+            js.index("function renderPendingAuthorityPolicyForRetry()"):
+            js.index("function parseCanonicalSnapshot(value)")
+        ]
+        self.assertIn(
+            "confirmation.dataset.reviewCommandId !== state.pendingCommand.command_id",
+            render,
+        )
+        self.assertIn(
+            "confirmation.dataset.reviewStateVersion !== state.version.toString()",
+            render,
+        )
+        self.assertIn(
+            "confirmation.dataset.reviewScope !== authorityReviewScopeKey()",
+            render,
+        )
+        self.assertIn("invalidateAuthorityPolicyReview();", render)
+        self.assertIn(
+            'state.pendingCommand.action === "SET_AUTHORITY"',
+            js,
+        )
+        self.assertIn(
+            "const reviewedPolicy = authorityPolicyPayload()",
+            js,
+        )
+        self.assertIn(
+            "JSON.stringify(state.pendingCommand.payload)",
+            js,
+        )
+        self.assertIn(
+            "reviewed authority policy does not exactly match the unresolved command payload",
+            js,
+        )
+        render = js[
+            js.index("function renderPendingAuthorityPolicyForRetry()"):
+            js.index("function parseCanonicalSnapshot(value)")
+        ]
+        for field_id in (
+            "authority-policy-id",
+            "authority-instrument-id",
+            "authority-instrument-version",
+            "authority-actions",
+            "authority-max-notional",
+            "authority-valid-from",
+            "authority-expires-at",
+            "authority-policy-version",
+        ):
+            self.assertIn(f'byId("{field_id}").value', render)
+        self.assertIn(
+            'byId("authority-autonomous").checked = policy.autonomous === true',
+            render,
+        )
+        self.assertIn(
+            'byId("authority-protection-only").checked = policy.protection_only === true',
+            render,
+        )
 
     def test_action_change_rechecks_role_before_enabling_submit(self):
         js = APP.read_text(encoding="utf-8")
@@ -453,7 +683,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
             js,
         )
         self.assertIn(
-            "roleCanSubmitAction(state.sessionIdentity.role, effectiveAction)",
+            "actionCanSubmitInCurrentScope(state.sessionIdentity.role, effectiveAction)",
             js,
         )
         self.assertIn(
@@ -465,7 +695,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
     def test_pending_owner_command_is_not_retried_after_role_downgrade(self):
         js = APP.read_text(encoding="utf-8")
         submit = js.index("async function submitCommand(event)")
-        payload = js.index("const payload = commandForSubmission(action)", submit)
+        payload = js.index("payload = commandForSubmission(action)", submit)
         role_fence = js.index(
             "if (recovering && !roleCanSubmitAction(",
             submit,
@@ -606,14 +836,14 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("if (state.pendingCommand !== null)", js)
         self.assertIn("return state.pendingCommand", js)
         self.assertIn("state.pendingCommand = payload", js)
-        self.assertIn("const payload = commandForSubmission(action)", js)
+        self.assertIn("payload = commandForSubmission(action)", js)
         self.assertIn("clearConfirmedCommand(payload)", js)
         self.assertIn(
             "Its original command_id and idempotency_key are retained for exact retry",
             js,
         )
         submit = js.index("async function submitCommand(event)")
-        construct = js.index("const payload = commandForSubmission(action)", submit)
+        construct = js.index("payload = commandForSubmission(action)", submit)
         post = js.index("await submitCanonicalCommand(payload)", construct)
         clear = js.index("clearConfirmedCommand(payload)", post)
         ambiguous = js.index("could not be confirmed", clear)

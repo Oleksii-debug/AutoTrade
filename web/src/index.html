@@ -104,12 +104,57 @@
       <form id="host-command-form">
         <input id="expected-state-version" name="expected_state_version" type="hidden" value="0">
         <fieldset>
-          <legend>Host safety command</legend>
+          <legend>Host authority command</legend>
           <label for="host-action">Action</label>
           <select id="host-action" name="action" required>
             <option value="BLOCK_NEW_EXPOSURE">Block new exposure</option>
             <option value="REVOKE_AUTHORITY">Revoke active authority</option>
+            <option value="SET_AUTHORITY">Review and activate bounded authority policy</option>
           </select>
+          <div id="authority-policy-fields" hidden>
+            <p>
+              Owner-only policy activation. The account and environment are copied from the
+              current authenticated host snapshot; no browser-authored scope is accepted.
+            </p>
+            <dl>
+              <dt>Account</dt><dd><output id="authority-policy-account">Unavailable</output></dd>
+              <dt>Environment</dt><dd><output id="authority-policy-environment">Unavailable</output></dd>
+            </dl>
+            <label for="authority-policy-id">Policy ID</label>
+            <input id="authority-policy-id" name="policy_id" type="text" autocomplete="off">
+            <label for="authority-instrument-id">Instrument ID</label>
+            <input id="authority-instrument-id" name="instrument_id" type="text" autocomplete="off">
+            <label for="authority-instrument-version">Instrument version</label>
+            <input id="authority-instrument-version" name="instrument_version" type="number" min="1" step="1" inputmode="numeric">
+            <label for="authority-actions">Allowed actions</label>
+            <input id="authority-actions" name="authority_actions" type="text"
+                   autocomplete="off" aria-describedby="authority-actions-help">
+            <p id="authority-actions-help">Enter one or more canonical action names separated by commas, for example ORDER.SUBMIT.</p>
+            <label for="authority-max-notional">Maximum notional</label>
+            <input id="authority-max-notional" name="max_notional" type="text"
+                   inputmode="decimal" autocomplete="off">
+            <label for="authority-valid-from">Valid from (UTC instant)</label>
+            <input id="authority-valid-from" name="valid_from" type="text"
+                   placeholder="2030-01-01T00:00:00Z" autocomplete="off">
+            <label for="authority-expires-at">Expires at (UTC instant)</label>
+            <input id="authority-expires-at" name="expires_at" type="text"
+                   placeholder="2030-01-02T00:00:00Z" autocomplete="off">
+            <label for="authority-policy-version">Policy version</label>
+            <input id="authority-policy-version" name="policy_version" type="number"
+                   min="1" step="1" inputmode="numeric" value="1">
+            <label>
+              <input id="authority-autonomous" name="autonomous" type="checkbox">
+              Permit autonomous use within these exact bounds
+            </label>
+            <label>
+              <input id="authority-protection-only" name="protection_only" type="checkbox">
+              Protection-only policy
+            </label>
+            <label>
+              <input id="authority-policy-confirm" name="authority_policy_confirm" type="checkbox">
+              I reviewed the exact account, environment, instrument, actions, notional and validity window above.
+            </label>
+          </div>
           <button id="submit-command" type="submit" disabled>Submit command</button>
           <button id="refresh-state" type="button">Refresh host state</button>
         </fieldset>

@@ -110,34 +110,60 @@ def _python_blockers(root: Path) -> tuple[list[str], list[str]]:
         blockers.append("UNREADABLE_RESEARCH_PYPROJECT")
         return blockers, exact
 
-    build_requires = document.get("build-system", {}).get("requires")
-    if not isinstance(build_requires, list) or not build_requires:
+    build_requires_raw = document.get("build-system", {}).get("requires")
+    build_requires: list[str] = []
+    if not isinstance(build_requires_raw, list) or not build_requires_raw:
         blockers.append("MISSING_RESEARCH_BUILD_REQUIREMENTS")
     else:
+        build_requires = list(build_requires_raw)
         for requirement in build_requires:
             if not is_exact_python_requirement(requirement):
                 blockers.append(
                     f"NON_EXACT_RESEARCH_BUILD_REQUIREMENT:{requirement}"
                 )
+        if not set(build_requires).issubset(set(dev_requirements)):
+            blockers.append("RESEARCH_BUILD_REQUIREMENTS_DRIFT")
 
-    test_requires = (
+    test_requires_raw = (
         document.get("project", {})
         .get("optional-dependencies", {})
         .get("test")
     )
-    if not isinstance(test_requires, list) or not test_requires:
+    if not isinstance(test_requires_raw, list) or not test_requires_raw:
         blockers.append("MISSING_RESEARCH_TEST_REQUIREMENTS")
     else:
+        test_requires = list(test_requires_raw)
         for requirement in test_requires:
             if not is_exact_python_requirement(requirement):
                 blockers.append(
                     f"NON_EXACT_RESEARCH_TEST_REQUIREMENT:{requirement}"
                 )
-        if set(test_requires) != set(dev_requirements):
+        expected_tests = set(dev_requirements) - set(build_requires)
+        if set(test_requires) != expected_tests:
             blockers.append("RESEARCH_TEST_REQUIREMENTS_DRIFT")
 
-    return blockers, exact
+    workflow = root / ".github" / "workflows" / "research-primitives.yml"
+    try:
+        workflow_text = workflow.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        blockers.append("UNREADABLE_RESEARCH_INSTALL_WORKFLOW")
+    else:
+        if '- "requirements-dev.txt"' not in workflow_text:
+            blockers.append("RESEARCH_HASH_LOCK_WORKFLOW_PATH_MISSING")
+        expected_hash_install = (
+            "run: python -m pip install --disable-pip-version-check "
+            "--force-reinstall --no-deps --only-binary=:all: --require-hashes "
+            "-r requirements-dev.txt"
+        )
+        if expected_hash_install not in workflow_text:
+            blockers.append("RESEARCH_HASHED_INSTALL_COMMAND_MISSING")
+        expected_editable_install = (
+            "run: python -m pip install --no-deps --no-build-isolation -e research"
+        )
+        if expected_editable_install not in workflow_text:
+            blockers.append("RESEARCH_EDITABLE_NO_BUILD_ISOLATION_MISSING")
 
+    return blockers, exact
 
 def _dotnet_dependency_lock_blockers(
     root: Path,

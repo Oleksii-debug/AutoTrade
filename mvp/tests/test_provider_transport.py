@@ -55,6 +55,7 @@ from mvp.autotrade_mvp.provider_transport import (
     WHITEBIT_ENDPOINT_POLICIES,
     WhiteBitDurableNonceAllocator,
     WhiteBitHttpTransport,
+    _DurableProviderNonceAllocator,
 )
 from mvp.autotrade_mvp.whitebit import WhiteBitPreparedRequest
 from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
@@ -1173,6 +1174,92 @@ class KrakenSpotProviderTransportTests(unittest.TestCase):
                 distinct_key_domain.aggregate_id,
                 trade_domain.aggregate_id,
             )
+
+    def test_provider_key_nonce_domain_inherits_legacy_handle_high_water(self):
+        fixed = datetime(2026, 9, 26, 0, 0, tzinfo=timezone.utc)
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            legacy_trade = _DurableProviderNonceAllocator(
+                provider_id="KRAKEN",
+                display_name="Kraken Spot",
+                journal=store,
+                account_id="acct-kraken",
+                environment="LIVE",
+                clock_millis=lambda: 700,
+                clock_utc=lambda: fixed,
+                scope_fields={
+                    "credential_handle_id": "legacy-trade",
+                    "credential_generation": 1,
+                },
+                max_nonce=(1 << 64) - 1,
+                nonce_domain_name="unsigned 64-bit",
+            )
+            legacy_rotated = _DurableProviderNonceAllocator(
+                provider_id="KRAKEN",
+                display_name="Kraken Spot",
+                journal=store,
+                account_id="acct-kraken",
+                environment="LIVE",
+                clock_millis=lambda: 900,
+                clock_utc=lambda: fixed + timedelta(milliseconds=1),
+                scope_fields={
+                    "credential_handle_id": "legacy-trade",
+                    "credential_generation": 2,
+                },
+                max_nonce=(1 << 64) - 1,
+                nonce_domain_name="unsigned 64-bit",
+            )
+            legacy_read = _DurableProviderNonceAllocator(
+                provider_id="KRAKEN",
+                display_name="Kraken Spot",
+                journal=store,
+                account_id="acct-kraken",
+                environment="LIVE",
+                clock_millis=lambda: 800,
+                clock_utc=lambda: fixed + timedelta(milliseconds=2),
+                scope_fields={
+                    "credential_handle_id": "legacy-read",
+                    "credential_generation": 1,
+                },
+                max_nonce=(1 << 64) - 1,
+                nonce_domain_name="unsigned 64-bit",
+            )
+            self.assertEqual(legacy_trade.allocate(), 700)
+            self.assertEqual(legacy_rotated.allocate(), 900)
+            self.assertEqual(legacy_read.allocate(), 800)
+
+            manager = KrakenSpotDurableNonceAllocator(
+                journal=store,
+                account_id="acct-kraken",
+                environment="LIVE",
+                credential_handle=kraken_trade_handle(),
+                clock_millis=lambda: 100,
+                clock_utc=lambda: fixed + timedelta(seconds=1),
+            )
+            self.assertEqual(manager.legacy_nonce_floor, 900)
+            domain = manager.for_provider_api_key("shared-kraken-key")
+            self.assertEqual(domain.allocate(), 901)
+
+            restarted = KrakenSpotDurableNonceAllocator(
+                journal=store,
+                account_id="acct-kraken",
+                environment="LIVE",
+                credential_handle=PersistentCredentialHandle(
+                    handle_id="restarted-read",
+                    account_id="acct-kraken",
+                    provider="KRAKEN",
+                    environment="LIVE",
+                    purpose="READ",
+                    generation=1,
+                ),
+                clock_millis=lambda: 50,
+                clock_utc=lambda: fixed + timedelta(seconds=2),
+            )
+            self.assertEqual(restarted.legacy_nonce_floor, 900)
+            restarted_domain = restarted.for_provider_api_key(
+                "shared-kraken-key"
+            )
+            self.assertEqual(restarted_domain.allocate(), 902)
 
     def test_nonce_uint64_boundary_fails_closed_before_persist_or_sign(self):
         maximum = (1 << 64) - 1

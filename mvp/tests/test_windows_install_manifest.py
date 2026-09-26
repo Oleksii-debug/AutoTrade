@@ -1,10 +1,14 @@
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 import zipfile
 
+import research.autotrade_research.artifacts.durable_publish as durable_publish_module
+import tools.build_windows_install_manifest as installer_manifest_module
 from tools.build_windows_bundle import build_bundle
 from tools.build_windows_install_manifest import (
     InstallerManifestError,
@@ -139,6 +143,297 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
             for name, payload in entries:
                 archive.writestr(name, payload)
 
+    def _symlink_or_skip(self, link: Path, target: Path):
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError) as error:
+            self.skipTest(f"symlink creation unavailable: {error}")
+
+    def _hardlink_or_skip(self, link: Path, target: Path):
+        try:
+            os.link(target, link)
+        except (OSError, NotImplementedError) as error:
+            self.skipTest(f"hardlink creation unavailable: {error}")
+
+    def test_release_bundle_path_swap_during_open_fails_closed(self):
+        bundle = self.release_bundle("stable-release.zip")
+        original_bytes = bundle.read_bytes()
+
+        (self.staging / "AutoTrade.Desktop.exe").write_bytes(b"replacement-desktop")
+        replacement = self.release_bundle("replacement-release.zip")
+        self.assertNotEqual(original_bytes, replacement.read_bytes())
+
+        original_open = Path.open
+        swapped = False
+
+        def open_then_swap(path_obj, *args, **kwargs):
+            nonlocal swapped
+            handle = original_open(path_obj, *args, **kwargs)
+            mode = args[0] if args else kwargs.get("mode", "r")
+            if Path(path_obj) == bundle and mode == "rb" and not swapped:
+                try:
+                    os.replace(replacement, bundle)
+                except OSError as error:
+                    handle.close()
+                    self.skipTest(f"open-file replacement unavailable: {error}")
+                swapped = True
+            return handle
+
+        with patch.object(
+            Path,
+            "open",
+            autospec=True,
+            side_effect=open_then_swap,
+        ):
+            with self.assertRaisesRegex(
+                InstallerManifestError,
+                "release bundle changed during verification",
+            ):
+                verify_release_bundle(bundle)
+
+        self.assertTrue(swapped)
+
+    def test_same_inode_mutation_during_verification_fails_closed(self):
+        bundle = self.release_bundle("same-inode-release.zip")
+        original_verify = installer_manifest_module._verify_release_bundle_stream
+        mutated = False
+
+        def verify_then_mutate(stream, digest):
+            nonlocal mutated
+            result = original_verify(stream, digest)
+            try:
+                with bundle.open("r+b") as writer:
+                    first = writer.read(1)
+                    if not first:
+                        self.fail("release bundle unexpectedly empty")
+                    writer.seek(0)
+                    writer.write(bytes([first[0] ^ 0x01]))
+                    writer.flush()
+                    os.fsync(writer.fileno())
+            except OSError as error:
+                self.skipTest(f"in-place mutation unavailable: {error}")
+            mutated = True
+            return result
+
+        with patch.object(
+            installer_manifest_module,
+            "_verify_release_bundle_stream",
+            side_effect=verify_then_mutate,
+        ):
+            with self.assertRaisesRegex(
+                InstallerManifestError,
+                "release bundle changed during verification",
+            ):
+                verify_release_bundle(bundle)
+
+        self.assertTrue(mutated)
+
+    def test_compressed_payload_is_rejected_as_noncanonical_bundle(self):
+        source = self.release_bundle()
+        tampered = self.root / "compressed.zip"
+
+        with zipfile.ZipFile(source, "r") as original:
+            entries = [
+                (info.filename, original.read(info))
+                for info in original.infolist()
+            ]
+        with zipfile.ZipFile(
+            tampered,
+            "w",
+            compression=zipfile.ZIP_DEFLATED,
+        ) as archive:
+            for name, payload in entries:
+                archive.writestr(name, payload)
+
+        with self.assertRaisesRegex(
+            InstallerManifestError,
+            "compression is not canonical",
+        ):
+            verify_release_bundle(tampered)
+
+    def test_installer_manifest_cannot_overwrite_verified_bundle(self):
+        bundle = self.release_bundle()
+        before = bundle.read_bytes()
+
+        with self.assertRaisesRegex(
+            InstallerManifestError,
+            "output must not overwrite verified release bundle",
+        ):
+            build_installer_input_manifest(
+                bundle=bundle,
+                output=bundle,
+                target_framework="net10.0-windows",
+                runtime_mode="SELF_CONTAINED",
+            )
+
+        self.assertEqual(bundle.read_bytes(), before)
+
+    def test_installer_digest_cannot_overwrite_verified_bundle(self):
+        bundle = self.release_bundle(name="installer-input.json.sha256")
+        before = bundle.read_bytes()
+        output = self.root / "installer-input.json"
+
+        with self.assertRaisesRegex(
+            InstallerManifestError,
+            "digest output must not overwrite verified release bundle",
+        ):
+            build_installer_input_manifest(
+                bundle=bundle,
+                output=output,
+                target_framework="net10.0-windows",
+                runtime_mode="SELF_CONTAINED",
+            )
+
+        self.assertFalse(output.exists())
+        self.assertEqual(bundle.read_bytes(), before)
+
+    def test_manifest_output_hardlink_is_rejected_without_touching_alias(self):
+        bundle = self.release_bundle()
+        victim = self.root / "victim-output-hardlink.txt"
+        victim.write_text("do-not-touch", encoding="utf-8")
+        output = self.root / "installer-input.json"
+        self._hardlink_or_skip(output, victim)
+
+        with self.assertRaisesRegex(
+            InstallerManifestError,
+            "installer manifest output is unsafe",
+        ):
+            build_installer_input_manifest(
+                bundle=bundle,
+                output=output,
+                target_framework="net10.0-windows",
+                runtime_mode="SELF_CONTAINED",
+            )
+
+        self.assertEqual(victim.read_text(encoding="utf-8"), "do-not-touch")
+        self.assertEqual(output.read_text(encoding="utf-8"), "do-not-touch")
+
+    def test_manifest_output_symlink_is_rejected_without_touching_target(self):
+        bundle = self.release_bundle()
+        victim = self.root / "victim-output.txt"
+        victim.write_text("do-not-touch", encoding="utf-8")
+        output = self.root / "installer-input.json"
+        self._symlink_or_skip(output, victim)
+
+        with self.assertRaisesRegex(
+            InstallerManifestError,
+            "installer manifest output is unsafe",
+        ):
+            build_installer_input_manifest(
+                bundle=bundle,
+                output=output,
+                target_framework="net10.0-windows",
+                runtime_mode="SELF_CONTAINED",
+            )
+
+        self.assertEqual(victim.read_text(encoding="utf-8"), "do-not-touch")
+
+    def test_legacy_manifest_temp_symlink_is_ignored_without_touching_target(self):
+        bundle = self.release_bundle()
+        victim = self.root / "victim-temp.txt"
+        victim.write_text("do-not-touch", encoding="utf-8")
+        output = self.root / "installer-input.json"
+        legacy_temp = output.with_name(output.name + ".tmp")
+        self._symlink_or_skip(legacy_temp, victim)
+
+        built = build_installer_input_manifest(
+            bundle=bundle,
+            output=output,
+            target_framework="net10.0-windows",
+            runtime_mode="SELF_CONTAINED",
+        )
+
+        self.assertTrue(output.exists())
+        self.assertTrue(legacy_temp.is_symlink())
+        self.assertEqual(victim.read_text(encoding="utf-8"), "do-not-touch")
+        self.assertEqual(
+            Path(built["hash_file"]).read_text(encoding="utf-8").split()[0],
+            built["sha256"],
+        )
+
+    def test_digest_hardlink_is_rejected_before_primary_manifest_mutation(self):
+        bundle = self.release_bundle()
+        output = self.root / "installer-input.json"
+        output.write_text("old-manifest", encoding="utf-8")
+        victim = self.root / "victim-digest-hardlink.txt"
+        victim.write_text("do-not-touch", encoding="utf-8")
+        digest_path = output.with_suffix(output.suffix + ".sha256")
+        self._hardlink_or_skip(digest_path, victim)
+
+        with self.assertRaisesRegex(
+            InstallerManifestError,
+            "installer manifest digest output is unsafe",
+        ):
+            build_installer_input_manifest(
+                bundle=bundle,
+                output=output,
+                target_framework="net10.0-windows",
+                runtime_mode="SELF_CONTAINED",
+            )
+
+        self.assertEqual(output.read_text(encoding="utf-8"), "old-manifest")
+        self.assertEqual(victim.read_text(encoding="utf-8"), "do-not-touch")
+        self.assertEqual(digest_path.read_text(encoding="utf-8"), "do-not-touch")
+
+    def test_digest_symlink_is_rejected_before_primary_manifest_mutation(self):
+        bundle = self.release_bundle()
+        output = self.root / "installer-input.json"
+        output.write_text("old-manifest", encoding="utf-8")
+        victim = self.root / "victim-digest.txt"
+        victim.write_text("do-not-touch", encoding="utf-8")
+        digest_path = output.with_suffix(output.suffix + ".sha256")
+        self._symlink_or_skip(digest_path, victim)
+
+        with self.assertRaisesRegex(
+            InstallerManifestError,
+            "installer manifest digest output is unsafe",
+        ):
+            build_installer_input_manifest(
+                bundle=bundle,
+                output=output,
+                target_framework="net10.0-windows",
+                runtime_mode="SELF_CONTAINED",
+            )
+
+        self.assertEqual(output.read_text(encoding="utf-8"), "old-manifest")
+        self.assertEqual(victim.read_text(encoding="utf-8"), "do-not-touch")
+
+    def test_manifest_pair_failure_restores_existing_primary_and_digest(self):
+        bundle = self.release_bundle()
+        output = self.root / "installer-input.json"
+        digest_path = output.with_suffix(output.suffix + ".sha256")
+        output.write_bytes(b"old-manifest")
+        digest_path.write_bytes(b"old-digest\n")
+        original_replace = durable_publish_module.os.replace
+        injected = False
+
+        def replace_with_primary_failure(source, target):
+            nonlocal injected
+            if Path(target) == output and not injected:
+                injected = True
+                raise OSError("simulated installer primary replace failure")
+            return original_replace(source, target)
+
+        with patch.object(
+            durable_publish_module.os,
+            "replace",
+            side_effect=replace_with_primary_failure,
+        ):
+            with self.assertRaisesRegex(
+                InstallerManifestError,
+                "installer manifest publication failed closed",
+            ):
+                build_installer_input_manifest(
+                    bundle=bundle,
+                    output=output,
+                    target_framework="net10.0-windows",
+                    runtime_mode="SELF_CONTAINED",
+                )
+
+        self.assertTrue(injected)
+        self.assertEqual(output.read_bytes(), b"old-manifest")
+        self.assertEqual(digest_path.read_bytes(), b"old-digest\n")
+
     def test_release_bundle_produces_deterministic_fail_closed_install_inventory(self):
         bundle = self.release_bundle()
         first = build_installer_input_manifest(
@@ -200,7 +495,7 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
             return [
                 (
                     name,
-                    b"tampered"
+                    b"DESKTOP"
                     if name == "payload/AutoTrade.Desktop.exe"
                     else payload,
                 )

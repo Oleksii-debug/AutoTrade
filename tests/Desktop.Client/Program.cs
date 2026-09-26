@@ -30,27 +30,39 @@ internal static class Program
             "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'",
             System.Globalization.CultureInfo.InvariantCulture);
     
-    static object Snapshot(string token, string version = "0") => new
+    static object Snapshot(
+        string token,
+        string version = "0",
+        string hostFreshness = "CURRENT",
+        string? freshnessAsOf = null)
     {
-        state_version = version,
-        event_cursor = version,
-        server_time = NowUtc(),
-        host_id = "host-local-1",
-        account_id = "paper-account-1",
-        environment = "PAPER",
-        permission_summary = new
+        string serverTime = NowUtc();
+        return new
         {
-            actor = "owner",
-            role = "OWNER",
-            session = AuthenticatedEmergencyHostClient.PublicSessionReference(token),
-        },
-        connection_freshness = new { host = "CURRENT", as_of = NowUtc() },
-        portfolio = new { },
-        risk = new { },
-        strategy = new { },
-        jobs = Array.Empty<object>(),
-        reason_codes = Array.Empty<string>(),
-    };
+            state_version = version,
+            event_cursor = version,
+            server_time = serverTime,
+            host_id = "host-local-1",
+            account_id = "paper-account-1",
+            environment = "PAPER",
+            permission_summary = new
+            {
+                actor = "owner",
+                role = "OWNER",
+                session = AuthenticatedEmergencyHostClient.PublicSessionReference(token),
+            },
+            connection_freshness = new
+            {
+                host = hostFreshness,
+                as_of = freshnessAsOf ?? serverTime,
+            },
+            portfolio = new { },
+            risk = new { },
+            strategy = new { },
+            jobs = Array.Empty<object>(),
+            reason_codes = Array.Empty<string>(),
+        };
+    }
     
     static void AssertAuth(HttpRequestMessage request, string token)
     {
@@ -164,6 +176,7 @@ internal static class Program
     
         EmergencyHostStatus status = await client.GetStatusAsync(CancellationToken.None);
         Check.True(status.Connected, "authenticated snapshot must be connected");
+        Check.True(status.IsCurrent, "CURRENT host freshness was not preserved");
         Check.True(status.HostId == "host-local-1", "host identity changed");
         Check.True(status.AccountId == "paper-account-1", "account identity changed");
         Check.True(status.Environment == "PAPER", "environment identity changed");
@@ -181,6 +194,56 @@ internal static class Program
             "operation success must not fabricate provider in-flight absence");
     }
     
+    static async Task NonCurrentFreshnessRemainsExplicitTest()
+    {
+        const string token = "session-token-stale";
+        const string freshnessAsOf = "2026-09-25T09:29:00Z";
+        MutableSessionProvider sessions =
+            new(PairedSession(token));
+        DelegateHandler handler = new((request, _, _) =>
+        {
+            AssertAuth(request, token);
+            if (request.Method == HttpMethod.Get
+                && request.RequestUri!.AbsolutePath == "/api/v1/state")
+            {
+                return Task.FromResult(
+                    Json(
+                        HttpStatusCode.OK,
+                        Snapshot(
+                            token,
+                            "8",
+                            hostFreshness: "STALE",
+                            freshnessAsOf: freshnessAsOf)));
+            }
+
+            throw new InvalidOperationException(
+                "stale-status test issued an unexpected request");
+        });
+        AuthenticatedEmergencyHostClient client = new(
+            new HttpClient(handler),
+            HostOrigin,
+            sessions);
+
+        EmergencyHostStatus status =
+            await client.GetStatusAsync(CancellationToken.None);
+        Check.True(status.Connected, "stale authenticated snapshot lost host reachability");
+        Check.True(!status.IsCurrent, "STALE host freshness was fabricated as CURRENT");
+        Check.True(
+            status.StateVersion == "8",
+            "stale snapshot lost its durable state version");
+        Check.True(
+            status.ObservedAtUtc
+                == DateTimeOffset.Parse(
+                    freshnessAsOf,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AssumeUniversal
+                        | System.Globalization.DateTimeStyles.AdjustToUniversal),
+            "native last-evidence time did not use connection_freshness.as_of");
+        Check.True(
+            status.Message.Contains("STALE", StringComparison.Ordinal),
+            "non-current host freshness was not surfaced in status text");
+    }
+
     static async Task AmbiguousPostExactRetryTest()
     {
         const string token = "session-token-b";
@@ -703,6 +766,7 @@ internal static class Program
         CredentialTargetIsOriginBoundTest();
         await PairedOriginMismatchFailsBeforeTransportTest();
         await CanonicalStatusAndOperationTest();
+        await NonCurrentFreshnessRemainsExplicitTest();
         await AmbiguousPostExactRetryTest();
         await UncertainCommandCannotRetargetSessionTest();
         await UncertainCommandSurvivesDesktopRestartTest();

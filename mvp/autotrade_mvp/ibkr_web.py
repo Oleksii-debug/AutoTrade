@@ -8,7 +8,7 @@ an order. Those steps require separate exact-version qualification.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
@@ -45,6 +45,8 @@ _ORDER_TYPES = {
 }
 _TIFS = frozenset({"DAY", "GTC", "IOC"})
 _SIDES = frozenset({"BUY", "SELL"})
+_ACCOUNTS_OBSERVATION_TOKEN = object()
+_SESSION_STATUS_TOKEN = object()
 
 
 def _text(value: str, *, name: str) -> str:
@@ -84,19 +86,171 @@ def validate_coid(value: str) -> str:
     return coid
 
 
+def _brokerage_session_fingerprint(
+    session: "IbkrBrokerageSessionStatus",
+    accounts: "IbkrBrokerageAccountsObservation",
+) -> str:
+    payload = {
+        "environment": session.environment,
+        "connected": session.connected,
+        "authenticated": session.authenticated,
+        "established": session.established,
+        "competing": session.competing,
+        "observed_at": session.observed_at.isoformat(),
+        "initialization_id": session.initialization_id,
+        "session_generation_id": session.generation_id,
+        "session_source_sha256": session.source_sha256,
+        "accounts_source_sha256": accounts.source_sha256,
+        "accounts_observed_at": accounts.observed_at.isoformat(),
+        "accounts_session_id": accounts.session_id,
+        "accounts_session_generation_id": accounts.session_generation_id,
+        "accounts_environment": accounts.environment,
+        "selected_account": accounts.selected_account,
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
 @dataclass(frozen=True)
 class IbkrBrokerageSessionStatus:
+    """Canonical evidence for one concrete brokerage-session initialization."""
+
+    environment: str
     connected: bool
     authenticated: bool
     established: bool
     competing: bool
     observed_at: datetime
+    initialization_id: str
+    generation_id: str
+    source_sha256: str
+    _verification_token: InitVar[object | None] = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _verification_token: object | None) -> None:
+        if _verification_token is not _SESSION_STATUS_TOKEN:
+            raise IbkrWebAdapterError(
+                "brokerage session status must come from canonical init payload parsing"
+            )
+        environment = _text(self.environment, name="environment").upper()
+        if environment not in {"PAPER", "LIVE"}:
+            raise IbkrWebAdapterError(
+                "brokerage session environment must be PAPER or LIVE"
+            )
         for field in ("connected", "authenticated", "established", "competing"):
             if type(getattr(self, field)) is not bool:
                 raise TypeError(f"{field} must be boolean")
-        object.__setattr__(self, "observed_at", _instant(self.observed_at, name="observed_at"))
+        initialization_id = _text(
+            self.initialization_id,
+            name="brokerage initialization_id",
+        )
+        generation_id = _text(
+            self.generation_id,
+            name="brokerage session generation_id",
+        )
+        source_sha256 = _text(
+            self.source_sha256,
+            name="brokerage session source_sha256",
+        )
+        for name, value in (
+            ("brokerage session generation_id", generation_id),
+            ("brokerage session source_sha256", source_sha256),
+        ):
+            if (
+                len(value) != 71
+                or not value.startswith("sha256:")
+                or any(ch not in "0123456789abcdef" for ch in value[7:])
+            ):
+                raise IbkrWebAdapterError(
+                    f"{name} must be canonical lowercase SHA-256"
+                )
+        object.__setattr__(self, "environment", environment)
+        object.__setattr__(
+            self,
+            "observed_at",
+            _instant(self.observed_at, name="observed_at"),
+        )
+        object.__setattr__(self, "initialization_id", initialization_id)
+        object.__setattr__(self, "generation_id", generation_id)
+        object.__setattr__(self, "source_sha256", source_sha256)
+
+    @classmethod
+    def from_init_payload(
+        cls,
+        payload: Mapping[str, object],
+        *,
+        environment: str,
+        initialization_id: str,
+        observed_at: datetime,
+    ) -> "IbkrBrokerageSessionStatus":
+        """Bind readiness to one exact POST /iserver/auth/ssodh/init result."""
+
+        if not isinstance(payload, Mapping):
+            raise TypeError("brokerage init payload must be a mapping")
+        normalized_environment = _text(environment, name="environment").upper()
+        if normalized_environment not in {"PAPER", "LIVE"}:
+            raise IbkrWebAdapterError(
+                "brokerage session environment must be PAPER or LIVE"
+            )
+        normalized_initialization_id = _text(
+            initialization_id,
+            name="brokerage initialization_id",
+        )
+        observed = _instant(observed_at, name="observed_at")
+        values: dict[str, bool] = {}
+        for field in ("connected", "authenticated", "established", "competing"):
+            value = payload.get(field)
+            if type(value) is not bool:
+                raise IbkrWebAdapterError(
+                    f"{field} must be a provider boolean"
+                )
+            values[field] = value
+        try:
+            canonical = json.dumps(
+                dict(payload),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as error:
+            raise IbkrWebAdapterError(
+                "brokerage init payload is not canonical JSON"
+            ) from error
+        source_sha256 = "sha256:" + hashlib.sha256(canonical).hexdigest()
+        generation_material = json.dumps(
+            {
+                "endpoint": "/iserver/auth/ssodh/init",
+                "environment": normalized_environment,
+                "initialization_id": normalized_initialization_id,
+                "observed_at": observed.isoformat(),
+                "source_sha256": source_sha256,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+        generation_id = (
+            "sha256:" + hashlib.sha256(generation_material).hexdigest()
+        )
+        return cls(
+            environment=normalized_environment,
+            connected=values["connected"],
+            authenticated=values["authenticated"],
+            established=values["established"],
+            competing=values["competing"],
+            observed_at=observed,
+            initialization_id=normalized_initialization_id,
+            generation_id=generation_id,
+            source_sha256=source_sha256,
+            _verification_token=_SESSION_STATUS_TOKEN,
+        )
 
     @property
     def trade_ready(self) -> bool:
@@ -111,6 +265,154 @@ class IbkrBrokerageSessionStatus:
             raise IbkrWebAdapterError("brokerage session is not established")
         if self.competing:
             raise IbkrWebAdapterError("another competing brokerage session is active")
+
+
+@dataclass(frozen=True)
+class IbkrBrokerageAccountsObservation:
+    """Provider-derived /iserver/accounts membership for one brokerage session."""
+
+    accounts: tuple[str, ...]
+    selected_account: str
+    environment: str
+    session_id: str
+    session_generation_id: str
+    observed_at: datetime
+    source_sha256: str
+    _verification_token: InitVar[object | None] = None
+
+    def __post_init__(self, _verification_token: object | None) -> None:
+        if _verification_token is not _ACCOUNTS_OBSERVATION_TOKEN:
+            raise IbkrWebAdapterError(
+                "brokerage accounts evidence must come from canonical provider payload parsing"
+            )
+        if not isinstance(self.accounts, tuple) or not self.accounts:
+            raise IbkrWebAdapterError(
+                "brokerage accounts evidence must contain at least one provider account"
+            )
+        normalized = tuple(
+            _text(account, name="provider account_id")
+            for account in self.accounts
+        )
+        if len(normalized) != len(set(normalized)):
+            raise IbkrWebAdapterError("provider account list must not contain duplicates")
+        selected = _text(self.selected_account, name="selected_account")
+        if selected not in normalized:
+            raise IbkrWebAdapterError(
+                "selectedAccount must belong to the provider account list"
+            )
+        environment = _text(self.environment, name="environment").upper()
+        if environment not in {"PAPER", "LIVE"}:
+            raise IbkrWebAdapterError(
+                "brokerage accounts environment must be PAPER or LIVE"
+            )
+        session_id = _text(self.session_id, name="brokerage session_id")
+        session_generation_id = _text(
+            self.session_generation_id,
+            name="brokerage accounts session_generation_id",
+        )
+        if (
+            len(session_generation_id) != 71
+            or not session_generation_id.startswith("sha256:")
+            or any(ch not in "0123456789abcdef" for ch in session_generation_id[7:])
+        ):
+            raise IbkrWebAdapterError(
+                "brokerage accounts session_generation_id must be canonical lowercase SHA-256"
+            )
+        digest = _text(self.source_sha256, name="accounts source_sha256")
+        if (
+            len(digest) != 71
+            or not digest.startswith("sha256:")
+            or any(ch not in "0123456789abcdef" for ch in digest[7:])
+        ):
+            raise IbkrWebAdapterError(
+                "accounts source_sha256 must be canonical lowercase SHA-256"
+            )
+        object.__setattr__(self, "accounts", normalized)
+        object.__setattr__(self, "selected_account", selected)
+        object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "session_id", session_id)
+        object.__setattr__(
+            self,
+            "session_generation_id",
+            session_generation_id,
+        )
+        object.__setattr__(
+            self,
+            "observed_at",
+            _instant(self.observed_at, name="accounts observed_at"),
+        )
+        object.__setattr__(self, "source_sha256", digest)
+
+    @classmethod
+    def from_iserver_accounts_payload(
+        cls,
+        payload: Mapping[str, object],
+        *,
+        session: IbkrBrokerageSessionStatus,
+        observed_at: datetime,
+    ) -> "IbkrBrokerageAccountsObservation":
+        """Parse /iserver/accounts and bind it to the active init generation."""
+
+        if not isinstance(session, IbkrBrokerageSessionStatus):
+            raise TypeError("session must be IbkrBrokerageSessionStatus")
+        session.require_trade_ready()
+        if not isinstance(payload, Mapping):
+            raise TypeError("iserver accounts payload must be a mapping")
+        observed = _instant(observed_at, name="accounts observed_at")
+        if observed < session.observed_at:
+            raise IbkrWebAdapterError(
+                "brokerage accounts evidence predates current session generation"
+            )
+        raw_accounts = payload.get("accounts")
+        if isinstance(raw_accounts, (str, bytes)) or not isinstance(
+            raw_accounts,
+            (list, tuple),
+        ):
+            raise IbkrWebAdapterError(
+                "iserver accounts payload accounts must be an array"
+            )
+        accounts = tuple(
+            _text(account, name="provider account_id")
+            for account in raw_accounts
+        )
+        selected = _text(
+            payload.get("selectedAccount"),
+            name="selectedAccount",
+        )
+        is_paper = payload.get("isPaper")
+        if type(is_paper) is not bool:
+            raise IbkrWebAdapterError("isPaper must be a provider boolean")
+        provider_environment = "PAPER" if is_paper else "LIVE"
+        if provider_environment != session.environment:
+            raise IbkrWebAdapterError(
+                "provider account environment does not match brokerage session environment"
+            )
+        session_id = _text(payload.get("sessionId"), name="sessionId")
+        try:
+            canonical = json.dumps(
+                dict(payload),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as error:
+            raise IbkrWebAdapterError(
+                "iserver accounts payload is not canonical JSON"
+            ) from error
+        return cls(
+            accounts=accounts,
+            selected_account=selected,
+            environment=provider_environment,
+            session_id=session_id,
+            session_generation_id=session.generation_id,
+            observed_at=observed,
+            source_sha256="sha256:" + hashlib.sha256(canonical).hexdigest(),
+            _verification_token=_ACCOUNTS_OBSERVATION_TOKEN,
+        )
+
+    def admits_account(self, account_id: str) -> bool:
+        return _text(account_id, name="account_id") in self.accounts
 
 
 @dataclass(frozen=True)
@@ -281,11 +583,60 @@ class IbkrNormalizedOrder:
     exact_limit_price_text: str | None
     exact_stop_price_text: str | None
     capability_snapshot_id: str
+    brokerage_session_fingerprint: str
+    brokerage_accounts_source_sha256: str
+    brokerage_session_id: str
+    brokerage_selected_account: str
     documentation_refs: tuple[str, ...]
     provider_serialization_qualified: bool = False
 
     def __post_init__(self) -> None:
+        fingerprint = _text(
+            self.brokerage_session_fingerprint,
+            name="brokerage_session_fingerprint",
+        )
+        if (
+            len(fingerprint) != 71
+            or not fingerprint.startswith("sha256:")
+            or any(ch not in "0123456789abcdef" for ch in fingerprint[7:])
+        ):
+            raise IbkrWebAdapterError(
+                "brokerage_session_fingerprint must be canonical lowercase SHA-256"
+            )
+        accounts_digest = _text(
+            self.brokerage_accounts_source_sha256,
+            name="brokerage_accounts_source_sha256",
+        )
+        if (
+            len(accounts_digest) != 71
+            or not accounts_digest.startswith("sha256:")
+            or any(ch not in "0123456789abcdef" for ch in accounts_digest[7:])
+        ):
+            raise IbkrWebAdapterError(
+                "brokerage_accounts_source_sha256 must be canonical lowercase SHA-256"
+            )
+        session_id = _text(self.brokerage_session_id, name="brokerage_session_id")
+        selected_account = _text(
+            self.brokerage_selected_account,
+            name="brokerage_selected_account",
+        )
         object.__setattr__(self, "fields", MappingProxyType(dict(self.fields)))
+        object.__setattr__(
+            self,
+            "brokerage_session_fingerprint",
+            fingerprint,
+        )
+        object.__setattr__(
+            self,
+            "brokerage_accounts_source_sha256",
+            accounts_digest,
+        )
+        object.__setattr__(self, "brokerage_session_id", session_id)
+        object.__setattr__(
+            self,
+            "brokerage_selected_account",
+            selected_account,
+        )
 
 
 def prepare_normalized_order(
@@ -294,8 +645,10 @@ def prepare_normalized_order(
     client_order_id: str,
     capability: CapabilitySnapshot,
     session: IbkrBrokerageSessionStatus,
+    accounts: IbkrBrokerageAccountsObservation,
     at: datetime,
     maximum_session_age_seconds: int,
+    maximum_accounts_age_seconds: int,
 ) -> IbkrNormalizedOrder:
     """Build normalized fields but deliberately stop before provider serialization.
 
@@ -310,6 +663,8 @@ def prepare_normalized_order(
         raise TypeError("capability must be CapabilitySnapshot")
     if not isinstance(session, IbkrBrokerageSessionStatus):
         raise TypeError("session must be IbkrBrokerageSessionStatus")
+    if not isinstance(accounts, IbkrBrokerageAccountsObservation):
+        raise TypeError("accounts must be IbkrBrokerageAccountsObservation")
     point = _instant(at, name="at")
     if (
         isinstance(maximum_session_age_seconds, bool)
@@ -319,16 +674,54 @@ def prepare_normalized_order(
         raise IbkrWebAdapterError(
             "maximum_session_age_seconds must be a non-negative integer"
         )
+    if (
+        isinstance(maximum_accounts_age_seconds, bool)
+        or not isinstance(maximum_accounts_age_seconds, int)
+        or maximum_accounts_age_seconds < 0
+    ):
+        raise IbkrWebAdapterError(
+            "maximum_accounts_age_seconds must be a non-negative integer"
+        )
     if session.observed_at > point:
         raise IbkrWebAdapterError("session evidence is from the future")
     if point - session.observed_at > timedelta(seconds=maximum_session_age_seconds):
         raise IbkrWebAdapterError("brokerage session evidence is stale")
     session.require_trade_ready()
+    if accounts.session_generation_id != session.generation_id:
+        raise IbkrWebAdapterError(
+            "brokerage accounts evidence belongs to a superseded session generation"
+        )
+    if accounts.observed_at < session.observed_at:
+        raise IbkrWebAdapterError(
+            "brokerage accounts evidence predates current session generation"
+        )
+    if accounts.observed_at > point:
+        raise IbkrWebAdapterError("brokerage accounts evidence is from the future")
+    if point - accounts.observed_at > timedelta(
+        seconds=maximum_accounts_age_seconds
+    ):
+        raise IbkrWebAdapterError("brokerage accounts evidence is stale")
+    if accounts.environment != session.environment:
+        raise IbkrWebAdapterError(
+            "provider account environment does not match brokerage session environment"
+        )
+    if not accounts.admits_account(intent.account_id):
+        raise IbkrWebAdapterError(
+            "intent account is absent from provider-derived brokerage accounts"
+        )
     coid = validate_coid(client_order_id)
     if capability.provider_id.upper() != "IBKR":
         raise IbkrWebAdapterError("capability belongs to another provider")
     if capability.account_id != intent.account_id:
         raise IbkrWebAdapterError("capability account does not match intent account")
+    if capability.environment.upper() != session.environment:
+        raise IbkrWebAdapterError(
+            "capability environment does not match brokerage session environment"
+        )
+    if capability.environment.upper() != accounts.environment:
+        raise IbkrWebAdapterError(
+            "capability environment does not match provider account environment"
+        )
     if capability.instrument_version != intent.instrument_version:
         raise IbkrWebAdapterError("capability instrument version does not match intent")
     if not capability.admits(
@@ -366,6 +759,13 @@ def prepare_normalized_order(
             None if intent.stop_price is None else _decimal_text(intent.stop_price)
         ),
         capability_snapshot_id=capability.snapshot_id,
+        brokerage_session_fingerprint=_brokerage_session_fingerprint(
+            session,
+            accounts,
+        ),
+        brokerage_accounts_source_sha256=accounts.source_sha256,
+        brokerage_session_id=accounts.session_id,
+        brokerage_selected_account=accounts.selected_account,
         documentation_refs=tuple(IBKR_WEB_DOCS.values()),
     )
 

@@ -1358,38 +1358,16 @@ def complete_restore_reconciliation(
             )
         evidence.append(item)
 
-    proof = {
-        "schema_version": 3,
-        "backup_manifest_sha256": marker["backup_manifest_sha256"],
-        "restored_at": marker["restored_at"],
-        "completed_at": completed.isoformat().replace("+00:00", "Z"),
-        "owner_scope": marker["source_owner_scope"],
-        "source_owner_id": source_owner_id,
-        "source_owner_epoch": source_owner_epoch,
-        "current_owner_id": current_owner.owner_id,
-        "current_owner_epoch": current_owner.epoch,
-        "sender_fence_events": evidence,
-        "reconciliation": reconciliation_proof,
-    }
-    proof_bytes = _canonical_json(proof)
-    proof_hash = "sha256:" + _sha256_bytes(proof_bytes)
-    _write_bytes_durable(
-        root / RESTORE_COMPLETION_PROOF_NAME,
-        proof_bytes,
+    # The durable owner chain is a local stale-process fence only.  It cannot
+    # establish that a source host with an independent journal copy, lease,
+    # session, or already-resolved credential bytes has lost outbound
+    # capability.  Until the canonical independently issued sender-fence
+    # authority is available and verifiable here, terminal restore completion
+    # must remain impossible.
+    raise BackupError(
+        "Restore completion requires independently issued sender fence evidence; "
+        "local durable owner epochs are insufficient"
     )
-    completed_marker = {
-        **marker,
-        "status": "RECONCILIATION_COMPLETE",
-        "completed_at": proof["completed_at"],
-        "completion_proof_sha256": proof_hash,
-        "current_owner_id": current_owner.owner_id,
-        "current_owner_epoch": current_owner.epoch,
-    }
-    _write_bytes_durable(
-        root / RESTORE_MARKER_NAME,
-        _canonical_json(completed_marker),
-    )
-    return proof
 
 
 def restore_requires_reconciliation(destination_root: str | Path) -> bool:
@@ -1530,4 +1508,8 @@ def restore_requires_reconciliation(destination_root: str | Path) -> bool:
         sqlite3.Error,
     ):
         return True
-    return False
+    # Historical completion proofs in the current schemas were produced from
+    # local/self-authored fence evidence.  They are integrity records, not proof
+    # that the old sender lost outbound capability, so an upgraded runtime must
+    # reopen the restore gate rather than grandfather them.
+    return True

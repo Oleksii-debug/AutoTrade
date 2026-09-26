@@ -1,6 +1,8 @@
 using AutoTrade.Engine.Lean;
 using QuantConnect;
 using QuantConnect.Orders;
+using QuantConnect.Orders.Fees;
+using QuantConnect.Securities;
 using System.Xml.Linq;
 
 static void Require(bool condition, string message)
@@ -62,7 +64,9 @@ if (args.Length > 0)
             UtcTime = instant.AddMilliseconds(1),
             Status = OrderStatus.PartiallyFilled,
             FillQuantity = 0.25m,
-            FillPrice = 451.125m
+            FillPrice = 451.125m,
+            FillPriceCurrency = "USD",
+            OrderFee = new OrderFee(new CashAmount(0.15m, "USD"))
         });
         File.WriteAllText(
             restartStatePath,
@@ -84,11 +88,30 @@ if (args.Length > 0)
             UtcTime = instant.AddMilliseconds(1),
             Status = OrderStatus.PartiallyFilled,
             FillQuantity = 0.25m,
-            FillPrice = 451.125m
+            FillPrice = 451.125m,
+            FillPriceCurrency = "USD",
+            OrderFee = new OrderFee(new CashAmount(0.15m, "USD"))
         });
         Require(
             repeated.DuplicateIdentity && !repeated.IdentityConflict,
             "Restart lost an identical callback identity.");
+
+        var feeConflictAfterRestart = resumedCallbacks.Observe(new OrderEvent
+        {
+            OrderId = 84,
+            Id = 2,
+            Symbol = restartSymbol,
+            UtcTime = instant.AddMilliseconds(1),
+            Status = OrderStatus.PartiallyFilled,
+            FillQuantity = 0.25m,
+            FillPrice = 451.125m,
+            FillPriceCurrency = "USD",
+            OrderFee = new OrderFee(new CashAmount(0.16m, "USD"))
+        });
+        Require(
+            feeConflictAfterRestart.DuplicateIdentity &&
+                feeConflictAfterRestart.IdentityConflict,
+            "Restart hid changed fee economics for the same callback identity.");
 
         var conflicting = resumedCallbacks.Observe(new OrderEvent
         {
@@ -98,7 +121,9 @@ if (args.Length > 0)
             UtcTime = instant.AddMilliseconds(1),
             Status = OrderStatus.PartiallyFilled,
             FillQuantity = 0.25m,
-            FillPrice = 451.500m
+            FillPrice = 451.500m,
+            FillPriceCurrency = "USD",
+            OrderFee = new OrderFee(new CashAmount(0.15m, "USD"))
         });
         Require(
             conflicting.DuplicateIdentity && conflicting.IdentityConflict,
@@ -197,12 +222,18 @@ var partial = callbacks.Observe(new OrderEvent
     UtcTime = instant.AddMilliseconds(1),
     Status = OrderStatus.PartiallyFilled,
     FillQuantity = 0.25m,
-    FillPrice = 451.125m
+    FillPrice = 451.125m,
+    FillPriceCurrency = "USD",
+    OrderFee = new OrderFee(new CashAmount(0.15m, "USD"))
 });
 Require(partial.Status == "PartiallyFilled", "Partial-fill status was not preserved.");
 Require(partial.HasEconomicFill, "Non-zero fill quantity was lost.");
 Require(partial.FillQuantity == "0.25", "Callback fill quantity changed.");
 Require(partial.FillPrice == "451.125", "Callback fill price changed.");
+Require(partial.FillPriceCurrency == "USD", "Callback fill-price currency changed.");
+Require(partial.HasOrderFee, "Callback order-fee presence was lost.");
+Require(partial.OrderFeeAmount == "0.15", "Callback order-fee amount changed.");
+Require(partial.OrderFeeCurrency == "USD", "Callback order-fee currency changed.");
 Require(!partial.DuplicateIdentity, "New callback identity was marked duplicate.");
 
 var duplicate = callbacks.Observe(new OrderEvent
@@ -213,10 +244,43 @@ var duplicate = callbacks.Observe(new OrderEvent
     UtcTime = instant.AddMilliseconds(1),
     Status = OrderStatus.PartiallyFilled,
     FillQuantity = 0.25m,
-    FillPrice = 451.125m
+    FillPrice = 451.125m,
+    FillPriceCurrency = "USD",
+    OrderFee = new OrderFee(new CashAmount(0.15m, "USD"))
 });
 Require(duplicate.DuplicateIdentity, "Duplicate callback identity was not surfaced.");
 Require(!duplicate.IdentityConflict, "Identical duplicate callback was marked conflicting.");
+
+var feeConflict = callbacks.Observe(new OrderEvent
+{
+    OrderId = 42,
+    Id = 2,
+    Symbol = symbol,
+    UtcTime = instant.AddMilliseconds(1),
+    Status = OrderStatus.PartiallyFilled,
+    FillQuantity = 0.25m,
+    FillPrice = 451.125m,
+    FillPriceCurrency = "USD",
+    OrderFee = new OrderFee(new CashAmount(0.16m, "USD"))
+});
+Require(feeConflict.DuplicateIdentity, "Fee-changed callback identity was not surfaced as duplicate.");
+Require(feeConflict.IdentityConflict, "Changed fee economics did not conflict for the same callback identity.");
+
+var fillCurrencyConflict = callbacks.Observe(new OrderEvent
+{
+    OrderId = 42,
+    Id = 2,
+    Symbol = symbol,
+    UtcTime = instant.AddMilliseconds(1),
+    Status = OrderStatus.PartiallyFilled,
+    FillQuantity = 0.25m,
+    FillPrice = 451.125m,
+    FillPriceCurrency = "EUR",
+    OrderFee = new OrderFee(new CashAmount(0.15m, "USD"))
+});
+Require(
+    fillCurrencyConflict.DuplicateIdentity && fillCurrencyConflict.IdentityConflict,
+    "Changed fill-price currency did not conflict for the same callback identity.");
 
 var conflictingDuplicate = callbacks.Observe(new OrderEvent
 {
@@ -226,7 +290,9 @@ var conflictingDuplicate = callbacks.Observe(new OrderEvent
     UtcTime = instant.AddMilliseconds(1),
     Status = OrderStatus.PartiallyFilled,
     FillQuantity = 0.25m,
-    FillPrice = 451.500m
+    FillPrice = 451.500m,
+    FillPriceCurrency = "USD",
+    OrderFee = new OrderFee(new CashAmount(0.15m, "USD"))
 });
 Require(
     conflictingDuplicate.DuplicateIdentity,
@@ -257,7 +323,9 @@ restartIntegrity.Observe(new OrderEvent
     UtcTime = instant,
     Status = OrderStatus.PartiallyFilled,
     FillQuantity = 0.5m,
-    FillPrice = 451.125m
+    FillPrice = 451.125m,
+    FillPriceCurrency = "USD",
+    OrderFee = new OrderFee(new CashAmount(0.20m, "USD"))
 });
 var restartCheckpoint = restartIntegrity.ExportRestartState();
 var verifiedRestart = LeanCallbackCharacterizer.RestoreRestartState(restartCheckpoint);
@@ -269,7 +337,9 @@ var verifiedDuplicate = verifiedRestart.Observe(new OrderEvent
     UtcTime = instant,
     Status = OrderStatus.PartiallyFilled,
     FillQuantity = 0.5m,
-    FillPrice = 451.125m
+    FillPrice = 451.125m,
+    FillPriceCurrency = "USD",
+    OrderFee = new OrderFee(new CashAmount(0.20m, "USD"))
 });
 Require(
     verifiedDuplicate.DuplicateIdentity && !verifiedDuplicate.IdentityConflict,
@@ -308,8 +378,8 @@ ExpectFailure<InvalidDataException>(
     "unknown callback restart state fields must fail closed");
 
 var checkpointWithDuplicateTopLevel = restartCheckpoint.Replace(
-    "\"SchemaVersion\":\"1.0.0\"",
-    "\"SchemaVersion\":\"1.0.0\",\"SchemaVersion\":\"1.0.0\"",
+    "\"SchemaVersion\":\"1.1.0\"",
+    "\"SchemaVersion\":\"1.1.0\",\"SchemaVersion\":\"1.1.0\"",
     StringComparison.Ordinal);
 Require(
     checkpointWithDuplicateTopLevel != restartCheckpoint,

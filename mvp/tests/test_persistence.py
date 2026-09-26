@@ -827,6 +827,165 @@ class JournalStoreTests(unittest.TestCase):
                 connection.close()
             self.assertIsNone(migration_table)
 
+    def test_partial_unique_index_does_not_satisfy_identity_contract(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    """
+                    CREATE TABLE events(
+                        event_id TEXT PRIMARY KEY,
+                        event_type TEXT NOT NULL,
+                        aggregate_type TEXT NOT NULL,
+                        aggregate_id TEXT NOT NULL,
+                        aggregate_version INTEGER NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        payload_hash TEXT NOT NULL,
+                        committed_at TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE UNIQUE INDEX forged_events_identity
+                    ON events(aggregate_type, aggregate_id, aggregate_version)
+                    WHERE 0
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "aggregate_type,aggregate_id,aggregate_version",
+            ):
+                JournalStore(path)
+
+            connection = sqlite3.connect(path)
+            try:
+                migration_table = connection.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'schema_migrations'"
+                ).fetchone()
+                index_rows = {
+                    row[1]: (bool(row[2]), bool(row[4]))
+                    for row in connection.execute("PRAGMA index_list(events)")
+                }
+            finally:
+                connection.close()
+
+            # Initialization is atomic: the adversarial pre-existing index remains
+            # visible as partial, while migration metadata/DDL is rolled back.
+            self.assertIsNone(migration_table)
+            self.assertEqual(index_rows["forged_events_identity"], (True, True))
+
+    def test_partial_schema_with_matching_names_but_weakened_column_contract_is_rejected(self):
+        cases = (
+            ("payload_hash BLOB NOT NULL", "invalid declared type"),
+            ("payload_hash TEXT", "invalid NOT NULL contract"),
+        )
+        for payload_hash_column, expected_error in cases:
+            with self.subTest(payload_hash_column=payload_hash_column):
+                with TemporaryDirectory() as directory:
+                    path = f"{directory}/journal.sqlite3"
+                    connection = sqlite3.connect(path)
+                    try:
+                        connection.execute(
+                            f"""
+                            CREATE TABLE events(
+                                event_id TEXT PRIMARY KEY,
+                                event_type TEXT NOT NULL,
+                                aggregate_type TEXT NOT NULL,
+                                aggregate_id TEXT NOT NULL,
+                                aggregate_version INTEGER NOT NULL,
+                                payload_json TEXT NOT NULL,
+                                {payload_hash_column},
+                                committed_at TEXT NOT NULL,
+                                UNIQUE (aggregate_type, aggregate_id, aggregate_version)
+                            )
+                            """
+                        )
+                        connection.commit()
+                    finally:
+                        connection.close()
+
+                    with self.assertRaisesRegex(ValueError, expected_error):
+                        JournalStore(path)
+
+                    connection = sqlite3.connect(path)
+                    try:
+                        migration_table = connection.execute(
+                            "SELECT name FROM sqlite_master "
+                            "WHERE type = 'table' AND name = 'schema_migrations'"
+                        ).fetchone()
+                        event_columns = {
+                            row[1]: (str(row[2]).upper(), bool(row[3]))
+                            for row in connection.execute("PRAGMA table_info(events)")
+                        }
+                    finally:
+                        connection.close()
+
+                    # Initialization is one transaction. Detection of the
+                    # weakened pre-existing contract must not leave migration
+                    # metadata or partially upgraded columns behind.
+                    self.assertIsNone(migration_table)
+                    expected_type = "BLOB" if "BLOB" in payload_hash_column else "TEXT"
+                    expected_not_null = payload_hash_column.endswith("NOT NULL")
+                    self.assertEqual(
+                        event_columns["payload_hash"],
+                        (expected_type, expected_not_null),
+                    )
+                    self.assertNotIn("envelope_json", event_columns)
+                    self.assertNotIn("journal_sequence", event_columns)
+
+    def test_partial_schema_with_unrecorded_extra_column_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    """
+                    CREATE TABLE events(
+                        event_id TEXT PRIMARY KEY,
+                        event_type TEXT NOT NULL,
+                        aggregate_type TEXT NOT NULL,
+                        aggregate_id TEXT NOT NULL,
+                        aggregate_version INTEGER NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        payload_hash TEXT NOT NULL,
+                        committed_at TEXT NOT NULL,
+                        unexpected_shadow TEXT,
+                        UNIQUE (aggregate_type, aggregate_id, aggregate_version)
+                    )
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "has unexpected columns"):
+                JournalStore(path)
+
+            connection = sqlite3.connect(path)
+            try:
+                migration_table = connection.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'schema_migrations'"
+                ).fetchone()
+                event_columns = {
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info(events)")
+                }
+            finally:
+                connection.close()
+
+            self.assertIsNone(migration_table)
+            self.assertIn("unexpected_shadow", event_columns)
+            self.assertNotIn("envelope_json", event_columns)
+            self.assertNotIn("journal_sequence", event_columns)
+
     def test_v1_database_upgrades_atomically_without_losing_events(self):
         class LegacyJournalStore(JournalStore):
             SCHEMA_VERSION = 1

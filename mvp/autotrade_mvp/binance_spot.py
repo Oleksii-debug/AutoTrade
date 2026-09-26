@@ -1043,6 +1043,10 @@ def parse_order_ack(
     if echoed != cid:
         raise BinanceSpotAdapterError("Binance clientOrderId does not match request")
     symbol = _text(response.get("symbol"), name="response.symbol")
+    if symbol != symbol.upper():
+        raise BinanceSpotAdapterError(
+            "response.symbol must be canonical uppercase"
+        )
     order_id = response.get("orderId")
     if isinstance(order_id, bool) or not isinstance(order_id, int) or order_id < 0:
         raise BinanceSpotAdapterError("response.orderId must be a non-negative integer")

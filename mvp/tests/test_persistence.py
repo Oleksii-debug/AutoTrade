@@ -1717,6 +1717,131 @@ class JournalStoreTests(unittest.TestCase):
                     aggregate_id="paper-1",
                 )
 
+    def test_projection_checkpoint_version_tamper_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+            store.append_event(
+                event("evt-2", 2, {"kind": "fill", "quantity": "2"})
+            )
+            store.save_projection_checkpoint(
+                projection_name="position",
+                aggregate_type="account",
+                aggregate_id="paper-1",
+                aggregate_version=2,
+                state={"net_quantity": "3"},
+            )
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE projection_checkpoints "
+                    "SET aggregate_version = 1 "
+                    "WHERE projection_name = 'position'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "hash does not match identity, version, and state",
+            ):
+                JournalStore(path).load_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                )
+
+    def test_projection_checkpoint_identity_tamper_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+            store.save_projection_checkpoint(
+                projection_name="position",
+                aggregate_type="account",
+                aggregate_id="paper-1",
+                aggregate_version=1,
+                state={"net_quantity": "1"},
+            )
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE projection_checkpoints "
+                    "SET projection_name = 'position-renamed' "
+                    "WHERE projection_name = 'position'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "hash does not match identity, version, and state",
+            ):
+                JournalStore(path).load_projection_checkpoint(
+                    projection_name="position-renamed",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                )
+
+    def test_v7_upgrade_invalidates_unbound_projection_checkpoint(self):
+        class V7JournalStore(JournalStore):
+            SCHEMA_VERSION = 7
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            legacy = V7JournalStore(path)
+            legacy.append_event(event())
+            legacy.save_projection_checkpoint(
+                projection_name="position",
+                aggregate_type="account",
+                aggregate_id="paper-1",
+                aggregate_version=1,
+                state={"net_quantity": "1"},
+            )
+            self.assertEqual(legacy.current_schema_version(), 7)
+            self.assertIsNotNone(
+                legacy.load_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                )
+            )
+
+            upgraded = JournalStore(path)
+            self.assertEqual(upgraded.current_schema_version(), 8)
+            self.assertIsNone(
+                upgraded.load_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                )
+            )
+            self.assertEqual(
+                [item["event_id"] for item in upgraded.load_events("account", "paper-1")],
+                ["evt-1"],
+            )
+            self.assertTrue(
+                upgraded.save_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                    aggregate_version=1,
+                    state={"net_quantity": "1"},
+                )
+            )
+            rebuilt = upgraded.load_projection_checkpoint(
+                projection_name="position",
+                aggregate_type="account",
+                aggregate_id="paper-1",
+            )
+            self.assertEqual(rebuilt["aggregate_version"], 1)
+            self.assertEqual(rebuilt["state"], {"net_quantity": "1"})
+
 
     def test_event_retry_rejects_changed_committed_at(self):
         with TemporaryDirectory() as directory:

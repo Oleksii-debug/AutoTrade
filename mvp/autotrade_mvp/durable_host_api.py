@@ -226,6 +226,22 @@ class JournalBackedHostCommandStore:
             }
         )
 
+    def _scoped_command_uuid(self, command_id: str, *, purpose: str) -> str:
+        """Derive one durable identity inside the active host account scope."""
+        scope_digest = payload_digest(
+            {
+                "account_id": self.account_id,
+                "environment": self.environment,
+                "command_id": command_id,
+            }
+        )
+        return str(
+            uuid5(
+                NAMESPACE_URL,
+                f"https://{purpose}.autotrade.local/host/{scope_digest}",
+            )
+        )
+
     def submit(self, command: Mapping[str, object]) -> CommandResult:
         if not isinstance(command, Mapping):
             raise TypeError("command must be a mapping")
@@ -264,7 +280,10 @@ class JournalBackedHostCommandStore:
             )
             try:
                 stored, _ = self._journal.record_command(
-                    command_id=command_id,
+                    command_id=self._scoped_command_uuid(
+                        command_id,
+                        purpose="commands",
+                    ),
                     actor=actor,
                     environment=environment,
                     idempotency_key=self._journal_idempotency_key(idempotency_key),
@@ -281,8 +300,9 @@ class JournalBackedHostCommandStore:
                 )
             return self._command_result(stored)
 
-        operation_id = str(
-            uuid5(NAMESPACE_URL, f"https://operations.autotrade.local/{command_id}")
+        operation_id = self._scoped_command_uuid(
+            command_id,
+            purpose="operations",
         )
         next_version = current + 1
         result = CommandResult(
@@ -291,8 +311,9 @@ class JournalBackedHostCommandStore:
             state_version=str(next_version),
             operation_id=operation_id,
         )
-        event_id = str(
-            uuid5(NAMESPACE_URL, f"https://events.autotrade.local/command/{command_id}")
+        event_id = self._scoped_command_uuid(
+            command_id,
+            purpose="events/command",
         )
         operation_time = self._now()
         envelope = self._event_envelope(
@@ -316,7 +337,10 @@ class JournalBackedHostCommandStore:
         )
         try:
             stored, inserted, _ = self._journal.commit_command(
-                command_id=command_id,
+                command_id=self._scoped_command_uuid(
+                    command_id,
+                    purpose="commands",
+                ),
                 actor=actor,
                 environment=environment,
                 idempotency_key=self._journal_idempotency_key(idempotency_key),

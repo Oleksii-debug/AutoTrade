@@ -71,6 +71,67 @@ class HistoricalVintageTests(unittest.TestCase):
         self.assertEqual(late[0]["revision"], "2")
         self.assertEqual(late[0]["payload"]["close"], "101")
 
+    def test_event_available_before_cutoff_but_ingested_after_is_invisible(self):
+        row = {
+            "event_id": str(uuid4()),
+            "instrument_version": "instrument:v1",
+            "kind": "TRADE",
+            "source_event_at": "2026-01-01T10:00:00Z",
+            "available_at": "2026-01-01T10:01:00Z",
+            "ingested_at": "2026-01-01T10:10:00Z",
+            "revision": "1",
+            "availability_basis": "provider-history",
+            "payload": {"price": "100"},
+            "quality_flags": [],
+            "raw_evidence_ref": evidence("2026-01-01T10:10:00Z"),
+        }
+        before_ingest = point_in_time_market_events(
+            [row],
+            datetime(2026, 1, 1, 10, 5, tzinfo=timezone.utc),
+        )
+        after_ingest = point_in_time_market_events(
+            [row],
+            datetime(2026, 1, 1, 10, 10, tzinfo=timezone.utc),
+        )
+        self.assertEqual(before_ingest, ())
+        self.assertEqual(after_ingest, (row,))
+
+    def test_late_ingested_correction_cannot_replace_visible_revision_early(self):
+        event_id = str(uuid4())
+        first = {
+            "event_id": event_id,
+            "instrument_version": "instrument:v1",
+            "kind": "BAR",
+            "source_event_at": "2026-01-01T10:00:00Z",
+            "available_at": "2026-01-01T10:01:00Z",
+            "ingested_at": "2026-01-01T10:01:30Z",
+            "revision": "1",
+            "availability_basis": "provider-history",
+            "payload": {"close": "100"},
+            "quality_flags": [],
+            "raw_evidence_ref": evidence("2026-01-01T10:01:30Z"),
+        }
+        correction = {
+            **first,
+            "available_at": "2026-01-01T10:02:00Z",
+            "ingested_at": "2026-01-01T11:00:00Z",
+            "revision": "2",
+            "payload": {"close": "99"},
+            "raw_evidence_ref": evidence("2026-01-01T11:00:00Z"),
+        }
+        early = point_in_time_market_events(
+            [first, correction],
+            datetime(2026, 1, 1, 10, 30, tzinfo=timezone.utc),
+        )
+        late = point_in_time_market_events(
+            [first, correction],
+            datetime(2026, 1, 1, 11, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(early[0]["revision"], "1")
+        self.assertEqual(early[0]["payload"]["close"], "100")
+        self.assertEqual(late[0]["revision"], "2")
+        self.assertEqual(late[0]["payload"]["close"], "99")
+
     def test_point_in_time_view_orders_by_evidenced_availability(self):
         earlier_source = {
             "event_id": str(uuid4()),

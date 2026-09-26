@@ -11,6 +11,8 @@ import argparse
 from contextlib import ExitStack
 from hashlib import sha256
 import json
+import os
+import stat
 from pathlib import Path, PurePosixPath
 import re
 import sys
@@ -263,6 +265,54 @@ def _verify_composition(
     }
 
 
+def _open_stable_regular_file(path: Path, *, name: str):
+    """Open one immutable-by-identity verification snapshot without path re-open."""
+
+    try:
+        stream = path.open("rb")
+    except OSError as error:
+        raise InstallerManifestError(f"{name} must be an existing regular file") from error
+    try:
+        _assert_open_file_identity(path, stream, name=name)
+    except BaseException:
+        stream.close()
+        raise
+    return stream
+
+
+def _assert_open_file_identity(path: Path, stream, *, name: str) -> None:
+    try:
+        opened = os.fstat(stream.fileno())
+        current = os.stat(path, follow_symlinks=False)
+    except OSError as error:
+        raise InstallerManifestError(
+            f"{name} identity cannot be verified"
+        ) from error
+    if not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(current.st_mode):
+        raise InstallerManifestError(f"{name} must be a regular non-symlink file")
+    if opened.st_nlink != 1 or current.st_nlink != 1:
+        raise InstallerManifestError(f"{name} must not have hard-link aliases")
+    if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+        raise InstallerManifestError(f"{name} changed during verification")
+
+
+def _sha256_stream(stream) -> str:
+    digest = sha256()
+    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _sha256_zip_member(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> tuple[str, int]:
+    digest = sha256()
+    observed_size = 0
+    with archive.open(info, "r") as member:
+        for chunk in iter(lambda: member.read(1024 * 1024), b""):
+            observed_size += len(chunk)
+            digest.update(chunk)
+    return digest.hexdigest(), observed_size
+
+
 def _zip_member_is_regular(info: zipfile.ZipInfo) -> bool:
     if info.is_dir():
         return False
@@ -271,199 +321,215 @@ def _zip_member_is_regular(info: zipfile.ZipInfo) -> bool:
 
 
 def verify_release_bundle(bundle: Path) -> dict[str, object]:
-    if bundle.is_symlink() or not bundle.is_file():
-        raise InstallerManifestError("release bundle must be a regular file")
-    bundle_bytes = bundle.read_bytes()
-    bundle_digest = "sha256:" + sha256(bundle_bytes).hexdigest()
-    try:
-        with zipfile.ZipFile(bundle, "r") as archive:
-            infos = archive.infolist()
-            names = [info.filename for info in infos]
-            if len(names) != len(set(names)):
-                raise InstallerManifestError(
-                    "release bundle contains duplicate archive paths"
-                )
-            if "bundle-manifest.json" not in names:
-                raise InstallerManifestError("bundle manifest is missing")
-            manifest_info = archive.getinfo("bundle-manifest.json")
-            if not _zip_member_is_regular(manifest_info):
-                raise InstallerManifestError("bundle manifest is not a regular file")
-            try:
-                manifest = json.loads(
-                    archive.read("bundle-manifest.json").decode("utf-8")
-                )
-            except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                raise InstallerManifestError("bundle manifest is invalid") from error
-            if not isinstance(manifest, dict):
-                raise InstallerManifestError("bundle manifest must be an object")
-            expected_manifest_fields = {
-                "schema_version",
-                "product",
-                "version",
-                "source_sha",
-                "mode",
-                "release_eligible",
-                "trading_authority_granted_by_artifact",
-                "provenance_sha256",
-                "composition_sha256",
-                "composition",
-                "provenance_blockers",
-                "files",
-            }
-            if set(manifest) != expected_manifest_fields:
-                raise InstallerManifestError(
-                    "bundle manifest fields do not match supported schema"
-                )
-            if manifest.get("schema_version") != "1.0.0":
-                raise InstallerManifestError(
-                    "unsupported bundle manifest schema version"
-                )
-            if manifest.get("product") != "AutoTrade":
-                raise InstallerManifestError("bundle product identity is invalid")
-            if manifest.get("mode") != "release":
-                raise InstallerManifestError(
-                    "installer inputs require a release-mode bundle"
-                )
-            if manifest.get("release_eligible") is not True:
-                raise InstallerManifestError("bundle is not release eligible")
-            if manifest.get("trading_authority_granted_by_artifact") is not False:
-                raise InstallerManifestError(
-                    "bundle artifact must not grant trading authority"
-                )
-            blockers = manifest.get("provenance_blockers")
-            if blockers != []:
-                raise InstallerManifestError(
-                    "release bundle still contains provenance blockers"
-                )
-            source_sha = _text(manifest.get("source_sha"), name="source_sha")
-            if _GIT_SHA.fullmatch(source_sha) is None:
-                raise InstallerManifestError("source_sha is not canonical")
-            version = _text(manifest.get("version"), name="version")
-            provenance_sha256 = _digest(
-                manifest.get("provenance_sha256"),
-                name="provenance_sha256",
-            )
-            composition_sha256 = _digest(
-                manifest.get("composition_sha256"),
-                name="composition_sha256",
-            )
-            composition = manifest.get("composition")
-            if not isinstance(composition, dict):
-                raise InstallerManifestError(
-                    "release bundle composition evidence is missing"
-                )
-            if composition.get("product") != "AutoTrade":
-                raise InstallerManifestError(
-                    "release bundle composition product identity is invalid"
-                )
-            if composition.get("source_sha") != source_sha:
-                raise InstallerManifestError(
-                    "release bundle composition source_sha does not match bundle"
-                )
-            files = manifest.get("files")
-            if not isinstance(files, list) or not files:
-                raise InstallerManifestError("bundle file inventory is empty")
-
-            verified_files: list[dict[str, object]] = []
-            expected_payload_names: set[str] = set()
-            seen_paths: set[str] = set()
-            seen_windows_paths: set[str] = set()
-            for item in files:
-                if not isinstance(item, dict) or set(item) != {
-                    "path",
-                    "sha256",
-                    "size",
-                }:
+    with _open_stable_regular_file(bundle, name="release bundle") as bundle_stream:
+        bundle_digest = "sha256:" + _sha256_stream(bundle_stream)
+        bundle_stream.seek(0)
+        try:
+            with zipfile.ZipFile(bundle_stream, "r") as archive:
+                infos = archive.infolist()
+                names = [info.filename for info in infos]
+                if len(names) != len(set(names)):
                     raise InstallerManifestError(
-                        "bundle file inventory entry is invalid"
+                        "release bundle contains duplicate archive paths"
                     )
-                relative = _safe_relative(item["path"])
-                if relative in seen_paths:
+                if "bundle-manifest.json" not in names:
+                    raise InstallerManifestError("bundle manifest is missing")
+                manifest_info = archive.getinfo("bundle-manifest.json")
+                if not _zip_member_is_regular(manifest_info):
+                    raise InstallerManifestError("bundle manifest is not a regular file")
+                if manifest_info.compress_type != zipfile.ZIP_STORED:
                     raise InstallerManifestError(
-                        "bundle manifest contains duplicate paths"
+                        "bundle manifest compression is not canonical"
                     )
-                windows_key = _windows_path_key(relative)
-                if windows_key in seen_windows_paths:
-                    raise InstallerManifestError(
-                        "bundle manifest contains Windows-colliding paths"
-                    )
-                seen_paths.add(relative)
-                seen_windows_paths.add(windows_key)
-                digest = _digest(item["sha256"], name="file sha256")
-                size = item["size"]
-                if isinstance(size, bool) or not isinstance(size, int) or size < 0:
-                    raise InstallerManifestError("bundle file size is invalid")
-                archive_name = f"payload/{relative}"
-                expected_payload_names.add(archive_name)
                 try:
-                    info = archive.getinfo(archive_name)
-                except KeyError as error:
-                    raise InstallerManifestError(
-                        f"bundle payload is missing: {relative}"
-                    ) from error
-                if not _zip_member_is_regular(info):
-                    raise InstallerManifestError(
-                        f"bundle payload is not a regular file: {relative}"
+                    manifest = json.loads(
+                        archive.read("bundle-manifest.json").decode("utf-8")
                     )
-                payload = archive.read(info)
-                observed_digest = "sha256:" + sha256(payload).hexdigest()
-                if observed_digest != digest:
+                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise InstallerManifestError("bundle manifest is invalid") from error
+                if not isinstance(manifest, dict):
+                    raise InstallerManifestError("bundle manifest must be an object")
+                expected_manifest_fields = {
+                    "schema_version",
+                    "product",
+                    "version",
+                    "source_sha",
+                    "mode",
+                    "release_eligible",
+                    "trading_authority_granted_by_artifact",
+                    "provenance_sha256",
+                    "composition_sha256",
+                    "composition",
+                    "provenance_blockers",
+                    "files",
+                }
+                if set(manifest) != expected_manifest_fields:
                     raise InstallerManifestError(
-                        f"bundle payload digest mismatch: {relative}"
+                        "bundle manifest fields do not match supported schema"
                     )
-                if len(payload) != size or info.file_size != size:
+                if manifest.get("schema_version") != "1.0.0":
                     raise InstallerManifestError(
-                        f"bundle payload size mismatch: {relative}"
+                        "unsupported bundle manifest schema version"
                     )
-                verified_files.append(
-                    {
-                        "source_path": relative,
-                        "target_relative_path": relative,
-                        "sha256": digest,
-                        "size": size,
-                    }
+                if manifest.get("product") != "AutoTrade":
+                    raise InstallerManifestError("bundle product identity is invalid")
+                if manifest.get("mode") != "release":
+                    raise InstallerManifestError(
+                        "installer inputs require a release-mode bundle"
+                    )
+                if manifest.get("release_eligible") is not True:
+                    raise InstallerManifestError("bundle is not release eligible")
+                if manifest.get("trading_authority_granted_by_artifact") is not False:
+                    raise InstallerManifestError(
+                        "bundle artifact must not grant trading authority"
+                    )
+                blockers = manifest.get("provenance_blockers")
+                if blockers != []:
+                    raise InstallerManifestError(
+                        "release bundle still contains provenance blockers"
+                    )
+                source_sha = _text(manifest.get("source_sha"), name="source_sha")
+                if _GIT_SHA.fullmatch(source_sha) is None:
+                    raise InstallerManifestError("source_sha is not canonical")
+                version = _text(manifest.get("version"), name="version")
+                provenance_sha256 = _digest(
+                    manifest.get("provenance_sha256"),
+                    name="provenance_sha256",
                 )
+                composition_sha256 = _digest(
+                    manifest.get("composition_sha256"),
+                    name="composition_sha256",
+                )
+                composition = manifest.get("composition")
+                if not isinstance(composition, dict):
+                    raise InstallerManifestError(
+                        "release bundle composition evidence is missing"
+                    )
+                if composition.get("product") != "AutoTrade":
+                    raise InstallerManifestError(
+                        "release bundle composition product identity is invalid"
+                    )
+                if composition.get("source_sha") != source_sha:
+                    raise InstallerManifestError(
+                        "release bundle composition source_sha does not match bundle"
+                    )
+                files = manifest.get("files")
+                if not isinstance(files, list) or not files:
+                    raise InstallerManifestError("bundle file inventory is empty")
 
-            observed_payload_names = {
-                name for name in names if name.startswith("payload/")
-            }
-            if observed_payload_names != expected_payload_names:
-                raise InstallerManifestError(
-                    "bundle contains untracked or missing payload entries"
-                )
-            allowed_names = {"bundle-manifest.json"} | expected_payload_names
-            if set(names) != allowed_names:
-                raise InstallerManifestError(
-                    "bundle contains untracked non-payload entries"
-                )
-    except zipfile.BadZipFile as error:
-        raise InstallerManifestError("release bundle is not a valid ZIP") from error
+                verified_files: list[dict[str, object]] = []
+                expected_payload_names: set[str] = set()
+                seen_paths: set[str] = set()
+                seen_windows_paths: set[str] = set()
+                for item in files:
+                    if not isinstance(item, dict) or set(item) != {
+                        "path",
+                        "sha256",
+                        "size",
+                    }:
+                        raise InstallerManifestError(
+                            "bundle file inventory entry is invalid"
+                        )
+                    relative = _safe_relative(item["path"])
+                    if relative in seen_paths:
+                        raise InstallerManifestError(
+                            "bundle manifest contains duplicate paths"
+                        )
+                    windows_key = _windows_path_key(relative)
+                    if windows_key in seen_windows_paths:
+                        raise InstallerManifestError(
+                            "bundle manifest contains Windows-colliding paths"
+                        )
+                    seen_paths.add(relative)
+                    seen_windows_paths.add(windows_key)
+                    digest = _digest(item["sha256"], name="file sha256")
+                    size = item["size"]
+                    if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+                        raise InstallerManifestError("bundle file size is invalid")
+                    archive_name = f"payload/{relative}"
+                    expected_payload_names.add(archive_name)
+                    try:
+                        info = archive.getinfo(archive_name)
+                    except KeyError as error:
+                        raise InstallerManifestError(
+                            f"bundle payload is missing: {relative}"
+                        ) from error
+                    if not _zip_member_is_regular(info):
+                        raise InstallerManifestError(
+                            f"bundle payload is not a regular file: {relative}"
+                        )
+                    if info.compress_type != zipfile.ZIP_STORED:
+                        raise InstallerManifestError(
+                            f"bundle payload compression is not canonical: {relative}"
+                        )
+                    if info.file_size != size:
+                        raise InstallerManifestError(
+                            f"bundle payload size mismatch: {relative}"
+                        )
+                    observed_hash, observed_size = _sha256_zip_member(archive, info)
+                    observed_digest = "sha256:" + observed_hash
+                    if observed_digest != digest:
+                        raise InstallerManifestError(
+                            f"bundle payload digest mismatch: {relative}"
+                        )
+                    if observed_size != size:
+                        raise InstallerManifestError(
+                            f"bundle payload size mismatch: {relative}"
+                        )
+                    verified_files.append(
+                        {
+                            "source_path": relative,
+                            "target_relative_path": relative,
+                            "sha256": digest,
+                            "size": size,
+                        }
+                    )
 
-    verified_files = sorted(
-        verified_files,
-        key=lambda item: str(item["target_relative_path"]),
-    )
-    verified_composition = _verify_composition(
-        composition,
-        source_sha=source_sha,
-        verified_files=verified_files,
-    )
-    observed_composition_sha256 = (
-        "sha256:" + sha256(_canonical_bytes(verified_composition)).hexdigest()
-    )
-    if observed_composition_sha256 != composition_sha256:
-        raise InstallerManifestError(
-            "composition_sha256 does not match canonical stored composition"
+                observed_payload_names = {
+                    name for name in names if name.startswith("payload/")
+                }
+                if observed_payload_names != expected_payload_names:
+                    raise InstallerManifestError(
+                        "bundle contains untracked or missing payload entries"
+                    )
+                allowed_names = {"bundle-manifest.json"} | expected_payload_names
+                if set(names) != allowed_names:
+                    raise InstallerManifestError(
+                        "bundle contains untracked non-payload entries"
+                    )
+        except zipfile.BadZipFile as error:
+            raise InstallerManifestError("release bundle is not a valid ZIP") from error
+
+        verified_files = sorted(
+            verified_files,
+            key=lambda item: str(item["target_relative_path"]),
         )
-    return {
-        "bundle_sha256": bundle_digest,
-        "source_sha": source_sha,
-        "version": version,
-        "provenance_sha256": provenance_sha256,
-        "composition_sha256": composition_sha256,
-        "composition": verified_composition,
-        "files": verified_files,
-    }
+        verified_composition = _verify_composition(
+            composition,
+            source_sha=source_sha,
+            verified_files=verified_files,
+        )
+        observed_composition_sha256 = (
+            "sha256:" + sha256(_canonical_bytes(verified_composition)).hexdigest()
+        )
+        if observed_composition_sha256 != composition_sha256:
+            raise InstallerManifestError(
+                "composition_sha256 does not match canonical stored composition"
+            )
+        _assert_open_file_identity(
+            bundle,
+            bundle_stream,
+            name="release bundle",
+        )
+        return {
+            "bundle_sha256": bundle_digest,
+            "source_sha": source_sha,
+            "version": version,
+            "provenance_sha256": provenance_sha256,
+            "composition_sha256": composition_sha256,
+            "composition": verified_composition,
+            "files": verified_files,
+        }
 
 
 

@@ -232,12 +232,13 @@ def alpaca_prepared_request(client_order_id="at-alpaca-1"):
     )
 
 
-def whitebit_trade_handle(*, account_id="acct-wb"):
+def whitebit_trade_handle(*, account_id="acct-wb", provider_environment="LIVE"):
     return PersistentCredentialHandle(
         handle_id="cred-whitebit-trade",
         account_id=account_id,
         provider="WHITEBIT",
         environment="LIVE",
+        provider_environment=provider_environment,
         purpose="TRADE",
         generation=1,
     )
@@ -645,6 +646,45 @@ class AlpacaProviderTransportTests(unittest.TestCase):
 
 
 class WhiteBitProviderTransportTests(unittest.TestCase):
+    def test_provider_environment_mismatch_fails_before_quota_nonce_secret_or_wire(self):
+        calls = []
+        fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            journal = JournalStore(path)
+            allocator = WhiteBitDurableNonceAllocator(
+                journal=journal,
+                account_id="acct-wb",
+                environment="LIVE",
+                clock_millis=lambda: calls.append("nonce") or 1_700_000_000_000,
+                clock_utc=lambda: fixed,
+            )
+            with self.assertRaisesRegex(
+                ProviderTransportScopeError,
+                "provider_environment",
+            ):
+                WhiteBitHttpTransport(
+                    policy=WHITEBIT_ENDPOINT_POLICIES["LIVE"],
+                    account_id="acct-wb",
+                    capability_snapshot_id="wb-cap-1",
+                    secret_resolver=FakeSecretResolver(calls),
+                    credential_handle=whitebit_trade_handle(
+                        provider_environment="DEMO"
+                    ),
+                    session_token="session-1",
+                    origin="autotrade://execution",
+                    execution_identity="sender-1",
+                    nonce_allocator=allocator,
+                    quota_gate=lambda *_args: calls.append("quota"),
+                    wire_client=RecordingWire(calls),
+                )
+
+            self.assertEqual(calls, [])
+            self.assertEqual(
+                journal.load_events("provider_nonce", allocator.aggregate_id),
+                [],
+            )
+
     def test_durable_nonce_survives_restart_and_clock_regression(self):
         fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
         with TemporaryDirectory() as directory:

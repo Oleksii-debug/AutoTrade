@@ -17,6 +17,12 @@ from typing import Callable, Mapping, Sequence
 import json
 import re
 import time
+from uuid import UUID
+
+from research.autotrade_research.artifacts.store import (
+    ArtifactIntegrityError,
+    ArtifactStore,
+)
 
 from .performance_qualification import (
     RuntimeBudgetDecision,
@@ -99,6 +105,7 @@ class RuntimeCampaignPlan:
     declared_duration_ms: int
     expected_financial_event_ids: tuple[str, ...]
     financial_aggregate_types: tuple[str, ...]
+    release_artifact_id: str | None = None
     release_artifact_sha256: str | None = None
 
     def __post_init__(self) -> None:
@@ -147,7 +154,18 @@ class RuntimeCampaignPlan:
                 name="financial_aggregate_types",
             ),
         )
-        if self.release_artifact_sha256 is not None:
+        if (self.release_artifact_id is None) != (self.release_artifact_sha256 is None):
+            raise RuntimeBudgetError(
+                "release_artifact_id and release_artifact_sha256 must be provided together"
+            )
+        if self.release_artifact_id is not None:
+            try:
+                artifact_id = str(UUID(self.release_artifact_id))
+            except (ValueError, AttributeError, TypeError) as error:
+                raise RuntimeBudgetError("release_artifact_id must be a canonical UUID") from error
+            if artifact_id != self.release_artifact_id:
+                raise RuntimeBudgetError("release_artifact_id must be a canonical UUID")
+            object.__setattr__(self, "release_artifact_id", artifact_id)
             object.__setattr__(
                 self,
                 "release_artifact_sha256",
@@ -166,6 +184,7 @@ class RuntimeCampaignPlan:
         declared_duration_ms: int,
         expected_financial_event_ids: Sequence[str],
         financial_aggregate_types: Sequence[str],
+        release_artifact_id: str | None = None,
         release_artifact_sha256: str | None = None,
     ) -> "RuntimeCampaignPlan":
         if not isinstance(spec, RuntimeBudgetSpec):
@@ -194,6 +213,7 @@ class RuntimeCampaignPlan:
             declared_duration_ms=declared_duration_ms,
             expected_financial_event_ids=tuple(expected_financial_event_ids),
             financial_aggregate_types=tuple(financial_aggregate_types),
+            release_artifact_id=release_artifact_id,
             release_artifact_sha256=release_artifact_sha256,
         )
 
@@ -210,6 +230,7 @@ class RuntimeCampaignPlan:
                 "declared_duration_ms": self.declared_duration_ms,
                 "expected_financial_event_ids": list(self.expected_financial_event_ids),
                 "financial_aggregate_types": list(self.financial_aggregate_types),
+                "release_artifact_id": self.release_artifact_id,
                 "release_artifact_sha256": self.release_artifact_sha256,
             }
         )
@@ -271,6 +292,8 @@ class RuntimeCampaignEvidence:
     reconnect_backlog_remaining: int
     resource_evidence_hash: str
     resource_metrics: Mapping[str, int]
+    release_artifact_id: str | None = None
+    release_artifact_sha256: str | None = None
     _token: InitVar[object | None] = None
 
     def __post_init__(self, _token: object | None) -> None:
@@ -289,6 +312,26 @@ class RuntimeCampaignEvidence:
             or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", self.release_sha) is None
         ):
             raise RuntimeBudgetError("release_sha must be a canonical Git object id")
+        if (self.release_artifact_id is None) != (self.release_artifact_sha256 is None):
+            raise RuntimeBudgetError(
+                "release_artifact_id and release_artifact_sha256 must be provided together"
+            )
+        if self.release_artifact_id is not None:
+            try:
+                artifact_id = str(UUID(self.release_artifact_id))
+            except (ValueError, AttributeError, TypeError) as error:
+                raise RuntimeBudgetError("release_artifact_id must be a canonical UUID") from error
+            if artifact_id != self.release_artifact_id:
+                raise RuntimeBudgetError("release_artifact_id must be a canonical UUID")
+            object.__setattr__(self, "release_artifact_id", artifact_id)
+            object.__setattr__(
+                self,
+                "release_artifact_sha256",
+                _sha256_identity(
+                    self.release_artifact_sha256,
+                    name="release_artifact_sha256",
+                ),
+            )
         object.__setattr__(
             self,
             "configuration_hash",
@@ -416,6 +459,8 @@ class RuntimeCampaignEvidence:
                 "plan_digest": self.plan_digest,
                 "spec_digest": self.spec_digest,
                 "release_sha": self.release_sha,
+                "release_artifact_id": self.release_artifact_id,
+                "release_artifact_sha256": self.release_artifact_sha256,
                 "configuration_hash": self.configuration_hash,
                 "host_fingerprint": self.host_fingerprint,
                 "declared_duration_us": self.declared_duration_us,
@@ -574,6 +619,8 @@ def collect_runtime_campaign_evidence(
         plan_digest=plan.digest,
         spec_digest=spec.digest,
         release_sha=spec.release_sha,
+        release_artifact_id=plan.release_artifact_id,
+        release_artifact_sha256=plan.release_artifact_sha256,
         configuration_hash=spec.configuration_hash,
         host_fingerprint=spec.host_fingerprint,
         declared_duration_us=declared_duration_us,
@@ -595,7 +642,57 @@ def collect_runtime_campaign_evidence(
 def evaluate_runtime_campaign(
     spec: RuntimeBudgetSpec,
     evidence: RuntimeCampaignEvidence,
+    *,
+    expected_release_artifact_id: str | None = None,
+    expected_release_artifact_sha256: str | None = None,
+    release_artifact_store: ArtifactStore | None = None,
 ) -> RuntimeBudgetDecision:
     if not isinstance(evidence, RuntimeCampaignEvidence):
         raise TypeError("evidence must be RuntimeCampaignEvidence")
+    if (expected_release_artifact_id is None) != (
+        expected_release_artifact_sha256 is None
+    ):
+        raise RuntimeBudgetError(
+            "delivered release artifact id and digest must be provided together"
+        )
+    if expected_release_artifact_id is None:
+        raise RuntimeBudgetError(
+            "delivered release artifact identity is required for runtime qualification"
+        )
+    try:
+        artifact_id = str(UUID(expected_release_artifact_id))
+    except (ValueError, AttributeError, TypeError) as error:
+        raise RuntimeBudgetError(
+            "delivered release artifact id must be a canonical UUID"
+        ) from error
+    if artifact_id != expected_release_artifact_id:
+        raise RuntimeBudgetError(
+            "delivered release artifact id must be a canonical UUID"
+        )
+    artifact_sha256 = _sha256_identity(
+        expected_release_artifact_sha256,
+        name="delivered release artifact digest",
+    )
+    if (
+        evidence.release_artifact_id != artifact_id
+        or evidence.release_artifact_sha256 != artifact_sha256
+    ):
+        raise RuntimeBudgetError(
+            "campaign evidence is not bound to the delivered release artifact"
+        )
+    if not isinstance(release_artifact_store, ArtifactStore):
+        raise RuntimeBudgetError(
+            "immutable delivered release artifact evidence is required for runtime qualification"
+        )
+    try:
+        manifest = release_artifact_store.load_manifest(artifact_id)
+        release_artifact_store.read_bytes(artifact_id)
+    except (ArtifactIntegrityError, FileNotFoundError, OSError, TypeError, ValueError) as error:
+        raise RuntimeBudgetError(
+            "delivered release artifact cannot be integrity verified"
+        ) from error
+    if manifest.get("sha256") != artifact_sha256:
+        raise RuntimeBudgetError(
+            "delivered release artifact digest does not match immutable evidence"
+        )
     return evaluate_runtime_budget(spec, evidence.to_observation(spec))

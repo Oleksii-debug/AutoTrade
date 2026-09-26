@@ -180,6 +180,28 @@ test = [["jsonschema==4.26.0"]]
             self.assertIn("MALFORMED_RESEARCH_BUILD_REQUIREMENT", malformed)
             self.assertIn("MALFORMED_RESEARCH_TEST_REQUIREMENT", malformed)
 
+            pyproject.write_text(
+                """build-system = "not-a-table"
+project = "not-a-table"
+""",
+                encoding="utf-8",
+            )
+            malformed_tables, _ = _python_blockers(root)
+            self.assertIn("MALFORMED_RESEARCH_BUILD_SYSTEM", malformed_tables)
+            self.assertIn("MALFORMED_RESEARCH_PROJECT", malformed_tables)
+            self.assertIn(
+                "MALFORMED_RESEARCH_OPTIONAL_DEPENDENCIES",
+                malformed_tables,
+            )
+            self.assertIn(
+                "MISSING_RESEARCH_BUILD_REQUIREMENTS",
+                malformed_tables,
+            )
+            self.assertIn(
+                "MISSING_RESEARCH_TEST_REQUIREMENTS",
+                malformed_tables,
+            )
+
     def test_research_test_extra_matches_exact_resolved_graph(self):
         self.assertFalse(
             any(

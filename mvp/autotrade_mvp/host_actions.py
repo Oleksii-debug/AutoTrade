@@ -11,12 +11,13 @@ from types import MappingProxyType
 from typing import Final, Mapping
 
 
-HOST_ACTION_POLICY_VERSION: Final[str] = "1.0.0"
+HOST_ACTION_POLICY_VERSION: Final[str] = "1.1.0"
 
 HOST_ACTION_REQUIRED_ROLES: Mapping[str, frozenset[str]] = MappingProxyType(
     {
         "BLOCK_NEW_EXPOSURE": frozenset({"OWNER", "OPERATOR"}),
         "REVOKE_AUTHORITY": frozenset({"OWNER"}),
+        "RESTORE_NEW_EXPOSURE": frozenset({"OWNER"}),
         "SET_AUTHORITY": frozenset({"OWNER"}),
     }
 )

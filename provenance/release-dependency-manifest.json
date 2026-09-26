@@ -31,9 +31,18 @@
     {
       "code": "DEPENDENCY_ADVISORY_EVIDENCE_MISSING",
       "detail": "Exact release dependency graph has no qualified vulnerability/advisory review."
+    },
+    {
+      "code": "DOTNET_TRANSITIVE_LOCK_MISSING",
+      "detail": "Release PackageReference dependencies exist without committed packages.lock.json files."
     }
   ],
-  "dotnet_package_dependencies": [],
+  "dotnet_package_dependencies": [
+    {
+      "name": "Velopack",
+      "version": "1.2.158"
+    }
+  ],
   "dotnet_sdk": "10.0.100",
   "inspected_components": [
     {

@@ -381,6 +381,34 @@ class ArtifactStoreTests(unittest.TestCase):
             self.assertEqual(store.audit().objects, 0)
             self.assertEqual(list(store.staging.iterdir()), [])
 
+    def test_crash_during_object_directory_sync_leaves_recoverable_orphan(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            data = b"object-published-before-directory-sync"
+            artifact_id = str(uuid4())
+            digest = hashlib.sha256(data).hexdigest()
+
+            with patch(
+                "autotrade_research.artifacts.store.sync_parent_directory",
+                side_effect=OSError("simulated object directory sync failure"),
+            ):
+                with self.assertRaisesRegex(OSError, "directory sync failure"):
+                    store.publish_bytes(
+                        artifact_id=artifact_id,
+                        data=data,
+                        media_type="application/octet-stream",
+                        rights={"storage": True, "export": False},
+                    )
+
+            object_path = store._object_path(digest)
+            self.assertTrue(object_path.is_file())
+            self.assertFalse(store._manifest_path(artifact_id).exists())
+            self.assertIn(digest, store.audit().unreferenced_objects)
+
+            recovered = ArtifactStore(directory).recover_orphans()
+            self.assertFalse(object_path.exists())
+            self.assertEqual(recovered.unreferenced_objects, ())
+
     def test_crash_after_manifest_commit_recovers_committed_artifact(self):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)

@@ -267,6 +267,73 @@ class DurableOrderProjectionTests(unittest.TestCase):
             self.assertEqual(restarted.order("c1").filled_quantity, Decimal("0"))
             self.assertEqual(book.order("c1").filled_quantity, Decimal("0"))
 
+    def test_canonical_execution_fill_event_key_binds_full_fill_content(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store)
+            book.create_order(
+                event_key="create",
+                client_order_id="c1",
+                instrument="instrument-v1",
+                side="BUY",
+                requested_quantity="2",
+                committed_at=T0,
+            )
+            fill = {
+                "fill_id": "fill-1",
+                "provider_execution_id": "exec-1",
+                "instrument_version": "instrument-v1",
+                "side": "BUY",
+                "last_quantity": {"value": "1", "unit": "unit"},
+                "last_price": "100",
+                "trade_time": T1,
+                "receipt_time": T2,
+                "fees": [],
+                "settlement_date": "2026-09-27",
+                "evidence": [],
+            }
+            first = book.ingest_execution_fill(
+                event_key="canonical-fill-1",
+                client_order_id="c1",
+                committed_at=T2,
+                execution_fill=fill,
+            )
+            exact_retry = book.ingest_execution_fill(
+                event_key="canonical-fill-1",
+                client_order_id="c1",
+                committed_at=T2,
+                execution_fill=dict(fill),
+            )
+            self.assertFalse(exact_retry.inserted)
+            self.assertEqual(exact_retry.event_id, first.event_id)
+
+            changed = dict(fill)
+            changed["fees"] = [{"amount": "1", "currency": "USD"}]
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "event_key was already used",
+            ):
+                book.ingest_execution_fill(
+                    event_key="canonical-fill-1",
+                    client_order_id="c1",
+                    committed_at=T2,
+                    execution_fill=changed,
+                )
+
+            event = store.load_events(
+                "order_projection_book",
+                book.aggregate_id,
+            )[-1]
+            self.assertTrue(
+                event["payload"]["request"]["canonical_execution_fill_hash"].startswith(
+                    "sha256:"
+                )
+            )
+            self.assertEqual(
+                durable(store).order("c1").filled_quantity,
+                Decimal("1"),
+            )
+
     def test_canonical_execution_fill_correction_uses_existing_fill_lineage(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

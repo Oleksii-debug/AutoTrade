@@ -486,29 +486,139 @@ class ArtifactStore:
                 "artifact manifest created_at must include timezone"
             )
 
-    def _load_manifest_path(self, path: Path) -> dict[str, Any]:
-        before = self._validate_manifest_entry(path)
+    @staticmethod
+    def _manifest_entry_identity(entry: os.stat_result) -> tuple[int, ...]:
+        """Return the stable manifest identity fields that must not change in-flight."""
+
+        return (
+            entry.st_dev,
+            entry.st_ino,
+            entry.st_mode,
+            entry.st_nlink,
+            entry.st_size,
+            entry.st_mtime_ns,
+            entry.st_ctime_ns,
+        )
+
+    def _open_manifest_descriptor(
+        self,
+        manifest_path: Path,
+    ) -> tuple[int, os.stat_result]:
+        before = self._validate_manifest_entry(manifest_path)
         try:
-            raw = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError, ValueError) as error:
-            raise ArtifactIntegrityError(f"invalid artifact manifest: {path.name}") from error
-        after = self._validate_manifest_entry(path)
-        before_identity = (
-            before.st_dev,
-            before.st_ino,
-            before.st_size,
-            before.st_mtime_ns,
-            before.st_ctime_ns,
-        )
-        after_identity = (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-            after.st_ctime_ns,
-        )
-        if before_identity != after_identity:
+            if os.name == "nt":
+                descriptor = _open_read_only_descriptor(manifest_path)
+            else:
+                no_follow = getattr(os, "O_NOFOLLOW", 0)
+                if not no_follow:
+                    raise OSError(
+                        "platform lacks no-follow artifact manifest open support"
+                    )
+                flags = (
+                    os.O_RDONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | no_follow
+                    | getattr(os, "O_NONBLOCK", 0)
+                )
+                descriptor = os.open(manifest_path, flags)
+        except OSError as error:
+            raise ArtifactIntegrityError(
+                "artifact manifest could not be opened safely"
+            ) from error
+
+        try:
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode):
+                raise ArtifactIntegrityError(
+                    "artifact manifest descriptor must be a regular file"
+                )
+            if opened.st_nlink != 1:
+                raise ArtifactIntegrityError(
+                    "artifact manifest descriptor must not have hard-link aliases"
+                )
+            current = self._validate_manifest_entry(manifest_path)
+            expected_identity = self._manifest_entry_identity(before)
+            if (
+                self._manifest_entry_identity(opened) != expected_identity
+                or self._manifest_entry_identity(current) != expected_identity
+            ):
+                raise ArtifactIntegrityError(
+                    "artifact manifest changed during read"
+                )
+        except Exception:
+            os.close(descriptor)
+            raise
+        return descriptor, opened
+
+    def _revalidate_manifest_descriptor(
+        self,
+        manifest_path: Path,
+        descriptor: int,
+        opened: os.stat_result,
+    ) -> None:
+        try:
+            after_descriptor = os.fstat(descriptor)
+        except OSError as error:
+            raise ArtifactIntegrityError(
+                "artifact manifest descriptor could not be revalidated"
+            ) from error
+        current = self._validate_manifest_entry(manifest_path)
+        expected_identity = self._manifest_entry_identity(opened)
+        if (
+            self._manifest_entry_identity(after_descriptor) != expected_identity
+            or self._manifest_entry_identity(current) != expected_identity
+        ):
             raise ArtifactIntegrityError("artifact manifest changed during read")
+
+    def _read_manifest_descriptor(
+        self,
+        manifest_path: Path,
+        descriptor: int,
+        opened: os.stat_result,
+    ) -> bytes:
+        expected_bytes = opened.st_size
+        remaining = expected_bytes + 1
+        chunks: list[bytes] = []
+        copied = 0
+        while remaining > 0:
+            try:
+                chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            except OSError as error:
+                raise ArtifactIntegrityError(
+                    "artifact manifest could not be read safely"
+                ) from error
+            if not chunk:
+                break
+            chunks.append(chunk)
+            copied += len(chunk)
+            remaining -= len(chunk)
+
+        self._revalidate_manifest_descriptor(
+            manifest_path,
+            descriptor,
+            opened,
+        )
+        if copied != expected_bytes:
+            raise ArtifactIntegrityError("artifact manifest changed during read")
+        return b"".join(chunks)
+
+    def _load_manifest_path(self, path: Path) -> dict[str, Any]:
+        descriptor, opened = self._open_manifest_descriptor(path)
+        try:
+            raw_bytes = self._read_manifest_descriptor(
+                path,
+                descriptor,
+                opened,
+            )
+        finally:
+            os.close(descriptor)
+
+        try:
+            raw = raw_bytes.decode("utf-8")
+        except UnicodeError as error:
+            raise ArtifactIntegrityError(
+                f"invalid artifact manifest: {path.name}"
+            ) from error
         try:
             value = strict_json_loads(raw)
         except (UnicodeError, ValueError) as error:

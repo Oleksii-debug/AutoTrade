@@ -25,6 +25,8 @@ _REDACTION_MARKERS = (
     "credential",
     "cookie",
     "privatekey",
+    "xtxcpayload",
+    "xtxcsignature",
 )
 
 
@@ -47,8 +49,9 @@ _EMBEDDED_SECRET_PATTERNS = (
         r"(?i)\b(https?://)[^/@\s]+@"
     ),
     re.compile(
-        r"""(?i)(?:["'])?\b(api[_-]?key|token|access[_-]?token|refresh[_-]?token|session|session[_-]?token|"""
-        r"""secret|credential|api[_-]?secret|client[_-]?secret|private[_-]?key|password)\b(?:["'])?\s*[:=]\s*"""
+        r"""(?i)(?:["'])?\b(api[_-]?key|x[_-]?txc[_-]?apikey|x[_-]?txc[_-]?payload|x[_-]?txc[_-]?signature|"""
+        r"""token|access[_-]?token|refresh[_-]?token|session|session[_-]?token|secret|credential|api[_-]?secret|"""
+        r"""client[_-]?secret|private[_-]?key|password)\b(?:["'])?\s*[:=]\s*"""
         r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^&\s;,}\]]+)"""
     ),
 )

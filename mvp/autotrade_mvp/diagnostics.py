@@ -24,6 +24,7 @@ _REDACTION_MARKERS = (
     "authorization",
     "credential",
     "cookie",
+    "session",
     "privatekey",
     "xtxcpayload",
     "xtxcsignature",

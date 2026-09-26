@@ -1,5 +1,6 @@
 from decimal import Decimal
 from pathlib import Path
+import platform
 import unittest
 
 from qualification.zero_model.qualify import (
@@ -30,6 +31,14 @@ class ZeroModelQualificationTests(unittest.TestCase):
         evidence = qualify(observed)
 
         self.assertEqual(evidence["qualification"], "WP-62_ZERO_MODEL_FOUNDATION")
+        self.assertEqual(
+            evidence["execution_platform"],
+            {
+                "system": platform.system(),
+                "python_implementation": platform.python_implementation(),
+                "python_version": platform.python_version(),
+            },
+        )
         self.assertEqual(evidence["source_sha"], observed)
         self.assertEqual(evidence["observed_source_sha"], observed)
         self.assertRegex(evidence["qualifier_sha256"], r"^sha256:[0-9a-f]{64}$")

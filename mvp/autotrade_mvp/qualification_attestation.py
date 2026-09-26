@@ -645,6 +645,29 @@ def _canonical_qualification_trust_policy_bytes(
             "canonical qualification trust policy is outside trusted source root"
         ) from error
     try:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=source_root,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise QualificationTrustUnavailable(
+            "qualification trust source selection is unavailable"
+        ) from error
+    if head.returncode != 0:
+        raise QualificationTrustUnavailable(
+            "qualification trust source selection could not be verified"
+        )
+    if head.stdout.strip() != source_sha:
+        raise QualificationTrustError(
+            "qualification trust source SHA does not match checkout HEAD"
+        )
+
+    try:
         completed = subprocess.run(
             ["git", "cat-file", "blob", f"{source_sha}:{relative_policy}"],
             cwd=source_root,

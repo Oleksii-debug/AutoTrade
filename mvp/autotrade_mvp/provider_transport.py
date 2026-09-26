@@ -73,7 +73,6 @@ class ProviderSecretResolver(Protocol):
         provider: str,
         environment: str,
         purpose: str,
-        provider_environment: str | None = None,
     ) -> str: ...
 
 
@@ -1437,7 +1436,6 @@ class KrakenSpotDurableNonceAllocator:
         if (
             credential_handle.provider != "KRAKEN"
             or credential_handle.environment != env
-            or credential_handle.provider_environment != env
             or credential_handle.purpose not in {"TRADE", "READ"}
             or credential_handle.account_id != account
         ):
@@ -1662,11 +1660,10 @@ class WhiteBitHttpTransport:
         if (
             credential_handle.provider != "WHITEBIT"
             or credential_handle.environment != "LIVE"
-            or credential_handle.provider_environment != "LIVE"
             or credential_handle.purpose != "TRADE"
         ):
             raise ProviderTransportScopeError(
-                "credential handle provider/environment/provider_environment/purpose mismatch"
+                "credential handle provider/environment/purpose mismatch"
             )
         account = _canonical_text(account_id, name="account_id")
         if credential_handle.account_id != account:
@@ -1785,7 +1782,6 @@ class WhiteBitHttpTransport:
             provider="WHITEBIT",
             environment="LIVE",
             purpose="TRADE",
-            provider_environment="LIVE",
         )
         try:
             credential = WhiteBitCredential.parse(credential_plaintext)
@@ -2136,7 +2132,6 @@ class KrakenSpotHttpTransport:
         if (
             credential_handle.provider != "KRAKEN"
             or credential_handle.environment != "LIVE"
-            or credential_handle.provider_environment != "LIVE"
             or credential_handle.purpose != "TRADE"
         ):
             raise ProviderTransportScopeError(
@@ -2256,7 +2251,6 @@ class KrakenSpotHttpTransport:
             provider="KRAKEN",
             environment="LIVE",
             purpose="TRADE",
-            provider_environment="LIVE",
         )
         provider_api_key = None
         try:
@@ -2333,7 +2327,6 @@ class KrakenSpotAuthenticatedReadTransport:
         if (
             credential_handle.provider != "KRAKEN"
             or credential_handle.environment != "LIVE"
-            or credential_handle.provider_environment != "LIVE"
             or credential_handle.purpose != "READ"
         ):
             raise ProviderTransportScopeError(
@@ -2482,7 +2475,6 @@ class KrakenSpotAuthenticatedReadTransport:
             provider="KRAKEN",
             environment="LIVE",
             purpose="READ",
-            provider_environment="LIVE",
         )
         provider_api_key = None
         try:
@@ -2611,7 +2603,6 @@ class AlpacaTradingHttpTransport:
         if (
             credential_handle.provider != policy.provider_id
             or credential_handle.environment != policy.environment
-            or credential_handle.provider_environment != policy.environment
             or credential_handle.purpose != "TRADE"
         ):
             raise ProviderTransportScopeError(
@@ -2780,7 +2771,6 @@ class AlpacaTradingHttpTransport:
             provider=self.policy.provider_id,
             environment=self.policy.environment,
             purpose="TRADE",
-            provider_environment=self.policy.environment,
         )
         try:
             credential = AlpacaTradingCredential.parse(
@@ -2970,7 +2960,6 @@ class BybitV5HttpTransport:
         if (
             credential_handle.provider != "BYBIT"
             or credential_handle.environment != policy.environment
-            or credential_handle.provider_environment != provider_env
             or credential_handle.purpose != "TRADE"
         ):
             raise ProviderTransportScopeError(
@@ -3240,7 +3229,6 @@ class BybitV5HttpTransport:
             provider="BYBIT",
             environment=self.policy.environment,
             purpose="TRADE",
-            provider_environment=self.provider_environment,
         )
         try:
             signed = BybitV5Signer.sign(
@@ -3397,7 +3385,6 @@ class BybitV5AuthenticatedReadTransport:
         if (
             credential_handle.provider != "BYBIT"
             or credential_handle.environment != policy.environment
-            or credential_handle.provider_environment != provider_env
             or credential_handle.purpose != "READ"
         ):
             raise ProviderTransportScopeError(
@@ -3536,7 +3523,6 @@ class BybitV5AuthenticatedReadTransport:
             provider="BYBIT",
             environment=self.policy.environment,
             purpose="READ",
-            provider_environment=self.provider_environment,
         )
         try:
             signed = BybitV5AuthenticatedReadSigner.sign(
@@ -3565,7 +3551,6 @@ class BybitV5AuthenticatedReadTransport:
             http_status=wire_response.http_status,
             response_bytes=wire_response.body,
             observed_at=self.clock_utc(),
-            provider_environment=self.provider_environment,
         )
 
 
@@ -3719,7 +3704,6 @@ class BinanceSpotHttpTransport:
         if (
             credential_handle.provider != policy.provider_id
             or credential_handle.environment != policy.environment
-            or credential_handle.provider_environment != policy.environment
             or credential_handle.purpose != "TRADE"
         ):
             raise ProviderTransportScopeError(
@@ -3847,7 +3831,6 @@ class BinanceSpotHttpTransport:
             provider=self.policy.provider_id,
             environment=self.policy.environment,
             purpose="TRADE",
-            provider_environment=self.policy.environment,
         )
         try:
             timestamp_ms = self.clock_millis()
@@ -3992,7 +3975,6 @@ class BinanceSpotAuthenticatedReadTransport:
         if (
             credential_handle.provider != policy.provider_id
             or credential_handle.environment != policy.environment
-            or credential_handle.provider_environment != policy.environment
             or credential_handle.purpose != "READ"
         ):
             raise ProviderTransportScopeError(
@@ -4140,7 +4122,6 @@ class BinanceSpotAuthenticatedReadTransport:
             provider=self.policy.provider_id,
             environment=self.policy.environment,
             purpose="READ",
-            provider_environment=self.policy.environment,
         )
         try:
             signed = BinanceSpotAuthenticatedReadSigner.sign(

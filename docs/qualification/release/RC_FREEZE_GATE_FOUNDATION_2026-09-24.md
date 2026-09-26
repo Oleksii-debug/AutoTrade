@@ -27,6 +27,11 @@ Required roles are currently:
 - LICENSE_NOTICES
 - RELEASE_QUALIFICATION
 
+This list is a closed set for the current freeze protocol. An unknown or extra
+artifact role is a protocol error and requires an explicit schema/protocol review
+before it can participate in a release candidate; it cannot be smuggled into the
+manifest merely by supplying matching PASS metadata or a signed attestation.
+
 HOST, WEB, DESKTOP and WINDOWS_PACKAGE must carry verified signatures. Every required artifact
 must carry the same exact source SHA as the candidate. RELEASE_QUALIFICATION is
 the exact-head PASS evidence produced by the canonical release-qualification

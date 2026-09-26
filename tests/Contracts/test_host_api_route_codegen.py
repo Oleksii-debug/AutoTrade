@@ -140,6 +140,22 @@ paths:
 """
             )
 
+    def test_noncanonical_http_method_entry_cannot_be_silently_ignored(self):
+        for method_line in ('    "get":', "    'get':", "    GET:", "    get: # hidden"):
+            with self.subTest(method_line=method_line):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "unsupported OpenAPI HTTP operation syntax",
+                ):
+                    parse_operations(
+                        "openapi: 3.1.0\n"
+                        "paths:\n"
+                        "  /api/v1/state:\n"
+                        + method_line
+                        + "\n"
+                        "      operationId: getState\n"
+                    )
+
     def test_noncanonical_prefix_and_ambiguous_templates_fail_closed(self):
         with self.assertRaisesRegex(
             ValueError,

@@ -311,7 +311,8 @@ class DurableUnknownRestartTests(unittest.TestCase):
                 return ExactJsonTransportResponse(
                     exact_bytes,
                     http_status=200,
-                    reconciliation_required=True,
+                    requires_reconciliation=True,
+                    ambiguity_reason="provider-deadline",
                 )
 
             outcome = dispatcher.dispatch(
@@ -328,7 +329,7 @@ class DurableUnknownRestartTests(unittest.TestCase):
             self.assertEqual(outcome.status, "UNKNOWN")
             self.assertEqual(
                 outcome.reason,
-                "provider_response_requires_reconciliation",
+                "provider-deadline",
             )
             events = store.load_events_by_aggregate_type("submission_attempt")
             self.assertEqual(
@@ -348,7 +349,7 @@ class DurableUnknownRestartTests(unittest.TestCase):
             self.assertEqual(unknown_payload["http_status"], 200)
             self.assertEqual(
                 unknown_payload["reason"],
-                "provider_response_requires_reconciliation",
+                "provider-deadline",
             )
 
             recovery = RecoveryController(

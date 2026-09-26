@@ -118,3 +118,18 @@ Current official references:
 - https://bybit-exchange.github.io/docs/v5/order/open-order
 - https://bybit-exchange.github.io/docs/v5/order/order-list
 
+## Execution pagination foundation — 2026-09-26
+
+The execution-history seam now prepares bounded `/v5/execution/list` queries,
+preserves the opaque provider cursor, validates response category and exact
+queried `orderLinkId`, and derives `EXECUTIONS` pagination coverage only
+from a contiguous first-page-to-terminal-page chain with an explicit
+`startTime`/`endTime` window. The explicit window is limited to the
+documented seven-day maximum and each page remains economically fail-closed
+through the existing fee-currency and `extraFees` checks.
+
+A complete cursor chain still does not, by itself, assert provider exclusion
+semantics. `provider_semantics_exclude_execution` remains false unless exact
+provider/product/environment qualification separately establishes that stronger
+claim.
+

@@ -66,6 +66,45 @@ def _normalized_key(value: object) -> str:
     )
 
 
+# These are bounded non-secret diagnostic metrics whose names intentionally
+# mention a security concept. Keep the allowlist exact: broader suffix-based
+# exceptions could turn attacker-chosen credential/session counters into an
+# opaque secret escape.
+_BENIGN_DIAGNOSTIC_KEYS = {
+    "api_secret_rotation_count",
+    "token_budget",
+}
+
+_COMPOUND_SENSITIVE_KEY_PARTS = {
+    "authorization",
+    "password",
+    "secret",
+    "credential",
+    "cookie",
+    "session",
+    "token",
+    "apikey",
+}
+
+
+def _is_sensitive_key(value: object) -> bool:
+    normalized = _normalized_key(value)
+    if normalized in _BENIGN_DIAGNOSTIC_KEYS:
+        return False
+    if normalized in _SENSITIVE_KEYS:
+        return True
+
+    parts = tuple(part for part in normalized.split("_") if part)
+    part_set = set(parts)
+    if any(part in _COMPOUND_SENSITIVE_KEY_PARTS for part in parts):
+        return True
+    if {"api", "key"} <= part_set or {"private", "key"} <= part_set:
+        return True
+    return "txc" in part_set and bool(
+        part_set & {"apikey", "payload", "signature"}
+    )
+
+
 _EMBEDDED_SECRET_PATTERNS = (
     re.compile(
         r"""(?i)(?:["'])?\b(authorization(?:[_-]?header)?|proxy[_-]?authorization)\b"""
@@ -92,12 +131,6 @@ _PRIVATE_KEY_MARKERS = (
     "-----BEGIN EC PRIVATE KEY-----",
     "-----BEGIN OPENSSH PRIVATE KEY-----",
 )
-
-_URL_QUERY_SENSITIVE_KEYS = _SENSITIVE_KEYS | {
-    "credential",
-    "proxy_authorization",
-}
-
 
 def _redact_structured_json_text(value: str) -> str | None:
     try:
@@ -134,8 +167,7 @@ def _redact_structured_url_query(value: str) -> str | None:
     query_parts: list[str] = []
     for part in parsed.query.split("&"):
         raw_key, separator, _ = part.partition("=")
-        normalized = _normalized_key(unquote_plus(raw_key))
-        if normalized in _URL_QUERY_SENSITIVE_KEYS:
+        if _is_sensitive_key(unquote_plus(raw_key)):
             query_parts.append(f"{raw_key}{separator or '='}[REDACTED]")
             changed = True
         else:
@@ -177,8 +209,7 @@ def _redact(value: Any) -> Any:
     if isinstance(value, Mapping):
         result: dict[str, Any] = {}
         for key, item in value.items():
-            normalized = _normalized_key(key)
-            result[str(key)] = "[REDACTED]" if normalized in _SENSITIVE_KEYS else _redact(item)
+            result[str(key)] = "[REDACTED]" if _is_sensitive_key(key) else _redact(item)
         return result
     if isinstance(value, list):
         return [_redact(item) for item in value]

@@ -78,6 +78,57 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
             self.assertIn("[REDACTED]", exported)
             self.assertNotIn("super-secret", exported)
 
+    def test_compound_sensitive_keys_never_reach_persistence_or_accessible_export(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = evidence_trace("decision-compound-secrets")
+            item["attributes"].update(
+                {
+                    "session_reference": "OPAQUE-SESSION-REFERENCE",
+                    "credential_handle": "OPAQUE-CREDENTIAL-HANDLE",
+                    "provider_credential_id": "OPAQUE-PROVIDER-CREDENTIAL-ID",
+                    "proxy_authorization_token": "OPAQUE-PROXY-AUTH-TOKEN",
+                    "token_budget": 8,
+                    "api_secret_rotation_count": 4,
+                    "signed_url": (
+                        "https://provider.test/private?"
+                        "credential_handle=OPAQUE-URL-CREDENTIAL&symbol=BTC"
+                    ),
+                    "structured_json": (
+                        '{"session_reference":"OPAQUE-JSON-SESSION","safe":"ok"}'
+                    ),
+                }
+            )
+
+            self.assertTrue(store.append(item))
+            raw = path.read_text(encoding="utf-8")
+            exported = store.accessible_export("decision-compound-secrets")
+
+            for leaked in (
+                "OPAQUE-SESSION-REFERENCE",
+                "OPAQUE-CREDENTIAL-HANDLE",
+                "OPAQUE-PROVIDER-CREDENTIAL-ID",
+                "OPAQUE-PROXY-AUTH-TOKEN",
+                "OPAQUE-URL-CREDENTIAL",
+                "OPAQUE-JSON-SESSION",
+            ):
+                self.assertNotIn(leaked, raw)
+                self.assertNotIn(leaked, exported)
+
+            attributes = json.loads(raw)["attributes"]
+            self.assertEqual(attributes["session_reference"], "[REDACTED]")
+            self.assertEqual(attributes["credential_handle"], "[REDACTED]")
+            self.assertEqual(attributes["provider_credential_id"], "[REDACTED]")
+            self.assertEqual(attributes["proxy_authorization_token"], "[REDACTED]")
+            self.assertEqual(attributes["token_budget"], 8)
+            self.assertEqual(attributes["api_secret_rotation_count"], 4)
+            self.assertIn("credential_handle=[REDACTED]", attributes["signed_url"])
+            structured = json.loads(attributes["structured_json"])
+            self.assertEqual(structured["session_reference"], "[REDACTED]")
+            self.assertEqual(structured["safe"], "ok")
+            self.assertTrue(store.verify())
+
     def test_conflicting_retry_compares_redacted_persisted_semantics(self):
         with TemporaryDirectory() as directory:
             store = DecisionTraceStore(Path(directory) / "decision-traces.jsonl")

@@ -115,6 +115,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
         store = self.store()
         for action in (
             "FUTURE_PRIVILEGED_ACTION",
+            "RESTORE_NEW_EXPOSURE",
             "block_new_exposure",
             " BLOCK_NEW_EXPOSURE",
         ):

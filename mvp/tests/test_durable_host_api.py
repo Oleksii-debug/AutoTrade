@@ -565,6 +565,30 @@ class JournalBackedHostApiTests(unittest.TestCase):
         )
         self.assertEqual(restarted.submit(command), accepted)
 
+    def test_set_authority_cannot_reactivate_revoked_policy_identity(self):
+        journal = JournalStore(self.path)
+        authority = AuthorityService(journal)
+        policy = self.authority_policy("revoked-policy")
+        authority.register_policy(policy)
+        authority.revoke_policy(
+            policy.policy_id,
+            reason="test-revocation",
+            revoked_at="2029-12-31T00:00:00Z",
+        )
+        store = self.store(now="2030-01-01T00:00:00Z")
+        exported = authority.export_state()["policies"][0]
+        payload = {
+            key: value
+            for key, value in exported.items()
+            if key != "account_id"
+        }
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "cannot be reactivated",
+        ):
+            store.submit(self.command(action="SET_AUTHORITY", payload=payload))
+        self.assertEqual(store.state_version, 0)
+
     def test_set_authority_cannot_cross_host_environment(self):
         store = self.store(now="2030-01-01T00:00:00Z")
         payload = {
@@ -681,6 +705,40 @@ class JournalBackedHostApiTests(unittest.TestCase):
         self.assertEqual(
             len(journal.load_events("authority_state", "canonical")),
             authority_event_count,
+        )
+
+    def test_success_cannot_forge_affected_refs_with_real_authority_evidence(self):
+        journal = JournalStore(self.path)
+        AuthorityService(journal).register_policy(
+            self.authority_policy("exposure-policy")
+        )
+        store = self.store(now="2030-01-01T00:00:00Z")
+        accepted = store.submit(self.command())
+        event = store.events_after(0)[0]
+        from mvp.autotrade_mvp.operator_authority_commands import (
+            execute_operator_authority_action,
+        )
+
+        result = execute_operator_authority_action(
+            journal,
+            event.payload["action"],
+            event.payload["action_payload"],
+            event.payload["action_payload_hash"],
+            event.payload["account_id"],
+            event.payload["environment"],
+            event.payload["started_at"],
+        )
+        with self.assertRaisesRegex(ValueError, "affected_refs"):
+            store.update_operation(
+                accepted.operation_id,
+                "SUCCEEDED",
+                affected_refs=("authority-policy:forged",),
+                evidence=result.evidence,
+            )
+        self.assertEqual(store.get_operation(accepted.operation_id).phase, "QUEUED")
+        self.assertEqual(
+            store.execute_authority_operation(accepted.operation_id).phase,
+            "SUCCEEDED",
         )
 
     def test_success_cannot_be_fabricated_without_authority_evidence(self):

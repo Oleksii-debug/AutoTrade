@@ -1,4 +1,6 @@
+from dataclasses import replace
 from hashlib import sha256
+import json
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -22,6 +24,7 @@ from mvp.autotrade_mvp.science_qualification import (
 from mvp.tests.test_qualification_attestation import (
     EVIDENCE_SHA,
     SOURCE,
+    _initialize_exact_source_policy_repo,
     attestation,
     evidence_ref,
     policy,
@@ -67,8 +70,8 @@ def evidence(
     )
 
 
-def _signed_science_receipt(value):
-    trust_root = root()
+def _signed_science_receipt(value, *, trust_root=None):
+    trust_root = trust_root or root()
     trust_policy = policy(trust_root)
     requirement_ids = [
         "scientific-learning-qualification",
@@ -99,14 +102,15 @@ def _signed_science_receipt(value):
         protocol_id=value.frozen_protocol_hash,
         protocol_version="1.0.0",
         requirement_ids=tuple(requirement_ids),
+        source_sha=value.source_sha,
         evidence_refs=(
-            evidence_ref(),
+            replace(evidence_ref(), source_sha=value.source_sha),
             EvidenceArtifactRef(
                 artifact_id=_POPULATION_ID,
                 sha256=P,
                 media_type="application/vnd.autotrade.qualification-evidence",
                 evidence_kind="SCIENCE_POPULATION_COVERAGE",
-                source_sha=SOURCE,
+                source_sha=value.source_sha,
             ),
         ),
         result="PASS",
@@ -199,6 +203,72 @@ class ScientificQualificationTests(unittest.TestCase):
         self.assertFalse(result.economic_claim_accepted)
         self.assertIn(
             "SCIENCE.CALLER_SELECTED_TRUST_POLICY_FORBIDDEN",
+            result.reason_codes,
+        )
+
+    def test_dirty_hostile_trust_policy_cannot_authorize_science_pass(self):
+        canonical_root = root()
+        hostile_root = replace(
+            canonical_root,
+            producer_id="candidate.self",
+        )
+        canonical_policy = policy(canonical_root)
+        hostile_policy = policy(hostile_root)
+        self.assertNotEqual(canonical_policy.policy_id, hostile_policy.policy_id)
+
+        with TemporaryDirectory() as repository_directory:
+            source_sha, policy_path = _initialize_exact_source_policy_repo(
+                qualification_trust.Path(repository_directory),
+                canonical_policy,
+            )
+            policy_path.write_text(
+                json.dumps(
+                    qualification_trust.qualification_trust_policy_payload(
+                        hostile_policy
+                    ),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            value = replace(
+                evidence(claim="ECONOMIC_EDGE_QUALIFIED"),
+                source_sha=source_sha,
+            )
+            receipt, _ = _signed_science_receipt(
+                value,
+                trust_root=hostile_root,
+            )
+
+            with TemporaryDirectory() as evidence_directory:
+                store = ArtifactStore(evidence_directory)
+                publish(store, source=source_sha)
+                store.publish_bytes(
+                    artifact_id=_POPULATION_ID,
+                    data=_POPULATION_BYTES,
+                    media_type="application/vnd.autotrade.qualification-evidence",
+                    rights={"storage": True, "export": False},
+                    source_refs=[f"git:{source_sha}"],
+                    metadata={
+                        "evidence_kind": "SCIENCE_POPULATION_COVERAGE"
+                    },
+                )
+                with patch.object(
+                    qualification_trust,
+                    "_QUALIFICATION_TRUST_REPOSITORY_ROOT",
+                    qualification_trust.Path(repository_directory),
+                ):
+                    result = qualify_scientific_learning(
+                        value,
+                        qualification_receipt=receipt,
+                        evidence_store=store,
+                    )
+
+        self.assertEqual(result.status, "FAIL")
+        self.assertFalse(result.economic_claim_accepted)
+        self.assertIn(
+            "SCIENCE.INDEPENDENT_ATTESTATION_INVALID",
             result.reason_codes,
         )
 

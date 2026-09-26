@@ -2326,5 +2326,90 @@ class JournalStoreTests(unittest.TestCase):
             ):
                 store.pending_outbox()
 
+    def test_idempotent_event_replay_revalidates_journal_sequence_authority(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+            second = event("evt-2", 2, {"kind": "fill", "quantity": "2"})
+            store.append_event(second)
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE events SET journal_sequence = 1.5 "
+                    "WHERE event_id = 'evt-1'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "contiguous canonical positive integer series",
+            ):
+                store.append_event(second)
+
+    def test_idempotent_event_replay_revalidates_aggregate_authority(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+            second = event("evt-2", 2, {"kind": "fill", "quantity": "2"})
+            store.append_event(second)
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE events SET aggregate_version = 1.5 "
+                    "WHERE event_id = 'evt-1'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "aggregate version authority is not a contiguous positive integer sequence",
+            ):
+                store.append_event(second)
+
+    def test_idempotent_command_replay_revalidates_journal_authority(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            command_event = event()
+            command_args = {
+                "actor": "alice",
+                "environment": "PAPER",
+                "command_id": "cmd-replay-integrity",
+                "idempotency_key": "key-replay-integrity",
+                "request": {"action": "ORDER.SUBMIT", "intent_id": "intent-1"},
+                "result": {"status": "ACCEPTED"},
+                "state_version": 1,
+                "events": [(command_event, None)],
+                "expected_journal_sequence": 0,
+            }
+            saved, inserted, appended = store.commit_command(**command_args)
+            self.assertTrue(inserted)
+            self.assertEqual(saved, {"status": "ACCEPTED"})
+            self.assertEqual(len(appended), 1)
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE events SET journal_sequence = 1.5 "
+                    "WHERE event_id = 'evt-1'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "contiguous canonical positive integer series",
+            ):
+                store.commit_command(**command_args)
+
 if __name__ == "__main__":
     unittest.main()

@@ -27,6 +27,7 @@ from .operator_authority_commands import (
     OperatorAuthorityConflict,
     canonical_operator_payload,
     execute_operator_authority_action,
+    observed_authority_operation_effects,
     validate_authority_success_evidence,
     validate_persisted_payload,
 )
@@ -618,11 +619,21 @@ class JournalBackedHostCommandStore:
                 accepted_at,
             )
         except OperatorAuthorityConflict:
+            observed = observed_authority_operation_effects(
+                self._journal,
+                action,
+                action_payload,
+                action_hash,
+                self.account_id,
+                self.environment,
+                accepted_at,
+            )
             return self.update_operation(
                 operation_id,
                 "FAILED",
-                affected_refs=(),
-                evidence=(
+                affected_refs=observed.affected_refs,
+                evidence=observed.evidence
+                + (
                     {
                         "kind": "authority-command-rejected",
                         "reason_code": "authority_state_changed",

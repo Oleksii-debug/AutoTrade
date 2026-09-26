@@ -4,6 +4,8 @@ from uuid import uuid5, NAMESPACE_URL
 
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
+    CapabilityError,
+    CapabilityRegistry,
     EvidenceVerification,
     derive_capability_snapshot,
 )
@@ -22,7 +24,14 @@ NOW = datetime(2026, 9, 24, 18, tzinfo=timezone.utc)
 INSTRUMENT = "instrument-v1"
 
 
-def capability(provider: str, *, environment="PAPER", order_types=("LIMIT", "MARKET")):
+def capability(
+    provider: str,
+    *,
+    environment="PAPER",
+    order_types=("LIMIT", "MARKET"),
+    observed_at=NOW,
+    evidence_valid=True,
+):
     claims = []
     for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT"):
         artifact_id = str(uuid5(NAMESPACE_URL, f"{provider}:{source}:{environment}"))
@@ -34,8 +43,8 @@ def capability(provider: str, *, environment="PAPER", order_types=("LIMIT", "MAR
                 entity_id="entity-1",
                 environment=environment,
                 instrument_version=INSTRUMENT,
-                observed_at=NOW - timedelta(minutes=1),
-                expires_at=NOW + timedelta(hours=1),
+                observed_at=observed_at - timedelta(minutes=1),
+                expires_at=observed_at + timedelta(hours=1),
                 supported_order_types=frozenset(order_types),
                 time_in_force=frozenset({"GTC", "IOC"}),
                 permission_scopes=frozenset({"ORDER.WRITE", "ORDER.READ"}),
@@ -46,15 +55,23 @@ def capability(provider: str, *, environment="PAPER", order_types=("LIMIT", "MAR
                 evidence_ref={
                     "artifact_id": artifact_id,
                     "sha256": "sha256:" + "a" * 64,
-                    "observed_at": "2026-09-24T17:59:00Z",
+                    "observed_at": (observed_at - timedelta(minutes=1))
+                    .astimezone(timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z"),
                 },
             )
         )
     return derive_capability_snapshot(
-        snapshot_id=str(uuid5(NAMESPACE_URL, f"snapshot:{provider}:{environment}")),
+        snapshot_id=str(
+            uuid5(
+                NAMESPACE_URL,
+                f"snapshot:{provider}:{environment}:{observed_at.isoformat()}",
+            )
+        ),
         claims=claims,
-        observed_at=NOW,
-        evidence_verifier=lambda claim: EvidenceVerification(valid=True),
+        observed_at=observed_at,
+        evidence_verifier=lambda claim: EvidenceVerification(valid=evidence_valid),
     )
 
 
@@ -101,17 +118,50 @@ def request(**overrides):
     return ProviderRouteRequest(**values)
 
 
+def select(request_value, candidates, *, at=NOW, capability_registry=None):
+    materialized = tuple(candidates)
+    registry = capability_registry or CapabilityRegistry()
+    if capability_registry is None:
+        for item in materialized:
+            registry.add(item.capability)
+    return select_provider(
+        request_value,
+        materialized,
+        at=at,
+        capability_registry=registry,
+    )
+
+
+
+class CapabilityLookupWrapper:
+    """Minimal restart-aware wrapper shape used to freeze structural compatibility."""
+
+    def __init__(self, registry):
+        self.registry = registry
+
+    def latest(self, **kwargs):
+        return self.registry.latest(**kwargs)
+
+    def require_verified(self, **kwargs):
+        return self.registry.require_verified(**kwargs)
+
+
+class RestartFencedCapabilityLookup(CapabilityLookupWrapper):
+    def require_verified(self, **kwargs):
+        raise CapabilityError("fresh current-process verification required")
+
+
 class ProviderSelectionTests(unittest.TestCase):
     def test_single_exact_candidate_is_selected(self):
         bybit = candidate("BYBIT", "SPOT")
-        result = select_provider(request(), [bybit], at=NOW)
+        result = select(request(), [bybit], at=NOW)
         self.assertEqual(result.status, "SELECTED_UNAMBIGUOUS")
         self.assertIs(result.selected, bybit)
 
     def test_multiple_eligible_providers_never_trigger_implicit_fallback(self):
         bybit = candidate("BYBIT", "SPOT")
         binance = candidate("BINANCE", "SPOT")
-        result = select_provider(request(), [bybit, binance], at=NOW)
+        result = select(request(), [bybit, binance], at=NOW)
         self.assertEqual(result.status, "AMBIGUOUS_REQUIRES_POLICY")
         self.assertIsNone(result.selected)
         self.assertEqual(
@@ -122,7 +172,7 @@ class ProviderSelectionTests(unittest.TestCase):
     def test_explicit_provider_policy_resolves_ambiguity_only_if_eligible(self):
         bybit = candidate("BYBIT", "SPOT")
         binance = candidate("BINANCE", "SPOT")
-        result = select_provider(
+        result = select(
             request(preferred_provider_id="binance"),
             [bybit, binance],
             at=NOW,
@@ -130,7 +180,7 @@ class ProviderSelectionTests(unittest.TestCase):
         self.assertEqual(result.status, "SELECTED_BY_EXPLICIT_POLICY")
         self.assertEqual(result.selected.provider_id, "BINANCE")
 
-        missing = select_provider(
+        missing = select(
             request(preferred_provider_id="kraken"),
             [bybit, binance],
             at=NOW,
@@ -138,9 +188,84 @@ class ProviderSelectionTests(unittest.TestCase):
         self.assertEqual(missing.status, "NO_ELIGIBLE_PREFERRED_PROVIDER")
         self.assertIsNone(missing.selected)
 
+    def test_newer_capability_downgrade_revokes_cached_verified_candidate(self):
+        bybit = candidate("BYBIT", "SPOT")
+        registry = CapabilityRegistry()
+        registry.add(bybit.capability)
+        refresh_at = NOW + timedelta(minutes=5)
+        downgraded = capability(
+            "BYBIT",
+            observed_at=refresh_at,
+            evidence_valid=False,
+        )
+        self.assertEqual(downgraded.status, "UNKNOWN")
+        registry.add(downgraded)
+
+        result = select(
+            request(),
+            [bybit],
+            at=refresh_at + timedelta(seconds=1),
+            capability_registry=registry,
+        )
+
+        self.assertEqual(result.status, "NO_ELIGIBLE_PROVIDER")
+        self.assertIn("CAPABILITY_SUPERSEDED", result.decisions[0].reasons)
+        self.assertIn(
+            "CAPABILITY_NOT_CURRENTLY_VERIFIED",
+            result.decisions[0].reasons,
+        )
+        self.assertLess(
+            refresh_at + timedelta(seconds=1),
+            bybit.capability.expires_at,
+        )
+
+    def test_structural_capability_lookup_wrapper_is_accepted(self):
+        bybit = candidate("BYBIT", "SPOT")
+        registry = CapabilityRegistry()
+        registry.add(bybit.capability)
+
+        result = select(
+            request(),
+            [bybit],
+            capability_registry=CapabilityLookupWrapper(registry),
+        )
+
+        self.assertEqual(result.status, "SELECTED_UNAMBIGUOUS")
+        self.assertIs(result.selected, bybit)
+
+    def test_restart_fenced_verified_history_cannot_select_provider(self):
+        bybit = candidate("BYBIT", "SPOT")
+        registry = CapabilityRegistry()
+        registry.add(bybit.capability)
+
+        result = select(
+            request(),
+            [bybit],
+            capability_registry=RestartFencedCapabilityLookup(registry),
+        )
+
+        self.assertEqual(result.status, "NO_ELIGIBLE_PROVIDER")
+        self.assertIn(
+            "CAPABILITY_NOT_CURRENTLY_VERIFIED",
+            result.decisions[0].reasons,
+        )
+
+    def test_selection_fails_closed_when_candidate_snapshot_is_not_in_registry(self):
+        bybit = candidate("BYBIT", "SPOT")
+        result = select(
+            request(),
+            [bybit],
+            capability_registry=CapabilityRegistry(),
+        )
+        self.assertEqual(result.status, "NO_ELIGIBLE_PROVIDER")
+        self.assertIn(
+            "CAPABILITY_REGISTRY_UNRESOLVED",
+            result.decisions[0].reasons,
+        )
+
     def test_asset_product_mismatch_is_rejected_even_with_valid_capability(self):
         bybit_spot = candidate("BYBIT", "SPOT")
-        result = select_provider(
+        result = select(
             request(asset_class="OPTION"),
             [bybit_spot],
             at=NOW,
@@ -155,7 +280,7 @@ class ProviderSelectionTests(unittest.TestCase):
             code_sha="2" * 40,
             qualified_sha="3" * 40,
         )
-        result = select_provider(request(), [stale], at=NOW)
+        result = select(request(), [stale], at=NOW)
         self.assertEqual(result.status, "NO_ELIGIBLE_PROVIDER")
         self.assertIn("QUALIFICATION_CODE_MISMATCH", result.decisions[0].reasons)
 
@@ -173,7 +298,7 @@ class ProviderSelectionTests(unittest.TestCase):
 
     def test_live_never_inherits_nonlive_qualification(self):
         live = candidate("BYBIT", "SPOT", environment="LIVE")
-        result = select_provider(
+        result = select(
             request(environment="LIVE"),
             [live],
             at=NOW,
@@ -187,7 +312,7 @@ class ProviderSelectionTests(unittest.TestCase):
             "SPOT",
             unsupported=("ORDER_TYPE:LIMIT",),
         )
-        result = select_provider(request(), [bybit], at=NOW)
+        result = select(request(), [bybit], at=NOW)
         self.assertEqual(result.status, "NO_ELIGIBLE_PROVIDER")
         self.assertIn(
             "QUALIFICATION_EXPLICITLY_UNSUPPORTED",

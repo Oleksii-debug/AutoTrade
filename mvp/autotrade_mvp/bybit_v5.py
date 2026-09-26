@@ -30,6 +30,7 @@ from .provider_core import (
 )
 from .reconciliation import (
     CoverageSurfaceEvidence,
+    ProviderActivityEvidence,
     ProviderFillEvidence,
     ProviderWorkingOrderEvidence,
 )
@@ -2537,6 +2538,438 @@ def provider_position_quantities_from_pages(
     if pages[-1].next_cursor is not None:
         raise ProviderCoreError("Bybit position pagination is incomplete")
     return MappingProxyType(dict(sorted(quantities.items())))
+
+
+@dataclass(frozen=True)
+class BybitActivityPage:
+    """One exact Unified-account transaction-log cursor page."""
+
+    account_id: str
+    environment: str
+    provider_environment: str
+    activities: tuple[ProviderActivityEvidence, ...]
+    next_cursor: str | None
+    evidence_ref: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "account_id", _text(self.account_id, name="account_id"))
+        environment = _text(self.environment, name="environment").upper()
+        provider_environment = _text(
+            self.provider_environment,
+            name="provider_environment",
+        ).upper()
+        if provider_environment not in _REST_BASE_BY_ENVIRONMENT:
+            raise ProviderCoreError(
+                "Bybit provider_environment must be MAINNET, TESTNET or DEMO"
+            )
+        if _RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT[provider_environment] != environment:
+            raise ProviderCoreError(
+                "Bybit provider environment does not match runtime environment"
+            )
+        object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "provider_environment", provider_environment)
+        if not isinstance(self.activities, tuple):
+            raise TypeError("activities must be an immutable tuple")
+        ids: set[str] = set()
+        for activity in self.activities:
+            if not isinstance(activity, ProviderActivityEvidence):
+                raise TypeError(
+                    "activities must contain ProviderActivityEvidence values"
+                )
+            if (
+                activity.provider_id != "BYBIT"
+                or activity.account_id != self.account_id
+                or activity.environment != self.environment
+                or activity.provider_environment != self.provider_environment
+            ):
+                raise ProviderCoreError(
+                    "Bybit activity page contains cross-scope activity evidence"
+                )
+            if activity.activity_id in ids:
+                raise ProviderCoreError(
+                    "Bybit activity page contains duplicate activity identity"
+                )
+            ids.add(activity.activity_id)
+        if self.next_cursor is not None:
+            object.__setattr__(
+                self,
+                "next_cursor",
+                _opaque_cursor(self.next_cursor, name="next_cursor"),
+            )
+        if re.fullmatch(r"provider-read:sha256:[0-9a-f]{64}", self.evidence_ref) is None:
+            raise ProviderCoreError("evidence_ref must be canonical provider-read evidence")
+
+    @property
+    def pagination_complete(self) -> bool:
+        return self.next_cursor is None
+
+
+def prepare_activity_read_query(
+    *,
+    capability: CapabilitySnapshot,
+    at: datetime,
+    category: str | None = None,
+    currency: str | None = None,
+    activity_type: str | None = None,
+    cursor: str | None = None,
+    limit: object = 50,
+    start_time_ms: object | None = None,
+    end_time_ms: object | None = None,
+) -> AuthenticatedReadQueryBinding:
+    """Prepare one bounded Unified transaction-log read without network I/O."""
+
+    normalized_limit = _integer(limit, name="limit", minimum=1)
+    if normalized_limit > 50:
+        raise ProviderCoreError("Bybit activity page limit cannot exceed 50")
+    query: dict[str, str] = {
+        "accountType": "UNIFIED",
+        "limit": str(normalized_limit),
+    }
+    if category is not None:
+        normalized_category = _text(category, name="category").lower()
+        if normalized_category not in {
+            "spot",
+            "linear",
+            "inverse",
+            "option",
+            "event",
+        }:
+            raise ProviderCoreError("unsupported Bybit activity category")
+        query["category"] = normalized_category
+    if currency is not None:
+        normalized_currency = _text(currency, name="currency")
+        if normalized_currency != normalized_currency.upper():
+            raise ProviderCoreError("Bybit activity currency must be uppercase")
+        query["currency"] = normalized_currency
+    if activity_type is not None:
+        query["type"] = _text(activity_type, name="activity_type").upper()
+    if cursor is not None:
+        query["cursor"] = _opaque_cursor(cursor)
+
+    start = (
+        None
+        if start_time_ms is None
+        else _integer(start_time_ms, name="start_time_ms", minimum=0)
+    )
+    end = (
+        None
+        if end_time_ms is None
+        else _integer(end_time_ms, name="end_time_ms", minimum=0)
+    )
+    if start is not None and end is not None:
+        if end < start:
+            raise ProviderCoreError("Bybit activity history end precedes start")
+        if end - start > _MAX_ORDER_HISTORY_WINDOW_MS:
+            raise ProviderCoreError(
+                "Bybit activity history window cannot exceed seven days"
+            )
+    if start is not None:
+        query["startTime"] = str(start)
+    if end is not None:
+        query["endTime"] = str(end)
+
+    return prepare_authenticated_read_query(
+        capability=capability,
+        surface=Surface.AUTHENTICATED_READ,
+        endpoint=BYBIT_DOCUMENTED_ENDPOINTS["ACTIVITIES"],
+        query=query,
+        at=at,
+        permission_scope="ACCOUNT.READ",
+    )
+
+
+def parse_activity_page(
+    observation: ProviderResponseObservation,
+    *,
+    instrument_versions: Mapping[str, str],
+) -> BybitActivityPage:
+    """Parse exact transaction-log rows into conservative canonical activities."""
+
+    if not isinstance(observation, ProviderResponseObservation):
+        raise TypeError("observation must be ProviderResponseObservation")
+    if not isinstance(instrument_versions, Mapping):
+        raise ProviderCoreError("instrument_versions must be a mapping")
+    observation.require_scope(
+        provider_id="BYBIT",
+        surface=Surface.AUTHENTICATED_READ,
+        endpoint=BYBIT_DOCUMENTED_ENDPOINTS["ACTIVITIES"],
+    )
+    provider_environment = _text(
+        observation.provider_environment,
+        name="provider_environment",
+    ).upper()
+    if provider_environment not in _REST_BASE_BY_ENVIRONMENT:
+        raise ProviderCoreError(
+            "Bybit provider_environment must be MAINNET, TESTNET or DEMO"
+        )
+    if (
+        _RUNTIME_ENVIRONMENT_BY_PROVIDER_ENVIRONMENT[provider_environment]
+        != observation.environment
+    ):
+        raise ProviderCoreError(
+            "Bybit provider environment does not match runtime environment"
+        )
+
+    envelope = _mapping(observation.payload, name="response")
+    if _integer(envelope.get("retCode"), name="retCode") != 0:
+        raise ProviderCoreError("Bybit activity response was not successful")
+    result = _mapping(envelope.get("result"), name="result")
+    rows = result.get("list")
+    if not isinstance(rows, (list, tuple)):
+        raise ProviderCoreError("result.list must be an array")
+    raw_cursor = result.get("nextPageCursor")
+    next_cursor = (
+        None
+        if raw_cursor in (None, "")
+        else _opaque_cursor(raw_cursor, name="nextPageCursor")
+    )
+
+    expected_category = observation.query_binding.query.get("category")
+    expected_currency = observation.query_binding.query.get("currency")
+    expected_type = observation.query_binding.query.get("type")
+    by_id: dict[str, ProviderActivityEvidence] = {}
+    for index, value in enumerate(rows):
+        row = _mapping(value, name=f"result.list[{index}]")
+        activity_id = _text(row.get("id"), name="id")
+        activity_type = _text(row.get("type"), name="type").upper()
+        category = _text(row.get("category"), name="category").lower()
+        if expected_category is not None and category != expected_category:
+            raise ProviderCoreError(
+                "Bybit activity response category does not match exact query"
+            )
+        currency = _text(row.get("currency"), name="currency").upper()
+        if expected_currency is not None and currency != expected_currency:
+            raise ProviderCoreError(
+                "Bybit activity response currency does not match exact query"
+            )
+        if expected_type is not None and activity_type != expected_type:
+            raise ProviderCoreError(
+                "Bybit activity response type does not match exact query"
+            )
+
+        raw_symbol = row.get("symbol")
+        instrument = None
+        if raw_symbol not in (None, ""):
+            symbol = _text(raw_symbol, name="symbol")
+            try:
+                instrument = _text(
+                    instrument_versions[symbol],
+                    name="instrument_version",
+                )
+            except KeyError as error:
+                raise ProviderCoreError(
+                    f"unmapped Bybit activity instrument symbol: {symbol}"
+                ) from error
+
+        raw_client_id = row.get("orderLinkId")
+        client_order_id = (
+            None
+            if raw_client_id in (None, "")
+            else _client_order_id(raw_client_id)
+        )
+        raw_order_id = row.get("orderId")
+        provider_order_id = (
+            None
+            if raw_order_id in (None, "")
+            else _text(raw_order_id, name="orderId")
+        )
+        raw_trade_id = row.get("tradeId")
+        provider_execution_id = (
+            None
+            if raw_trade_id in (None, "")
+            else _text(raw_trade_id, name="tradeId")
+        )
+
+        activity = ProviderActivityEvidence.create(
+            provider_id="BYBIT",
+            account_id=observation.account_id,
+            environment=observation.environment,
+            provider_environment=provider_environment,
+            activity_id=activity_id,
+            activity_type=activity_type,
+            origin="UNKNOWN",
+            occurred_at=_millis_to_utc(
+                row.get("transactionTime"),
+                name="transactionTime",
+            ),
+            instrument=instrument,
+            currency=currency,
+            client_order_id=client_order_id,
+            provider_order_id=provider_order_id,
+            provider_execution_id=provider_execution_id,
+            signed_amount=_decimal(row.get("change"), name="change"),
+        )
+        previous = by_id.get(activity_id)
+        if previous is not None and previous != activity:
+            raise ProviderCoreError(
+                "Bybit activity id appears with conflicting content"
+            )
+        by_id[activity_id] = activity
+
+    return BybitActivityPage(
+        account_id=observation.account_id,
+        environment=observation.environment,
+        provider_environment=provider_environment,
+        activities=tuple(by_id.values()),
+        next_cursor=next_cursor,
+        evidence_ref=observation.evidence_ref,
+    )
+
+
+def prepare_next_activity_read_query(
+    *,
+    observation: ProviderResponseObservation,
+    capability: CapabilitySnapshot,
+    instrument_versions: Mapping[str, str],
+    at: datetime,
+) -> AuthenticatedReadQueryBinding | None:
+    page = parse_activity_page(
+        observation,
+        instrument_versions=instrument_versions,
+    )
+    if page.next_cursor is None:
+        return None
+    binding = observation.query_binding
+    if not isinstance(capability, CapabilitySnapshot):
+        raise TypeError("capability must be CapabilitySnapshot")
+    if (
+        capability.snapshot_id != binding.capability_snapshot_id
+        or capability.provider_id.upper() != binding.provider_id
+        or capability.account_id != binding.account_id
+        or capability.entity_id != binding.entity_id
+        or capability.environment != binding.environment
+        or capability.instrument_version != binding.instrument_version
+    ):
+        raise ProviderCoreError(
+            "Bybit activity pagination must retain exact verified capability scope"
+        )
+    query = dict(binding.query)
+    query["cursor"] = page.next_cursor
+    return prepare_authenticated_read_query(
+        capability=capability,
+        surface=binding.surface,
+        endpoint=binding.endpoint,
+        query=query,
+        at=at,
+        permission_scope=binding.permission_scope,
+    )
+
+
+def activity_coverage_from_pages(
+    observations: tuple[ProviderResponseObservation, ...],
+    *,
+    instrument_versions: Mapping[str, str],
+    consistency_horizon_satisfied: bool,
+    qualified_exclusion_semantics: bool = False,
+) -> CoverageSurfaceEvidence:
+    """Derive activity coverage only from an explicit complete cursor chain."""
+
+    if not isinstance(observations, tuple) or not observations:
+        raise ProviderCoreError(
+            "Bybit activity coverage requires a non-empty immutable page tuple"
+        )
+    if not isinstance(instrument_versions, Mapping):
+        raise ProviderCoreError("instrument_versions must be a mapping")
+    for name, value in (
+        ("consistency_horizon_satisfied", consistency_horizon_satisfied),
+        ("qualified_exclusion_semantics", qualified_exclusion_semantics),
+    ):
+        if type(value) is not bool:
+            raise ProviderCoreError(f"{name} must be boolean")
+
+    pages = tuple(
+        parse_activity_page(
+            observation,
+            instrument_versions=instrument_versions,
+        )
+        for observation in observations
+    )
+    first_binding = observations[0].query_binding
+    if "cursor" in first_binding.query:
+        raise ProviderCoreError(
+            "Bybit activity coverage must begin at the first page"
+        )
+    raw_start = first_binding.query.get("startTime")
+    raw_end = first_binding.query.get("endTime")
+    if raw_start is None or raw_end is None:
+        raise ProviderCoreError(
+            "Bybit activity coverage requires explicit startTime and endTime"
+        )
+    start_ms = _integer(raw_start, name="startTime", minimum=0)
+    end_ms = _integer(raw_end, name="endTime", minimum=0)
+    if end_ms < start_ms:
+        raise ProviderCoreError("Bybit activity history end precedes start")
+    if end_ms - start_ms > _MAX_ORDER_HISTORY_WINDOW_MS:
+        raise ProviderCoreError(
+            "Bybit activity history window cannot exceed seven days"
+        )
+
+    base_query = {
+        key: value
+        for key, value in first_binding.query.items()
+        if key != "cursor"
+    }
+    first = pages[0]
+    scope = (
+        first.account_id,
+        first.environment,
+        first.provider_environment,
+    )
+    evidence_refs: set[str] = set()
+    activity_ids: set[str] = set()
+    for index, (observation, page) in enumerate(zip(observations, pages)):
+        if (
+            page.account_id,
+            page.environment,
+            page.provider_environment,
+        ) != scope:
+            raise ProviderCoreError(
+                "Bybit activity pagination crossed provider/account scope"
+            )
+        current_base = {
+            key: value
+            for key, value in observation.query_binding.query.items()
+            if key != "cursor"
+        }
+        if current_base != base_query:
+            raise ProviderCoreError(
+                "Bybit activity pagination changed the base query"
+            )
+        expected_cursor = None if index == 0 else pages[index - 1].next_cursor
+        actual_cursor = observation.query_binding.query.get("cursor")
+        if actual_cursor != expected_cursor:
+            raise ProviderCoreError(
+                "Bybit activity pagination cursor chain is not contiguous"
+            )
+        if observation.evidence_ref in evidence_refs:
+            raise ProviderCoreError(
+                "Bybit activity pagination repeats exact page evidence"
+            )
+        evidence_refs.add(observation.evidence_ref)
+        for activity in page.activities:
+            if activity.activity_id in activity_ids:
+                raise ProviderCoreError(
+                    "Bybit activity identity repeats across cursor pages"
+                )
+            activity_ids.add(activity.activity_id)
+        if index < len(pages) - 1 and page.next_cursor is None:
+            raise ProviderCoreError(
+                "Bybit activity pagination continues after terminal page"
+            )
+    if pages[-1].next_cursor is not None:
+        raise ProviderCoreError("Bybit activity pagination is incomplete")
+
+    return coverage_evidence(
+        account_id=first.account_id,
+        environment=first.environment,
+        provider_environment=first.provider_environment,
+        surface="ACTIVITIES",
+        coverage_start=_millis_to_utc(start_ms, name="startTime"),
+        coverage_end=_millis_to_utc(end_ms, name="endTime"),
+        pagination_complete=True,
+        consistency_horizon_satisfied=consistency_horizon_satisfied,
+        qualified_exclusion_semantics=qualified_exclusion_semantics,
+    )
 
 
 def coverage_evidence(

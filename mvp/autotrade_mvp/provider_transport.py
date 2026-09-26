@@ -16,7 +16,7 @@ another dispatcher.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256, sha512
@@ -79,7 +79,7 @@ class ProviderSecretResolver(Protocol):
 class ProviderWireClient(Protocol):
     def send(
         self,
-        request: "SignedHttpRequest | AuthenticatedReadHttpRequest",
+        request: "SignedHttpRequest | AuthenticatedReadHttpRequest | PublicDataHttpRequest",
     ) -> "bytes | TradingWireResponse | AuthenticatedReadWireResponse": ...
 
 
@@ -267,6 +267,26 @@ BINANCE_SPOT_ENDPOINT_POLICIES: Mapping[str, ProviderEndpointPolicy] = (
 )
 
 
+BINANCE_USDM_ENDPOINT_POLICIES: Mapping[str, ProviderEndpointPolicy] = (
+    MappingProxyType(
+        {
+            "PAPER": ProviderEndpointPolicy(
+                provider_id="BINANCE",
+                environment="PAPER",
+                base_url="https://demo-fapi.binance.com",
+                allowed_hosts=frozenset({"demo-fapi.binance.com"}),
+            ),
+            "LIVE": ProviderEndpointPolicy(
+                provider_id="BINANCE",
+                environment="LIVE",
+                base_url="https://fapi.binance.com",
+                allowed_hosts=frozenset({"fapi.binance.com"}),
+            ),
+        }
+    )
+)
+
+
 WHITEBIT_ORDER_ENDPOINTS = frozenset(
     {
         "/api/v4/order/market",
@@ -354,6 +374,104 @@ ALPACA_ENDPOINT_POLICIES: Mapping[str, ProviderEndpointPolicy] = (
         }
     )
 )
+
+
+@dataclass(frozen=True)
+class PublicDataEndpointRule:
+    permission_scope: str
+    allowed_query_fields: frozenset[str]
+    required_query_fields: frozenset[str]
+    success_statuses: frozenset[int]
+
+    def __post_init__(self) -> None:
+        permission = _canonical_text(
+            self.permission_scope,
+            name="permission_scope",
+        )
+        if permission != "ORDER_WRITE":
+            raise ProviderTransportScopeError(
+                "admission public-data rule must bind ORDER_WRITE capability"
+            )
+        if (
+            not isinstance(self.allowed_query_fields, frozenset)
+            or not isinstance(self.required_query_fields, frozenset)
+            or not self.required_query_fields.issubset(
+                self.allowed_query_fields
+            )
+        ):
+            raise ProviderTransportScopeError(
+                "public-data query field policy is invalid"
+            )
+        if (
+            not isinstance(self.success_statuses, frozenset)
+            or not self.success_statuses
+            or any(
+                isinstance(status, bool)
+                or not isinstance(status, int)
+                or status < 200
+                or status > 299
+                for status in self.success_statuses
+            )
+        ):
+            raise ProviderTransportScopeError(
+                "public-data success_statuses must be non-empty 2xx integers"
+            )
+        object.__setattr__(self, "permission_scope", permission)
+
+
+BINANCE_USDM_PUBLIC_DATA_ENDPOINTS: Mapping[
+    str, PublicDataEndpointRule
+] = MappingProxyType(
+    {
+        "/fapi/v1/exchangeInfo": PublicDataEndpointRule(
+            permission_scope="ORDER_WRITE",
+            allowed_query_fields=frozenset(),
+            required_query_fields=frozenset(),
+            success_statuses=frozenset({200}),
+        ),
+        "/fapi/v1/premiumIndex": PublicDataEndpointRule(
+            permission_scope="ORDER_WRITE",
+            allowed_query_fields=frozenset({"symbol"}),
+            required_query_fields=frozenset({"symbol"}),
+            success_statuses=frozenset({200}),
+        ),
+    }
+)
+
+
+def _binance_usdm_public_data_rule(
+    binding: AuthenticatedReadQueryBinding,
+) -> PublicDataEndpointRule:
+    if binding.provider_id != "BINANCE" or binding.surface != Surface.PUBLIC_DATA:
+        raise ProviderTransportScopeError(
+            "Binance USD-M public data requires BINANCE PUBLIC_DATA binding"
+        )
+    rule = BINANCE_USDM_PUBLIC_DATA_ENDPOINTS.get(binding.endpoint)
+    if rule is None:
+        raise ProviderTransportScopeError(
+            "Binance USD-M public-data endpoint is not explicitly allowed"
+        )
+    if binding.permission_scope != rule.permission_scope:
+        raise ProviderTransportScopeError(
+            "Binance USD-M public-data permission scope mismatch"
+        )
+    fields = frozenset(binding.query)
+    if (
+        not rule.required_query_fields.issubset(fields)
+        or not fields.issubset(rule.allowed_query_fields)
+    ):
+        raise ProviderTransportScopeError(
+            "Binance USD-M public-data query does not match endpoint policy"
+        )
+    for key, value in binding.query.items():
+        if (
+            key != _canonical_text(key, name="query parameter")
+            or value != _canonical_text(value, name=f"query {key}")
+        ):
+            raise ProviderTransportScopeError(
+                "Binance USD-M public-data query is not canonical"
+            )
+    return rule
 
 
 @dataclass(frozen=True)
@@ -928,6 +1046,51 @@ class AuthenticatedReadHttpRequest:
 
 
 @dataclass(frozen=True)
+class PublicDataHttpRequest:
+    """One immutable allowlisted public provider GET request."""
+
+    url: str
+    headers: Mapping[str, str]
+    timeout_seconds: int
+
+    def __post_init__(self) -> None:
+        parsed = urlsplit(_text(self.url, name="url"))
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+        ):
+            raise ProviderTransportScopeError(
+                "public-data URL must be canonical HTTPS"
+            )
+        if not isinstance(self.headers, Mapping):
+            raise ProviderTransportScopeError("headers must be a mapping")
+        normalized_headers: dict[str, str] = {}
+        for raw_key, raw_value in self.headers.items():
+            key = _text(raw_key, name="header name")
+            value = _text(raw_value, name=f"header {key}")
+            if "\r" in key or "\n" in key or "\r" in value or "\n" in value:
+                raise ProviderTransportScopeError(
+                    "header values must not contain line breaks"
+                )
+            normalized_headers[key] = value
+        if (
+            isinstance(self.timeout_seconds, bool)
+            or not isinstance(self.timeout_seconds, int)
+            or self.timeout_seconds < 1
+            or self.timeout_seconds > 120
+        ):
+            raise ProviderTransportScopeError("invalid request timeout")
+        object.__setattr__(
+            self,
+            "headers",
+            MappingProxyType(dict(normalized_headers)),
+        )
+
+
+@dataclass(frozen=True)
 class TradingWireResponse:
     """Definitive HTTP response observed after one guarded write send."""
 
@@ -967,6 +1130,83 @@ class AuthenticatedReadWireResponse:
             )
 
 
+_TRANSPORTED_PROVIDER_OBSERVATION_TOKEN = object()
+
+
+@dataclass(frozen=True)
+class TransportedProviderResponseObservation:
+    """Provider response whose exact bytes came through an allowlisted wire request."""
+
+    observation: ProviderResponseObservation
+    request_url: str
+    origin: str
+    request_url_sha256: str
+    _verification_token: InitVar[object | None] = None
+
+    def __post_init__(self, _verification_token: object | None) -> None:
+        if _verification_token is not _TRANSPORTED_PROVIDER_OBSERVATION_TOKEN:
+            raise ProviderTransportScopeError(
+                "transported provider observation must be issued by shared transport"
+            )
+        if not isinstance(self.observation, ProviderResponseObservation):
+            raise TypeError("observation must be ProviderResponseObservation")
+        binding = self.observation.query_binding
+        if binding.surface != Surface.PUBLIC_DATA:
+            raise ProviderTransportScopeError(
+                "transported public observation requires PUBLIC_DATA binding"
+            )
+        origin = _text(self.origin, name="origin")
+        origin_parts = urlsplit(origin)
+        if (
+            origin_parts.scheme != "https"
+            or not origin_parts.hostname
+            or origin_parts.username is not None
+            or origin_parts.password is not None
+            or origin_parts.path not in ("", "/")
+            or origin_parts.query
+            or origin_parts.fragment
+        ):
+            raise ProviderTransportScopeError(
+                "transported observation origin must be an HTTPS origin"
+            )
+        request_url = _text(self.request_url, name="request_url")
+        parsed = urlsplit(request_url)
+        expected_query = urlencode(sorted(binding.query.items()))
+        if (
+            parsed.scheme != "https"
+            or parsed.netloc != origin_parts.netloc
+            or parsed.path != binding.endpoint
+            or parsed.query != expected_query
+            or parsed.fragment
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise ProviderTransportScopeError(
+                "transported observation request URL does not match exact binding"
+            )
+        expected_url = origin.rstrip("/") + binding.endpoint
+        if expected_query:
+            expected_url += "?" + expected_query
+        if request_url != expected_url:
+            raise ProviderTransportScopeError(
+                "transported observation request URL is not canonical"
+            )
+        digest = _canonical_text(
+            self.request_url_sha256,
+            name="request_url_sha256",
+        )
+        expected_digest = "sha256:" + sha256(
+            request_url.encode("utf-8")
+        ).hexdigest()
+        if digest != expected_digest:
+            raise ProviderTransportScopeError(
+                "transported observation request URL digest mismatch"
+            )
+        object.__setattr__(self, "origin", origin.rstrip("/"))
+        object.__setattr__(self, "request_url", request_url)
+        object.__setattr__(self, "request_url_sha256", digest)
+
+
 class _NoRedirectHandler(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -980,21 +1220,24 @@ class UrllibJsonWireClient:
 
     def send(
         self,
-        request: SignedHttpRequest | AuthenticatedReadHttpRequest,
+        request: SignedHttpRequest | AuthenticatedReadHttpRequest | PublicDataHttpRequest,
     ) -> bytes | TradingWireResponse | AuthenticatedReadWireResponse:
         if not isinstance(
             request,
-            (SignedHttpRequest, AuthenticatedReadHttpRequest),
+            (SignedHttpRequest, AuthenticatedReadHttpRequest, PublicDataHttpRequest),
         ):
             raise TypeError(
-                "request must be SignedHttpRequest or AuthenticatedReadHttpRequest"
+                "request must be SignedHttpRequest, AuthenticatedReadHttpRequest or PublicDataHttpRequest"
             )
         if isinstance(request, SignedHttpRequest):
             data = request.body
             method = request.method
-        else:
+        elif isinstance(request, AuthenticatedReadHttpRequest):
             data = request.body or None
             method = request.method
+        else:
+            data = None
+            method = "GET"
         outbound = Request(
             request.url,
             data=data,
@@ -1003,7 +1246,7 @@ class UrllibJsonWireClient:
         )
         is_authenticated_read = isinstance(
             request,
-            AuthenticatedReadHttpRequest,
+            (AuthenticatedReadHttpRequest, PublicDataHttpRequest),
         )
         http_status: int | None = None
         try:
@@ -2520,6 +2763,162 @@ class KrakenSpotAuthenticatedReadTransport:
             http_status=wire_response.http_status,
             response_bytes=wire_response.body,
             observed_at=observed_at,
+        )
+
+
+class BinanceUsdmPublicDataTransport:
+    """Allowlisted one-shot USD-M public-data transport for order admission evidence."""
+
+    def __init__(
+        self,
+        *,
+        policy: ProviderEndpointPolicy,
+        account_id: str,
+        capability_snapshot_id: str,
+        capability_registry: CapabilityRegistry,
+        clock_utc: ClockUtc,
+        quota_gate: QuotaGate | None = None,
+        wire_client: ProviderWireClient | None = None,
+    ) -> None:
+        if not isinstance(policy, ProviderEndpointPolicy):
+            raise TypeError("policy must be ProviderEndpointPolicy")
+        if policy.provider_id != "BINANCE":
+            raise ProviderTransportScopeError(
+                "Binance USD-M public-data transport requires BINANCE policy"
+            )
+        if policy.base_url not in {
+            "https://fapi.binance.com",
+            "https://demo-fapi.binance.com",
+        }:
+            raise ProviderTransportScopeError(
+                "Binance USD-M public-data transport requires canonical futures origin"
+            )
+        self.policy = policy
+        self.account_id = _canonical_text(account_id, name="account_id")
+        self.capability_snapshot_id = _canonical_text(
+            capability_snapshot_id,
+            name="capability_snapshot_id",
+        )
+        if not isinstance(capability_registry, CapabilityRegistry):
+            raise TypeError("capability_registry must be CapabilityRegistry")
+        if not callable(clock_utc):
+            raise TypeError("clock_utc must be callable")
+        if quota_gate is not None and not callable(quota_gate):
+            raise TypeError("quota_gate must be callable or None")
+        if wire_client is not None and not hasattr(wire_client, "send"):
+            raise TypeError("wire_client must implement send")
+        self.capability_registry = capability_registry
+        self.clock_utc = clock_utc
+        self.quota_gate = quota_gate
+        self.wire_client = wire_client or UrllibJsonWireClient()
+
+    def _require_current_capability(
+        self,
+        query_binding: AuthenticatedReadQueryBinding,
+        rule: PublicDataEndpointRule,
+    ) -> CapabilitySnapshot:
+        point = self.clock_utc()
+        if (
+            not isinstance(point, datetime)
+            or point.tzinfo is None
+            or point.utcoffset() is None
+        ):
+            raise ProviderTransportScopeError(
+                "clock_utc must return a timezone-aware datetime"
+            )
+        point = point.astimezone(timezone.utc)
+        try:
+            current = self.capability_registry.require_verified(
+                provider_id=self.policy.provider_id,
+                account_id=self.account_id,
+                entity_id=query_binding.entity_id,
+                environment=self.policy.environment,
+                instrument_version=query_binding.instrument_version,
+                at=point,
+            )
+        except Exception as error:
+            raise ProviderTransportScopeError(
+                "public-data current capability cannot be verified"
+            ) from error
+        if (
+            not isinstance(current, CapabilitySnapshot)
+            or current.snapshot_id != self.capability_snapshot_id
+            or current.provider_id != self.policy.provider_id
+            or current.account_id != self.account_id
+            or current.entity_id != query_binding.entity_id
+            or current.environment != self.policy.environment
+            or current.instrument_version != query_binding.instrument_version
+            or current.status != "VERIFIED"
+            or not (current.observed_at <= point < current.expires_at)
+            or rule.permission_scope not in current.permission_scopes
+        ):
+            raise ProviderTransportScopeError(
+                "public-data capability is no longer valid for exact query binding"
+            )
+        return current
+
+    def __call__(
+        self,
+        query_binding: AuthenticatedReadQueryBinding,
+    ) -> TransportedProviderResponseObservation:
+        if not isinstance(query_binding, AuthenticatedReadQueryBinding):
+            raise TypeError(
+                "query_binding must be AuthenticatedReadQueryBinding"
+            )
+        if (
+            query_binding.provider_id != self.policy.provider_id
+            or query_binding.account_id != self.account_id
+            or query_binding.environment != self.policy.environment
+            or query_binding.capability_snapshot_id != self.capability_snapshot_id
+        ):
+            raise ProviderTransportScopeError(
+                "public-data query scope mismatch"
+            )
+        rule = _binance_usdm_public_data_rule(query_binding)
+
+        if self.quota_gate is not None:
+            self.quota_gate(
+                self.policy.provider_id,
+                self.account_id,
+                self.policy.environment,
+                "PUBLIC_DATA",
+            )
+        self._require_current_capability(query_binding, rule)
+
+        query = urlencode(sorted(query_binding.query.items()))
+        request_url = self.policy.absolute_url(query_binding.endpoint)
+        if query:
+            request_url += "?" + query
+        request = PublicDataHttpRequest(
+            url=request_url,
+            headers=MappingProxyType({"Accept": "application/json"}),
+            timeout_seconds=self.policy.timeout_seconds,
+        )
+        wire_response = self.wire_client.send(request)
+        if not isinstance(wire_response, AuthenticatedReadWireResponse):
+            raise ProviderTransportError(
+                "public-data wire client must preserve HTTP status"
+            )
+        if wire_response.http_status not in rule.success_statuses:
+            raise ProviderTransportError(
+                "public provider read returned unexpected HTTP status "
+                + str(wire_response.http_status)
+            )
+        observed_at = self.clock_utc()
+        observation = observe_authenticated_json_response(
+            query_binding=query_binding,
+            http_status=wire_response.http_status,
+            response_bytes=wire_response.body,
+            observed_at=observed_at,
+        )
+        return TransportedProviderResponseObservation(
+            observation=observation,
+            request_url=request.url,
+            origin=self.policy.base_url,
+            request_url_sha256=(
+                "sha256:" + sha256(request.url.encode("utf-8")).hexdigest()
+            ),
+            _verification_token=_TRANSPORTED_PROVIDER_OBSERVATION_TOKEN,
         )
 
 

@@ -1,3 +1,4 @@
+from hashlib import sha256
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -342,7 +343,7 @@ class DurableUnknownRestartTests(unittest.TestCase):
             self.assertEqual(
                 unknown_payload["response_sha256"],
                 "sha256:"
-                + __import__("hashlib").sha256(exact_bytes).hexdigest(),
+                + sha256(exact_bytes).hexdigest(),
             )
             self.assertEqual(unknown_payload["http_status"], 200)
             self.assertEqual(

@@ -405,6 +405,7 @@ def parse_account_trades(
             "client_ids_by_order_id must be a mapping"
         )
     normalized_client_map: dict[int, str] = {}
+    seen_client_ids: set[str] = set()
     for raw_order_id, raw_client_id in client_map.items():
         if (
             isinstance(raw_order_id, bool)
@@ -415,11 +416,12 @@ def parse_account_trades(
                 "client_ids_by_order_id keys must be non-negative integer order ids"
             )
         normalized_client_id = validate_client_order_id(raw_client_id)
-        if normalized_client_id in normalized_client_map.values():
+        if normalized_client_id in seen_client_ids:
             raise BinanceUsdmAdapterError(
                 "client_ids_by_order_id maps one client_order_id to multiple provider order ids"
             )
         normalized_client_map[raw_order_id] = normalized_client_id
+        seen_client_ids.add(normalized_client_id)
 
     by_id: dict[str, ProviderFillEvidence] = {}
     for index, raw in enumerate(rows):

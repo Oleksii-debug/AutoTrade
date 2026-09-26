@@ -587,6 +587,14 @@ _KRAKEN_SPOT_PAGINATION_ENDPOINTS = MappingProxyType(
     }
 )
 
+_KRAKEN_SPOT_ACCOUNT_WIDE_RESTRICTING_FILTERS = MappingProxyType(
+    {
+        "ORDER_HISTORY": frozenset({"userref", "cl_ord_id", "start"}),
+        "EXECUTIONS": frozenset({"pair", "type", "start"}),
+        "ACTIVITIES": frozenset({"asset", "type", "start"}),
+    }
+)
+
 
 _KRAKEN_SPOT_PAGE_EVIDENCE_FACTORY_TOKEN = object()
 
@@ -601,6 +609,7 @@ class KrakenSpotPageEvidence:
     offset: int
     limit: int
     record_count: int
+    record_ids: tuple[str, ...]
     total_count: int
     evidence_ref: str
     filter_items: tuple[tuple[str, str], ...]
@@ -639,6 +648,25 @@ class KrakenSpotPageEvidence:
             )
         if self.total_count < 0:
             raise KrakenSpotAdapterError("total_count cannot be negative")
+        if not isinstance(self.record_ids, tuple):
+            raise TypeError("record_ids must be a tuple")
+        normalized_record_ids = tuple(
+            _text(str(value), name="pagination record id")
+            for value in self.record_ids
+        )
+        if len(normalized_record_ids) != self.record_count:
+            raise KrakenSpotAdapterError(
+                "record_ids must exactly match the page record count"
+            )
+        if len(set(normalized_record_ids)) != len(normalized_record_ids):
+            raise KrakenSpotAdapterError(
+                "pagination record ids must be unique within one page"
+            )
+        if tuple(sorted(normalized_record_ids)) != normalized_record_ids:
+            raise KrakenSpotAdapterError(
+                "pagination record ids must be sorted canonically"
+            )
+        object.__setattr__(self, "record_ids", normalized_record_ids)
         if self.offset + self.record_count > self.total_count:
             raise KrakenSpotAdapterError(
                 "Kraken page extends beyond provider total count"
@@ -726,11 +754,61 @@ class KrakenSpotPaginationCoverage:
                 raise KrakenSpotAdapterError(
                     "Kraken pagination response evidence is duplicated"
                 )
+            existing_record_ids = {
+                record_id
+                for item in self._pages
+                for record_id in item.record_ids
+            }
+            if existing_record_ids.intersection(page.record_ids):
+                raise KrakenSpotAdapterError(
+                    "Kraken pagination record id is duplicated across pages"
+                )
         self._pages.append(page)
 
     @property
+    def has_stable_end_boundary(self) -> bool:
+        """Whether offset pagination is protected from a proven fixed upper bound."""
+
+        if len(self._pages) <= 1:
+            return True
+        end = dict(self._pages[0].filter_items).get("end")
+        if end is None or not end or any(
+            character.isspace() or ord(character) < 0x20
+            for character in end
+        ):
+            return False
+        if end.isascii() and end.isdigit():
+            return str(int(end, 10)) == end
+        parts = end.split("-")
+        return (
+            len(parts) >= 2
+            and all(
+                part
+                and part.isascii()
+                and part.isalnum()
+                for part in parts
+            )
+        )
+
+    @property
     def complete(self) -> bool:
-        return bool(self._pages and self._pages[-1].proves_last_page)
+        return bool(
+            self._pages
+            and self._pages[-1].proves_last_page
+            and self.has_stable_end_boundary
+        )
+
+    @property
+    def complete_for_account(self) -> bool:
+        """Whether complete pagination covers the account-wide surface population."""
+
+        if not self.complete:
+            return False
+        filters = set(dict(self._pages[0].filter_items))
+        restricting = _KRAKEN_SPOT_ACCOUNT_WIDE_RESTRICTING_FILTERS[
+            self.surface
+        ]
+        return not bool(filters & restricting)
 
     @property
     def next_offset(self) -> int:
@@ -834,6 +912,12 @@ def pagination_page_from_observation(
         offset=offset,
         limit=limit,
         record_count=len(records),
+        record_ids=tuple(
+            sorted(
+                _text(str(value), name="pagination record id")
+                for value in records
+            )
+        ),
         total_count=total_count,
         evidence_ref=observation.evidence_ref,
         filter_items=tuple(
@@ -992,6 +1076,10 @@ def absence_evidence_from_pagination(
             raise KrakenSpotAdapterError(
                 f"{expected} pagination coverage is incomplete"
             )
+        if not coverage.complete_for_account:
+            raise KrakenSpotAdapterError(
+                f"{expected} pagination does not cover account-wide population"
+            )
         if coverage.scope != (
             open_orders.account_id,
             open_orders.environment,
@@ -1009,9 +1097,9 @@ def absence_evidence_from_pagination(
     return KrakenSpotAbsenceEvidence(
         order_found=order_found,
         open_orders_complete=open_orders.complete_for_account,
-        closed_orders_complete=order_history.complete,
-        trades_complete=executions.complete,
-        ledgers_complete=activities.complete,
+        closed_orders_complete=order_history.complete_for_account,
+        trades_complete=executions.complete_for_account,
+        ledgers_complete=activities.complete_for_account,
         consistency_horizon_satisfied=consistency_horizon_satisfied,
         qualified_exclusion_semantics=qualified_exclusion_semantics,
     )

@@ -11,6 +11,7 @@ from autotrade_research.artifacts.store import (
     ArtifactConflict,
     ArtifactIntegrityError,
     ArtifactStore,
+    atomic_write_json,
 )
 
 
@@ -324,6 +325,149 @@ class ArtifactStoreTests(unittest.TestCase):
                 store.export(artifact_id, target)
                 sync.assert_any_call(target)
                 self.assertEqual(target.read_bytes(), b"durable")
+
+    def test_crash_after_object_publish_before_manifest_leaves_recoverable_orphan(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            data = b"crash-boundary-evidence"
+            artifact_id = str(uuid4())
+            digest = hashlib.sha256(data).hexdigest()
+
+            with patch(
+                "autotrade_research.artifacts.store.atomic_write_json",
+                side_effect=RuntimeError("simulated process death before manifest commit"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "simulated process death"):
+                    store.publish_bytes(
+                        artifact_id=artifact_id,
+                        data=data,
+                        media_type="application/octet-stream",
+                        rights={"storage": True, "export": False},
+                    )
+
+            object_path = store._object_path(digest)
+            self.assertTrue(object_path.is_file())
+            self.assertFalse(store._manifest_path(artifact_id).exists())
+            self.assertIn(digest, store.audit().unreferenced_objects)
+
+            recovered = ArtifactStore(directory).recover_orphans()
+            self.assertFalse(object_path.exists())
+            self.assertEqual(recovered.unreferenced_objects, ())
+
+    def test_failed_object_replace_cleans_staging_without_manifest(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            artifact_id = str(uuid4())
+            real_replace = os.replace
+
+            def fail_object_replace(source, destination):
+                if Path(destination).is_relative_to(store.objects):
+                    raise OSError("simulated object replace failure")
+                return real_replace(source, destination)
+
+            with patch(
+                "autotrade_research.artifacts.store.os.replace",
+                side_effect=fail_object_replace,
+            ):
+                with self.assertRaisesRegex(OSError, "simulated object replace failure"):
+                    store.publish_bytes(
+                        artifact_id=artifact_id,
+                        data=b"never-published",
+                        media_type="application/octet-stream",
+                        rights={"storage": True, "export": False},
+                    )
+
+            self.assertFalse(store._manifest_path(artifact_id).exists())
+            self.assertEqual(store.audit().objects, 0)
+            self.assertEqual(list(store.staging.iterdir()), [])
+
+    def test_crash_during_object_directory_sync_leaves_recoverable_orphan(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            data = b"object-published-before-directory-sync"
+            artifact_id = str(uuid4())
+            digest = hashlib.sha256(data).hexdigest()
+
+            with patch(
+                "autotrade_research.artifacts.store.sync_parent_directory",
+                side_effect=OSError("simulated object directory sync failure"),
+            ):
+                with self.assertRaisesRegex(OSError, "directory sync failure"):
+                    store.publish_bytes(
+                        artifact_id=artifact_id,
+                        data=data,
+                        media_type="application/octet-stream",
+                        rights={"storage": True, "export": False},
+                    )
+
+            object_path = store._object_path(digest)
+            self.assertTrue(object_path.is_file())
+            self.assertFalse(store._manifest_path(artifact_id).exists())
+            self.assertIn(digest, store.audit().unreferenced_objects)
+
+            recovered = ArtifactStore(directory).recover_orphans()
+            self.assertFalse(object_path.exists())
+            self.assertEqual(recovered.unreferenced_objects, ())
+
+    def test_crash_after_manifest_commit_recovers_committed_artifact(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            artifact_id = str(uuid4())
+
+            def commit_then_crash(path, value):
+                atomic_write_json(path, value)
+                raise RuntimeError("simulated process death after manifest commit")
+
+            with patch(
+                "autotrade_research.artifacts.store.atomic_write_json",
+                side_effect=commit_then_crash,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "simulated process death after manifest commit",
+                ):
+                    store.publish_bytes(
+                        artifact_id=artifact_id,
+                        data=b"committed-before-crash",
+                        media_type="application/octet-stream",
+                        rights={"storage": True, "export": False},
+                    )
+
+            reopened = ArtifactStore(directory)
+            self.assertEqual(
+                reopened.read_bytes(artifact_id),
+                b"committed-before-crash",
+            )
+            audit = reopened.audit()
+            self.assertEqual(audit.manifests, 1)
+            self.assertEqual(audit.objects, 1)
+            self.assertEqual(audit.unreferenced_objects, ())
+            self.assertEqual(audit.missing_objects, ())
+            self.assertEqual(audit.corrupt_objects, ())
+
+    def test_restart_after_manifest_commit_exposes_only_verified_complete_artifact(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"complete",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+
+            reopened = ArtifactStore(directory)
+            self.assertEqual(reopened.read_bytes(artifact_id), b"complete")
+            audit = reopened.audit()
+            self.assertEqual(audit.manifests, 1)
+            self.assertEqual(audit.objects, 1)
+            self.assertEqual(audit.unreferenced_objects, ())
+            self.assertEqual(audit.missing_objects, ())
+            self.assertEqual(audit.corrupt_objects, ())
+            self.assertEqual(
+                reopened.load_manifest(artifact_id)["manifest_hash"],
+                manifest["manifest_hash"],
+            )
 
     def test_recovery_reports_malformed_or_misplaced_objects_without_crashing(self):
         with TemporaryDirectory() as directory:

@@ -1,7 +1,7 @@
 name: reconvergence-integrity
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened, edited, ready_for_review]
   workflow_dispatch:
 
@@ -16,22 +16,27 @@ jobs:
   guard:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out trusted base revision
+        uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
           fetch-depth: 0
-      - name: Ensure exact pull-request revisions are available
-        if: github.event_name == 'pull_request'
+          persist-credentials: false
+      - name: Fetch exact candidate revision without checking it out
+        if: github.event_name == 'pull_request_target'
         shell: bash
         run: |
+          git fetch --no-tags origin "pull/${{ github.event.pull_request.number }}/head"
+          test "$(git rev-parse FETCH_HEAD)" = "${{ github.event.pull_request.head.sha }}"
           git cat-file -e "${{ github.event.pull_request.base.sha }}^{commit}"
           git cat-file -e "${{ github.event.pull_request.head.sha }}^{commit}"
-      - name: Guard pull-request repository tree
-        if: github.event_name == 'pull_request'
+      - name: Guard pull-request repository tree with trusted base code
+        if: github.event_name == 'pull_request_target'
         shell: bash
         run: >-
           python control/tools/reconvergence_integrity.py
           --base "${{ github.event.pull_request.base.sha }}"
           --head "${{ github.event.pull_request.head.sha }}"
           --pull-request-event "$GITHUB_EVENT_PATH"
-      - name: Run guard regression tests
+      - name: Run trusted guard regression tests
         run: python -m unittest tests.Control.test_reconvergence_integrity -v

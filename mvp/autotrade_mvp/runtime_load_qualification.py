@@ -36,6 +36,8 @@ from .persistence import JournalStore
 
 _CUT_TOKEN = object()
 _EVIDENCE_TOKEN = object()
+_RELEASE_ARTIFACT_MEDIA_TYPE = "application/vnd.autotrade.release-artifact"
+_RELEASE_ARTIFACT_EVIDENCE_KIND = "DELIVERED_RELEASE"
 
 
 def _text(value: object, *, name: str) -> str:
@@ -694,5 +696,18 @@ def evaluate_runtime_campaign(
     if manifest.get("sha256") != artifact_sha256:
         raise RuntimeBudgetError(
             "delivered release artifact digest does not match immutable evidence"
+        )
+    source_refs = manifest.get("source_refs")
+    metadata = manifest.get("metadata")
+    if (
+        manifest.get("media_type") != _RELEASE_ARTIFACT_MEDIA_TYPE
+        or not isinstance(source_refs, list)
+        or f"git:{spec.release_sha}" not in source_refs
+        or not isinstance(metadata, dict)
+        or metadata.get("evidence_kind") != _RELEASE_ARTIFACT_EVIDENCE_KIND
+        or metadata.get("source_sha") != spec.release_sha
+    ):
+        raise RuntimeBudgetError(
+            "delivered release artifact manifest does not bind canonical release provenance"
         )
     return evaluate_runtime_budget(spec, evidence.to_observation(spec))

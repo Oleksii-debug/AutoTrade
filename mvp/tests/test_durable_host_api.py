@@ -474,7 +474,12 @@ class JournalBackedHostApiTests(unittest.TestCase):
                 "event_type": "OPERATION_UPDATED",
                 "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
                 "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
-                "aggregate_version": "3",
+                "aggregate_version": str(
+                    journal.next_aggregate_version(
+                        JournalBackedHostCommandStore.AGGREGATE_TYPE,
+                        JournalBackedHostCommandStore.AGGREGATE_ID,
+                    )
+                ),
                 "payload": payload,
                 "payload_hash": payload_digest(payload),
                 "committed_at": "2026-09-24T18:00:01Z",
@@ -1760,7 +1765,10 @@ class JournalBackedHostApiTests(unittest.TestCase):
     def test_success_cannot_be_fabricated_without_authority_evidence(self):
         store = self.store(now="2030-01-01T00:00:00Z")
         accepted = store.submit(self.command())
-        with self.assertRaisesRegex(ValueError, "evidence"):
+        with self.assertRaisesRegex(
+            ValueError,
+            "terminal authority operation has no canonical outcome",
+        ):
             store.update_operation(accepted.operation_id, "SUCCEEDED")
         self.assertEqual(
             store.get_operation(accepted.operation_id).phase,

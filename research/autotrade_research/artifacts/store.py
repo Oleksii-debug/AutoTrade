@@ -143,6 +143,46 @@ class ArtifactStore:
     def _manifest_path(self, artifact_id: str) -> Path:
         return self.manifests / f"{self._artifact_id(artifact_id)}.json"
 
+    def _validate_manifest_namespace(self, manifest_path: Path) -> None:
+        try:
+            resolved_root = self.root.resolve(strict=False)
+            expected_manifests = resolved_root / "manifests"
+            resolved_manifests = self.manifests.resolve(strict=False)
+            resolved_parent = manifest_path.parent.resolve(strict=False)
+        except OSError as error:
+            raise ArtifactIntegrityError(
+                "artifact manifest namespace cannot be resolved"
+            ) from error
+        if (
+            resolved_manifests != expected_manifests
+            or resolved_parent != expected_manifests
+        ):
+            raise ArtifactIntegrityError(
+                "artifact manifest path escapes store namespace"
+            )
+
+    def _validate_manifest_entry(self, manifest_path: Path) -> os.stat_result:
+        self._validate_manifest_namespace(manifest_path)
+        try:
+            entry = os.stat(manifest_path, follow_symlinks=False)
+        except FileNotFoundError:
+            raise FileNotFoundError(manifest_path)
+        except OSError as error:
+            raise ArtifactIntegrityError(
+                "artifact manifest cannot be inspected"
+            ) from error
+        if stat.S_ISLNK(entry.st_mode):
+            raise ArtifactIntegrityError("artifact manifest must not be a symlink")
+        if not stat.S_ISREG(entry.st_mode):
+            raise ArtifactIntegrityError(
+                "artifact manifest must be a regular file"
+            )
+        if entry.st_nlink != 1:
+            raise ArtifactIntegrityError(
+                "artifact manifest must not have hard-link aliases"
+            )
+        return entry
+
     def _validate_object_namespace(self, object_path: Path) -> None:
         try:
             resolved_root = self.root.resolve(strict=False)
@@ -304,6 +344,7 @@ class ArtifactStore:
             )
 
     def _load_manifest_path(self, path: Path) -> dict[str, Any]:
+        self._validate_manifest_entry(path)
         try:
             value = strict_json_loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, ValueError) as error:
@@ -316,8 +357,6 @@ class ArtifactStore:
 
     def load_manifest(self, artifact_id: str) -> dict[str, Any]:
         path = self._manifest_path(artifact_id)
-        if not path.is_file():
-            raise FileNotFoundError(path)
         manifest = self._load_manifest_path(path)
         if manifest.get("artifact_id") != self._artifact_id(artifact_id):
             raise ArtifactIntegrityError("manifest artifact identity mismatch")
@@ -348,7 +387,8 @@ class ArtifactStore:
         manifest_path = self._manifest_path(normalized_id)
 
         with ResourceLock(self.lock_path):
-            if manifest_path.exists():
+            self._validate_manifest_namespace(manifest_path)
+            if manifest_path.exists() or manifest_path.is_symlink():
                 existing = self._load_manifest_path(manifest_path)
                 immutable = {
                     "artifact_id": normalized_id,
@@ -534,6 +574,11 @@ class ArtifactStore:
                 referenced.add(digest)
                 self._verify_manifest_object(manifest)
             except (ArtifactIntegrityError, KeyError, AttributeError, ValueError):
+                try:
+                    self._validate_manifest_entry(manifest_path)
+                except (ArtifactIntegrityError, FileNotFoundError):
+                    corrupt.append(manifest_path.name)
+                    continue
                 try:
                     value = json.loads(manifest_path.read_text(encoding="utf-8"))
                     digest_value = value.get("sha256") if isinstance(value, dict) else None

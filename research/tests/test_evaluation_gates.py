@@ -240,7 +240,7 @@ class EvaluationGateTests(unittest.TestCase):
                     )
                     if kind == "locked_evaluation":
                         forged = json.loads(payload.decode("utf-8"))
-                        forged[forged_field] = False
+                        forged[forged_field] = not forged[forged_field]
                         payload = json.dumps(
                             forged,
                             sort_keys=True,

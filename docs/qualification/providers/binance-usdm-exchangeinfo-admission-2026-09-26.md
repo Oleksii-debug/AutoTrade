@@ -14,11 +14,14 @@ qualification artifact.
 ## Implemented admission boundaries
 
 USD-M order preparation now requires a version-bound
-`/fapi/v1/exchangeInfo` response admitted through the canonical
-`ProviderResponseObservation` exact-byte boundary. The response is bound to
-provider, environment, endpoint, query, instrument version, exact response
-SHA-256 and canonical evidence identity before symbol rules can authorize an
-order.
+`/fapi/v1/exchangeInfo` response issued by the shared provider transport.
+The transport accepts only the explicitly allowlisted Binance USD-M origin,
+endpoint and canonical query for the exact runtime environment, revalidates the
+VERIFIED capability, performs one GET, preserves the HTTP status and exact
+response bytes, and only then promotes the result to a transport-issued
+observation. The resulting rules retain provider, environment, endpoint/query,
+instrument version, response SHA-256, evidence identity, origin, and exact
+request-URL digest before they can authorize an order.
 
 The adapter validates the following provider rules before a LIMIT or MARKET
 request can be prepared:
@@ -38,11 +41,14 @@ Filter increments use Binance USD-M's documented offset semantics:
 `pricePrecision` as tick size or `quantityPrecision` as step size.
 
 Where a rule depends on mark price, order preparation accepts only a
-`BinanceUsdmMarkPrice` created from the canonical exact-byte public-response
-observation for `/fapi/v1/premiumIndex?symbol=<exact symbol>`. The evidence is
-bound to provider/environment/query/instrument/symbol and the exact response
-digest; the provider timestamp cannot be after the network observation, cannot
-be from the future at admission, and must satisfy an explicit maximum age.
+`BinanceUsdmMarkPrice` promoted from the same shared transport path for
+`/fapi/v1/premiumIndex?symbol=<exact symbol>`. A locally fabricated
+`ProviderResponseObservation`, even with valid exact JSON bytes and capability
+identity, is not an admission authority. The promoted evidence is bound to
+provider/environment/origin/endpoint/query/instrument/symbol, exact request URL
+digest and exact response digest; the provider timestamp cannot be after the
+network observation, cannot be from the future at admission, and must satisfy
+an explicit maximum age.
 
 For MARKET `MIN_NOTIONAL`, mark price is used because USD-M documents that
 MARKET orders have no order price and use mark price for the notional rule.
@@ -55,8 +61,9 @@ For LIMIT `PERCENT_PRICE`, BUY is checked against
 This source hardening does **not** qualify or implement the remaining WP-25
 provider authority. In particular it does not prove:
 
-- USD-M HTTP signing, credential permissions, server-time skew control,
-  `recvWindow`, quota accounting, or retry behavior;
+- USD-M authenticated HTTP signing, credential permissions, server-time skew
+  control, `recvWindow`, or write retry behavior; the public admission GET
+  path added here carries no credential or signing authority;
 - USD-M authenticated-read transport or user-data-stream lifecycle/recovery;
 - exact open-order count admission for `MAX_NUM_ORDERS`;
 - a predictive MARKET `PERCENT_PRICE` pass: Binance can reject a MARKET order
@@ -70,6 +77,13 @@ provider authority. In particular it does not prove:
 Provider rejection remains distinct from execution evidence. ACK is not a fill,
 and timeout/UNKNOWN must still reconcile through the canonical execution
 authority.
+
+The source policy currently maps LIVE USD-M REST traffic to
+`https://fapi.binance.com` and PAPER/demo traffic to
+`https://demo-fapi.binance.com`. LIVE `fapi.binance.com` is present in the
+current official USD-M API reference. PAPER/demo remains subject to the
+provider-qualification gate and must not be treated as empirically qualified
+until the exact delivered build completes the external provider campaign.
 
 ## Official semantics checked
 
@@ -88,7 +102,9 @@ Checked 2026-09-26 against Binance Futures (USDⓈ-M) documentation:
 Before this work can be integrated, the exact repaired PR head still requires
 successful `baseline`, `reconvergence-integrity`, and full
 `Verify AutoTrade`. The provenance regression suite must also prove that raw
-caller mappings, wrong provider/environment/endpoint/query/instrument scope and
-changed exact response bytes cannot silently authorize ORDER_WRITE admission.
+caller mappings, locally fabricated exact observations, wrong
+provider/environment/origin/endpoint/query/instrument scope, non-success HTTP
+responses and changed exact response bytes cannot silently authorize
+ORDER_WRITE admission.
 Those checks are implementation evidence only; they are not provider
 qualification.

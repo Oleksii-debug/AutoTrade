@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 import zipfile
 
 from tools.build_windows_bundle import BundleError, _windows_path_key, build_bundle
@@ -37,6 +38,70 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
             os.link(target, link)
         except (OSError, NotImplementedError) as error:
             self.skipTest(f"hardlink creation unavailable: {error}")
+
+    def test_hardlinked_staged_file_is_rejected_without_reading_alias(self):
+        staged = self.staging / "AutoTrade.exe"
+        staged.unlink()
+        victim = self.root / "external-runtime.exe"
+        victim.write_bytes(b"external-runtime")
+        self._hardlink_or_skip(staged, victim)
+
+        with self.assertRaisesRegex(
+            BundleError,
+            "hardlinked staged files are forbidden",
+        ):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "hardlink.zip",
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+
+        self.assertEqual(victim.read_bytes(), b"external-runtime")
+
+    def test_staged_path_swap_during_open_fails_closed(self):
+        staged = self.staging / "AutoTrade.exe"
+        replacement = self.root / "replacement.exe"
+        replacement.write_bytes(b"replacement")
+        original_open = Path.open
+        swapped = False
+
+        def open_then_swap(path_obj, *args, **kwargs):
+            nonlocal swapped
+            handle = original_open(path_obj, *args, **kwargs)
+            mode = args[0] if args else kwargs.get("mode", "r")
+            if Path(path_obj) == staged and mode == "rb" and not swapped:
+                try:
+                    os.replace(replacement, staged)
+                except OSError as error:
+                    handle.close()
+                    self.skipTest(f"open-file replacement unavailable: {error}")
+                swapped = True
+            return handle
+
+        with patch.object(
+            Path,
+            "open",
+            autospec=True,
+            side_effect=open_then_swap,
+        ):
+            with self.assertRaisesRegex(
+                BundleError,
+                "staged file changed during collection",
+            ):
+                build_bundle(
+                    staging=self.staging,
+                    output=self.root / "swapped.zip",
+                    version="0.1.0-dev",
+                    source_sha=SOURCE_SHA,
+                    mode="diagnostics",
+                    provenance_path=self.provenance(eligible=False),
+                )
+
+        self.assertTrue(swapped)
+        self.assertFalse((self.root / "swapped.zip").exists())
 
     def provenance(self, *, eligible=False, source_sha=None):
         path = self.root / "provenance.json"

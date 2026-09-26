@@ -200,6 +200,8 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
             ["quota", "capability", "resolve", "capability", "wire"],
         )
         self.assertEqual(len(resolver.calls), 1)
+        self.assertEqual(resolver.calls[0]["environment"], "PAPER")
+        self.assertEqual(resolver.calls[0]["provider_environment"], "TESTNET")
         self.assertEqual(observation.provider_id, "BYBIT")
         self.assertEqual(observation.account_id, "paper-1")
         self.assertEqual(observation.environment, "PAPER")
@@ -407,6 +409,8 @@ class BybitV5SharedTransportTests(unittest.TestCase):
             ["quota", "capability", "resolve", "capability", "guard", "wire"],
         )
         self.assertEqual(len(resolver.calls), 1)
+        self.assertEqual(resolver.calls[0]["environment"], "PAPER")
+        self.assertEqual(resolver.calls[0]["provider_environment"], "TESTNET")
         self.assertEqual(len(wire.requests), 1)
         outbound = wire.requests[0]
         self.assertEqual(

@@ -34,6 +34,13 @@ from tools.build_windows_install_manifest import (
     _sha256_stream,
     _verify_release_bundle_stream,
 )
+from tools.windows_authenticode import (
+    AuthenticodeSigningError,
+    assert_windows_signing_environment,
+    azure_metadata_bytes,
+    load_canonical_authenticode_policy,
+    verify_velopack_authenticode,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -360,6 +367,7 @@ def _vpk_command(
     pack_dir: Path,
     output_dir: Path,
     installer: dict[str, object],
+    azure_trusted_sign_file: Path | None = None,
 ) -> list[str]:
     command = [
         "dotnet",
@@ -398,6 +406,10 @@ def _vpk_command(
     runtime = installer["runtime"]
     if runtime["mode"] == "FRAMEWORK_DEPENDENT":
         command.extend(["--framework", str(runtime["prerequisite"])])
+    if azure_trusted_sign_file is not None:
+        command.extend(
+            ["--azureTrustedSignFile", os.fspath(azure_trusted_sign_file)]
+        )
     return command
 
 
@@ -639,18 +651,36 @@ def build_velopack_release(
     bundle: Path,
     installer_manifest: Path,
     output_dir: Path,
+    sign: bool = False,
     runner=subprocess.run,
 ) -> dict[str, object]:
-    """Build and publish an unsigned Velopack artifact family.
+    """Build and publish one Velopack artifact family.
 
-    The final build manifest is published last. Downstream release consumers must
-    require that manifest and must independently apply WP-64 signing/trust plus
-    delivered-Windows qualification before any release claim.
+    Unsigned remains the default. Signed mode can only use the separately
+    reviewed fixed Authenticode policy and Velopack's own Azure Artifact Signing
+    integration, because Velopack must sign application and generated binaries
+    at different build stages. Even verified Authenticode evidence remains
+    release_eligible=false until the canonical WP-64 and delivered-Windows gates
+    qualify the exact artifact digest.
     """
 
     _ensure_empty_output_directory(output_dir)
     _validate_tool_manifest()
     installer, installer_digest = _load_installer_manifest(installer_manifest)
+    signing_policy = None
+    signing_policy_sha256 = None
+    if sign:
+        try:
+            assert_windows_signing_environment()
+            signing_policy, signing_policy_sha256 = (
+                load_canonical_authenticode_policy()
+            )
+            if not signing_policy.enabled:
+                raise AuthenticodeSigningError(
+                    "canonical Authenticode signing policy is disabled"
+                )
+        except AuthenticodeSigningError as error:
+            raise VelopackPackagingError(str(error)) from error
 
     with TemporaryDirectory(prefix="autotrade-velopack-pack-") as pack_root_raw, TemporaryDirectory(
         prefix="autotrade-velopack-output-"
@@ -661,10 +691,23 @@ def build_velopack_release(
         vpk_output = Path(vpk_output_raw)
         publication_stage = Path(publication_stage_raw)
         verified = _verify_and_extract_bundle(bundle, installer, pack_root)
+        signing_metadata_path = None
+        if signing_policy is not None:
+            signing_metadata_path = publication_stage / "azure-signing-metadata.json"
+            try:
+                with signing_metadata_path.open("xb") as handle:
+                    handle.write(azure_metadata_bytes(signing_policy))
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except (AuthenticodeSigningError, OSError) as error:
+                raise VelopackPackagingError(
+                    "Azure Artifact Signing metadata staging failed closed"
+                ) from error
         command = _vpk_command(
             pack_dir=pack_root,
             output_dir=vpk_output,
             installer=installer,
+            azure_trusted_sign_file=signing_metadata_path,
         )
         try:
             completed = runner(
@@ -687,6 +730,20 @@ def build_velopack_release(
             vpk_output,
             version=str(installer["version"]),
         )
+        signing_evidence = None
+        if signing_policy is not None:
+            assert signing_policy_sha256 is not None
+            try:
+                signing_evidence = verify_velopack_authenticode(
+                    generated,
+                    version=str(installer["version"]),
+                    policy=signing_policy,
+                    policy_sha256=signing_policy_sha256,
+                )
+            except AuthenticodeSigningError as error:
+                raise VelopackPackagingError(
+                    "Velopack Authenticode verification failed closed"
+                ) from error
         staged_outputs: list[tuple[Path, str, int]] = []
         for source, expected_digest, expected_size in generated:
             staged_source = publication_stage / source.name
@@ -732,7 +789,12 @@ def build_velopack_release(
         "installer_input_sha256": installer_digest,
         "platform": installer["platform"],
         "artifacts": artifacts,
-        "signing_status": "UNSIGNED_REQUIRES_WP64",
+        "signing_status": (
+            "AUTHENTICODE_VERIFIED_REQUIRES_WP64"
+            if signing_evidence is not None
+            else "UNSIGNED_REQUIRES_WP64"
+        ),
+        "signing": signing_evidence,
         "release_eligible": False,
         "trading_authority_granted_by_artifact": False,
     }
@@ -772,12 +834,21 @@ def main() -> int:
     parser.add_argument("--bundle", required=True, type=Path)
     parser.add_argument("--installer-manifest", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument(
+        "--sign",
+        action="store_true",
+        help=(
+            "Use the fixed canonical Azure Artifact Signing policy and verify "
+            "Authenticode before publication."
+        ),
+    )
     args = parser.parse_args()
     try:
         result = build_velopack_release(
             bundle=args.bundle,
             installer_manifest=args.installer_manifest,
             output_dir=args.output_dir,
+            sign=args.sign,
         )
     except VelopackPackagingError as error:
         print(str(error), file=sys.stderr)

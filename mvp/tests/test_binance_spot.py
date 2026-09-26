@@ -124,6 +124,7 @@ def symbol_rules(
     tick_size="0.01",
     min_notional="5",
     apply_to_market=True,
+    avg_price_mins=5,
 ):
     return BinanceSpotSymbolRules.from_exchange_info(
         instrument_version=instrument_version,
@@ -152,7 +153,7 @@ def symbol_rules(
                     "filterType": "MIN_NOTIONAL",
                     "minNotional": min_notional,
                     "applyToMarket": apply_to_market,
-                    "avgPriceMins": 5,
+                    "avgPriceMins": avg_price_mins,
                 },
             ],
         },
@@ -165,6 +166,7 @@ def reference_price(
     symbol="BTCUSDT",
     price="40000",
     observed_at=NOW - timedelta(seconds=1),
+    avg_price_mins=5,
 ):
     epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
     delta = observed_at - epoch
@@ -173,12 +175,22 @@ def reference_price(
         + delta.seconds * 1_000
         + delta.microseconds // 1_000
     )
-    return BinanceSpotReferencePrice.from_provider_payload(
+    if avg_price_mins == 0:
+        return BinanceSpotReferencePrice.from_last_trade_payload(
+            instrument_version=instrument_version,
+            symbol=symbol,
+            payload={
+                "price": price,
+                "time": timestamp_ms,
+            },
+        )
+    return BinanceSpotReferencePrice.from_average_price_payload(
         instrument_version=instrument_version,
+        symbol=symbol,
         payload={
-            "symbol": symbol,
-            "referencePrice": price,
-            "timestamp": timestamp_ms,
+            "mins": avg_price_mins,
+            "price": price,
+            "closeTime": timestamp_ms,
         },
     )
 
@@ -234,6 +246,8 @@ class BinanceSpotFoundationTests(unittest.TestCase):
             request.market_reference_source_sha256,
             reference.source_sha256,
         )
+        self.assertEqual(request.market_reference_kind, "AVERAGE")
+        self.assertEqual(request.market_reference_window_minutes, 5)
         with self.assertRaises(BinanceSpotAdapterError):
             BinanceSpotOrderIntent.create(
                 instrument_version="BTCUSDT:v1",
@@ -424,6 +438,107 @@ class BinanceSpotFoundationTests(unittest.TestCase):
                 maximum_market_reference_age_seconds=30,
             )
 
+    def test_market_notional_reference_window_must_match_exchange_info(self):
+        intent = BinanceSpotOrderIntent.create(
+            instrument_version="BTCUSDT:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="MARKET",
+            quantity="1",
+        )
+        rules = symbol_rules(min_notional="50", avg_price_mins=5)
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "averaging window"):
+            prepare_order_request(
+                intent,
+                client_order_id="at-filter-last-cannot-substitute-average",
+                capability=capability(),
+                symbol_rules=rules,
+                at=NOW,
+                market_reference=reference_price(
+                    price="60",
+                    avg_price_mins=0,
+                ),
+                maximum_market_reference_age_seconds=30,
+            )
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "notional"):
+            prepare_order_request(
+                intent,
+                client_order_id="at-filter-required-window-average",
+                capability=capability(),
+                symbol_rules=rules,
+                at=NOW,
+                market_reference=reference_price(
+                    price="40",
+                    avg_price_mins=5,
+                ),
+                maximum_market_reference_age_seconds=30,
+            )
+
+        accepted = prepare_order_request(
+            intent,
+            client_order_id="at-filter-required-window-pass",
+            capability=capability(),
+            symbol_rules=rules,
+            at=NOW,
+            market_reference=reference_price(
+                price="60",
+                avg_price_mins=5,
+            ),
+            maximum_market_reference_age_seconds=30,
+        )
+        self.assertEqual(accepted.market_reference_kind, "AVERAGE")
+        self.assertEqual(accepted.market_reference_window_minutes, 5)
+
+    def test_zero_avg_price_mins_requires_last_price_evidence(self):
+        intent = BinanceSpotOrderIntent.create(
+            instrument_version="BTCUSDT:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="MARKET",
+            quantity="1",
+        )
+        rules = symbol_rules(min_notional="50", avg_price_mins=0)
+
+        with self.assertRaisesRegex(BinanceSpotAdapterError, "averaging window"):
+            prepare_order_request(
+                intent,
+                client_order_id="at-filter-average-cannot-substitute-last",
+                capability=capability(),
+                symbol_rules=rules,
+                at=NOW,
+                market_reference=reference_price(
+                    price="60",
+                    avg_price_mins=5,
+                ),
+                maximum_market_reference_age_seconds=30,
+            )
+
+        accepted = prepare_order_request(
+            intent,
+            client_order_id="at-filter-last-price-pass",
+            capability=capability(),
+            symbol_rules=rules,
+            at=NOW,
+            market_reference=reference_price(
+                price="60",
+                avg_price_mins=0,
+            ),
+            maximum_market_reference_age_seconds=30,
+        )
+        self.assertEqual(accepted.market_reference_kind, "LAST")
+        self.assertEqual(accepted.market_reference_window_minutes, 0)
+
+    def test_exchange_info_avg_price_mins_is_strictly_validated(self):
+        for invalid in (True, -1, "5"):
+            with self.subTest(avg_price_mins=invalid):
+                with self.assertRaisesRegex(
+                    BinanceSpotAdapterError,
+                    "avgPriceMins",
+                ):
+                    symbol_rules(avg_price_mins=invalid)
+
     def test_reference_price_cannot_be_forged_by_direct_construction(self):
         parsed = reference_price()
         with self.assertRaisesRegex(
@@ -436,6 +551,8 @@ class BinanceSpotFoundationTests(unittest.TestCase):
                 price=parsed.price,
                 observed_at=parsed.observed_at,
                 source_sha256=parsed.source_sha256,
+                reference_kind=parsed.reference_kind,
+                averaging_window_minutes=parsed.averaging_window_minutes,
             )
 
     def test_exchange_info_rules_are_bound_to_exact_instrument(self):

@@ -1128,6 +1128,245 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 )
             self.assertEqual(budget.snapshot(), before)
 
+    def test_fallback_requires_real_durable_parent(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            fallback = spec(
+                fallback_parent_attempt_id="model-attempt-" + "f" * 64,
+                fallback_index=1,
+            )
+            calls = []
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "fallback parent attempt does not exist",
+            ):
+                orchestrator.execute(
+                    spec=fallback,
+                    policy=fixed_policy(),
+                    request=request_for(orchestrator, fallback),
+                    descriptors=[descriptor()],
+                    call=lambda *_args: calls.append(True),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
+            self.assertEqual(calls, [])
+            self.assertEqual(budget.snapshot().reserved, Decimal("0"))
+            self.assertEqual(budget.snapshot().incurred, Decimal("0"))
+            self.assertEqual(budget.snapshot().estimated_unbilled, Decimal("0"))
+
+    def test_unknown_parent_cannot_be_blindly_retried_as_fallback(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            parent_spec = spec()
+            parent = orchestrator.execute(
+                spec=parent_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, parent_spec),
+                descriptors=[descriptor()],
+                call=lambda *_args: (_ for _ in ()).throw(
+                    RuntimeError("ambiguous remote boundary")
+                ),
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+            self.assertEqual(parent.status, "UNKNOWN")
+
+            fallback = spec(
+                fallback_parent_attempt_id=parent.attempt_id,
+                fallback_index=1,
+            )
+            calls = []
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "outcome is uncertain",
+            ):
+                orchestrator.execute(
+                    spec=fallback,
+                    policy=fixed_policy(),
+                    request=request_for(orchestrator, fallback),
+                    descriptors=[descriptor()],
+                    call=lambda *_args: calls.append(True),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
+            self.assertEqual(calls, [])
+            self.assertEqual(
+                budget.snapshot().estimated_unbilled,
+                Decimal("1.2"),
+            )
+
+    def test_schema_invalid_parent_can_start_one_direct_fallback(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            parent_spec = spec()
+            parent = orchestrator.execute(
+                spec=parent_spec,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, parent_spec),
+                descriptors=[descriptor()],
+                call=lambda *_args: observation(
+                    incurred="0.2",
+                    unbilled="0",
+                    output={"invalid": True},
+                ),
+                validate_result=lambda _value: False,
+                now_utc=NOW,
+            )
+            self.assertEqual(parent.status, "OBSERVED_INVALID")
+
+            fallback = spec(
+                fallback_parent_attempt_id=parent.attempt_id,
+                fallback_index=1,
+            )
+            calls = []
+
+            def fallback_call(*_args):
+                calls.append(True)
+                return observation(incurred="0.1", unbilled="0")
+
+            child = orchestrator.execute(
+                spec=fallback,
+                policy=fixed_policy(),
+                request=request_for(orchestrator, fallback),
+                descriptors=[descriptor()],
+                call=fallback_call,
+                validate_result=lambda value: value == {"answer": 7},
+                now_utc=NOW,
+            )
+            self.assertEqual(child.status, "OBSERVED_VALID")
+            self.assertEqual(calls, [True])
+
+            skipped = spec(
+                fallback_parent_attempt_id=parent.attempt_id,
+                fallback_index=2,
+            )
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "fallback index must directly follow",
+            ):
+                orchestrator.execute(
+                    spec=skipped,
+                    policy=fixed_policy(),
+                    request=request_for(orchestrator, skipped),
+                    descriptors=[descriptor()],
+                    call=lambda *_args: self.fail("must not call"),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
+
+    def test_fallback_policy_cannot_widen_under_same_policy_id(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            parent_spec = spec()
+            parent = orchestrator.execute(
+                spec=parent_spec,
+                policy=fixed_policy(maximum_cost="2"),
+                request=request_for(orchestrator, parent_spec),
+                descriptors=[descriptor()],
+                call=lambda *_args: observation(
+                    incurred="0.2",
+                    unbilled="0",
+                    output={"invalid": True},
+                ),
+                validate_result=lambda _value: False,
+                now_utc=NOW,
+            )
+            self.assertEqual(parent.status, "OBSERVED_INVALID")
+            fallback = spec(
+                fallback_parent_attempt_id=parent.attempt_id,
+                fallback_index=1,
+            )
+            calls = []
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "fallback policy must match",
+            ):
+                orchestrator.execute(
+                    spec=fallback,
+                    policy=fixed_policy(maximum_cost="3"),
+                    request=request_for(orchestrator, fallback),
+                    descriptors=[descriptor()],
+                    call=lambda *_args: calls.append(True),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
+            self.assertEqual(calls, [])
+
+    def test_fallback_request_cannot_widen_parent_remote_privacy(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            parent_spec = spec()
+            parent_request = ModelRequest(
+                request_id=orchestrator.attempt_id(parent_spec),
+                allowed_model_ids=("model-a",),
+                privacy_remote_allowed=False,
+                budget_remaining=Decimal("2"),
+                deadline_utc=NOW + timedelta(hours=1),
+            )
+            policy = fixed_policy(allow_remote=True)
+            parent = orchestrator.execute(
+                spec=parent_spec,
+                policy=policy,
+                request=parent_request,
+                descriptors=[
+                    descriptor(
+                        provider_id="local-runtime",
+                        remote=False,
+                    )
+                ],
+                call=lambda *_args: observation(
+                    provider_id="local-runtime",
+                    incurred="0.1",
+                    unbilled="0",
+                    output={"invalid": True},
+                    billing_id=None,
+                ),
+                validate_result=lambda _value: False,
+                now_utc=NOW,
+            )
+            self.assertEqual(parent.status, "OBSERVED_INVALID")
+
+            fallback = spec(
+                fallback_parent_attempt_id=parent.attempt_id,
+                fallback_index=1,
+            )
+            widened_request = request_for(orchestrator, fallback)
+            calls = []
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "cannot widen remote privacy permission",
+            ):
+                orchestrator.execute(
+                    spec=fallback,
+                    policy=policy,
+                    request=widened_request,
+                    descriptors=[descriptor()],
+                    call=lambda *_args: calls.append(True),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
+            self.assertEqual(calls, [])
+
     def test_fallback_lineage_remains_local_only_when_policy_is_local_only(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)
@@ -1135,9 +1374,39 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 budget=budget,
                 clock=MutableClock(),
             )
-            parent = orchestrator.attempt_id(spec())
+            local_policy = local_only_policy("local-a", "remote-only")
+            parent_spec = spec()
+            parent = orchestrator.execute(
+                spec=parent_spec,
+                policy=local_policy,
+                request=request_for(
+                    orchestrator,
+                    parent_spec,
+                    allowed_model_ids=("local-a", "remote-only"),
+                ),
+                descriptors=[
+                    descriptor(
+                        model_id="local-a",
+                        provider_id="local-runtime",
+                        remote=False,
+                        cost="0",
+                    ),
+                    descriptor(
+                        model_id="remote-only",
+                        provider_id="remote-provider",
+                        remote=True,
+                        cost="0.1",
+                    ),
+                ],
+                call=lambda *_args: (_ for _ in ()).throw(
+                    ModelCallNotSent("local boundary was not crossed")
+                ),
+                validate_result=lambda _value: True,
+                now_utc=NOW,
+            )
+            self.assertEqual(parent.status, "NOT_SENT")
             fallback = spec(
-                fallback_parent_attempt_id=parent,
+                fallback_parent_attempt_id=parent.attempt_id,
                 fallback_index=1,
             )
             request = request_for(
@@ -1148,7 +1417,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
             calls = []
             outcome = orchestrator.execute(
                 spec=fallback,
-                policy=local_only_policy("remote-only"),
+                policy=local_policy,
                 request=request,
                 descriptors=[
                     descriptor(

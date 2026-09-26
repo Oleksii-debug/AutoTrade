@@ -587,9 +587,17 @@ class ArtifactStore:
             object_path.parent.mkdir(parents=True, exist_ok=True)
             self._validate_object_namespace(object_path)
             if object_path.exists() or object_path.is_symlink():
-                entry = self._validate_object_entry(object_path)
-                if entry.st_size != len(data) or sha256_file(object_path) != digest:
-                    raise ArtifactIntegrityError("content-addressed object path is corrupt")
+                try:
+                    self._verify_manifest_object(
+                        {
+                            "sha256": f"sha256:{digest}",
+                            "bytes": len(data),
+                        }
+                    )
+                except ArtifactIntegrityError as error:
+                    raise ArtifactIntegrityError(
+                        "content-addressed object path is corrupt"
+                    ) from error
             else:
                 self._validate_staging_namespace()
                 temporary: Path | None = None

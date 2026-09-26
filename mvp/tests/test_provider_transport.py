@@ -724,6 +724,98 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
             self.assertEqual(body["nonce"], 1_700_000_000_000)
             self.assertIn("X-TXC-SIGNATURE", signed.headers)
 
+    def test_whitebit_concurrent_sends_cannot_overtake_nonce_order(self):
+        fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+        first_wire_entered = Event()
+        release_first_wire = Event()
+        second_started = Event()
+        second_wire_entered = Event()
+        wire_calls = []
+
+        class BlockingWhiteBitWire(RecordingWire):
+            def send(self, request):
+                self.events.append("wire")
+                self.requests.append(request)
+                wire_calls.append(json.loads(request.body)["nonce"])
+                if len(self.requests) == 1:
+                    first_wire_entered.set()
+                    if not release_first_wire.wait(2):
+                        raise TimeoutError("WhiteBIT test wire release timed out")
+                else:
+                    second_wire_entered.set()
+                return TradingWireResponse(
+                    http_status=200,
+                    body=b'{"orderId":"123"}',
+                )
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            events = []
+            wire = BlockingWhiteBitWire(events)
+            first_allocator = WhiteBitDurableNonceAllocator(
+                journal=JournalStore(path),
+                account_id="acct-wb",
+                environment="LIVE",
+                clock_millis=lambda: 1_700_000_000_000,
+                clock_utc=lambda: fixed,
+            )
+            second_allocator = WhiteBitDurableNonceAllocator(
+                journal=JournalStore(path),
+                account_id="acct-wb",
+                environment="LIVE",
+                clock_millis=lambda: 1_700_000_000_000,
+                clock_utc=lambda: fixed + timedelta(milliseconds=1),
+            )
+
+            def make_transport(allocator, sender):
+                return WhiteBitHttpTransport(
+                    policy=WHITEBIT_ENDPOINT_POLICIES["LIVE"],
+                    account_id="acct-wb",
+                    capability_snapshot_id="wb-cap-1",
+                    secret_resolver=FakeSecretResolver(events),
+                    credential_handle=whitebit_trade_handle(),
+                    session_token="session-1",
+                    origin="autotrade://execution",
+                    execution_identity=sender,
+                    nonce_allocator=allocator,
+                    wire_client=wire,
+                )
+
+            first = make_transport(first_allocator, "sender-1")
+            second = make_transport(second_allocator, "sender-2")
+
+            def run_first():
+                return first(
+                    "at-whitebit-first",
+                    whitebit_prepared_request("at-whitebit-first"),
+                    lambda: None,
+                )
+
+            def run_second():
+                second_started.set()
+                return second(
+                    "at-whitebit-second",
+                    whitebit_prepared_request("at-whitebit-second"),
+                    lambda: None,
+                )
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                first_future = pool.submit(run_first)
+                self.assertTrue(first_wire_entered.wait(2))
+                second_future = pool.submit(run_second)
+                self.assertTrue(second_started.wait(2))
+                self.assertFalse(second_wire_entered.wait(0.1))
+                self.assertEqual(wire_calls, [1_700_000_000_000])
+                release_first_wire.set()
+                first_future.result(timeout=2)
+                second_future.result(timeout=2)
+
+            self.assertTrue(second_wire_entered.is_set())
+            self.assertEqual(
+                wire_calls,
+                [1_700_000_000_000, 1_700_000_000_001],
+            )
+
     def test_whitebit_final_guard_failure_never_reaches_wire(self):
         fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
         events = []

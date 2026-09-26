@@ -1932,7 +1932,6 @@ class AlpacaTradingHttpTransport:
             environment=self.policy.environment,
             purpose="TRADE",
             provider_environment=self.policy.environment,
-            provider_environment=self.policy.environment,
         )
         try:
             credential = AlpacaTradingCredential.parse(

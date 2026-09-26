@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Mapping, Sequence
+from hashlib import sha256
+import json
 import re
 
 
@@ -54,6 +56,72 @@ def _git_sha(value: str, *, name: str) -> str:
         )
     return text
 
+
+
+def forward_paper_protocol_hash(
+    *,
+    campaign_id: str,
+    exact_build_sha: str,
+    registered_at: str,
+    starts_at: str,
+    ends_at: str,
+    minimum_predictions: int,
+    maximum_decision_latency_ms: int,
+    required_provider_capabilities: Sequence[str],
+    required_operational_cases: Sequence[str],
+) -> str:
+    """Canonical semantic identity of a frozen forward-paper protocol."""
+
+    campaign = _text(campaign_id, name="campaign_id")
+    build = _git_sha(exact_build_sha, name="exact_build_sha")
+    registered = _instant(registered_at, name="registered_at")
+    start = _instant(starts_at, name="starts_at")
+    end = _instant(ends_at, name="ends_at")
+    minimum = _positive_int(minimum_predictions, name="minimum_predictions")
+    latency = _positive_int(
+        maximum_decision_latency_ms,
+        name="maximum_decision_latency_ms",
+        allow_zero=True,
+    )
+    capabilities = tuple(
+        sorted(
+            _unique_text(
+                required_provider_capabilities,
+                name="required_provider_capabilities",
+            )
+        )
+    )
+    if not capabilities:
+        raise ForwardPaperError("at least one provider capability is required")
+    raw_cases = _unique_text(
+        required_operational_cases,
+        name="required_operational_cases",
+    )
+    cases = tuple(sorted(value.upper() for value in raw_cases))
+    if len(set(cases)) != len(cases):
+        raise ForwardPaperError(
+            "required_operational_cases contains case-insensitive duplicates"
+        )
+    payload = {
+        "schema_version": 1,
+        "campaign_id": campaign,
+        "exact_build_sha": build,
+        "registered_at": registered.isoformat(),
+        "starts_at": start.isoformat(),
+        "ends_at": end.isoformat(),
+        "minimum_predictions": minimum,
+        "maximum_decision_latency_ms": latency,
+        "required_provider_capabilities": list(capabilities),
+        "required_operational_cases": list(cases),
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + sha256(encoded).hexdigest()
 
 
 def _decimal(value, *, name: str, nonnegative: bool = False) -> Decimal:
@@ -106,9 +174,9 @@ class ForwardPaperProtocol:
         registered = _instant(self.registered_at, name="registered_at")
         start = _instant(self.starts_at, name="starts_at")
         end = _instant(self.ends_at, name="ends_at")
-        if registered > start:
+        if registered >= start:
             raise ForwardPaperError(
-                "registered_at must not be after campaign starts_at"
+                "registered_at must be strictly before campaign starts_at"
             )
         if end <= start:
             raise ForwardPaperError("ends_at must be after starts_at")
@@ -135,11 +203,23 @@ class ForwardPaperProtocol:
             _text(self.campaign_id, name="campaign_id"),
         )
         object.__setattr__(self, "exact_build_sha", build)
-        object.__setattr__(
-            self,
-            "protocol_hash",
-            _hash(self.protocol_hash, name="protocol_hash"),
+        provided_hash = _hash(self.protocol_hash, name="protocol_hash")
+        expected_hash = forward_paper_protocol_hash(
+            campaign_id=self.campaign_id,
+            exact_build_sha=build,
+            registered_at=self.registered_at,
+            starts_at=self.starts_at,
+            ends_at=self.ends_at,
+            minimum_predictions=self.minimum_predictions,
+            maximum_decision_latency_ms=self.maximum_decision_latency_ms,
+            required_provider_capabilities=capabilities,
+            required_operational_cases=cases,
         )
+        if provided_hash != expected_hash:
+            raise ForwardPaperError(
+                "protocol_hash does not match canonical frozen protocol content"
+            )
+        object.__setattr__(self, "protocol_hash", provided_hash)
         object.__setattr__(
             self,
             "minimum_predictions",
@@ -183,9 +263,9 @@ class ForwardPaperProtocol:
         registered = _instant(registered_at, name="registered_at")
         start = _instant(starts_at, name="starts_at")
         end = _instant(ends_at, name="ends_at")
-        if registered > start:
+        if registered >= start:
             raise ForwardPaperError(
-                "registered_at must not be after campaign starts_at"
+                "registered_at must be strictly before campaign starts_at"
             )
         if end <= start:
             raise ForwardPaperError("ends_at must be after starts_at")

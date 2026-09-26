@@ -1662,10 +1662,11 @@ class WhiteBitHttpTransport:
         if (
             credential_handle.provider != "WHITEBIT"
             or credential_handle.environment != "LIVE"
+            or credential_handle.provider_environment != "LIVE"
             or credential_handle.purpose != "TRADE"
         ):
             raise ProviderTransportScopeError(
-                "credential handle provider/environment/purpose mismatch"
+                "credential handle provider/environment/provider_environment/purpose mismatch"
             )
         account = _canonical_text(account_id, name="account_id")
         if credential_handle.account_id != account:

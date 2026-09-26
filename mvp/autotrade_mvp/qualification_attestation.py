@@ -36,6 +36,15 @@ _CANONICAL_QUALIFICATION_TRUST_POLICY_GIT_PATH = (
 
 _QUALIFICATION_TRUST_SOURCE_ROOT = Path(__file__).resolve().parents[2]
 
+# Release builds do not ship a Git checkout.  Once the independently reviewed
+# production trust policy is introduced, its canonical SHA-256 is committed here
+# with the runtime source.  A signed/exact-composition release therefore
+# authenticates this pin as part of the executable/source payload, while the
+# mutable packaged JSON remains data only.  None means terminal packaged trust is
+# intentionally unavailable; callers cannot provide or override this value.
+_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256: str | None = None
+_MAX_QUALIFICATION_TRUST_POLICY_BYTES = 1_048_576
+
 
 def _trusted_git_candidate_paths() -> tuple[Path, ...]:
     """Return fail-closed OS-managed Git locations without consulting PATH."""
@@ -795,14 +804,79 @@ def _canonical_qualification_trust_policy_bytes(
     return bytes(completed.stdout)
 
 
+def _canonical_packaged_qualification_trust_policy_bytes(
+    *, expected_source_sha: str
+) -> bytes:
+    """Read a release policy only when signed runtime source pins its digest.
+
+    This is deliberately a non-Git release path, not a working-tree fallback.
+    The digest pin is source code shipped inside the exact/signed release
+    composition; evidence callers cannot supply a path, digest, policy, or pin.
+    A source checkout remains on the Git-object authority path even when Git is
+    temporarily unavailable, preventing an untracked working-tree policy from
+    acquiring trust by matching a release pin.
+    """
+
+    _git_sha(expected_source_sha, name="expected_source_sha")
+    source_root = _QUALIFICATION_TRUST_SOURCE_ROOT.resolve()
+    if (source_root / ".git").exists():
+        raise QualificationTrustUnavailable(
+            "packaged qualification trust policy is forbidden in a source checkout"
+        )
+
+    expected_digest = _CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256
+    if expected_digest is None:
+        raise QualificationTrustUnavailable(
+            "packaged qualification trust policy digest is not pinned by release source"
+        )
+    expected_digest = _digest(
+        expected_digest,
+        name="packaged qualification trust policy digest",
+    )
+
+    path = _CANONICAL_QUALIFICATION_TRUST_POLICY_PATH
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError as error:
+        raise QualificationTrustUnavailable(
+            "packaged canonical qualification trust policy is not configured"
+        ) from error
+    except OSError as error:
+        raise QualificationTrustUnavailable(
+            "packaged canonical qualification trust policy is unavailable"
+        ) from error
+    if len(raw) > _MAX_QUALIFICATION_TRUST_POLICY_BYTES:
+        raise QualificationTrustError(
+            "packaged qualification trust policy exceeds the bounded release size"
+        )
+    observed_digest = "sha256:" + sha256(raw).hexdigest()
+    if observed_digest != expected_digest:
+        raise QualificationTrustError(
+            "packaged qualification trust policy digest does not match signed release pin"
+        )
+    return raw
+
+
 def load_canonical_qualification_trust_policy(
     *, expected_source_sha: str
 ) -> QualificationTrustPolicy:
-    """Load the release-controlled policy from the exact trusted source SHA."""
+    """Load canonical policy from exact Git source or a signed-release digest pin.
 
-    raw = _canonical_qualification_trust_policy_bytes(
-        expected_source_sha=expected_source_sha
-    )
+    Checkout/dev verification uses the exact Git object and never mutable
+    working-tree policy bytes.  A delivered non-Git release may instead use the
+    fixed packaged policy only when the runtime source itself pins its exact
+    digest.  This preserves fail-closed terminal verification without requiring
+    Git for Windows on the installed machine.
+    """
+
+    try:
+        raw = _canonical_qualification_trust_policy_bytes(
+            expected_source_sha=expected_source_sha
+        )
+    except QualificationTrustUnavailable:
+        raw = _canonical_packaged_qualification_trust_policy_bytes(
+            expected_source_sha=expected_source_sha
+        )
     try:
         payload = json.loads(
             raw.decode("utf-8"),

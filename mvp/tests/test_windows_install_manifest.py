@@ -139,6 +139,79 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
             for name, payload in entries:
                 archive.writestr(name, payload)
 
+    def _symlink_or_skip(self, link: Path, target: Path):
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError) as error:
+            self.skipTest(f"symlink creation unavailable: {error}")
+
+    def test_manifest_output_symlink_is_rejected_without_touching_target(self):
+        bundle = self.release_bundle()
+        victim = self.root / "victim-output.txt"
+        victim.write_text("do-not-touch", encoding="utf-8")
+        output = self.root / "installer-input.json"
+        self._symlink_or_skip(output, victim)
+
+        with self.assertRaisesRegex(
+            InstallerManifestError,
+            "installer manifest output cannot be a symlink",
+        ):
+            build_installer_input_manifest(
+                bundle=bundle,
+                output=output,
+                target_framework="net10.0-windows",
+                runtime_mode="SELF_CONTAINED",
+            )
+
+        self.assertEqual(victim.read_text(encoding="utf-8"), "do-not-touch")
+
+    def test_manifest_temp_symlink_is_rejected_without_touching_target(self):
+        bundle = self.release_bundle()
+        victim = self.root / "victim-temp.txt"
+        victim.write_text("do-not-touch", encoding="utf-8")
+        output = self.root / "installer-input.json"
+        self._symlink_or_skip(
+            output.with_name(output.name + ".tmp"),
+            victim,
+        )
+
+        with self.assertRaisesRegex(
+            InstallerManifestError,
+            "installer manifest output temporary path cannot be a symlink",
+        ):
+            build_installer_input_manifest(
+                bundle=bundle,
+                output=output,
+                target_framework="net10.0-windows",
+                runtime_mode="SELF_CONTAINED",
+            )
+
+        self.assertFalse(output.exists())
+        self.assertEqual(victim.read_text(encoding="utf-8"), "do-not-touch")
+
+    def test_digest_symlink_is_rejected_before_primary_manifest_mutation(self):
+        bundle = self.release_bundle()
+        output = self.root / "installer-input.json"
+        output.write_text("old-manifest", encoding="utf-8")
+        victim = self.root / "victim-digest.txt"
+        victim.write_text("do-not-touch", encoding="utf-8")
+        digest_path = output.with_suffix(output.suffix + ".sha256")
+        self._symlink_or_skip(digest_path, victim)
+
+        with self.assertRaisesRegex(
+            InstallerManifestError,
+            "installer manifest digest output cannot be a symlink",
+        ):
+            build_installer_input_manifest(
+                bundle=bundle,
+                output=output,
+                target_framework="net10.0-windows",
+                runtime_mode="SELF_CONTAINED",
+            )
+
+        self.assertEqual(output.read_text(encoding="utf-8"), "old-manifest")
+        self.assertEqual(victim.read_text(encoding="utf-8"), "do-not-touch")
+
     def test_release_bundle_produces_deterministic_fail_closed_install_inventory(self):
         bundle = self.release_bundle()
         first = build_installer_input_manifest(

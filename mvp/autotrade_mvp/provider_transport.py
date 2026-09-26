@@ -1096,6 +1096,7 @@ class _DurableProviderNonceAllocator:
         max_nonce: int | None = None,
         nonce_domain_name: str = "positive integer",
         aggregate_identity_material: str | None = None,
+        initial_nonce_floor: int = 0,
     ) -> None:
         if not isinstance(journal, JournalStore):
             raise TypeError("journal must be JournalStore")
@@ -1127,6 +1128,18 @@ class _DurableProviderNonceAllocator:
         ):
             raise ProviderTransportScopeError(
                 "max_nonce must be a positive integer or None"
+            )
+        if (
+            isinstance(initial_nonce_floor, bool)
+            or not isinstance(initial_nonce_floor, int)
+            or initial_nonce_floor < 0
+            or (
+                max_nonce is not None
+                and initial_nonce_floor > max_nonce
+            )
+        ):
+            raise ProviderTransportScopeError(
+                "initial_nonce_floor must be a non-negative integer within the nonce domain"
             )
         domain_name = _canonical_text(
             nonce_domain_name,
@@ -1165,6 +1178,7 @@ class _DurableProviderNonceAllocator:
         self.max_contention_retries = max_contention_retries
         self.max_nonce = max_nonce
         self.nonce_domain_name = domain_name
+        self.initial_nonce_floor = initial_nonce_floor
         self.scope_fields = MappingProxyType(scope)
         if aggregate_identity_material is None:
             aggregate_material = f"{self.account_id}|{self.environment}"
@@ -1243,7 +1257,7 @@ class _DurableProviderNonceAllocator:
                 )
             previous_nonce = nonce
             previous_version = version
-        return previous_nonce, previous_version
+        return max(previous_nonce, self.initial_nonce_floor), previous_version
 
     def allocate(self) -> int:
         for _ in range(self.max_contention_retries):
@@ -1417,6 +1431,54 @@ class KrakenSpotDurableNonceAllocator:
         self.clock_millis = clock_millis
         self.clock_utc = clock_utc
         self.max_contention_retries = max_contention_retries
+        self.legacy_nonce_floor = self._load_legacy_nonce_floor()
+
+    def _load_legacy_nonce_floor(self) -> int:
+        """Carry pre-provider-key Kraken nonce history forward across upgrade."""
+
+        highest = 0
+        for event in self.journal.load_events_by_aggregate_type(
+            _DurableProviderNonceAllocator.AGGREGATE_TYPE
+        ):
+            payload = event.get("payload")
+            if not isinstance(payload, Mapping):
+                raise ProviderTransportError(
+                    "provider nonce journal payload is invalid"
+                )
+            if payload.get("provider_id") != "KRAKEN":
+                continue
+            if (
+                payload.get("account_id") != self.account_id
+                or payload.get("environment") != self.environment
+            ):
+                continue
+            scope_keys = set(payload) - {
+                "provider_id",
+                "account_id",
+                "environment",
+                "nonce",
+            }
+            if scope_keys == {"provider_api_key_fingerprint"}:
+                continue
+            if scope_keys != {
+                "credential_handle_id",
+                "credential_generation",
+            }:
+                raise ProviderTransportError(
+                    "Kraken Spot nonce journal contains an unknown legacy scope"
+                )
+            nonce = payload.get("nonce")
+            if (
+                isinstance(nonce, bool)
+                or not isinstance(nonce, int)
+                or nonce <= 0
+                or nonce > _UINT64_MAX
+            ):
+                raise ProviderTransportError(
+                    "Kraken Spot legacy nonce journal is invalid"
+                )
+            highest = max(highest, nonce)
+        return highest
 
     @staticmethod
     def provider_api_key_fingerprint(provider_api_key: object) -> str:
@@ -1448,6 +1510,7 @@ class KrakenSpotDurableNonceAllocator:
             aggregate_identity_material=(
                 f"KRAKEN|{self.environment}|provider-api-key|{fingerprint}"
             ),
+            initial_nonce_floor=self.legacy_nonce_floor,
         )
 
     def aggregate_id_for_provider_api_key(self, provider_api_key: object) -> str:

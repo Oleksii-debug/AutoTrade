@@ -57,5 +57,24 @@ class CommonScalarConformanceTests(unittest.TestCase):
                 self.assertEqual(binding_result, case["expected"])
 
 
+    def test_every_regex_scalar_rejects_terminal_line_endings(self):
+        by_name = {case["name"]: case for case in self.corpus["cases"]}
+        scalar_prefixes = ("decimal", "sequence", "digest", "currency", "unit")
+        for prefix in scalar_prefixes:
+            for suffix in ("terminal-lf", "terminal-crlf"):
+                name = f"{prefix}-{suffix}"
+                with self.subTest(case=name):
+                    case = by_name[name]
+                    self.assertFalse(case["expected"])
+                    validator = Draft202012Validator(
+                        {"$ref": f"{self.common['$id']}#/$defs/{case['type']}"},
+                        registry=self.registry,
+                    )
+                    self.assertFalse(validator.is_valid(case["value"]))
+                    self.assertFalse(
+                        is_valid_common_scalar(case["type"], case["value"])
+                    )
+
+
 if __name__ == "__main__":
     unittest.main()

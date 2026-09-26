@@ -111,7 +111,6 @@
           "enum": [
             "BLOCK_NEW_EXPOSURE",
             "REVOKE_AUTHORITY",
-            "RESTORE_NEW_EXPOSURE",
             "SET_AUTHORITY"
           ]
         },

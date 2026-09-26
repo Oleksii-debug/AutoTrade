@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Iterable
 from uuid import NAMESPACE_URL, uuid5
 
+from .dispatch import submission_attempt_aggregate_id
 from .persistence import JournalStore, payload_digest
 from .reconciliation_journal import load_reconciliation_checkpoint_for_readiness
 
@@ -158,6 +159,10 @@ class RecoveryController:
             str,
             tuple[str, int, tuple[str, ...]],
         ] = {}
+        self._recovered_unknown_identities: dict[
+            str,
+            tuple[str, str, str, str, str],
+        ] = {}
         self.storage_writable = True
         self.clock_trusted = True
         self.provider_reconciled = False
@@ -284,7 +289,241 @@ class RecoveryController:
         self.state = HostState.RECOVERING
         self.provider_reconciled = False
         self.reason_codes = {"startup_reconciliation_required"}
+        self._recover_scoped_submission_uncertainty_from_owner_scope()
         return self.owner
+
+    @staticmethod
+    def _normalized_submission_scope(
+        environment: str,
+        account_id: str,
+    ) -> tuple[str, str]:
+        normalized_environment = (
+            environment.strip().upper() if isinstance(environment, str) else ""
+        )
+        if normalized_environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+            raise ValueError(
+                "environment must be REPLAY, SIMULATION, PAPER, or LIVE"
+            )
+        if not isinstance(account_id, str) or not account_id.strip():
+            raise ValueError("account_id is required")
+        return normalized_environment, account_id.strip()
+
+    def _recover_scoped_submission_uncertainty_from_owner_scope(self) -> None:
+        """Restore durable UNKNOWN send barriers for ENVIRONMENT:account scopes.
+
+        Sender ownership is durable already.  This companion scan reconstructs
+        ambiguous SubmissionSending/SubmissionUnknown state from the same
+        journal after process restart, before READY can be established.
+        """
+
+        if self._owner_store is None or ":" not in self._owner_scope:
+            return
+        environment, account_id = self._owner_scope.split(":", 1)
+        if environment.strip().upper() not in {
+            "REPLAY", "SIMULATION", "PAPER", "LIVE"
+        }:
+            return
+        self.recover_durable_submission_uncertainty(
+            environment=environment,
+            account_id=account_id,
+        )
+
+    @staticmethod
+    def _validated_submission_event_sequence(
+        aggregate_id: str,
+        aggregate_events: list[dict[str, object]],
+    ) -> tuple[str, ...]:
+        """Validate one durable submission attempt before recovery classifies it.
+
+        JournalStore proves byte integrity; recovery must still prove the
+        dispatch state machine.  In particular, no unknown tail or fabricated
+        terminal event may erase a previously durable send barrier.
+        """
+
+        if not aggregate_events:
+            raise RuntimeError("Submission journal aggregate is empty")
+        event_types: list[str] = []
+        for expected_version, event in enumerate(aggregate_events, start=1):
+            if event.get("aggregate_id") != aggregate_id:
+                raise RuntimeError("Submission journal aggregate identity changed")
+            version = event.get("aggregate_version")
+            if type(version) is not int or version != expected_version:
+                raise RuntimeError(
+                    "Submission journal aggregate versions are not contiguous"
+                )
+            event_type = event.get("event_type")
+            if not isinstance(event_type, str) or not event_type:
+                raise RuntimeError("Submission journal event type is invalid")
+            event_types.append(event_type)
+
+        sequence = tuple(event_types)
+        valid_sequences = {
+            ("SubmissionPrepared",),
+            ("SubmissionPrepared", "SubmissionBlocked"),
+            ("SubmissionPrepared", "SubmissionUnknown"),
+            ("SubmissionPrepared", "SubmissionSending"),
+            (
+                "SubmissionPrepared",
+                "SubmissionSending",
+                "SubmissionSent",
+            ),
+            (
+                "SubmissionPrepared",
+                "SubmissionSending",
+                "SubmissionUnknown",
+            ),
+            # A provider wrapper may swallow/mask a final-guard rejection.
+            # The dispatcher records Blocked first, then upgrades the outcome
+            # to UNKNOWN because an outbound side effect can no longer be
+            # disproved.  Recovery must preserve that legitimate ambiguity.
+            (
+                "SubmissionPrepared",
+                "SubmissionBlocked",
+                "SubmissionUnknown",
+            ),
+        }
+        if sequence not in valid_sequences:
+            raise RuntimeError(
+                "Submission journal transition sequence is invalid: "
+                + " -> ".join(sequence)
+            )
+        return sequence
+
+    def recover_durable_submission_uncertainty(
+        self,
+        *,
+        environment: str,
+        account_id: str,
+    ) -> tuple[str, ...]:
+        """Rebuild sticky ambiguous sends from the canonical dispatch journal.
+
+        Only SubmissionSending and SubmissionUnknown are ambiguous.  A legacy
+        ambiguous row that predates durable attempt_id storage becomes an
+        explicit opaque blocker instead of being silently forgotten.
+        """
+
+        if self._owner_store is None:
+            raise PermissionError(
+                "Durable submission recovery requires a journal-backed controller"
+            )
+        normalized_environment, normalized_account = self._normalized_submission_scope(
+            environment,
+            account_id,
+        )
+        events = self._owner_store.load_events_by_aggregate_type(
+            "submission_attempt"
+        )
+        grouped: dict[str, list[dict[str, object]]] = {}
+        for event in events:
+            aggregate_id = event.get("aggregate_id")
+            if not isinstance(aggregate_id, str) or not aggregate_id:
+                raise RuntimeError("Submission journal aggregate identity is invalid")
+            grouped.setdefault(aggregate_id, []).append(event)
+
+        recovered: set[str] = set()
+        for aggregate_id, aggregate_events in grouped.items():
+            first = aggregate_events[0]
+            if first.get("event_type") != "SubmissionPrepared":
+                raise RuntimeError(
+                    "Submission journal aggregate does not start with SubmissionPrepared"
+                )
+            payload = first.get("payload")
+            if not isinstance(payload, dict):
+                raise RuntimeError("SubmissionPrepared payload is invalid")
+            durable_environment = payload.get("environment")
+            durable_account = payload.get("account_id")
+            if (
+                not isinstance(durable_environment, str)
+                or not isinstance(durable_account, str)
+            ):
+                raise RuntimeError("SubmissionPrepared durable scope is invalid")
+            if (
+                durable_environment.strip().upper() != normalized_environment
+                or durable_account.strip() != normalized_account
+            ):
+                continue
+
+            sequence = self._validated_submission_event_sequence(
+                aggregate_id,
+                aggregate_events,
+            )
+            last = aggregate_events[-1]
+
+            attempt_id = payload.get("attempt_id")
+            if isinstance(attempt_id, str) and attempt_id.strip():
+                expected_aggregate = submission_attempt_aggregate_id(
+                    environment=normalized_environment,
+                    account_id=normalized_account,
+                    attempt_id=attempt_id.strip(),
+                )
+                if expected_aggregate != aggregate_id:
+                    raise RuntimeError(
+                        "SubmissionPrepared attempt identity does not match durable aggregate"
+                    )
+
+            if sequence[-1] not in {
+                "SubmissionSending",
+                "SubmissionUnknown",
+            }:
+                continue
+
+            attempt_id = payload.get("attempt_id")
+            if not isinstance(attempt_id, str) or not attempt_id.strip():
+                opaque = "legacy_submission:" + aggregate_id
+                self._unresolved_send_attempts.add(opaque)
+                self.unresolved_attempts.add(opaque)
+                recovered.add(opaque)
+                self.reason_codes.add("legacy_submission_identity_unrecoverable")
+                continue
+            attempt_id = attempt_id.strip()
+            intent_id = payload.get("intent_id")
+            client_order_id = payload.get("client_order_id")
+            provider = payload.get("provider")
+            if any(
+                not isinstance(value, str) or not value.strip()
+                for value in (intent_id, client_order_id, provider)
+            ):
+                raise RuntimeError(
+                    "Ambiguous submission lacks durable reconciliation identity"
+                )
+            owner_epoch_raw = last.get("owner_epoch")
+            if (
+                not isinstance(owner_epoch_raw, str)
+                or not owner_epoch_raw.isdigit()
+                or int(owner_epoch_raw) <= 0
+            ):
+                raise RuntimeError("Ambiguous submission owner epoch is invalid")
+            event_id = last.get("event_id")
+            if not isinstance(event_id, str) or not event_id:
+                raise RuntimeError("Ambiguous submission evidence identity is invalid")
+
+            binding = (
+                str(intent_id).strip(),
+                int(owner_epoch_raw),
+                (event_id,),
+            )
+            existing = self._unresolved_send_bindings.get(attempt_id)
+            if existing is not None and existing != binding:
+                raise RuntimeError(
+                    "Durable ambiguous submission conflicts with recovered identity"
+                )
+            self._unresolved_send_bindings[attempt_id] = binding
+            self._recovered_unknown_identities[attempt_id] = (
+                str(intent_id).strip(),
+                str(client_order_id).strip(),
+                str(provider).strip().upper(),
+                normalized_environment,
+                normalized_account,
+            )
+            self._unresolved_send_attempts.add(attempt_id)
+            self.unresolved_attempts.add(attempt_id)
+            recovered.add(attempt_id)
+
+        if recovered:
+            self.provider_reconciled = False
+            self.reason_codes.add("provider_uncertainty")
+            self._recompute_state()
+        return tuple(sorted(recovered))
 
     def record_reconciliation_checkpoint(
         self,
@@ -362,6 +601,8 @@ class RecoveryController:
             raise RuntimeError("Reconciliation checkpoint readiness fields are invalid")
 
         reported_unresolved: set[str] = set()
+        terminally_resolved_recovered: set[str] = set()
+        recovered_resolution_seen: set[str] = set()
         for resource in blocking:
             if not isinstance(resource, str) or not resource.strip():
                 raise RuntimeError("Reconciliation blocking resource is invalid")
@@ -371,12 +612,103 @@ class RecoveryController:
                 raise RuntimeError("Reconciliation submission resolution is invalid")
             outcome = resolution.get("outcome")
             attempt_id = resolution.get("attempt_id")
-            if outcome == "UNKNOWN":
+            if not isinstance(outcome, str):
+                raise RuntimeError("Reconciliation submission outcome is invalid")
+            normalized_outcome = outcome.strip().upper()
+            if normalized_outcome not in {
+                "UNKNOWN",
+                "PROVEN_ABSENT",
+                "OBSERVED_EXECUTION",
+                "OBSERVED_WORKING_ORDER",
+            }:
+                raise RuntimeError(
+                    "Reconciliation submission outcome is unsupported"
+                )
+            provider_order_ids = resolution.get("provider_order_ids", [])
+            provider_execution_ids = resolution.get("provider_execution_ids", [])
+            if not isinstance(provider_order_ids, list) or not isinstance(
+                provider_execution_ids, list
+            ):
+                raise RuntimeError(
+                    "Reconciliation submission provider identities are invalid"
+                )
+            if any(
+                not isinstance(value, str) or not value.strip()
+                for value in [*provider_order_ids, *provider_execution_ids]
+            ):
+                raise RuntimeError(
+                    "Reconciliation submission provider identities are invalid"
+                )
+            normalized_order_ids = tuple(
+                value.strip() for value in provider_order_ids
+            )
+            normalized_execution_ids = tuple(
+                value.strip() for value in provider_execution_ids
+            )
+            if (
+                len(normalized_order_ids) != len(set(normalized_order_ids))
+                or len(normalized_execution_ids)
+                != len(set(normalized_execution_ids))
+            ):
+                raise RuntimeError(
+                    "Reconciliation submission provider identities must be unique"
+                )
+            if normalized_outcome in {"UNKNOWN", "PROVEN_ABSENT"} and (
+                normalized_order_ids or normalized_execution_ids
+            ):
+                raise RuntimeError(
+                    "Absence/unknown reconciliation cannot carry provider identity"
+                )
+            if (
+                normalized_outcome == "OBSERVED_EXECUTION"
+                and not normalized_execution_ids
+            ):
+                raise RuntimeError(
+                    "Observed execution reconciliation lacks execution identity"
+                )
+            if normalized_outcome == "OBSERVED_WORKING_ORDER" and (
+                not normalized_order_ids or normalized_execution_ids
+            ):
+                raise RuntimeError(
+                    "Observed working-order reconciliation identity is invalid"
+                )
+            if normalized_outcome == "UNKNOWN":
                 if not isinstance(attempt_id, str) or not attempt_id.strip():
                     raise RuntimeError(
                         "UNKNOWN reconciliation resolution lacks attempt identity"
                     )
                 reported_unresolved.add(attempt_id.strip())
+            if isinstance(attempt_id, str):
+                normalized_attempt = attempt_id.strip()
+                recovered_identity = self._recovered_unknown_identities.get(
+                    normalized_attempt
+                )
+                if recovered_identity is not None:
+                    if normalized_attempt in recovered_resolution_seen:
+                        raise RuntimeError(
+                            "Reconciliation checkpoint duplicates recovered submission resolution"
+                        )
+                    recovered_resolution_seen.add(normalized_attempt)
+                    intent_id, client_order_id, provider, recovered_environment, recovered_account = (
+                        recovered_identity
+                    )
+                    if (
+                        resolution.get("intent_id") != intent_id
+                        or resolution.get("client_order_id") != client_order_id
+                        or payload.get("provider_id", "").strip().upper() != provider
+                        or payload.get("environment", "").strip().upper()
+                        != recovered_environment
+                        or payload.get("account_id", "").strip() != recovered_account
+                    ):
+                        raise RuntimeError(
+                            "Reconciliation resolution identity conflicts with recovered submission"
+                        )
+                    if normalized_outcome in {
+                        "PROVEN_ABSENT",
+                        "OBSERVED_EXECUTION",
+                        "OBSERVED_WORKING_ORDER",
+                    }:
+                        terminally_resolved_recovered.add(normalized_attempt)
 
         # Validate the complete durable proof before mutating recovery state.
         # A malformed checkpoint must fail closed without leaving this controller
@@ -396,9 +728,10 @@ class RecoveryController:
         ):
             raise RuntimeError("Reconciliation checkpoint durable identity is invalid")
 
-        next_unresolved_attempts = (
-            self._unresolved_send_attempts | reported_unresolved
+        next_sticky_unknowns = (
+            self._unresolved_send_attempts - terminally_resolved_recovered
         )
+        next_unresolved_attempts = next_sticky_unknowns | reported_unresolved
         complete = (
             payload.get("complete") is True
             and payload.get("snapshot_consistent") is True
@@ -408,6 +741,10 @@ class RecoveryController:
             complete and not next_unresolved_attempts
         )
 
+        for attempt_id in terminally_resolved_recovered:
+            self._unresolved_send_attempts.discard(attempt_id)
+            self._unresolved_send_bindings.pop(attempt_id, None)
+            self._recovered_unknown_identities.pop(attempt_id, None)
         self.unresolved_attempts = next_unresolved_attempts
         self.provider_reconciled = next_provider_reconciled
         if self.provider_reconciled:
@@ -632,6 +969,10 @@ class RecoveryController:
         self.owner = None
         self.provider_reconciled = False
         self.reason_codes = {"stopped"}
+        self.unresolved_attempts.clear()
+        self._unresolved_send_attempts.clear()
+        self._unresolved_send_bindings.clear()
+        self._recovered_unknown_identities.clear()
 
     def _recompute_state(self) -> None:
         if self.owner is None:

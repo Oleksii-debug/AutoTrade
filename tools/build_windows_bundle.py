@@ -6,6 +6,8 @@ import argparse
 from contextlib import ExitStack
 from hashlib import sha256
 import json
+import os
+import stat
 from pathlib import Path, PurePosixPath
 import re
 import sys
@@ -146,9 +148,74 @@ def _reject_sensitive_content(relative: str, data: bytes) -> None:
         )
 
 
+def _assert_staged_file_identity(
+    path: Path,
+    stream,
+    *,
+    staging_resolved: Path,
+) -> os.stat_result:
+    try:
+        opened = os.fstat(stream.fileno())
+        current = os.stat(path, follow_symlinks=False)
+        resolved_path = path.resolve(strict=True)
+        resolved_current = os.stat(resolved_path, follow_symlinks=False)
+    except OSError as error:
+        raise BundleError(f"staged file identity cannot be verified: {path}") from error
+
+    for observed in (opened, current, resolved_current):
+        if not stat.S_ISREG(observed.st_mode):
+            raise BundleError(f"staged entry must remain a regular file: {path}")
+        if observed.st_nlink != 1:
+            raise BundleError(f"hardlinked staged files are forbidden: {path}")
+
+    try:
+        resolved_path.relative_to(staging_resolved)
+    except ValueError as error:
+        raise BundleError(f"staged file escaped staging directory: {path}") from error
+
+    identity = (opened.st_dev, opened.st_ino)
+    if identity != (current.st_dev, current.st_ino) or identity != (
+        resolved_current.st_dev,
+        resolved_current.st_ino,
+    ):
+        raise BundleError(f"staged file changed during collection: {path}")
+    return opened
+
+
+def _read_staged_regular_file(path: Path, *, staging_resolved: Path) -> bytes:
+    try:
+        stream = path.open("rb")
+    except OSError as error:
+        raise BundleError(f"staged file cannot be opened: {path}") from error
+    with stream:
+        before = _assert_staged_file_identity(
+            path,
+            stream,
+            staging_resolved=staging_resolved,
+        )
+        data = stream.read()
+        after = os.fstat(stream.fileno())
+        if (
+            (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+            or before.st_size != after.st_size
+            or before.st_mtime_ns != after.st_mtime_ns
+            or before.st_ctime_ns != after.st_ctime_ns
+        ):
+            raise BundleError(f"staged file changed while being read: {path}")
+        _assert_staged_file_identity(
+            path,
+            stream,
+            staging_resolved=staging_resolved,
+        )
+        if len(data) != after.st_size:
+            raise BundleError(f"staged file size changed while being read: {path}")
+        return data
+
+
 def _collect(staging: Path) -> list[tuple[str, Path, bytes]]:
     if not staging.is_dir():
         raise BundleError("staging must be an existing directory")
+    staging_resolved = staging.resolve(strict=True)
     collected: list[tuple[str, Path, bytes]] = []
     windows_names: dict[str, str] = {}
     for path in sorted(staging.rglob("*"), key=lambda item: item.as_posix()):
@@ -169,7 +236,10 @@ def _collect(staging: Path) -> list[tuple[str, Path, bytes]]:
         windows_names[windows_key] = relative
         if _is_sensitive(PurePosixPath(relative)):
             raise BundleError(f"sensitive path is forbidden in bundles: {relative}")
-        data = path.read_bytes()
+        data = _read_staged_regular_file(
+            path,
+            staging_resolved=staging_resolved,
+        )
         _reject_sensitive_content(relative, data)
         collected.append((relative, path, data))
     if not collected:

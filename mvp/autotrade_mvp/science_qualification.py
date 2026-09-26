@@ -20,7 +20,7 @@ from .qualification_attestation import (
     QualificationTrustError,
     QualificationTrustPolicy,
     SignedQualificationAttestation,
-    verify_qualification_attestation,
+    verify_canonical_qualification_attestation,
 )
 
 
@@ -241,7 +241,9 @@ def qualify_scientific_learning(
 
     ``evidence_verifier`` is retained only for source compatibility. A
     caller-selected callback is not an independent trust boundary and can
-    never make a gate terminally VERIFIED.
+    never make a gate terminally VERIFIED. Terminal signed evidence is checked
+    only against the fixed canonical qualification trust policy; caller-selected
+    policy objects or pins are rejected fail-closed.
     """
     if not isinstance(evidence, ScientificQualificationInput):
         raise TypeError("evidence must be ScientificQualificationInput")
@@ -255,25 +257,24 @@ def qualify_scientific_learning(
     signed_digest_set: frozenset[str] = frozenset()
     signed_requirement_set: frozenset[str] = frozenset()
     trust_status = "INCONCLUSIVE"
-    trust_inputs = (
-        qualification_receipt,
+    caller_selected_trust = (
         qualification_policy,
-        evidence_store,
         expected_policy_id,
         expected_policy_version,
     )
-    if all(value is None for value in trust_inputs):
+    trust_inputs = (qualification_receipt, evidence_store)
+    if any(value is not None for value in caller_selected_trust):
+        trust_status = "FAIL"
+        reasons.append("SCIENCE.CALLER_SELECTED_TRUST_POLICY_FORBIDDEN")
+    elif all(value is None for value in trust_inputs):
         reasons.append("SCIENCE.INDEPENDENT_ATTESTATION_MISSING")
     elif any(value is None for value in trust_inputs) or evidence.source_sha is None:
         reasons.append("SCIENCE.INDEPENDENT_ATTESTATION_INCOMPLETE")
     else:
         try:
-            accepted = verify_qualification_attestation(
+            accepted = verify_canonical_qualification_attestation(
                 qualification_receipt,
-                policy=qualification_policy,
                 evidence_store=evidence_store,
-                expected_policy_id=expected_policy_id,
-                expected_policy_version=expected_policy_version,
                 expected_source_sha=evidence.source_sha,
                 expected_domain=_QUALIFICATION_DOMAIN,
                 expected_gate=_QUALIFICATION_GATE,

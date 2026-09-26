@@ -71,7 +71,7 @@ class JournalStore:
     publication intent; a separate qualified dispatcher must perform delivery.
     """
 
-    SCHEMA_VERSION = 6
+    SCHEMA_VERSION = 7
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -203,6 +203,18 @@ class JournalStore:
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_journal_sequence "
                 "ON events(journal_sequence)",
             )
+        if version == 7:
+            return (
+                """
+                CREATE TABLE IF NOT EXISTS global_projection_checkpoints (
+                    projection_name TEXT PRIMARY KEY,
+                    journal_sequence INTEGER NOT NULL CHECK (journal_sequence >= 0),
+                    state_json TEXT NOT NULL,
+                    state_hash TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """,
+            )
         raise ValueError(f"Unsupported journal migration version: {version}")
 
     @classmethod
@@ -233,13 +245,159 @@ class JournalStore:
                 "projection_name", "aggregate_type", "aggregate_id",
                 "aggregate_version", "state_json", "state_hash", "updated_at",
             })
+        if cls.SCHEMA_VERSION >= 7:
+            required["global_projection_checkpoints"] = frozenset({
+                "projection_name", "journal_sequence",
+                "state_json", "state_hash", "updated_at",
+            })
         return required
+
+    @classmethod
+    def _required_column_contracts(
+        cls,
+    ) -> dict[str, dict[str, tuple[str, bool]]]:
+        """Return the exact declared type/nullability contract for this schema version.
+
+        Column names alone are insufficient migration evidence. SQLite will accept
+        a pre-existing CREATE TABLE IF NOT EXISTS target with weaker affinity or
+        nullability, which can otherwise make a partial/corrupt schema look current.
+        Keep this version-aware so the legacy stores used by migration qualification
+        continue to validate the exact schema they actually own.
+        """
+
+        command_columns: dict[str, tuple[str, bool]]
+        if cls.SCHEMA_VERSION >= 3:
+            command_columns = {
+                "command_id": ("TEXT", False),
+                "actor": ("TEXT", True),
+                "environment": ("TEXT", True),
+                "idempotency_key": ("TEXT", True),
+                "request_hash": ("TEXT", True),
+                "result_json": ("TEXT", True),
+                "state_version": ("INTEGER", True),
+                "created_at": ("TEXT", True),
+            }
+        else:
+            command_columns = {
+                "command_id": ("TEXT", False),
+                "idempotency_key": ("TEXT", True),
+                "request_hash": ("TEXT", True),
+                "result_json": ("TEXT", True),
+                "state_version": ("INTEGER", True),
+                "created_at": ("TEXT", True),
+            }
+        if cls.SCHEMA_VERSION >= 5:
+            command_columns["result_hash"] = ("TEXT", False)
+
+        events = {
+            "event_id": ("TEXT", False),
+            "event_type": ("TEXT", True),
+            "aggregate_type": ("TEXT", True),
+            "aggregate_id": ("TEXT", True),
+            "aggregate_version": ("INTEGER", True),
+            "payload_json": ("TEXT", True),
+            "payload_hash": ("TEXT", True),
+            "committed_at": ("TEXT", True),
+        }
+        if cls.SCHEMA_VERSION >= 5:
+            events.update(
+                {
+                    "envelope_json": ("TEXT", False),
+                    "envelope_hash": ("TEXT", False),
+                }
+            )
+        if cls.SCHEMA_VERSION >= 6:
+            events["journal_sequence"] = ("INTEGER", False)
+
+        outbox = {
+            "outbox_id": ("TEXT", False),
+            "event_id": ("TEXT", True),
+            "topic": ("TEXT", True),
+            "payload_json": ("TEXT", True),
+            "created_at": ("TEXT", True),
+            "delivered_at": ("TEXT", False),
+        }
+        if cls.SCHEMA_VERSION >= 4:
+            outbox["envelope_hash"] = ("TEXT", False)
+
+        required = {
+            "schema_migrations": {
+                "version": ("INTEGER", False),
+                "applied_at": ("TEXT", True),
+            },
+            "events": events,
+            "outbox": outbox,
+            "command_dedupe": command_columns,
+        }
+        if cls.SCHEMA_VERSION >= 2:
+            required["projection_checkpoints"] = {
+                "projection_name": ("TEXT", True),
+                "aggregate_type": ("TEXT", True),
+                "aggregate_id": ("TEXT", True),
+                "aggregate_version": ("INTEGER", True),
+                "state_json": ("TEXT", True),
+                "state_hash": ("TEXT", True),
+                "updated_at": ("TEXT", True),
+            }
+        if cls.SCHEMA_VERSION >= 7:
+            required["global_projection_checkpoints"] = {
+                "projection_name": ("TEXT", False),
+                "journal_sequence": ("INTEGER", True),
+                "state_json": ("TEXT", True),
+                "state_hash": ("TEXT", True),
+                "updated_at": ("TEXT", True),
+            }
+        return required
+
+    @classmethod
+    def _validate_column_contracts(cls, connection) -> None:
+        for table_name, expected in cls._required_column_contracts().items():
+            actual = {
+                str(row["name"]): (
+                    str(row["type"]).strip().upper(),
+                    bool(row["notnull"]),
+                )
+                for row in connection.execute(f"PRAGMA table_info({table_name})")
+            }
+            unexpected = set(actual) - set(expected)
+            if unexpected:
+                raise ValueError(
+                    "Journal schema table "
+                    + table_name
+                    + " has unexpected columns: "
+                    + ", ".join(sorted(unexpected))
+                )
+            for column_name, (expected_type, expected_not_null) in expected.items():
+                if column_name not in actual:
+                    # Missing columns are reported by the existing structural
+                    # check with its established diagnostic.
+                    continue
+                declared_type, not_null = actual[column_name]
+                if declared_type != expected_type:
+                    raise ValueError(
+                        "Journal schema table "
+                        + table_name
+                        + " column "
+                        + column_name
+                        + " has invalid declared type"
+                    )
+                if not_null != expected_not_null:
+                    raise ValueError(
+                        "Journal schema table "
+                        + table_name
+                        + " column "
+                        + column_name
+                        + " has invalid NOT NULL contract"
+                    )
 
     @staticmethod
     def _unique_index_columns(connection, table_name: str) -> set[tuple[str, ...]]:
         unique_indexes: set[tuple[str, ...]] = set()
         for index_row in connection.execute(f"PRAGMA index_list({table_name})"):
-            if not bool(index_row["unique"]):
+            # A partial UNIQUE index constrains only rows matching its WHERE
+            # predicate and therefore cannot satisfy a whole-table identity
+            # invariant, even when PRAGMA index_info reports the same columns.
+            if not bool(index_row["unique"]) or bool(index_row["partial"]):
                 continue
             index_name = str(index_row["name"]).replace("'", "''")
             columns = tuple(
@@ -263,6 +421,10 @@ class JournalStore:
                 "projection_name",
                 "aggregate_type",
                 "aggregate_id",
+            )
+        if cls.SCHEMA_VERSION >= 7:
+            expected_primary_keys["global_projection_checkpoints"] = (
+                "projection_name",
             )
         expected_unique = {
             "events": {
@@ -554,6 +716,8 @@ class JournalStore:
                 }
                 if self.SCHEMA_VERSION >= 2:
                     required_tables.add("projection_checkpoints")
+                if self.SCHEMA_VERSION >= 7:
+                    required_tables.add("global_projection_checkpoints")
                 present_tables = {
                     str(row[0])
                     for row in connection.execute(
@@ -586,6 +750,7 @@ class JournalStore:
                             + " is missing required columns: "
                             + ", ".join(sorted(missing_columns))
                         )
+                self._validate_column_contracts(connection)
                 self._validate_key_contracts(connection)
                 connection.commit()
             except Exception:
@@ -1176,6 +1341,140 @@ class JournalStore:
             "aggregate_type": aggregate_type,
             "aggregate_id": aggregate_id,
             "aggregate_version": int(row["aggregate_version"]),
+            "state": state,
+            "state_hash": row["state_hash"],
+            "updated_at": row["updated_at"],
+        }
+
+    def save_global_projection_checkpoint(
+        self,
+        *,
+        projection_name: str,
+        journal_sequence: int,
+        state: Any,
+    ) -> bool:
+        """Persist derived multi-aggregate state at one exact durable journal cut."""
+
+        projection_name = self._require_text(projection_name, "projection_name")
+        if type(journal_sequence) is not int or journal_sequence < 0:
+            raise ValueError("journal_sequence must be a non-negative integer")
+        state_json = canonical_json(state)
+        state_hash = payload_digest(
+            {
+                "projection_name": projection_name,
+                "journal_sequence": journal_sequence,
+                "state": state,
+            }
+        )
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                current = self._journal_sequence_value(connection)
+                if journal_sequence > current:
+                    raise ValueError(
+                        "global projection checkpoint cannot outrun the journal"
+                    )
+                existing = connection.execute(
+                    """
+                    SELECT journal_sequence, state_json, state_hash
+                    FROM global_projection_checkpoints
+                    WHERE projection_name = ?
+                    """,
+                    (projection_name,),
+                ).fetchone()
+                if existing is not None:
+                    existing_sequence = int(existing["journal_sequence"])
+                    exact = (
+                        existing_sequence == journal_sequence
+                        and existing["state_json"] == state_json
+                        and existing["state_hash"] == state_hash
+                    )
+                    if exact:
+                        connection.commit()
+                        return False
+                    if journal_sequence <= existing_sequence:
+                        raise ValueError(
+                            "global projection checkpoint cannot regress or change at the same journal cut"
+                        )
+
+                connection.execute(
+                    """
+                    INSERT INTO global_projection_checkpoints(
+                        projection_name, journal_sequence,
+                        state_json, state_hash, updated_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(projection_name)
+                    DO UPDATE SET
+                        journal_sequence = excluded.journal_sequence,
+                        state_json = excluded.state_json,
+                        state_hash = excluded.state_hash,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        projection_name,
+                        journal_sequence,
+                        state_json,
+                        state_hash,
+                        self._now(),
+                    ),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return True
+
+    def load_global_projection_checkpoint(
+        self,
+        *,
+        projection_name: str,
+    ) -> dict[str, Any] | None:
+        """Load and integrity-check a multi-aggregate projection checkpoint."""
+
+        projection_name = self._require_text(projection_name, "projection_name")
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT journal_sequence, state_json, state_hash, updated_at
+                FROM global_projection_checkpoints
+                WHERE projection_name = ?
+                """,
+                (projection_name,),
+            ).fetchone()
+            if row is None:
+                return None
+            current = self._journal_sequence_value(connection)
+
+        try:
+            state = json.loads(row["state_json"])
+        except (json.JSONDecodeError, TypeError) as error:
+            raise ValueError(
+                "global projection checkpoint state is not valid JSON"
+            ) from error
+        if canonical_json(state) != row["state_json"]:
+            raise ValueError(
+                "global projection checkpoint state is not canonical JSON"
+            )
+        journal_sequence = int(row["journal_sequence"])
+        expected_hash = payload_digest(
+            {
+                "projection_name": projection_name,
+                "journal_sequence": journal_sequence,
+                "state": state,
+            }
+        )
+        if expected_hash != row["state_hash"]:
+            raise ValueError(
+                "global projection checkpoint hash does not match identity, cut, and state"
+            )
+        if journal_sequence > current:
+            raise ValueError(
+                "global projection checkpoint is ahead of the journal"
+            )
+        return {
+            "projection_name": projection_name,
+            "journal_sequence": journal_sequence,
             "state": state,
             "state_hash": row["state_hash"],
             "updated_at": row["updated_at"],

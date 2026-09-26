@@ -21,6 +21,27 @@ class ResearchBoundaryError(ValueError):
     pass
 
 
+_MAX_INPUT_NODES = 10_000
+_MAX_CONTAINER_ITEMS = 2_048
+_MAX_STRING_UTF8_BYTES = 1_048_576
+_MAX_TOTAL_STRING_UTF8_BYTES = 8 * _MAX_STRING_UTF8_BYTES
+_MAX_INTEGER_BITS = 4_096
+
+
+def _utf8_size(value: str, *, label: str) -> int:
+    # Every Unicode code point needs at least one UTF-8 byte.  Reject obviously
+    # oversized text before encoding so the boundary never allocates a second
+    # attacker-sized byte buffer just to discover that the input is too large.
+    if len(value) > _MAX_STRING_UTF8_BYTES:
+        return _MAX_STRING_UTF8_BYTES + 1
+    try:
+        return len(value.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise ResearchBoundaryError(
+            f"{label} must contain valid UTF-8 text"
+        ) from error
+
+
 class _FrozenDict(MappingABC[str, object]):
     """Read-only mapping with no mutable dict base class."""
 
@@ -62,26 +83,84 @@ def _freeze_proposal(
     *,
     depth: int = 0,
     label: str = "model proposal",
+    _budget: list[int] | None = None,
 ) -> object:
+    """Freeze JSON-like input while enforcing deterministic structural budgets.
+
+    Depth alone is insufficient for hostile input: a shallow object can still
+    contain millions of leaves or one enormous scalar.  The shared mutable
+    budget counts every visited node across the whole tree before copying it.
+    """
+
+    if _budget is None:
+        # [visited_nodes, aggregate_utf8_bytes]
+        _budget = [0, 0]
+    _budget[0] += 1
+    if _budget[0] > _MAX_INPUT_NODES:
+        raise ResearchBoundaryError(
+            f"{label} exceeds maximum structural node budget"
+        )
     if depth > 32:
         raise ResearchBoundaryError(f"{label} exceeds maximum nesting depth")
     if isinstance(value, Mapping):
+        if len(value) > _MAX_CONTAINER_ITEMS:
+            raise ResearchBoundaryError(
+                f"{label} exceeds maximum object width"
+            )
         frozen: dict[str, object] = {}
         for key, nested in value.items():
             if not isinstance(key, str):
                 raise ResearchBoundaryError(f"{label} object keys must be strings")
+            key_size = _utf8_size(key, label=f"{label} object key")
+            if key_size > _MAX_STRING_UTF8_BYTES:
+                raise ResearchBoundaryError(
+                    f"{label} object key exceeds maximum text size"
+                )
+            _budget[1] += key_size
+            if _budget[1] > _MAX_TOTAL_STRING_UTF8_BYTES:
+                raise ResearchBoundaryError(
+                    f"{label} exceeds aggregate UTF-8 text budget"
+                )
             frozen[key] = _freeze_proposal(
                 nested,
                 depth=depth + 1,
                 label=label,
+                _budget=_budget,
             )
         return _FrozenDict(frozen)
     if isinstance(value, (list, tuple)):
+        if len(value) > _MAX_CONTAINER_ITEMS:
+            raise ResearchBoundaryError(
+                f"{label} exceeds maximum array width"
+            )
         return tuple(
-            _freeze_proposal(item, depth=depth + 1, label=label)
+            _freeze_proposal(
+                item,
+                depth=depth + 1,
+                label=label,
+                _budget=_budget,
+            )
             for item in value
         )
-    if value is None or isinstance(value, (str, bool, int)):
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        value_size = _utf8_size(value, label=f"{label} text value")
+        if value_size > _MAX_STRING_UTF8_BYTES:
+            raise ResearchBoundaryError(
+                f"{label} text value exceeds maximum size"
+            )
+        _budget[1] += value_size
+        if _budget[1] > _MAX_TOTAL_STRING_UTF8_BYTES:
+            raise ResearchBoundaryError(
+                f"{label} exceeds aggregate UTF-8 text budget"
+            )
+        return value
+    if isinstance(value, int):
+        if value.bit_length() > _MAX_INTEGER_BITS:
+            raise ResearchBoundaryError(
+                f"{label} integer exceeds maximum numeric size"
+            )
         return value
     if isinstance(value, float):
         if not isfinite(value):
@@ -92,7 +171,6 @@ def _freeze_proposal(
     raise ResearchBoundaryError(
         f"{label} values must be JSON-compatible scalars, objects, or arrays"
     )
-
 
 class ResearchCapability(StrEnum):
     READ_MARKET_EVIDENCE = "READ_MARKET_EVIDENCE"

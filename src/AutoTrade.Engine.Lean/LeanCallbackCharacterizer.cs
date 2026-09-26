@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using QuantConnect.Orders;
 
@@ -84,10 +86,15 @@ public sealed class LeanCallbackCharacterizer
                 item.Value.UtcTime))
             .ToArray();
 
-        var state = new LeanCallbackCharacterizerState(
+        var payload = new LeanCallbackCharacterizerStatePayload(
             StateSchemaVersion,
             _lastArrivalUtc,
             callbacks);
+        var state = new LeanCallbackCharacterizerState(
+            payload.SchemaVersion,
+            payload.LastArrivalUtc,
+            payload.Callbacks,
+            ComputeStateHash(payload));
 
         return JsonSerializer.Serialize(state, StateJsonOptions);
     }
@@ -133,6 +140,17 @@ public sealed class LeanCallbackCharacterizer
             throw new InvalidDataException("LEAN callback restart state callbacks are required.");
         }
 
+        var payload = new LeanCallbackCharacterizerStatePayload(
+            state.SchemaVersion,
+            state.LastArrivalUtc,
+            state.Callbacks);
+        var expectedStateHash = ComputeStateHash(payload);
+        if (!string.Equals(state.StateHash, expectedStateHash, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "LEAN callback restart state integrity hash mismatch.");
+        }
+
         if (state.LastArrivalUtc.HasValue &&
             state.LastArrivalUtc.Value.Kind != DateTimeKind.Utc)
         {
@@ -172,6 +190,13 @@ public sealed class LeanCallbackCharacterizer
         result._lastArrivalUtc = state.LastArrivalUtc;
         return result;
     }
+
+    private static string ComputeStateHash(LeanCallbackCharacterizerStatePayload payload)
+    {
+        var canonical = JsonSerializer.Serialize(payload, StateJsonOptions);
+        var digest = SHA256.HashData(Encoding.UTF8.GetBytes(canonical));
+        return "sha256:" + Convert.ToHexString(digest).ToLowerInvariant();
+    }
 }
 
 internal readonly record struct CallbackFingerprint(
@@ -181,10 +206,16 @@ internal readonly record struct CallbackFingerprint(
     decimal FillPrice,
     DateTime UtcTime);
 
-public sealed record LeanCallbackCharacterizerState(
+internal sealed record LeanCallbackCharacterizerStatePayload(
     string SchemaVersion,
     DateTime? LastArrivalUtc,
     IReadOnlyList<LeanCallbackStateEntry> Callbacks);
+
+public sealed record LeanCallbackCharacterizerState(
+    string SchemaVersion,
+    DateTime? LastArrivalUtc,
+    IReadOnlyList<LeanCallbackStateEntry> Callbacks,
+    string StateHash);
 
 public readonly record struct LeanCallbackStateEntry(
     int OrderId,

@@ -22,6 +22,10 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+
 jobs:
   registry:
     strategy:
@@ -32,7 +36,21 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m unittest discover -s tests/Control -v
+      - name: Write exact-head control-plane evidence
+        run: >-
+          python tools/write_ci_evidence.py
+          --suite control-plane
+          --command "python -m unittest discover -s tests/Control -v"
+          --output "artifacts/control-plane-${{ runner.os }}.json"
+      - name: Upload exact-head control-plane evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: control-plane-evidence-${{ runner.os }}
+          path: artifacts/control-plane-${{ runner.os }}.json
+          if-no-files-found: error

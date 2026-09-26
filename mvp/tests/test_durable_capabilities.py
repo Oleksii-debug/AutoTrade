@@ -96,6 +96,14 @@ class DurableCapabilityRegistryTests(unittest.TestCase):
                 at=NOW + timedelta(seconds=1),
             )
             self.assertEqual(historical, snapshot)
+            self.assertFalse(
+                historical.admits(
+                    at=NOW + timedelta(seconds=1),
+                    order_type="LIMIT",
+                    time_in_force="DAY",
+                    permission_scope="ORDER.WRITE",
+                )
+            )
             with self.assertRaisesRegex(
                 CapabilityError,
                 "fresh current-process verification",
@@ -115,16 +123,22 @@ class DurableCapabilityRegistryTests(unittest.TestCase):
                 refreshed_at,
             )
             self.assertTrue(restarted.add(refreshed))
-            self.assertEqual(
-                restarted.require_verified(
-                    provider_id="simulated",
-                    account_id="paper-account",
-                    entity_id="entity-1",
-                    environment="PAPER",
-                    instrument_version="instrument-v1",
+            admitted = restarted.require_verified(
+                provider_id="simulated",
+                account_id="paper-account",
+                entity_id="entity-1",
+                environment="PAPER",
+                instrument_version="instrument-v1",
+                at=refreshed_at + timedelta(seconds=1),
+            )
+            self.assertEqual(admitted.snapshot_id, refreshed.snapshot_id)
+            self.assertTrue(
+                admitted.admits(
                     at=refreshed_at + timedelta(seconds=1),
-                ).snapshot_id,
-                refreshed.snapshot_id,
+                    order_type="LIMIT",
+                    time_in_force="DAY",
+                    permission_scope="ORDER.WRITE",
+                )
             )
 
     def test_newer_unknown_refresh_persists_and_supersedes_verified_history(self):

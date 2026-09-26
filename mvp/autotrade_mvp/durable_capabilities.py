@@ -109,7 +109,7 @@ class DurableCapabilityRegistry:
         if not isinstance(store, JournalStore):
             raise TypeError("store must be JournalStore")
         self.store = store
-        self._session_verified_ids: set[str] = set()
+        self._session_verified: dict[str, CapabilitySnapshot] = {}
 
     def _history(self) -> CapabilityRegistry:
         registry = CapabilityRegistry()
@@ -203,7 +203,7 @@ class DurableCapabilityRegistry:
             ) from error
 
         if result.inserted and snapshot.status == "VERIFIED":
-            self._session_verified_ids.add(snapshot.snapshot_id)
+            self._session_verified[snapshot.snapshot_id] = snapshot
         return result.inserted
 
     def latest(self, **kwargs) -> CapabilitySnapshot:
@@ -211,8 +211,9 @@ class DurableCapabilityRegistry:
 
     def require_verified(self, **kwargs) -> CapabilitySnapshot:
         snapshot = self._history().require_verified(**kwargs)
-        if snapshot.snapshot_id not in self._session_verified_ids:
+        fresh = self._session_verified.get(snapshot.snapshot_id)
+        if fresh is None or fresh != snapshot:
             raise CapabilityError(
                 "capability requires fresh current-process verification after restart"
             )
-        return snapshot
+        return fresh

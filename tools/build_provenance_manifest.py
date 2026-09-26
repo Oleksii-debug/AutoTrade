@@ -15,6 +15,7 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "provenance" / "release-dependency-manifest.json"
 PIN = re.compile(r"^([A-Za-z0-9_.-]+)==([^=\s]+)$")
+EXACT_NUGET_VERSION = re.compile(r"^\[([0-9][A-Za-z0-9.+-]*)\]$")
 GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 GIT_OBJECT_ID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 REPOSITORY_SLUG = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -279,15 +280,115 @@ def dotnet_package_dependencies() -> list[dict[str, str]]:
                 raise ValueError(
                     f"PackageReference must have exact Include/Version in {project.relative_to(ROOT)}"
                 )
-            if any(token in version for token in ("*", "[", "]", "(", ")")):
+            match = EXACT_NUGET_VERSION.fullmatch(version)
+            if match is None:
                 raise ValueError(
-                    f"PackageReference is not an exact version in {project.relative_to(ROOT)}: {name} {version}"
+                    "PackageReference must use an exact NuGet range "
+                    f"in {project.relative_to(ROOT)}: {name} {version}"
                 )
-            packages.add((name, version))
+            packages.add((name, match.group(1)))
     return [
         {"name": name, "version": version}
         for name, version in sorted(packages, key=lambda item: item[0].lower())
     ]
+
+
+def _normalized_dotnet_lock(path: Path) -> dict[str, object]:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"NuGet lock is unreadable: {path}") from error
+    if type(document) is not dict or document.get("version") != 1:
+        raise ValueError(f"NuGet lock must use schema version 1: {path}")
+    dependencies = document.get("dependencies")
+    if type(dependencies) is not dict:
+        raise ValueError(f"NuGet lock dependencies must be an object: {path}")
+
+    normalized_targets: dict[str, dict[str, object]] = {}
+    for target, raw_entries in sorted(dependencies.items()):
+        if not isinstance(target, str) or not target or type(raw_entries) is not dict:
+            raise ValueError(f"NuGet lock target is invalid: {path}")
+        normalized_entries: dict[str, object] = {}
+        for name, raw_entry in sorted(raw_entries.items(), key=lambda item: item[0].casefold()):
+            if not isinstance(name, str) or not name or type(raw_entry) is not dict:
+                raise ValueError(f"NuGet lock dependency entry is invalid: {path}")
+            dependency_type = raw_entry.get("type")
+            if dependency_type not in {"Direct", "Transitive", "Project"}:
+                raise ValueError(f"NuGet lock dependency type is invalid: {path}:{name}")
+
+            entry: dict[str, object] = {"type": dependency_type}
+            requested = raw_entry.get("requested")
+            if requested is not None:
+                if not isinstance(requested, str) or not requested:
+                    raise ValueError(f"NuGet lock requested range is invalid: {path}:{name}")
+                entry["requested"] = requested
+
+            resolved = raw_entry.get("resolved")
+            content_hash = raw_entry.get("contentHash")
+            if dependency_type != "Project":
+                if not isinstance(resolved, str) or not resolved:
+                    raise ValueError(f"NuGet lock resolved version is missing: {path}:{name}")
+                if not isinstance(content_hash, str) or not content_hash:
+                    raise ValueError(f"NuGet lock contentHash is missing: {path}:{name}")
+                entry["resolved"] = resolved
+                entry["contentHash"] = content_hash
+            elif resolved is not None or content_hash is not None:
+                raise ValueError(f"NuGet project lock entry has package bytes: {path}:{name}")
+
+            child_dependencies = raw_entry.get("dependencies")
+            if child_dependencies is not None:
+                if type(child_dependencies) is not dict or not all(
+                    isinstance(child_name, str)
+                    and child_name
+                    and isinstance(child_range, str)
+                    and child_range
+                    for child_name, child_range in child_dependencies.items()
+                ):
+                    raise ValueError(f"NuGet lock child dependencies are invalid: {path}:{name}")
+                entry["dependencies"] = {
+                    child_name: child_dependencies[child_name]
+                    for child_name in sorted(child_dependencies, key=str.casefold)
+                }
+
+            unexpected = set(raw_entry) - {
+                "type",
+                "requested",
+                "resolved",
+                "contentHash",
+                "dependencies",
+            }
+            if unexpected:
+                raise ValueError(
+                    f"NuGet lock dependency entry has unexpected fields: {path}:{name}: "
+                    + ", ".join(sorted(unexpected))
+                )
+            normalized_entries[name] = entry
+        normalized_targets[target] = normalized_entries
+
+    return {
+        "version": 1,
+        "dependencies": normalized_targets,
+    }
+
+
+def dotnet_lock_graph() -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for lock_path in sorted((ROOT / "src").rglob("packages.lock.json")):
+        projects = sorted(lock_path.parent.glob("*.csproj"))
+        if len(projects) != 1:
+            raise ValueError(
+                "Each release NuGet lock must have exactly one sibling project: "
+                f"{lock_path.relative_to(ROOT)}"
+            )
+        records.append(
+            {
+                "project": projects[0].relative_to(ROOT).as_posix(),
+                "lock_file": lock_path.relative_to(ROOT).as_posix(),
+                "lock_blob_sha": git_blob_sha(lock_path),
+                **_normalized_dotnet_lock(lock_path),
+            }
+        )
+    return records
 
 
 def dotnet_package_projects() -> list[Path]:
@@ -382,9 +483,11 @@ def build_manifest() -> dict[str, object]:
 
     python_dependencies = python_dev_dependencies()
     dotnet_packages = dotnet_package_dependencies()
+    dotnet_locks = dotnet_lock_graph()
     dependency_graph = {
         "python_development_dependencies": python_dependencies,
         "dotnet_package_dependencies": dotnet_packages,
+        "dotnet_lock_graph": dotnet_locks,
         "inspected_components": components,
     }
 
@@ -487,10 +590,15 @@ def build_manifest() -> dict[str, object]:
             "components_blob_sha": git_blob_sha(components_path),
             "requirements_dev_blob_sha": git_blob_sha(requirements_path),
             "global_json_blob_sha": git_blob_sha(global_path),
+            "dotnet_lock_blob_shas": {
+                record["lock_file"]: record["lock_blob_sha"]
+                for record in dotnet_locks
+            },
         },
         "dotnet_sdk": str(global_doc["sdk"]["version"]),
         "python_development_dependencies": python_dependencies,
         "dotnet_package_dependencies": dotnet_packages,
+        "dotnet_lock_graph": dotnet_locks,
         "inspected_components": components,
         "blocking_issues": blockers,
         "release_eligible": not blockers,

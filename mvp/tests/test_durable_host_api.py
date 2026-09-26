@@ -602,6 +602,23 @@ class JournalBackedHostApiTests(unittest.TestCase):
         self.assertEqual(store.state_version, 0)
         self.assertEqual(store.events_after(0), ())
 
+    def test_empty_block_target_cannot_ignore_later_authority_grant(self):
+        store = self.store(now="2030-01-01T00:00:00Z")
+        accepted = store.submit(self.command())
+        accepted_event = store.events_after(0)[0]
+        self.assertEqual(
+            accepted_event.payload["action_payload"]["target_policies"],
+            [],
+        )
+
+        AuthorityService(JournalStore(self.path)).register_policy(
+            self.authority_policy("later-policy")
+        )
+        failed = store.execute_authority_operation(accepted.operation_id)
+        self.assertEqual(failed.phase, "FAILED")
+        restored = AuthorityService(JournalStore(self.path)).export_state()
+        self.assertEqual(restored["revocations"], [])
+
     def test_authority_change_after_acceptance_fails_closed(self):
         journal = JournalStore(self.path)
         authority = AuthorityService(journal)

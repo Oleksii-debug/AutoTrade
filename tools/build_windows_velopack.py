@@ -16,7 +16,6 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
-import shutil
 import stat
 import subprocess
 import sys
@@ -400,7 +399,34 @@ def _vpk_command(
     return command
 
 
-def _validate_vpk_outputs(directory: Path, *, version: str) -> list[Path]:
+def _snapshot_vpk_output(path: Path) -> tuple[str, int]:
+    """Bind one generated artifact to exact bytes before final publication."""
+
+    name = f"Velopack output {path.name}"
+    try:
+        with _open_stable_regular_file(path, name=name) as stream:
+            before = os.fstat(stream.fileno())
+            digest = "sha256:" + _sha256_stream(stream)
+            after = _assert_open_file_identity(path, stream, name=name)
+            if (
+                (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+                or before.st_size != after.st_size
+                or before.st_mtime_ns != after.st_mtime_ns
+                or before.st_ctime_ns != after.st_ctime_ns
+            ):
+                raise VelopackPackagingError(
+                    f"Velopack output changed during validation: {path.name}"
+                )
+            return digest, before.st_size
+    except InstallerManifestError as error:
+        raise VelopackPackagingError(str(error)) from error
+
+
+def _validate_vpk_outputs(
+    directory: Path,
+    *,
+    version: str,
+) -> list[tuple[Path, str, int]]:
     observed: list[Path] = []
     for path in sorted(directory.iterdir(), key=lambda item: item.name.casefold()):
         if path.is_symlink():
@@ -451,7 +477,12 @@ def _validate_vpk_outputs(directory: Path, *, version: str) -> list[Path]:
             "Velopack emitted unrecognized release artifacts: "
             + ", ".join(sorted(unexpected))
         )
-    return observed
+
+    snapshots: list[tuple[Path, str, int]] = []
+    for path in observed:
+        digest, size = _snapshot_vpk_output(path)
+        snapshots.append((path, digest, size))
+    return snapshots
 
 
 def _ensure_empty_output_directory(output_dir: Path) -> None:
@@ -466,24 +497,72 @@ def _ensure_empty_output_directory(output_dir: Path) -> None:
         )
 
 
-def _publish_file(source: Path, destination: Path) -> tuple[str, int]:
+def _publish_file(
+    source: Path,
+    destination: Path,
+    *,
+    expected_digest: str,
+    expected_size: int,
+) -> tuple[str, int]:
     digest_path = destination.with_suffix(destination.suffix + ".sha256")
-
-    def writer(handle) -> None:
-        with source.open("rb") as input_stream:
-            shutil.copyfileobj(input_stream, handle, length=1024 * 1024)
+    name = f"Velopack output {source.name}"
 
     try:
-        digest = atomic_write_stream_with_sha256_sidecar(
-            destination,
-            digest_path,
-            writer,
-        )
-    except (DurablePublishLockError, OSError) as error:
+        input_stream = _open_stable_regular_file(source, name=name)
+    except InstallerManifestError as error:
+        raise VelopackPackagingError(str(error)) from error
+
+    try:
+        before = os.fstat(input_stream.fileno())
+        if before.st_size != expected_size:
+            raise VelopackPackagingError(
+                f"Velopack output changed after validation: {source.name}"
+            )
+
+        def writer(handle) -> None:
+            input_stream.seek(0)
+            observed_digest = sha256()
+            observed_size = 0
+            for chunk in iter(lambda: input_stream.read(1024 * 1024), b""):
+                handle.write(chunk)
+                observed_digest.update(chunk)
+                observed_size += len(chunk)
+
+            try:
+                after = _assert_open_file_identity(source, input_stream, name=name)
+            except InstallerManifestError as error:
+                raise VelopackPackagingError(str(error)) from error
+            if (
+                (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+                or before.st_size != after.st_size
+                or before.st_mtime_ns != after.st_mtime_ns
+                or before.st_ctime_ns != after.st_ctime_ns
+                or observed_size != expected_size
+                or "sha256:" + observed_digest.hexdigest() != expected_digest
+            ):
+                raise VelopackPackagingError(
+                    f"Velopack output changed after validation: {source.name}"
+                )
+
+        try:
+            digest = atomic_write_stream_with_sha256_sidecar(
+                destination,
+                digest_path,
+                writer,
+            )
+        except (DurablePublishLockError, OSError) as error:
+            raise VelopackPackagingError(
+                f"Velopack artifact publication failed closed: {destination.name}"
+            ) from error
+    finally:
+        input_stream.close()
+
+    published_digest = "sha256:" + digest
+    if published_digest != expected_digest:
         raise VelopackPackagingError(
-            f"Velopack artifact publication failed closed: {destination.name}"
-        ) from error
-    return "sha256:" + digest, source.stat().st_size
+            f"Velopack output digest changed during publication: {source.name}"
+        )
+    return published_digest, expected_size
 
 
 def build_velopack_release(
@@ -537,8 +616,13 @@ def build_velopack_release(
             version=str(installer["version"]),
         )
         artifacts: list[dict[str, object]] = []
-        for source in generated:
-            digest, size = _publish_file(source, output_dir / source.name)
+        for source, expected_digest, expected_size in generated:
+            digest, size = _publish_file(
+                source,
+                output_dir / source.name,
+                expected_digest=expected_digest,
+                expected_size=expected_size,
+            )
             artifacts.append(
                 {
                     "path": source.name,

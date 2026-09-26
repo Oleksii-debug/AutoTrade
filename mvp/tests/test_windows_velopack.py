@@ -352,6 +352,77 @@ class WindowsVelopackPackagingTests(unittest.TestCase):
         self.assertNotIn("secret-looking", str(context.exception))
         self.assertEqual(list(output.iterdir()), [])
 
+    def test_output_path_swap_after_validation_fails_before_publication(self):
+        bundle, manifest = self.release_inputs(stem="output-swap")
+        output = self.root / "output-swap-out"
+        original_validate = velopack_module._validate_vpk_outputs
+
+        def validate_then_swap(directory, *, version):
+            snapshots = original_validate(directory, version=version)
+            victim = next(
+                path
+                for path, _digest, _size in snapshots
+                if path.name == "AutoTrade-Setup.exe"
+            )
+            victim.unlink()
+            victim.write_bytes(b"evil!")
+            return snapshots
+
+        with patch.object(
+            velopack_module,
+            "_validate_vpk_outputs",
+            side_effect=validate_then_swap,
+        ):
+            with self.assertRaisesRegex(
+                VelopackPackagingError,
+                "changed after validation",
+            ):
+                build_velopack_release(
+                    bundle=bundle,
+                    installer_manifest=manifest,
+                    output_dir=output,
+                    runner=self.successful_runner({}),
+                )
+
+        self.assertEqual(list(output.iterdir()), [])
+
+    def test_output_same_inode_mutation_after_validation_fails_before_publication(self):
+        bundle, manifest = self.release_inputs(stem="output-mutation")
+        output = self.root / "output-mutation-out"
+        original_validate = velopack_module._validate_vpk_outputs
+
+        def validate_then_mutate(directory, *, version):
+            snapshots = original_validate(directory, version=version)
+            victim = next(
+                path
+                for path, _digest, _size in snapshots
+                if path.name == "AutoTrade-Setup.exe"
+            )
+            with victim.open("r+b") as handle:
+                handle.seek(0)
+                handle.write(b"evil!")
+                handle.flush()
+                os.fsync(handle.fileno())
+            return snapshots
+
+        with patch.object(
+            velopack_module,
+            "_validate_vpk_outputs",
+            side_effect=validate_then_mutate,
+        ):
+            with self.assertRaisesRegex(
+                VelopackPackagingError,
+                "changed after validation",
+            ):
+                build_velopack_release(
+                    bundle=bundle,
+                    installer_manifest=manifest,
+                    output_dir=output,
+                    runner=self.successful_runner({}),
+                )
+
+        self.assertEqual(list(output.iterdir()), [])
+
     def test_existing_output_content_fails_before_any_vpk_execution(self):
         bundle, manifest = self.release_inputs(stem="existing")
         output = self.root / "existing-out"

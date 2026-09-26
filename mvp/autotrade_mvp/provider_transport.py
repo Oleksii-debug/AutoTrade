@@ -1772,40 +1772,41 @@ class WhiteBitHttpTransport:
                 "ORDER_WRITE",
             )
 
-        nonce = self.nonce_allocator.allocate()
-        credential_plaintext = self.secret_resolver.resolve_for_execution(
-            self.session_token,
-            origin=self.origin,
-            handle=self.credential_handle,
-            execution_identity=self.execution_identity,
-            account_id=self.account_id,
-            provider="WHITEBIT",
-            environment="LIVE",
-            purpose="TRADE",
-        )
-        try:
-            credential = WhiteBitCredential.parse(credential_plaintext)
-            provider_signed = sign_private_request(
-                endpoint=endpoint,
-                parameters=body,
-                nonce=nonce,
-                api_key=credential.api_key,
-                api_secret=credential.api_secret,
-                nonce_window=False,
+        with self.nonce_allocator.serialized_send():
+            nonce = self.nonce_allocator.allocate()
+            credential_plaintext = self.secret_resolver.resolve_for_execution(
+                self.session_token,
+                origin=self.origin,
+                handle=self.credential_handle,
+                execution_identity=self.execution_identity,
+                account_id=self.account_id,
+                provider="WHITEBIT",
+                environment="LIVE",
+                purpose="TRADE",
             )
-            signed = SignedHttpRequest(
-                method="POST",
-                url=self.policy.absolute_url(provider_signed.endpoint),
-                headers=provider_signed.headers,
-                body=provider_signed.body,
-                timeout_seconds=self.policy.timeout_seconds,
-            )
-        finally:
-            credential_plaintext = None
+            try:
+                credential = WhiteBitCredential.parse(credential_plaintext)
+                provider_signed = sign_private_request(
+                    endpoint=endpoint,
+                    parameters=body,
+                    nonce=nonce,
+                    api_key=credential.api_key,
+                    api_secret=credential.api_secret,
+                    nonce_window=False,
+                )
+                signed = SignedHttpRequest(
+                    method="POST",
+                    url=self.policy.absolute_url(provider_signed.endpoint),
+                    headers=provider_signed.headers,
+                    body=provider_signed.body,
+                    timeout_seconds=self.policy.timeout_seconds,
+                )
+            finally:
+                credential_plaintext = None
 
-        final_guard()
-        wire_response = self.wire_client.send(signed)
-        return _exact_trading_response(wire_response)
+            final_guard()
+            wire_response = self.wire_client.send(signed)
+            return _exact_trading_response(wire_response)
 
 
 @dataclass(frozen=True)

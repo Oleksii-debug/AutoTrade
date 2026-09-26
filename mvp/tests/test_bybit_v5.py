@@ -2899,6 +2899,42 @@ class BybitV5AdapterTests(unittest.TestCase):
                 instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
             )
 
+    def test_position_projection_rejects_mixed_capability_snapshots(self):
+        first_capability = read_capability(permission_scopes=("ACCOUNT.READ",))
+        second_capability = read_capability(permission_scopes=("ACCOUNT.READ",))
+        first = bound_position_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "linear",
+                    "nextPageCursor": "position-page-2",
+                    "list": [],
+                },
+            },
+            capability=first_capability,
+        )
+        second = bound_position_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "linear",
+                    "nextPageCursor": "",
+                    "list": [],
+                },
+            },
+            cursor="position-page-2",
+            capability=second_capability,
+        )
+
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "authenticated-read capability scope",
+        ):
+            provider_position_quantities_from_pages(
+                (first, second),
+                instrument_versions={},
+            )
+
     def test_position_projection_fails_closed_for_hedge_or_liquidation_state(self):
         hedge = bound_position_response(
             {

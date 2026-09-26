@@ -1,7 +1,12 @@
 import base64
 from hashlib import sha256
+import json
+import os
+from pathlib import Path
+import subprocess
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
@@ -12,12 +17,17 @@ from mvp.autotrade_mvp.qualification_attestation import (
     QualificationScope,
     QualificationTrustError,
     QualificationTrustPolicy,
+    QualificationTrustUnavailable,
     SignedQualificationAttestation,
     TrustRoot,
     parse_qualification_trust_policy,
     parse_signed_qualification_attestation,
     qualification_trust_policy_payload,
+    load_canonical_qualification_trust_policy,
+    verify_canonical_qualification_attestation,
     verify_qualification_attestation,
+    _trusted_git_environment,
+    _trusted_git_executable,
 )
 
 
@@ -170,6 +180,826 @@ def verify(receipt, store, trust_policy, **overrides):
 
 
 class QualificationAttestationTests(unittest.TestCase):
+    def test_trusted_git_environment_drops_caller_loader_and_config_authority(self):
+        hostile = {
+            "PATH": "/attacker/bin",
+            "HOME": "/attacker/home",
+            "XDG_CONFIG_HOME": "/attacker/config",
+            "LD_PRELOAD": "/attacker/libinject.so",
+            "LD_LIBRARY_PATH": "/attacker/lib",
+            "DYLD_INSERT_LIBRARIES": "/attacker/libinject.dylib",
+            "PYTHONPATH": "/attacker/python",
+            "GIT_OBJECT_DIRECTORY": "/attacker/objects",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES": "/attacker/alternates",
+            "GIT_CONFIG_GLOBAL": "/attacker/gitconfig",
+            "SYSTEMROOT": r"C:\\Windows",
+        }
+        with patch.dict(os.environ, hostile, clear=True):
+            environment = _trusted_git_environment()
+
+        self.assertEqual(environment["SYSTEMROOT"], r"C:\\Windows")
+        self.assertEqual(environment["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(environment["GIT_CONFIG_GLOBAL"], os.devnull)
+        self.assertEqual(environment["GIT_NO_REPLACE_OBJECTS"], "1")
+        self.assertEqual(environment["LC_ALL"], "C")
+        self.assertEqual(environment["LANG"], "C")
+        for key in (
+            "PATH",
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "DYLD_INSERT_LIBRARIES",
+            "PYTHONPATH",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        ):
+            self.assertNotIn(key, environment)
+
+    def test_canonical_policy_rejects_duplicate_json_keys(self):
+        with TemporaryDirectory() as directory:
+            source_root = Path(directory) / "source"
+            policy_path = (
+                source_root
+                / "mvp"
+                / "autotrade_mvp"
+                / "qualification_trust_policy.json"
+            )
+            policy_path.parent.mkdir(parents=True)
+            policy_path.write_text(
+                '{"policy_version":"first","policy_version":"second","roots":[]}',
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-q"], cwd=source_root, check=True)
+            subprocess.run(
+                ["git", "add", "mvp/autotrade_mvp/qualification_trust_policy.json"],
+                cwd=source_root,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git", "-c", "user.name=AutoTrade Test",
+                    "-c", "user.email=autotrade-test@example.invalid",
+                    "commit", "-q", "-m", "ambiguous policy",
+                ],
+                cwd=source_root,
+                check=True,
+            )
+            source_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=source_root,
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_QUALIFICATION_TRUST_SOURCE_ROOT",
+                    source_root,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_CANONICAL_QUALIFICATION_TRUST_POLICY_PATH",
+                    policy_path,
+                ),
+                self.assertRaisesRegex(
+                    QualificationTrustError,
+                    "duplicate JSON object key",
+                ),
+            ):
+                load_canonical_qualification_trust_policy(
+                    expected_source_sha=source_sha
+                )
+
+    def test_canonical_policy_is_bound_to_exact_source_not_working_tree(self):
+        canonical_root = root()
+        canonical_policy = policy(canonical_root)
+        with TemporaryDirectory() as directory:
+            source_root = Path(directory) / "source"
+            policy_path = source_root / "mvp" / "autotrade_mvp" / "qualification_trust_policy.json"
+            policy_path.parent.mkdir(parents=True)
+            policy_path.write_text(
+                json.dumps(
+                    qualification_trust_policy_payload(canonical_policy),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-q"], cwd=source_root, check=True)
+            subprocess.run(
+                ["git", "add", "mvp/autotrade_mvp/qualification_trust_policy.json"],
+                cwd=source_root,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git", "-c", "user.name=AutoTrade Test",
+                    "-c", "user.email=autotrade-test@example.invalid",
+                    "commit", "-q", "-m", "trusted policy",
+                ],
+                cwd=source_root,
+                check=True,
+            )
+            source_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=source_root,
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+            exact_ref = EvidenceArtifactRef(
+                artifact_id=EVIDENCE_ID,
+                sha256=EVIDENCE_SHA,
+                media_type="application/vnd.autotrade.qualification-evidence",
+                evidence_kind="QUALIFICATION_RUN",
+                source_sha=source_sha,
+            )
+            canonical_value = attestation(
+                canonical_root,
+                source_sha=source_sha,
+                evidence_refs=(exact_ref,),
+            )
+            canonical_receipt = SignedQualificationAttestation(
+                canonical_value, sign(canonical_value)
+            )
+            with TemporaryDirectory() as evidence_directory:
+                store = ArtifactStore(evidence_directory)
+                publish(store, source=source_sha)
+                with (
+                    patch(
+                        "mvp.autotrade_mvp.qualification_attestation."
+                        "_QUALIFICATION_TRUST_SOURCE_ROOT",
+                        source_root,
+                    ),
+                    patch(
+                        "mvp.autotrade_mvp.qualification_attestation."
+                        "_CANONICAL_QUALIFICATION_TRUST_POLICY_PATH",
+                        policy_path,
+                    ),
+                ):
+                    accepted = verify_canonical_qualification_attestation(
+                        canonical_receipt,
+                        evidence_store=store,
+                        expected_source_sha=source_sha,
+                        expected_domain="RELEASE",
+                        expected_gate="FREEZE",
+                        expected_package_id="WP-54",
+                        expected_protocol_id="release-freeze-v1",
+                        expected_protocol_version="1.0.0",
+                        expected_requirement_id="release-candidate-freeze",
+                        expected_release_artifact_id=RELEASE_A,
+                        expected_release_artifact_sha256=RELEASE_A_SHA,
+                    )
+                    self.assertEqual(accepted.policy_id, canonical_policy.policy_id)
+
+                    hostile_root = TrustRoot(
+                        producer_id="candidate.self",
+                        verifier_id=canonical_root.verifier_id,
+                        public_modulus_hex=canonical_root.public_modulus_hex,
+                        public_exponent=canonical_root.public_exponent,
+                        allowed_scopes=canonical_root.allowed_scopes,
+                        valid_from=canonical_root.valid_from,
+                    )
+                    hostile_policy = policy(hostile_root)
+                    policy_path.write_text(
+                        json.dumps(
+                            qualification_trust_policy_payload(hostile_policy),
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        encoding="utf-8",
+                    )
+                    hostile_value = attestation(
+                        hostile_root,
+                        source_sha=source_sha,
+                        evidence_refs=(exact_ref,),
+                    )
+                    hostile_receipt = SignedQualificationAttestation(
+                        hostile_value, sign(hostile_value)
+                    )
+                    with self.assertRaisesRegex(
+                        QualificationTrustError,
+                        "trust root is not authorized",
+                    ):
+                        verify_canonical_qualification_attestation(
+                            hostile_receipt,
+                            evidence_store=store,
+                            expected_source_sha=source_sha,
+                            expected_domain="RELEASE",
+                            expected_gate="FREEZE",
+                            expected_package_id="WP-54",
+                            expected_protocol_id="release-freeze-v1",
+                            expected_protocol_version="1.0.0",
+                            expected_requirement_id="release-candidate-freeze",
+                            expected_release_artifact_id=RELEASE_A,
+                            expected_release_artifact_sha256=RELEASE_A_SHA,
+                        )
+
+    def test_canonical_policy_git_resolution_ignores_ambient_path(self):
+        with TemporaryDirectory() as directory:
+            source_root = Path(directory) / "source"
+            isolated_path = Path(directory) / "isolated-path"
+            isolated_path.mkdir(parents=True)
+            before = _trusted_git_executable(source_root=source_root)
+
+            with patch.dict(
+                os.environ,
+                {"PATH": os.fspath(isolated_path)},
+                clear=False,
+            ):
+                after = _trusted_git_executable(source_root=source_root)
+
+            self.assertEqual(after, before)
+
+    def test_canonical_policy_rejects_git_executable_from_source_checkout(self):
+        with TemporaryDirectory() as directory:
+            source_root = Path(directory) / "source"
+            source_root.mkdir()
+            candidate_git = source_root / ("git.exe" if os.name == "nt" else "git")
+            candidate_git.write_bytes(b"candidate-controlled executable")
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_trusted_git_candidate_paths",
+                    return_value=(candidate_git,),
+                ),
+                self.assertRaisesRegex(
+                    QualificationTrustUnavailable,
+                    "Git executable originates from trusted source checkout",
+                ),
+            ):
+                _trusted_git_executable(source_root=source_root)
+
+    def test_packaged_policy_uses_source_pinned_digest_without_git(self):
+        canonical_policy = policy(root())
+        raw = json.dumps(
+            qualification_trust_policy_payload(canonical_policy),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        with TemporaryDirectory() as directory:
+            source_root = Path(directory) / "installed-runtime"
+            policy_path = (
+                source_root
+                / "mvp"
+                / "autotrade_mvp"
+                / "qualification_trust_policy.json"
+            )
+            policy_path.parent.mkdir(parents=True)
+            policy_path.write_bytes(raw)
+            digest = "sha256:" + sha256(raw).hexdigest()
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_QUALIFICATION_TRUST_SOURCE_ROOT",
+                    source_root,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_CANONICAL_QUALIFICATION_TRUST_POLICY_PATH",
+                    policy_path,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256",
+                    digest,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_trusted_git_candidate_paths",
+                    return_value=(),
+                ),
+            ):
+                loaded = load_canonical_qualification_trust_policy(
+                    expected_source_sha=SOURCE
+                )
+
+        self.assertEqual(loaded.policy_id, canonical_policy.policy_id)
+        self.assertEqual(loaded.roots, canonical_policy.roots)
+
+    def test_packaged_policy_rejects_valid_but_unpinned_policy_bytes(self):
+        canonical_root = root()
+        canonical_policy = policy(canonical_root)
+        raw = json.dumps(
+            qualification_trust_policy_payload(canonical_policy),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        hostile_root = TrustRoot(
+            producer_id="candidate.self",
+            verifier_id=canonical_root.verifier_id,
+            public_modulus_hex=canonical_root.public_modulus_hex,
+            public_exponent=canonical_root.public_exponent,
+            allowed_scopes=canonical_root.allowed_scopes,
+            valid_from=canonical_root.valid_from,
+        )
+        hostile_raw = json.dumps(
+            qualification_trust_policy_payload(policy(hostile_root)),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        with TemporaryDirectory() as directory:
+            source_root = Path(directory) / "installed-runtime"
+            policy_path = (
+                source_root
+                / "mvp"
+                / "autotrade_mvp"
+                / "qualification_trust_policy.json"
+            )
+            policy_path.parent.mkdir(parents=True)
+            policy_path.write_bytes(hostile_raw)
+            pinned_digest = "sha256:" + sha256(raw).hexdigest()
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_QUALIFICATION_TRUST_SOURCE_ROOT",
+                    source_root,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_CANONICAL_QUALIFICATION_TRUST_POLICY_PATH",
+                    policy_path,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256",
+                    pinned_digest,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_trusted_git_candidate_paths",
+                    return_value=(),
+                ),
+                self.assertRaisesRegex(
+                    QualificationTrustError,
+                    "does not match signed release pin",
+                ),
+            ):
+                load_canonical_qualification_trust_policy(
+                    expected_source_sha=SOURCE
+                )
+
+    def test_source_checkout_never_downgrades_to_packaged_policy_pin(self):
+        canonical_policy = policy(root())
+        raw = json.dumps(
+            qualification_trust_policy_payload(canonical_policy),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        with TemporaryDirectory() as directory:
+            source_root = Path(directory) / "source"
+            source_root.mkdir()
+            (source_root / ".git").mkdir()
+            policy_path = (
+                source_root
+                / "mvp"
+                / "autotrade_mvp"
+                / "qualification_trust_policy.json"
+            )
+            policy_path.parent.mkdir(parents=True)
+            policy_path.write_bytes(raw)
+            digest = "sha256:" + sha256(raw).hexdigest()
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_QUALIFICATION_TRUST_SOURCE_ROOT",
+                    source_root,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_CANONICAL_QUALIFICATION_TRUST_POLICY_PATH",
+                    policy_path,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256",
+                    digest,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_trusted_git_candidate_paths",
+                    return_value=(),
+                ),
+                self.assertRaisesRegex(
+                    QualificationTrustUnavailable,
+                    "forbidden in a source checkout",
+                ),
+            ):
+                load_canonical_qualification_trust_policy(
+                    expected_source_sha=SOURCE
+                )
+
+    def test_nested_source_checkout_cannot_use_packaged_fallback_without_git(self):
+        canonical_policy = policy(root())
+        raw = json.dumps(
+            qualification_trust_policy_payload(canonical_policy),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        with TemporaryDirectory() as directory:
+            repository_root = Path(directory) / "parent-repository"
+            source_root = repository_root / "nested-installed-shape"
+            source_root.mkdir(parents=True)
+            (repository_root / ".git").mkdir()
+            policy_path = (
+                source_root
+                / "mvp"
+                / "autotrade_mvp"
+                / "qualification_trust_policy.json"
+            )
+            policy_path.parent.mkdir(parents=True)
+            policy_path.write_bytes(raw)
+            digest = "sha256:" + sha256(raw).hexdigest()
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_QUALIFICATION_TRUST_SOURCE_ROOT",
+                    source_root,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_CANONICAL_QUALIFICATION_TRUST_POLICY_PATH",
+                    policy_path,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256",
+                    digest,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_trusted_git_candidate_paths",
+                    return_value=(),
+                ),
+                self.assertRaisesRegex(
+                    QualificationTrustUnavailable,
+                    "forbidden in a source checkout",
+                ),
+            ):
+                load_canonical_qualification_trust_policy(
+                    expected_source_sha=SOURCE
+                )
+
+    def test_canonical_policy_git_path_ignores_working_tree_symlink_redirect(self):
+        canonical_root = root()
+        canonical_policy = policy(canonical_root)
+        hostile_root = TrustRoot(
+            producer_id="candidate.self",
+            verifier_id=canonical_root.verifier_id,
+            public_modulus_hex=canonical_root.public_modulus_hex,
+            public_exponent=canonical_root.public_exponent,
+            allowed_scopes=canonical_root.allowed_scopes,
+            valid_from=canonical_root.valid_from,
+        )
+        hostile_policy = policy(hostile_root)
+        with TemporaryDirectory() as directory:
+            source_root = Path(directory) / "source"
+            policy_path = (
+                source_root
+                / "mvp"
+                / "autotrade_mvp"
+                / "qualification_trust_policy.json"
+            )
+            hostile_path = source_root / "provenance" / "hostile-policy.json"
+            policy_path.parent.mkdir(parents=True)
+            hostile_path.parent.mkdir(parents=True)
+            policy_path.write_text(
+                json.dumps(
+                    qualification_trust_policy_payload(canonical_policy),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            hostile_path.write_text(
+                json.dumps(
+                    qualification_trust_policy_payload(hostile_policy),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-q"], cwd=source_root, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "add",
+                    "mvp/autotrade_mvp/qualification_trust_policy.json",
+                    "provenance/hostile-policy.json",
+                ],
+                cwd=source_root,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git", "-c", "user.name=AutoTrade Test",
+                    "-c", "user.email=autotrade-test@example.invalid",
+                    "commit", "-q", "-m", "trusted policy and hostile decoy",
+                ],
+                cwd=source_root,
+                check=True,
+            )
+            source_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=source_root,
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+
+            policy_path.unlink()
+            try:
+                policy_path.symlink_to("../../../provenance/hostile-policy.json")
+            except OSError as error:
+                self.skipTest(f"working-tree symlink unavailable: {error}")
+            self.assertIn("candidate.self", policy_path.read_text(encoding="utf-8"))
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_QUALIFICATION_TRUST_SOURCE_ROOT",
+                    source_root,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_CANONICAL_QUALIFICATION_TRUST_POLICY_PATH",
+                    policy_path,
+                ),
+            ):
+                loaded = load_canonical_qualification_trust_policy(
+                    expected_source_sha=source_sha
+                )
+            self.assertEqual(loaded.roots, canonical_policy.roots)
+            self.assertNotEqual(loaded.roots, hostile_policy.roots)
+
+    def test_canonical_policy_ignores_git_replace_refs(self):
+        canonical_root = root()
+        canonical_policy = policy(canonical_root)
+        with TemporaryDirectory() as directory:
+            source_root = Path(directory) / "source"
+            policy_path = (
+                source_root
+                / "mvp"
+                / "autotrade_mvp"
+                / "qualification_trust_policy.json"
+            )
+            policy_path.parent.mkdir(parents=True)
+            policy_path.write_text(
+                json.dumps(
+                    qualification_trust_policy_payload(canonical_policy),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-q"], cwd=source_root, check=True)
+            subprocess.run(
+                ["git", "add", "mvp/autotrade_mvp/qualification_trust_policy.json"],
+                cwd=source_root,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git", "-c", "user.name=AutoTrade Test",
+                    "-c", "user.email=autotrade-test@example.invalid",
+                    "commit", "-q", "-m", "trusted policy",
+                ],
+                cwd=source_root,
+                check=True,
+            )
+            source_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=source_root,
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+
+            hostile_root = TrustRoot(
+                producer_id="candidate.self",
+                verifier_id=canonical_root.verifier_id,
+                public_modulus_hex=canonical_root.public_modulus_hex,
+                public_exponent=canonical_root.public_exponent,
+                allowed_scopes=canonical_root.allowed_scopes,
+                valid_from=canonical_root.valid_from,
+            )
+            hostile_policy = policy(hostile_root)
+            policy_path.write_text(
+                json.dumps(
+                    qualification_trust_policy_payload(hostile_policy),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "add", "mvp/autotrade_mvp/qualification_trust_policy.json"],
+                cwd=source_root,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git", "-c", "user.name=AutoTrade Test",
+                    "-c", "user.email=autotrade-test@example.invalid",
+                    "commit", "-q", "-m", "hostile replacement policy",
+                ],
+                cwd=source_root,
+                check=True,
+            )
+            hostile_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=source_root,
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+            subprocess.run(
+                ["git", "reset", "--hard", source_sha],
+                cwd=source_root,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            subprocess.run(
+                ["git", "replace", source_sha, hostile_sha],
+                cwd=source_root,
+                check=True,
+            )
+
+            replaced_policy = subprocess.run(
+                [
+                    "git",
+                    "show",
+                    f"{source_sha}:mvp/autotrade_mvp/qualification_trust_policy.json",
+                ],
+                cwd=source_root,
+                check=True,
+                stdout=subprocess.PIPE,
+            ).stdout
+            self.assertIn(b"candidate.self", replaced_policy)
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_QUALIFICATION_TRUST_SOURCE_ROOT",
+                    source_root,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_CANONICAL_QUALIFICATION_TRUST_POLICY_PATH",
+                    policy_path,
+                ),
+            ):
+                loaded = load_canonical_qualification_trust_policy(
+                    expected_source_sha=source_sha
+                )
+            self.assertEqual(loaded.roots, canonical_policy.roots)
+            self.assertNotEqual(loaded.roots, hostile_policy.roots)
+
+    def test_canonical_policy_rejects_parent_repository_fallback(self):
+        canonical_policy = policy(root())
+        with TemporaryDirectory() as directory:
+            repository_root = Path(directory) / "parent-repository"
+            source_root = repository_root / "nested-source"
+            policy_path = (
+                repository_root
+                / "mvp"
+                / "autotrade_mvp"
+                / "qualification_trust_policy.json"
+            )
+            policy_path.parent.mkdir(parents=True)
+            source_root.mkdir(parents=True)
+            policy_path.write_text(
+                json.dumps(
+                    qualification_trust_policy_payload(canonical_policy),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-q"], cwd=repository_root, check=True)
+            subprocess.run(
+                ["git", "add", "mvp/autotrade_mvp/qualification_trust_policy.json"],
+                cwd=repository_root,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git", "-c", "user.name=AutoTrade Test",
+                    "-c", "user.email=autotrade-test@example.invalid",
+                    "commit", "-q", "-m", "parent repository policy",
+                ],
+                cwd=repository_root,
+                check=True,
+            )
+            source_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repository_root,
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_QUALIFICATION_TRUST_SOURCE_ROOT",
+                    source_root,
+                ),
+                self.assertRaisesRegex(
+                    QualificationTrustError,
+                    "source root is not the Git top-level",
+                ),
+            ):
+                load_canonical_qualification_trust_policy(
+                    expected_source_sha=source_sha
+                )
+
+    def test_canonical_policy_rejects_caller_selected_historical_source(self):
+        canonical_policy = policy(root())
+        with TemporaryDirectory() as directory:
+            source_root = Path(directory) / "source"
+            policy_path = (
+                source_root
+                / "mvp"
+                / "autotrade_mvp"
+                / "qualification_trust_policy.json"
+            )
+            policy_path.parent.mkdir(parents=True)
+            policy_path.write_text(
+                json.dumps(
+                    qualification_trust_policy_payload(canonical_policy),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-q"], cwd=source_root, check=True)
+            subprocess.run(
+                ["git", "add", "mvp/autotrade_mvp/qualification_trust_policy.json"],
+                cwd=source_root,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git", "-c", "user.name=AutoTrade Test",
+                    "-c", "user.email=autotrade-test@example.invalid",
+                    "commit", "-q", "-m", "trusted policy",
+                ],
+                cwd=source_root,
+                check=True,
+            )
+            historical_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=source_root,
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+            (source_root / "README.md").write_text(
+                "advance trusted checkout\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "README.md"], cwd=source_root, check=True)
+            subprocess.run(
+                [
+                    "git", "-c", "user.name=AutoTrade Test",
+                    "-c", "user.email=autotrade-test@example.invalid",
+                    "commit", "-q", "-m", "advance trusted checkout",
+                ],
+                cwd=source_root,
+                check=True,
+            )
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_QUALIFICATION_TRUST_SOURCE_ROOT",
+                    source_root,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_CANONICAL_QUALIFICATION_TRUST_POLICY_PATH",
+                    policy_path,
+                ),
+                self.assertRaisesRegex(
+                    QualificationTrustError,
+                    "source SHA does not match checkout HEAD",
+                ),
+            ):
+                load_canonical_qualification_trust_policy(
+                    expected_source_sha=historical_sha
+                )
+
     def test_valid_signed_receipt_resolves_exact_evidence(self):
         trust_root = root()
         trust_policy = policy(trust_root)

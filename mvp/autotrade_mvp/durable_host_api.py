@@ -21,6 +21,7 @@ from .host_api import (
     HostEvent,
     OperationResult,
     command_result_payload,
+    scoped_host_operation_id,
 )
 from .persistence import JournalStore, payload_digest
 
@@ -300,9 +301,10 @@ class JournalBackedHostCommandStore:
                 )
             return self._command_result(stored)
 
-        operation_id = self._scoped_command_uuid(
-            command_id,
-            purpose="operations",
+        operation_id = scoped_host_operation_id(
+            account_id=self.account_id,
+            environment=self.environment,
+            command_id=command_id,
         )
         next_version = current + 1
         result = CommandResult(
@@ -313,7 +315,7 @@ class JournalBackedHostCommandStore:
         )
         event_id = self._scoped_command_uuid(
             command_id,
-            purpose="events/command",
+            purpose="command-events",
         )
         operation_time = self._now()
         envelope = self._event_envelope(

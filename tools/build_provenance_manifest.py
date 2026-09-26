@@ -290,6 +290,15 @@ def dotnet_package_dependencies() -> list[dict[str, str]]:
     ]
 
 
+def dotnet_package_projects() -> list[Path]:
+    projects: list[Path] = []
+    for project in sorted((ROOT / "src").rglob("*.csproj")):
+        tree = ET.parse(project)
+        if tree.findall(".//PackageReference"):
+            projects.append(project)
+    return projects
+
+
 def build_manifest() -> dict[str, object]:
     components_path = ROOT / "provenance" / "components.json"
     requirements_path = ROOT / "requirements-dev.txt"
@@ -401,13 +410,76 @@ def build_manifest() -> dict[str, object]:
             }
         )
 
-    if dotnet_packages and not list((ROOT / "src").rglob("packages.lock.json")):
+    dotnet_projects = dotnet_package_projects()
+    missing_dotnet_locks = [
+        project.relative_to(ROOT).as_posix()
+        for project in dotnet_projects
+        if not (project.parent / "packages.lock.json").is_file()
+    ]
+    if missing_dotnet_locks:
         blockers.append(
             {
                 "code": "DOTNET_TRANSITIVE_LOCK_MISSING",
-                "detail": "Release PackageReference dependencies exist without committed packages.lock.json files.",
+                "projects": missing_dotnet_locks,
+                "detail": (
+                    "Each release project with PackageReference dependencies "
+                    "requires its own committed sibling packages.lock.json."
+                ),
             }
         )
+
+    if dotnet_projects:
+        foundation = ROOT / ".github" / "workflows" / "dotnet-foundation.yml"
+        if not foundation.is_file():
+            blockers.append(
+                {
+                    "code": "DOTNET_LOCKED_RESTORE_WORKFLOW_MISSING",
+                    "detail": "NuGet dependencies require the canonical .NET restore workflow.",
+                }
+            )
+        else:
+            foundation_text = foundation.read_text(encoding="utf-8")
+            if '"src/**/packages.lock.json"' not in foundation_text:
+                blockers.append(
+                    {
+                        "code": "DOTNET_LOCK_WORKFLOW_PATH_MISSING",
+                        "detail": (
+                            "NuGet lock-file changes must trigger the canonical "
+                            ".NET workflow."
+                        ),
+                    }
+                )
+            restore_commands: list[str] = []
+            for raw in foundation_text.splitlines():
+                command = raw.strip()
+                if command.startswith("- "):
+                    command = command[2:].strip()
+                if command.startswith("run: dotnet restore "):
+                    restore_commands.append(command)
+            if not restore_commands:
+                blockers.append(
+                    {
+                        "code": "DOTNET_LOCKED_RESTORE_COMMAND_MISSING",
+                        "detail": (
+                            "NuGet dependencies require an explicit canonical "
+                            "dotnet restore command."
+                        ),
+                    }
+                )
+            elif any(
+                "--locked-mode" not in command
+                and "RestoreLockedMode=true" not in command
+                for command in restore_commands
+            ):
+                blockers.append(
+                    {
+                        "code": "DOTNET_RESTORE_NOT_LOCKED",
+                        "detail": (
+                            "Every canonical dotnet restore must enforce the "
+                            "committed NuGet dependency graph."
+                        ),
+                    }
+                )
 
     return {
         "schema_version": "1.0.0",

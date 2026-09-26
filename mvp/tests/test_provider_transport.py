@@ -2738,6 +2738,46 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
         self.assertEqual(fills[0].fee_amount, Decimal("2.50"))
         self.assertEqual(fills[0].evidence_refs, (observation.evidence_ref,))
 
+    def test_query_orders_read_is_bounded_and_uses_existing_read_authority(self):
+        events = []
+        capability = verified_kraken_read_capability(
+            permission_scopes=frozenset({"ORDER.READ"}),
+            data_entitlements=frozenset({"ORDERS"}),
+        )
+        wire = RecordingWire(
+            events,
+            response=b'{"error":[],"result":{"O-ONE":{},"O-TWO":{}}}',
+            http_status=200,
+        )
+        with TemporaryDirectory() as directory:
+            transport, _resolver, _allocator = self.make_transport(
+                directory=directory,
+                events=events,
+                capability=capability,
+                wire=wire,
+            )
+            binding = kraken_authenticated_read_binding(
+                endpoint="/0/private/QueryOrders",
+                query={
+                    "txid": "O-ONE,O-TWO",
+                    "trades": "false",
+                    "consolidate_taker": "true",
+                },
+                capability=capability,
+                permission_scope="ORDER.READ",
+            )
+            observation = transport(binding)
+            request = wire.requests[0]
+
+        self.assertEqual(
+            request.url,
+            "https://api.kraken.com/0/private/QueryOrders",
+        )
+        self.assertIn(b"txid=O-ONE%2CO-TWO", request.body)
+        self.assertIn(b"trades=false", request.body)
+        self.assertEqual(set(observation.payload["result"]), {"O-ONE", "O-TWO"})
+        self.assertEqual(observation.query_binding, binding)
+
     def test_invalid_private_read_query_fails_before_quota_nonce_secret_or_wire(self):
         cases = (
             (
@@ -2760,6 +2800,27 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
                 "ORDER.READ",
                 frozenset({"ORDERS"}),
                 "outside the documented range",
+            ),
+            (
+                "/0/private/QueryOrders",
+                {},
+                "ORDER.READ",
+                frozenset({"ORDERS"}),
+                "requires txid",
+            ),
+            (
+                "/0/private/QueryOrders",
+                {"txid": ",".join(f"O-{index}" for index in range(51))},
+                "ORDER.READ",
+                frozenset({"ORDERS"}),
+                "1..50 unique order ids",
+            ),
+            (
+                "/0/private/QueryOrders",
+                {"txid": "O-ONE,O-ONE"},
+                "ORDER.READ",
+                frozenset({"ORDERS"}),
+                "1..50 unique order ids",
             ),
             (
                 "/0/private/TradesHistory",

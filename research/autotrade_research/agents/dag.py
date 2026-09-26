@@ -325,6 +325,27 @@ def aggregate_specialists(
         if role_id not in seen:
             rejected.append((role_id, "missing_result"))
 
+    # Planning dependencies are semantic data dependencies, not only scheduling
+    # hints. A downstream result cannot remain accepted when any dependency's
+    # result was missing, late, over-budget, critique-blocked, or otherwise
+    # rejected. scheduled_roles is canonical topological order from the planner,
+    # so cascading removal is deterministic.
+    accepted_by_role = {run.role_id: (spec, run) for spec, run in accepted}
+    for role_id in scheduled:
+        pair = accepted_by_role.get(role_id)
+        if pair is None:
+            continue
+        spec, _run = pair
+        if any(dependency not in accepted_by_role for dependency in spec.dependencies):
+            del accepted_by_role[role_id]
+            rejected.append((role_id, "dependency_result_unavailable"))
+
+    accepted = [
+        accepted_by_role[role_id]
+        for role_id in scheduled
+        if role_id in accepted_by_role
+    ]
+
     if not accepted:
         return AggregatedProposal(
             direction="FLAT",

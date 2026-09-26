@@ -389,10 +389,15 @@ def parse_account_trades(
             raw_symbol,
             name="instrument_versions symbol",
         )
-        normalized_instruments[provider_symbol] = _text(
+        instrument_version = _text(
             raw_instrument_version,
             name="instrument_version",
         )
+        if provider_symbol in normalized_instruments:
+            raise BinanceUsdmAdapterError(
+                "instrument_versions contains duplicate normalized symbols"
+            )
+        normalized_instruments[provider_symbol] = instrument_version
 
     client_map = {} if client_ids_by_order_id is None else client_ids_by_order_id
     if not isinstance(client_map, Mapping):

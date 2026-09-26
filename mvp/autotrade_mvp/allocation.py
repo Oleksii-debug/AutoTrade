@@ -958,27 +958,80 @@ def allocate_targets(
     high = Decimal("1")
     best = _evaluate(candidates, policy, normalized_stress, low)
 
-    # Uniform scaling is not globally monotone when a reconciled position crosses
-    # through zero (for example, reducing a large long before establishing a
-    # smaller short).  Probe those exact risk minima before using bisection to
-    # find the upper feasible boundary; otherwise an infeasible midpoint can
-    # discard the only risk-reducing feasible interval.
-    zero_crossings: set[Decimal] = set()
+    # Uniform scaling is not globally monotone around absolute-value risk
+    # surfaces.  A feasible interior can exist even when scale 0, 0.5 and 1 are
+    # all infeasible.  Seed the search at deterministic extrema/corners of the
+    # continuous risk functions before using bisection for the upper feasible
+    # boundary.  In particular, portfolio net zero is independent of any one
+    # position crossing zero.
+    critical_scales: set[Decimal] = set()
+
+    def add_interior_root(constant: Decimal, slope: Decimal) -> None:
+        if slope == 0:
+            return
+        crossing = -constant / slope
+        if Decimal("0") < crossing < Decimal("1"):
+            critical_scales.add(crossing)
+
+    current_notionals: dict[str, Decimal] = {}
+    notional_changes: dict[str, Decimal] = {}
     for candidate in candidates:
         current_notional = candidate.current_quantity * candidate.price
         change = candidate.desired_notional - current_notional
-        if change == 0:
-            continue
-        crossing = -current_notional / change
-        if Decimal("0") < crossing < Decimal("1"):
-            zero_crossings.add(crossing)
-    for crossing in sorted(zero_crossings):
-        probe = _evaluate(candidates, policy, normalized_stress, crossing)
+        current_notionals[candidate.symbol] = current_notional
+        notional_changes[candidate.symbol] = change
+        add_interior_root(current_notional, change)
+
+        # A liquidity cap changes the affine target path into a flat segment.
+        # Probe the saturation corner as another deterministic piecewise point.
+        if candidate.max_executable_notional is not None and change != 0:
+            saturation = candidate.max_executable_notional / abs(change)
+            if Decimal("0") < saturation < Decimal("1"):
+                critical_scales.add(saturation)
+
+    add_interior_root(
+        sum(current_notionals.values(), Decimal("0")),
+        sum(notional_changes.values(), Decimal("0")),
+    )
+
+    # Worst stress loss is the upper envelope of affine scenario-loss lines.
+    # Its interior minimum can occur where two scenarios exchange dominance,
+    # not only where one scenario P&L crosses zero.  Probe both roots and all
+    # pairwise intersections so a V-shaped feasible stress interval is not
+    # discarded by an infeasible midpoint.
+    stress_lines: list[tuple[Decimal, Decimal]] = []
+    for scenario in normalized_stress.values():
+        current_pnl = sum(
+            (
+                current_notionals[candidate.symbol] * scenario[candidate.symbol]
+                for candidate in candidates
+            ),
+            Decimal("0"),
+        )
+        pnl_change = sum(
+            (
+                notional_changes[candidate.symbol] * scenario[candidate.symbol]
+                for candidate in candidates
+            ),
+            Decimal("0"),
+        )
+        add_interior_root(current_pnl, pnl_change)
+        stress_lines.append((current_pnl, pnl_change))
+
+    for index, (left_constant, left_slope) in enumerate(stress_lines):
+        for right_constant, right_slope in stress_lines[index + 1 :]:
+            add_interior_root(
+                left_constant - right_constant,
+                left_slope - right_slope,
+            )
+
+    for scale in sorted(critical_scales):
+        probe = _evaluate(candidates, policy, normalized_stress, scale)
         if probe.status == "ALLOCATED" and (
-            best.status != "ALLOCATED" or crossing > best.scale
+            best.status != "ALLOCATED" or scale > best.scale
         ):
             best = probe
-            low = crossing
+            low = scale
 
     for _ in range(policy.max_iterations):
         if high - low <= policy.min_scale_tolerance:

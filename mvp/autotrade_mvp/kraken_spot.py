@@ -274,6 +274,16 @@ class KrakenSpotPreparedRequest:
             "sha256:" + sha256(rendered_body.encode("utf-8")).hexdigest(),
         )
 
+    def to_guarded_dispatch_request(self) -> Mapping[str, object]:
+        """Project canonical Kraken preparation into GuardedDispatcher payload."""
+        return MappingProxyType(
+            {
+                "endpoint": self.endpoint,
+                "body": dict(self.body),
+                "capability_snapshot_id": self.capability_snapshot_id,
+            }
+        )
+
 
 def prepare_spot_order_request(
     intent: KrakenSpotOrderIntent,

@@ -24,6 +24,7 @@ from .provider_core import (
     ProviderResponseObservation,
     Surface,
 )
+from .provider_transport import TransportedProviderResponseObservation
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
 
@@ -215,12 +216,14 @@ class BinanceUsdmMarkPrice:
     source_sha256: str
     evidence_ref: str
     query_digest: str
+    origin: str
+    request_url_sha256: str
     _verification_token: InitVar[object | None] = None
 
     def __post_init__(self, _verification_token: object | None) -> None:
         if _verification_token is not _MARK_PRICE_TOKEN:
             raise BinanceUsdmAdapterError(
-                "mark price must come from an exact provider response observation"
+                "mark price must come from the shared provider transport"
             )
         environment = _text(self.environment, name="environment").upper()
         instrument = _text(self.instrument_version, name="instrument_version")
@@ -242,7 +245,19 @@ class BinanceUsdmMarkPrice:
             raise BinanceUsdmAdapterError(
                 "mark-price query_digest must be canonical lowercase SHA-256"
             )
-        object.__setattr__(self, "environment", environment)
+        origin = _text(self.origin, name="mark-price origin")
+        if not origin.startswith("https://") or "/" in origin.removeprefix("https://"):
+            raise BinanceUsdmAdapterError(
+                "mark-price origin must be a canonical HTTPS origin"
+            )
+        request_url_sha256 = _text(
+            self.request_url_sha256,
+            name="mark-price request_url_sha256",
+        )
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", request_url_sha256) is None:
+            raise BinanceUsdmAdapterError(
+                "mark-price request_url_sha256 must be canonical lowercase SHA-256"
+            )
         object.__setattr__(self, "environment", environment)
         object.__setattr__(self, "instrument_version", instrument)
         object.__setattr__(self, "symbol", symbol)
@@ -251,28 +266,33 @@ class BinanceUsdmMarkPrice:
         object.__setattr__(self, "source_sha256", digest)
         object.__setattr__(self, "evidence_ref", evidence_ref)
         object.__setattr__(self, "query_digest", query_digest)
+        object.__setattr__(self, "origin", origin)
+        object.__setattr__(self, "request_url_sha256", request_url_sha256)
 
     @classmethod
     def from_premium_index(
         cls,
         *,
-        observation: ProviderResponseObservation,
+        observation: TransportedProviderResponseObservation,
         symbol: str,
     ) -> "BinanceUsdmMarkPrice":
-        if not isinstance(observation, ProviderResponseObservation):
-            raise TypeError("observation must be ProviderResponseObservation")
+        if not isinstance(observation, TransportedProviderResponseObservation):
+            raise TypeError(
+                "observation must be TransportedProviderResponseObservation"
+            )
+        provider_observation = observation.observation
         requested_symbol = _provider_symbol(symbol, name="mark-price symbol")
-        observation.require_scope(
+        provider_observation.require_scope(
             provider_id="BINANCE",
             surface=Surface.PUBLIC_DATA,
             endpoint=BINANCE_USDM_ENDPOINTS["MARK_PRICE"],
         )
-        query = dict(observation.query_binding.query)
+        query = dict(provider_observation.query_binding.query)
         if query != {"symbol": requested_symbol}:
             raise BinanceUsdmAdapterError(
                 "mark-price observation query must bind the exact requested symbol"
             )
-        payload = observation.payload
+        payload = provider_observation.payload
         if not isinstance(payload, Mapping):
             raise BinanceUsdmAdapterError(
                 "mark-price provider response must be an object"
@@ -293,21 +313,23 @@ class BinanceUsdmMarkPrice:
         timestamp = _millis(payload.get("time"), name="mark-price time")
         provider_observed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
         response_observed = datetime.fromisoformat(
-            observation.observed_at.replace("Z", "+00:00")
+            provider_observation.observed_at.replace("Z", "+00:00")
         )
         if provider_observed > response_observed:
             raise BinanceUsdmAdapterError(
                 "mark-price provider timestamp is after exact response observation"
             )
         return cls(
-            environment=observation.environment,
-            instrument_version=observation.query_binding.instrument_version,
+            environment=provider_observation.environment,
+            instrument_version=provider_observation.query_binding.instrument_version,
             symbol=provider_symbol,
             price=price,
             observed_at=provider_observed,
-            source_sha256=observation.response_sha256,
-            evidence_ref=observation.evidence_ref,
-            query_digest=observation.query_binding.query_digest,
+            source_sha256=provider_observation.response_sha256,
+            evidence_ref=provider_observation.evidence_ref,
+            query_digest=provider_observation.query_binding.query_digest,
+            origin=observation.origin,
+            request_url_sha256=observation.request_url_sha256,
             _verification_token=_MARK_PRICE_TOKEN,
         )
 
@@ -324,6 +346,8 @@ class BinanceUsdmSymbolRules:
     source_sha256: str
     evidence_ref: str
     query_digest: str
+    origin: str
+    request_url_sha256: str
     supported_order_types: frozenset[str]
     supported_time_in_force: frozenset[str]
     lot_min_qty: Decimal
@@ -343,7 +367,7 @@ class BinanceUsdmSymbolRules:
     def __post_init__(self, _verification_token: object | None) -> None:
         if _verification_token is not _EXCHANGE_INFO_RULES_TOKEN:
             raise BinanceUsdmAdapterError(
-                "exchangeInfo rules must come from canonical provider payload parsing"
+                "exchangeInfo rules must come from the shared provider transport"
             )
         environment = _text(self.environment, name="environment").upper()
         instrument = _text(self.instrument_version, name="instrument_version")
@@ -367,6 +391,19 @@ class BinanceUsdmSymbolRules:
         if re.fullmatch(r"sha256:[0-9a-f]{64}", query_digest) is None:
             raise BinanceUsdmAdapterError(
                 "exchangeInfo query_digest must be canonical lowercase SHA-256"
+            )
+        origin = _text(self.origin, name="exchangeInfo origin")
+        if not origin.startswith("https://") or "/" in origin.removeprefix("https://"):
+            raise BinanceUsdmAdapterError(
+                "exchangeInfo origin must be a canonical HTTPS origin"
+            )
+        request_url_sha256 = _text(
+            self.request_url_sha256,
+            name="exchangeInfo request_url_sha256",
+        )
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", request_url_sha256) is None:
+            raise BinanceUsdmAdapterError(
+                "exchangeInfo request_url_sha256 must be canonical lowercase SHA-256"
             )
         if (
             not isinstance(self.supported_order_types, frozenset)
@@ -452,6 +489,7 @@ class BinanceUsdmSymbolRules:
                 positive=True,
             )
 
+        object.__setattr__(self, "environment", environment)
         object.__setattr__(self, "instrument_version", instrument)
         object.__setattr__(self, "symbol", symbol)
         object.__setattr__(self, "status", status)
@@ -459,6 +497,8 @@ class BinanceUsdmSymbolRules:
         object.__setattr__(self, "source_sha256", digest)
         object.__setattr__(self, "evidence_ref", evidence_ref)
         object.__setattr__(self, "query_digest", query_digest)
+        object.__setattr__(self, "origin", origin)
+        object.__setattr__(self, "request_url_sha256", request_url_sha256)
         object.__setattr__(self, "supported_order_types", order_types)
         object.__setattr__(self, "supported_time_in_force", time_in_force)
         object.__setattr__(self, "lot_min_qty", lot_min)
@@ -483,22 +523,25 @@ class BinanceUsdmSymbolRules:
     def from_exchange_info(
         cls,
         *,
-        observation: ProviderResponseObservation,
+        observation: TransportedProviderResponseObservation,
         symbol: str,
     ) -> "BinanceUsdmSymbolRules":
-        if not isinstance(observation, ProviderResponseObservation):
-            raise TypeError("observation must be ProviderResponseObservation")
+        if not isinstance(observation, TransportedProviderResponseObservation):
+            raise TypeError(
+                "observation must be TransportedProviderResponseObservation"
+            )
+        provider_observation = observation.observation
         requested_symbol = _provider_symbol(symbol, name="exchangeInfo symbol")
-        observation.require_scope(
+        provider_observation.require_scope(
             provider_id="BINANCE",
             surface=Surface.PUBLIC_DATA,
             endpoint=BINANCE_USDM_ENDPOINTS["EXCHANGE_INFO"],
         )
-        if dict(observation.query_binding.query):
+        if dict(provider_observation.query_binding.query):
             raise BinanceUsdmAdapterError(
                 "exchangeInfo observation must bind the canonical empty query"
             )
-        payload = observation.payload
+        payload = provider_observation.payload
         if not isinstance(payload, Mapping):
             raise BinanceUsdmAdapterError(
                 "exchangeInfo provider response must be an object"
@@ -532,7 +575,7 @@ class BinanceUsdmSymbolRules:
             )
 
         instrument = _text(
-            observation.query_binding.instrument_version,
+            provider_observation.query_binding.instrument_version,
             name="instrument_version",
         )
         status = _text(
@@ -693,14 +736,16 @@ class BinanceUsdmSymbolRules:
             )
 
         return cls(
-            environment=observation.environment,
+            environment=provider_observation.environment,
             instrument_version=instrument,
             symbol=requested_symbol,
             status=status,
             contract_type=contract_type,
-            source_sha256=observation.response_sha256,
-            evidence_ref=observation.evidence_ref,
-            query_digest=observation.query_binding.query_digest,
+            source_sha256=provider_observation.response_sha256,
+            evidence_ref=provider_observation.evidence_ref,
+            query_digest=provider_observation.query_binding.query_digest,
+            origin=observation.origin,
+            request_url_sha256=observation.request_url_sha256,
             supported_order_types=order_types,
             supported_time_in_force=time_in_force,
             lot_min_qty=lot_min,

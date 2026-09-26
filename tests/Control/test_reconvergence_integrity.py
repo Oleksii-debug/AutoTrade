@@ -151,6 +151,7 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         for path in (
             ".github/workflows/reconvergence-integrity.yml",
             "control/tools/reconvergence_integrity.py",
+            "control/tools/registry_state.py",
             "AGENTS.md",
             "control/CONSTITUTION.md",
             "control/qualification.json",

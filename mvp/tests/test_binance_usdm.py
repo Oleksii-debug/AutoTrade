@@ -15,6 +15,7 @@ from mvp.autotrade_mvp.binance_usdm import (
     prepare_order_request,
 )
 from mvp.autotrade_mvp.provider_core import (
+    ProviderCoreError,
     Surface,
     observe_authenticated_json_response,
     prepare_authenticated_read_query,
@@ -908,7 +909,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             row,
             provider_id="KRAKEN",
         )
-        with self.assertRaisesRegex(BinanceUsdmAdapterError, "provider mismatch"):
+        with self.assertRaisesRegex(ProviderCoreError, "provider mismatch"):
             BinanceUsdmSymbolRules.from_exchange_info(
                 observation=wrong_provider,
                 symbol="BTCUSDT",
@@ -919,7 +920,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             payload={"symbols": [row]},
             query={},
         )
-        with self.assertRaisesRegex(BinanceUsdmAdapterError, "endpoint mismatch"):
+        with self.assertRaisesRegex(ProviderCoreError, "endpoint mismatch"):
             BinanceUsdmSymbolRules.from_exchange_info(
                 observation=wrong_endpoint,
                 symbol="BTCUSDT",

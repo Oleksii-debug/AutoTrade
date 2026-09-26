@@ -37,7 +37,8 @@ class SemanticWebClientContractTests(unittest.TestCase):
         ):
             self.assertIn(required, html)
         self.assertIn("function renderProjection(bodyId, record, emptyMessage)", js)
-        self.assertIn("function renderPermissionSummary(permissionSummary)", js)\n        self.assertIn("renderPermissionSummary(parsed.permissionSummary)", js)
+        self.assertIn("function renderPermissionSummary(permissionSummary)", js)
+        self.assertIn("renderPermissionSummary(parsed.permissionSummary)", js)
         self.assertIn('renderProjection(\n      "portfolio-body"', js)
         self.assertIn('renderProjection(\n      "risk-body"', js)
         self.assertIn('renderProjection(\n      "strategy-body"', js)
@@ -50,7 +51,8 @@ class SemanticWebClientContractTests(unittest.TestCase):
         js = APP.read_text(encoding="utf-8")
         self.assertIn("function stableProjectionValue(value)", js)
         self.assertIn("Object.keys(value).sort()", js)
-        self.assertIn("rows.push([path, projectionText(value)])", js)\n        self.assertIn("cell.textContent = value", js)
+        self.assertIn("rows.push([path, projectionText(value)])", js)
+        self.assertIn("cell.textContent = value", js)
         self.assertIn('header.scope = "row"', js)
         self.assertNotIn("innerHTML", js)
         for region in (

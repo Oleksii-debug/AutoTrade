@@ -9,6 +9,8 @@ from mvp.autotrade_mvp.bybit_v5 import (
     build_order_payload,
     prepare_order_submission,
     prepare_order_read_query,
+    prepare_next_order_read_query,
+    order_history_coverage_from_pages,
     coverage_evidence,
     parse_executions,
     parse_order_page,
@@ -1363,6 +1365,168 @@ class BybitV5AdapterTests(unittest.TestCase):
                 bound_execution_response(
                     {"retCode": 0, "result": {"list": []}}
                 )
+            )
+
+
+    def test_next_order_page_preserves_exact_base_query_and_capability_scope(self):
+        first = bound_order_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "cursor-next",
+                    "list": [],
+                },
+            },
+            client_order_id="client_123",
+            start_time_ms=1790193600000,
+            end_time_ms=1790280000000,
+        )
+        binding = prepare_next_order_read_query(
+            observation=first,
+            capability=read_capability(),
+            at=READ_AT,
+        )
+        self.assertIsNotNone(binding)
+        self.assertEqual(binding.query["cursor"], "cursor-next")
+        self.assertEqual(binding.query["orderLinkId"], "client_123")
+        self.assertEqual(binding.query["startTime"], "1790193600000")
+        self.assertEqual(binding.query["endTime"], "1790280000000")
+
+        terminal = bound_order_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "",
+                    "list": [],
+                },
+            },
+            start_time_ms=1790193600000,
+            end_time_ms=1790280000000,
+        )
+        self.assertIsNone(
+            prepare_next_order_read_query(
+                observation=terminal,
+                capability=read_capability(),
+                at=READ_AT,
+            )
+        )
+
+    def test_order_history_coverage_requires_contiguous_complete_cursor_chain(self):
+        common = {
+            "start_time_ms": 1790193600000,
+            "end_time_ms": 1790280000000,
+        }
+        first = bound_order_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "page-2",
+                    "list": [],
+                },
+            },
+            **common,
+        )
+        second = bound_order_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "",
+                    "list": [],
+                },
+            },
+            cursor="page-2",
+            **common,
+        )
+        coverage = order_history_coverage_from_pages(
+            (first, second),
+            consistency_horizon_satisfied=True,
+        )
+        self.assertTrue(coverage.pagination_complete)
+        self.assertTrue(coverage.consistency_horizon_satisfied)
+        self.assertFalse(coverage.provider_semantics_exclude_execution)
+        self.assertEqual(coverage.surface, "ORDER_HISTORY")
+        self.assertEqual(coverage.provider_environment, "TESTNET")
+        self.assertEqual(coverage.coverage_start, "2026-09-23T20:00:00.000Z")
+        self.assertEqual(coverage.coverage_end, "2026-09-24T20:00:00.000Z")
+
+    def test_order_history_coverage_rejects_skipped_or_partial_cursor_chain(self):
+        common = {
+            "start_time_ms": 1790193600000,
+            "end_time_ms": 1790280000000,
+        }
+        first = bound_order_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "page-2",
+                    "list": [],
+                },
+            },
+            **common,
+        )
+        wrong_second = bound_order_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "",
+                    "list": [],
+                },
+            },
+            cursor="page-3",
+            **common,
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "cursor chain"):
+            order_history_coverage_from_pages(
+                (first, wrong_second),
+                consistency_horizon_satisfied=True,
+            )
+
+        with self.assertRaisesRegex(ProviderCoreError, "incomplete"):
+            order_history_coverage_from_pages(
+                (first,),
+                consistency_horizon_satisfied=True,
+            )
+
+    def test_order_history_coverage_rejects_mid_chain_start_and_implicit_window(self):
+        mid_chain = bound_order_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "",
+                    "list": [],
+                },
+            },
+            cursor="page-2",
+            start_time_ms=1790193600000,
+            end_time_ms=1790280000000,
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "first page"):
+            order_history_coverage_from_pages(
+                (mid_chain,),
+                consistency_horizon_satisfied=True,
+            )
+
+        implicit = bound_order_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "",
+                    "list": [],
+                },
+            }
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "explicit startTime"):
+            order_history_coverage_from_pages(
+                (implicit,),
+                consistency_horizon_satisfied=True,
             )
 
 

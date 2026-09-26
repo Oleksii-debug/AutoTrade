@@ -351,6 +351,60 @@ class JournalBackedHostApiTests(unittest.TestCase):
             ):
                 operation()
 
+    def test_restart_rejects_uuid_shaped_noncanonical_bound_operation_identity(self):
+        source = self.store()
+        accepted = source.submit(self.command())
+        source_event = JournalStore(self.path).load_events(
+            source.AGGREGATE_TYPE,
+            source.aggregate_id,
+        )[0]
+        payload = dict(source_event["payload"])
+        forged_operation_id = "22222222-2222-4222-8222-222222222222"
+        self.assertNotEqual(forged_operation_id, accepted.operation_id)
+        payload["operation_id"] = forged_operation_id
+
+        with TemporaryDirectory() as directory:
+            forged_path = f"{directory}/journal.sqlite3"
+            journal = JournalStore(forged_path)
+            forged = JournalBackedHostCommandStore(
+                journal,
+                account_id="paper-account-1",
+                environment="PAPER",
+                session_validator=lambda session, actor, origin, action: (
+                    session,
+                    actor,
+                )
+                in self.sessions,
+                max_events=100,
+                request_origin_provider=lambda: "https://local.autotrade.invalid",
+                now=lambda: "2026-09-24T18:00:01Z",
+            )
+            journal.append_event(
+                {
+                    "event_id": "forged-bound-host-command-event",
+                    "event_type": "COMMAND_ACCEPTED",
+                    "aggregate_type": forged.AGGREGATE_TYPE,
+                    "aggregate_id": forged.aggregate_id,
+                    "aggregate_version": "1",
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                    "committed_at": "2026-09-24T18:00:00Z",
+                },
+                outbox_topic="ui.host-events",
+            )
+
+            for operation in (
+                lambda: forged.state_version,
+                forged.snapshot,
+                lambda: forged.events_after(0),
+                lambda: forged.get_operation(forged_operation_id),
+            ):
+                with self.subTest(operation=operation), self.assertRaisesRegex(
+                    ValueError,
+                    "operation identity does not match canonical command scope",
+                ):
+                    operation()
+
     def test_exact_retry_after_restart_returns_original_result_without_new_event(self):
         first = self.store()
         command = self.command()

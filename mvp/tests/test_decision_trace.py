@@ -252,5 +252,63 @@ class DecisionTraceStoreTests(unittest.TestCase):
             self.assertIn("[REDACTED]", attributes["repr_message"])
 
 
+    def test_escaped_json_and_encoded_query_secret_keys_are_redacted(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = trace("trace-encoded-secret-keys")
+            item["attributes"] = {
+                "escaped_json": (
+                    '{"api\\u005fsecret":"WHITEBIT-ESCAPED-SECRET","safe":"ok"}'
+                ),
+                "escaped_json_array": (
+                    '[{"api\\u005fsecret":"WHITEBIT-ARRAY-SECRET"},{"safe":"ok"}]'
+                ),
+                "encoded_url_upper": (
+                    "https://provider.test/orders?"
+                    "api%5Fsecret=WHITEBIT-PERCENT-UPPER&symbol=BTC"
+                ),
+                "encoded_url_lower": (
+                    "https://provider.test/orders?"
+                    "api%5fsecret=WHITEBIT-PERCENT-LOWER&symbol=ETH"
+                ),
+                "benign_encoded_url": (
+                    "https://provider.test/orders?"
+                    "api%5Fsecret%5Frotation%5Fcount=4&symbol=BTC"
+                ),
+            }
+            store.append(item)
+
+            raw = path.read_text(encoding="utf-8")
+            for leaked in (
+                "WHITEBIT-ESCAPED-SECRET",
+                "WHITEBIT-ARRAY-SECRET",
+                "WHITEBIT-PERCENT-UPPER",
+                "WHITEBIT-PERCENT-LOWER",
+            ):
+                self.assertNotIn(leaked, raw)
+
+            attributes = json.loads(raw)["attributes"]
+            decoded_object = json.loads(attributes["escaped_json"])
+            self.assertEqual(decoded_object["api_secret"], "[REDACTED]")
+            self.assertEqual(decoded_object["safe"], "ok")
+            decoded_array = json.loads(attributes["escaped_json_array"])
+            self.assertEqual(decoded_array[0]["api_secret"], "[REDACTED]")
+            self.assertEqual(decoded_array[1]["safe"], "ok")
+            self.assertEqual(
+                attributes["encoded_url_upper"],
+                "https://provider.test/orders?api%5Fsecret=[REDACTED]&symbol=BTC",
+            )
+            self.assertEqual(
+                attributes["encoded_url_lower"],
+                "https://provider.test/orders?api%5fsecret=[REDACTED]&symbol=ETH",
+            )
+            self.assertEqual(
+                attributes["benign_encoded_url"],
+                "https://provider.test/orders?"
+                "api%5Fsecret%5Frotation%5Fcount=4&symbol=BTC",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

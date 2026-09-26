@@ -194,6 +194,58 @@ internal static class Program
             "operation success must not fabricate provider in-flight absence");
     }
     
+    static void StaleSuccessorMayCarryOlderEvidenceTimeTest()
+    {
+        EmergencyHostStatus current = new(
+            Connected: true,
+            HostId: "host-local-1",
+            AccountId: "paper-account-1",
+            Environment: "PAPER",
+            StateVersion: "7",
+            ObservedAtUtc: DateTimeOffset.Parse(
+                "2026-09-25T09:30:00Z",
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal
+                    | System.Globalization.DateTimeStyles.AdjustToUniversal),
+            Message: "current")
+        {
+            IsCurrent = true,
+        };
+        EmergencyHostStatus stale = new(
+            Connected: true,
+            HostId: "host-local-1",
+            AccountId: "paper-account-1",
+            Environment: "PAPER",
+            StateVersion: "8",
+            ObservedAtUtc: DateTimeOffset.Parse(
+                "2026-09-25T09:29:00Z",
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal
+                    | System.Globalization.DateTimeStyles.AdjustToUniversal),
+            Message: "stale")
+        {
+            IsCurrent = false,
+        };
+
+        EmergencyHostStatus accepted = stale.ValidateStaleSuccessorOf(current);
+        Check.True(
+            ReferenceEquals(accepted, stale),
+            "stale successor should preserve the validated observation");
+
+        bool normalSuccessorRejected = false;
+        try
+        {
+            stale.ValidateSuccessorOf(current);
+        }
+        catch (InvalidOperationException)
+        {
+            normalSuccessorRejected = true;
+        }
+        Check.True(
+            normalSuccessorRejected,
+            "current-evidence successor validation must still reject evidence-time regression");
+    }
+
     static async Task NonCurrentFreshnessRemainsExplicitTest()
     {
         const string token = "session-token-stale";
@@ -844,6 +896,7 @@ internal static class Program
         CredentialTargetIsOriginBoundTest();
         await PairedOriginMismatchFailsBeforeTransportTest();
         await CanonicalStatusAndOperationTest();
+        StaleSuccessorMayCarryOlderEvidenceTimeTest();
         await NonCurrentFreshnessRemainsExplicitTest();
         await StaleFreshnessDoesNotDisableEmergencyBlockTest();
         await AmbiguousPostExactRetryTest();

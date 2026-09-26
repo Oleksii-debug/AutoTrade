@@ -415,7 +415,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("await refreshSnapshot();", js)
         self.assertNotIn('action: "REFRESH_STATE"', js)
 
-    def test_host_safety_commands_fail_closed_by_authenticated_role(self):
+    def test_host_authority_commands_fail_closed_by_authenticated_role(self):
         html = INDEX.read_text(encoding="utf-8")
         js = APP.read_text(encoding="utf-8")
         self.assertIn(
@@ -427,10 +427,15 @@ class SemanticWebClientContractTests(unittest.TestCase):
             js,
         )
         self.assertIn(
+            'SET_AUTHORITY: new Set(["OWNER"])',
+            js,
+        )
+        self.assertIn(
             'role: requiredText(permissionSummary.role, "permission_summary.role")',
             js,
         )
         self.assertIn("function roleCanSubmitAction(role, action)", js)
+        self.assertIn("function actionCanSubmitInCurrentScope(role, action)", js)
         self.assertIn("function syncHostActionOptions(role)", js)
         self.assertIn("option.disabled = !allowed", js)
         self.assertIn(
@@ -440,7 +445,81 @@ class SemanticWebClientContractTests(unittest.TestCase):
         )
         self.assertIn('value="BLOCK_NEW_EXPOSURE"', html)
         self.assertIn('value="REVOKE_AUTHORITY"', html)
-        self.assertNotIn('value="SET_AUTHORITY"', html)
+        self.assertIn('value="SET_AUTHORITY"', html)
+        self.assertIn(
+            'if (action === "SET_AUTHORITY" && state.environment === "REPLAY")',
+            js,
+        )
+
+    def test_owner_authority_policy_workflow_is_structured_and_scope_bound(self):
+        html = INDEX.read_text(encoding="utf-8")
+        js = APP.read_text(encoding="utf-8")
+        for field_id in (
+            "authority-policy-fields",
+            "authority-policy-account",
+            "authority-policy-environment",
+            "authority-policy-id",
+            "authority-instrument-id",
+            "authority-instrument-version",
+            "authority-actions",
+            "authority-max-notional",
+            "authority-valid-from",
+            "authority-expires-at",
+            "authority-policy-version",
+            "authority-autonomous",
+            "authority-protection-only",
+            "authority-policy-confirm",
+        ):
+            self.assertIn(f'id="{field_id}"', html)
+        self.assertNotIn("<textarea", html.lower())
+        self.assertIn("function authorityPolicyPayload()", js)
+        self.assertIn("environments: Object.freeze([state.environment])", js)
+        self.assertIn("policy_id: requiredPolicyInput", js)
+        self.assertIn("instrument_id: instrumentId.toLowerCase()", js)
+        self.assertIn("actions: Object.freeze(authorityPolicyActions())", js)
+        self.assertIn("max_notional: positiveDecimalPolicyInput", js)
+        self.assertIn("autonomous: byId(\"authority-autonomous\").checked", js)
+        self.assertIn(
+            "protection_only: byId(\"authority-protection-only\").checked",
+            js,
+        )
+        self.assertIn(
+            "review confirmation is required before authority policy submission",
+            js,
+        )
+        self.assertIn(
+            'if (action === "SET_AUTHORITY") return authorityPolicyPayload()',
+            js,
+        )
+        self.assertNotIn('name="account_id"', html)
+        self.assertNotIn('name="environment"', html)
+
+    def test_policy_form_uses_exact_integer_and_decimal_guards_before_host_submit(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("function positiveSafeIntegerPolicyInput(id, name)", js)
+        self.assertIn("Number.isSafeInteger(value)", js)
+        self.assertIn("function positiveDecimalPolicyInput(id, name)", js)
+        self.assertIn(
+            'throw new Error(name + " must be a positive canonical decimal")',
+            js,
+        )
+        self.assertIn("utcInstant(validFrom, \"valid from\")", js)
+        self.assertIn("utcInstant(expiresAt, \"expires at\")", js)
+        self.assertIn(
+            'throw new Error("authority policy expiry must be after valid from")',
+            js,
+        )
+
+    def test_invalid_policy_form_does_not_invalidate_fresh_host_snapshot(self):
+        js = APP.read_text(encoding="utf-8")
+        submit = js.index("async function submitCommand(event)")
+        build = js.index("payload = commandForSubmission(action)", submit)
+        local_catch = js.index("} catch (error) {", build)
+        network_submit = js.index("await submitCanonicalCommand(payload)", local_catch)
+        local_slice = js[local_catch:network_submit]
+        self.assertIn("Command was not submitted:", local_slice)
+        self.assertNotIn("state.snapshotReady = false", local_slice)
+        self.assertNotIn("state.sessionIdentity = null", local_slice)
 
     def test_action_change_rechecks_role_before_enabling_submit(self):
         js = APP.read_text(encoding="utf-8")

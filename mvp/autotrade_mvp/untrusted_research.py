@@ -307,6 +307,12 @@ class AdmittedResearchToolRequest:
                 label="admitted research tool arguments",
             ),
         )
+        privileged_arguments = _scan_privileged_fields(self.arguments)
+        if privileged_arguments:
+            raise PermissionError(
+                "admitted research tool arguments contain forbidden privileged fields: "
+                + ", ".join(sorted(privileged_arguments))
+            )
         refs = tuple(
             _text(item, name="evidence_ref")
             for item in self.evidence_refs

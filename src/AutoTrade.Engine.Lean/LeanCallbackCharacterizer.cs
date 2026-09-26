@@ -14,7 +14,7 @@ namespace AutoTrade.Engine.Lean;
 /// </summary>
 public sealed class LeanCallbackCharacterizer
 {
-    private const string StateSchemaVersion = "1.0.0";
+    private const string StateSchemaVersion = "2.0.0";
 
     private static readonly JsonSerializerOptions StateJsonOptions = new()
     {
@@ -37,11 +37,24 @@ public sealed class LeanCallbackCharacterizer
         }
 
         var identity = (orderEvent.OrderId, orderEvent.Id);
+        var hasOrderFee = orderEvent.OrderFee is not null;
+        var feeAmount = hasOrderFee ? orderEvent.OrderFee.Value.Amount : decimal.Zero;
+        var feeCurrency = hasOrderFee
+            ? orderEvent.OrderFee.Value.Currency ?? string.Empty
+            : string.Empty;
         var fingerprint = new CallbackFingerprint(
             orderEvent.Status,
             orderEvent.Symbol?.Value ?? string.Empty,
             orderEvent.FillQuantity,
             orderEvent.FillPrice,
+            orderEvent.FillPriceCurrency ?? string.Empty,
+            orderEvent.Direction,
+            hasOrderFee,
+            feeAmount,
+            feeCurrency,
+            orderEvent.Quantity,
+            orderEvent.IsAssignment,
+            orderEvent.IsInTheMoney,
             orderEvent.UtcTime);
         var duplicateIdentity = _seen.TryGetValue(identity, out var existing);
         var identityConflict = duplicateIdentity && existing != fingerprint;
@@ -61,6 +74,14 @@ public sealed class LeanCallbackCharacterizer
             orderEvent.Symbol?.Value ?? string.Empty,
             orderEvent.FillQuantity.ToString(CultureInfo.InvariantCulture),
             orderEvent.FillPrice.ToString(CultureInfo.InvariantCulture),
+            orderEvent.FillPriceCurrency ?? string.Empty,
+            orderEvent.Direction.ToString(),
+            hasOrderFee,
+            feeAmount.ToString(CultureInfo.InvariantCulture),
+            feeCurrency,
+            orderEvent.Quantity.ToString(CultureInfo.InvariantCulture),
+            orderEvent.IsAssignment,
+            orderEvent.IsInTheMoney,
             orderEvent.FillQuantity != decimal.Zero,
             duplicateIdentity,
             identityConflict,
@@ -85,6 +106,14 @@ public sealed class LeanCallbackCharacterizer
                 item.Value.Symbol,
                 item.Value.FillQuantity,
                 item.Value.FillPrice,
+                item.Value.FillPriceCurrency,
+                item.Value.Direction,
+                item.Value.HasOrderFee,
+                item.Value.FeeAmount,
+                item.Value.FeeCurrency,
+                item.Value.Quantity,
+                item.Value.IsAssignment,
+                item.Value.IsInTheMoney,
                 item.Value.UtcTime))
             .ToArray();
 
@@ -178,11 +207,31 @@ public sealed class LeanCallbackCharacterizer
             }
 
             var key = (entry.OrderId, entry.EventId);
+            if (entry.HasOrderFee && string.IsNullOrWhiteSpace(entry.FeeCurrency))
+            {
+                throw new InvalidDataException(
+                    "LEAN callback restart fee currency is required when a fee is present.");
+            }
+            if (!entry.HasOrderFee &&
+                (entry.FeeAmount != decimal.Zero || !string.IsNullOrEmpty(entry.FeeCurrency)))
+            {
+                throw new InvalidDataException(
+                    "LEAN callback restart fee fields are inconsistent.");
+            }
+
             var fingerprint = new CallbackFingerprint(
                 entry.Status,
                 entry.Symbol ?? string.Empty,
                 entry.FillQuantity,
                 entry.FillPrice,
+                entry.FillPriceCurrency ?? string.Empty,
+                entry.Direction,
+                entry.HasOrderFee,
+                entry.FeeAmount,
+                entry.FeeCurrency ?? string.Empty,
+                entry.Quantity,
+                entry.IsAssignment,
+                entry.IsInTheMoney,
                 entry.UtcTime);
             if (!result._seen.TryAdd(key, fingerprint))
             {
@@ -234,6 +283,14 @@ internal readonly record struct CallbackFingerprint(
     string Symbol,
     decimal FillQuantity,
     decimal FillPrice,
+    string FillPriceCurrency,
+    OrderDirection Direction,
+    bool HasOrderFee,
+    decimal FeeAmount,
+    string FeeCurrency,
+    decimal Quantity,
+    bool IsAssignment,
+    bool IsInTheMoney,
     DateTime UtcTime);
 
 internal sealed record LeanCallbackCharacterizerStatePayload(
@@ -254,6 +311,14 @@ public readonly record struct LeanCallbackStateEntry(
     string Symbol,
     decimal FillQuantity,
     decimal FillPrice,
+    string FillPriceCurrency,
+    OrderDirection Direction,
+    bool HasOrderFee,
+    decimal FeeAmount,
+    string FeeCurrency,
+    decimal Quantity,
+    bool IsAssignment,
+    bool IsInTheMoney,
     DateTime UtcTime);
 
 public readonly record struct LeanCallbackObservation(
@@ -263,6 +328,14 @@ public readonly record struct LeanCallbackObservation(
     string Symbol,
     string FillQuantity,
     string FillPrice,
+    string FillPriceCurrency,
+    string Direction,
+    bool HasOrderFee,
+    string FeeAmount,
+    string FeeCurrency,
+    string Quantity,
+    bool IsAssignment,
+    bool IsInTheMoney,
     bool HasEconomicFill,
     bool DuplicateIdentity,
     bool IdentityConflict,

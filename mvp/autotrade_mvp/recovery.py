@@ -335,9 +335,9 @@ class RecoveryController:
     ) -> tuple[str, ...]:
         """Validate one durable submission attempt before recovery classifies it.
 
-        JournalStore proves byte integrity; recovery must still prove the
-        dispatch state machine.  In particular, no unknown tail or fabricated
-        terminal event may erase a previously durable send barrier.
+        JournalStore proves byte integrity; recovery must additionally prove both
+        the dispatch state machine and one continuous durable sender identity.
+        Prepared is the canonical sender/client identity for the attempt.
         """
 
         if not aggregate_events:
@@ -375,7 +375,7 @@ class RecoveryController:
             # A provider wrapper may swallow/mask a final-guard rejection.
             # The dispatcher records Blocked first, then upgrades the outcome
             # to UNKNOWN because an outbound side effect can no longer be
-            # disproved.  Recovery must preserve that legitimate ambiguity.
+            # disproved. Recovery must preserve that legitimate ambiguity.
             (
                 "SubmissionPrepared",
                 "SubmissionBlocked",
@@ -387,6 +387,85 @@ class RecoveryController:
                 "Submission journal transition sequence is invalid: "
                 + " -> ".join(sequence)
             )
+
+        prepared = aggregate_events[0]
+        prepared_payload = prepared.get("payload")
+        if not isinstance(prepared_payload, dict):
+            raise RuntimeError("SubmissionPrepared payload is invalid")
+        prepared_owner_token = prepared_payload.get("owner_token")
+        prepared_owner_epoch = prepared_payload.get("owner_epoch")
+        prepared_client_order_id = prepared_payload.get("client_order_id")
+        if (
+            not isinstance(prepared_owner_token, str)
+            or not prepared_owner_token.strip()
+        ):
+            raise RuntimeError("SubmissionPrepared owner token is invalid")
+        if (
+            type(prepared_owner_epoch) is not int
+            or prepared_owner_epoch <= 0
+        ):
+            raise RuntimeError("SubmissionPrepared owner epoch is invalid")
+        if (
+            not isinstance(prepared_client_order_id, str)
+            or not prepared_client_order_id.strip()
+        ):
+            raise RuntimeError("SubmissionPrepared client order identity is invalid")
+
+        expected_envelope_epoch = str(prepared_owner_epoch)
+        for event in aggregate_events:
+            envelope_epoch = event.get("owner_epoch")
+            if (
+                not isinstance(envelope_epoch, str)
+                or not envelope_epoch.isdigit()
+                or envelope_epoch == "0"
+                or (
+                    len(envelope_epoch) > 1
+                    and envelope_epoch.startswith("0")
+                )
+            ):
+                raise RuntimeError("Submission journal owner epoch is invalid")
+            if envelope_epoch != expected_envelope_epoch:
+                raise RuntimeError(
+                    "Submission journal sender owner epoch changed"
+                )
+
+            event_payload = event.get("payload")
+            if not isinstance(event_payload, dict):
+                raise RuntimeError("Submission journal event payload is invalid")
+            if event is prepared:
+                if envelope_epoch != str(prepared_owner_epoch):
+                    raise RuntimeError(
+                        "SubmissionPrepared envelope/payload owner epoch mismatch"
+                    )
+                continue
+
+            if event_payload.get("client_order_id") != prepared_client_order_id:
+                raise RuntimeError(
+                    "Submission journal client order identity changed"
+                )
+            if (
+                "owner_epoch" in event_payload
+                and event_payload.get("owner_epoch") != prepared_owner_epoch
+            ):
+                raise RuntimeError(
+                    "Submission journal payload owner epoch changed"
+                )
+            if (
+                "owner_token" in event_payload
+                and event_payload.get("owner_token") != prepared_owner_token
+            ):
+                raise RuntimeError(
+                    "Submission journal payload owner token changed"
+                )
+            if event.get("event_type") == "SubmissionSending":
+                if (
+                    event_payload.get("owner_epoch") != prepared_owner_epoch
+                    or event_payload.get("owner_token") != prepared_owner_token
+                ):
+                    raise RuntimeError(
+                        "SubmissionSending sender identity does not match Prepared"
+                    )
+
         return sequence
 
     def recover_durable_submission_uncertainty(
@@ -421,6 +500,10 @@ class RecoveryController:
             grouped.setdefault(aggregate_id, []).append(event)
 
         recovered: set[str] = set()
+        staged_unresolved: set[str] = set()
+        staged_bindings: dict[str, tuple[str, int, tuple[str, ...]]] = {}
+        staged_identities: dict[str, tuple[str, str, str, str, str]] = {}
+        staged_legacy_identity = False
         for aggregate_id, aggregate_events in grouped.items():
             first = aggregate_events[0]
             if first.get("event_type") != "SubmissionPrepared":
@@ -470,10 +553,9 @@ class RecoveryController:
             attempt_id = payload.get("attempt_id")
             if not isinstance(attempt_id, str) or not attempt_id.strip():
                 opaque = "legacy_submission:" + aggregate_id
-                self._unresolved_send_attempts.add(opaque)
-                self.unresolved_attempts.add(opaque)
+                staged_unresolved.add(opaque)
                 recovered.add(opaque)
-                self.reason_codes.add("legacy_submission_identity_unrecoverable")
+                staged_legacy_identity = True
                 continue
             attempt_id = attempt_id.strip()
             intent_id = payload.get("intent_id")
@@ -486,11 +568,10 @@ class RecoveryController:
                 raise RuntimeError(
                     "Ambiguous submission lacks durable reconciliation identity"
                 )
-            owner_epoch_raw = last.get("owner_epoch")
+            owner_epoch_raw = payload.get("owner_epoch")
             if (
-                not isinstance(owner_epoch_raw, str)
-                or not owner_epoch_raw.isdigit()
-                or int(owner_epoch_raw) <= 0
+                type(owner_epoch_raw) is not int
+                or owner_epoch_raw <= 0
             ):
                 raise RuntimeError("Ambiguous submission owner epoch is invalid")
             event_id = last.get("event_id")
@@ -499,25 +580,44 @@ class RecoveryController:
 
             binding = (
                 str(intent_id).strip(),
-                int(owner_epoch_raw),
+                owner_epoch_raw,
                 (event_id,),
             )
             existing = self._unresolved_send_bindings.get(attempt_id)
+            if existing is None:
+                existing = staged_bindings.get(attempt_id)
             if existing is not None and existing != binding:
                 raise RuntimeError(
                     "Durable ambiguous submission conflicts with recovered identity"
                 )
-            self._unresolved_send_bindings[attempt_id] = binding
-            self._recovered_unknown_identities[attempt_id] = (
+            identity = (
                 str(intent_id).strip(),
                 str(client_order_id).strip(),
                 str(provider).strip().upper(),
                 normalized_environment,
                 normalized_account,
             )
-            self._unresolved_send_attempts.add(attempt_id)
-            self.unresolved_attempts.add(attempt_id)
+            existing_identity = self._recovered_unknown_identities.get(attempt_id)
+            if existing_identity is None:
+                existing_identity = staged_identities.get(attempt_id)
+            if existing_identity is not None and existing_identity != identity:
+                raise RuntimeError(
+                    "Durable ambiguous submission conflicts with recovered reconciliation identity"
+                )
+            staged_bindings[attempt_id] = binding
+            staged_identities[attempt_id] = identity
+            staged_unresolved.add(attempt_id)
             recovered.add(attempt_id)
+
+        # Apply recovered state only after every aggregate has passed semantic
+        # identity and transition validation. A later corrupt aggregate must
+        # never leave a partially mutated recovery authority behind.
+        self._unresolved_send_bindings.update(staged_bindings)
+        self._recovered_unknown_identities.update(staged_identities)
+        self._unresolved_send_attempts.update(staged_unresolved)
+        self.unresolved_attempts.update(staged_unresolved)
+        if staged_legacy_identity:
+            self.reason_codes.add("legacy_submission_identity_unrecoverable")
 
         if recovered:
             self.provider_reconciled = False

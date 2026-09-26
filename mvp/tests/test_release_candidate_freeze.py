@@ -154,7 +154,10 @@ def _qualification(candidate, trust_root, *, artifacts=None, result="PASS"):
         package_id="WP-54",
         protocol_id="release-freeze-v1",
         protocol_version="1.0.0",
-        requirement_ids=("release-candidate-freeze",),
+        requirement_ids=(
+            "release-candidate-freeze",
+            release_candidate_module.release_candidate_subject_requirement(candidate),
+        ),
         evidence_refs=evidence,
         producer_id=trust_root.producer_id,
         verifier_id=trust_root.verifier_id,
@@ -389,6 +392,44 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
         body["artifacts"][0]["artifact_id"] = str(
             uuid5(NAMESPACE_URL, "wp54:forged-artifact-binding")
         )
+        forged_json = json.dumps(
+            body,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        forged_sha = (
+            "sha256:" + sha256(forged_json.encode("utf-8")).hexdigest()
+        )
+
+        with self.assertRaisesRegex(
+            ReleaseCandidateError,
+            "does not cover exact artifact set",
+        ):
+            ReleaseCandidateDecision(
+                status="FROZEN",
+                reasons=(),
+                manifest_json=forged_json,
+                manifest_sha256=forged_sha,
+                qualification_attestation_id=decision.qualification_attestation_id,
+                qualification_attestation_digest=decision.qualification_attestation_digest,
+                qualification_policy_id=decision.qualification_policy_id,
+                qualification_trust_root_id=decision.qualification_trust_root_id,
+                _freeze_token=release_candidate_module._FROZEN_DECISION_TOKEN,
+            )
+
+    def test_imported_factory_token_cannot_bypass_signed_role_binding(self):
+        decision = freeze_with_integrity_store(
+            self.candidate(),
+            with_attestation=True,
+        )
+        body = json.loads(decision.manifest_json)
+        by_role = {item["role"]: item for item in body["artifacts"]}
+        sbom = by_role["SBOM"]
+        notices = by_role["LICENSE_NOTICES"]
+        sbom["role"], notices["role"] = notices["role"], sbom["role"]
+        body["artifacts"].sort(key=lambda item: item["role"])
         forged_json = json.dumps(
             body,
             sort_keys=True,

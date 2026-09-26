@@ -64,6 +64,7 @@ _QUALIFICATION_PACKAGE = "WP-54"
 _QUALIFICATION_PROTOCOL = "release-freeze-v1"
 _QUALIFICATION_PROTOCOL_VERSION = "1.0.0"
 _QUALIFICATION_REQUIREMENT = "release-candidate-freeze"
+_QUALIFICATION_SUBJECT_REQUIREMENT_PREFIX = "release-candidate-subject-sha256:"
 _FROZEN_DECISION_TOKEN = object()
 
 
@@ -327,6 +328,47 @@ class ReleaseCandidateInput:
             artifacts=normalized_artifacts,
             unresolved_blockers=blockers,
         )
+
+
+def release_candidate_subject_requirement(
+    candidate: ReleaseCandidateInput,
+) -> str:
+    """Return the signed requirement binding every release-authority claim."""
+
+    if not isinstance(candidate, ReleaseCandidateInput):
+        raise TypeError("candidate must be ReleaseCandidateInput")
+    subject = {
+        "release_id": candidate.release_id,
+        "source_sha": candidate.source_sha,
+        "baseline_hash": candidate.baseline_hash,
+        "schema_contract_hash": candidate.schema_contract_hash,
+        "artifacts": [
+            {
+                "role": artifact.role,
+                "artifact_id": artifact.artifact_id,
+                "artifact_sha256": artifact.artifact_sha256,
+                "source_sha": artifact.source_sha,
+                "signature_status": artifact.signature_status,
+                "evidence_status": artifact.evidence_status,
+            }
+            for artifact in sorted(
+                candidate.artifacts,
+                key=lambda item: item.role,
+            )
+        ],
+        "unresolved_blockers": sorted(candidate.unresolved_blockers),
+    }
+    canonical = json.dumps(
+        subject,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return (
+        _QUALIFICATION_SUBJECT_REQUIREMENT_PREFIX
+        + sha256(canonical).hexdigest()
+    )
 
 
 @dataclass(frozen=True)
@@ -693,7 +735,12 @@ def _qualification_covers_exact_candidate(
         )
         for ref in receipt.attestation.evidence_refs
     }
-    return observed == expected
+    if observed != expected:
+        return False
+    return (
+        release_candidate_subject_requirement(candidate)
+        in receipt.attestation.requirement_ids
+    )
 
 
 def freeze_release_candidate(

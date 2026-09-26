@@ -9,7 +9,9 @@ from unittest.mock import patch
 from autotrade_research.artifacts import durable_publish
 from autotrade_research.artifacts.durable_publish import (
     DurablePublishLockError,
+    atomic_write_bytes,
     atomic_write_json,
+    atomic_write_stream,
     durable_path_lock,
 )
 
@@ -25,6 +27,39 @@ class DurablePublishHardeningTests(unittest.TestCase):
                 atomic_write_json(destination, {"invalid": object()})
 
             self.assertEqual(destination.read_bytes(), stable_bytes)
+            self.assertEqual(
+                list(destination.parent.glob(f".{destination.name}.*.tmp")),
+                [],
+            )
+
+    def test_atomic_write_bytes_preserves_exact_binary_payload(self):
+        with TemporaryDirectory() as directory:
+            destination = Path(directory) / "artifact.bin"
+            payload = bytes(range(256)) + b"\x00\xffAutoTrade"
+            atomic_write_bytes(destination, payload)
+
+            self.assertEqual(destination.read_bytes(), payload)
+            self.assertEqual(
+                list(destination.parent.glob(f".{destination.name}.*.tmp")),
+                [],
+            )
+
+    def test_atomic_write_stream_failure_preserves_destination_and_removes_temp(self):
+        with TemporaryDirectory() as directory:
+            destination = Path(directory) / "artifact.bin"
+            destination.write_bytes(b"stable")
+
+            def fail_after_partial_write(handle):
+                handle.write(b"partial")
+                raise RuntimeError("simulated stream writer failure")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "simulated stream writer failure",
+            ):
+                atomic_write_stream(destination, fail_after_partial_write)
+
+            self.assertEqual(destination.read_bytes(), b"stable")
             self.assertEqual(
                 list(destination.parent.glob(f".{destination.name}.*.tmp")),
                 [],

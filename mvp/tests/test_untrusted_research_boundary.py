@@ -133,6 +133,39 @@ class UntrustedResearchBoundaryTests(unittest.TestCase):
                 permission_effect="EXECUTION",
             )
 
+    def test_privileged_tool_argument_fields_are_rejected_on_normal_admission(self):
+        for arguments in (
+            {"authorization": "Bearer injected"},
+            {"nested": {"api-key": "secret"}},
+            {"steps": [{"executionAuthority": "TRADE_ALLOWED"}]},
+        ):
+            with self.subTest(arguments=arguments), self.assertRaisesRegex(
+                PermissionError,
+                "privileged fields",
+            ):
+                self.boundary().admit(
+                    ResearchToolRequest(
+                        request_id="privileged-arguments",
+                        tool_name="statistics",
+                        requested_capabilities=("COMPUTE_STATISTICS",),
+                        arguments=arguments,
+                    )
+                )
+
+    def test_direct_admitted_request_cannot_bypass_privileged_argument_scan(self):
+        with self.assertRaisesRegex(PermissionError, "privileged fields"):
+            AdmittedResearchToolRequest(
+                request_id="direct-privileged",
+                tool_name="statistics",
+                capabilities=(ResearchCapability.COMPUTE_STATISTICS,),
+                arguments={
+                    "analysis": {
+                        "private_key": "must-not-cross-boundary",
+                    }
+                },
+                evidence_refs=("artifact:1",),
+            )
+
     def test_tool_arguments_are_deeply_immutable_across_admission(self):
         nested = {"window": {"size": 20}, "fields": ["price"]}
         request = ResearchToolRequest(

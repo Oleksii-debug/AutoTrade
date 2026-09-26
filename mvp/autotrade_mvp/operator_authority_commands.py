@@ -502,9 +502,15 @@ def execute_operator_authority_action(
         account_id,
         environment,
     )
-    resolved = _resolved(journal, action_name, payload, accepted)
-    if resolved is not None:
-        return resolved
+    targets_empty = (
+        action_name != "SET_AUTHORITY"
+        and isinstance(payload.get("target_policies"), list)
+        and not payload["target_policies"]
+    )
+    if not targets_empty:
+        resolved = _resolved(journal, action_name, payload, accepted)
+        if resolved is not None:
+            return resolved
 
     expected_version = _seq(
         payload["expected_authority_version"],

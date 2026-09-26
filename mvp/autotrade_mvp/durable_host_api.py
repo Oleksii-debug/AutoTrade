@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Callable, Mapping
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from contracts.bindings.python.common_scalars import is_valid_common_scalar
 
@@ -42,6 +42,7 @@ class JournalBackedHostCommandStore:
     TERMINAL_PHASES = {"SUCCEEDED", "FAILED", "CANCELLED"}
     UPDATE_PHASES = {"RUNNING", "WAITING_EXTERNAL", "UNKNOWN", *TERMINAL_PHASES}
     LEGACY_AUTHORITY_UNCERTAINTY = "legacy_authority_payload_unavailable"
+    SUPPORTED_EVENT_TYPES = frozenset({"COMMAND_ACCEPTED", "OPERATION_UPDATED"})
 
     def __init__(
         self,
@@ -178,11 +179,25 @@ class JournalBackedHostCommandStore:
         return tuple(dict(item) for item in values)
 
     def _events(self) -> list[dict[str, object]]:
-        return self._journal.load_events(self.AGGREGATE_TYPE, self.aggregate_id)
+        events = self._journal.load_events(self.AGGREGATE_TYPE, self.aggregate_id)
+        for event in events:
+            event_type = event.get("event_type")
+            if event_type not in self.SUPPORTED_EVENT_TYPES:
+                raise ValueError(
+                    f"Host journal contains unsupported event type: {event_type!r}"
+                )
+        return events
 
     @property
     def state_version(self) -> int:
         events = self._events()
+        if events:
+            # A raw aggregate sequence is not a usable host state version until
+            # every durable event can be replayed under the current canonical
+            # semantics. This prevents callers from advancing commands/cursors
+            # on top of a known event whose scoped identity or transition is
+            # invalid after restart.
+            self._operation_projection()
         return int(events[-1]["aggregate_version"]) if events else 0
 
     @property
@@ -477,10 +492,9 @@ class JournalBackedHostCommandStore:
                     raise ValueError(
                         "Host journal command scope does not match active host account/environment"
                     )
+                command_id = self._required_text(payload, "command_id")
                 operation_id = self._required_text(payload, "operation_id")
-                authority_contracts[operation_id] = (
-                    self._authority_contract_if_present(payload)
-                )
+                authority_contract = self._authority_contract_if_present(payload)
                 if operation_id in operations:
                     raise ValueError(
                         "Host journal contains duplicate COMMAND_ACCEPTED operation identity"
@@ -502,6 +516,35 @@ class JournalBackedHostCommandStore:
                 updated_at = str(payload.get("updated_at") or started_at)
                 affected_refs = self._replay_text_array(payload, "affected_refs")
                 evidence = self._replay_evidence(payload)
+
+                if authority_contract is None:
+                    # Legacy COMMAND_ACCEPTED events predate durable action-payload
+                    # binding and therefore cannot be re-derived from the scoped
+                    # command identity. Preserve only the historical UUID-shaped
+                    # read model; _accepted_authority_contract still prevents it
+                    # from acquiring execution authority.
+                    try:
+                        legacy_operation_id = UUID(operation_id)
+                    except ValueError as error:
+                        raise ValueError(
+                            "Host journal operation identity does not match canonical command scope"
+                        ) from error
+                    if str(legacy_operation_id) != operation_id:
+                        raise ValueError(
+                            "Host journal operation identity does not match canonical command scope"
+                        )
+                else:
+                    expected_operation_id = scoped_host_operation_id(
+                        account_id=self.account_id,
+                        environment=self.environment,
+                        command_id=command_id,
+                    )
+                    if operation_id != expected_operation_id:
+                        raise ValueError(
+                            "Host journal operation identity does not match canonical command scope"
+                        )
+
+                authority_contracts[operation_id] = authority_contract
                 operations[operation_id] = OperationResult(
                     operation_id=operation_id,
                     phase=phase,

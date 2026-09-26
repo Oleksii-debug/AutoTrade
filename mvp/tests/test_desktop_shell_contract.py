@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import unittest
 import xml.etree.ElementTree as ET
@@ -9,17 +10,39 @@ CODE = ROOT / "src" / "AutoTrade.Desktop" / "MainWindow.xaml.cs"
 APP = ROOT / "src" / "AutoTrade.Desktop" / "App.xaml.cs"
 CLIENT = ROOT / "src" / "AutoTrade.Desktop" / "EmergencyHostClient.cs"
 PROJECT = ROOT / "src" / "AutoTrade.Desktop" / "AutoTrade.Desktop.csproj"
+TOOL_MANIFEST = ROOT / ".config" / "dotnet-tools.json"
 WORKFLOW = ROOT / ".github" / "workflows" / "dotnet-foundation.yml"
 
 
 class DesktopSafetyShellContractTests(unittest.TestCase):
-    def test_wpf_project_targets_windows_without_unreviewed_packages(self):
+    def test_wpf_project_targets_windows_with_only_reviewed_velopack_package(self):
         project = ET.parse(PROJECT).getroot()
         text = PROJECT.read_text(encoding="utf-8")
         self.assertIn("<TargetFramework>net10.0-windows</TargetFramework>", text)
         self.assertIn("<UseWPF>true</UseWPF>", text)
-        self.assertNotIn("<PackageReference", text)
+        package_references = project.findall(".//PackageReference")
+        self.assertEqual(len(package_references), 1)
+        self.assertEqual(
+            package_references[0].attrib,
+            {"Include": "Velopack", "Version": "1.2.158"},
+        )
         self.assertEqual(project.tag, "Project")
+
+    def test_velopack_cli_tool_is_exactly_pinned(self):
+        manifest = json.loads(TOOL_MANIFEST.read_text(encoding="utf-8"))
+        self.assertEqual(
+            manifest,
+            {
+                "version": 1,
+                "isRoot": True,
+                "tools": {
+                    "vpk": {
+                        "version": "1.2.158",
+                        "commands": ["vpk"],
+                    }
+                },
+            },
+        )
 
     def test_wpf_uses_an_explicit_early_bootstrap_entrypoint(self):
         project_text = PROJECT.read_text(encoding="utf-8")
@@ -31,6 +54,7 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn('<ApplicationDefinition Remove="App.xaml" />', project_text)
         self.assertIn('<Page Include="App.xaml" />', project_text)
         self.assertIn("[STAThread]", app_text)
+        self.assertIn("using Velopack;", app_text)
         self.assertIn("private static void Main(string[] args)", app_text)
         self.assertLess(
             app_text.index("private static void Main(string[] args)"),
@@ -39,9 +63,18 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         main_body = app_text.split(
             "private static void Main(string[] args)", 1
         )[1].split("protected override void OnStartup", 1)[0]
+        self.assertIn("VelopackApp.Build()", main_body)
+        self.assertIn(".SetAutoApplyOnStartup(false)", main_body)
         self.assertIn("App app = new();", main_body)
         self.assertIn("app.InitializeComponent();", main_body)
         self.assertIn("app.Run();", main_body)
+        self.assertLess(
+            main_body.index("VelopackApp.Build()"),
+            main_body.index("App app = new();"),
+        )
+        self.assertNotIn("UpdateManager", main_body)
+        self.assertNotIn("ApplyUpdates", main_body)
+        self.assertNotIn("WaitExitThenApplyUpdates", main_body)
         self.assertNotIn("OnStartup(", main_body)
 
     def test_native_surface_exposes_copyable_host_account_environment_and_evidence(self):

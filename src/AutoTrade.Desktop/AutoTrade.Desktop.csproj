@@ -16,4 +16,7 @@
   <ItemGroup>
     <ProjectReference Include="../AutoTrade.Contracts/AutoTrade.Contracts.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Velopack" Version="1.2.158" />
+  </ItemGroup>
 </Project>

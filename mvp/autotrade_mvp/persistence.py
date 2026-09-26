@@ -1449,7 +1449,12 @@ class JournalStore:
                     (projection_name,),
                 ).fetchone()
                 if existing is not None:
-                    existing_sequence = int(existing["journal_sequence"])
+                    existing_sequence = existing["journal_sequence"]
+                    if type(existing_sequence) is not int or existing_sequence < 0:
+                        raise ValueError(
+                            "global projection checkpoint journal_sequence "
+                            "is not a canonical integer"
+                        )
                     exact = (
                         existing_sequence == journal_sequence
                         and existing["state_json"] == state_json
@@ -1521,7 +1526,12 @@ class JournalStore:
             raise ValueError(
                 "global projection checkpoint state is not canonical JSON"
             )
-        journal_sequence = int(row["journal_sequence"])
+        journal_sequence = row["journal_sequence"]
+        if type(journal_sequence) is not int or journal_sequence < 0:
+            raise ValueError(
+                "global projection checkpoint journal_sequence "
+                "is not a canonical integer"
+            )
         expected_hash = payload_digest(
             {
                 "projection_name": projection_name,

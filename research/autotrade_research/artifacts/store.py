@@ -109,12 +109,30 @@ class ArtifactStore:
             raise TypeError("rights must be a dict")
         if rights.get("storage") is not True:
             raise ValueError("artifact storage is not permitted by rights")
-        if set(rights) != {"storage", "export"}:
-            raise ValueError("rights must contain exactly storage and export")
+        allowed_fields = {"storage", "export", "rights_id"}
+        if (
+            not {"storage", "export"}.issubset(rights)
+            or set(rights) - allowed_fields
+        ):
+            raise ValueError(
+                "rights must contain storage/export and only canonical optional fields"
+            )
         export = rights.get("export")
         if type(export) is not bool:
             raise ValueError("rights.export must be explicitly true or false")
-        return {"storage": True, "export": export}
+        normalized: dict[str, Any] = {"storage": True, "export": export}
+        if "rights_id" in rights:
+            rights_id = rights["rights_id"]
+            if (
+                not isinstance(rights_id, str)
+                or not rights_id
+                or rights_id != rights_id.strip()
+            ):
+                raise ValueError(
+                    "rights.rights_id must be canonical non-empty text"
+                )
+            normalized["rights_id"] = rights_id
+        return normalized
 
     def _object_path(self, digest: str) -> Path:
         if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
@@ -205,12 +223,24 @@ class ArtifactStore:
         rights = manifest.get("rights")
         if type(rights) is not dict:
             raise ArtifactIntegrityError("artifact manifest rights are invalid")
+        allowed_rights_fields = {"storage", "export", "rights_id"}
         if (
-            set(rights) != {"storage", "export"}
+            not {"storage", "export"}.issubset(rights)
+            or set(rights) - allowed_rights_fields
             or rights.get("storage") is not True
             or type(rights.get("export")) is not bool
         ):
             raise ArtifactIntegrityError("artifact manifest rights contract is invalid")
+        if "rights_id" in rights:
+            rights_id = rights["rights_id"]
+            if (
+                not isinstance(rights_id, str)
+                or not rights_id
+                or rights_id != rights_id.strip()
+            ):
+                raise ArtifactIntegrityError(
+                    "artifact manifest rights identity is invalid"
+                )
 
         source_refs = manifest.get("source_refs")
         if type(source_refs) is not list or not all(

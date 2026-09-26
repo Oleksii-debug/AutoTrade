@@ -156,6 +156,89 @@ paths:
                         "      operationId: getState\n"
                     )
 
+    def test_path_template_requires_matching_direct_path_parameter(self):
+        cases = (
+            (
+                "missing",
+                """openapi: 3.1.0
+paths:
+  /api/v1/operations/{operation_id}:
+    get:
+      operationId: getOperation
+      responses: {}
+""",
+                "do not match",
+            ),
+            (
+                "query-not-path",
+                """openapi: 3.1.0
+paths:
+  /api/v1/operations/{operation_id}:
+    get:
+      operationId: getOperation
+      parameters:
+        - in: query
+          name: operation_id
+          required: true
+      responses: {}
+""",
+                "do not match",
+            ),
+            (
+                "wrong-name",
+                """openapi: 3.1.0
+paths:
+  /api/v1/operations/{operation_id}:
+    get:
+      operationId: getOperation
+      parameters:
+        - in: path
+          name: other_id
+          required: true
+      responses: {}
+""",
+                "do not match",
+            ),
+            (
+                "not-required",
+                """openapi: 3.1.0
+paths:
+  /api/v1/operations/{operation_id}:
+    get:
+      operationId: getOperation
+      parameters:
+        - in: path
+          name: operation_id
+          required: false
+      responses: {}
+""",
+                "must be required: true",
+            ),
+        )
+        for name, document, message in cases:
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, message):
+                    parse_operations(document)
+
+    def test_path_level_parameter_declarations_fail_closed(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "path-level OpenAPI parameters are unsupported",
+        ):
+            parse_operations(
+                """openapi: 3.1.0
+paths:
+  /api/v1/operations/{operation_id}:
+    parameters:
+      - in: path
+        name: operation_id
+        required: true
+    get:
+      operationId: getOperation
+      responses: {}
+"""
+            )
+
     def test_noncanonical_prefix_and_ambiguous_templates_fail_closed(self):
         with self.assertRaisesRegex(
             ValueError,

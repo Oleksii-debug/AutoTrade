@@ -160,7 +160,7 @@ class RuntimeRecoveryTests(unittest.TestCase):
         self.assertEqual(controller.state, HostState.READY)
         return controller, owner
 
-    def test_runtime_overload_blocks_new_risk_but_preserves_protective_path(self):
+    def test_runtime_overload_blocks_admission_and_send_fail_closed(self):
         controller, owner = self._ready()
         controller.set_runtime_overloaded(True)
 
@@ -171,44 +171,27 @@ class RuntimeRecoveryTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             controller.validate_sender(owner.owner_id, owner.epoch)
 
-        controller.validate_admission(owner.epoch, risk_reducing=True)
-        controller.validate_sender(
-            owner.owner_id,
-            owner.epoch,
-            risk_reducing=True,
-        )
-
         controller.set_runtime_overloaded(False)
         self.assertEqual(controller.state, HostState.READY)
         self.assertNotIn("runtime_overload", controller.reason_codes)
+        controller.validate_admission(owner.epoch)
+        controller.validate_sender(owner.owner_id, owner.epoch)
 
-    def test_runtime_overload_protective_path_never_bypasses_durable_barriers(self):
+    def test_runtime_overload_cannot_bypass_stronger_durable_barriers(self):
         controller, owner = self._ready()
         controller.set_runtime_overloaded(True)
         controller.set_storage_writable(False)
 
         self.assertEqual(controller.state, HostState.BLOCKED)
         with self.assertRaises(PermissionError):
-            controller.validate_admission(owner.epoch, risk_reducing=True)
+            controller.validate_admission(owner.epoch)
         with self.assertRaises(PermissionError):
-            controller.validate_sender(
-                owner.owner_id,
-                owner.epoch,
-                risk_reducing=True,
-            )
+            controller.validate_sender(owner.owner_id, owner.epoch)
 
-    def test_runtime_overload_state_and_risk_reducing_flag_require_booleans(self):
-        controller, owner = self._ready()
+    def test_runtime_overload_state_requires_real_boolean(self):
+        controller, _ = self._ready()
         with self.assertRaises(TypeError):
             controller.set_runtime_overloaded(1)
-        with self.assertRaises(TypeError):
-            controller.validate_admission(owner.epoch, risk_reducing=1)
-        with self.assertRaises(TypeError):
-            controller.validate_sender(
-                owner.owner_id,
-                owner.epoch,
-                risk_reducing=1,
-            )
     def test_start_never_reports_ready_before_reconciliation(self):
         controller = RecoveryController()
         controller.start("host-a")

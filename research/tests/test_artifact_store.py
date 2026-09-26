@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -65,6 +66,114 @@ class ArtifactStoreTests(unittest.TestCase):
             store._object_path(digest).write_bytes(b"tampered")
             with self.assertRaises(ArtifactIntegrityError):
                 store.read_bytes(artifact_id)
+
+    def test_manifest_reparse_attribute_is_rejected_cross_platform(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            fake = SimpleNamespace(
+                st_mode=0o100644,
+                st_nlink=1,
+                st_size=8,
+                st_file_attributes=0x400,
+            )
+            candidate = store._manifest_path(str(uuid4()))
+            with patch.object(
+                store,
+                "_validate_manifest_namespace",
+                return_value=None,
+            ), patch(
+                "autotrade_research.artifacts.store.os.stat",
+                return_value=fake,
+            ):
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "Windows reparse point",
+                ):
+                    store._validate_manifest_entry(candidate)
+
+    def test_object_reparse_attribute_fails_before_open_or_read(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            manifest = {
+                "sha256": "sha256:" + "a" * 64,
+                "bytes": 8,
+            }
+            fake = SimpleNamespace(
+                st_mode=0o100644,
+                st_nlink=1,
+                st_size=8,
+                st_file_attributes=0x400,
+            )
+            with patch.object(
+                store,
+                "load_manifest",
+                return_value=manifest,
+            ), patch.object(
+                store,
+                "_validate_object_namespace",
+                return_value=None,
+            ), patch(
+                "autotrade_research.artifacts.store.os.stat",
+                return_value=fake,
+            ), patch(
+                "autotrade_research.artifacts.store.os.open"
+            ) as open_call, patch(
+                "autotrade_research.artifacts.store.os.read"
+            ) as read_call:
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "Windows reparse point",
+                ):
+                    store.read_bytes(artifact_id)
+                open_call.assert_not_called()
+                read_call.assert_not_called()
+
+    def test_descriptor_reparse_attribute_fails_before_consumption(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            object_path = store._object_path("a" * 64)
+            ordinary = SimpleNamespace(
+                st_mode=0o100644,
+                st_nlink=1,
+                st_size=8,
+                st_dev=1,
+                st_ino=2,
+                st_file_attributes=0,
+            )
+            reparsed = SimpleNamespace(
+                st_mode=0o100644,
+                st_nlink=1,
+                st_size=8,
+                st_dev=1,
+                st_ino=2,
+                st_file_attributes=0x400,
+            )
+            with patch.object(
+                store,
+                "_validate_object_entry",
+                return_value=ordinary,
+            ), patch(
+                "autotrade_research.artifacts.store.os.open",
+                return_value=123,
+            ), patch(
+                "autotrade_research.artifacts.store.os.fstat",
+                return_value=reparsed,
+            ), patch(
+                "autotrade_research.artifacts.store.os.close"
+            ) as close_call, patch(
+                "autotrade_research.artifacts.store.os.read"
+            ) as read_call:
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "Windows reparse point",
+                ):
+                    store._open_object_descriptor(
+                        object_path,
+                        expected_bytes=8,
+                    )
+                read_call.assert_not_called()
+                close_call.assert_called_once_with(123)
 
     def test_read_rejects_oversized_swap_before_consuming_replacement(self):
         with TemporaryDirectory() as directory:

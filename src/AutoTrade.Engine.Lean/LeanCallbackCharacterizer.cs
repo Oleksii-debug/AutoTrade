@@ -171,7 +171,7 @@ public sealed class LeanCallbackCharacterizer
 
         var payload = new LeanCallbackCharacterizerStatePayload(
             state.SchemaVersion,
-            state.LastArrivalUtc,
+            state.ArrivalHighWaterUtc,
             state.Callbacks);
         var expectedStateHash = ComputeStateHash(payload);
         if (!string.Equals(state.StateHash, expectedStateHash, StringComparison.Ordinal))

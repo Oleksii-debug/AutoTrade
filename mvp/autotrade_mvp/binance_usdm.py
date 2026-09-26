@@ -605,13 +605,15 @@ class BinanceUsdmSymbolRules:
         value: Decimal,
         step: Decimal | None,
         *,
+        minimum: Decimal | None,
         name: str,
     ) -> None:
         if step in (None, Decimal("0")):
             return
-        if value % step != 0:
+        origin = Decimal("0") if minimum is None else minimum
+        if (value - origin) % step != 0:
             raise BinanceUsdmAdapterError(
-                f"{name} is not an exact multiple of exchangeInfo step"
+                f"{name} does not align with exchangeInfo minimum/step"
             )
 
     def validate(
@@ -672,7 +674,12 @@ class BinanceUsdmSymbolRules:
             raise BinanceUsdmAdapterError(
                 "quantity exceeds exchangeInfo maximum"
             )
-        self._require_step(intent.quantity, step, name="quantity")
+        self._require_step(
+            intent.quantity,
+            step,
+            minimum=min_qty,
+            name="quantity",
+        )
 
         if intent.order_type == "LIMIT":
             if intent.price is None:
@@ -685,9 +692,14 @@ class BinanceUsdmSymbolRules:
                 raise BinanceUsdmAdapterError(
                     "price exceeds exchangeInfo maximum"
                 )
-            self._require_step(intent.price, self.tick_size, name="price")
+            self._require_step(
+                intent.price,
+                self.tick_size,
+                minimum=self.price_min,
+                name="price",
+            )
 
-        if self.min_notional is None:
+        if self.min_notional is None or intent.reduce_only:
             return None
 
         if intent.order_type == "LIMIT":

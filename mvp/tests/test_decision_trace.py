@@ -235,6 +235,7 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 "message": '{"api_secret":"WHITEBIT-JSON-SECRET","safe":"ok"}',
                 "repr_message": "{'api-secret': 'WHITEBIT-REPR-SECRET', 'safe': 'ok'}",
                 "header_text": "X-TXC-SIGNATURE: WHITEBIT-TEXT-SIGNATURE",
+                "sentinel_prefixed": "X-TXC-SIGNATURE=[REDACTED]WHITEBIT-SENTINEL-BYPASS",
                 "signed_url": (
                     "https://provider.test/private?"
                     "X-TXC-SIGNATURE=WHITEBIT-URL-SIGNATURE&symbol=BTC"
@@ -253,6 +254,7 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 "WHITEBIT-REPR-SECRET",
                 "WHITEBIT-TEXT-SIGNATURE",
                 "WHITEBIT-URL-SIGNATURE",
+                "WHITEBIT-SENTINEL-BYPASS",
             ):
                 self.assertNotIn(leaked, raw)
 
@@ -269,6 +271,10 @@ class DecisionTraceStoreTests(unittest.TestCase):
             self.assertEqual(
                 attributes["header_text"],
                 "X-TXC-SIGNATURE:[REDACTED]",
+            )
+            self.assertEqual(
+                attributes["sentinel_prefixed"],
+                "X-TXC-SIGNATURE=[REDACTED]",
             )
             self.assertEqual(
                 attributes["signed_url"],

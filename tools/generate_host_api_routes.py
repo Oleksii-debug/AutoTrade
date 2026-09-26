@@ -94,9 +94,38 @@ def _declared_path_parameters(lines: list[str]) -> tuple[str, ...]:
                 "parameter entries must begin with canonical '- in:'"
             )
         direct: dict[str, str] = {}
+        schema: dict[str, str] = {}
+        in_schema = False
         for line in entry[1:]:
-            if line.startswith("            "):
+            if line == "          schema:":
+                if in_schema or "schema" in direct:
+                    raise ValueError(
+                        "duplicate OpenAPI operation parameter schema"
+                    )
+                direct["schema"] = "mapping"
+                in_schema = True
                 continue
+            if line.startswith("            "):
+                if not in_schema:
+                    raise ValueError(
+                        "nested OpenAPI parameter content appeared outside schema"
+                    )
+                schema_match = re.fullmatch(
+                    r"            ([A-Za-z_][A-Za-z0-9_]*):\s*([^\s#]+)\s*",
+                    line,
+                )
+                if schema_match is None:
+                    raise ValueError(
+                        "unsupported OpenAPI parameter schema field syntax"
+                    )
+                key, value = schema_match.groups()
+                if key in schema:
+                    raise ValueError(
+                        f"duplicate OpenAPI parameter schema field: {key}"
+                    )
+                schema[key] = value
+                continue
+            in_schema = False
             field_match = re.fullmatch(
                 r"          ([A-Za-z_][A-Za-z0-9_]*):\s*([^\s#]+)\s*",
                 line,
@@ -123,6 +152,10 @@ def _declared_path_parameters(lines: list[str]) -> tuple[str, ...]:
         if direct.get("required") != "true":
             raise ValueError(
                 f"OpenAPI path parameter {name} must be required: true"
+            )
+        if schema.get("type") != "string":
+            raise ValueError(
+                f"OpenAPI path parameter {name} must use schema type: string"
             )
         if name in path_parameters:
             raise ValueError(f"duplicate OpenAPI path parameter declaration: {name}")

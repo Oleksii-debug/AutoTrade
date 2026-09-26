@@ -1807,6 +1807,15 @@ class BybitV5AdapterTests(unittest.TestCase):
             one_millisecond_too_old.provider_semantics_exclude_execution
         )
 
+        older_than_seven_days = terminal_history(
+            start_time_ms=1789588800000,
+            end_time_ms=1789675200000,
+        )
+        self.assertTrue(older_than_seven_days.pagination_complete)
+        self.assertFalse(
+            older_than_seven_days.provider_semantics_exclude_execution
+        )
+
         future_end = terminal_history(
             start_time_ms=1790276400000,
             end_time_ms=1790280000001,

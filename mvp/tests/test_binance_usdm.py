@@ -6,7 +6,9 @@ from uuid import uuid4
 
 from mvp.autotrade_mvp.binance_usdm import (
     BinanceUsdmAdapterError,
+    BinanceUsdmMarkPrice,
     BinanceUsdmOrderIntent,
+    BinanceUsdmSymbolRules,
     coverage_evidence,
     parse_account_trades,
     parse_order_ack,
@@ -121,6 +123,104 @@ def capability(
     )
 
 
+
+def symbol_rules(
+    *,
+    status="TRADING",
+    order_types=("LIMIT", "MARKET"),
+    time_in_force=("GTC", "IOC", "FOK"),
+    price_min="0.01",
+    price_max="1000000",
+    tick_size="0.01",
+    lot_min="0.001",
+    lot_max="1000",
+    lot_step="0.001",
+    market_min="0.001",
+    market_max="1000",
+    market_step="0.001",
+    percent_price_up=None,
+    percent_price_down=None,
+    min_notional=None,
+    price_precision=0,
+    quantity_precision=0,
+):
+    filters = [
+        {
+            "filterType": "PRICE_FILTER",
+            "minPrice": price_min,
+            "maxPrice": price_max,
+            "tickSize": tick_size,
+        },
+        {
+            "filterType": "LOT_SIZE",
+            "minQty": lot_min,
+            "maxQty": lot_max,
+            "stepSize": lot_step,
+        },
+        {
+            "filterType": "MARKET_LOT_SIZE",
+            "minQty": market_min,
+            "maxQty": market_max,
+            "stepSize": market_step,
+        },
+    ]
+    if (percent_price_up is None) != (percent_price_down is None):
+        raise ValueError("percent price helper requires both multipliers")
+    if percent_price_up is not None:
+        filters.append(
+            {
+                "filterType": "PERCENT_PRICE",
+                "multiplierUp": percent_price_up,
+                "multiplierDown": percent_price_down,
+                "multiplierDecimal": 4,
+            }
+        )
+    if min_notional is not None:
+        filters.append(
+            {
+                "filterType": "MIN_NOTIONAL",
+                "notional": min_notional,
+            }
+        )
+    return BinanceUsdmSymbolRules.from_exchange_info(
+        instrument_version="BTCUSDT-PERP:v1",
+        symbol_payload={
+            "symbol": "BTCUSDT",
+            "status": status,
+            "contractType": "PERPETUAL",
+            "pricePrecision": price_precision,
+            "quantityPrecision": quantity_precision,
+            "orderTypes": list(order_types),
+            "timeInForce": list(time_in_force),
+            "filters": filters,
+        },
+    )
+
+
+def mark_price(
+    *,
+    price="40000",
+    observed_at=NOW,
+    symbol="BTCUSDT",
+    instrument_version="BTCUSDT-PERP:v1",
+):
+    timestamp_ms = int(observed_at.timestamp() * 1000)
+    return BinanceUsdmMarkPrice.from_premium_index(
+        instrument_version=instrument_version,
+        symbol=symbol,
+        payload={
+            "symbol": symbol,
+            "markPrice": price,
+            "indexPrice": price,
+            "estimatedSettlePrice": price,
+            "lastFundingRate": "0.0001",
+            "interestRate": "0.0001",
+            "nextFundingTime": timestamp_ms + 28_800_000,
+            "time": timestamp_ms,
+        },
+    )
+
+
 class BinanceUsdmFoundationTests(unittest.TestCase):
     def test_net_limit_preserves_exact_strings_and_ack_only(self):
         intent = BinanceUsdmOrderIntent.create(
@@ -137,6 +237,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             intent,
             client_order_id="at-usdm-1",
             capability=capability(),
+            symbol_rules=symbol_rules(),
             at=NOW,
         )
         self.assertEqual(request.endpoint, "/fapi/v1/order")
@@ -160,6 +261,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             intent,
             client_order_id="at-usdm-market",
             capability=capability(),
+            symbol_rules=symbol_rules(),
             at=NOW,
         )
         self.assertEqual(request.body["quantity"], "0.5")
@@ -209,6 +311,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
                 intent,
                 client_order_id="at-usdm-net",
                 capability=capability(position_mode="NET"),
+                symbol_rules=symbol_rules(),
                 at=NOW,
             )
 
@@ -226,6 +329,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
                 both,
                 client_order_id="at-usdm-hedge-both",
                 capability=capability(position_mode="HEDGE"),
+                symbol_rules=symbol_rules(),
                 at=NOW,
             )
 
@@ -243,6 +347,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
                 reduce,
                 client_order_id="at-usdm-hedge-reduce",
                 capability=capability(position_mode="HEDGE"),
+                symbol_rules=symbol_rules(),
                 at=NOW,
             )
 
@@ -259,6 +364,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             valid,
             client_order_id="at-usdm-hedge",
             capability=capability(position_mode="HEDGE"),
+            symbol_rules=symbol_rules(),
             at=NOW,
         )
         self.assertEqual(request.body["positionSide"], "LONG")
@@ -277,6 +383,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             intent,
             client_order_id="at-usdm-reduce",
             capability=capability(position_mode="NET"),
+            symbol_rules=symbol_rules(),
             at=NOW,
         )
         self.assertEqual(request.body["reduceOnly"], "true")
@@ -295,6 +402,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
                 intent,
                 client_order_id="at-usdm-provider",
                 capability=capability(provider_id="KRAKEN"),
+                symbol_rules=symbol_rules(),
                 at=NOW,
             )
         with self.assertRaisesRegex(BinanceUsdmAdapterError, "instrument version"):
@@ -302,6 +410,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
                 intent,
                 client_order_id="at-usdm-version",
                 capability=capability(instrument_version="ETHUSDT-PERP:v1"),
+                symbol_rules=symbol_rules(),
                 at=NOW,
             )
         with self.assertRaisesRegex(BinanceUsdmAdapterError, "capability"):
@@ -309,7 +418,418 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
                 intent,
                 client_order_id="at-usdm-status",
                 capability=capability(status="UNKNOWN"),
+                symbol_rules=symbol_rules(),
                 at=NOW,
+            )
+
+    def test_exchange_info_filters_are_required_and_precision_fields_are_not_rules(self):
+        intent = BinanceUsdmOrderIntent.create(
+            instrument_version="BTCUSDT-PERP:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="LIMIT",
+            quantity="0.123",
+            price="40000.25",
+            time_in_force="GTC",
+        )
+        rules = symbol_rules(
+            price_precision=0,
+            quantity_precision=0,
+            tick_size="0.01",
+            lot_step="0.001",
+        )
+        request = prepare_order_request(
+            intent,
+            client_order_id="at-usdm-filter-evidence",
+            capability=capability(),
+            symbol_rules=rules,
+            at=NOW,
+        )
+        self.assertEqual(request.body["quantity"], "0.123")
+        self.assertEqual(request.body["price"], "40000.25")
+        self.assertEqual(request.filter_source_sha256, rules.source_sha256)
+        self.assertRegex(request.filter_source_sha256, r"^sha256:[0-9a-f]{64}$")
+
+        with self.assertRaises(TypeError):
+            prepare_order_request(
+                intent,
+                client_order_id="at-usdm-missing-rules",
+                capability=capability(),
+                symbol_rules=None,
+                at=NOW,
+            )
+
+    def test_exchange_info_quantity_price_status_and_capabilities_fail_closed(self):
+        off_step = BinanceUsdmOrderIntent.create(
+            instrument_version="BTCUSDT-PERP:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="LIMIT",
+            quantity="0.0105",
+            price="40000.25",
+            time_in_force="GTC",
+        )
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "quantity"):
+            prepare_order_request(
+                off_step,
+                client_order_id="at-usdm-off-step",
+                capability=capability(),
+                symbol_rules=symbol_rules(lot_step="0.001"),
+                at=NOW,
+            )
+
+        off_tick = BinanceUsdmOrderIntent.create(
+            instrument_version="BTCUSDT-PERP:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="LIMIT",
+            quantity="0.010",
+            price="40000.255",
+            time_in_force="GTC",
+        )
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "price"):
+            prepare_order_request(
+                off_tick,
+                client_order_id="at-usdm-off-tick",
+                capability=capability(),
+                symbol_rules=symbol_rules(tick_size="0.01"),
+                at=NOW,
+            )
+
+        valid = BinanceUsdmOrderIntent.create(
+            instrument_version="BTCUSDT-PERP:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="LIMIT",
+            quantity="0.010",
+            price="40000.25",
+            time_in_force="GTC",
+        )
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "not TRADING"):
+            prepare_order_request(
+                valid,
+                client_order_id="at-usdm-halted",
+                capability=capability(),
+                symbol_rules=symbol_rules(status="SETTLING"),
+                at=NOW,
+            )
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "order type"):
+            prepare_order_request(
+                valid,
+                client_order_id="at-usdm-order-type-filter",
+                capability=capability(),
+                symbol_rules=symbol_rules(order_types=("MARKET",)),
+                at=NOW,
+            )
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "time_in_force"):
+            prepare_order_request(
+                valid,
+                client_order_id="at-usdm-tif-filter",
+                capability=capability(),
+                symbol_rules=symbol_rules(time_in_force=("IOC",)),
+                at=NOW,
+            )
+
+    def test_filter_step_alignment_is_relative_to_filter_minimum(self):
+        intent = BinanceUsdmOrderIntent.create(
+            instrument_version="BTCUSDT-PERP:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="LIMIT",
+            quantity="0.015",
+            price="40000.15",
+            time_in_force="GTC",
+        )
+        request = prepare_order_request(
+            intent,
+            client_order_id="at-usdm-filter-offsets",
+            capability=capability(),
+            symbol_rules=symbol_rules(
+                lot_min="0.005",
+                lot_step="0.01",
+                price_min="0.05",
+                tick_size="0.1",
+            ),
+            at=NOW,
+        )
+        self.assertEqual(request.body["quantity"], "0.015")
+        self.assertEqual(request.body["price"], "40000.15")
+
+    def test_reduce_only_is_exempt_from_min_notional_without_price_evidence(self):
+        intent = BinanceUsdmOrderIntent.create(
+            instrument_version="BTCUSDT-PERP:v1",
+            symbol="BTCUSDT",
+            side="SELL",
+            order_type="MARKET",
+            quantity="0.001",
+            position_side="BOTH",
+            reduce_only=True,
+        )
+        request = prepare_order_request(
+            intent,
+            client_order_id="at-usdm-reduce-min-notional",
+            capability=capability(position_mode="NET"),
+            symbol_rules=symbol_rules(min_notional="1000000"),
+            at=NOW,
+        )
+        self.assertEqual(request.body["reduceOnly"], "true")
+        self.assertIsNone(request.mark_price_source_sha256)
+
+    def test_market_lot_size_overrides_limit_lot_size(self):
+        intent = BinanceUsdmOrderIntent.create(
+            instrument_version="BTCUSDT-PERP:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="MARKET",
+            quantity="0.005",
+        )
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "quantity"):
+            prepare_order_request(
+                intent,
+                client_order_id="at-usdm-market-lot",
+                capability=capability(),
+                symbol_rules=symbol_rules(
+                    lot_min="0.001",
+                    lot_step="0.001",
+                    market_min="0.01",
+                    market_step="0.01",
+                ),
+                at=NOW,
+            )
+
+    def test_limit_percent_price_requires_fresh_mark_price_and_enforces_side_bounds(self):
+        rules = symbol_rules(
+            percent_price_up="1.05",
+            percent_price_down="0.95",
+        )
+        buy = BinanceUsdmOrderIntent.create(
+            instrument_version="BTCUSDT-PERP:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="LIMIT",
+            quantity="0.01",
+            price="42000",
+            time_in_force="GTC",
+        )
+        with self.assertRaisesRegex(
+            BinanceUsdmAdapterError,
+            "PERCENT_PRICE admission requires canonical mark-price evidence",
+        ):
+            prepare_order_request(
+                buy,
+                client_order_id="at-usdm-percent-no-mark",
+                capability=capability(),
+                symbol_rules=rules,
+                at=NOW,
+            )
+
+        provider_mark = mark_price(price="40000")
+        accepted = prepare_order_request(
+            buy,
+            client_order_id="at-usdm-percent-cap",
+            capability=capability(),
+            symbol_rules=rules,
+            at=NOW,
+            mark_price=provider_mark,
+            maximum_mark_price_age_seconds=30,
+        )
+        self.assertEqual(
+            accepted.mark_price_source_sha256,
+            provider_mark.source_sha256,
+        )
+
+        too_high = BinanceUsdmOrderIntent.create(
+            instrument_version="BTCUSDT-PERP:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="LIMIT",
+            quantity="0.01",
+            price="42000.05",
+            time_in_force="GTC",
+        )
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "PERCENT_PRICE cap"):
+            prepare_order_request(
+                too_high,
+                client_order_id="at-usdm-percent-high",
+                capability=capability(),
+                symbol_rules=rules,
+                at=NOW,
+                mark_price=provider_mark,
+                maximum_mark_price_age_seconds=30,
+            )
+
+        too_low = BinanceUsdmOrderIntent.create(
+            instrument_version="BTCUSDT-PERP:v1",
+            symbol="BTCUSDT",
+            side="SELL",
+            order_type="LIMIT",
+            quantity="0.01",
+            price="37999.95",
+            time_in_force="GTC",
+        )
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "PERCENT_PRICE floor"):
+            prepare_order_request(
+                too_low,
+                client_order_id="at-usdm-percent-low",
+                capability=capability(),
+                symbol_rules=rules,
+                at=NOW,
+                mark_price=provider_mark,
+                maximum_mark_price_age_seconds=30,
+            )
+
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "stale"):
+            prepare_order_request(
+                buy,
+                client_order_id="at-usdm-percent-stale",
+                capability=capability(),
+                symbol_rules=rules,
+                at=NOW,
+                mark_price=mark_price(
+                    price="40000",
+                    observed_at=NOW - timedelta(seconds=31),
+                ),
+                maximum_mark_price_age_seconds=30,
+            )
+
+    def test_market_min_notional_requires_fresh_bound_mark_price_evidence(self):
+        intent = BinanceUsdmOrderIntent.create(
+            instrument_version="BTCUSDT-PERP:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="MARKET",
+            quantity="0.001",
+        )
+        rules = symbol_rules(min_notional="20")
+
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "mark-price evidence"):
+            prepare_order_request(
+                intent,
+                client_order_id="at-usdm-market-no-mark",
+                capability=capability(),
+                symbol_rules=rules,
+                at=NOW,
+            )
+
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "stale"):
+            prepare_order_request(
+                intent,
+                client_order_id="at-usdm-market-stale-mark",
+                capability=capability(),
+                symbol_rules=rules,
+                at=NOW,
+                mark_price=mark_price(observed_at=NOW - timedelta(seconds=31)),
+                maximum_mark_price_age_seconds=30,
+            )
+
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "notional"):
+            prepare_order_request(
+                intent,
+                client_order_id="at-usdm-market-small",
+                capability=capability(),
+                symbol_rules=rules,
+                at=NOW,
+                mark_price=mark_price(price="10000"),
+                maximum_mark_price_age_seconds=30,
+            )
+
+        provider_mark = mark_price(price="40000")
+        accepted = prepare_order_request(
+            intent,
+            client_order_id="at-usdm-market-fresh-mark",
+            capability=capability(),
+            symbol_rules=rules,
+            at=NOW,
+            mark_price=provider_mark,
+            maximum_mark_price_age_seconds=30,
+        )
+        self.assertEqual(
+            accepted.mark_price_source_sha256,
+            provider_mark.source_sha256,
+        )
+
+    def test_exchange_info_rules_and_mark_price_cannot_be_forged_directly(self):
+        parsed_rules = symbol_rules()
+        with self.assertRaisesRegex(
+            BinanceUsdmAdapterError,
+            "canonical provider payload parsing",
+        ):
+            BinanceUsdmSymbolRules(**parsed_rules.__dict__)
+
+        provider_mark = mark_price()
+        with self.assertRaisesRegex(
+            BinanceUsdmAdapterError,
+            "canonical provider payload parsing",
+        ):
+            BinanceUsdmMarkPrice(**provider_mark.__dict__)
+
+    def test_exchange_info_parser_rejects_missing_duplicate_and_invalid_filters(self):
+        base = {
+            "symbol": "BTCUSDT",
+            "status": "TRADING",
+            "contractType": "PERPETUAL",
+            "orderTypes": ["LIMIT", "MARKET"],
+            "timeInForce": ["GTC", "IOC"],
+        }
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "required PRICE_FILTER"):
+            BinanceUsdmSymbolRules.from_exchange_info(
+                instrument_version="BTCUSDT-PERP:v1",
+                symbol_payload={
+                    **base,
+                    "filters": [
+                        {
+                            "filterType": "LOT_SIZE",
+                            "minQty": "0.001",
+                            "maxQty": "100",
+                            "stepSize": "0.001",
+                        }
+                    ],
+                },
+            )
+
+        duplicate_price = {
+            "filterType": "PRICE_FILTER",
+            "minPrice": "1",
+            "maxPrice": "100000",
+            "tickSize": "0.1",
+        }
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "duplicate"):
+            BinanceUsdmSymbolRules.from_exchange_info(
+                instrument_version="BTCUSDT-PERP:v1",
+                symbol_payload={
+                    **base,
+                    "filters": [
+                        duplicate_price,
+                        dict(duplicate_price),
+                        {
+                            "filterType": "LOT_SIZE",
+                            "minQty": "0.001",
+                            "maxQty": "100",
+                            "stepSize": "0.001",
+                        },
+                    ],
+                },
+            )
+
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "MIN_NOTIONAL"):
+            BinanceUsdmSymbolRules.from_exchange_info(
+                instrument_version="BTCUSDT-PERP:v1",
+                symbol_payload={
+                    **base,
+                    "filters": [
+                        duplicate_price,
+                        {
+                            "filterType": "LOT_SIZE",
+                            "minQty": "0.001",
+                            "maxQty": "100",
+                            "stepSize": "0.001",
+                        },
+                        {
+                            "filterType": "MIN_NOTIONAL",
+                            "notional": "0",
+                        },
+                    ],
+                },
             )
 
     def test_ack_never_promotes_executed_qty_to_fill(self):
@@ -586,6 +1106,7 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
                 intent,
                 client_order_id="at-usdm-mode",
                 capability=capability(position_mode="CONFLICTED"),
+                symbol_rules=symbol_rules(),
                 at=NOW,
             )
 

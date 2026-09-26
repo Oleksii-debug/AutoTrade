@@ -474,6 +474,16 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
                 client_ids_by_order_id={42: "bad client id with spaces"},
             )
 
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "multiple provider order ids"):
+            parse_account_trades(
+                observation,
+                instrument_versions={"BTCUSDT": "BTCUSDT-PERP:v1"},
+                client_ids_by_order_id={
+                    43: "at-usdm-same-client",
+                    44: "at-usdm-same-client",
+                },
+            )
+
     def test_instrument_identity_map_is_fully_validated_before_fill_mapping(self):
         row = {
             "commission": "0.01",
@@ -504,6 +514,15 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
                 instrument_versions={
                     "BTCUSDT": "BTCUSDT-PERP:v1",
                     "ETHUSDT": "",
+                },
+            )
+
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "duplicate normalized"):
+            parse_account_trades(
+                observation,
+                instrument_versions={
+                    "BTCUSDT": "BTCUSDT-PERP:v1",
+                    " BTCUSDT ": "BTCUSDT-PERP:v2",
                 },
             )
 
@@ -539,17 +558,20 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
         )
         self.assertFalse(evidence.provider_semantics_exclude_execution)
 
-        qualified = coverage_evidence(
-            account_id="paper-1",
-            environment="PAPER",
-            surface="ORDER_HISTORY",
-            coverage_start="2026-09-24T20:00:00Z",
-            coverage_end="2026-09-25T00:00:00Z",
-            pagination_complete=True,
-            consistency_horizon_satisfied=True,
-            qualified_exclusion_semantics=True,
-        )
-        self.assertTrue(qualified.provider_semantics_exclude_execution)
+        with self.assertRaisesRegex(
+            BinanceUsdmAdapterError,
+            "cannot self-assert provider exclusion semantics",
+        ):
+            coverage_evidence(
+                account_id="paper-1",
+                environment="PAPER",
+                surface="ORDER_HISTORY",
+                coverage_start="2026-09-24T20:00:00Z",
+                coverage_end="2026-09-25T00:00:00Z",
+                pagination_complete=True,
+                consistency_horizon_satisfied=True,
+                qualified_exclusion_semantics=True,
+            )
 
     def test_bad_position_mode_and_bad_trade_position_side_fail_closed(self):
         intent = BinanceUsdmOrderIntent.create(

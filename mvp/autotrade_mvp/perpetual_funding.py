@@ -21,6 +21,7 @@ from .accounting import (
     reverse_transaction,
     transaction_digest,
 )
+from .futures import FuturesError, settle_fraction
 from .instruments import InstrumentRegistry, InstrumentVersion
 from .perpetuals import (
     FundingConvention,
@@ -28,6 +29,7 @@ from .perpetuals import (
     PerpetualContract,
     PerpetualError,
     funding_cashflow,
+    inverse_funding_cashflow_exact,
 )
 from .persistence import JournalStore, canonical_json, payload_digest
 from .provider_activity_accounting import DurableProviderEconomicBook
@@ -73,6 +75,42 @@ def _utc_text(value: datetime) -> str:
 def _identity(kind: str, *parts: str) -> str:
     digest = sha256(canonical_json(list(parts)).encode("utf-8")).hexdigest()
     return f"{kind}:sha256:{digest}"
+
+
+def _inverse_settlement_policy(
+    version: InstrumentVersion,
+) -> tuple[Decimal, str]:
+    """Resolve the one explicit cash-quantization boundary from versioned contract data."""
+
+    if not isinstance(version, InstrumentVersion) or version.payoff != "INVERSE":
+        raise PerpetualFundingError(
+            "inverse settlement policy requires an INVERSE instrument version"
+        )
+    schedule = version.funding_schedule
+    if not isinstance(schedule, Mapping):
+        raise PerpetualFundingError(
+            "inverse durable funding requires an explicit settlement quantization policy"
+        )
+    quantum_value = schedule.get("settlement_quantum")
+    rounding_value = schedule.get("settlement_rounding")
+    if quantum_value is None or rounding_value is None:
+        raise PerpetualFundingError(
+            "inverse durable funding requires an explicit settlement quantization policy"
+        )
+    quantum = _decimal(quantum_value, "funding_schedule.settlement_quantum")
+    if quantum <= 0:
+        raise PerpetualFundingError(
+            "funding_schedule.settlement_quantum must be positive"
+        )
+    rounding = _text(
+        rounding_value,
+        "funding_schedule.settlement_rounding",
+    ).upper()
+    if rounding not in {"HALF_EVEN", "DOWN"}:
+        raise PerpetualFundingError(
+            "funding_schedule.settlement_rounding must be HALF_EVEN or DOWN"
+        )
+    return quantum, rounding
 
 
 @dataclass(frozen=True)
@@ -573,6 +611,7 @@ class DurablePerpetualFundingAuthority:
     def _transaction(
         self,
         observation: PerpetualFundingObservation,
+        version: InstrumentVersion,
         contract: PerpetualContract,
         canonical_position: Decimal,
         *,
@@ -581,10 +620,6 @@ class DurablePerpetualFundingAuthority:
     ) -> tuple[JournalTransaction, Decimal, str]:
         if contract.instrument_id != observation.instrument_id:
             raise PerpetualFundingError("contract instrument does not match funding evidence")
-        if contract.payoff != "LINEAR":
-            raise PerpetualFundingError(
-                "inverse durable funding requires an explicit settlement quantization policy"
-            )
         canonical_position = _decimal(canonical_position, "position_at_cut")
         if canonical_position != observation.signed_contracts:
             raise PerpetualFundingConflict(
@@ -600,14 +635,37 @@ class DurablePerpetualFundingAuthority:
         convention = FundingConvention(
             observation.positive_rate_effect, observation.price_basis
         )
-        currency, amount = funding_cashflow(
-            contract=contract,
-            signed_contracts=canonical_position,
-            funding_rate=observation.funding_rate,
-            snapshot=snapshot,
-            convention=convention,
-            at=observation.effective_at,
-        )
+        if contract.payoff == "LINEAR":
+            currency, amount = funding_cashflow(
+                contract=contract,
+                signed_contracts=canonical_position,
+                funding_rate=observation.funding_rate,
+                snapshot=snapshot,
+                convention=convention,
+                at=observation.effective_at,
+            )
+        elif contract.payoff == "INVERSE":
+            quantum, rounding = _inverse_settlement_policy(version)
+            try:
+                currency, exact_amount = inverse_funding_cashflow_exact(
+                    contract=contract,
+                    signed_contracts=canonical_position,
+                    funding_rate=observation.funding_rate,
+                    snapshot=snapshot,
+                    convention=convention,
+                    at=observation.effective_at,
+                )
+                amount = settle_fraction(
+                    exact_amount,
+                    quantum=quantum,
+                    rounding=rounding,
+                )
+            except (PerpetualError, FuturesError) as error:
+                raise PerpetualFundingError(
+                    "inverse funding settlement economics are invalid"
+                ) from error
+        else:
+            raise PerpetualFundingError("perpetual payoff is not canonically qualified")
         transaction_id = str(
             uuid5(
                 NAMESPACE_URL,
@@ -792,6 +850,7 @@ class DurablePerpetualFundingAuthority:
         )
         replacement, amount, currency = self._transaction(
             observation,
+            version,
             contract,
             position_cut.position,
             cause_event_id=event_id,

@@ -4,7 +4,7 @@ Status: **implementation/recorded-fixture foundation only; NOT QUALIFIED for LIV
 provider authority and NOT evidence of a WhiteBIT paper/testnet environment**.
 
 Exact implementation source revision covered by this evidence:
-`c4333e88f07c13ffb9f23bc20702f125d3dafe29`.
+`e2571d461bcaf7f51dedfc693ffb19c96c4e31a0`.
 
 Canonical implementation and tests:
 - `mvp/autotrade_mvp/whitebit.py`
@@ -52,9 +52,10 @@ Observed provider contracts used by the implementation:
    limits can override broad defaults. AutoTrade therefore does not embed a
    universal provider quota in its admission policy.
 3. HTTP 429 is documented for exponential retry starting at 1 second, doubling
-   to a 30-second cap with jitter. Generic 5xx guidance permits backoff, but
-   AutoTrade deliberately does **not** blindly retry WRITE/CANCEL after a
-   possibly-sent 5xx; those responses enter reconciliation-first handling.
+   to a 30-second cap with jitter. AutoTrade applies automatic backoff only to
+   READ/RECOVERY classes. Until provider-side financial idempotency is separately
+   qualified, WRITE/CANCEL 429 and 5xx outcomes enter reconciliation-first
+   handling rather than blind retry.
 4. WhiteBIT security guidance identifies `Info + Trading` as the minimal
    trading-application permission set and reserves `Deposit + Withdraw` for
    applications that move funds.
@@ -101,7 +102,8 @@ caller. It reserves capacity in this priority order:
 3. cancel has highest admission priority.
 
 `classify_whitebit_http_retry` records:
-- 429: bounded exponential backoff with jitter;
+- 429 READ/RECOVERY: bounded exponential backoff with jitter;
+- 429 WRITE/CANCEL: no automatic retry; reconciliation required;
 - 5xx READ/RECOVERY: bounded backoff;
 - 5xx WRITE/CANCEL: no automatic retry; reconciliation required;
 - authentication and client/validation failures: no automatic retry.

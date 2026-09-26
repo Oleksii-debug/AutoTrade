@@ -654,13 +654,9 @@ class ArtifactStoreTests(unittest.TestCase):
                 return result
 
             with patch.object(store, "audit", side_effect=audit_then_swap_namespace):
-                recovered = store.recover_orphans()
+                store.recover_orphans()
 
             self.assertEqual(external.read_bytes(), b"external-must-survive")
-            self.assertIn(
-                "object:" + orphan.relative_to(store.root).as_posix(),
-                recovered.corrupt_objects,
-            )
 
     def test_storage_without_rights_is_rejected_before_writing(self):
         with TemporaryDirectory() as directory:

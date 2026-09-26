@@ -997,7 +997,7 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(legacy.current_schema_version(), 1)
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 7)
+            self.assertEqual(upgraded.current_schema_version(), 8)
             self.assertEqual(
                 upgraded.load_events("account", "paper-1")[0]["event_id"],
                 "evt-1",
@@ -1034,7 +1034,7 @@ class JournalStoreTests(unittest.TestCase):
                 connection.close()
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 7)
+            self.assertEqual(upgraded.current_schema_version(), 8)
             with self.assertRaisesRegex(ValueError, "legacy unscoped"):
                 upgraded.record_command(
                     actor="alice",
@@ -1098,7 +1098,7 @@ class JournalStoreTests(unittest.TestCase):
                 connection.close()
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 7)
+            self.assertEqual(upgraded.current_schema_version(), 8)
             replayed, inserted = upgraded.record_command(
                 actor="alice",
                 environment="PAPER",
@@ -1396,7 +1396,10 @@ class JournalStoreTests(unittest.TestCase):
 
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
-            healthy = JournalStore(path)
+            class V7JournalStore(JournalStore):
+                SCHEMA_VERSION = 7
+
+            healthy = V7JournalStore(path)
             healthy.append_event(event())
             self.assertEqual(healthy.current_schema_version(), 7)
 
@@ -1617,6 +1620,172 @@ class JournalStoreTests(unittest.TestCase):
                     projection_name="portfolio"
                 )
 
+    def test_fractional_authoritative_journal_cursor_tamper_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+            store.append_event(
+                event("evt-2", 2, {"kind": "fill", "quantity": "2"})
+            )
+
+            # Keep an integer MAX(sequence)=2 so a max-only integrity check would
+            # incorrectly hide the corrupted earlier authority row.
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE events SET journal_sequence = 1.5 "
+                    "WHERE event_id = 'evt-1'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "contiguous canonical positive integer series",
+            ):
+                JournalStore(path).current_journal_sequence()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "contiguous canonical positive integer series",
+            ):
+                JournalStore(path).save_global_projection_checkpoint(
+                    projection_name="portfolio",
+                    journal_sequence=2,
+                    state={"net": "1"},
+                )
+
+    def test_missing_interior_journal_sequence_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+            store.append_event(
+                event("evt-2", 2, {"kind": "fill", "quantity": "2"})
+            )
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute("DELETE FROM events WHERE event_id = 'evt-1'")
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "contiguous canonical positive integer series",
+            ):
+                JournalStore(path).current_journal_sequence()
+
+    def test_global_projection_checkpoint_tamper_cannot_be_overwritten(self):
+        for tamper_sql in (
+            (
+                "UPDATE global_projection_checkpoints "
+                "SET state_json = '{\"net\":\"999\"}' "
+                "WHERE projection_name = 'portfolio'"
+            ),
+            (
+                "UPDATE global_projection_checkpoints "
+                "SET state_hash = 'sha256:"
+                + "0" * 64
+                + "' WHERE projection_name = 'portfolio'"
+            ),
+        ):
+            with self.subTest(tamper_sql=tamper_sql):
+                with TemporaryDirectory() as directory:
+                    path = f"{directory}/journal.sqlite3"
+                    store = JournalStore(path)
+                    store.append_event(event())
+                    self.assertTrue(
+                        store.save_global_projection_checkpoint(
+                            projection_name="portfolio",
+                            journal_sequence=1,
+                            state={"net": "1"},
+                        )
+                    )
+                    store.append_event(
+                        event(
+                            "evt-2",
+                            2,
+                            {"kind": "fill", "quantity": "2"},
+                        )
+                    )
+
+                    connection = sqlite3.connect(path)
+                    try:
+                        connection.execute(tamper_sql)
+                        connection.commit()
+                    finally:
+                        connection.close()
+
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "hash does not match identity, cut, and state",
+                    ):
+                        store.save_global_projection_checkpoint(
+                            projection_name="portfolio",
+                            journal_sequence=2,
+                            state={"net": "3"},
+                        )
+
+                    connection = sqlite3.connect(path)
+                    try:
+                        row = connection.execute(
+                            "SELECT journal_sequence FROM global_projection_checkpoints "
+                            "WHERE projection_name = 'portfolio'"
+                        ).fetchone()
+                    finally:
+                        connection.close()
+                    self.assertEqual(
+                        row[0],
+                        1,
+                        "tampered predecessor was overwritten by a later global cut",
+                    )
+
+    def test_global_projection_checkpoint_fractional_cut_tamper_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+            self.assertTrue(
+                store.save_global_projection_checkpoint(
+                    projection_name="portfolio",
+                    journal_sequence=1,
+                    state={"net": "1"},
+                )
+            )
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE global_projection_checkpoints "
+                    "SET journal_sequence = 1.5 WHERE projection_name = ?",
+                    ("portfolio",),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "journal_sequence is not a canonical integer",
+            ):
+                JournalStore(path).load_global_projection_checkpoint(
+                    projection_name="portfolio"
+                )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "journal_sequence is not a canonical integer",
+            ):
+                store.save_global_projection_checkpoint(
+                    projection_name="portfolio",
+                    journal_sequence=1,
+                    state={"net": "1"},
+                )
+
     def test_v6_upgrade_adds_global_projection_checkpoint_without_losing_journal(self):
         class V6JournalStore(JournalStore):
             SCHEMA_VERSION = 6
@@ -1628,7 +1797,7 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(legacy.current_schema_version(), 6)
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 7)
+            self.assertEqual(upgraded.current_schema_version(), 8)
             self.assertEqual(
                 [item["event_id"] for item in upgraded.load_events_after_journal_sequence(0)],
                 ["evt-1"],
@@ -1716,6 +1885,259 @@ class JournalStoreTests(unittest.TestCase):
                     aggregate_type="account",
                     aggregate_id="paper-1",
                 )
+
+    def test_fractional_authoritative_aggregate_version_tamper_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+            store.save_projection_checkpoint(
+                projection_name="position",
+                aggregate_type="account",
+                aggregate_id="paper-1",
+                aggregate_version=1,
+                state={"net_quantity": "1"},
+            )
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE events SET aggregate_version = 1.5 "
+                    "WHERE event_id = 'evt-1'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            corrupted = JournalStore(path)
+            expected = (
+                "aggregate version authority is not a contiguous "
+                "positive integer sequence"
+            )
+            with self.assertRaisesRegex(ValueError, expected):
+                corrupted.next_aggregate_version("account", "paper-1")
+            with self.assertRaisesRegex(ValueError, expected):
+                corrupted.load_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                )
+            with self.assertRaisesRegex(ValueError, expected):
+                corrupted.save_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                    aggregate_version=1,
+                    state={"net_quantity": "1"},
+                )
+            with self.assertRaisesRegex(ValueError, expected):
+                corrupted.append_event(
+                    event("evt-2", 2, {"kind": "fill", "quantity": "2"})
+                )
+
+    def test_aggregate_version_authority_rejects_duplicate_gap_shape(self):
+        connection = sqlite3.connect(":memory:")
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute(
+                """
+                CREATE TABLE events (
+                    aggregate_type TEXT NOT NULL,
+                    aggregate_id TEXT NOT NULL,
+                    aggregate_version NUMERIC NOT NULL
+                )
+                """
+            )
+            connection.executemany(
+                "INSERT INTO events(aggregate_type, aggregate_id, aggregate_version) "
+                "VALUES (?, ?, ?)",
+                [
+                    ("account", "paper-1", 1),
+                    ("account", "paper-1", 1),
+                    ("account", "paper-1", 3),
+                ],
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "contiguous positive integer sequence",
+            ):
+                JournalStore._aggregate_version_value(
+                    connection,
+                    "account",
+                    "paper-1",
+                )
+        finally:
+            connection.close()
+
+    def test_projection_checkpoint_version_tamper_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+            store.append_event(
+                event("evt-2", 2, {"kind": "fill", "quantity": "2"})
+            )
+            store.save_projection_checkpoint(
+                projection_name="position",
+                aggregate_type="account",
+                aggregate_id="paper-1",
+                aggregate_version=2,
+                state={"net_quantity": "3"},
+            )
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE projection_checkpoints "
+                    "SET aggregate_version = 1 "
+                    "WHERE projection_name = 'position'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "hash does not match identity, version, and state",
+            ):
+                JournalStore(path).load_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                )
+
+    def test_projection_checkpoint_fractional_version_tamper_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+            store.save_projection_checkpoint(
+                projection_name="position",
+                aggregate_type="account",
+                aggregate_id="paper-1",
+                aggregate_version=1,
+                state={"net_quantity": "1"},
+            )
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE projection_checkpoints "
+                    "SET aggregate_version = 1.5 "
+                    "WHERE projection_name = 'position'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "aggregate_version is not a canonical integer",
+            ):
+                JournalStore(path).load_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "aggregate_version is not a canonical integer",
+            ):
+                JournalStore(path).save_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                    aggregate_version=2,
+                    state={"net_quantity": "2"},
+                )
+
+    def test_projection_checkpoint_identity_tamper_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+            store.save_projection_checkpoint(
+                projection_name="position",
+                aggregate_type="account",
+                aggregate_id="paper-1",
+                aggregate_version=1,
+                state={"net_quantity": "1"},
+            )
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE projection_checkpoints "
+                    "SET projection_name = 'position-renamed' "
+                    "WHERE projection_name = 'position'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "hash does not match identity, version, and state",
+            ):
+                JournalStore(path).load_projection_checkpoint(
+                    projection_name="position-renamed",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                )
+
+    def test_v7_upgrade_invalidates_unbound_projection_checkpoint(self):
+        class V7JournalStore(JournalStore):
+            SCHEMA_VERSION = 7
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            legacy = V7JournalStore(path)
+            legacy.append_event(event())
+            legacy.save_projection_checkpoint(
+                projection_name="position",
+                aggregate_type="account",
+                aggregate_id="paper-1",
+                aggregate_version=1,
+                state={"net_quantity": "1"},
+            )
+            self.assertEqual(legacy.current_schema_version(), 7)
+            self.assertIsNotNone(
+                legacy.load_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                )
+            )
+
+            upgraded = JournalStore(path)
+            self.assertEqual(upgraded.current_schema_version(), 8)
+            self.assertIsNone(
+                upgraded.load_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                )
+            )
+            self.assertEqual(
+                [item["event_id"] for item in upgraded.load_events("account", "paper-1")],
+                ["evt-1"],
+            )
+            self.assertTrue(
+                upgraded.save_projection_checkpoint(
+                    projection_name="position",
+                    aggregate_type="account",
+                    aggregate_id="paper-1",
+                    aggregate_version=1,
+                    state={"net_quantity": "1"},
+                )
+            )
+            rebuilt = upgraded.load_projection_checkpoint(
+                projection_name="position",
+                aggregate_type="account",
+                aggregate_id="paper-1",
+            )
+            self.assertEqual(rebuilt["aggregate_version"], 1)
+            self.assertEqual(rebuilt["state"], {"net_quantity": "1"})
 
 
     def test_event_retry_rejects_changed_committed_at(self):

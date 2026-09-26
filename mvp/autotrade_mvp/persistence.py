@@ -38,6 +38,27 @@ def _event_envelope_digest(envelope_json: str) -> str:
     return "sha256:" + sha256(envelope_json.encode("utf-8")).hexdigest()
 
 
+def _projection_checkpoint_digest(
+    *,
+    projection_name: str,
+    aggregate_type: str,
+    aggregate_id: str,
+    aggregate_version: int,
+    state: Any,
+) -> str:
+    """Bind a derived checkpoint to its exact projection identity and journal cut."""
+
+    return payload_digest(
+        {
+            "projection_name": projection_name,
+            "aggregate_type": aggregate_type,
+            "aggregate_id": aggregate_id,
+            "aggregate_version": aggregate_version,
+            "state": state,
+        }
+    )
+
+
 _SEQUENCE_RE = re.compile(r"^(0|[1-9][0-9]*)$")
 
 
@@ -71,7 +92,7 @@ class JournalStore:
     publication intent; a separate qualified dispatcher must perform delivery.
     """
 
-    SCHEMA_VERSION = 7
+    SCHEMA_VERSION = 8
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -215,6 +236,13 @@ class JournalStore:
                 )
                 """,
             )
+        if version == 8:
+            # v7 checkpoint hashes covered state only, not projection identity or
+            # aggregate cut. Those missing bindings cannot be reconstructed after
+            # the fact without trusting potentially tampered derived rows. Drop
+            # only derived checkpoints and rebuild them from the authoritative
+            # event journal under the v8 digest semantics.
+            return ("DELETE FROM projection_checkpoints",)
         raise ValueError(f"Unsupported journal migration version: {version}")
 
     @classmethod
@@ -482,7 +510,7 @@ class JournalStore:
                 for value in raw_sequences
             ) or raw_sequences != list(range(1, len(raw_sequences) + 1)):
                 raise ValueError(
-                    "Journal schema events journal_sequence is not contiguous"
+                    "journal sequence authority is not a contiguous canonical positive integer series"
                 )
 
         foreign_keys = [
@@ -874,22 +902,116 @@ class JournalStore:
             return None
         return self._decode_event_row(row)
 
+    @staticmethod
+    def _aggregate_version_value(
+        connection: sqlite3.Connection,
+        aggregate_type: str,
+        aggregate_id: str,
+    ) -> int:
+        row = connection.execute(
+            """
+            SELECT
+                COUNT(*) AS event_count,
+                MIN(aggregate_version) AS first_version,
+                MAX(aggregate_version) AS last_version,
+                COUNT(DISTINCT aggregate_version) AS distinct_version_count,
+                SUM(
+                    CASE
+                        WHEN typeof(aggregate_version) = 'integer' THEN 0
+                        ELSE 1
+                    END
+                ) AS non_integer_count
+            FROM events
+            WHERE aggregate_type = ? AND aggregate_id = ?
+            """,
+            (aggregate_type, aggregate_id),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("aggregate version authority query returned no row")
+        event_count = row["event_count"]
+        if type(event_count) is not int or event_count < 0:
+            raise ValueError(
+                "aggregate version authority count is not a canonical integer"
+            )
+        if event_count == 0:
+            return 0
+        first_version = row["first_version"]
+        last_version = row["last_version"]
+        distinct_version_count = row["distinct_version_count"]
+        non_integer_count = row["non_integer_count"]
+        if (
+            type(first_version) is not int
+            or type(last_version) is not int
+            or type(distinct_version_count) is not int
+            or type(non_integer_count) is not int
+            or non_integer_count != 0
+            or first_version != 1
+            or last_version != event_count
+            or distinct_version_count != event_count
+        ):
+            raise ValueError(
+                "aggregate version authority is not a contiguous positive integer sequence"
+            )
+        return last_version
+
     def next_aggregate_version(self, aggregate_type: str, aggregate_id: str) -> int:
         aggregate_type = self._require_text(aggregate_type, "aggregate_type")
         aggregate_id = self._require_text(aggregate_id, "aggregate_id")
         with self._connect() as connection:
-            current = connection.execute(
-                "SELECT MAX(aggregate_version) FROM events WHERE aggregate_type = ? AND aggregate_id = ?",
-                (aggregate_type, aggregate_id),
-            ).fetchone()[0]
-        return 1 if current is None else int(current) + 1
+            current = self._aggregate_version_value(
+                connection,
+                aggregate_type,
+                aggregate_id,
+            )
+        return current + 1
 
     @staticmethod
     def _journal_sequence_value(connection: sqlite3.Connection) -> int:
         row = connection.execute(
-            "SELECT MAX(journal_sequence) FROM events"
+            """
+            SELECT
+                COUNT(*) AS event_count,
+                MIN(journal_sequence) AS min_sequence,
+                MAX(journal_sequence) AS max_sequence,
+                SUM(
+                    CASE
+                        WHEN typeof(journal_sequence) != 'integer'
+                          OR journal_sequence <= 0
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS invalid_sequence_count,
+                COUNT(DISTINCT journal_sequence) AS distinct_sequence_count
+            FROM events
+            """
         ).fetchone()
-        return 0 if row is None or row[0] is None else int(row[0])
+        if row is None:
+            raise ValueError("journal sequence authority query returned no row")
+        event_count = row["event_count"]
+        if type(event_count) is not int or event_count < 0:
+            raise ValueError("journal sequence cardinality is not canonical")
+        if event_count == 0:
+            return 0
+
+        minimum = row["min_sequence"]
+        maximum = row["max_sequence"]
+        invalid_count = row["invalid_sequence_count"]
+        distinct_count = row["distinct_sequence_count"]
+        if (
+            type(minimum) is not int
+            or type(maximum) is not int
+            or type(invalid_count) is not int
+            or type(distinct_count) is not int
+            or invalid_count != 0
+            or minimum != 1
+            or maximum != event_count
+            or distinct_count != event_count
+        ):
+            raise ValueError(
+                "journal sequence authority is not a contiguous canonical "
+                "positive integer series"
+            )
+        return maximum
 
     def current_journal_sequence(self) -> int:
         """Return the explicit durable global journal cursor."""
@@ -1021,11 +1143,12 @@ class JournalStore:
                 connection.commit()
                 return AppendResult(event_id, aggregate_version, False)
 
-            current = connection.execute(
-                "SELECT MAX(aggregate_version) FROM events WHERE aggregate_type = ? AND aggregate_id = ?",
-                (aggregate_type, aggregate_id),
-            ).fetchone()[0]
-            expected_version = 1 if current is None else int(current) + 1
+            current = self._aggregate_version_value(
+                connection,
+                aggregate_type,
+                aggregate_id,
+            )
+            expected_version = current + 1
             if aggregate_version != expected_version:
                 connection.rollback()
                 raise ValueError(
@@ -1229,20 +1352,21 @@ class JournalStore:
         ):
             raise ValueError("aggregate_version must be a non-negative integer")
         state_json = canonical_json(state)
-        state_hash = payload_digest(state)
+        state_hash = (
+            _projection_checkpoint_digest(
+                projection_name=projection_name,
+                aggregate_type=aggregate_type,
+                aggregate_id=aggregate_id,
+                aggregate_version=aggregate_version,
+                state=state,
+            )
+            if self.SCHEMA_VERSION >= 8
+            else payload_digest(state)
+        )
 
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                current = connection.execute(
-                    "SELECT MAX(aggregate_version) FROM events "
-                    "WHERE aggregate_type = ? AND aggregate_id = ?",
-                    (aggregate_type, aggregate_id),
-                ).fetchone()[0]
-                journal_version = 0 if current is None else int(current)
-                if aggregate_version > journal_version:
-                    raise ValueError("projection checkpoint cannot outrun the journal")
-
                 existing = connection.execute(
                     """
                     SELECT aggregate_version, state_json, state_hash
@@ -1254,7 +1378,46 @@ class JournalStore:
                     (projection_name, aggregate_type, aggregate_id),
                 ).fetchone()
                 if existing is not None:
-                    existing_version = int(existing["aggregate_version"])
+                    existing_version = existing["aggregate_version"]
+                    if type(existing_version) is not int or existing_version < 0:
+                        raise ValueError(
+                            "projection checkpoint aggregate_version is not a canonical integer"
+                        )
+                    try:
+                        existing_state = json.loads(existing["state_json"])
+                    except (json.JSONDecodeError, TypeError) as error:
+                        raise ValueError(
+                            "projection checkpoint state is not valid JSON"
+                        ) from error
+                    if canonical_json(existing_state) != existing["state_json"]:
+                        raise ValueError(
+                            "projection checkpoint state is not canonical JSON"
+                        )
+                    existing_hash = (
+                        _projection_checkpoint_digest(
+                            projection_name=projection_name,
+                            aggregate_type=aggregate_type,
+                            aggregate_id=aggregate_id,
+                            aggregate_version=existing_version,
+                            state=existing_state,
+                        )
+                        if self.SCHEMA_VERSION >= 8
+                        else payload_digest(existing_state)
+                    )
+                    if existing_hash != existing["state_hash"]:
+                        raise ValueError(
+                            "projection checkpoint hash does not match identity, version, and state"
+                        )
+
+                journal_version = self._aggregate_version_value(
+                    connection,
+                    aggregate_type,
+                    aggregate_id,
+                )
+                if aggregate_version > journal_version:
+                    raise ValueError("projection checkpoint cannot outrun the journal")
+
+                if existing is not None:
                     exact = (
                         existing_version == aggregate_version
                         and existing["state_json"] == state_json
@@ -1324,23 +1487,49 @@ class JournalStore:
             ).fetchone()
             if row is None:
                 return None
-            current = connection.execute(
-                "SELECT MAX(aggregate_version) FROM events "
-                "WHERE aggregate_type = ? AND aggregate_id = ?",
-                (aggregate_type, aggregate_id),
-            ).fetchone()[0]
+            journal_version = self._aggregate_version_value(
+                connection,
+                aggregate_type,
+                aggregate_id,
+            )
 
-        state = json.loads(row["state_json"])
-        if payload_digest(state) != row["state_hash"]:
-            raise ValueError("projection checkpoint hash does not match state")
-        journal_version = 0 if current is None else int(current)
-        if int(row["aggregate_version"]) > journal_version:
+        try:
+            state = json.loads(row["state_json"])
+        except (json.JSONDecodeError, TypeError) as error:
+            raise ValueError(
+                "projection checkpoint state is not valid JSON"
+            ) from error
+        if canonical_json(state) != row["state_json"]:
+            raise ValueError(
+                "projection checkpoint state is not canonical JSON"
+            )
+        aggregate_version = row["aggregate_version"]
+        if type(aggregate_version) is not int or aggregate_version < 0:
+            raise ValueError(
+                "projection checkpoint aggregate_version is not a canonical integer"
+            )
+        expected_hash = (
+            _projection_checkpoint_digest(
+                projection_name=projection_name,
+                aggregate_type=aggregate_type,
+                aggregate_id=aggregate_id,
+                aggregate_version=aggregate_version,
+                state=state,
+            )
+            if self.SCHEMA_VERSION >= 8
+            else payload_digest(state)
+        )
+        if expected_hash != row["state_hash"]:
+            raise ValueError(
+                "projection checkpoint hash does not match identity, version, and state"
+            )
+        if aggregate_version > journal_version:
             raise ValueError("projection checkpoint is ahead of the journal")
         return {
             "projection_name": projection_name,
             "aggregate_type": aggregate_type,
             "aggregate_id": aggregate_id,
-            "aggregate_version": int(row["aggregate_version"]),
+            "aggregate_version": aggregate_version,
             "state": state,
             "state_hash": row["state_hash"],
             "updated_at": row["updated_at"],
@@ -1384,7 +1573,34 @@ class JournalStore:
                     (projection_name,),
                 ).fetchone()
                 if existing is not None:
-                    existing_sequence = int(existing["journal_sequence"])
+                    existing_sequence = existing["journal_sequence"]
+                    if type(existing_sequence) is not int or existing_sequence < 0:
+                        raise ValueError(
+                            "global projection checkpoint journal_sequence "
+                            "is not a canonical integer"
+                        )
+                    try:
+                        existing_state = json.loads(existing["state_json"])
+                    except (json.JSONDecodeError, TypeError) as error:
+                        raise ValueError(
+                            "global projection checkpoint state is not valid JSON"
+                        ) from error
+                    if canonical_json(existing_state) != existing["state_json"]:
+                        raise ValueError(
+                            "global projection checkpoint state is not canonical JSON"
+                        )
+                    existing_hash = payload_digest(
+                        {
+                            "projection_name": projection_name,
+                            "journal_sequence": existing_sequence,
+                            "state": existing_state,
+                        }
+                    )
+                    if existing_hash != existing["state_hash"]:
+                        raise ValueError(
+                            "global projection checkpoint hash does not match "
+                            "identity, cut, and state"
+                        )
                     exact = (
                         existing_sequence == journal_sequence
                         and existing["state_json"] == state_json
@@ -1456,7 +1672,12 @@ class JournalStore:
             raise ValueError(
                 "global projection checkpoint state is not canonical JSON"
             )
-        journal_sequence = int(row["journal_sequence"])
+        journal_sequence = row["journal_sequence"]
+        if type(journal_sequence) is not int or journal_sequence < 0:
+            raise ValueError(
+                "global projection checkpoint journal_sequence "
+                "is not a canonical integer"
+            )
         expected_hash = payload_digest(
             {
                 "projection_name": projection_name,
@@ -1976,12 +2197,12 @@ class JournalStore:
                         raise ValueError("event_id already exists for another command")
                     key = (item["aggregate_type"], item["aggregate_id"])
                     if key not in next_versions:
-                        current = connection.execute(
-                            "SELECT MAX(aggregate_version) FROM events "
-                            "WHERE aggregate_type = ? AND aggregate_id = ?",
-                            key,
-                        ).fetchone()[0]
-                        next_versions[key] = 1 if current is None else int(current) + 1
+                        current = self._aggregate_version_value(
+                            connection,
+                            key[0],
+                            key[1],
+                        )
+                        next_versions[key] = current + 1
                     expected_version = next_versions[key]
                     if item["aggregate_version"] != expected_version:
                         raise ValueError(

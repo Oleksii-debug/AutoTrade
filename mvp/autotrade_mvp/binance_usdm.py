@@ -528,6 +528,11 @@ def coverage_evidence(
     ):
         if type(value) is not bool:
             raise BinanceUsdmAdapterError(f"{name} must be boolean")
+    if qualified_exclusion_semantics:
+        raise BinanceUsdmAdapterError(
+            "Binance USD-M foundation cannot self-assert provider exclusion semantics; "
+            "exact qualification evidence is required"
+        )
 
     return CoverageSurfaceEvidence(
         provider_id="BINANCE",

@@ -70,6 +70,9 @@ EXPECTED_GATE_NAMES = frozenset(
 TERMINAL_PACKAGE_STATUS = "DONE"
 TERMINAL_OVERALL_STATUS = "FULL_PRODUCT_QUALIFIED"
 TERMINAL_GATE_STATUS = "QUALIFIED"
+_BANK_SCHEMA_VERSION = "1.0.0"
+_QUALIFICATION_SCHEMA_VERSION = "2.0.0"
+_NVDA_STATUS_SCHEMA_VERSION = "1.0.0"
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_TEXT = re.compile(r"^sha256:[0-9a-f]{64}$")
 _UUID_TEXT = re.compile(
@@ -212,6 +215,8 @@ def _terminal_nvda_status(
     evidence_context: WholeProductEvidenceContext | None,
 ) -> bool:
     """Reverify terminal NVDA truth instead of trusting a hand-authored status."""
+    if nvda_status.get("schema_version") != _NVDA_STATUS_SCHEMA_VERSION:
+        return False
     if nvda_status.get("qualified") is not True:
         return False
     if nvda_status.get("reason") != _NVDA_TERMINAL_REASON:
@@ -438,6 +443,15 @@ def evaluate_completion(
     exact_source_sha: str | None,
     evidence_context: WholeProductEvidenceContext | None = None,
 ) -> dict[str, Any]:
+    if bank.get("schema_version") != _BANK_SCHEMA_VERSION:
+        raise ProductCompletionError(
+            f"unsupported work-package bank schema_version: {bank.get('schema_version')!r}"
+        )
+    if qualification.get("schema_version") != _QUALIFICATION_SCHEMA_VERSION:
+        raise ProductCompletionError(
+            "unsupported qualification schema_version: "
+            f"{qualification.get('schema_version')!r}"
+        )
     sections = _section_ids(spec_text)
     packages = bank.get("packages")
     if not isinstance(packages, list):

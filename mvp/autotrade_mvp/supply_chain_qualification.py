@@ -35,6 +35,7 @@ _DEPENDENCY_LOCK_MEDIA_TYPE = "application/vnd.autotrade.dependency-lock"
 _COMPONENT_MEDIA_TYPE = "application/vnd.autotrade.distributed-component"
 _RIGHTS_MEDIA_TYPE = "application/vnd.autotrade.rights-evidence"
 _ADVISORY_EXCEPTION_MEDIA_TYPE = "application/vnd.autotrade.advisory-exception"
+_QUALIFICATION_SUBJECT_REQUIREMENT_PREFIX = "supply-chain-subject-sha256:"
 
 
 def _artifact_id(value: str, name: str) -> str:
@@ -190,6 +191,77 @@ class SupplyChainEvidence:
         rights_ids = [item.artifact_id for item in self.model_data_rights]
         if len(rights_ids) != len(set(rights_ids)):
             raise ValueError("model/data rights evidence contains duplicate ids")
+
+
+def supply_chain_subject_requirement(evidence: SupplyChainEvidence) -> str:
+    """Bind signed review authority to the exact semantic supply-chain claims."""
+
+    if not isinstance(evidence, SupplyChainEvidence):
+        raise TypeError("evidence must be SupplyChainEvidence")
+    subject = {
+        "release_commit_sha": evidence.release_commit_sha,
+        "built_from_commit_sha": evidence.built_from_commit_sha,
+        "sbom": {
+            "artifact_id": evidence.sbom_artifact_id,
+            "sha256": evidence.sbom_hash,
+            "reviewed_for_release_sha": evidence.sbom_reviewed_for_release_sha,
+        },
+        "provenance": {
+            "artifact_id": evidence.provenance_artifact_id,
+            "sha256": evidence.provenance_hash,
+            "reviewed_for_release_sha": evidence.provenance_reviewed_for_release_sha,
+        },
+        "dependency_lock": {
+            "artifact_id": evidence.dependency_lock_artifact_id,
+            "sha256": evidence.dependency_lock_hash,
+            "reviewed_for_release_sha": evidence.dependency_lock_reviewed_for_release_sha,
+        },
+        "distributed_component_ids": sorted(evidence.distributed_component_ids),
+        "sbom_component_ids": sorted(evidence.sbom_component_ids),
+        "components": [
+            {
+                "component_id": item.component_id,
+                "artifact_id": item.artifact_id,
+                "version": item.version,
+                "declared_artifact_hash": item.declared_artifact_hash,
+                "observed_artifact_hash": item.observed_artifact_hash,
+                "source_revision": item.source_revision,
+                "license_status": item.license_status,
+                "distribution_rights": item.distribution_rights,
+                "advisory_status": item.advisory_status,
+                "advisory_exception_id": item.advisory_exception_id,
+                "advisory_exception_hash": item.advisory_exception_hash,
+                "notice_required": item.notice_required,
+                "notice_present": item.notice_present,
+                "reviewed_for_release_sha": item.reviewed_for_release_sha,
+            }
+            for item in sorted(evidence.components, key=lambda value: value.component_id)
+        ],
+        "model_data_rights": [
+            {
+                "artifact_id": item.artifact_id,
+                "artifact_hash": item.artifact_hash,
+                "use_scope": item.use_scope,
+                "rights_status": item.rights_status,
+                "reviewed_for_release_sha": item.reviewed_for_release_sha,
+            }
+            for item in sorted(
+                evidence.model_data_rights,
+                key=lambda value: value.artifact_id,
+            )
+        ],
+    }
+    canonical = json.dumps(
+        subject,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return (
+        _QUALIFICATION_SUBJECT_REQUIREMENT_PREFIX
+        + sha256(canonical).hexdigest()
+    )
 
 
 @dataclass(frozen=True)
@@ -478,6 +550,15 @@ def qualify_supply_chain(
                     "independent_evidence_trust",
                     _FAIL,
                     "SUPPLY_CHAIN.TRUST_EVIDENCE_SET_MISMATCH",
+                )
+            elif (
+                supply_chain_subject_requirement(evidence)
+                not in trust_receipt.attestation.requirement_ids
+            ):
+                record(
+                    "independent_evidence_trust",
+                    _FAIL,
+                    "SUPPLY_CHAIN.TRUST_SUBJECT_MISMATCH",
                 )
             elif accepted_trust.result == _PASS:
                 record("independent_evidence_trust", _PASS)

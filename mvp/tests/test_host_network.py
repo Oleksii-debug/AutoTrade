@@ -809,15 +809,29 @@ class HostNetworkTests(unittest.TestCase):
             ),
         )
         response = conn.getresponse()
-        response.read()
+        first_payload = json.loads(response.read().decode("utf-8"))
         self.assertEqual(response.status, 200)
-        self.assertEqual(app.store.state_version, 1)
+        self.assertEqual(first_payload["status"], "ACCEPTED")
         conn.close()
+
+        # The concrete handler resumes accepted authority work after writing the
+        # response. Observe the resulting canonical state instead of racing that
+        # durable completion with a hard-coded state version.
+        operation_id = first_payload["operation_id"]
+        for _ in range(100):
+            if app.store.get_operation(operation_id).phase in {
+                "SUCCEEDED",
+                "FAILED",
+                "CANCELLED",
+            }:
+                break
+        self.assertEqual(app.store.get_operation(operation_id).phase, "SUCCEEDED")
+        current_state_version = str(app.store.state_version)
 
         native = self._wire_command(
             session,
             command_id="33333333-3333-3333-3333-333333333333",
-            expected_state_version="1",
+            expected_state_version=current_state_version,
             idempotency_key="host-network-wire-key-2",
         )
         native_body = json.dumps(native).encode("utf-8")
@@ -829,9 +843,13 @@ class HostNetworkTests(unittest.TestCase):
             headers=self._wire_headers(session, json_body=True),
         )
         response = conn.getresponse()
-        response.read()
+        native_payload = json.loads(response.read().decode("utf-8"))
         self.assertEqual(response.status, 200)
-        self.assertEqual(app.store.state_version, 2)
+        self.assertEqual(native_payload["status"], "ACCEPTED")
+        self.assertEqual(
+            int(native_payload["state_version"]),
+            int(current_state_version) + 1,
+        )
         conn.close()
 
     def test_concrete_server_rejects_duplicate_sensitive_headers_before_dispatch(self):

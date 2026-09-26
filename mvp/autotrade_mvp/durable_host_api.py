@@ -43,6 +43,37 @@ class JournalBackedHostCommandStore:
     UPDATE_PHASES = {"RUNNING", "WAITING_EXTERNAL", "UNKNOWN", *TERMINAL_PHASES}
     LEGACY_AUTHORITY_UNCERTAINTY = "legacy_authority_payload_unavailable"
     SUPPORTED_EVENT_TYPES = frozenset({"COMMAND_ACCEPTED", "OPERATION_UPDATED"})
+    EVENT_PAYLOAD_FIELDS = {
+        "COMMAND_ACCEPTED": frozenset(
+            {
+                "command_id",
+                "operation_id",
+                "action",
+                "action_payload",
+                "action_payload_hash",
+                "actor",
+                "account_id",
+                "environment",
+                "phase",
+                "started_at",
+                "updated_at",
+                "affected_refs",
+                "evidence",
+                "remaining_uncertainty",
+            }
+        ),
+        "OPERATION_UPDATED": frozenset(
+            {
+                "operation_id",
+                "phase",
+                "started_at",
+                "updated_at",
+                "affected_refs",
+                "evidence",
+                "remaining_uncertainty",
+            }
+        ),
+    }
 
     def __init__(
         self,
@@ -185,6 +216,15 @@ class JournalBackedHostCommandStore:
             if event_type not in self.SUPPORTED_EVENT_TYPES:
                 raise ValueError(
                     f"Host journal contains unsupported event type: {event_type!r}"
+                )
+            payload = event.get("payload")
+            if not isinstance(payload, Mapping):
+                raise ValueError("Host journal event payload must be an object")
+            unexpected = set(payload) - self.EVENT_PAYLOAD_FIELDS[str(event_type)]
+            if unexpected:
+                raise ValueError(
+                    "Host journal contains unsupported payload fields for "
+                    f"{event_type}: " + ", ".join(sorted(unexpected))
                 )
         return events
 

@@ -22,9 +22,16 @@ from mvp.autotrade_mvp.provider_core import (
 )
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
+    CapabilityRegistry,
     CapabilitySnapshot,
     EvidenceVerification,
     derive_capability_snapshot,
+)
+from mvp.autotrade_mvp.provider_transport import (
+    BINANCE_USDM_ENDPOINT_POLICIES,
+    AuthenticatedReadWireResponse,
+    BinanceUsdmPublicDataTransport,
+    ProviderTransportScopeError,
 )
 
 
@@ -125,7 +132,22 @@ def capability(
 
 
 
-def public_observation(
+
+class PublicDataWire:
+    def __init__(self, response_bytes, *, http_status=200):
+        self.response_bytes = response_bytes
+        self.http_status = http_status
+        self.requests = []
+
+    def send(self, request):
+        self.requests.append(request)
+        return AuthenticatedReadWireResponse(
+            http_status=self.http_status,
+            body=self.response_bytes,
+        )
+
+
+def raw_public_observation(
     *,
     endpoint,
     payload,
@@ -137,6 +159,8 @@ def public_observation(
     observed_at=NOW,
     response_bytes=None,
 ):
+    """Deliberately bypass transport for adversarial non-promotion tests."""
+
     binding = prepare_authenticated_read_query(
         capability=capability(
             provider_id=provider_id,
@@ -148,7 +172,7 @@ def public_observation(
         endpoint=endpoint,
         query=query,
         at=observed_at,
-        permission_scope="ORDER.READ",
+        permission_scope="ORDER_WRITE",
     )
     raw = response_bytes
     if raw is None:
@@ -166,6 +190,61 @@ def public_observation(
         observed_at=observed_at,
     )
 
+
+def public_observation(
+    *,
+    endpoint,
+    payload,
+    query,
+    provider_id="BINANCE",
+    account_id="account-1",
+    environment="PAPER",
+    instrument_version="BTCUSDT-PERP:v1",
+    observed_at=NOW,
+    response_bytes=None,
+    policy_environment=None,
+    return_wire=False,
+):
+    provider_capability = capability(
+        provider_id=provider_id,
+        account_id=account_id,
+        environment=environment,
+        instrument_version=instrument_version,
+    )
+    binding = prepare_authenticated_read_query(
+        capability=provider_capability,
+        surface=Surface.PUBLIC_DATA,
+        endpoint=endpoint,
+        query=query,
+        at=observed_at,
+        permission_scope="ORDER_WRITE",
+    )
+    raw = response_bytes
+    if raw is None:
+        raw = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+
+    registry = CapabilityRegistry()
+    registry.add(provider_capability)
+    wire = PublicDataWire(raw)
+    policy_name = environment if policy_environment is None else policy_environment
+    transport = BinanceUsdmPublicDataTransport(
+        policy=BINANCE_USDM_ENDPOINT_POLICIES[policy_name],
+        account_id=account_id,
+        capability_snapshot_id=provider_capability.snapshot_id,
+        capability_registry=registry,
+        clock_utc=lambda: observed_at,
+        wire_client=wire,
+    )
+    observation = transport(binding)
+    if return_wire:
+        return observation, wire
+    return observation
 
 def exchange_info_observation(
     symbol_payload,
@@ -835,18 +914,18 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
         parsed_rules = symbol_rules()
         with self.assertRaisesRegex(
             BinanceUsdmAdapterError,
-            "exact provider response observation",
+            "shared provider transport",
         ):
             BinanceUsdmSymbolRules(**parsed_rules.__dict__)
 
         provider_mark = mark_price()
         with self.assertRaisesRegex(
             BinanceUsdmAdapterError,
-            "exact provider response observation",
+            "shared provider transport",
         ):
             BinanceUsdmMarkPrice(**provider_mark.__dict__)
 
-    def test_public_admission_evidence_requires_exact_response_authority(self):
+    def test_public_admission_requires_shared_wire_transport_authority(self):
         raw_row = {
             "symbol": "BTCUSDT",
             "status": "TRADING",
@@ -883,7 +962,21 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
                 symbol="BTCUSDT",
             )
 
-    def test_public_admission_evidence_rejects_wrong_scope(self):
+        fabricated = raw_public_observation(
+            endpoint="/fapi/v1/exchangeInfo",
+            payload={"symbols": [raw_row]},
+            query={},
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "TransportedProviderResponseObservation",
+        ):
+            BinanceUsdmSymbolRules.from_exchange_info(
+                observation=fabricated,
+                symbol="BTCUSDT",
+            )
+
+    def test_public_transport_rejects_wrong_provider_endpoint_query_and_environment(self):
         row = {
             "symbol": "BTCUSDT",
             "status": "TRADING",
@@ -905,39 +998,113 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
                 },
             ],
         }
-        wrong_provider = exchange_info_observation(
-            row,
-            provider_id="KRAKEN",
-        )
-        with self.assertRaisesRegex(ProviderCoreError, "provider mismatch"):
-            BinanceUsdmSymbolRules.from_exchange_info(
-                observation=wrong_provider,
-                symbol="BTCUSDT",
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "query scope mismatch",
+        ):
+            exchange_info_observation(
+                row,
+                provider_id="KRAKEN",
             )
 
-        wrong_endpoint = public_observation(
-            endpoint="/fapi/v1/premiumIndex",
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "not explicitly allowed",
+        ):
+            public_observation(
+                endpoint="/fapi/v1/not-authorized",
+                payload={"symbols": [row]},
+                query={},
+            )
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "query does not match endpoint policy",
+        ):
+            exchange_info_observation(
+                row,
+                query={"symbol": "BTCUSDT"},
+            )
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "query scope mismatch",
+        ):
+            public_observation(
+                endpoint="/fapi/v1/exchangeInfo",
+                payload={"symbols": [row]},
+                query={},
+                environment="PAPER",
+                policy_environment="LIVE",
+            )
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "query does not match endpoint policy",
+        ):
+            mark_price(query_symbol="ETHUSDT")
+
+    def test_public_transport_binds_exact_usdm_origin_and_query(self):
+        row = {
+            "symbol": "BTCUSDT",
+            "status": "TRADING",
+            "contractType": "PERPETUAL",
+            "orderTypes": ["LIMIT", "MARKET"],
+            "timeInForce": ["GTC", "IOC"],
+            "filters": [
+                {
+                    "filterType": "PRICE_FILTER",
+                    "minPrice": "0.01",
+                    "maxPrice": "1000000",
+                    "tickSize": "0.01",
+                },
+                {
+                    "filterType": "LOT_SIZE",
+                    "minQty": "0.001",
+                    "maxQty": "1000",
+                    "stepSize": "0.001",
+                },
+            ],
+        }
+        observation, wire = public_observation(
+            endpoint="/fapi/v1/exchangeInfo",
             payload={"symbols": [row]},
             query={},
+            return_wire=True,
         )
-        with self.assertRaisesRegex(ProviderCoreError, "endpoint mismatch"):
-            BinanceUsdmSymbolRules.from_exchange_info(
-                observation=wrong_endpoint,
-                symbol="BTCUSDT",
-            )
+        self.assertEqual(len(wire.requests), 1)
+        self.assertEqual(
+            wire.requests[0].url,
+            "https://demo-fapi.binance.com/fapi/v1/exchangeInfo",
+        )
+        rules = BinanceUsdmSymbolRules.from_exchange_info(
+            observation=observation,
+            symbol="BTCUSDT",
+        )
+        self.assertEqual(rules.origin, "https://demo-fapi.binance.com")
+        self.assertRegex(rules.request_url_sha256, r"^sha256:[0-9a-f]{64}$")
 
-        wrong_query = exchange_info_observation(
-            row,
+        timestamp_ms = int(NOW.timestamp() * 1000)
+        mark_observation, mark_wire = public_observation(
+            endpoint="/fapi/v1/premiumIndex",
+            payload={
+                "symbol": "BTCUSDT",
+                "markPrice": "40000",
+                "time": timestamp_ms,
+            },
             query={"symbol": "BTCUSDT"},
+            return_wire=True,
         )
-        with self.assertRaisesRegex(BinanceUsdmAdapterError, "canonical empty query"):
-            BinanceUsdmSymbolRules.from_exchange_info(
-                observation=wrong_query,
-                symbol="BTCUSDT",
-            )
-
-        with self.assertRaisesRegex(BinanceUsdmAdapterError, "exact requested symbol"):
-            mark_price(query_symbol="ETHUSDT")
+        self.assertEqual(
+            mark_wire.requests[0].url,
+            "https://demo-fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT",
+        )
+        point = BinanceUsdmMarkPrice.from_premium_index(
+            observation=mark_observation,
+            symbol="BTCUSDT",
+        )
+        self.assertEqual(point.origin, "https://demo-fapi.binance.com")
+        self.assertRegex(point.request_url_sha256, r"^sha256:[0-9a-f]{64}$")
 
     def test_public_admission_evidence_binds_environment_and_instrument(self):
         intent = BinanceUsdmOrderIntent.create(

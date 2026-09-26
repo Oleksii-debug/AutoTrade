@@ -351,12 +351,14 @@ class IbkrWebAdapterTests(unittest.TestCase):
             time_in_force="DAY",
             quantity="1",
         )
+        current_accounts = ready_accounts(session=ready_session())
         with self.assertRaisesRegex(IbkrWebAdapterError, "future"):
             prepare_normalized_order(
                 intent,
                 client_order_id="at-future-1",
                 capability=capability(),
                 session=ready_session(observed_at=NOW + timedelta(seconds=1)),
+                accounts=current_accounts,
                 at=NOW,
                 maximum_session_age_seconds=30,
             )
@@ -597,17 +599,23 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 maximum_session_age_seconds=30,
             )
 
+        stale_accounts_session = ready_session(
+            observed_at=NOW - timedelta(seconds=40),
+            initialization_id="init-stale-account-evidence",
+        )
+        stale_accounts = ready_accounts(
+            session=stale_accounts_session,
+            observed_at=NOW - timedelta(seconds=31),
+        )
         with self.assertRaisesRegex(IbkrWebAdapterError, "stale"):
             prepare_normalized_order(
                 intent,
                 client_order_id="at-stale-account-evidence",
                 capability=capability(),
-                session=ready_session(),
-                accounts=ready_accounts(
-                    observed_at=NOW - timedelta(seconds=31),
-                ),
+                session=stale_accounts_session,
+                accounts=stale_accounts,
                 at=NOW,
-                maximum_session_age_seconds=30,
+                maximum_session_age_seconds=60,
                 maximum_accounts_age_seconds=30,
             )
 

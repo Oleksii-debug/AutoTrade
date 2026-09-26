@@ -389,6 +389,8 @@ def _vpk_command(
         str(installer["platform"]["runtime_identifier"]),
         "--noPortable",
         "true",
+        "--exclude",
+        "(?!)",
         "--noDefaultExclude",
         "true",
     ]

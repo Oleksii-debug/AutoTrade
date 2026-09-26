@@ -199,6 +199,7 @@ class WindowsVelopackPackagingTests(unittest.TestCase):
         self.assertEqual(command[command.index("--mainExe") + 1], "AutoTrade.Desktop.exe")
         self.assertEqual(command[command.index("--runtime") + 1], "win-x64")
         self.assertEqual(command[command.index("--noPortable") + 1], "true")
+        self.assertEqual(command[command.index("--exclude") + 1], "(?!)")
         self.assertEqual(command[command.index("--noDefaultExclude") + 1], "true")
         self.assertNotIn("--msi", command)
         self.assertNotIn("--signParams", command)

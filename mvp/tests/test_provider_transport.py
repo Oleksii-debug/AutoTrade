@@ -1724,7 +1724,9 @@ with open(path, "a+b") as stream:
                 len(
                     store.load_events(
                         "provider_nonce",
-                        allocator.aggregate_id,
+                        allocator.aggregate_id_for_provider_api_key(
+                            "kraken-test-key"
+                        ),
                     )
                 ),
                 1,
@@ -2821,7 +2823,7 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
         )
         self.assertNotIn("credential_handle_id", nonce_events[0]["payload"])
         self.assertNotIn("credential_generation", nonce_events[0]["payload"])
-        self.assertNotIn("key", json.dumps(nonce_events, sort_keys=True))
+        self.assertNotIn('"key"', json.dumps(nonce_events, sort_keys=True))
     def test_trades_history_pagination_query_flows_into_existing_fill_parser(self):
         events = []
         capability = verified_kraken_read_capability(

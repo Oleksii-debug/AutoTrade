@@ -686,7 +686,8 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         string eventCursor = CanonicalSequence(
             RequiredString(value, "event_cursor"),
             "event_cursor");
-        DateTimeOffset observed = RequiredUtcInstant(value, "server_time");
+        DateTimeOffset serverObservedAt =
+            RequiredUtcInstant(value, "server_time");
 
         if (ContainsSecret(value, session.Token))
         {
@@ -736,6 +737,11 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
             hostFreshness,
             "CURRENT",
             StringComparison.Ordinal);
+        if (freshnessObservedAt > serverObservedAt)
+        {
+            throw new InvalidOperationException(
+                "Host freshness evidence cannot be later than host server time.");
+        }
 
         EmergencyHostStatus status = new EmergencyHostStatus(
             Connected: true,

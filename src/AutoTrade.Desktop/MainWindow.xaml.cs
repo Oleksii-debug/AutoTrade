@@ -90,7 +90,9 @@ public partial class MainWindow : Window
         {
             if (_lastKnownConnectedStatus is { } previous)
             {
-                status = status.ValidateSuccessorOf(previous);
+                status = status.IsCurrent
+                    ? status.ValidateSuccessorOf(previous)
+                    : status.ValidateStaleSuccessorOf(previous);
             }
 
             if (status.IsCurrent)

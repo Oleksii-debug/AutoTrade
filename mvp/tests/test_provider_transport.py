@@ -779,7 +779,10 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 )
             self.assertEqual(events, [])
             self.assertEqual(
-                journal.load_events(\n                    "provider_nonce",\n                    allocator.aggregate_id_for_provider_api_key("api-key-SECRET"),\n                ),
+                journal.load_events(
+                    "provider_nonce",
+                    allocator.aggregate_id_for_provider_api_key("api-key-SECRET"),
+                ),
                 [],
             )
 

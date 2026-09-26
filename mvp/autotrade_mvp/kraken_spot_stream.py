@@ -121,6 +121,121 @@ def _decode_exact_json(response_bytes: object) -> Mapping[str, object]:
 
 
 @dataclass(frozen=True)
+class KrakenSpotExecutionsSubscriptionAck:
+    """Exact successful executions subscription acknowledgement."""
+
+    account_id: str
+    environment: str
+    evidence_ref: str
+    response_bytes: bytes = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "account_id",
+            _canonical_text(self.account_id, name="account_id"),
+        )
+        environment = _canonical_text(
+            self.environment,
+            name="environment",
+        ).upper()
+        if environment != "LIVE":
+            raise KrakenSpotStreamError(
+                "Kraken Spot stream foundation permits LIVE only"
+            )
+        object.__setattr__(self, "environment", environment)
+        if type(self.response_bytes) is not bytes:
+            raise TypeError("response_bytes must be bytes")
+        expected_ref = (
+            "provider-stream:sha256:"
+            + sha256(self.response_bytes).hexdigest()
+        )
+        evidence_ref = _canonical_text(
+            self.evidence_ref,
+            name="evidence_ref",
+        )
+        if evidence_ref != expected_ref:
+            raise KrakenSpotStreamError(
+                "Kraken subscription evidence_ref does not match exact bytes"
+            )
+
+
+def parse_executions_subscription_ack(
+    response_bytes: object,
+    *,
+    account_id: str,
+    environment: str = "LIVE",
+) -> KrakenSpotExecutionsSubscriptionAck:
+    """Bind the exact server ACK to the required executions snapshot profile."""
+
+    raw = _decode_exact_json(response_bytes)
+    allowed_root = {
+        "method",
+        "result",
+        "success",
+        "error",
+        "time_in",
+        "time_out",
+        "req_id",
+    }
+    if set(raw) - allowed_root:
+        raise KrakenSpotStreamError(
+            "Kraken subscription acknowledgement fields are not canonical"
+        )
+    if raw.get("method") != "subscribe":
+        raise KrakenSpotStreamError(
+            "Kraken subscription acknowledgement method must be subscribe"
+        )
+    if raw.get("success") is not True:
+        raise KrakenSpotStreamError(
+            "Kraken executions subscription was not accepted"
+        )
+    if "error" in raw and raw.get("error") not in (None, ""):
+        raise KrakenSpotStreamError(
+            "Kraken executions subscription acknowledgement contains error"
+        )
+    result = raw.get("result")
+    if not isinstance(result, Mapping):
+        raise KrakenSpotStreamError(
+            "Kraken subscription acknowledgement result must be an object"
+        )
+    allowed_result = {
+        "channel",
+        "snap_orders",
+        "snap_trades",
+        "maxratecount",
+        "snapshot",
+        "warnings",
+    }
+    if set(result) - allowed_result:
+        raise KrakenSpotStreamError(
+            "Kraken subscription result fields are not canonical"
+        )
+    if result.get("channel") != "executions":
+        raise KrakenSpotStreamError(
+            "Kraken subscription acknowledgement channel must be executions"
+        )
+    if result.get("snap_orders") is not True:
+        raise KrakenSpotStreamError(
+            "Kraken executions subscription must acknowledge snap_orders=true"
+        )
+    if result.get("snap_trades") is not False:
+        raise KrakenSpotStreamError(
+            "Kraken executions subscription must acknowledge snap_trades=false"
+        )
+
+    exact = response_bytes
+    return KrakenSpotExecutionsSubscriptionAck(
+        account_id=account_id,
+        environment=environment,
+        evidence_ref=(
+            "provider-stream:sha256:" + sha256(exact).hexdigest()
+        ),
+        response_bytes=exact,
+    )
+
+
+@dataclass(frozen=True)
 class KrakenSpotExecutionReport:
     """Minimal identity/status projection from one exact executions report."""
 
@@ -317,6 +432,7 @@ class KrakenSpotStreamRecoveryEvidence:
     environment: str
     connection_generation: int
     phase: str
+    subscription_ack_evidence_ref: str | None
     snapshot_sequence: int | None
     last_sequence: int | None
     snapshot_evidence_ref: str | None
@@ -337,6 +453,7 @@ class KrakenSpotExecutionStreamRecovery:
     """Detect snapshot/reconnect/sequence gaps without inventing READY state."""
 
     DISCONNECTED = "DISCONNECTED"
+    AWAITING_SUBSCRIPTION_ACK = "AWAITING_SUBSCRIPTION_ACK"
     AWAITING_SNAPSHOT = "AWAITING_SNAPSHOT"
     REST_RECONCILIATION_REQUIRED = "REST_RECONCILIATION_REQUIRED"
     GAP_RECONCILIATION_REQUIRED = "GAP_RECONCILIATION_REQUIRED"
@@ -373,6 +490,7 @@ class KrakenSpotExecutionStreamRecovery:
         self.max_buffered_updates = max_buffered_updates
         self.connection_generation = 0
         self.phase = self.DISCONNECTED
+        self._subscription_ack_evidence_ref: str | None = None
         self._snapshot_sequence: int | None = None
         self._last_sequence: int | None = None
         self._snapshot_evidence_ref: str | None = None
@@ -386,7 +504,8 @@ class KrakenSpotExecutionStreamRecovery:
         """Start/restart a stream generation and require a fresh snapshot."""
 
         self.connection_generation += 1
-        self.phase = self.AWAITING_SNAPSHOT
+        self.phase = self.AWAITING_SUBSCRIPTION_ACK
+        self._subscription_ack_evidence_ref = None
         self._snapshot_sequence = None
         self._last_sequence = None
         self._snapshot_evidence_ref = None
@@ -401,6 +520,7 @@ class KrakenSpotExecutionStreamRecovery:
         """Invalidate all stream-local state; stale orders are never reusable."""
 
         self.phase = self.DISCONNECTED
+        self._subscription_ack_evidence_ref = None
         self._snapshot_sequence = None
         self._last_sequence = None
         self._snapshot_evidence_ref = None
@@ -409,6 +529,33 @@ class KrakenSpotExecutionStreamRecovery:
         self._gap_expected_sequence = None
         self._gap_observed_sequence = None
         self._gap_evidence_ref = None
+
+    def apply_subscription_ack(
+        self,
+        acknowledgement: KrakenSpotExecutionsSubscriptionAck,
+    ) -> None:
+        """Require an exact successful ACK before accepting a snapshot."""
+
+        if not isinstance(
+            acknowledgement,
+            KrakenSpotExecutionsSubscriptionAck,
+        ):
+            raise TypeError(
+                "acknowledgement must be KrakenSpotExecutionsSubscriptionAck"
+            )
+        if self.phase != self.AWAITING_SUBSCRIPTION_ACK:
+            raise KrakenSpotStreamError(
+                "Kraken subscription acknowledgement is out of phase"
+            )
+        if (
+            acknowledgement.account_id != self.account_id
+            or acknowledgement.environment != self.environment
+        ):
+            raise KrakenSpotStreamError(
+                "Kraken subscription acknowledgement scope mismatch"
+            )
+        self._subscription_ack_evidence_ref = acknowledgement.evidence_ref
+        self.phase = self.AWAITING_SNAPSHOT
 
     def _require_scope(self, frame: KrakenSpotExecutionFrame) -> None:
         if not isinstance(frame, KrakenSpotExecutionFrame):
@@ -446,6 +593,10 @@ class KrakenSpotExecutionStreamRecovery:
         if self.phase == self.GAP_RECONCILIATION_REQUIRED:
             raise KrakenSpotStreamError(
                 "Kraken stream gap requires a fresh connection and reconciliation"
+            )
+        if self.phase == self.AWAITING_SUBSCRIPTION_ACK:
+            raise KrakenSpotStreamError(
+                "Kraken stream requires subscription acknowledgement before data"
             )
 
         if self.phase == self.AWAITING_SNAPSHOT:
@@ -507,6 +658,7 @@ class KrakenSpotExecutionStreamRecovery:
             environment=self.environment,
             connection_generation=self.connection_generation,
             phase=self.phase,
+            subscription_ack_evidence_ref=self._subscription_ack_evidence_ref,
             snapshot_sequence=self._snapshot_sequence,
             last_sequence=self._last_sequence,
             snapshot_evidence_ref=self._snapshot_evidence_ref,

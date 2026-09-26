@@ -166,6 +166,7 @@ class RecoveryController:
         self.storage_writable = True
         self.clock_trusted = True
         self.provider_reconciled = False
+        self.runtime_overloaded = False
 
     @staticmethod
     def _now() -> str:
@@ -805,6 +806,17 @@ class RecoveryController:
             self.reason_codes.add("startup_reconciliation_required")
         self._recompute_state()
 
+    def set_runtime_overloaded(self, overloaded: bool) -> None:
+        """Fail closed on load pressure without disabling protective actions."""
+
+        if type(overloaded) is not bool:
+            raise TypeError("overloaded must be a boolean")
+        self.runtime_overloaded = overloaded
+        if overloaded:
+            self.reason_codes.add("runtime_overload")
+        else:
+            self.reason_codes.discard("runtime_overload")
+        self._recompute_state()
     def note_unknown_send(self, attempt: OutboundAttempt) -> None:
         if not isinstance(attempt, OutboundAttempt):
             raise TypeError("attempt must be an OutboundAttempt")
@@ -904,7 +916,11 @@ class RecoveryController:
         self.state = HostState.RECOVERING
         return self.owner
 
-    def validate_sender(self, owner_id: str, owner_epoch: int) -> None:
+    def validate_sender(
+        self,
+        owner_id: str,
+        owner_epoch: int,
+    ) -> None:
         if not isinstance(owner_epoch, int) or isinstance(owner_epoch, bool) or owner_epoch < 1:
             raise ValueError("owner_epoch must be a positive integer")
         if self.owner is None:
@@ -912,24 +928,32 @@ class RecoveryController:
         self._require_current_durable_owner()
         if owner_id != self.owner.owner_id or owner_epoch != self.owner.epoch:
             raise PermissionError("Sender fence mismatch")
-        if self.state is not HostState.READY:
-            raise PermissionError("Host is not ready for new sends")
+        if self.state is HostState.READY:
+            return
+        # Runtime overload is fail-closed here. A protective-action exception
+        # must be bound to durable financial admission evidence, not a caller-
+        # supplied boolean at the recovery fence.
+        raise PermissionError("Host is not ready for new sends")
 
-    def validate_admission(self, owner_epoch: int) -> None:
+    def validate_admission(
+        self,
+        owner_epoch: int,
+    ) -> None:
         if not isinstance(owner_epoch, int) or isinstance(owner_epoch, bool) or owner_epoch < 1:
             raise ValueError("owner_epoch must be a positive integer")
         if self.owner is not None:
             self._require_current_durable_owner()
         if self.owner is None or owner_epoch != self.owner.epoch:
             raise PermissionError("Admission owner epoch is stale")
-        if self.state is not HostState.READY:
-            raise PermissionError("Host is not ready")
         if not self.storage_writable:
             raise PermissionError("Durable journal is unavailable")
         if not self.clock_trusted:
             raise PermissionError("Clock is not trusted")
         if self.unresolved_attempts:
             raise PermissionError("External uncertainty is unresolved")
+        if self.state is HostState.READY:
+            return
+        raise PermissionError("Host is not ready")
 
     def on_lease_expired(self) -> None:
         """Lease expiry never transfers sender authority by itself."""
@@ -943,6 +967,7 @@ class RecoveryController:
         self.state = HostState.STOPPED
         self.owner = None
         self.provider_reconciled = False
+        self.runtime_overloaded = False
         self.reason_codes = {"stopped"}
         self.unresolved_attempts.clear()
         self._unresolved_send_attempts.clear()
@@ -963,6 +988,9 @@ class RecoveryController:
             self.state = HostState.DEGRADED
             return
         if "lease_expired_no_failover" in self.reason_codes:
+            self.state = HostState.DEGRADED
+            return
+        if self.runtime_overloaded:
             self.state = HostState.DEGRADED
             return
         if self.provider_reconciled and "startup_reconciliation_required" not in self.reason_codes:

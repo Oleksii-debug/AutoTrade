@@ -11,6 +11,7 @@ import json
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 import re
+import tomllib
 import xml.etree.ElementTree as ET
 
 
@@ -56,36 +57,47 @@ def _meaningful_requirements(path: Path) -> list[str]:
 
 def _python_blockers(root: Path) -> tuple[list[str], list[str]]:
     blockers: list[str] = []
+    dev_requirements = _meaningful_requirements(root / "requirements-dev.txt")
     exact: list[str] = []
-    for requirement in _meaningful_requirements(root / "requirements-dev.txt"):
+    for requirement in dev_requirements:
         if is_exact_python_requirement(requirement):
             exact.append(requirement)
         else:
             blockers.append(f"NON_EXACT_PYTHON_REQUIREMENT:{requirement}")
 
     pyproject = root / "research" / "pyproject.toml"
-    text = pyproject.read_text(encoding="utf-8")
-    in_build_requires = False
-    build_requires_found = False
-    for raw in text.splitlines():
-        stripped = raw.strip()
-        if stripped.startswith("["):
-            in_build_requires = stripped == "[build-system]"
-            continue
-        if in_build_requires and stripped.startswith("requires"):
-            build_requires_found = True
-            value = stripped.split("=", 1)[1].strip()
-            try:
-                items = json.loads(value)
-            except json.JSONDecodeError:
-                blockers.append("UNREADABLE_RESEARCH_BUILD_REQUIREMENTS")
-                break
-            for requirement in items:
-                if not is_exact_python_requirement(requirement):
-                    blockers.append(f"NON_EXACT_RESEARCH_BUILD_REQUIREMENT:{requirement}")
-            break
-    if not build_requires_found:
+    try:
+        document = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        blockers.append("UNREADABLE_RESEARCH_PYPROJECT")
+        return blockers, exact
+
+    build_requires = document.get("build-system", {}).get("requires")
+    if not isinstance(build_requires, list) or not build_requires:
         blockers.append("MISSING_RESEARCH_BUILD_REQUIREMENTS")
+    else:
+        for requirement in build_requires:
+            if not is_exact_python_requirement(requirement):
+                blockers.append(
+                    f"NON_EXACT_RESEARCH_BUILD_REQUIREMENT:{requirement}"
+                )
+
+    test_requires = (
+        document.get("project", {})
+        .get("optional-dependencies", {})
+        .get("test")
+    )
+    if not isinstance(test_requires, list) or not test_requires:
+        blockers.append("MISSING_RESEARCH_TEST_REQUIREMENTS")
+    else:
+        for requirement in test_requires:
+            if not is_exact_python_requirement(requirement):
+                blockers.append(
+                    f"NON_EXACT_RESEARCH_TEST_REQUIREMENT:{requirement}"
+                )
+        if set(test_requires) != set(dev_requirements):
+            blockers.append("RESEARCH_TEST_REQUIREMENTS_DRIFT")
+
     return blockers, exact
 
 

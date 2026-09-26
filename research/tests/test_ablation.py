@@ -1241,7 +1241,10 @@ class AblationTests(unittest.TestCase):
                 protocol_payload,
                 protocol_id="11111111-1111-4111-8111-111111111111",
             )
-            cutoff = CUT + timedelta(days=1)
+            registered_at = datetime.fromisoformat(registration.created_at)
+            self.assertIsNotNone(registered_at.tzinfo)
+            registered_at = registered_at.astimezone(timezone.utc)
+            cutoff = registered_at + timedelta(hours=1)
             evaluation_cutoff = cutoff + timedelta(hours=2)
             units = (
                 "22222222-2222-4222-8222-222222222222",

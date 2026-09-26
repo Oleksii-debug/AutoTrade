@@ -2,7 +2,7 @@
 
 This directory documents the release-packaging boundary. It is **not** evidence that AutoTrade has a qualified or signed Windows release.
 
-`tools/build_windows_bundle.py` creates a byte-deterministic ZIP from an already built staging directory. Entries are sorted, timestamps and permissions are fixed, compression is disabled to avoid zlib-version drift, every payload file is SHA-256 listed, the archive is bound to an exact 40-character source SHA, and a sibling SHA-256 file is written.
+`tools/build_windows_bundle.py` creates a byte-deterministic ZIP from an already built staging directory. Entries are sorted, timestamps and permissions are fixed, compression is disabled to avoid zlib-version drift, every payload file is SHA-256 listed, the archive is bound to an exact 40-character source SHA, and a sibling SHA-256 file is written. Bundle and SHA-sidecar publication reuse the canonical `research.autotrade_research.artifacts.durable_publish` boundary: cross-process path locks, final-destination symlink/special-file/hardlink rejection, random same-directory temporary files, file flush/fsync, atomic replacement and parent-directory synchronization where the platform supports it. Safe stale fixed `.tmp` files from the older implementation are removed; unsafe legacy aliases are never followed and are otherwise ignored because publication no longer uses those predictable names. Output and hash destinations are also rejected when they alias the release provenance or composition inputs, preventing the builder from destroying evidence it just consumed.
 
 Two modes exist:
 
@@ -15,7 +15,7 @@ The release composition manifest is the allow-list for the delivered staging tre
 
 Release packaging fails closed if a staged file is undeclared, a declared file is absent, any component digest differs, source SHA differs, component identities/paths collide, required fields are missing, the runtime identifier contradicts the architecture, or the staged payload does not contain exactly one declared dependency-lock component and one declared SBOM component matching their top-level digests. The validated normalized composition and the SHA-256 of its exact input bytes are embedded in `bundle-manifest.json`.
 
-Secret-like files, private-key formats and symlinks are rejected before archive creation. The bundle itself never grants live-trading authority. Composition integrity also does not establish signer authenticity; signing/trust remains the WP-64/shared qualification-attestation boundary.
+Secret-like files, private-key formats, symlink entries and hardlinked staged files are rejected before archive creation. Each staged regular file is read from one held descriptor and its path/device/inode/size/timestamps are revalidated around the read, so a path swap cannot silently substitute different bytes after admission. The bundle itself never grants live-trading authority. Composition integrity also does not establish signer authenticity; signing/trust remains the WP-64/shared qualification-attestation boundary.
 
 ## Update and rollback plan
 
@@ -27,7 +27,9 @@ The checkpoint/execution boundary revalidates the nested current/candidate relea
 
 ## Verified installer input
 
-`tools/build_windows_install_manifest.py` is the verified installer-input boundary. It accepts only a release-mode, release-eligible deterministic bundle, re-hashes the complete archive and every payload member, rejects untracked/duplicate/unsafe entries, and emits a deterministic manifest for a future signed installer technology. The manifest records runtime dependency mode, per-user versioned application placement, explicit preservation of durable state on uninstall, and the requirement that update/recovery use the separately verified Windows update plan. It never claims that an MSI/MSIX exists or is signed.
+`tools/build_windows_install_manifest.py` is the verified installer-input boundary. It accepts only a release-mode, release-eligible deterministic bundle, holds one verified regular-file descriptor from whole-archive hashing through ZIP validation, revalidates the path identity before success, streams payload hashing from that same ZIP snapshot, rejects non-canonical compressed payloads plus untracked/duplicate/unsafe entries, and emits a deterministic manifest for a future signed installer technology. The manifest records runtime dependency mode, per-user versioned application placement, explicit preservation of durable state on uninstall, and the requirement that update/recovery use the separately verified Windows update plan. It never claims that an MSI/MSIX exists or is signed. Manifest and SHA-256 sidecar publication reuse the same canonical durable-publication boundary, including cross-process locking and final symlink/special-file/hardlink rejection. Safe stale predictable `.tmp` files are compatibility cleanup only; new writes use random same-directory temporaries. The manifest or its digest is also forbidden from aliasing the verified release bundle itself.
+
+Publication creates persistent hidden `.lock` sidecars next to bundle, digest and installer-manifest outputs. They are coordination metadata for cooperating writers, not release payload, provenance, signature or user data. Release upload/install manifests must enumerate explicit deliverables and must never glob these lock files into a shipped artifact.
 
 ## Remaining terminal WP-50 work
 

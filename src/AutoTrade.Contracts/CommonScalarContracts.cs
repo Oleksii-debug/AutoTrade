@@ -3,21 +3,15 @@ using System.Text.RegularExpressions;
 namespace AutoTrade.Contracts;
 
 /// <summary>
-/// Strict admission for the language-neutral common scalar subset.
-/// Values stay textual: no float or integer coercion is performed.
+/// AUTO-GENERATED strict admission for the language-neutral common scalar subset.
+/// Run python tools/generate_common_scalar_bindings.py to regenerate.
 /// </summary>
 public static partial class CommonScalarContracts
 {
-    private static readonly HashSet<string> Environments =
+    private static readonly HashSet<string> EnvironmentValues =
         new(StringComparer.Ordinal) { "REPLAY", "SIMULATION", "PAPER", "LIVE" };
 
-    /// <summary>
-    /// Validates a textual common-scalar value against the named canonical scalar kind.
-    /// </summary>
-    /// <param name="kind">Canonical scalar kind, such as Decimal, Digest, or Environment.</param>
-    /// <param name="value">Textual value to validate without numeric coercion.</param>
-    /// <returns><see langword="true"/> when the value satisfies the selected canonical scalar contract.</returns>
-    /// <exception cref="ArgumentOutOfRangeException">Thrown when <paramref name="kind"/> is unsupported.</exception>
+    /// <summary>Validates a textual common scalar without numeric coercion.</summary>
     public static bool IsValid(string kind, string? value)
     {
         if (value is null)
@@ -30,9 +24,9 @@ public static partial class CommonScalarContracts
             "Decimal" => DecimalPattern().IsMatch(value),
             "Sequence" => SequencePattern().IsMatch(value),
             "Digest" => DigestPattern().IsMatch(value),
-            "CurrencyId" => CurrencyPattern().IsMatch(value),
-            "UnitId" => UnitPattern().IsMatch(value),
-            "Environment" => Environments.Contains(value),
+            "CurrencyId" => value.Length >= 1 && value.Length <= 32 && CurrencyIdPattern().IsMatch(value),
+            "UnitId" => value.Length >= 1 && value.Length <= 64 && UnitIdPattern().IsMatch(value),
+            "Environment" => EnvironmentValues.Contains(value),
             _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unsupported common scalar kind."),
         };
     }
@@ -46,9 +40,10 @@ public static partial class CommonScalarContracts
     [GeneratedRegex(@"^sha256:[0-9a-f]{64}$", RegexOptions.CultureInvariant)]
     private static partial Regex DigestPattern();
 
-    [GeneratedRegex(@"^[A-Za-z0-9._:-]{1,32}$", RegexOptions.CultureInvariant)]
-    private static partial Regex CurrencyPattern();
+    [GeneratedRegex(@"^[A-Za-z0-9._:-]+$", RegexOptions.CultureInvariant)]
+    private static partial Regex CurrencyIdPattern();
 
-    [GeneratedRegex(@"^[A-Za-z0-9._:/-]{1,64}$", RegexOptions.CultureInvariant)]
-    private static partial Regex UnitPattern();
+    [GeneratedRegex(@"^[A-Za-z0-9._:/-]+$", RegexOptions.CultureInvariant)]
+    private static partial Regex UnitIdPattern();
+
 }

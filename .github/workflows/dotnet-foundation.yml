@@ -33,6 +33,10 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+
 jobs:
   build:
     strategy:
@@ -42,6 +46,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: "10.0.100"
@@ -50,11 +59,28 @@ jobs:
       # package locks and locked-mode before introducing release dependencies.
       - run: dotnet restore src/AutoTrade.Contracts/AutoTrade.Contracts.csproj
       - run: dotnet build src/AutoTrade.Contracts/AutoTrade.Contracts.csproj --configuration Release --no-restore
+      - name: Write exact-head .NET foundation evidence
+        run: >-
+          python tools/write_ci_evidence.py
+          --suite dotnet-foundation
+          --command "dotnet restore/build AutoTrade.Contracts"
+          --output "artifacts/dotnet-foundation-${{ runner.os }}.json"
+      - name: Upload exact-head .NET foundation evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: dotnet-foundation-evidence-${{ runner.os }}
+          path: artifacts/dotnet-foundation-${{ runner.os }}.json
+          if-no-files-found: error
 
   desktop-build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.AUTOTRADE_SOURCE_SHA }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: "10.0.100"
@@ -62,3 +88,15 @@ jobs:
       - run: dotnet build src/AutoTrade.Desktop/AutoTrade.Desktop.csproj --configuration Release --no-restore
       - run: dotnet restore tests/Desktop.Client/Desktop.Client.csproj
       - run: dotnet run --project tests/Desktop.Client/Desktop.Client.csproj --configuration Release --no-restore
+      - name: Write exact-head desktop foundation evidence
+        run: >-
+          python tools/write_ci_evidence.py
+          --suite dotnet-desktop-foundation
+          --command "dotnet build AutoTrade.Desktop + Desktop.Client"
+          --output "artifacts/dotnet-desktop-Windows.json"
+      - name: Upload exact-head desktop foundation evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: dotnet-desktop-foundation-evidence-Windows
+          path: artifacts/dotnet-desktop-Windows.json
+          if-no-files-found: error

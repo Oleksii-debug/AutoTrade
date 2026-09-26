@@ -729,8 +729,20 @@ class KrakenSpotPaginationCoverage:
         self._pages.append(page)
 
     @property
+    def has_stable_end_boundary(self) -> bool:
+        """Whether offset pagination is protected from a moving newest-first head."""
+
+        if len(self._pages) <= 1:
+            return True
+        return "end" in dict(self._pages[0].filter_items)
+
+    @property
     def complete(self) -> bool:
-        return bool(self._pages and self._pages[-1].proves_last_page)
+        return bool(
+            self._pages
+            and self._pages[-1].proves_last_page
+            and self.has_stable_end_boundary
+        )
 
     @property
     def next_offset(self) -> int:

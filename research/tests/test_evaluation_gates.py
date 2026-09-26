@@ -44,6 +44,9 @@ def evidence(**overrides):
         drawdown="0.05",
         adverse_cost_loss="0.01",
         retention_passed=True,
+        untouched_holdout_passed=True,
+        valid_sequential_evaluation_passed=False,
+        walk_forward_passed=True,
         baseline_advantages={
             "cash": "0.04",
             "passive": "0.035",
@@ -70,6 +73,7 @@ EVIDENCE_KINDS = (
     "causal_audit",
     "financial_invariants",
     "retention",
+    "locked_evaluation",
     "metrics",
     "independent_review",
 )
@@ -87,6 +91,7 @@ def evaluate_with_verified_bundle(gate_profile, evaluation_evidence):
                 "causal_audit",
                 "financial_invariants",
                 "retention",
+                "locked_evaluation",
                 "metrics",
                 "independent_review",
             }
@@ -162,6 +167,111 @@ class EvaluationGateTests(unittest.TestCase):
             evaluate_with_verified_bundle(profile(), evidence()).status,
             "PASS",
         )
+
+
+    def test_locked_evaluation_and_walk_forward_are_required_for_terminal_pass(self):
+        no_locked_path = evaluate_with_verified_bundle(
+            profile(),
+            evidence(
+                untouched_holdout_passed=False,
+                valid_sequential_evaluation_passed=False,
+            ),
+        )
+        self.assertEqual(no_locked_path.status, "FAIL")
+        self.assertEqual(no_locked_path.checks["locked_evaluation"], "FAIL")
+
+        sequential = evaluate_with_verified_bundle(
+            profile(),
+            evidence(
+                untouched_holdout_passed=False,
+                valid_sequential_evaluation_passed=True,
+            ),
+        )
+        self.assertEqual(sequential.status, "PASS")
+        self.assertEqual(sequential.checks["locked_evaluation"], "PASS")
+
+        walk_forward = evaluate_with_verified_bundle(
+            profile(),
+            evidence(walk_forward_passed=False),
+        )
+        self.assertEqual(walk_forward.status, "FAIL")
+        self.assertEqual(walk_forward.checks["walk_forward"], "FAIL")
+
+        missing = evaluate_gates(
+            profile(),
+            evidence(
+                untouched_holdout_passed=None,
+                valid_sequential_evaluation_passed=None,
+                walk_forward_passed=None,
+            ),
+        )
+        self.assertEqual(missing.status, "INCONCLUSIVE")
+        self.assertEqual(missing.checks["locked_evaluation"], "INCONCLUSIVE")
+        self.assertEqual(missing.checks["walk_forward"], "INCONCLUSIVE")
+
+    def test_locked_evaluation_artifact_cannot_forge_holdout_or_walk_forward_pass(self):
+        gate_profile = profile()
+        base_evidence = evidence()
+
+        for forged_field in (
+            "untouched_holdout_passed",
+            "valid_sequential_evaluation_passed",
+            "walk_forward_passed",
+        ):
+            with self.subTest(forged_field=forged_field), TemporaryDirectory() as directory:
+                store = ArtifactStore(directory)
+                refs = {}
+                for kind in EVIDENCE_KINDS:
+                    artifact_id = str(uuid4())
+                    is_report = kind in {
+                        "profile",
+                        "trial_log",
+                        "causal_audit",
+                        "financial_invariants",
+                        "retention",
+                        "locked_evaluation",
+                        "metrics",
+                        "independent_review",
+                    }
+                    payload = (
+                        gate_report_payload(kind, gate_profile, base_evidence)
+                        if is_report
+                        else f"{gate_profile.profile_id}:{kind}".encode("utf-8")
+                    )
+                    if kind == "locked_evaluation":
+                        forged = json.loads(payload.decode("utf-8"))
+                        forged[forged_field] = not forged[forged_field]
+                        payload = json.dumps(
+                            forged,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    manifest = store.publish_bytes(
+                        artifact_id=artifact_id,
+                        data=payload,
+                        media_type=(
+                            "application/json"
+                            if is_report
+                            else "application/octet-stream"
+                        ),
+                        rights={"storage": True, "export": False},
+                        metadata={
+                            "evidence_kind": kind,
+                            "profile_id": gate_profile.profile_id,
+                        },
+                    )
+                    refs[kind] = GateEvidenceRef(
+                        artifact_id=artifact_id,
+                        sha256=manifest["sha256"],
+                    )
+
+                decision = evaluate_gates(
+                    gate_profile,
+                    replace(base_evidence, evidence_refs=refs),
+                    artifact_store=store,
+                )
+                self.assertEqual(decision.status, "FAIL")
+                self.assertEqual(decision.checks["evidence_bundle"], "FAIL")
 
 
     def test_all_true_metrics_without_resolvable_evidence_cannot_pass(self):

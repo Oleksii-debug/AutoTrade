@@ -14,6 +14,7 @@ from decimal import Decimal
 from hashlib import sha256
 import json
 from pathlib import Path
+import platform
 import subprocess
 import tempfile
 
@@ -261,6 +262,11 @@ def qualify(source_sha: str) -> dict[str, object]:
 
         return {
             "qualification": "WP-62_ZERO_MODEL_FOUNDATION",
+            "execution_platform": {
+                "system": platform.system(),
+                "python_implementation": platform.python_implementation(),
+                "python_version": platform.python_version(),
+            },
             "qualification_schema_version": "1.0.0",
             "source_sha": source_sha,
             "observed_source_sha": source_sha,

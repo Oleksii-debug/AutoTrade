@@ -103,7 +103,7 @@ def _canonical_query_values(
             raise ProviderCoreError("query keys must be unique after normalization")
         if not isinstance(raw_value, str) or raw_value != raw_value.strip():
             raise ProviderCoreError(
-                "authenticated-read query values must be canonical strings"
+                "provider-read query values must be canonical strings"
             )
         normalized[key] = raw_value
     return MappingProxyType(dict(sorted(normalized.items())))
@@ -213,14 +213,18 @@ class AuthenticatedReadQueryBinding:
         )
         if not isinstance(self.surface, Surface):
             raise ProviderCoreError("surface must be a provider Surface")
-        if self.surface not in {Surface.AUTHENTICATED_READ, Surface.ACTIVITIES}:
+        if self.surface not in {
+            Surface.PUBLIC_DATA,
+            Surface.AUTHENTICATED_READ,
+            Surface.ACTIVITIES,
+        }:
             raise ProviderCoreError(
-                "authenticated-read binding requires AUTHENTICATED_READ or ACTIVITIES"
+                "provider-read binding requires PUBLIC_DATA, AUTHENTICATED_READ or ACTIVITIES"
             )
         endpoint = _text(self.endpoint, "endpoint")
         if not endpoint.startswith("/") or "://" in endpoint:
             raise ProviderCoreError(
-                "authenticated-read endpoint must be a canonical provider-relative path"
+                "provider-read endpoint must be a canonical provider-relative path"
             )
         object.__setattr__(self, "endpoint", endpoint)
         object.__setattr__(self, "query", _canonical_query_values(self.query))
@@ -281,10 +285,13 @@ def prepare_authenticated_read_query(
     at: datetime,
     permission_scope: str = "ORDER.READ",
 ) -> AuthenticatedReadQueryBinding:
-    """Prepare one authenticated query from canonical capability identity.
+    """Prepare one exact provider-read query from canonical capability identity.
 
-    Account/environment are intentionally not parameters: they are inherited
-    from the VERIFIED capability snapshot before any provider response exists.
+    This existing authority is also used for PUBLIC_DATA so provider responses
+    that can affect later order admission retain exact provider/environment/
+    instrument/query identity. Account/environment are intentionally not
+    parameters: they are inherited from the VERIFIED capability snapshot before
+    any provider response exists.
     """
 
     if not isinstance(capability, CapabilitySnapshot):
@@ -297,7 +304,7 @@ def prepare_authenticated_read_query(
         or scope not in capability.permission_scopes
     ):
         raise ProviderCoreError(
-            "exact verified capability does not admit authenticated provider read"
+            "exact verified capability does not admit provider read"
         )
     provider = capability.provider_id.upper()
     if provider not in PROVIDERS:
@@ -305,7 +312,7 @@ def prepare_authenticated_read_query(
     normalized_endpoint = _text(endpoint, "endpoint")
     if not normalized_endpoint.startswith("/") or "://" in normalized_endpoint:
         raise ProviderCoreError(
-            "authenticated-read endpoint must be a canonical provider-relative path"
+            "provider-read endpoint must be a canonical provider-relative path"
         )
     normalized_query = _canonical_query_values(query)
     prepared_at = _utc_text(point, "at")
@@ -348,7 +355,7 @@ def prepare_authenticated_read_query(
 
 @dataclass(frozen=True)
 class ProviderResponseObservation:
-    """Exact response bytes bound to one immutable authenticated query."""
+    """Exact response bytes bound to one immutable provider-read query."""
 
     query_binding: AuthenticatedReadQueryBinding
     observed_at: str
@@ -456,7 +463,7 @@ def observe_authenticated_json_response(
         or http_status > 299
     ):
         raise ProviderCoreError(
-            "authenticated provider state requires an HTTP 2xx response"
+            "provider state requires an HTTP 2xx response"
         )
     payload = _decode_exact_json(response_bytes)
     observed = _utc_text(observed_at, "observed_at")

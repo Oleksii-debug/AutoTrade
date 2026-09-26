@@ -1,7 +1,9 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from hashlib import sha256
 import json
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 from mvp.autotrade_mvp.binance_usdm import (
@@ -12,18 +14,28 @@ from mvp.autotrade_mvp.binance_usdm import (
     coverage_evidence,
     parse_account_trades,
     parse_order_ack,
-    prepare_order_request,
+    _prepare_order_request_with_rules as prepare_order_request,
+    prepare_order_request as prepare_order_request_with_public_data,
 )
 from mvp.autotrade_mvp.provider_core import (
+    ProviderCoreError,
     Surface,
     observe_authenticated_json_response,
     prepare_authenticated_read_query,
 )
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
+    CapabilityRegistry,
     CapabilitySnapshot,
     EvidenceVerification,
     derive_capability_snapshot,
+)
+from mvp.autotrade_mvp.provider_transport import (
+    BINANCE_USDM_ENDPOINT_POLICIES,
+    AuthenticatedReadWireResponse,
+    BinanceUsdmPublicDataTransport,
+    ProviderTransportScopeError,
+    UrllibJsonWireClient,
 )
 
 
@@ -124,6 +136,102 @@ def capability(
 
 
 
+
+
+def raw_public_observation(
+    *,
+    endpoint,
+    payload,
+    query,
+    provider_id="BINANCE",
+    account_id="account-1",
+    environment="PAPER",
+    instrument_version="BTCUSDT-PERP:v1",
+    observed_at=NOW,
+    response_bytes=None,
+):
+    """Create parser-only exact bytes; never production admission authority."""
+
+    binding = prepare_authenticated_read_query(
+        capability=capability(
+            provider_id=provider_id,
+            account_id=account_id,
+            environment=environment,
+            instrument_version=instrument_version,
+        ),
+        surface=Surface.PUBLIC_DATA,
+        endpoint=endpoint,
+        query=query,
+        at=observed_at,
+        permission_scope="ORDER_WRITE",
+    )
+    raw = response_bytes
+    if raw is None:
+        raw = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    return observe_authenticated_json_response(
+        query_binding=binding,
+        http_status=200,
+        response_bytes=raw,
+        observed_at=observed_at,
+    )
+
+
+def public_source(*, environment, endpoint, query):
+    origin = {
+        "PAPER": "https://demo-fapi.binance.com",
+        "LIVE": "https://fapi.binance.com",
+    }[environment]
+    items = sorted(query.items())
+    suffix = ""
+    if items:
+        suffix = "?" + "&".join(f"{key}={value}" for key, value in items)
+    request_url = origin + endpoint + suffix
+    return origin, request_url, "sha256:" + sha256(
+        request_url.encode("utf-8")
+    ).hexdigest()
+
+
+def exchange_info_observation(
+    symbol_payload,
+    *,
+    provider_id="BINANCE",
+    environment="PAPER",
+    instrument_version="BTCUSDT-PERP:v1",
+    query=None,
+    response_bytes=None,
+):
+    return raw_public_observation(
+        endpoint="/fapi/v1/exchangeInfo",
+        payload={"symbols": [symbol_payload]},
+        query={} if query is None else query,
+        provider_id=provider_id,
+        environment=environment,
+        instrument_version=instrument_version,
+        response_bytes=response_bytes,
+    )
+
+
+def parse_exchange_info(*, observation, symbol="BTCUSDT"):
+    origin, request_url, request_digest = public_source(
+        environment=observation.environment,
+        endpoint="/fapi/v1/exchangeInfo",
+        query=dict(observation.query_binding.query),
+    )
+    return BinanceUsdmSymbolRules._from_provider_observation(
+        observation=observation,
+        symbol=symbol,
+        origin=origin,
+        request_url=request_url,
+        request_url_sha256=request_digest,
+    )
+
+
 def symbol_rules(
     *,
     status="TRADING",
@@ -143,6 +251,9 @@ def symbol_rules(
     min_notional=None,
     price_precision=0,
     quantity_precision=0,
+    provider_id="BINANCE",
+    environment="PAPER",
+    instrument_version="BTCUSDT-PERP:v1",
 ):
     filters = [
         {
@@ -182,18 +293,33 @@ def symbol_rules(
                 "notional": min_notional,
             }
         )
-    return BinanceUsdmSymbolRules.from_exchange_info(
-        instrument_version="BTCUSDT-PERP:v1",
-        symbol_payload={
-            "symbol": "BTCUSDT",
-            "status": status,
-            "contractType": "PERPETUAL",
-            "pricePrecision": price_precision,
-            "quantityPrecision": quantity_precision,
-            "orderTypes": list(order_types),
-            "timeInForce": list(time_in_force),
-            "filters": filters,
-        },
+    row = {
+        "symbol": "BTCUSDT",
+        "status": status,
+        "contractType": "PERPETUAL",
+        "pricePrecision": price_precision,
+        "quantityPrecision": quantity_precision,
+        "orderTypes": list(order_types),
+        "timeInForce": list(time_in_force),
+        "filters": filters,
+    }
+    observation = exchange_info_observation(
+        row,
+        provider_id=provider_id,
+        environment=environment,
+        instrument_version=instrument_version,
+    )
+    origin, request_url, request_digest = public_source(
+        environment=environment,
+        endpoint="/fapi/v1/exchangeInfo",
+        query={},
+    )
+    return BinanceUsdmSymbolRules._from_provider_observation(
+        observation=observation,
+        symbol="BTCUSDT",
+        origin=origin,
+        request_url=request_url,
+        request_url_sha256=request_digest,
     )
 
 
@@ -203,21 +329,42 @@ def mark_price(
     observed_at=NOW,
     symbol="BTCUSDT",
     instrument_version="BTCUSDT-PERP:v1",
+    provider_id="BINANCE",
+    environment="PAPER",
+    query_symbol=None,
 ):
     timestamp_ms = int(observed_at.timestamp() * 1000)
-    return BinanceUsdmMarkPrice.from_premium_index(
+    query_value = symbol if query_symbol is None else query_symbol
+    payload = {
+        "symbol": symbol,
+        "markPrice": price,
+        "indexPrice": price,
+        "estimatedSettlePrice": price,
+        "lastFundingRate": "0.0001",
+        "interestRate": "0.0001",
+        "nextFundingTime": timestamp_ms + 28_800_000,
+        "time": timestamp_ms,
+    }
+    observation = raw_public_observation(
+        endpoint="/fapi/v1/premiumIndex",
+        payload=payload,
+        query={"symbol": query_value},
+        provider_id=provider_id,
+        environment=environment,
         instrument_version=instrument_version,
+        observed_at=observed_at,
+    )
+    origin, request_url, request_digest = public_source(
+        environment=environment,
+        endpoint="/fapi/v1/premiumIndex",
+        query={"symbol": query_value},
+    )
+    return BinanceUsdmMarkPrice._from_provider_observation(
+        observation=observation,
         symbol=symbol,
-        payload={
-            "symbol": symbol,
-            "markPrice": price,
-            "indexPrice": price,
-            "estimatedSettlePrice": price,
-            "lastFundingRate": "0.0001",
-            "interestRate": "0.0001",
-            "nextFundingTime": timestamp_ms + 28_800_000,
-            "time": timestamp_ms,
-        },
+        origin=origin,
+        request_url=request_url,
+        request_url_sha256=request_digest,
     )
 
 
@@ -752,16 +899,277 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
         parsed_rules = symbol_rules()
         with self.assertRaisesRegex(
             BinanceUsdmAdapterError,
-            "canonical provider payload parsing",
+            "canonical USD-M parser",
         ):
             BinanceUsdmSymbolRules(**parsed_rules.__dict__)
 
         provider_mark = mark_price()
         with self.assertRaisesRegex(
             BinanceUsdmAdapterError,
-            "canonical provider payload parsing",
+            "canonical USD-M parser",
         ):
             BinanceUsdmMarkPrice(**provider_mark.__dict__)
+
+    def test_public_order_preparation_rejects_caller_presented_rules(self):
+        intent = BinanceUsdmOrderIntent.create(
+            instrument_version="BTCUSDT-PERP:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="LIMIT",
+            quantity="0.01",
+            price="40000",
+            time_in_force="GTC",
+        )
+        forged_rules = symbol_rules()
+        with self.assertRaisesRegex(TypeError, "symbol_rules"):
+            prepare_order_request_with_public_data(
+                intent,
+                client_order_id="at-usdm-no-caller-rules",
+                capability=capability(),
+                symbol_rules=forged_rules,
+                public_data_transport=object(),
+                at=NOW,
+            )
+
+        from mvp.autotrade_mvp import provider_transport as transport_module
+
+        self.assertFalse(
+            hasattr(
+                transport_module,
+                "_TRANSPORTED_PROVIDER_OBSERVATION_TOKEN",
+            )
+        )
+        self.assertFalse(
+            hasattr(
+                transport_module,
+                "TransportedProviderResponseObservation",
+            )
+        )
+
+    def test_public_transport_constructor_has_no_wire_injection(self):
+        provider_capability = capability()
+        registry = CapabilityRegistry()
+        registry.add(provider_capability)
+        with self.assertRaisesRegex(TypeError, "wire_client"):
+            BinanceUsdmPublicDataTransport(
+                policy=BINANCE_USDM_ENDPOINT_POLICIES["PAPER"],
+                account_id=provider_capability.account_id,
+                capability_snapshot_id=provider_capability.snapshot_id,
+                capability_registry=registry,
+                clock_utc=lambda: NOW,
+                wire_client=object(),
+            )
+
+    def test_public_order_preparation_fetches_exchange_info_inside_transport(self):
+        provider_capability = capability()
+        registry = CapabilityRegistry()
+        registry.add(provider_capability)
+        transport = BinanceUsdmPublicDataTransport(
+            policy=BINANCE_USDM_ENDPOINT_POLICIES["PAPER"],
+            account_id=provider_capability.account_id,
+            capability_snapshot_id=provider_capability.snapshot_id,
+            capability_registry=registry,
+            clock_utc=lambda: NOW,
+        )
+        row = {
+            "symbol": "BTCUSDT",
+            "status": "TRADING",
+            "contractType": "PERPETUAL",
+            "orderTypes": ["LIMIT", "MARKET"],
+            "timeInForce": ["GTC", "IOC", "FOK"],
+            "filters": [
+                {
+                    "filterType": "PRICE_FILTER",
+                    "minPrice": "0.01",
+                    "maxPrice": "1000000",
+                    "tickSize": "0.01",
+                },
+                {
+                    "filterType": "LOT_SIZE",
+                    "minQty": "0.001",
+                    "maxQty": "1000",
+                    "stepSize": "0.001",
+                },
+                {
+                    "filterType": "MARKET_LOT_SIZE",
+                    "minQty": "0.001",
+                    "maxQty": "1000",
+                    "stepSize": "0.001",
+                },
+            ],
+        }
+        body = json.dumps(
+            {"symbols": [row]},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        intent = BinanceUsdmOrderIntent.create(
+            instrument_version="BTCUSDT-PERP:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="LIMIT",
+            quantity="0.01",
+            price="40000",
+            time_in_force="GTC",
+        )
+        with patch.object(
+            UrllibJsonWireClient,
+            "send",
+            return_value=AuthenticatedReadWireResponse(
+                http_status=200,
+                body=body,
+            ),
+        ) as send:
+            prepared = prepare_order_request_with_public_data(
+                intent,
+                client_order_id="at-usdm-composed-read",
+                capability=provider_capability,
+                public_data_transport=transport,
+                at=NOW,
+            )
+        self.assertEqual(prepared.body["symbol"], "BTCUSDT")
+        self.assertEqual(send.call_count, 1)
+        request = send.call_args.args[0]
+        self.assertEqual(
+            request.url,
+            "https://demo-fapi.binance.com/fapi/v1/exchangeInfo",
+        )
+        self.assertEqual(
+            prepared.filter_source_sha256,
+            "sha256:" + sha256(body).hexdigest(),
+        )
+
+    def test_public_order_preparation_environment_mismatch_fails_before_wire(self):
+        provider_capability = capability(environment="PAPER")
+        registry = CapabilityRegistry()
+        registry.add(provider_capability)
+        transport = BinanceUsdmPublicDataTransport(
+            policy=BINANCE_USDM_ENDPOINT_POLICIES["LIVE"],
+            account_id=provider_capability.account_id,
+            capability_snapshot_id=provider_capability.snapshot_id,
+            capability_registry=registry,
+            clock_utc=lambda: NOW,
+        )
+        intent = BinanceUsdmOrderIntent.create(
+            instrument_version="BTCUSDT-PERP:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="LIMIT",
+            quantity="0.01",
+            price="40000",
+            time_in_force="GTC",
+        )
+        with patch.object(UrllibJsonWireClient, "send") as send:
+            with self.assertRaisesRegex(
+                ProviderTransportScopeError,
+                "does not match transport composition",
+            ):
+                prepare_order_request_with_public_data(
+                    intent,
+                    client_order_id="at-usdm-wrong-composition",
+                    capability=provider_capability,
+                    public_data_transport=transport,
+                    at=NOW,
+                )
+            send.assert_not_called()
+
+    def test_public_admission_evidence_binds_environment_and_instrument(self):
+        intent = BinanceUsdmOrderIntent.create(
+            instrument_version="BTCUSDT-PERP:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="LIMIT",
+            quantity="0.01",
+            price="40000",
+            time_in_force="GTC",
+        )
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "environment"):
+            prepare_order_request(
+                intent,
+                client_order_id="at-usdm-wrong-env-rules",
+                capability=capability(environment="PAPER"),
+                symbol_rules=symbol_rules(environment="LIVE"),
+                at=NOW,
+            )
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "instrument version"):
+            prepare_order_request(
+                intent,
+                client_order_id="at-usdm-wrong-instrument-rules",
+                capability=capability(),
+                symbol_rules=symbol_rules(instrument_version="ETHUSDT-PERP:v1"),
+                at=NOW,
+            )
+
+        percent_rules = symbol_rules(
+            percent_price_up="1.05",
+            percent_price_down="0.95",
+        )
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "environment"):
+            prepare_order_request(
+                intent,
+                client_order_id="at-usdm-wrong-env-mark",
+                capability=capability(),
+                symbol_rules=percent_rules,
+                at=NOW,
+                mark_price=mark_price(environment="LIVE"),
+                maximum_mark_price_age_seconds=30,
+            )
+
+    def test_exact_public_response_bytes_define_admission_digest(self):
+        row = {
+            "symbol": "BTCUSDT",
+            "status": "TRADING",
+            "contractType": "PERPETUAL",
+            "orderTypes": ["LIMIT", "MARKET"],
+            "timeInForce": ["GTC", "IOC"],
+            "filters": [
+                {
+                    "filterType": "PRICE_FILTER",
+                    "minPrice": "0.01",
+                    "maxPrice": "1000000",
+                    "tickSize": "0.01",
+                },
+                {
+                    "filterType": "LOT_SIZE",
+                    "minQty": "0.001",
+                    "maxQty": "1000",
+                    "stepSize": "0.001",
+                },
+            ],
+        }
+        compact = json.dumps(
+            {"symbols": [row]},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        spaced = json.dumps(
+            {"symbols": [row]},
+            sort_keys=True,
+            separators=(", ", ": "),
+        ).encode("utf-8")
+        first_observation = raw_public_observation(
+            endpoint="/fapi/v1/exchangeInfo",
+            payload={},
+            query={},
+            response_bytes=compact,
+        )
+        second_observation = raw_public_observation(
+            endpoint="/fapi/v1/exchangeInfo",
+            payload={},
+            query={},
+            response_bytes=spaced,
+        )
+        first = parse_exchange_info(
+            observation=first_observation,
+            symbol="BTCUSDT",
+        )
+        second = parse_exchange_info(
+            observation=second_observation,
+            symbol="BTCUSDT",
+        )
+        self.assertNotEqual(first.source_sha256, second.source_sha256)
+        self.assertNotEqual(first.evidence_ref, second.evidence_ref)
+        self.assertEqual(first.query_digest, second.query_digest)
 
     def test_exchange_info_parser_rejects_missing_duplicate_and_invalid_filters(self):
         base = {
@@ -772,19 +1180,21 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             "timeInForce": ["GTC", "IOC"],
         }
         with self.assertRaisesRegex(BinanceUsdmAdapterError, "required PRICE_FILTER"):
-            BinanceUsdmSymbolRules.from_exchange_info(
-                instrument_version="BTCUSDT-PERP:v1",
-                symbol_payload={
-                    **base,
-                    "filters": [
-                        {
-                            "filterType": "LOT_SIZE",
-                            "minQty": "0.001",
-                            "maxQty": "100",
-                            "stepSize": "0.001",
-                        }
-                    ],
-                },
+            parse_exchange_info(
+                observation=exchange_info_observation(
+                    {
+                        **base,
+                        "filters": [
+                            {
+                                "filterType": "LOT_SIZE",
+                                "minQty": "0.001",
+                                "maxQty": "100",
+                                "stepSize": "0.001",
+                            }
+                        ],
+                    }
+                ),
+                symbol="BTCUSDT",
             )
 
         duplicate_price = {
@@ -794,43 +1204,48 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
             "tickSize": "0.1",
         }
         with self.assertRaisesRegex(BinanceUsdmAdapterError, "duplicate"):
-            BinanceUsdmSymbolRules.from_exchange_info(
-                instrument_version="BTCUSDT-PERP:v1",
-                symbol_payload={
-                    **base,
-                    "filters": [
-                        duplicate_price,
-                        dict(duplicate_price),
-                        {
-                            "filterType": "LOT_SIZE",
-                            "minQty": "0.001",
-                            "maxQty": "100",
-                            "stepSize": "0.001",
-                        },
-                    ],
-                },
+            parse_exchange_info(
+                observation=exchange_info_observation(
+                    {
+                        **base,
+                        "filters": [
+                            duplicate_price,
+                            dict(duplicate_price),
+                            {
+                                "filterType": "LOT_SIZE",
+                                "minQty": "0.001",
+                                "maxQty": "100",
+                                "stepSize": "0.001",
+                            },
+                        ],
+                    }
+                ),
+                symbol="BTCUSDT",
             )
 
         with self.assertRaisesRegex(BinanceUsdmAdapterError, "MIN_NOTIONAL"):
-            BinanceUsdmSymbolRules.from_exchange_info(
-                instrument_version="BTCUSDT-PERP:v1",
-                symbol_payload={
-                    **base,
-                    "filters": [
-                        duplicate_price,
-                        {
-                            "filterType": "LOT_SIZE",
-                            "minQty": "0.001",
-                            "maxQty": "100",
-                            "stepSize": "0.001",
-                        },
-                        {
-                            "filterType": "MIN_NOTIONAL",
-                            "notional": "0",
-                        },
-                    ],
-                },
+            parse_exchange_info(
+                observation=exchange_info_observation(
+                    {
+                        **base,
+                        "filters": [
+                            duplicate_price,
+                            {
+                                "filterType": "LOT_SIZE",
+                                "minQty": "0.001",
+                                "maxQty": "100",
+                                "stepSize": "0.001",
+                            },
+                            {
+                                "filterType": "MIN_NOTIONAL",
+                                "notional": "0",
+                            },
+                        ],
+                    }
+                ),
+                symbol="BTCUSDT",
             )
+
 
     def test_ack_never_promotes_executed_qty_to_fill(self):
         result = parse_order_ack(

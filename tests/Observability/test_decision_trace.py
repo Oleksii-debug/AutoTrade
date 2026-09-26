@@ -212,6 +212,16 @@ class DecisionTraceEvidenceTests(unittest.TestCase):
         self.assertEqual(len(snapshot), 2)
         self.assertEqual(snapshot[-1]["labels"]["password"], "[REDACTED]")
 
+    def test_metric_backlog_rejects_unbounded_or_non_json_labels(self):
+        backlog = BoundedMetricBacklog(max_items=2, max_label_bytes=32)
+        with self.assertRaisesRegex(ValueError, "bounded size"):
+            backlog.record("queue.delay", 1.0, detail="x" * 100)
+        with self.assertRaisesRegex(ValueError, "finite JSON values"):
+            backlog.record("queue.delay", 1.0, score=float("nan"))
+        with self.assertRaisesRegex(ValueError, "finite JSON values"):
+            backlog.record("queue.delay", 1.0, marker=object())
+        self.assertEqual(backlog.snapshot(), ())
+
 
 if __name__ == "__main__":
     unittest.main()

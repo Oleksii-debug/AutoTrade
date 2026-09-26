@@ -26,7 +26,7 @@ PAYLOAD_SCHEMA = 1
 REASON_CODES = frozenset({"OPERATOR_REQUEST", "EMERGENCY_STOP", "POLICY_REVIEW"})
 
 
-class OperatorAuthorityConflict(RuntimeError):
+class OperatorAuthorityConflict(ValueError):
     """The accepted command can no longer be applied safely."""
 
 

@@ -28,7 +28,11 @@ from .provider_core import (
     Surface,
     prepare_authenticated_read_query,
 )
-from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
+from .reconciliation import (
+    CoverageSurfaceEvidence,
+    ProviderFillEvidence,
+    ProviderWorkingOrderEvidence,
+)
 
 
 BYBIT_DOCUMENTED_ENDPOINTS: Mapping[str, str] = {
@@ -89,6 +93,20 @@ _ORDER_READ_ENDPOINT_BY_SURFACE: Mapping[str, str] = MappingProxyType(
     }
 )
 _BYBIT_ORDER_CATEGORIES = frozenset({"spot", "linear", "inverse", "option"})
+_BYBIT_OPEN_ORDER_STATUSES = frozenset({"New", "PartiallyFilled", "Untriggered"})
+_BYBIT_CLOSED_ORDER_STATUSES = frozenset(
+    {
+        "Rejected",
+        "PartiallyFilledCanceled",
+        "Filled",
+        "Cancelled",
+        "Triggered",
+        "Deactivated",
+    }
+)
+_BYBIT_KNOWN_ORDER_STATUSES = (
+    _BYBIT_OPEN_ORDER_STATUSES | _BYBIT_CLOSED_ORDER_STATUSES
+)
 _MAX_ORDER_HISTORY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 
 
@@ -824,6 +842,7 @@ class BybitOrderSnapshot:
     client_order_id: str | None
     symbol: str
     order_status: str
+    remaining_quantity: Decimal
     created_at: str
     updated_at: str
     evidence_ref: str
@@ -862,11 +881,21 @@ class BybitOrderSnapshot:
                 _client_order_id(self.client_order_id),
             )
         object.__setattr__(self, "symbol", _text(self.symbol, name="symbol"))
-        object.__setattr__(
-            self,
-            "order_status",
-            _text(self.order_status, name="order_status"),
+        status = _text(self.order_status, name="order_status")
+        if status not in _BYBIT_KNOWN_ORDER_STATUSES:
+            raise ProviderCoreError("unsupported Bybit order status")
+        object.__setattr__(self, "order_status", status)
+        remaining = _decimal(
+            self.remaining_quantity,
+            name="remaining_quantity",
         )
+        if remaining < 0:
+            raise ProviderCoreError("remaining_quantity must be non-negative")
+        if status in _BYBIT_OPEN_ORDER_STATUSES and remaining <= 0:
+            raise ProviderCoreError(
+                "Bybit open order must have positive remaining quantity"
+            )
+        object.__setattr__(self, "remaining_quantity", remaining)
         created_at = _utc_text(self.created_at, name="created_at")
         updated_at = _utc_text(self.updated_at, name="updated_at")
         created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
@@ -958,6 +987,7 @@ def prepare_order_read_query(
     surface: str,
     category: str,
     client_order_id: str | None = None,
+    symbol: str | None = None,
     cursor: str | None = None,
     limit: object = 50,
     start_time_ms: object | None = None,
@@ -989,10 +1019,22 @@ def prepare_order_read_query(
     }
     if client_order_id is not None:
         query["orderLinkId"] = _client_order_id(client_order_id)
+    if symbol is not None:
+        provider_symbol = _text(symbol, name="symbol")
+        if provider_symbol != provider_symbol.upper():
+            raise ProviderCoreError("Bybit symbol must be uppercase")
+        query["symbol"] = provider_symbol
     if cursor is not None:
         query["cursor"] = _opaque_cursor(cursor)
 
     if normalized_surface == "OPEN_ORDERS":
+        # Make the requested provider state explicit rather than depending on
+        # a remote default. Bybit ignores openOnly for direct order identities.
+        query["openOnly"] = "0"
+        if normalized_category == "linear" and symbol is None:
+            raise ProviderCoreError(
+                "Bybit linear realtime order query requires symbol"
+            )
         if start_time_ms is not None or end_time_ms is not None:
             raise ProviderCoreError(
                 "Bybit realtime order query does not accept history time windows"
@@ -1126,6 +1168,10 @@ def parse_order_page(observation: ProviderResponseObservation) -> BybitOrderPage
             client_order_id=client_order_id,
             symbol=_text(row.get("symbol"), name="symbol"),
             order_status=_text(row.get("orderStatus"), name="orderStatus"),
+            remaining_quantity=_decimal(
+                row.get("leavesQty"),
+                name="leavesQty",
+            ),
             created_at=_millis_to_utc(created_ms, name="createdTime"),
             updated_at=_millis_to_utc(updated_ms, name="updatedTime"),
             evidence_ref=observation.evidence_ref,
@@ -1147,6 +1193,49 @@ def parse_order_page(observation: ProviderResponseObservation) -> BybitOrderPage
         next_cursor=next_cursor,
         evidence_ref=observation.evidence_ref,
     )
+
+
+def working_orders_from_page(
+    page: BybitOrderPage,
+    *,
+    instrument_versions: Mapping[str, str],
+) -> tuple[ProviderWorkingOrderEvidence, ...]:
+    """Project documented open Bybit states into canonical working-order evidence."""
+
+    if not isinstance(page, BybitOrderPage):
+        raise TypeError("page must be BybitOrderPage")
+    if page.surface != "OPEN_ORDERS":
+        raise ProviderCoreError(
+            "Bybit working-order evidence requires OPEN_ORDERS page provenance"
+        )
+    if not isinstance(instrument_versions, Mapping):
+        raise ProviderCoreError("instrument_versions must be a mapping")
+
+    working: list[ProviderWorkingOrderEvidence] = []
+    for order in page.orders:
+        if order.order_status in _BYBIT_CLOSED_ORDER_STATUSES:
+            continue
+        if order.order_status not in _BYBIT_OPEN_ORDER_STATUSES:
+            raise ProviderCoreError("unsupported Bybit working order status")
+        try:
+            instrument = instrument_versions[order.symbol]
+        except KeyError as error:
+            raise ProviderCoreError(
+                f"unmapped Bybit instrument symbol: {order.symbol}"
+            ) from error
+        working.append(
+            ProviderWorkingOrderEvidence.create(
+                provider_id="BYBIT",
+                account_id=order.account_id,
+                environment=order.environment,
+                provider_environment=order.provider_environment,
+                provider_order_id=order.provider_order_id,
+                client_order_id=order.client_order_id,
+                instrument=_text(instrument, name="instrument_version"),
+                remaining_quantity=order.remaining_quantity,
+            )
+        )
+    return tuple(working)
 
 
 def prepare_next_order_read_query(

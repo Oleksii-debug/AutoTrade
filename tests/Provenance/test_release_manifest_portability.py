@@ -52,6 +52,19 @@ class ReleaseManifestPortabilityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "inside repository"):
                 git_blob_sha(outside)
 
+    def test_manifest_records_hash_locked_python_artifacts(self):
+        document = json.loads(rendered_manifest())
+        dependencies = document["python_development_dependencies"]
+        self.assertGreater(len(dependencies), 0)
+        for dependency in dependencies:
+            self.assertGreater(len(dependency["hashes"]), 0)
+            self.assertTrue(
+                all(
+                    hash_value.startswith("sha256:") and len(hash_value) == 71
+                    for hash_value in dependency["hashes"]
+                )
+            )
+
     def test_manifest_binds_research_dependency_entrypoint(self):
         document = json.loads(rendered_manifest())
         self.assertEqual(

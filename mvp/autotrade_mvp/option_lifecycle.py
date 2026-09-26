@@ -39,11 +39,34 @@ _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 _EVENT_KINDS = frozenset({"EXERCISE", "ASSIGNMENT", "EXPIRY"})
 _OPTION_LIFECYCLE_PARSER_ID = "autotrade.option-lifecycle.sealed-json"
-_OPTION_LIFECYCLE_PARSER_VERSION = "1.1.0"
+_OPTION_LIFECYCLE_PARSER_VERSION = "1.2.0"
 _OPTION_LIFECYCLE_PARSER_CONTRACT_DIGEST = payload_digest(
     {
         "parser_id": _OPTION_LIFECYCLE_PARSER_ID,
         "parser_version": _OPTION_LIFECYCLE_PARSER_VERSION,
+        "source_type": "ProviderResponseObservation",
+        "source_surface": "ACTIVITIES",
+        "source_scope_fields": ["provider_environment"],
+        "payload_fields": [
+            "venue_id",
+            "external_event_id",
+            "event_kind",
+            "signed_contracts",
+            "effective_at",
+            "provider_revision",
+            "underlying_price",
+            "cash_settlement_amount",
+            "corrects_external_event_id",
+        ],
+        "financial_binding": "EXACT_SEALED_PAYLOAD",
+    }
+)
+
+_LEGACY_OPTION_LIFECYCLE_PARSER_VERSION = "1.1.0"
+_LEGACY_OPTION_LIFECYCLE_PARSER_CONTRACT_DIGEST = payload_digest(
+    {
+        "parser_id": _OPTION_LIFECYCLE_PARSER_ID,
+        "parser_version": _LEGACY_OPTION_LIFECYCLE_PARSER_VERSION,
         "source_type": "ProviderResponseObservation",
         "source_surface": "ACTIVITIES",
         "payload_fields": [
@@ -145,6 +168,7 @@ def _canonical_observation_from_sealed_response(
         provider_id=source.provider_id,
         account_id=source.account_id,
         environment=source.environment,
+        provider_environment=source.provider_environment,
         venue_id=_text(payload["venue_id"], "venue_id"),
         instrument_version=source.query_binding.instrument_version,
         external_event_id=_text(
@@ -177,6 +201,34 @@ def _text(value: str, name: str) -> str:
     if not isinstance(value, str) or not value.strip() or value != value.strip():
         raise OptionLifecycleError(f"{name} must be canonical non-empty text")
     return value
+
+
+def _provider_environment(
+    value: str | None,
+    *,
+    provider_id: str,
+    environment: str,
+) -> str:
+    provider = _text(provider_id, "provider_id").upper()
+    runtime_environment = _text(environment, "environment").upper()
+    if provider == "BYBIT" and value is None:
+        raise OptionLifecycleError(
+            "BYBIT option lifecycle requires explicit provider_environment"
+        )
+    provider_environment = (
+        runtime_environment
+        if value is None
+        else _text(value, "provider_environment").upper()
+    )
+    if provider == "BYBIT" and provider_environment not in {
+        "MAINNET",
+        "TESTNET",
+        "DEMO",
+    }:
+        raise OptionLifecycleError(
+            "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
+        )
+    return provider_environment
 
 
 def _decimal(value: Decimal | str | int, name: str) -> Decimal:
@@ -238,6 +290,7 @@ class OptionLifecycleObservation:
     observed_at: datetime
     raw_evidence_digest: str
     provider_revision: str
+    provider_environment: str | None = None
     underlying_price: Decimal | None = None
     cash_settlement_amount: Decimal | None = None
     corrects_external_event_id: str | None = None
@@ -246,6 +299,11 @@ class OptionLifecycleObservation:
         provider = _text(self.provider_id, "provider_id").upper()
         account = _text(self.account_id, "account_id")
         environment = _text(self.environment, "environment").upper()
+        provider_environment = _provider_environment(
+            self.provider_environment,
+            provider_id=provider,
+            environment=environment,
+        )
         venue = _text(self.venue_id, "venue_id")
         instrument_version = _text(self.instrument_version, "instrument_version")
         external_event_id = _text(self.external_event_id, "external_event_id")
@@ -288,6 +346,7 @@ class OptionLifecycleObservation:
         object.__setattr__(self, "provider_id", provider)
         object.__setattr__(self, "account_id", account)
         object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "provider_environment", provider_environment)
         object.__setattr__(self, "venue_id", venue)
         object.__setattr__(self, "instrument_version", instrument_version)
         object.__setattr__(self, "external_event_id", external_event_id)
@@ -315,10 +374,11 @@ def canonical_option_lifecycle_observation(
     if not isinstance(observation, OptionLifecycleObservation):
         raise TypeError("observation must be OptionLifecycleObservation")
     return {
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0",
         "provider_id": observation.provider_id,
         "account_id": observation.account_id,
         "environment": observation.environment,
+        "provider_environment": observation.provider_environment,
         "venue_id": observation.venue_id,
         "instrument_version": observation.instrument_version,
         "external_event_id": observation.external_event_id,
@@ -333,6 +393,50 @@ def canonical_option_lifecycle_observation(
             observation.cash_settlement_amount
         ),
         "corrects_external_event_id": observation.corrects_external_event_id,
+    }
+
+
+def _legacy_canonical_option_lifecycle_observation(
+    observation: OptionLifecycleObservation,
+) -> dict[str, Any]:
+    """Reconstruct the exact pre-provider-environment observation identity.
+
+    This is used only to recognize exact retries of already durable generic
+    provider events. It never authorizes fresh writes and is intentionally
+    unavailable when provider_environment differs from runtime environment.
+    """
+
+    if observation.provider_environment != observation.environment:
+        raise OptionLifecycleConflict(
+            "legacy lifecycle compatibility is unavailable for distinct provider environments"
+        )
+    payload = canonical_option_lifecycle_observation(observation)
+    payload["schema_version"] = "1.0.0"
+    payload.pop("provider_environment")
+    return payload
+
+
+def _legacy_provider_evidence_payload(
+    provider_evidence: ProviderResponseObservation,
+) -> dict[str, Any]:
+    if provider_evidence.provider_environment != provider_evidence.environment:
+        raise OptionLifecycleConflict(
+            "legacy lifecycle evidence compatibility is unavailable for distinct provider environments"
+        )
+    return {
+        "evidence_ref": provider_evidence.evidence_ref,
+        "response_sha256": provider_evidence.response_sha256,
+        "query_digest": provider_evidence.query_binding.query_digest,
+        "endpoint": provider_evidence.query_binding.endpoint,
+        "permission_scope": provider_evidence.query_binding.permission_scope,
+        "capability_snapshot_id": (
+            provider_evidence.query_binding.capability_snapshot_id
+        ),
+        "instrument_version": provider_evidence.query_binding.instrument_version,
+        "observed_at": provider_evidence.observed_at,
+        "parser_id": _OPTION_LIFECYCLE_PARSER_ID,
+        "parser_version": _LEGACY_OPTION_LIFECYCLE_PARSER_VERSION,
+        "parser_contract_digest": _LEGACY_OPTION_LIFECYCLE_PARSER_CONTRACT_DIGEST,
     }
 
 
@@ -565,6 +669,7 @@ class DurableOptionLifecycleAuthority:
         evidence_resolver: OptionLifecycleEvidenceResolver,
         lifecycle_endpoints: frozenset[str],
         permission_scope: str,
+        provider_environment: str | None = None,
     ) -> None:
         if not isinstance(store, JournalStore):
             raise TypeError("store must be JournalStore")
@@ -587,21 +692,47 @@ class DurableOptionLifecycleAuthority:
                 "lifecycle endpoints must be canonical provider-relative paths"
             )
         scope = _text(permission_scope, "permission_scope")
+        provider_scope = _provider_environment(
+            provider_environment,
+            provider_id=economic_book.provider_id,
+            environment=economic_book.environment,
+        )
+        identity_scope = (
+            economic_book.provider_id,
+            economic_book.account_id,
+            economic_book.environment,
+        )
+        legacy_aggregate_id = _identity(
+            "option-lifecycle-book",
+            *identity_scope,
+        )
+        if provider_scope != economic_book.environment:
+            identity_scope = (*identity_scope, provider_scope)
         self.store = store
         self.registry = registry
         self.economic_book = economic_book
         self.evidence_resolver = evidence_resolver
         self.lifecycle_endpoints = endpoints
         self.permission_scope = scope
+        self.provider_environment = provider_scope
+        self.identity_scope = identity_scope
+        self.legacy_aggregate_id = legacy_aggregate_id
         self.aggregate_id = _identity(
             "option-lifecycle-book",
-            economic_book.provider_id,
-            economic_book.account_id,
-            economic_book.environment,
+            *identity_scope,
         )
 
     def _events(self) -> list[dict[str, Any]]:
         return self.store.load_events(self._AGGREGATE_TYPE, self.aggregate_id)
+
+    def _require_no_ambiguous_legacy_history(self) -> None:
+        if self.legacy_aggregate_id == self.aggregate_id:
+            return
+        if self.store.load_events(self._AGGREGATE_TYPE, self.legacy_aggregate_id):
+            raise OptionLifecycleConflict(
+                "legacy option lifecycle history lacks provider_environment; "
+                "explicit migration/reconciliation is required"
+            )
 
     @staticmethod
     def _payload(event: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -641,6 +772,7 @@ class DurableOptionLifecycleAuthority:
                 endpoint=endpoint,
                 account_id=self.economic_book.account_id,
                 environment=self.economic_book.environment,
+                provider_environment=self.provider_environment,
             )
         except Exception as error:
             raise OptionLifecycleError(
@@ -658,6 +790,7 @@ class DurableOptionLifecycleAuthority:
             observation.provider_id != source.provider_id
             or observation.account_id != source.account_id
             or observation.environment != source.environment
+            or observation.provider_environment != source.provider_environment
             or observation.instrument_version
             != source.query_binding.instrument_version
             or observation.raw_evidence_digest != source.response_sha256
@@ -672,6 +805,7 @@ class DurableOptionLifecycleAuthority:
         self,
         evidence_ref: str,
     ) -> OptionLifecycleApplyResult:
+        self._require_no_ambiguous_legacy_history()
         observation, provider_evidence = self._observation_from_evidence(evidence_ref)
         if observation.provider_id != self.economic_book.provider_id:
             raise OptionLifecycleError("provider scope does not match economic book")
@@ -679,6 +813,10 @@ class DurableOptionLifecycleAuthority:
             raise OptionLifecycleError("account scope does not match economic book")
         if observation.environment != self.economic_book.environment:
             raise OptionLifecycleError("environment scope does not match economic book")
+        if observation.provider_environment != self.provider_environment:
+            raise OptionLifecycleError(
+                "provider_environment scope does not match lifecycle authority"
+            )
 
         version = _bind_version(self.registry, observation)
         observation_payload = canonical_option_lifecycle_observation(observation)
@@ -695,6 +833,7 @@ class DurableOptionLifecycleAuthority:
             ),
             "instrument_version": provider_evidence.query_binding.instrument_version,
             "observed_at": provider_evidence.observed_at,
+            "provider_environment": provider_evidence.provider_environment,
             "parser_id": _OPTION_LIFECYCLE_PARSER_ID,
             "parser_version": _OPTION_LIFECYCLE_PARSER_VERSION,
             "parser_contract_digest": _OPTION_LIFECYCLE_PARSER_CONTRACT_DIGEST,
@@ -714,12 +853,35 @@ class DurableOptionLifecycleAuthority:
                     "external lifecycle identity appears more than once"
                 )
             saved = self._payload(same_identity[0])
+            current_exact_retry = (
+                saved.get("observation_digest") == observation_digest
+                and saved.get("instrument_digest") == instrument_digest
+                and saved.get("provider_evidence_digest")
+                == provider_evidence_digest
+            )
+            legacy_exact_retry = False
             if (
-                saved.get("observation_digest") != observation_digest
-                or saved.get("instrument_digest") != instrument_digest
-                or saved.get("provider_evidence_digest")
-                != provider_evidence_digest
+                not current_exact_retry
+                and saved.get("schema_version") == "1.0.0"
+                and self.provider_environment == self.economic_book.environment
+                and "provider_environment" not in saved
             ):
+                legacy_observation_payload = (
+                    _legacy_canonical_option_lifecycle_observation(observation)
+                )
+                legacy_provider_payload = _legacy_provider_evidence_payload(
+                    provider_evidence
+                )
+                legacy_exact_retry = (
+                    saved.get("observation_digest")
+                    == payload_digest(legacy_observation_payload)
+                    and saved.get("instrument_digest") == instrument_digest
+                    and saved.get("provider_evidence_digest")
+                    == payload_digest(legacy_provider_payload)
+                    and saved.get("provider_evidence")
+                    == legacy_provider_payload
+                )
+            if not current_exact_retry and not legacy_exact_retry:
                 raise OptionLifecycleConflict(
                     "external lifecycle identity was reused with changed evidence"
                 )
@@ -814,9 +976,7 @@ class DurableOptionLifecycleAuthority:
 
         lifecycle_event_id = _identity(
             "option-lifecycle-event",
-            observation.provider_id,
-            observation.account_id,
-            observation.environment,
+            *self.identity_scope,
             observation.external_event_id,
         )
 
@@ -829,9 +989,7 @@ class DurableOptionLifecycleAuthority:
                     original,
                     transaction_id=_identity(
                         "option-lifecycle-reversal",
-                        observation.provider_id,
-                        observation.account_id,
-                        observation.environment,
+                        *self.identity_scope,
                         observation.external_event_id,
                         original.transaction_id,
                     ),
@@ -882,10 +1040,11 @@ class DurableOptionLifecycleAuthority:
             item.transaction_id for item in reversal_transactions
         )
         lifecycle_payload = {
-            "schema_version": "1.0.0",
+            "schema_version": "1.1.0",
             "provider_id": observation.provider_id,
             "account_id": observation.account_id,
             "environment": observation.environment,
+            "provider_environment": observation.provider_environment,
             "venue_id": observation.venue_id,
             "instrument_version": observation.instrument_version,
             "instrument_digest": instrument_digest,
@@ -940,9 +1099,7 @@ class DurableOptionLifecycleAuthority:
 
         command_id = _identity(
             "option-lifecycle-command",
-            observation.provider_id,
-            observation.account_id,
-            observation.environment,
+            *self.identity_scope,
             observation.external_event_id,
         )
         _, inserted, _ = self.store.commit_command(

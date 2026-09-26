@@ -598,6 +598,154 @@ class ReconciliationJournalTests(unittest.TestCase):
                     max_age_seconds="60",
                 )
 
+    def test_option_lifecycle_freshness_is_provider_environment_scoped(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="bybit-testnet-before-option-lifecycle",
+                result=reconciliation(
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    resource_availability=availability(
+                        provider_id="BYBIT",
+                        account_id="bybit-account",
+                        environment="PAPER",
+                        provider_environment="TESTNET",
+                    ),
+                ),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            demo_payload = {
+                "provider_id": "BYBIT",
+                "account_id": "bybit-account",
+                "environment": "PAPER",
+                "provider_environment": "DEMO",
+                "external_event_id": "demo-exercise",
+                "event_kind": "EXERCISE",
+            }
+            store.append_event(
+                {
+                    "event_id": "demo-option-lifecycle-after-testnet-snapshot",
+                    "event_type": "OptionLifecycleApplied",
+                    "aggregate_type": "option_lifecycle",
+                    "aggregate_id": "option-lifecycle-demo-scope",
+                    "aggregate_version": "1",
+                    "payload": demo_payload,
+                    "payload_hash": payload_digest(demo_payload),
+                    "committed_at": "2026-09-24T19:00:10Z",
+                }
+            )
+            evidence = load_account_resource_availability_evidence(
+                store,
+                checkpoint_event_id=checkpoint["event_id"],
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                resources=("CASH:USD",),
+                now="2026-09-24T19:00:30Z",
+                max_age_seconds="60",
+            )
+            self.assertEqual(evidence["availability"], {"CASH:USD": "850"})
+
+            testnet_payload = {
+                "provider_id": "BYBIT",
+                "account_id": "bybit-account",
+                "environment": "PAPER",
+                "provider_environment": "TESTNET",
+                "external_event_id": "testnet-exercise",
+                "event_kind": "EXERCISE",
+            }
+            store.append_event(
+                {
+                    "event_id": "testnet-option-lifecycle-after-testnet-snapshot",
+                    "event_type": "OptionLifecycleApplied",
+                    "aggregate_type": "option_lifecycle",
+                    "aggregate_id": "option-lifecycle-testnet-scope",
+                    "aggregate_version": "1",
+                    "payload": testnet_payload,
+                    "payload_hash": payload_digest(testnet_payload),
+                    "committed_at": "2026-09-24T19:00:11Z",
+                }
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "predates option lifecycle financial truth",
+            ):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds="60",
+                )
+
+    def test_bybit_legacy_option_lifecycle_without_provider_environment_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="bybit-testnet-legacy-option-lifecycle",
+                result=reconciliation(
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    resource_availability=availability(
+                        provider_id="BYBIT",
+                        account_id="bybit-account",
+                        environment="PAPER",
+                        provider_environment="TESTNET",
+                    ),
+                ),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            legacy_payload = {
+                "provider_id": "BYBIT",
+                "account_id": "bybit-account",
+                "environment": "PAPER",
+                "external_event_id": "legacy-exercise",
+                "event_kind": "EXERCISE",
+            }
+            store.append_event(
+                {
+                    "event_id": "legacy-option-lifecycle-after-provider-snapshot",
+                    "event_type": "OptionLifecycleApplied",
+                    "aggregate_type": "option_lifecycle",
+                    "aggregate_id": "legacy-option-lifecycle-scope",
+                    "aggregate_version": "1",
+                    "payload": legacy_payload,
+                    "payload_hash": payload_digest(legacy_payload),
+                    "committed_at": "2026-09-24T19:00:10Z",
+                }
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "lacks provider_environment",
+            ):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds="60",
+                )
+
     def test_financial_truth_timestamp_equality_fails_closed(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

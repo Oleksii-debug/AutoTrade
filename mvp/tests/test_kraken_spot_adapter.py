@@ -47,7 +47,7 @@ def trade_history_observation(
     *,
     account_id="paper-1",
     environment="PAPER",
-    surface=Surface.AUTHENTICATED_READ,
+    surface=Surface.ACTIVITIES,
 ):
     query = prepare_authenticated_read_query(
         capability=capability(
@@ -58,7 +58,7 @@ def trade_history_observation(
         endpoint="/0/private/TradesHistory",
         query={"ofs": "0"},
         at=NOW,
-        permission_scope="ORDER.READ",
+        permission_scope="TRADE.READ",
     )
     raw = json.dumps(
         response,
@@ -94,7 +94,7 @@ def capability(
             expires_at=NOW + timedelta(hours=1),
             supported_order_types=frozenset(order_types),
             time_in_force=frozenset(tif),
-            permission_scopes=frozenset({"ORDER_WRITE", "ORDER.READ"}),
+            permission_scopes=frozenset({"ORDER_WRITE", "ORDER.READ", "TRADE.READ", "ACCOUNT.READ"}),
             position_mode="CASH",
             native_protection=frozenset(),
             rate_limit_policy_id="kraken-spot-test",
@@ -807,7 +807,7 @@ class KrakenSpotAdapterTests(unittest.TestCase):
             response,
             account_id="bound-account",
             environment="PAPER",
-            surface=Surface.ACTIVITIES,
+            surface=Surface.AUTHENTICATED_READ,
         )
         with self.assertRaisesRegex(ProviderCoreError, "surface mismatch"):
             parse_trade_history(

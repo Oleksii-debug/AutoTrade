@@ -237,6 +237,7 @@
     confirmation.checked = false;
     delete confirmation.dataset.reviewStateVersion;
     delete confirmation.dataset.reviewScope;
+    delete confirmation.dataset.reviewCommandId;
   }
 
   function bindAuthorityPolicyReviewInvalidation() {
@@ -259,6 +260,11 @@
       }
       confirmation.dataset.reviewStateVersion = state.version.toString();
       confirmation.dataset.reviewScope = authorityReviewScopeKey();
+      confirmation.dataset.reviewCommandId =
+        state.pendingCommand !== null &&
+        state.pendingCommand.action === "SET_AUTHORITY"
+          ? state.pendingCommand.command_id
+          : "";
     });
   }
 
@@ -266,6 +272,9 @@
     const container = byId("authority-policy-fields");
     if (!container) return;
     const active = action === "SET_AUTHORITY";
+    const lockedForRetry = active &&
+      state.pendingCommand !== null &&
+      state.pendingCommand.action === "SET_AUTHORITY";
     const scopeKey = active ? authorityReviewScopeKey() : "";
     const priorScopeKey = container.dataset.authorityScopeKey || "";
     if (!active || (priorScopeKey !== "" && priorScopeKey !== scopeKey)) {
@@ -277,7 +286,7 @@
       const input = byId(id);
       if (!input) continue;
       input.required = active;
-      input.disabled = !active;
+      input.disabled = !active || lockedForRetry;
     }
     for (const id of [
       "authority-autonomous",
@@ -286,7 +295,7 @@
     ]) {
       const input = byId(id);
       if (!input) continue;
-      input.disabled = !active;
+      input.disabled = !active || (lockedForRetry && id !== "authority-policy-confirm");
       input.required = active && id === "authority-policy-confirm";
     }
     text("authority-policy-account", active ? state.accountId : null);
@@ -302,11 +311,52 @@
       option.disabled = !allowed;
       if (allowed && firstAllowed === null) firstAllowed = option.value;
     }
-    if (!actionCanSubmitInCurrentScope(role, select.value) && firstAllowed !== null) {
-      select.value = firstAllowed;
+    if (state.pendingCommand !== null) {
+      select.value = state.pendingCommand.action;
+      select.disabled = true;
+    } else {
+      select.disabled = false;
+      if (!actionCanSubmitInCurrentScope(role, select.value) && firstAllowed !== null) {
+        select.value = firstAllowed;
+      }
     }
     syncAuthorityPolicyFields(select.value);
     return firstAllowed !== null;
+  }
+
+  function renderPendingAuthorityPolicyForRetry() {
+    if (state.pendingCommand === null ||
+        state.pendingCommand.action !== "SET_AUTHORITY") {
+      return;
+    }
+    const policy = requiredObject(
+      state.pendingCommand.payload, "pending SET_AUTHORITY payload");
+    if (!Array.isArray(policy.environments) ||
+        policy.environments.length !== 1 ||
+        policy.environments[0] !== state.pendingCommand.environment) {
+      throw new Error("pending authority policy environment is not canonical");
+    }
+    if (!Array.isArray(policy.instruments) || policy.instruments.length !== 1) {
+      throw new Error("pending authority policy must contain exactly one instrument");
+    }
+    const instrument = requiredObject(
+      policy.instruments[0], "pending authority instrument");
+    if (!Array.isArray(policy.actions) || policy.actions.length === 0) {
+      throw new Error("pending authority policy actions are unavailable");
+    }
+
+    byId("authority-policy-id").value = String(policy.policy_id);
+    byId("authority-instrument-id").value = String(instrument.instrument_id);
+    byId("authority-instrument-version").value = String(instrument.version);
+    byId("authority-actions").value = policy.actions.join(",");
+    byId("authority-max-notional").value = String(policy.max_notional);
+    byId("authority-valid-from").value = String(policy.valid_from);
+    byId("authority-expires-at").value = String(policy.expires_at);
+    byId("authority-policy-version").value = String(policy.version);
+    byId("authority-autonomous").checked = policy.autonomous === true;
+    byId("authority-protection-only").checked = policy.protection_only === true;
+    text("authority-policy-account", state.pendingCommand.account_id);
+    text("authority-policy-environment", state.pendingCommand.environment);
   }
 
   function parseCanonicalSnapshot(value) {
@@ -820,6 +870,7 @@
 
     const hasAllowedAction = parsed.sessionIdentity !== null &&
       syncHostActionOptions(parsed.sessionIdentity.role);
+    renderPendingAuthorityPolicyForRetry();
     const canSubmit = parsed.sessionIdentity !== null && hasAllowedAction;
     setCommandAvailability(canSubmit);
     if (!canSubmit) {
@@ -1005,9 +1056,15 @@
     if (!confirmation || !confirmation.checked) {
       throw new Error("review confirmation is required before authority policy submission");
     }
+    const reviewCommandId =
+      state.pendingCommand !== null &&
+      state.pendingCommand.action === "SET_AUTHORITY"
+        ? state.pendingCommand.command_id
+        : "";
     if (
       confirmation.dataset.reviewStateVersion !== state.version.toString() ||
-      confirmation.dataset.reviewScope !== authorityReviewScopeKey()
+      confirmation.dataset.reviewScope !== authorityReviewScopeKey() ||
+      confirmation.dataset.reviewCommandId !== reviewCommandId
     ) {
       throw new Error(
         "review confirmation must be renewed after host state or policy scope changes");
@@ -1122,6 +1179,14 @@
     }
     let payload;
     try {
+      if (recovering && state.pendingCommand.action === "SET_AUTHORITY") {
+        const reviewedPolicy = authorityPolicyPayload();
+        if (JSON.stringify(reviewedPolicy) !==
+            JSON.stringify(state.pendingCommand.payload)) {
+          throw new Error(
+            "reviewed authority policy does not exactly match the unresolved command payload");
+        }
+      }
       payload = commandForSubmission(action);
     } catch (error) {
       const message = error instanceof Error ? error.message : "invalid authority command";

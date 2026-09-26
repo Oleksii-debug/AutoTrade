@@ -109,13 +109,12 @@ class ArtifactStore:
             raise TypeError("rights must be a dict")
         if rights.get("storage") is not True:
             raise ValueError("artifact storage is not permitted by rights")
+        if set(rights) != {"storage", "export"}:
+            raise ValueError("rights must contain exactly storage and export")
         export = rights.get("export")
-        if export not in (True, False):
+        if type(export) is not bool:
             raise ValueError("rights.export must be explicitly true or false")
-        normalized = dict(rights)
-        normalized["storage"] = True
-        normalized["export"] = export
-        return normalized
+        return {"storage": True, "export": export}
 
     def _object_path(self, digest: str) -> Path:
         if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
@@ -206,7 +205,11 @@ class ArtifactStore:
         rights = manifest.get("rights")
         if type(rights) is not dict:
             raise ArtifactIntegrityError("artifact manifest rights are invalid")
-        if rights.get("storage") is not True or type(rights.get("export")) is not bool:
+        if (
+            set(rights) != {"storage", "export"}
+            or rights.get("storage") is not True
+            or type(rights.get("export")) is not bool
+        ):
             raise ArtifactIntegrityError("artifact manifest rights contract is invalid")
 
         source_refs = manifest.get("source_refs")

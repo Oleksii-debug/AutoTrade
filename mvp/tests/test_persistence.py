@@ -1866,6 +1866,40 @@ class JournalStoreTests(unittest.TestCase):
                     event("evt-2", 2, {"kind": "fill", "quantity": "2"})
                 )
 
+    def test_aggregate_version_authority_rejects_duplicate_gap_shape(self):
+        connection = sqlite3.connect(":memory:")
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute(
+                """
+                CREATE TABLE events (
+                    aggregate_type TEXT NOT NULL,
+                    aggregate_id TEXT NOT NULL,
+                    aggregate_version NUMERIC NOT NULL
+                )
+                """
+            )
+            connection.executemany(
+                "INSERT INTO events(aggregate_type, aggregate_id, aggregate_version) "
+                "VALUES (?, ?, ?)",
+                [
+                    ("account", "paper-1", 1),
+                    ("account", "paper-1", 1),
+                    ("account", "paper-1", 3),
+                ],
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "contiguous positive integer sequence",
+            ):
+                JournalStore._aggregate_version_value(
+                    connection,
+                    "account",
+                    "paper-1",
+                )
+        finally:
+            connection.close()
+
     def test_projection_checkpoint_version_tamper_fails_closed(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

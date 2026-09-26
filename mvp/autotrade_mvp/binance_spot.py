@@ -1086,16 +1086,49 @@ def parse_account_trades(
         raise BinanceSpotAdapterError("trade rows must be an array")
     if not isinstance(instrument_versions, Mapping):
         raise BinanceSpotAdapterError("instrument_versions must be a mapping")
-    client_map = client_ids_by_order_id or {}
+    normalized_instruments: dict[str, str] = {}
+    for raw_symbol, raw_instrument_version in instrument_versions.items():
+        provider_symbol = _text(
+            raw_symbol,
+            name="instrument_versions symbol",
+        )
+        if provider_symbol != provider_symbol.upper():
+            raise BinanceSpotAdapterError(
+                "instrument_versions symbols must be canonical uppercase"
+            )
+        instrument_version = _text(
+            raw_instrument_version,
+            name="instrument_version",
+        )
+        if provider_symbol in normalized_instruments:
+            raise BinanceSpotAdapterError(
+                "instrument_versions contains duplicate normalized symbols"
+            )
+        normalized_instruments[provider_symbol] = instrument_version
+
+    client_map = {} if client_ids_by_order_id is None else client_ids_by_order_id
     if not isinstance(client_map, Mapping):
         raise BinanceSpotAdapterError("client_ids_by_order_id must be a mapping")
+    normalized_client_map: dict[int, str] = {}
+    for raw_order_id, raw_client_id in client_map.items():
+        if (
+            isinstance(raw_order_id, bool)
+            or not isinstance(raw_order_id, int)
+            or raw_order_id < 0
+        ):
+            raise BinanceSpotAdapterError(
+                "client_ids_by_order_id keys must be non-negative integer order ids"
+            )
+        normalized_client_map[raw_order_id] = validate_client_order_id(
+            raw_client_id
+        )
 
     by_id: dict[str, ProviderFillEvidence] = {}
     for index, raw in enumerate(rows):
         if not isinstance(raw, Mapping):
             raise BinanceSpotAdapterError(f"trade row {index} must be an object")
         symbol = _text(raw.get("symbol"), name=f"trade[{index}].symbol")
-        if symbol not in instrument_versions:
+        if symbol not in normalized_instruments:
             raise BinanceSpotAdapterError(f"unmapped Binance Spot symbol: {symbol}")
         trade_id = raw.get("id")
         order_id = raw.get("orderId")
@@ -1109,9 +1142,7 @@ def parse_account_trades(
         ):
             raise BinanceSpotAdapterError("trade id and orderId must be non-negative integers")
         execution_id = f"BINANCE-SPOT:{symbol}:{trade_id}"
-        client_id = client_map.get(order_id)
-        if client_id is not None:
-            client_id = validate_client_order_id(client_id)
+        client_id = normalized_client_map.get(order_id)
 
         is_buyer = raw.get("isBuyer")
         if type(is_buyer) is not bool:
@@ -1124,7 +1155,7 @@ def parse_account_trades(
             environment=environment,
             provider_execution_id=execution_id,
             client_order_id=client_id,
-            instrument=_text(instrument_versions[symbol], name="instrument_version"),
+            instrument=normalized_instruments[symbol],
             side="BUY" if is_buyer else "SELL",
             quantity=raw.get("qty"),
             price=raw.get("price"),

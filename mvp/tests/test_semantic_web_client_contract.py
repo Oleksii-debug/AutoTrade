@@ -568,6 +568,64 @@ class SemanticWebClientContractTests(unittest.TestCase):
         )
         self.assertIn("bindAuthorityPolicyReviewInvalidation();", js)
 
+    def test_pending_authority_retry_restores_locks_and_reconfirms_exact_payload(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("function renderPendingAuthorityPolicyForRetry()", js)
+        self.assertIn("select.value = state.pendingCommand.action", js)
+        self.assertIn("select.disabled = true", js)
+        self.assertIn("input.disabled = !active || lockedForRetry", js)
+        self.assertIn(
+            'input.disabled = !active || (lockedForRetry && id !== "authority-policy-confirm")',
+            js,
+        )
+        self.assertIn(
+            "confirmation.dataset.reviewCommandId =",
+            js,
+        )
+        self.assertIn(
+            "confirmation.dataset.reviewCommandId !== reviewCommandId",
+            js,
+        )
+        self.assertIn(
+            'state.pendingCommand.action === "SET_AUTHORITY"',
+            js,
+        )
+        self.assertIn(
+            "const reviewedPolicy = authorityPolicyPayload()",
+            js,
+        )
+        self.assertIn(
+            "JSON.stringify(state.pendingCommand.payload)",
+            js,
+        )
+        self.assertIn(
+            "reviewed authority policy does not exactly match the unresolved command payload",
+            js,
+        )
+        render = js[
+            js.index("function renderPendingAuthorityPolicyForRetry()"):
+            js.index("function parseCanonicalSnapshot(value)")
+        ]
+        for field_id in (
+            "authority-policy-id",
+            "authority-instrument-id",
+            "authority-instrument-version",
+            "authority-actions",
+            "authority-max-notional",
+            "authority-valid-from",
+            "authority-expires-at",
+            "authority-policy-version",
+        ):
+            self.assertIn(f'byId("{field_id}").value', render)
+        self.assertIn(
+            'byId("authority-autonomous").checked = policy.autonomous === true',
+            render,
+        )
+        self.assertIn(
+            'byId("authority-protection-only").checked = policy.protection_only === true',
+            render,
+        )
+
     def test_action_change_rechecks_role_before_enabling_submit(self):
         js = APP.read_text(encoding="utf-8")
         self.assertIn(

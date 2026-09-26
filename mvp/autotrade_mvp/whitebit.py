@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
-from threading import Lock
 from typing import Mapping
 from uuid import UUID
 import base64

@@ -914,6 +914,7 @@ class JournalStore:
                 COUNT(*) AS event_count,
                 MIN(aggregate_version) AS first_version,
                 MAX(aggregate_version) AS last_version,
+                COUNT(DISTINCT aggregate_version) AS distinct_version_count,
                 SUM(
                     CASE
                         WHEN typeof(aggregate_version) = 'integer' THEN 0
@@ -936,14 +937,17 @@ class JournalStore:
             return 0
         first_version = row["first_version"]
         last_version = row["last_version"]
+        distinct_version_count = row["distinct_version_count"]
         non_integer_count = row["non_integer_count"]
         if (
             type(first_version) is not int
             or type(last_version) is not int
+            or type(distinct_version_count) is not int
             or type(non_integer_count) is not int
             or non_integer_count != 0
             or first_version != 1
             or last_version != event_count
+            or distinct_version_count != event_count
         ):
             raise ValueError(
                 "aggregate version authority is not a contiguous positive integer sequence"

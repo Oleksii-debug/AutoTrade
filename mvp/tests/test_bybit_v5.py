@@ -18,6 +18,7 @@ from mvp.autotrade_mvp.bybit_v5 import (
     parse_execution_page,
     parse_executions,
     parse_order_page,
+    working_orders_from_page,
     parse_submission_response,
     server_time_from_response,
     validate_auth_timestamp,
@@ -273,6 +274,7 @@ def bound_order_response(
     surface="ORDER_HISTORY",
     category="spot",
     client_order_id=None,
+    symbol=None,
     cursor=None,
     limit=50,
     start_time_ms=None,
@@ -296,6 +298,7 @@ def bound_order_response(
         surface=surface,
         category=category,
         client_order_id=client_order_id,
+        symbol=symbol,
         cursor=cursor,
         limit=limit,
         start_time_ms=start_time_ms,
@@ -1307,6 +1310,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                             "orderLinkId": "client_123",
                             "symbol": "BTCUSDT",
                             "orderStatus": "Filled",
+                            "leavesQty": "0",
                             "createdTime": "1790279999000",
                             "updatedTime": "1790280000000",
                         }
@@ -1377,6 +1381,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                                     "orderLinkId": "other_client",
                                     "symbol": "BTCUSDT",
                                     "orderStatus": "New",
+                                    "leavesQty": "1",
                                     "createdTime": "1790279999000",
                                     "updatedTime": "1790280000000",
                                 }
@@ -1402,6 +1407,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                                     "orderLinkId": "",
                                     "symbol": "BTCUSDT",
                                     "orderStatus": "New",
+                                    "leavesQty": "1",
                                     "createdTime": "1790279999000",
                                     "updatedTime": "1790280000000",
                                 },
@@ -1410,6 +1416,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                                     "orderLinkId": "",
                                     "symbol": "BTCUSDT",
                                     "orderStatus": "Cancelled",
+                                    "leavesQty": "1",
                                     "createdTime": "1790279999000",
                                     "updatedTime": "1790280000000",
                                 },
@@ -1801,6 +1808,188 @@ class BybitV5AdapterTests(unittest.TestCase):
                 provider_environment="TESTNET",
                 instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
                 consistency_horizon_satisfied=True,
+            )
+
+
+    def test_realtime_linear_query_requires_documented_symbol_scope(self):
+        with self.assertRaisesRegex(ProviderCoreError, "requires symbol"):
+            prepare_order_read_query(
+                capability=read_capability(),
+                at=READ_AT,
+                surface="OPEN_ORDERS",
+                category="linear",
+            )
+        binding = prepare_order_read_query(
+            capability=read_capability(),
+            at=READ_AT,
+            surface="OPEN_ORDERS",
+            category="linear",
+            symbol="BTCUSDT",
+        )
+        self.assertEqual(binding.query["symbol"], "BTCUSDT")
+        self.assertEqual(binding.query["openOnly"], "0")
+
+    def test_open_order_page_projects_documented_working_states_into_reconciliation(self):
+        page = parse_order_page(
+            bound_order_response(
+                {
+                    "retCode": 0,
+                    "result": {
+                        "category": "spot",
+                        "nextPageCursor": "",
+                        "list": [
+                            {
+                                "orderId": "working-new",
+                                "orderLinkId": "client-new",
+                                "symbol": "BTCUSDT",
+                                "orderStatus": "New",
+                                "leavesQty": "2.5",
+                                "createdTime": "1790279999000",
+                                "updatedTime": "1790280000000",
+                            },
+                            {
+                                "orderId": "working-partial",
+                                "orderLinkId": "client-partial",
+                                "symbol": "BTCUSDT",
+                                "orderStatus": "PartiallyFilled",
+                                "leavesQty": "0.25",
+                                "createdTime": "1790279999000",
+                                "updatedTime": "1790280000000",
+                            },
+                            {
+                                "orderId": "working-trigger",
+                                "orderLinkId": "",
+                                "symbol": "BTCUSDT",
+                                "orderStatus": "Untriggered",
+                                "leavesQty": "1",
+                                "createdTime": "1790279999000",
+                                "updatedTime": "1790280000000",
+                            },
+                            {
+                                "orderId": "terminal-filled",
+                                "orderLinkId": "client-filled",
+                                "symbol": "BTCUSDT",
+                                "orderStatus": "Filled",
+                                "leavesQty": "0",
+                                "createdTime": "1790279999000",
+                                "updatedTime": "1790280000000",
+                            },
+                        ],
+                    },
+                },
+                surface="OPEN_ORDERS",
+            )
+        )
+        working = working_orders_from_page(
+            page,
+            instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+        )
+        self.assertEqual(
+            tuple(item.provider_order_id for item in working),
+            ("working-new", "working-partial", "working-trigger"),
+        )
+        self.assertEqual(
+            tuple(item.remaining_quantity for item in working),
+            (Decimal("2.5"), Decimal("0.25"), Decimal("1")),
+        )
+        self.assertTrue(all(item.provider_id == "BYBIT" for item in working))
+        self.assertTrue(all(item.provider_environment == "TESTNET" for item in working))
+        self.assertTrue(all(item.instrument == "BTCUSDT@v1" for item in working))
+
+    def test_working_order_projection_rejects_history_unknown_symbol_and_invalid_open_remainder(self):
+        history = parse_order_page(
+            bound_order_response(
+                {
+                    "retCode": 0,
+                    "result": {
+                        "category": "spot",
+                        "nextPageCursor": "",
+                        "list": [],
+                    },
+                }
+            )
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "OPEN_ORDERS"):
+            working_orders_from_page(
+                history,
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+
+        open_page = parse_order_page(
+            bound_order_response(
+                {
+                    "retCode": 0,
+                    "result": {
+                        "category": "spot",
+                        "nextPageCursor": "",
+                        "list": [
+                            {
+                                "orderId": "working-unmapped",
+                                "orderLinkId": "",
+                                "symbol": "UNKNOWN",
+                                "orderStatus": "New",
+                                "leavesQty": "1",
+                                "createdTime": "1790279999000",
+                                "updatedTime": "1790280000000",
+                            }
+                        ],
+                    },
+                },
+                surface="OPEN_ORDERS",
+            )
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "unmapped"):
+            working_orders_from_page(open_page, instrument_versions={})
+
+        with self.assertRaisesRegex(ProviderCoreError, "positive remaining"):
+            parse_order_page(
+                bound_order_response(
+                    {
+                        "retCode": 0,
+                        "result": {
+                            "category": "spot",
+                            "nextPageCursor": "",
+                            "list": [
+                                {
+                                    "orderId": "invalid-open-zero",
+                                    "orderLinkId": "",
+                                    "symbol": "BTCUSDT",
+                                    "orderStatus": "New",
+                                    "leavesQty": "0",
+                                    "createdTime": "1790279999000",
+                                    "updatedTime": "1790280000000",
+                                }
+                            ],
+                        },
+                    },
+                    surface="OPEN_ORDERS",
+                )
+            )
+
+    def test_unknown_future_order_status_fails_closed(self):
+        with self.assertRaisesRegex(ProviderCoreError, "unsupported Bybit order status"):
+            parse_order_page(
+                bound_order_response(
+                    {
+                        "retCode": 0,
+                        "result": {
+                            "category": "spot",
+                            "nextPageCursor": "",
+                            "list": [
+                                {
+                                    "orderId": "future-status",
+                                    "orderLinkId": "",
+                                    "symbol": "BTCUSDT",
+                                    "orderStatus": "FutureProviderStatus",
+                                    "leavesQty": "1",
+                                    "createdTime": "1790279999000",
+                                    "updatedTime": "1790280000000",
+                                }
+                            ],
+                        },
+                    },
+                    surface="OPEN_ORDERS",
+                )
             )
 
 

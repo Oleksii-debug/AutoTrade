@@ -1113,6 +1113,7 @@ class FillAccountingTests(unittest.TestCase):
             provider_id="PROVIDER-A",
             account_id="acct-1",
             environment="PAPER",
+            provider_environment="PAPER",
             complete=False,
             matched_execution_ids=(),
             unexpected_execution_ids=(execution_id,),

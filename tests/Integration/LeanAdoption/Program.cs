@@ -248,6 +248,44 @@ var regressed = callbacks.Observe(new OrderEvent
 Require(regressed.TimeRegressed, "Arrival-time regression was silently hidden.");
 Require(regressed.HasEconomicFill, "Final non-zero fill was not characterized.");
 
+var restartIntegrity = new LeanCallbackCharacterizer();
+restartIntegrity.Observe(new OrderEvent
+{
+    OrderId = 73,
+    Id = 1,
+    Symbol = symbol,
+    UtcTime = instant,
+    Status = OrderStatus.PartiallyFilled,
+    FillQuantity = 0.5m,
+    FillPrice = 451.125m
+});
+var restartCheckpoint = restartIntegrity.ExportRestartState();
+var verifiedRestart = LeanCallbackCharacterizer.RestoreRestartState(restartCheckpoint);
+var verifiedDuplicate = verifiedRestart.Observe(new OrderEvent
+{
+    OrderId = 73,
+    Id = 1,
+    Symbol = symbol,
+    UtcTime = instant,
+    Status = OrderStatus.PartiallyFilled,
+    FillQuantity = 0.5m,
+    FillPrice = 451.125m
+});
+Require(
+    verifiedDuplicate.DuplicateIdentity && !verifiedDuplicate.IdentityConflict,
+    "Integrity-bound restart checkpoint did not preserve callback identity.");
+
+var tamperedRestartCheckpoint = restartCheckpoint.Replace(
+    "\"FillPrice\":451.125",
+    "\"FillPrice\":451.5",
+    StringComparison.Ordinal);
+Require(
+    tamperedRestartCheckpoint != restartCheckpoint,
+    "Restart integrity regression did not mutate the serialized callback economics.");
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(tamperedRestartCheckpoint),
+    "tampered LEAN callback restart economics must fail integrity verification");
+
 var engineIdentity = LeanEngineAssemblyProbe.GetIdentity();
 Require(
     engineIdentity.TypeName == "QuantConnect.Lean.Engine.Engine",

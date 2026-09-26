@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: AutoTrade Host API
-  version: 3.0.0
+  version: 3.0.1
   description: Canonical UI/host boundary. Accepted commands are not financial-completion claims.
 servers:
   - url: https://localhost

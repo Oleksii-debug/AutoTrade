@@ -10,10 +10,18 @@ from __future__ import annotations
 import argparse
 from hashlib import sha256
 import json
+import os
+import stat
 from pathlib import Path, PurePosixPath
 import re
 import sys
 import zipfile
+
+from research.autotrade_research.artifacts.durable_publish import (
+    DurablePublishLockError,
+    atomic_write_bytes_with_sha256_sidecar,
+    validate_publication_destination,
+)
 
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -255,6 +263,62 @@ def _verify_composition(
     }
 
 
+def _open_stable_regular_file(path: Path, *, name: str):
+    """Open one immutable-by-identity verification snapshot without path re-open."""
+
+    try:
+        stream = path.open("rb")
+    except OSError as error:
+        raise InstallerManifestError(f"{name} must be an existing regular file") from error
+    try:
+        _assert_open_file_identity(path, stream, name=name)
+    except BaseException:
+        stream.close()
+        raise
+    return stream
+
+
+def _assert_open_file_identity(
+    path: Path,
+    stream,
+    *,
+    name: str,
+) -> os.stat_result:
+    try:
+        opened = os.fstat(stream.fileno())
+        current = os.stat(path, follow_symlinks=False)
+    except OSError as error:
+        raise InstallerManifestError(
+            f"{name} identity cannot be verified"
+        ) from error
+    if not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(current.st_mode):
+        raise InstallerManifestError(f"{name} must be a regular non-symlink file")
+    if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+        raise InstallerManifestError(f"{name} changed during verification")
+    if opened.st_nlink > 1 or current.st_nlink > 1:
+        raise InstallerManifestError(f"{name} must not have hard-link aliases")
+    if opened.st_nlink != 1 or current.st_nlink != 1:
+        raise InstallerManifestError(f"{name} changed during verification")
+    return opened
+
+
+def _sha256_stream(stream) -> str:
+    digest = sha256()
+    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _sha256_zip_member(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> tuple[str, int]:
+    digest = sha256()
+    observed_size = 0
+    with archive.open(info, "r") as member:
+        for chunk in iter(lambda: member.read(1024 * 1024), b""):
+            observed_size += len(chunk)
+            digest.update(chunk)
+    return digest.hexdigest(), observed_size
+
+
 def _zip_member_is_regular(info: zipfile.ZipInfo) -> bool:
     if info.is_dir():
         return False
@@ -263,12 +327,34 @@ def _zip_member_is_regular(info: zipfile.ZipInfo) -> bool:
 
 
 def verify_release_bundle(bundle: Path) -> dict[str, object]:
-    if bundle.is_symlink() or not bundle.is_file():
-        raise InstallerManifestError("release bundle must be a regular file")
-    bundle_bytes = bundle.read_bytes()
-    bundle_digest = "sha256:" + sha256(bundle_bytes).hexdigest()
+    with _open_stable_regular_file(bundle, name="release bundle") as bundle_stream:
+        before = os.fstat(bundle_stream.fileno())
+        bundle_digest = "sha256:" + _sha256_stream(bundle_stream)
+        bundle_stream.seek(0)
+        verified = _verify_release_bundle_stream(bundle_stream, bundle_digest)
+        after = _assert_open_file_identity(
+            bundle,
+            bundle_stream,
+            name="release bundle",
+        )
+        if (
+            (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+            or before.st_size != after.st_size
+            or before.st_mtime_ns != after.st_mtime_ns
+            or before.st_ctime_ns != after.st_ctime_ns
+        ):
+            raise InstallerManifestError(
+                "release bundle changed during verification"
+            )
+        return verified
+
+
+def _verify_release_bundle_stream(
+    bundle_stream,
+    bundle_digest: str,
+) -> dict[str, object]:
     try:
-        with zipfile.ZipFile(bundle, "r") as archive:
+        with zipfile.ZipFile(bundle_stream, "r") as archive:
             infos = archive.infolist()
             names = [info.filename for info in infos]
             if len(names) != len(set(names)):
@@ -280,6 +366,10 @@ def verify_release_bundle(bundle: Path) -> dict[str, object]:
             manifest_info = archive.getinfo("bundle-manifest.json")
             if not _zip_member_is_regular(manifest_info):
                 raise InstallerManifestError("bundle manifest is not a regular file")
+            if manifest_info.compress_type != zipfile.ZIP_STORED:
+                raise InstallerManifestError(
+                    "bundle manifest compression is not canonical"
+                )
             try:
                 manifest = json.loads(
                     archive.read("bundle-manifest.json").decode("utf-8")
@@ -397,13 +487,21 @@ def verify_release_bundle(bundle: Path) -> dict[str, object]:
                     raise InstallerManifestError(
                         f"bundle payload is not a regular file: {relative}"
                     )
-                payload = archive.read(info)
-                observed_digest = "sha256:" + sha256(payload).hexdigest()
+                if info.compress_type != zipfile.ZIP_STORED:
+                    raise InstallerManifestError(
+                        f"bundle payload compression is not canonical: {relative}"
+                    )
+                if info.file_size != size:
+                    raise InstallerManifestError(
+                        f"bundle payload size mismatch: {relative}"
+                    )
+                observed_hash, observed_size = _sha256_zip_member(archive, info)
+                observed_digest = "sha256:" + observed_hash
                 if observed_digest != digest:
                     raise InstallerManifestError(
                         f"bundle payload digest mismatch: {relative}"
                     )
-                if len(payload) != size or info.file_size != size:
+                if observed_size != size:
                     raise InstallerManifestError(
                         f"bundle payload size mismatch: {relative}"
                     )
@@ -458,6 +556,25 @@ def verify_release_bundle(bundle: Path) -> dict[str, object]:
     }
 
 
+
+def _validate_output_destination(path: Path, *, name: str) -> None:
+    try:
+        validate_publication_destination(path)
+    except (DurablePublishLockError, OSError) as error:
+        raise InstallerManifestError(f"{name} is unsafe: {error}") from error
+
+
+def _cleanup_legacy_temporary(path: Path) -> None:
+    try:
+        validate_publication_destination(path)
+    except (DurablePublishLockError, OSError):
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def build_installer_input_manifest(
     *,
     bundle: Path,
@@ -467,6 +584,19 @@ def build_installer_input_manifest(
     runtime_prerequisite: str | None = None,
 ) -> dict[str, object]:
     verified = verify_release_bundle(bundle)
+    bundle_resolved = bundle.resolve(strict=False)
+    output_resolved = output.resolve(strict=False)
+    digest_path = output.with_suffix(output.suffix + ".sha256")
+    digest_resolved = digest_path.resolve(strict=False)
+    if output_resolved == bundle_resolved:
+        raise InstallerManifestError(
+            "installer manifest output must not overwrite verified release bundle"
+        )
+    if digest_resolved == bundle_resolved:
+        raise InstallerManifestError(
+            "installer manifest digest output must not overwrite verified release bundle"
+        )
+
     framework = _text(target_framework, name="target_framework")
     mode = _text(runtime_mode, name="runtime_mode").upper()
     if mode not in {"SELF_CONTAINED", "FRAMEWORK_DEPENDENT"}:
@@ -522,23 +652,26 @@ def build_installer_input_manifest(
         "files": verified["files"],
     }
     payload = _canonical_bytes(manifest)
-    if output.exists() and output.is_dir():
-        raise InstallerManifestError("installer manifest output cannot be a directory")
     output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_name(output.name + ".tmp")
-    try:
-        temporary.write_bytes(payload)
-        temporary.replace(output)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
-    manifest_digest = sha256(payload).hexdigest()
-    digest_path = output.with_suffix(output.suffix + ".sha256")
-    digest_path.write_text(
-        f"{manifest_digest}  {output.name}\n",
-        encoding="utf-8",
-        newline="\n",
+    _validate_output_destination(output, name="installer manifest output")
+    _validate_output_destination(
+        digest_path,
+        name="installer manifest digest output",
     )
+    _cleanup_legacy_temporary(output.with_name(output.name + ".tmp"))
+    _cleanup_legacy_temporary(
+        digest_path.with_name(digest_path.name + ".tmp")
+    )
+    try:
+        manifest_digest = atomic_write_bytes_with_sha256_sidecar(
+            output,
+            digest_path,
+            payload,
+        )
+    except (DurablePublishLockError, OSError) as error:
+        raise InstallerManifestError(
+            f"installer manifest publication failed closed: {error}"
+        ) from error
     return {
         "output": str(output),
         "sha256": manifest_digest,

@@ -8,7 +8,7 @@ required evidence belongs to the same source SHA and is explicitly passing.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from hashlib import sha256
 import json
 import re
@@ -64,6 +64,8 @@ _QUALIFICATION_PACKAGE = "WP-54"
 _QUALIFICATION_PROTOCOL = "release-freeze-v1"
 _QUALIFICATION_PROTOCOL_VERSION = "1.0.0"
 _QUALIFICATION_REQUIREMENT = "release-candidate-freeze"
+_QUALIFICATION_SUBJECT_REQUIREMENT_PREFIX = "release-candidate-subject-sha256:"
+_FROZEN_DECISION_TOKEN = object()
 
 
 def _text(value: str, *, name: str) -> str:
@@ -222,6 +224,12 @@ class ReleaseCandidateInput:
                     f"duplicate release artifact role: {artifact.role}"
                 )
             roles.add(artifact.role)
+        unsupported_roles = sorted(roles - _REQUIRED_ROLES)
+        if unsupported_roles:
+            raise ReleaseCandidateError(
+                "unsupported release artifact role: "
+                + ", ".join(unsupported_roles)
+            )
 
         if isinstance(self.unresolved_blockers, (str, bytes)) or not isinstance(
             self.unresolved_blockers,
@@ -290,6 +298,12 @@ class ReleaseCandidateInput:
                     f"duplicate release artifact role: {artifact.role}"
                 )
             roles.add(artifact.role)
+        unsupported_roles = sorted(roles - _REQUIRED_ROLES)
+        if unsupported_roles:
+            raise ReleaseCandidateError(
+                "unsupported release artifact role: "
+                + ", ".join(unsupported_roles)
+            )
         if isinstance(unresolved_blockers, (str, bytes)) or not isinstance(
             unresolved_blockers,
             Sequence,
@@ -316,6 +330,47 @@ class ReleaseCandidateInput:
         )
 
 
+def release_candidate_subject_requirement(
+    candidate: ReleaseCandidateInput,
+) -> str:
+    """Return the signed requirement binding every release-authority claim."""
+
+    if not isinstance(candidate, ReleaseCandidateInput):
+        raise TypeError("candidate must be ReleaseCandidateInput")
+    subject = {
+        "release_id": candidate.release_id,
+        "source_sha": candidate.source_sha,
+        "baseline_hash": candidate.baseline_hash,
+        "schema_contract_hash": candidate.schema_contract_hash,
+        "artifacts": [
+            {
+                "role": artifact.role,
+                "artifact_id": artifact.artifact_id,
+                "artifact_sha256": artifact.artifact_sha256,
+                "source_sha": artifact.source_sha,
+                "signature_status": artifact.signature_status,
+                "evidence_status": artifact.evidence_status,
+            }
+            for artifact in sorted(
+                candidate.artifacts,
+                key=lambda item: item.role,
+            )
+        ],
+        "unresolved_blockers": sorted(candidate.unresolved_blockers),
+    }
+    canonical = json.dumps(
+        subject,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return (
+        _QUALIFICATION_SUBJECT_REQUIREMENT_PREFIX
+        + sha256(canonical).hexdigest()
+    )
+
+
 @dataclass(frozen=True)
 class ReleaseCandidateDecision:
     status: str
@@ -326,8 +381,9 @@ class ReleaseCandidateDecision:
     qualification_attestation_digest: str | None = None
     qualification_policy_id: str | None = None
     qualification_trust_root_id: str | None = None
+    _freeze_token: InitVar[object | None] = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _freeze_token: object | None) -> None:
         if self.status not in {"FROZEN", "BLOCKED"}:
             raise ReleaseCandidateError("unsupported release-candidate status")
         if not isinstance(self.reasons, tuple) or any(
@@ -393,20 +449,97 @@ class ReleaseCandidateDecision:
                 raise ReleaseCandidateError(
                     "frozen release candidate manifest has unsupported structure"
                 )
-            _text(manifest.get("release_id"), name="manifest.release_id")
-            _git_sha(manifest.get("source_sha"), name="manifest.source_sha")
-            _sha256(
+            manifest_release_id = _text(
+                manifest.get("release_id"),
+                name="manifest.release_id",
+            )
+            manifest_source_sha = _git_sha(
+                manifest.get("source_sha"),
+                name="manifest.source_sha",
+            )
+            manifest_baseline_hash = _sha256(
                 manifest.get("baseline_hash"),
                 name="manifest.baseline_hash",
             )
-            _sha256(
+            manifest_schema_contract_hash = _sha256(
                 manifest.get("schema_contract_hash"),
                 name="manifest.schema_contract_hash",
             )
-            if not isinstance(manifest.get("artifacts"), list):
+            artifacts_raw = manifest.get("artifacts")
+            if not isinstance(artifacts_raw, list):
                 raise ReleaseCandidateError(
                     "frozen release candidate artifacts must be a list"
                 )
+            artifact_fields = {
+                "role",
+                "artifact_id",
+                "artifact_sha256",
+                "source_sha",
+                "signature_status",
+                "evidence_status",
+            }
+            parsed_artifacts: list[ReleaseArtifactEvidence] = []
+            for raw in artifacts_raw:
+                if type(raw) is not dict or set(raw) != artifact_fields:
+                    raise ReleaseCandidateError(
+                        "frozen release candidate artifact structure is not canonical"
+                    )
+                try:
+                    artifact = ReleaseArtifactEvidence.create(**raw)
+                except (ReleaseCandidateError, TypeError) as error:
+                    raise ReleaseCandidateError(
+                        "frozen release candidate artifact is malformed"
+                    ) from error
+                canonical_artifact = {
+                    "role": artifact.role,
+                    "artifact_id": artifact.artifact_id,
+                    "artifact_sha256": artifact.artifact_sha256,
+                    "source_sha": artifact.source_sha,
+                    "signature_status": artifact.signature_status,
+                    "evidence_status": artifact.evidence_status,
+                }
+                if canonical_artifact != raw:
+                    raise ReleaseCandidateError(
+                        "frozen release candidate artifact values are not canonical"
+                    )
+                if artifact.source_sha != manifest_source_sha:
+                    raise ReleaseCandidateError(
+                        f"frozen release candidate artifact source mismatch: {artifact.role}"
+                    )
+                if artifact.evidence_status != "PASS":
+                    raise ReleaseCandidateError(
+                        f"frozen release candidate artifact is not PASS: {artifact.role}"
+                    )
+                if (
+                    artifact.role in _SIGNED_BINARY_ROLES
+                    and artifact.signature_status != "VERIFIED"
+                ):
+                    raise ReleaseCandidateError(
+                        f"frozen release candidate signature is not verified: {artifact.role}"
+                    )
+                if (
+                    artifact.role not in _SIGNED_BINARY_ROLES
+                    and artifact.signature_status in {"MISSING", "INVALID"}
+                ):
+                    raise ReleaseCandidateError(
+                        f"frozen release candidate signature state is unresolved: {artifact.role}"
+                    )
+                parsed_artifacts.append(artifact)
+
+            artifact_roles = [item.role for item in parsed_artifacts]
+            if len(set(artifact_roles)) != len(artifact_roles):
+                raise ReleaseCandidateError(
+                    "frozen release candidate contains duplicate artifact roles"
+                )
+            if set(artifact_roles) != _REQUIRED_ROLES:
+                raise ReleaseCandidateError(
+                    "frozen release candidate artifact role set is not canonical"
+                )
+            if artifact_roles != sorted(artifact_roles):
+                raise ReleaseCandidateError(
+                    "frozen release candidate artifacts are not in canonical role order"
+                )
+
             qualification = manifest.get("qualification")
             if type(qualification) is not dict or set(qualification) != {
                 "attestation_id",
@@ -450,6 +583,26 @@ class ReleaseCandidateDecision:
             ):
                 raise ReleaseCandidateError(
                     "frozen release candidate qualification receipt identity mismatch"
+                )
+            reconstructed_candidate = ReleaseCandidateInput.create(
+                release_id=manifest_release_id,
+                source_sha=manifest_source_sha,
+                baseline_hash=manifest_baseline_hash,
+                schema_contract_hash=manifest_schema_contract_hash,
+                artifacts=tuple(parsed_artifacts),
+                unresolved_blockers=(),
+            )
+            if not _qualification_covers_exact_candidate(
+                receipt,
+                reconstructed_candidate,
+            ):
+                raise ReleaseCandidateError(
+                    "frozen release candidate qualification receipt "
+                    "does not cover exact artifact set"
+                )
+            if _freeze_token is not _FROZEN_DECISION_TOKEN:
+                raise ReleaseCandidateError(
+                    "frozen release candidate requires verified factory authority"
                 )
         else:
             if not self.reasons:
@@ -582,7 +735,12 @@ def _qualification_covers_exact_candidate(
         )
         for ref in receipt.attestation.evidence_refs
     }
-    return observed == expected
+    if observed != expected:
+        return False
+    return (
+        release_candidate_subject_requirement(candidate)
+        in receipt.attestation.requirement_ids
+    )
 
 
 def freeze_release_candidate(
@@ -732,4 +890,5 @@ def freeze_release_candidate(
         qualification_attestation_digest=accepted.attestation_digest,
         qualification_policy_id=accepted.policy_id,
         qualification_trust_root_id=accepted.trust_root_id,
+        _freeze_token=_FROZEN_DECISION_TOKEN,
     )

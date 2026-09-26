@@ -36,6 +36,7 @@ WHITEBIT_OFFICIAL_DOCS = MappingProxyType(
         "client_order_id": "https://docs.whitebit.com/guides/client-order-id",
         "websocket": "https://docs.whitebit.com/websocket/overview",
         "rate_limits": "https://docs.whitebit.com/api-reference/rate-limits",
+        "security": "https://docs.whitebit.com/best-practices/security",
     }
 )
 
@@ -1587,6 +1588,68 @@ def sign_private_request(
         nonce=nonce,
         nonce_window=nonce_window,
     )
+
+
+@dataclass(frozen=True)
+class WhiteBitCredentialBoundary:
+    """Exact credential evidence admitted for AutoTrade WhiteBIT trading.
+
+    WhiteBIT currently documents Info + Trading as the minimum trading-application
+    permission set and does not offer a public sandbox/testnet. AutoTrade therefore
+    accepts only an IP-restricted LIVE credential binding with exactly those two
+    permissions. Deposit/Withdraw authority is intentionally outside this product.
+    """
+
+    credential_binding_id: str
+    permissions: frozenset[str]
+    ip_whitelist_enabled: bool
+    environment: str
+    observed_at: datetime
+    evidence_ref: str
+
+    def __post_init__(self) -> None:
+        binding = _text(
+            self.credential_binding_id,
+            name="credential_binding_id",
+        )
+        if not isinstance(self.permissions, frozenset):
+            raise TypeError("permissions must be a frozenset")
+        normalized = frozenset(
+            _text(value, name="permission").upper()
+            for value in self.permissions
+        )
+        known = frozenset({"INFO", "TRADING", "DEPOSIT", "WITHDRAW"})
+        if not normalized or not normalized.issubset(known):
+            raise WhiteBitAdapterError(
+                "credential permissions contain unknown or empty authority"
+            )
+        if type(self.ip_whitelist_enabled) is not bool:
+            raise WhiteBitAdapterError("ip_whitelist_enabled must be boolean")
+        environment = _text(self.environment, name="environment").upper()
+        observed = _instant(self.observed_at, name="observed_at")
+        evidence = _text(self.evidence_ref, name="evidence_ref")
+        object.__setattr__(self, "credential_binding_id", binding)
+        object.__setattr__(self, "permissions", normalized)
+        object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "observed_at", observed)
+        object.__setattr__(self, "evidence_ref", evidence)
+
+    def assert_autotrade_safe(self) -> "WhiteBitCredentialBoundary":
+        if self.environment != "LIVE":
+            raise WhiteBitAdapterError(
+                "WhiteBIT credential environment must be LIVE; no public sandbox "
+                "credential environment is qualified"
+            )
+        if self.permissions != frozenset({"INFO", "TRADING"}):
+            raise WhiteBitAdapterError(
+                "AutoTrade WhiteBIT credential must have exactly INFO and TRADING "
+                "permissions; deposit/withdraw authority is forbidden"
+            )
+        if not self.ip_whitelist_enabled:
+            raise WhiteBitAdapterError(
+                "AutoTrade WhiteBIT LIVE credential requires an IP whitelist"
+            )
+        return self
 
 
 @dataclass(frozen=True)

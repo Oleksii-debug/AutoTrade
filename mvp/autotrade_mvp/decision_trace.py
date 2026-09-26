@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime, timezone
 from hashlib import sha256
+from math import isfinite
 import json
 import os
 import re
@@ -439,6 +440,12 @@ class BoundedMetricBacklog:
     def record(self, name: str, value: float, **labels: Any) -> None:
         if not isinstance(name, str) or not name.strip():
             raise ValueError("metric name is required")
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not isfinite(value)
+        ):
+            raise ValueError("metric value must be a finite number")
         if len(self._items) == self._items.maxlen:
             self._dropped += 1
         self._items.append(

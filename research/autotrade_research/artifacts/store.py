@@ -229,6 +229,128 @@ class ArtifactStore:
             raise ArtifactIntegrityError("artifact object must not have hard-link aliases")
         return entry
 
+    def _manifest_object_contract(
+        self,
+        manifest: dict[str, Any],
+    ) -> tuple[Path, str, int]:
+        digest_value = manifest.get("sha256")
+        if (
+            not isinstance(digest_value, str)
+            or len(digest_value) != 71
+            or not digest_value.startswith("sha256:")
+            or any(ch not in "0123456789abcdef" for ch in digest_value[7:])
+        ):
+            raise ArtifactIntegrityError("manifest digest is invalid")
+        expected_bytes = manifest.get("bytes")
+        if (
+            isinstance(expected_bytes, bool)
+            or not isinstance(expected_bytes, int)
+            or expected_bytes < 0
+        ):
+            raise ArtifactIntegrityError("manifest byte count is invalid")
+        digest = digest_value.removeprefix("sha256:")
+        return self._object_path(digest), digest, expected_bytes
+
+    @staticmethod
+    def _same_filesystem_entry(
+        first: os.stat_result,
+        second: os.stat_result,
+    ) -> bool:
+        return os.path.samestat(first, second)
+
+    def _open_object_descriptor(
+        self,
+        object_path: Path,
+        *,
+        expected_bytes: int,
+    ) -> tuple[int, os.stat_result]:
+        before = self._validate_object_entry(object_path)
+        if before.st_size != expected_bytes:
+            raise ArtifactIntegrityError("artifact object size mismatch")
+
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        try:
+            descriptor = os.open(object_path, flags)
+        except OSError as error:
+            raise ArtifactIntegrityError(
+                "artifact object could not be opened safely"
+            ) from error
+
+        try:
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode):
+                raise ArtifactIntegrityError(
+                    "artifact object descriptor must be a regular file"
+                )
+            if opened.st_nlink != 1:
+                raise ArtifactIntegrityError(
+                    "artifact object descriptor must not have hard-link aliases"
+                )
+            if opened.st_size != expected_bytes:
+                raise ArtifactIntegrityError("artifact object size mismatch")
+            current = self._validate_object_entry(object_path)
+            if (
+                not self._same_filesystem_entry(before, opened)
+                or not self._same_filesystem_entry(opened, current)
+            ):
+                raise ArtifactIntegrityError(
+                    "artifact object changed before descriptor read"
+                )
+        except Exception:
+            os.close(descriptor)
+            raise
+        return descriptor, opened
+
+    def _revalidate_object_descriptor(
+        self,
+        object_path: Path,
+        descriptor: int,
+        opened: os.stat_result,
+        *,
+        expected_bytes: int,
+    ) -> None:
+        try:
+            after_descriptor = os.fstat(descriptor)
+        except OSError as error:
+            raise ArtifactIntegrityError(
+                "artifact object descriptor could not be revalidated"
+            ) from error
+        if (
+            not stat.S_ISREG(after_descriptor.st_mode)
+            or after_descriptor.st_nlink != 1
+            or after_descriptor.st_size != expected_bytes
+            or not self._same_filesystem_entry(opened, after_descriptor)
+        ):
+            raise ArtifactIntegrityError(
+                "artifact object changed during descriptor read"
+            )
+        current = self._validate_object_entry(object_path)
+        if not self._same_filesystem_entry(after_descriptor, current):
+            raise ArtifactIntegrityError(
+                "artifact object path changed during descriptor read"
+            )
+
+    @staticmethod
+    def _bounded_descriptor_chunks(descriptor: int, expected_bytes: int):
+        remaining = expected_bytes + 1
+        while remaining > 0:
+            try:
+                chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            except OSError as error:
+                raise ArtifactIntegrityError(
+                    "artifact object could not be read safely"
+                ) from error
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
+
     @classmethod
     def _validate_manifest_contract(
         cls,
@@ -504,31 +626,66 @@ class ArtifactStore:
             return manifest
 
     def _verify_manifest_object(self, manifest: dict[str, Any]) -> Path:
-        digest_value = manifest.get("sha256")
-        if not isinstance(digest_value, str) or not digest_value.startswith("sha256:"):
-            raise ArtifactIntegrityError("manifest digest is invalid")
-        digest = digest_value.removeprefix("sha256:")
-        object_path = self._object_path(digest)
-        entry = self._validate_object_entry(object_path)
-        if entry.st_size != manifest.get("bytes"):
+        object_path, expected_digest, expected_bytes = (
+            self._manifest_object_contract(manifest)
+        )
+        descriptor, opened = self._open_object_descriptor(
+            object_path,
+            expected_bytes=expected_bytes,
+        )
+        try:
+            copied = 0
+            copied_hash = sha256()
+            for chunk in self._bounded_descriptor_chunks(
+                descriptor,
+                expected_bytes,
+            ):
+                copied += len(chunk)
+                copied_hash.update(chunk)
+            self._revalidate_object_descriptor(
+                object_path,
+                descriptor,
+                opened,
+                expected_bytes=expected_bytes,
+            )
+        finally:
+            os.close(descriptor)
+        if copied != expected_bytes:
             raise ArtifactIntegrityError("artifact object size mismatch")
-        if sha256_file(object_path) != digest:
+        if copied_hash.hexdigest() != expected_digest:
             raise ArtifactIntegrityError("artifact object hash mismatch")
         return object_path
 
     def _read_verified_object_bytes(self, manifest: dict[str, Any]) -> bytes:
-        source = self._verify_manifest_object(manifest)
-        expected_digest = manifest["sha256"].removeprefix("sha256:")
-        expected_bytes = manifest["bytes"]
+        object_path, expected_digest, expected_bytes = (
+            self._manifest_object_contract(manifest)
+        )
+        descriptor, opened = self._open_object_descriptor(
+            object_path,
+            expected_bytes=expected_bytes,
+        )
         try:
-            data = source.read_bytes()
-        except OSError as error:
-            raise ArtifactIntegrityError("artifact object could not be read") from error
-        if len(data) != expected_bytes or sha256(data).hexdigest() != expected_digest:
+            chunks: list[bytes] = []
+            copied = 0
+            copied_hash = sha256()
+            for chunk in self._bounded_descriptor_chunks(
+                descriptor,
+                expected_bytes,
+            ):
+                chunks.append(chunk)
+                copied += len(chunk)
+                copied_hash.update(chunk)
+            self._revalidate_object_descriptor(
+                object_path,
+                descriptor,
+                opened,
+                expected_bytes=expected_bytes,
+            )
+        finally:
+            os.close(descriptor)
+        if copied != expected_bytes or copied_hash.hexdigest() != expected_digest:
             raise ArtifactIntegrityError("artifact object changed during read")
-        if source.is_symlink():
-            raise ArtifactIntegrityError("artifact object must not be a symlink")
-        return data
+        return b"".join(chunks)
 
     def read_bytes(self, artifact_id: str) -> bytes:
         manifest = self.load_manifest(artifact_id)
@@ -540,62 +697,79 @@ class ArtifactStore:
         _verify_manifest_integrity(manifest, required=True)
         if manifest.get("rights", {}).get("export") is not True:
             raise PermissionError("artifact rights do not permit export")
-        source = self._verify_manifest_object(manifest)
         if self._export_authorizer is None:
             raise PermissionError("independent export authorization is required")
+
+        source, expected_digest, expected_bytes = (
+            self._manifest_object_contract(manifest)
+        )
+        descriptor, opened = self._open_object_descriptor(
+            source,
+            expected_bytes=expected_bytes,
+        )
         try:
-            authorized = self._export_authorizer(
-                manifest["artifact_id"],
-                manifest["sha256"],
-            )
-        except Exception as error:
-            raise PermissionError(
-                "independent export authorization failed closed"
-            ) from error
-        if authorized is not True:
-            raise PermissionError(
-                "independent export authority does not permit export"
-            )
-        target = Path(destination)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temporary: Path | None = None
-        expected_digest = manifest["sha256"].removeprefix("sha256:")
-        expected_bytes = manifest["bytes"]
-        try:
-            with tempfile.NamedTemporaryFile(
-                "wb",
-                dir=target.parent,
-                prefix=f".{target.name}.",
-                suffix=".tmp",
-                delete=False,
-            ) as handle:
-                temporary = Path(handle.name)
-                copied = 0
-                copied_hash = sha256()
-                with source.open("rb") as source_handle:
-                    while True:
-                        chunk = source_handle.read(1024 * 1024)
-                        if not chunk:
-                            break
+            try:
+                authorized = self._export_authorizer(
+                    manifest["artifact_id"],
+                    manifest["sha256"],
+                )
+            except Exception as error:
+                raise PermissionError(
+                    "independent export authorization failed closed"
+                ) from error
+            if authorized is not True:
+                raise PermissionError(
+                    "independent export authority does not permit export"
+                )
+
+            target = Path(destination)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    "wb",
+                    dir=target.parent,
+                    prefix=f".{target.name}.",
+                    suffix=".tmp",
+                    delete=False,
+                ) as handle:
+                    temporary = Path(handle.name)
+                    copied = 0
+                    copied_hash = sha256()
+                    for chunk in self._bounded_descriptor_chunks(
+                        descriptor,
+                        expected_bytes,
+                    ):
                         handle.write(chunk)
                         copied += len(chunk)
                         copied_hash.update(chunk)
-                handle.flush()
-                os.fsync(handle.fileno())
-            if copied != expected_bytes or copied_hash.hexdigest() != expected_digest:
-                raise ArtifactIntegrityError(
-                    "artifact object changed during export copy"
-                )
-            os.replace(temporary, target)
-            temporary = None
-            sync_parent_directory(target)
+                    self._revalidate_object_descriptor(
+                        source,
+                        descriptor,
+                        opened,
+                        expected_bytes=expected_bytes,
+                    )
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                if (
+                    copied != expected_bytes
+                    or copied_hash.hexdigest() != expected_digest
+                ):
+                    raise ArtifactIntegrityError(
+                        "artifact object changed during export copy"
+                    )
+                os.replace(temporary, target)
+                temporary = None
+                sync_parent_directory(target)
+            finally:
+                if temporary is not None:
+                    try:
+                        temporary.unlink()
+                    except FileNotFoundError:
+                        pass
+            return target
         finally:
-            if temporary is not None:
-                try:
-                    temporary.unlink()
-                except FileNotFoundError:
-                    pass
-        return target
+            os.close(descriptor)
 
     def audit(self) -> ArtifactAudit:
         referenced: set[str] = set()

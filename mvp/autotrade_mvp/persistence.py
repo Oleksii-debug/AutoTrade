@@ -1140,6 +1140,16 @@ class JournalStore:
                     raise ValueError(
                         "event_id conflicts with an existing event or publication intent"
                     )
+                # Idempotent replay is still an authority read. Revalidate the
+                # durable aggregate/global cuts so corruption cannot be hidden
+                # merely because the event payload itself matches.
+                self._aggregate_version_value(
+                    connection,
+                    aggregate_type,
+                    aggregate_id,
+                )
+                if self.SCHEMA_VERSION >= 6:
+                    self._journal_sequence_value(connection)
                 connection.commit()
                 return AppendResult(event_id, aggregate_version, False)
 
@@ -2170,6 +2180,26 @@ class JournalStore:
                         raise ValueError(
                             "idempotency_key was already used for a different request"
                         )
+                    # A deduplicated financial command must not turn journal
+                    # corruption into an apparently successful replay. Validate
+                    # the current global cut and every aggregate implicated by
+                    # the supplied deterministic event batch before returning.
+                    if self.SCHEMA_VERSION >= 6:
+                        self._journal_sequence_value(connection)
+                    validated_aggregates: set[tuple[str, str]] = set()
+                    for item in prepared:
+                        aggregate_key = (
+                            item["aggregate_type"],
+                            item["aggregate_id"],
+                        )
+                        if aggregate_key in validated_aggregates:
+                            continue
+                        self._aggregate_version_value(
+                            connection,
+                            aggregate_key[0],
+                            aggregate_key[1],
+                        )
+                        validated_aggregates.add(aggregate_key)
                     connection.commit()
                     return saved_result, False, ()
 

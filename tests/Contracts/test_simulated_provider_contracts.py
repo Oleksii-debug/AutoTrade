@@ -86,6 +86,44 @@ class SimulatedProviderContractTests(unittest.TestCase):
             health,
         )
 
+    def test_partial_fill_and_remaining_order_stay_contract_valid(self):
+        provider = SimulatedProvider(initial_cash="1000")
+        provider.submit_order(
+            attempt_id=str(uuid4()),
+            client_order_id="partial-contract",
+            instrument_version="ABC@version-1",
+            side="BUY",
+            quantity="2",
+            price="100",
+            now="2026-09-24T18:00:00Z",
+            fill_immediately=False,
+        )
+        fill = provider.record_fill(
+            client_order_id="partial-contract",
+            provider_execution_id="exec-partial-contract",
+            quantity="0.5",
+            now="2026-09-24T18:00:01Z",
+        )
+        self.validate("execution.schema.json", "ExecutionFill", fill)
+
+        snapshot = provider.account_snapshot(
+            now="2026-09-24T18:01:00Z"
+        )
+        self.validate("provider.schema.json", "AccountSnapshot", snapshot)
+        self.assertEqual(len(snapshot["open_orders"]), 1)
+        self.assertEqual(snapshot["open_orders"][0]["filled_quantity"], "0.5")
+        self.assertEqual(snapshot["open_orders"][0]["remaining_quantity"], "1.5")
+
+        query = provider.query_order(
+            client_order_id="partial-contract",
+            coverage_start="2026-09-24T17:00:00Z",
+            coverage_end="2026-09-24T19:00:00Z",
+            pagination_complete=True,
+            now="2026-09-24T19:00:00Z",
+        )
+        self.validate("provider.schema.json", "QueryOrderResult", query)
+        self.assertEqual(query["order"]["status"], "PARTIALLY_FILLED")
+
     def test_short_net_position_preserves_negative_quantity_in_contract(self):
         provider = SimulatedProvider(initial_cash="1000")
         provider.submit_order(

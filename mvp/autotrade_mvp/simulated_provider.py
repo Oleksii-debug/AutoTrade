@@ -149,6 +149,9 @@ class SimulatedProvider:
         self.orders: dict[str, SimulatedOrder] = {}
         self._attempts: dict[str, SimulatedOrder] = {}
         self.fills: list[dict[str, Any]] = []
+        self._cancel_results: dict[str, dict[str, Any]] = {}
+        self._cancelled_orders: dict[str, str] = {}
+        self._cancellation_requests: dict[str, dict[str, str | None]] = {}
         self.outbound_request_count = 0
         allowed_faults = {"BEFORE_SEND_OUTAGE", "AFTER_ACCEPT_RESPONSE_LOST"}
         raw_faults = {} if transport_faults is None else dict(transport_faults)
@@ -193,6 +196,8 @@ class SimulatedProvider:
         qty = _positive(quantity, name="quantity")
         px = _positive(price, name="price")
         canonical_now = _utc_text(now, name="now")
+        if type(fill_immediately) is not bool:
+            raise TypeError("fill_immediately must be boolean")
         provider_order_id = "sim-" + sha256(cid.encode("utf-8")).hexdigest()[:24]
         proposed = SimulatedOrder(
             attempt_id=aid,
@@ -251,25 +256,93 @@ class SimulatedProvider:
             "retry_disposition": "NEVER",
         }
 
-    def _record_fill(self, order: SimulatedOrder, now: str) -> dict[str, Any]:
-        fill_id = _uuid("fill", order.provider_order_id)
-        provider_execution_id = "exec-" + sha256(
-            order.provider_order_id.encode("utf-8")
-        ).hexdigest()[:24]
-        if any(
-            item["provider_execution_id"] == provider_execution_id
-            for item in self.fills
-        ):
-            return next(
+    def _filled_quantity(self, order: SimulatedOrder) -> Decimal:
+        total = Decimal("0")
+        for fill in self.fills:
+            if fill["order_ref"] != order.provider_order_id:
+                continue
+            total += _decimal(
+                fill["last_quantity"]["value"],
+                name="fill.last_quantity",
+            )
+        return total
+
+    def _remaining_quantity(self, order: SimulatedOrder) -> Decimal:
+        remaining = order.quantity - self._filled_quantity(order)
+        if remaining < 0:
+            raise SimulatedProviderConflict(
+                "simulated provider history contains an overfilled order"
+            )
+        return remaining
+
+    def _record_fill(
+        self,
+        order: SimulatedOrder,
+        now: str,
+        *,
+        quantity=None,
+        price=None,
+        provider_execution_id: str | None = None,
+    ) -> dict[str, Any]:
+        canonical_now = _utc_text(now, name="now")
+        fill_quantity = (
+            self._remaining_quantity(order)
+            if quantity is None
+            else _positive(quantity, name="fill_quantity")
+        )
+        fill_price = (
+            order.price
+            if price is None
+            else _positive(price, name="fill_price")
+        )
+        execution_id = (
+            "exec-" + sha256(order.provider_order_id.encode("utf-8")).hexdigest()[:24]
+            if provider_execution_id is None
+            else _text(provider_execution_id, name="provider_execution_id")
+        )
+
+        existing = next(
+            (
                 item
                 for item in self.fills
-                if item["provider_execution_id"] == provider_execution_id
+                if item["provider_execution_id"] == execution_id
+            ),
+            None,
+        )
+        if existing is not None:
+            exact = (
+                existing["order_ref"] == order.provider_order_id
+                and existing["instrument_version"] == order.instrument_version
+                and existing["side"] == order.side
+                and existing["last_quantity"]["value"]
+                == _decimal_text(fill_quantity)
+                and existing["last_price"] == _decimal_text(fill_price)
+                and existing["trade_time"] == canonical_now
+            )
+            if not exact:
+                raise SimulatedProviderConflict(
+                    "provider_execution_id already has different simulated fill content"
+                )
+            return existing
+
+        if order.client_order_id in self._cancelled_orders:
+            raise SimulatedProviderConflict(
+                "cancelled simulated order cannot receive a later fill"
+            )
+        remaining = self._remaining_quantity(order)
+        if remaining <= 0:
+            raise SimulatedProviderConflict(
+                "fully filled simulated order cannot receive another execution"
+            )
+        if fill_quantity > remaining:
+            raise SimulatedProviderConflict(
+                "simulated execution would overfill the provider order"
             )
 
-        notional = order.quantity * order.price
+        notional = fill_quantity * fill_price
         fee = abs(notional) * self.fee_rate
         signed_quantity = (
-            order.quantity if order.side == "BUY" else -order.quantity
+            fill_quantity if order.side == "BUY" else -fill_quantity
         )
         cash_delta = (
             -notional - fee if order.side == "BUY" else notional - fee
@@ -280,40 +353,181 @@ class SimulatedProvider:
             + signed_quantity
         )
         payload = {
-            "fill_id": fill_id,
-            "provider_execution_id": provider_execution_id,
+            "fill_id": _uuid(
+                "fill",
+                order.provider_order_id
+                if provider_execution_id is None
+                else execution_id,
+            ),
+            "provider_execution_id": execution_id,
             "order_ref": order.provider_order_id,
             "intent_ref": None,
             "instrument_version": order.instrument_version,
             "side": order.side,
             "last_quantity": {
-                "value": _decimal_text(order.quantity),
+                "value": _decimal_text(fill_quantity),
                 "unit": _unit_id(order.instrument_version),
             },
-            "last_price": _decimal_text(order.price),
-            "trade_time": now,
-            "receipt_time": now,
+            "last_price": _decimal_text(fill_price),
+            "trade_time": canonical_now,
+            "receipt_time": canonical_now,
             "fees": [
                 {
                     "amount": _decimal_text(fee),
                     "currency": self.currency,
                 }
             ],
-            "settlement_date": _instant(now).date().isoformat(),
+            "settlement_date": _instant(canonical_now).date().isoformat(),
         }
         fill = {
             **payload,
             "evidence": [
                 _evidence(
                     "fill",
-                    provider_execution_id,
-                    now,
+                    execution_id,
+                    canonical_now,
                     payload,
                 )
             ],
         }
         self.fills.append(fill)
         return fill
+
+    def record_fill(
+        self,
+        *,
+        client_order_id: str,
+        provider_execution_id: str,
+        quantity,
+        now: str,
+        price=None,
+    ) -> dict[str, Any]:
+        """Apply one deterministic provider execution to an accepted order."""
+
+        cid = _text(client_order_id, name="client_order_id")
+        try:
+            order = self.orders[cid]
+        except KeyError as error:
+            raise KeyError(f"unknown simulated client_order_id: {cid}") from error
+        return self._record_fill(
+            order,
+            now,
+            quantity=quantity,
+            price=price,
+            provider_execution_id=provider_execution_id,
+        )
+
+    def cancel_order(
+        self,
+        *,
+        client_order_id: str,
+        now: str,
+        race_execution_id: str | None = None,
+        race_fill_quantity=None,
+        race_fill_price=None,
+    ) -> dict[str, Any]:
+        """Acknowledge cancel after an optional deterministic fill-before-cancel race."""
+
+        cid = _text(client_order_id, name="client_order_id")
+        try:
+            order = self.orders[cid]
+        except KeyError as error:
+            raise KeyError(f"unknown simulated client_order_id: {cid}") from error
+        canonical_now = _utc_text(now, name="now")
+        if (race_execution_id is None) != (race_fill_quantity is None):
+            raise ValueError(
+                "race_execution_id and race_fill_quantity must be supplied together"
+            )
+        if race_execution_id is None and race_fill_price is not None:
+            raise ValueError(
+                "race_fill_price requires a deterministic race execution"
+            )
+        normalized_race_execution_id = (
+            None
+            if race_execution_id is None
+            else _text(race_execution_id, name="race_execution_id")
+        )
+        normalized_race_quantity = (
+            None
+            if race_fill_quantity is None
+            else _positive(race_fill_quantity, name="race_fill_quantity")
+        )
+        normalized_race_price = (
+            None
+            if normalized_race_execution_id is None
+            else (
+                order.price
+                if race_fill_price is None
+                else _positive(race_fill_price, name="race_fill_price")
+            )
+        )
+        race_request = {
+            "race_execution_id": normalized_race_execution_id,
+            "race_fill_quantity": (
+                None
+                if normalized_race_quantity is None
+                else _decimal_text(normalized_race_quantity)
+            ),
+            "race_fill_price": (
+                None
+                if normalized_race_price is None
+                else _decimal_text(normalized_race_price)
+            ),
+        }
+        existing = self._cancel_results.get(cid)
+        if existing is not None:
+            if self._cancellation_requests[cid] != race_request:
+                raise SimulatedProviderConflict(
+                    "cancel retry changed deterministic race semantics"
+                )
+            return existing
+
+        if normalized_race_execution_id is not None:
+            self._record_fill(
+                order,
+                canonical_now,
+                quantity=normalized_race_quantity,
+                price=normalized_race_price,
+                provider_execution_id=normalized_race_execution_id,
+            )
+
+        filled = self._filled_quantity(order)
+        remaining = self._remaining_quantity(order)
+        payload = {
+            "provider_order_id": order.provider_order_id,
+            "client_order_id": cid,
+            "observed_at": canonical_now,
+            "filled_quantity": _decimal_text(filled),
+            "remaining_quantity": _decimal_text(remaining),
+        }
+        if normalized_race_execution_id is not None:
+            payload["race_execution_id"] = normalized_race_execution_id
+        if remaining == 0:
+            outcome = "REJECTED"
+            reason_code = "ALREADY_FILLED"
+        else:
+            outcome = "ACKNOWLEDGED"
+            reason_code = None
+            payload["cancelled_at"] = canonical_now
+
+        # The sealed evidence must bind the semantic cancellation verdict, not
+        # only quantities/timestamps. Otherwise identical provider state could
+        # be presented later as ACKNOWLEDGED or REJECTED without changing the
+        # evidence digest.
+        payload["outcome"] = outcome
+        if reason_code is not None:
+            payload["reason_code"] = reason_code
+        result = {
+            **payload,
+            "evidence": [
+                _evidence("cancel", order.provider_order_id, canonical_now, payload)
+            ],
+        }
+        self._cancellation_requests[cid] = race_request
+        self._cancel_results[cid] = result
+        if outcome == "ACKNOWLEDGED":
+            self._cancelled_orders[cid] = canonical_now
+        return result
 
     def transport_send(
         self,
@@ -375,26 +589,28 @@ class SimulatedProvider:
             for instrument, quantity in sorted(self.positions.items())
             if quantity != 0
         ]
-        filled_order_refs = {
-            fill["order_ref"]
-            for fill in self.fills
-        }
-        open_orders = [
-            {
-                "provider_order_id": order.provider_order_id,
-                "client_order_id": order.client_order_id,
-                "instrument_version": order.instrument_version,
-                "side": order.side,
-                "quantity": _decimal_text(order.quantity),
-                "price": _decimal_text(order.price),
-                "submitted_at": order.submitted_at,
-            }
-            for order in sorted(
-                self.orders.values(),
-                key=lambda item: item.client_order_id,
+        open_orders = []
+        for order in sorted(
+            self.orders.values(),
+            key=lambda item: item.client_order_id,
+        ):
+            remaining = self._remaining_quantity(order)
+            if remaining <= 0 or order.client_order_id in self._cancelled_orders:
+                continue
+            filled = order.quantity - remaining
+            open_orders.append(
+                {
+                    "provider_order_id": order.provider_order_id,
+                    "client_order_id": order.client_order_id,
+                    "instrument_version": order.instrument_version,
+                    "side": order.side,
+                    "quantity": _decimal_text(order.quantity),
+                    "filled_quantity": _decimal_text(filled),
+                    "remaining_quantity": _decimal_text(remaining),
+                    "price": _decimal_text(order.price),
+                    "submitted_at": order.submitted_at,
+                }
             )
-            if order.provider_order_id not in filled_order_refs
-        ]
         core = {
             "account_id": self.account_id,
             "environment": "SIMULATION",
@@ -458,15 +674,30 @@ class SimulatedProvider:
         }
         if order is not None:
             verdict = "FOUND"
+            filled = self._filled_quantity(order)
+            remaining = self._remaining_quantity(order)
+            if remaining == 0:
+                status = "FILLED"
+            elif order.client_order_id in self._cancelled_orders:
+                status = "CANCELLED"
+            elif filled > 0:
+                status = "PARTIALLY_FILLED"
+            else:
+                status = "WORKING"
             order_payload = {
                 "provider_order_id": order.provider_order_id,
                 "client_order_id": order.client_order_id,
                 "instrument_version": order.instrument_version,
                 "side": order.side,
                 "quantity": _decimal_text(order.quantity),
+                "filled_quantity": _decimal_text(filled),
+                "remaining_quantity": _decimal_text(remaining),
                 "price": _decimal_text(order.price),
                 "submitted_at": order.submitted_at,
+                "status": status,
             }
+            if status == "CANCELLED":
+                order_payload["cancelled_at"] = self._cancelled_orders[cid]
         elif pagination_complete:
             verdict = "PROVEN_ABSENT"
             order_payload = None

@@ -369,6 +369,29 @@ class OrderProjection:
         if not self.cancelled:
             self.cancel_requested = True
 
+    def reject_cancel(
+        self,
+        *,
+        command_id: str,
+        reason_code: str,
+    ) -> None:
+        """Resolve a pending cancel as provider-rejected without inventing cancel."""
+
+        command = _text(command_id, name="command_id")
+        _text(reason_code, name="reason_code")
+        if self.cancelled:
+            raise OrderProjectionConflict(
+                "confirmed cancellation cannot be relabelled rejected"
+            )
+        if not self.cancel_requested or self.cancel_command_id is None:
+            raise OrderProjectionConflict("order has no pending cancel request")
+        if self.cancel_command_id != command:
+            raise OrderProjectionConflict(
+                "cancel rejection command_id does not match pending request"
+            )
+        self.cancel_requested = False
+        self.cancel_command_id = None
+
     def request_replace(self, *, command_id: str) -> None:
         """Record one pending replace command without inventing completion."""
         command = _text(command_id, name="command_id")

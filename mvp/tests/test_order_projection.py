@@ -92,6 +92,90 @@ class OrderProjectionTests(unittest.TestCase):
         self.assertTrue(confirmed.cancel_confirmed)
         self.assertEqual(confirmed.open_quantity, Decimal("5"))
 
+    def test_provider_rejected_cancel_clears_pending_without_inventing_cancel(self):
+        item = order(requested_quantity="5")
+        item.acknowledge(provider_order_id="p1")
+        item.request_cancel(command_id="cancel-command-1")
+        item.record_fill(
+            fill_id="fill-during-cancel",
+            provider_execution_id="exec-during-cancel",
+            quantity="2",
+            price="10",
+        )
+        self.assertEqual(item.state, "PARTIALLY_FILLED_CANCEL_REQUESTED")
+
+        item.reject_cancel(
+            command_id="cancel-command-1",
+            reason_code="TOO_LATE_TO_CANCEL",
+        )
+        snapshot = item.snapshot()
+        self.assertEqual(snapshot.state, "PARTIALLY_FILLED")
+        self.assertFalse(snapshot.cancel_requested)
+        self.assertFalse(snapshot.cancel_confirmed)
+        self.assertIsNone(snapshot.cancel_command_id)
+        self.assertEqual(snapshot.filled_quantity, Decimal("2"))
+        self.assertEqual(snapshot.open_quantity, Decimal("3"))
+
+        item.request_cancel(command_id="cancel-command-2")
+        self.assertEqual(item.state, "PARTIALLY_FILLED_CANCEL_REQUESTED")
+        self.assertEqual(item.snapshot().cancel_command_id, "cancel-command-2")
+
+    def test_full_fill_wins_pending_cancel_and_rejection_resolves_action(self):
+        item = order(requested_quantity="1")
+        item.request_cancel(command_id="cancel-command")
+        item.record_fill(
+            fill_id="fill-wins-race",
+            provider_execution_id="exec-wins-race",
+            quantity="1",
+            price="10",
+        )
+        self.assertEqual(item.state, "FILLED")
+        self.assertTrue(item.snapshot().cancel_requested)
+
+        item.reject_cancel(
+            command_id="cancel-command",
+            reason_code="ALREADY_FILLED",
+        )
+        snapshot = item.snapshot()
+        self.assertEqual(snapshot.state, "FILLED")
+        self.assertFalse(snapshot.cancel_requested)
+        self.assertFalse(snapshot.cancel_confirmed)
+        self.assertIsNone(snapshot.cancel_command_id)
+
+    def test_cancel_rejection_requires_matching_pending_command_and_preserves_state(self):
+        item = order(requested_quantity="2")
+        with self.assertRaisesRegex(
+            OrderProjectionConflict,
+            "no pending cancel request",
+        ):
+            item.reject_cancel(
+                command_id="missing",
+                reason_code="NOT_FOUND",
+            )
+
+        item.request_cancel(command_id="cancel-command")
+        before = item.snapshot()
+        with self.assertRaisesRegex(
+            OrderProjectionConflict,
+            "does not match pending request",
+        ):
+            item.reject_cancel(
+                command_id="other-command",
+                reason_code="NOT_FOUND",
+            )
+        self.assertEqual(item.snapshot(), before)
+
+        item.confirm_cancel()
+        with self.assertRaisesRegex(
+            OrderProjectionConflict,
+            "cannot be relabelled rejected",
+        ):
+            item.reject_cancel(
+                command_id="cancel-command",
+                reason_code="LATE_REJECTION",
+            )
+        self.assertTrue(item.snapshot().cancel_confirmed)
+
     def test_fill_during_pending_cancel_remains_live_economic_truth(self):
         item = order(requested_quantity="5")
         item.request_cancel(command_id="cancel-command")

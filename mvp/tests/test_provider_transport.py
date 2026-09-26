@@ -1267,6 +1267,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
 
     def test_whitebit_ambiguous_http_write_status_requires_reconciliation(self):
         for status, expected_reason in (
+            (408, "whitebit_ambiguous_write_timeout"),
             (429, "whitebit_ambiguous_write_rate_limit"),
             (503, "whitebit_ambiguous_write"),
         ):
@@ -1315,6 +1316,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
 
     def test_whitebit_ambiguous_http_status_is_durable_unknown_and_never_retried(self):
         for status, expected_reason in (
+            (408, "whitebit_ambiguous_write_timeout"),
             (429, "whitebit_ambiguous_write_rate_limit"),
             (503, "whitebit_ambiguous_write"),
         ):

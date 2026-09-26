@@ -61,6 +61,8 @@ class ExactJsonTransportResponse:
 
     response_bytes: bytes
     http_status: int | None = None
+    requires_reconciliation: bool = False
+    ambiguity_reason: str | None = None
 
     def __post_init__(self) -> None:
         raw = self.response_bytes
@@ -72,6 +74,25 @@ class ExactJsonTransportResponse:
             or self.http_status > 599
         ):
             raise ValueError("http_status must be an integer 100..599 when provided")
+        if type(self.requires_reconciliation) is not bool:
+            raise TypeError("requires_reconciliation must be boolean")
+        if self.requires_reconciliation:
+            if (
+                not isinstance(self.ambiguity_reason, str)
+                or not self.ambiguity_reason.strip()
+            ):
+                raise ValueError(
+                    "ambiguous exact response requires a non-empty ambiguity_reason"
+                )
+            object.__setattr__(
+                self,
+                "ambiguity_reason",
+                self.ambiguity_reason.strip(),
+            )
+        elif self.ambiguity_reason is not None:
+            raise ValueError(
+                "ambiguity_reason is only valid when reconciliation is required"
+            )
 
     @property
     def response_text(self) -> str:
@@ -259,9 +280,13 @@ def load_submission_response_binding(
     if not events:
         raise ValueError("durable submission attempt was not found")
     event_types = [event.get("event_type") for event in events]
-    if event_types != ["SubmissionPrepared", "SubmissionSending", "SubmissionSent"]:
+    if (
+        len(event_types) != 3
+        or event_types[:2] != ["SubmissionPrepared", "SubmissionSending"]
+        or event_types[2] not in {"SubmissionSent", "SubmissionUnknown"}
+    ):
         raise ValueError(
-            "durable exact response requires Prepared -> Sending -> Sent"
+            "durable exact response requires Prepared -> Sending -> Sent/Unknown"
         )
     prepared, sending, sent = events
     payload = prepared.get("payload")
@@ -269,7 +294,7 @@ def load_submission_response_binding(
         raise ValueError("durable SubmissionPrepared payload is invalid")
     sent_payload = sent.get("payload")
     if not isinstance(sent_payload, dict):
-        raise ValueError("durable SubmissionSent payload is invalid")
+        raise ValueError("durable terminal submission payload is invalid")
     response_text = sent_payload.get("response_text")
     response_sha256 = sent_payload.get("response_sha256")
     if (
@@ -909,6 +934,8 @@ class GuardedDispatcher:
                 "provider_guard_contract_violation",
             )
 
+        terminal_requires_reconciliation = False
+        terminal_reason = "sent_confirmed"
         try:
             if isinstance(response, ExactJsonTransportResponse):
                 sent_payload = {
@@ -921,6 +948,14 @@ class GuardedDispatcher:
                 if response.http_status is not None:
                     sent_payload["http_status"] = response.http_status
                 outcome_response = response.payload
+                terminal_requires_reconciliation = response.requires_reconciliation
+                if terminal_requires_reconciliation:
+                    terminal_reason = (
+                        response.ambiguity_reason
+                        or "provider_response_ambiguous"
+                    )
+                    sent_payload["reason"] = terminal_reason
+                    sent_payload["retry_disposition"] = "RECONCILE_FIRST"
             else:
                 sent_payload = {
                     "client_order_id": client_order_id,
@@ -929,7 +964,11 @@ class GuardedDispatcher:
                 outcome_response = response
             self._append(
                 attempt_id=attempt_id,
-                event_type="SubmissionSent",
+                event_type=(
+                    "SubmissionUnknown"
+                    if terminal_requires_reconciliation
+                    else "SubmissionSent"
+                ),
                 version=3,
                 payload=sent_payload,
                 now=barrier_now,
@@ -961,6 +1000,13 @@ class GuardedDispatcher:
                 client_order_id,
                 None,
                 "sent_response_persistence_failed",
+            )
+        if terminal_requires_reconciliation:
+            return DispatchOutcome(
+                "UNKNOWN",
+                client_order_id,
+                None,
+                terminal_reason,
             )
         return DispatchOutcome(
             "SENT",

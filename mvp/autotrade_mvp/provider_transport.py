@@ -420,6 +420,38 @@ BINANCE_SPOT_AUTHENTICATED_READ_ENDPOINTS: Mapping[
 )
 
 
+KRAKEN_SPOT_AUTHENTICATED_READ_ENDPOINTS: Mapping[
+    str, AuthenticatedReadEndpointRule
+] = MappingProxyType(
+    {
+        "/0/private/OpenOrders": AuthenticatedReadEndpointRule(
+            surface=Surface.ACTIVITIES,
+            permission_scope="ORDER.READ",
+            data_entitlement="ORDERS",
+            success_statuses=frozenset({200}),
+        ),
+        "/0/private/ClosedOrders": AuthenticatedReadEndpointRule(
+            surface=Surface.ACTIVITIES,
+            permission_scope="ORDER.READ",
+            data_entitlement="ORDERS",
+            success_statuses=frozenset({200}),
+        ),
+        "/0/private/TradesHistory": AuthenticatedReadEndpointRule(
+            surface=Surface.ACTIVITIES,
+            permission_scope="TRADE.READ",
+            data_entitlement="TRADES",
+            success_statuses=frozenset({200}),
+        ),
+        "/0/private/Ledgers": AuthenticatedReadEndpointRule(
+            surface=Surface.ACTIVITIES,
+            permission_scope="ACCOUNT.READ",
+            data_entitlement="ACTIVITIES",
+            success_statuses=frozenset({200}),
+        ),
+    }
+)
+
+
 BYBIT_V5_AUTHENTICATED_READ_ENDPOINTS: Mapping[
     str, AuthenticatedReadEndpointRule
 ] = MappingProxyType(
@@ -502,6 +534,25 @@ def _binance_authenticated_read_rule(
     return rule
 
 
+def _kraken_spot_authenticated_read_rule(
+    binding: AuthenticatedReadQueryBinding,
+) -> AuthenticatedReadEndpointRule:
+    rule = KRAKEN_SPOT_AUTHENTICATED_READ_ENDPOINTS.get(binding.endpoint)
+    if rule is None:
+        raise ProviderTransportScopeError(
+            "Kraken Spot authenticated-read endpoint is not explicitly allowed"
+        )
+    if binding.surface != rule.surface:
+        raise ProviderTransportScopeError(
+            "authenticated-read endpoint surface does not match Kraken Spot policy"
+        )
+    if binding.permission_scope != rule.permission_scope:
+        raise ProviderTransportScopeError(
+            "authenticated-read permission scope does not match Kraken Spot endpoint policy"
+        )
+    return rule
+
+
 @dataclass(frozen=True)
 class SignedHttpRequest:
     method: str
@@ -555,17 +606,26 @@ class SignedHttpRequest:
 
 @dataclass(frozen=True)
 class AuthenticatedReadHttpRequest:
-    """One immutable authenticated provider GET request.
+    """One immutable authenticated provider read request.
 
-    This is intentionally separate from SignedHttpRequest so the write transport
-    cannot accidentally broaden its POST-only contract or final-send semantics.
+    GET keeps the exact signed-query contract used by Binance. POST supports
+    providers such as Kraken whose private read APIs authenticate a form body.
+    The envelope remains separate from SignedHttpRequest so read responses keep
+    their typed observation lifecycle and never acquire write authority.
     """
 
     url: str
     headers: Mapping[str, str]
     timeout_seconds: int
+    method: str = "GET"
+    body: bytes = b""
 
     def __post_init__(self) -> None:
+        method = _text(self.method, name="method").upper()
+        if method not in {"GET", "POST"}:
+            raise ProviderTransportScopeError(
+                "authenticated-read method must be GET or POST"
+            )
         parsed = urlsplit(_text(self.url, name="url"))
         if (
             parsed.scheme != "https"
@@ -573,10 +633,22 @@ class AuthenticatedReadHttpRequest:
             or parsed.username is not None
             or parsed.password is not None
             or parsed.fragment
-            or not parsed.query
         ):
             raise ProviderTransportScopeError(
-                "authenticated-read URL must be HTTPS with an exact signed query"
+                "authenticated-read URL must be canonical HTTPS"
+            )
+        if type(self.body) is not bytes:
+            raise ProviderTransportScopeError(
+                "authenticated-read body must be exact bytes"
+            )
+        if method == "GET":
+            if not parsed.query or self.body:
+                raise ProviderTransportScopeError(
+                    "authenticated GET requires an exact signed query and no body"
+                )
+        elif parsed.query or not self.body:
+            raise ProviderTransportScopeError(
+                "authenticated POST requires an exact body and no URL query"
             )
         if not isinstance(self.headers, Mapping):
             raise ProviderTransportScopeError("headers must be a mapping")
@@ -596,6 +668,7 @@ class AuthenticatedReadHttpRequest:
             or self.timeout_seconds > 120
         ):
             raise ProviderTransportScopeError("invalid request timeout")
+        object.__setattr__(self, "method", method)
         object.__setattr__(
             self,
             "headers",
@@ -669,8 +742,8 @@ class UrllibJsonWireClient:
             data = request.body
             method = request.method
         else:
-            data = None
-            method = "GET"
+            data = request.body or None
+            method = request.method
         outbound = Request(
             request.url,
             data=data,
@@ -1079,7 +1152,7 @@ class KrakenSpotDurableNonceAllocator(_DurableProviderNonceAllocator):
         if (
             credential_handle.provider != "KRAKEN"
             or credential_handle.environment != "LIVE"
-            or credential_handle.purpose != "TRADE"
+            or credential_handle.purpose not in {"TRADE", "READ"}
             or credential_handle.account_id != account
         ):
             raise ProviderTransportScopeError(

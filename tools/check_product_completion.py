@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 from typing import Any
@@ -151,6 +152,30 @@ def _trusted_git_environment() -> dict[str, str]:
     return environment
 
 
+def _trusted_git_executable(*, source_root: Path) -> str:
+    """Resolve Git outside the candidate-controlled release checkout."""
+
+    candidate = shutil.which("git")
+    if candidate is None:
+        raise ProductCompletionError(
+            "exact-source Git executable is unavailable"
+        )
+    try:
+        executable = Path(candidate).resolve(strict=True)
+        trusted_root = source_root.resolve(strict=True)
+    except OSError as error:
+        raise ProductCompletionError(
+            "exact-source Git executable could not be resolved"
+        ) from error
+    try:
+        executable.relative_to(trusted_root)
+    except ValueError:
+        return os.fspath(executable)
+    raise ProductCompletionError(
+        "exact-source Git executable originates from candidate checkout"
+    )
+
+
 def _load(path: Path, *, name: str) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -181,9 +206,10 @@ def _verify_exact_source_checkout(
         return
     if _exact_source(source_sha) is None:
         return
+    git_executable = _trusted_git_executable(source_root=ROOT)
     try:
         head = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            [git_executable, "rev-parse", "HEAD"],
             cwd=ROOT,
             capture_output=True,
             text=True,
@@ -221,7 +247,7 @@ def _verify_exact_source_checkout(
     try:
         status = subprocess.run(
             [
-                "git",
+                git_executable,
                 "status",
                 "--porcelain=v1",
                 "--untracked-files=all",

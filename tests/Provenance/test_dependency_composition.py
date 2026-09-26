@@ -78,6 +78,84 @@ class DependencyCompositionGateTests(unittest.TestCase):
             Path(__file__).resolve().parents[2] / "research" / "pyproject.toml"
         ).read_text(encoding="utf-8")
         self.assertIn('requires = ["setuptools==84.0.0"]', pyproject)
+        self.assertNotIn("RESEARCH_BUILD_REQUIREMENTS_DRIFT", self.report.blockers)
+        requirements = (
+            Path(__file__).resolve().parents[2] / "requirements-dev.txt"
+        ).read_text(encoding="utf-8")
+        self.assertIn("setuptools==84.0.0", requirements)
+        self.assertIn(
+            "--hash=sha256:51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670",
+            requirements,
+        )
+
+    def test_research_install_workflow_closes_build_isolation_escape(self):
+        root = Path(__file__).resolve().parents[2]
+        workflow = (
+            root / ".github" / "workflows" / "research-primitives.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn('- "requirements-dev.txt"', workflow)
+        self.assertIn(
+            "run: python -m pip install --disable-pip-version-check "
+            "--force-reinstall --no-deps --only-binary=:all: --require-hashes "
+            "-r requirements-dev.txt",
+            workflow,
+        )
+        self.assertIn(
+            "run: python -m pip install --no-deps --no-build-isolation -e research",
+            workflow,
+        )
+        self.assertNotIn(
+            "run: python -m pip install --no-deps -e research",
+            workflow,
+        )
+        for blocker in (
+            "RESEARCH_HASH_LOCK_WORKFLOW_PATH_MISSING",
+            "RESEARCH_HASHED_INSTALL_COMMAND_MISSING",
+            "RESEARCH_EDITABLE_NO_BUILD_ISOLATION_MISSING",
+        ):
+            self.assertNotIn(blocker, self.report.blockers)
+
+    def test_research_build_boundary_regression_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "research").mkdir()
+            (root / ".github" / "workflows").mkdir(parents=True)
+            (root / "requirements-dev.txt").write_text(
+                "setuptools==84.0.0 \\\n"
+                "    --hash=sha256:"
+                "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670\\n"
+                "jsonschema==4.26.0 \\\n"
+                "    --hash=sha256:"
+                "d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce\\n",
+                encoding="utf-8",
+            )
+            (root / "research" / "pyproject.toml").write_text(
+                "[build-system]\\n"
+                'requires = ["setuptools==84.0.0"]\\n\\n'
+                "[project]\\n"
+                'name = "sample"\\n'
+                'version = "0.0.1"\\n\\n'
+                "[project.optional-dependencies]\\n"
+                'test = ["jsonschema==4.26.0"]\\n',
+                encoding="utf-8",
+            )
+            workflow = root / ".github" / "workflows" / "research-primitives.yml"
+            workflow.write_text(
+                'paths:\\n  - "requirements-dev.txt"\\n'
+                "steps:\\n"
+                "  - run: python -m pip install --disable-pip-version-check "
+                "--force-reinstall --no-deps --only-binary=:all: --require-hashes "
+                "-r requirements-dev.txt\\n"
+                "  - run: python -m pip install --no-deps -e research\\n",
+                encoding="utf-8",
+            )
+            blockers, _ = _python_blockers(root)
+            self.assertIn(
+                "RESEARCH_EDITABLE_NO_BUILD_ISOLATION_MISSING",
+                blockers,
+            )
+            self.assertNotIn("RESEARCH_BUILD_REQUIREMENTS_DRIFT", blockers)
+            self.assertNotIn("RESEARCH_TEST_REQUIREMENTS_DRIFT", blockers)
 
     def test_research_test_extra_matches_exact_resolved_graph(self):
         self.assertFalse(

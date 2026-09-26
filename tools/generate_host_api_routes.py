@@ -140,6 +140,22 @@ def parse_operations(text: str) -> tuple[Operation, ...]:
             current_method = method_match.group(1)
             current_operation_id = None
             continue
+        if line.startswith("    ") and not line.startswith("      "):
+            candidate = line.strip()
+            raw_key = candidate.split(":", 1)[0].strip()
+            dequoted_key = raw_key
+            if (
+                len(raw_key) >= 2
+                and raw_key[0] == raw_key[-1]
+                and raw_key[0] in {'"', "'"}
+            ):
+                dequoted_key = raw_key[1:-1]
+            if dequoted_key.lower() in _HTTP_METHODS:
+                raise ValueError(
+                    "unsupported OpenAPI HTTP operation syntax; "
+                    "method keys must be canonical lowercase unquoted entries "
+                    "without inline content"
+                )
         operation_match = _OPERATION.fullmatch(line)
         if operation_match:
             if current_method is None:

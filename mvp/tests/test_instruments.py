@@ -2,10 +2,14 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import json
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry, Resource
+
+from research.autotrade_research.artifacts.store import ArtifactStore
 
 from mvp.autotrade_mvp.instruments import (
     DeliverableLeg,
@@ -102,6 +106,36 @@ def option(
     )
 
 
+def publish_metadata_evidence(
+    artifact_store: ArtifactStore,
+    observed_at: datetime,
+    *,
+    artifact_id: str = B,
+    committed_at: datetime | None = None,
+) -> dict[str, str]:
+    committed = committed_at or observed_at
+    with patch(
+        "research.autotrade_research.artifacts.store.datetime"
+    ) as artifact_datetime:
+        artifact_datetime.now.return_value = committed
+        manifest = artifact_store.publish_bytes(
+            artifact_id=artifact_id,
+            data=f"instrument-metadata:{artifact_id}".encode("utf-8"),
+            media_type="application/vnd.autotrade.instrument-metadata+json",
+            rights={"storage": True, "export": False},
+            source_refs=["provider:instrument-metadata"],
+            metadata={"kind": "instrument-metadata"},
+        )
+    return {
+        "artifact_id": artifact_id,
+        "sha256": manifest["sha256"],
+        "observed_at": observed_at.astimezone(timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z"),
+        "rights_id": "provider-metadata-rights",
+    }
+
+
 class InstrumentRegistryTests(unittest.TestCase):
     def test_symbol_rename_preserves_identity_and_history(self):
         registry = InstrumentRegistry()
@@ -117,6 +151,191 @@ class InstrumentRegistryTests(unittest.TestCase):
         self.assertEqual(after.version, 2)
         with self.assertRaises(InstrumentNotFound):
             registry.resolve("simulated", "simulated-venue", "OLD", when(7))
+
+    def test_causal_lookup_does_not_let_late_metadata_retroactively_truncate_history(self):
+        with TemporaryDirectory() as directory:
+            artifact_store = ArtifactStore(Path(directory) / "artifacts")
+            old_evidence = publish_metadata_evidence(
+                artifact_store,
+                when(1),
+                artifact_id=B,
+            )
+            new_evidence = publish_metadata_evidence(
+                artifact_store,
+                when(8),
+                artifact_id=C,
+            )
+            registry = InstrumentRegistry()
+            registry.add(
+                spot(
+                    symbol="OLD",
+                    metadata_evidence=(old_evidence,),
+                )
+            )
+            registry.add(
+                spot(
+                    version=2,
+                    symbol="NEW",
+                    effective_from=when(6),
+                    metadata_evidence=(new_evidence,),
+                )
+            )
+
+            # Current operational truth knows v2 and therefore sees the rename.
+            self.assertEqual(registry.at(A, when(7)).version, 2)
+
+            # A replay at July 1 could not have known metadata committed in August.
+            causal = registry.at_known(
+                A,
+                when(7),
+                knowledge_cutoff=when(7),
+                artifact_store=artifact_store,
+            )
+            self.assertEqual(causal.version, 1)
+            self.assertEqual(causal.provider_symbol, "OLD")
+            self.assertEqual(
+                registry.resolve_known(
+                    "simulated",
+                    "simulated-venue",
+                    "OLD",
+                    when(7),
+                    knowledge_cutoff=when(7),
+                    artifact_store=artifact_store,
+                ).version,
+                1,
+            )
+            with self.assertRaises(InstrumentNotFound):
+                registry.resolve_known(
+                    "simulated",
+                    "simulated-venue",
+                    "NEW",
+                    when(7),
+                    knowledge_cutoff=when(7),
+                    artifact_store=artifact_store,
+                )
+
+            # Once immutable evidence exists by the cutoff, the same instant resolves to v2.
+            self.assertEqual(
+                registry.at_known(
+                    A,
+                    when(7),
+                    knowledge_cutoff=when(8),
+                    artifact_store=artifact_store,
+                ).version,
+                2,
+            )
+
+    def test_causal_lookup_requires_resolvable_immutable_metadata_evidence(self):
+        with TemporaryDirectory() as directory:
+            artifact_store = ArtifactStore(Path(directory) / "artifacts")
+            registry = InstrumentRegistry()
+            registry.add(
+                spot(
+                    metadata_evidence=(
+                        {
+                            "artifact_id": B,
+                            "sha256": "sha256:" + "a" * 64,
+                            "observed_at": "2026-01-01T00:00:00Z",
+                            "rights_id": "provider-metadata-rights",
+                        },
+                    ),
+                )
+            )
+            with self.assertRaisesRegex(
+                InstrumentRegistryError,
+                "cannot be integrity verified",
+            ):
+                registry.at_known(
+                    A,
+                    when(1),
+                    knowledge_cutoff=when(2),
+                    artifact_store=artifact_store,
+                )
+
+    def test_causal_lookup_uses_immutable_commit_time_not_claimed_observation_only(self):
+        with TemporaryDirectory() as directory:
+            artifact_store = ArtifactStore(Path(directory) / "artifacts")
+            evidence = publish_metadata_evidence(
+                artifact_store,
+                when(1),
+                artifact_id=B,
+                committed_at=when(8),
+            )
+            registry = InstrumentRegistry()
+            registry.add(spot(metadata_evidence=(evidence,)))
+
+            with self.assertRaises(InstrumentNotFound):
+                registry.at_known(
+                    A,
+                    when(2),
+                    knowledge_cutoff=when(7),
+                    artifact_store=artifact_store,
+                )
+            self.assertEqual(
+                registry.at_known(
+                    A,
+                    when(2),
+                    knowledge_cutoff=when(8),
+                    artifact_store=artifact_store,
+                ).version,
+                1,
+            )
+
+    def test_causal_lookup_requires_metadata_evidence_and_no_future_effective_query(self):
+        with TemporaryDirectory() as directory:
+            artifact_store = ArtifactStore(Path(directory) / "artifacts")
+            registry = InstrumentRegistry()
+            registry.add(spot())
+            with self.assertRaisesRegex(InstrumentNotFound, "causally known"):
+                registry.at_known(
+                    A,
+                    when(1),
+                    knowledge_cutoff=when(2),
+                    artifact_store=artifact_store,
+                )
+            with self.assertRaisesRegex(InstrumentRegistryError, "later than causal"):
+                registry.at_known(
+                    A,
+                    when(3),
+                    knowledge_cutoff=when(2),
+                    artifact_store=artifact_store,
+                )
+
+    def test_all_metadata_evidence_must_be_committed_before_causal_version_is_visible(self):
+        with TemporaryDirectory() as directory:
+            artifact_store = ArtifactStore(Path(directory) / "artifacts")
+            first = publish_metadata_evidence(
+                artifact_store,
+                when(1),
+                artifact_id=B,
+            )
+            second = publish_metadata_evidence(
+                artifact_store,
+                when(3),
+                artifact_id=C,
+            )
+            registry = InstrumentRegistry()
+            registry.add(
+                spot(
+                    metadata_evidence=(first, second),
+                )
+            )
+            with self.assertRaises(InstrumentNotFound):
+                registry.at_known(
+                    A,
+                    when(2),
+                    knowledge_cutoff=when(2),
+                    artifact_store=artifact_store,
+                )
+            self.assertEqual(
+                registry.at_known(
+                    A,
+                    when(2),
+                    knowledge_cutoff=when(3),
+                    artifact_store=artifact_store,
+                ).version,
+                1,
+            )
 
     def test_uuid_identity_aliases_are_canonicalized_before_registry_use(self):
         braced = spot(instrument_id="{" + A + "}")

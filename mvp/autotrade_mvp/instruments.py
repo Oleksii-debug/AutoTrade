@@ -11,6 +11,11 @@ from typing import Iterable, Mapping
 from urllib.parse import urlsplit
 from uuid import UUID
 
+from research.autotrade_research.artifacts.store import (
+    ArtifactIntegrityError,
+    ArtifactStore,
+)
+
 
 class InstrumentRegistryError(ValueError):
     """Base error for invalid instrument metadata or lookups."""
@@ -679,6 +684,167 @@ class InstrumentRegistry:
             if version.contains(instant, implicit_end):
                 return version
         raise InstrumentNotFound("no instrument version is effective at requested instant")
+
+    @staticmethod
+    def _metadata_known_by(
+        version: InstrumentVersion,
+        knowledge_cutoff: datetime,
+        *,
+        artifact_store: ArtifactStore,
+    ) -> bool:
+        """Whether immutable metadata evidence was actually committed by the cutoff."""
+
+        if not isinstance(artifact_store, ArtifactStore):
+            raise TypeError("artifact_store must be the canonical ArtifactStore")
+        cutoff = _utc(knowledge_cutoff, "knowledge_cutoff")
+        if not version.metadata_evidence:
+            return False
+        known_at: list[datetime] = []
+        for evidence in version.metadata_evidence:
+            raw = evidence.get("observed_at")
+            if not isinstance(raw, str) or not raw.endswith("Z"):
+                raise InstrumentRegistryError(
+                    "instrument metadata evidence has invalid observed_at"
+                )
+            try:
+                observed = datetime.fromisoformat(raw[:-1] + "+00:00").astimezone(
+                    timezone.utc
+                )
+            except ValueError as error:
+                raise InstrumentRegistryError(
+                    "instrument metadata evidence has invalid observed_at"
+                ) from error
+
+            artifact_id = evidence.get("artifact_id")
+            expected_digest = evidence.get("sha256")
+            if not isinstance(artifact_id, str) or not isinstance(expected_digest, str):
+                raise InstrumentRegistryError(
+                    "instrument metadata evidence identity is invalid"
+                )
+            try:
+                manifest = artifact_store.load_manifest(artifact_id)
+                artifact_store.read_bytes(artifact_id)
+            except (
+                ArtifactIntegrityError,
+                FileNotFoundError,
+                OSError,
+                TypeError,
+                ValueError,
+            ) as error:
+                raise InstrumentRegistryError(
+                    "instrument metadata evidence cannot be integrity verified"
+                ) from error
+            if manifest.get("sha256") != expected_digest:
+                raise InstrumentRegistryError(
+                    "instrument metadata evidence digest mismatch"
+                )
+            committed_raw = manifest.get("created_at")
+            if not isinstance(committed_raw, str):
+                raise InstrumentRegistryError(
+                    "instrument metadata evidence lacks trusted commit time"
+                )
+            try:
+                committed = datetime.fromisoformat(
+                    committed_raw.replace("Z", "+00:00")
+                ).astimezone(timezone.utc)
+            except ValueError as error:
+                raise InstrumentRegistryError(
+                    "instrument metadata evidence commit time is invalid"
+                ) from error
+            if observed > committed:
+                raise InstrumentRegistryError(
+                    "instrument metadata evidence observation follows immutable commit"
+                )
+            known_at.append(max(observed, committed))
+        return max(known_at) <= cutoff
+
+    def at_known(
+        self,
+        instrument_id: str,
+        instant: datetime,
+        *,
+        knowledge_cutoff: datetime,
+        artifact_store: ArtifactStore,
+    ) -> InstrumentVersion:
+        """Resolve only from metadata that was actually knowable by the cutoff.
+
+        This is the replay/science lookup.  It intentionally differs from at():
+        operational runtime can use the registry's currently loaded truth, while
+        historical replay must not let a later-discovered version retroactively
+        truncate a prior version's effective interval.
+        """
+
+        effective_point = _utc(instant, "instant")
+        cutoff = _utc(knowledge_cutoff, "knowledge_cutoff")
+        if effective_point > cutoff:
+            raise InstrumentRegistryError(
+                "instant cannot be later than causal knowledge_cutoff"
+            )
+        versions = self._versions.get(instrument_id)
+        if not versions:
+            raise InstrumentNotFound("instrument_id is unknown")
+
+        known_versions = [
+            version
+            for version in versions
+            if self._metadata_known_by(
+                version,
+                cutoff,
+                artifact_store=artifact_store,
+            )
+        ]
+        for index in range(len(known_versions) - 1, -1, -1):
+            version = known_versions[index]
+            implicit_end = (
+                known_versions[index + 1].effective_from
+                if index + 1 < len(known_versions)
+                else None
+            )
+            if version.contains(effective_point, implicit_end):
+                return version
+        raise InstrumentNotFound(
+            "no causally known instrument version is effective at requested instant"
+        )
+
+    def resolve_known(
+        self,
+        provider_id: str,
+        venue_id: str,
+        provider_symbol: str,
+        instant: datetime,
+        *,
+        knowledge_cutoff: datetime,
+        artifact_store: ArtifactStore,
+    ) -> InstrumentVersion:
+        """Causal provider-symbol resolution for replay/research."""
+
+        provider = _text(provider_id, "provider_id")
+        venue = _text(venue_id, "venue_id")
+        symbol = _text(provider_symbol, "provider_symbol")
+        matches = []
+        for instrument_id in self._versions:
+            try:
+                version = self.at_known(
+                    instrument_id,
+                    instant,
+                    knowledge_cutoff=knowledge_cutoff,
+                    artifact_store=artifact_store,
+                )
+            except InstrumentNotFound:
+                continue
+            if (
+                version.provider_id == provider
+                and version.venue_id == venue
+                and version.provider_symbol == symbol
+            ):
+                matches.append(version)
+        if not matches:
+            raise InstrumentNotFound(
+                "provider symbol is not causally known at requested instant"
+            )
+        if len(matches) > 1:
+            raise InstrumentConflict("causal provider symbol resolution is ambiguous")
+        return matches[0]
 
     def resolve(
         self,

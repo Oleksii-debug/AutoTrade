@@ -236,6 +236,7 @@ def qualify_scientific_learning(
     evidence_store: ArtifactStore | None = None,
     expected_policy_id: str | None = None,
     expected_policy_version: str | None = None,
+    trusted_source_sha: str | None = None,
 ) -> ScientificQualificationResult:
     """Audit scientific evidence without granting release or trading authority.
 
@@ -243,7 +244,9 @@ def qualify_scientific_learning(
     caller-selected callback is not an independent trust boundary and can
     never make a gate terminally VERIFIED. Terminal signed evidence is checked
     only against the fixed canonical qualification trust policy; caller-selected
-    policy objects or pins are rejected fail-closed.
+    policy objects or pins are rejected fail-closed. Signed terminal verification
+    additionally requires trusted_source_sha from the qualification runner;
+    the evidence payload cannot nominate its own trusted source revision.
     """
     if not isinstance(evidence, ScientificQualificationInput):
         raise TypeError("evidence must be ScientificQualificationInput")
@@ -263,19 +266,30 @@ def qualify_scientific_learning(
         expected_policy_version,
     )
     trust_inputs = (qualification_receipt, evidence_store)
+    trusted_source = (
+        None
+        if trusted_source_sha is None
+        else _git_sha_identity(trusted_source_sha, "trusted_source_sha")
+    )
     if any(value is not None for value in caller_selected_trust):
         trust_status = "FAIL"
         reasons.append("SCIENCE.CALLER_SELECTED_TRUST_POLICY_FORBIDDEN")
     elif all(value is None for value in trust_inputs):
         reasons.append("SCIENCE.INDEPENDENT_ATTESTATION_MISSING")
-    elif any(value is None for value in trust_inputs) or evidence.source_sha is None:
+    elif any(value is None for value in trust_inputs):
         reasons.append("SCIENCE.INDEPENDENT_ATTESTATION_INCOMPLETE")
+    elif trusted_source is None:
+        trust_status = "FAIL"
+        reasons.append("SCIENCE.TRUSTED_SOURCE_MISSING")
+    elif evidence.source_sha is None or evidence.source_sha != trusted_source:
+        trust_status = "FAIL"
+        reasons.append("SCIENCE.TRUSTED_SOURCE_MISMATCH")
     else:
         try:
             accepted = verify_canonical_qualification_attestation(
                 qualification_receipt,
                 evidence_store=evidence_store,
-                expected_source_sha=evidence.source_sha,
+                expected_source_sha=trusted_source,
                 expected_domain=_QUALIFICATION_DOMAIN,
                 expected_gate=_QUALIFICATION_GATE,
                 expected_package_id=_QUALIFICATION_PACKAGE,

@@ -357,11 +357,14 @@ def build_diagnostic_snapshot(state_dir: str | Path) -> DiagnosticSnapshot:
     if observed_evidence_ids != set(evidence_by_id):
         raise ValueError("Learning evidence is missing durable journal trace linkage")
 
+    pending_total = store.pending_outbox_count()
     pending_sample = store.pending_outbox(limit=1000)
+    if pending_total < len(pending_sample):
+        raise ValueError("Pending outbox count is smaller than the diagnostic sample")
     return DiagnosticSnapshot(
         symbol=symbol,
         traces=tuple(traces),
         evidence_count=len(evidence),
         pending_outbox_sample_count=len(pending_sample),
-        pending_outbox_sample_truncated=len(pending_sample) == 1000,
+        pending_outbox_sample_truncated=pending_total > len(pending_sample),
     )

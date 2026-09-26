@@ -939,6 +939,55 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         self.assertFalse(coverage.complete)
         self.assertEqual(coverage.next_offset, 3)
 
+    def test_kraken_pagination_rejects_record_overlap_across_pages(self):
+        first = pagination_page_from_observation(
+            trade_history_observation(
+                {
+                    "error": [],
+                    "result": {
+                        "trades": {"T-1": {}, "T-2": {}},
+                        "count": 4,
+                    },
+                },
+                query={
+                    "ofs": "0",
+                    "limit": "2",
+                    "type": "all",
+                    "end": "1790385000",
+                },
+            ),
+            surface="EXECUTIONS",
+        )
+        second = pagination_page_from_observation(
+            trade_history_observation(
+                {
+                    "error": [],
+                    "result": {
+                        "trades": {"T-2": {}, "T-3": {}},
+                        "count": 4,
+                    },
+                },
+                query={
+                    "ofs": "2",
+                    "limit": "2",
+                    "type": "all",
+                    "end": "1790385000",
+                },
+            ),
+            surface="EXECUTIONS",
+        )
+        coverage = KrakenSpotPaginationCoverage(surface="EXECUTIONS")
+        coverage.add_page(first)
+
+        with self.assertRaisesRegex(
+            KrakenSpotAdapterError,
+            "duplicated across pages",
+        ):
+            coverage.add_page(second)
+
+        self.assertEqual(coverage.pages, (first,))
+        self.assertFalse(coverage.complete)
+
     def test_multi_page_kraken_coverage_rejects_pseudo_end_boundaries(self):
         for end in ("", "not a boundary", "001", "opaque"):
             with self.subTest(end=end):
@@ -1082,6 +1131,7 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 offset=0,
                 limit=50,
                 record_count=0,
+                record_ids=(),
                 total_count=0,
                 evidence_ref="provider-read:sha256:" + "0" * 64,
                 filter_items=(),

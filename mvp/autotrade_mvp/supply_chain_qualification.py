@@ -621,7 +621,12 @@ def qualify_supply_chain(
                 "attestation_digest": trust_receipt.attestation.content_digest,
                 "signature_sha256": "sha256:"
                 + sha256(trust_receipt.signature_b64.encode("ascii")).hexdigest(),
-                "policy_id": trust_policy.policy_id if trust_policy is not None else None,
+                "policy_id": (
+                    accepted_trust.policy_id if accepted_trust is not None else None
+                ),
+                "policy_version": (
+                    accepted_trust.policy_version if accepted_trust is not None else None
+                ),
                 "accepted_attestation_id": (
                     accepted_trust.attestation_id if accepted_trust is not None else None
                 ),

@@ -242,7 +242,7 @@ paths:
     def test_path_item_ref_cannot_be_silently_ignored(self):
         with self.assertRaisesRegex(
             ValueError,
-            r"unsupported OpenAPI Path Item field: \\$ref",
+            r"unsupported OpenAPI Path Item field: [$]ref",
         ):
             parse_operations(
                 """openapi: 3.1.0

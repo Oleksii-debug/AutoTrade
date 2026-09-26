@@ -43,6 +43,9 @@ _SENSITIVE_KEYS = {
     "api_key",
     "api_secret",
     "x_api_key",
+    "x_txc_apikey",
+    "x_txc_payload",
+    "x_txc_signature",
     "private_key",
     "private_key_pem",
 }
@@ -69,8 +72,9 @@ _EMBEDDED_SECRET_PATTERNS = (
         r"(?i)\b(https?://)[^/@\s]+@"
     ),
     re.compile(
-        r"""(?i)(?:["'])?\b(api[_-]?key|token|access[_-]?token|refresh[_-]?token|session|session[_-]?token|"""
-        r"""secret|credential|api[_-]?secret|client[_-]?secret|private[_-]?key|password)\b(?:["'])?\s*[:=]\s*"""
+        r"""(?i)(?:["'])?\b(api[_-]?key|x[_-]?txc[_-]?apikey|x[_-]?txc[_-]?payload|x[_-]?txc[_-]?signature|"""
+        r"""token|access[_-]?token|refresh[_-]?token|session|session[_-]?token|secret|credential|api[_-]?secret|"""
+        r"""client[_-]?secret|private[_-]?key|password)\b(?:["'])?\s*[:=]\s*"""
         r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^&\s;,}\]]+)"""
     ),
 )

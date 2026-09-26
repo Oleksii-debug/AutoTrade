@@ -209,6 +209,19 @@ class UntrustedResearchBoundaryTests(unittest.TestCase):
                 arguments=payload,
             )
 
+    def test_oversized_text_is_rejected_without_materializing_utf8_copy(self):
+        class EncodeMustNotRun(str):
+            def encode(self, *args, **kwargs):
+                raise AssertionError("oversized text must be rejected before encode")
+
+        hostile = EncodeMustNotRun("x" * 1_048_577)
+        with self.assertRaisesRegex(ResearchBoundaryError, "text value exceeds"):
+            ResearchModelResult(
+                result_id="oversized-no-encode",
+                proposal={"text": hostile},
+                evidence_refs=("evidence:1",),
+            )
+
     def test_hostile_giant_text_and_integer_scalars_are_rejected(self):
         with self.assertRaisesRegex(ResearchBoundaryError, "text value exceeds"):
             ResearchModelResult(

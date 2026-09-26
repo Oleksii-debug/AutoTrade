@@ -416,6 +416,38 @@ def _find_new_exposure_block(
     return matches[0] if matches else None
 
 
+def _preexisting_scope_block(
+    events: list[dict[str, Any]],
+    payload: Mapping[str, object],
+    expected_version: int,
+) -> dict[str, Any] | None:
+    account_id = _text(payload.get("account_id"), "account_id")
+    environment = _text(payload.get("environment"), "environment")
+    matches = [
+        event
+        for event in events
+        if event.get("event_type") == "AuthorityNewExposureBlocked"
+        and isinstance(event.get("payload"), Mapping)
+        and event["payload"].get("account_id") == account_id
+        and event["payload"].get("environment") == environment
+    ]
+    if len(matches) > 1:
+        raise OperatorAuthorityConflict(
+            "multiple durable new-exposure blocks exist for one authority scope"
+        )
+    if not matches:
+        return None
+    event = matches[0]
+    raw = event["payload"]
+    assert isinstance(raw, Mapping)
+    _text(raw.get("command_id"), "block command_id")
+    _text(raw.get("reason"), "block reason")
+    _text(raw.get("blocked_at"), "block blocked_at")
+    if int(event["aggregate_version"]) > expected_version:
+        return None
+    return event
+
+
 def _validated_new_exposure_block(
     events: list[dict[str, Any]],
     payload: Mapping[str, object],
@@ -540,6 +572,12 @@ def _resolved(
             accepted_at,
             expected_version,
         )
+        if block is None:
+            block = _preexisting_scope_block(
+                events,
+                payload,
+                expected_version,
+            )
         if block is None:
             return None
         affected.append(_new_exposure_block_ref(payload))
@@ -674,12 +712,18 @@ def execute_operator_authority_action(
             exact_done += 1
 
         block_event = None
+        preexisting_block = None
         block_done = 0
         if action_name == "BLOCK_NEW_EXPOSURE":
             block_event = _validated_new_exposure_block(
                 events,
                 payload,
                 accepted,
+                expected_version,
+            )
+            preexisting_block = _preexisting_scope_block(
+                events,
+                payload,
                 expected_version,
             )
             block_done = 1 if block_event is not None else 0
@@ -717,7 +761,11 @@ def execute_operator_authority_action(
                 "authority cut changed outside accepted operation"
             )
 
-        if action_name == "BLOCK_NEW_EXPOSURE" and block_event is None:
+        if (
+            action_name == "BLOCK_NEW_EXPOSURE"
+            and block_event is None
+            and preexisting_block is None
+        ):
             try:
                 service.block_new_exposure(
                     account_id=_text(payload["account_id"], "account_id"),

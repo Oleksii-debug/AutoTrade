@@ -95,9 +95,14 @@ public partial class MainWindow : Window
                     : status.ValidateStaleSuccessorOf(previous);
             }
 
+            // Preserve the newest validated connected authority snapshot even
+            // when its freshness is non-current.  Freshness may make evidence
+            // older, but it must never erase durable host/account/environment
+            // identity or state-version monotonicity from the successor chain.
+            _lastKnownConnectedStatus = status;
+
             if (status.IsCurrent)
             {
-                _lastKnownConnectedStatus = status;
                 HostValue.Text = status.HostId;
                 AccountValue.Text = status.AccountId;
                 EnvironmentValue.Text = status.Environment;

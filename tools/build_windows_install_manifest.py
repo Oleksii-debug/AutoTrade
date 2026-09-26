@@ -280,7 +280,27 @@ def _open_stable_regular_file(path: Path, *, name: str):
     return stream
 
 
-def _assert_open_file_identity(path: Path, stream, *, name: str) -> None:
+def _stable_file_fingerprint(value: os.stat_result) -> tuple[int, ...]:
+    """Return metadata that must remain stable for one verified open file."""
+
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _assert_open_file_identity(
+    path: Path,
+    stream,
+    *,
+    name: str,
+    expected: os.stat_result | None = None,
+) -> os.stat_result:
     try:
         opened = os.fstat(stream.fileno())
         current = os.stat(path, follow_symlinks=False)
@@ -292,8 +312,16 @@ def _assert_open_file_identity(path: Path, stream, *, name: str) -> None:
         raise InstallerManifestError(f"{name} must be a regular non-symlink file")
     if opened.st_nlink != 1 or current.st_nlink != 1:
         raise InstallerManifestError(f"{name} must not have hard-link aliases")
-    if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+    opened_fingerprint = _stable_file_fingerprint(opened)
+    current_fingerprint = _stable_file_fingerprint(current)
+    if opened_fingerprint != current_fingerprint:
         raise InstallerManifestError(f"{name} changed during verification")
+    if (
+        expected is not None
+        and opened_fingerprint != _stable_file_fingerprint(expected)
+    ):
+        raise InstallerManifestError(f"{name} changed during verification")
+    return opened
 
 
 def _sha256_stream(stream) -> str:
@@ -322,13 +350,25 @@ def _zip_member_is_regular(info: zipfile.ZipInfo) -> bool:
 
 def verify_release_bundle(bundle: Path) -> dict[str, object]:
     with _open_stable_regular_file(bundle, name="release bundle") as bundle_stream:
+        before = _assert_open_file_identity(
+            bundle,
+            bundle_stream,
+            name="release bundle",
+        )
         bundle_digest = "sha256:" + _sha256_stream(bundle_stream)
         bundle_stream.seek(0)
         verified = _verify_release_bundle_stream(bundle_stream, bundle_digest)
+        bundle_stream.seek(0)
+        final_digest = "sha256:" + _sha256_stream(bundle_stream)
+        if final_digest != bundle_digest:
+            raise InstallerManifestError(
+                "release bundle changed during verification"
+            )
         _assert_open_file_identity(
             bundle,
             bundle_stream,
             name="release bundle",
+            expected=before,
         )
         return verified
 

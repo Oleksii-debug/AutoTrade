@@ -15,6 +15,9 @@ on:
       - "tools/generate_common_scalar_bindings.py"
       - "tools/generate_host_api_routes.py"
       - "web/src/host-api-routes.js"
+      - "web/src/app.js"
+      - "web/src/index.html"
+      - "src/AutoTrade.Desktop/AuthenticatedEmergencyHostClient.cs"
       - ".github/workflows/contracts.yml"
   pull_request:
     paths:
@@ -28,6 +31,9 @@ on:
       - "tools/generate_common_scalar_bindings.py"
       - "tools/generate_host_api_routes.py"
       - "web/src/host-api-routes.js"
+      - "web/src/app.js"
+      - "web/src/index.html"
+      - "src/AutoTrade.Desktop/AuthenticatedEmergencyHostClient.cs"
       - ".github/workflows/contracts.yml"
 
 concurrency:

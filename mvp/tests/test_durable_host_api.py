@@ -511,7 +511,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
         ):
             with self.subTest(operation=operation), self.assertRaisesRegex(
                 ValueError,
-                "operation identity does not match canonical command scope",
+                "legacy operation identity must be a UUID",
             ):
                 operation()
 
@@ -569,7 +569,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
                 ):
                     operation()
 
-    def test_restart_rejects_uuid_shaped_noncanonical_legacy_operation_identity(self):
+    def test_restart_preserves_uuid_shaped_legacy_operation_as_non_executable(self):
         source = self.store()
         accepted = source.submit(self.command())
         source_event = JournalStore(self.path).load_events(
@@ -579,14 +579,14 @@ class JournalBackedHostApiTests(unittest.TestCase):
         payload = dict(source_event["payload"])
         payload.pop("action_payload")
         payload.pop("action_payload_hash")
-        forged_operation_id = "22222222-2222-4222-8222-222222222222"
-        self.assertNotEqual(forged_operation_id, accepted.operation_id)
-        payload["operation_id"] = forged_operation_id
+        legacy_operation_id = "22222222-2222-4222-8222-222222222222"
+        self.assertNotEqual(legacy_operation_id, accepted.operation_id)
+        payload["operation_id"] = legacy_operation_id
 
         with TemporaryDirectory() as directory:
             forged_path = f"{directory}/journal.sqlite3"
             journal = JournalStore(forged_path)
-            forged = JournalBackedHostCommandStore(
+            legacy = JournalBackedHostCommandStore(
                 journal,
                 account_id="paper-account-1",
                 environment="PAPER",
@@ -601,10 +601,10 @@ class JournalBackedHostApiTests(unittest.TestCase):
             )
             journal.append_event(
                 {
-                    "event_id": "forged-legacy-host-command-event",
+                    "event_id": "legacy-host-command-event",
                     "event_type": "COMMAND_ACCEPTED",
-                    "aggregate_type": forged.AGGREGATE_TYPE,
-                    "aggregate_id": forged.aggregate_id,
+                    "aggregate_type": legacy.AGGREGATE_TYPE,
+                    "aggregate_id": legacy.aggregate_id,
                     "aggregate_version": "1",
                     "payload": payload,
                     "payload_hash": payload_digest(payload),
@@ -613,17 +613,24 @@ class JournalBackedHostApiTests(unittest.TestCase):
                 outbox_topic="ui.host-events",
             )
 
-            for operation in (
-                lambda: forged.state_version,
-                forged.snapshot,
-                lambda: forged.events_after(0),
-                lambda: forged.get_operation(forged_operation_id),
+            self.assertEqual(legacy.state_version, 1)
+            self.assertEqual(
+                legacy.get_operation(legacy_operation_id).phase,
+                "QUEUED",
+            )
+            self.assertEqual(
+                legacy.snapshot()["operations"][legacy_operation_id],
+                "QUEUED",
+            )
+            self.assertEqual(
+                legacy.events_after(0)[0].payload["operation_id"],
+                legacy_operation_id,
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "predates durable action payload",
             ):
-                with self.subTest(operation=operation), self.assertRaisesRegex(
-                    ValueError,
-                    "operation identity does not match canonical command scope",
-                ):
-                    operation()
+                legacy.execute_authority_operation(legacy_operation_id)
 
     def test_exact_retry_after_restart_returns_original_result_without_new_event(self):
         first = self.store()
@@ -690,11 +697,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
         journal = JournalStore(self.path)
         aggregate_id = self.store().aggregate_id
         command_id = "11111111-1111-1111-1111-111111111111"
-        operation_id = scoped_host_operation_id(
-            account_id="paper-account-1",
-            environment="PAPER",
-            command_id=command_id,
-        )
+        operation_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
         payload = {
             "command_id": command_id,
             "operation_id": operation_id,
@@ -734,11 +737,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
         journal = JournalStore(self.path)
         aggregate_id = self.store().aggregate_id
         command_id = "11111111-1111-1111-1111-111111111111"
-        operation_id = scoped_host_operation_id(
-            account_id="paper-account-1",
-            environment="PAPER",
-            command_id=command_id,
-        )
+        operation_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
         accepted = {
             "command_id": command_id,
             "operation_id": operation_id,

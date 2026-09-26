@@ -61,6 +61,12 @@
     <section id="opportunities" aria-labelledby="opportunities-heading">
       <h2 id="opportunities-heading">Opportunities and decisions</h2>
       <p>This is the canonical strategy projection from the host snapshot; it is not an instruction to trade.</p>
+      <div class="table-tools" aria-label="Strategy and decision table tools">
+        <label for="strategy-filter">Filter strategy and decision rows</label>
+        <input id="strategy-filter" type="search" autocomplete="off" spellcheck="false">
+        <button id="strategy-copy" type="button">Copy visible rows</button>
+        <output id="strategy-filter-status" for="strategy-filter" role="status" aria-live="polite">No host rows are available to filter.</output>
+      </div>
       <div id="strategy-region" class="table-scroll" role="region" aria-label="Strategy and decision projection" tabindex="0">
         <table>
           <caption>Strategy and decision projection</caption>
@@ -73,6 +79,12 @@
     <section id="portfolio" aria-labelledby="portfolio-heading">
       <h2 id="portfolio-heading">Portfolio and orders</h2>
       <p>Financial values remain host-authoritative. Accepted commands are not fills.</p>
+      <div class="table-tools" aria-label="Portfolio table tools">
+        <label for="portfolio-filter">Filter portfolio rows</label>
+        <input id="portfolio-filter" type="search" autocomplete="off" spellcheck="false">
+        <button id="portfolio-copy" type="button">Copy visible rows</button>
+        <output id="portfolio-filter-status" for="portfolio-filter" role="status" aria-live="polite">No host rows are available to filter.</output>
+      </div>
       <div id="portfolio-region" class="table-scroll" role="region" aria-label="Portfolio projection" tabindex="0">
         <table>
           <caption>Portfolio projection</caption>
@@ -94,6 +106,12 @@
 
     <section id="risk" aria-labelledby="risk-heading">
       <h2 id="risk-heading">Risk and authority</h2>
+      <div class="table-tools" aria-label="Risk and authority table tools">
+        <label for="risk-filter">Filter risk and authority rows</label>
+        <input id="risk-filter" type="search" autocomplete="off" spellcheck="false">
+        <button id="risk-copy" type="button">Copy visible rows</button>
+        <output id="risk-filter-status" for="risk-filter" role="status" aria-live="polite">No host rows are available to filter.</output>
+      </div>
       <div id="risk-region" class="table-scroll" role="region" aria-label="Risk and authority projection" tabindex="0">
         <table>
           <caption>Risk and authority projection</caption>
@@ -120,6 +138,12 @@
     <section id="research" aria-labelledby="research-heading">
       <h2 id="research-heading">Research and replay</h2>
       <p>Background job evidence is read-only here until canonical research control contracts are exposed.</p>
+      <div class="table-tools" aria-label="Research and replay job table tools">
+        <label for="jobs-filter">Filter background research and replay jobs</label>
+        <input id="jobs-filter" type="search" autocomplete="off" spellcheck="false">
+        <button id="jobs-copy" type="button">Copy visible rows</button>
+        <output id="jobs-filter-status" for="jobs-filter" role="status" aria-live="polite">No host rows are available to filter.</output>
+      </div>
       <div id="jobs-region" class="table-scroll" role="region" aria-label="Background research and replay jobs" tabindex="0">
         <table>
           <caption>Background research and replay jobs</caption>
@@ -135,6 +159,12 @@
       <h2 id="history-heading">History and diagnostics</h2>
       <h3>Canonical host events received by this session</h3>
       <p>This table shows only events actually received from the canonical host event stream in this page session. A cursor gap triggers a fresh snapshot; missing events are not invented or reconstructed in the browser.</p>
+      <div class="table-tools" aria-label="Canonical host event history table tools">
+        <label for="event-history-filter">Filter received host events</label>
+        <input id="event-history-filter" type="search" autocomplete="off" spellcheck="false">
+        <button id="event-history-copy" type="button">Copy visible rows</button>
+        <output id="event-history-filter-status" for="event-history-filter" role="status" aria-live="polite">No host rows are available to filter.</output>
+      </div>
       <div id="event-history-region" class="table-scroll" role="region"
            aria-label="Canonical host event history received by this session" tabindex="0">
         <table>

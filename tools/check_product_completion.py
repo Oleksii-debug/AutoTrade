@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from hashlib import sha256
 import json
 from pathlib import Path
 import re
@@ -23,16 +24,23 @@ if str(ROOT) not in sys.path:
 from mvp.autotrade_mvp.qualification_attestation import (
     QualificationTrustError,
     QualificationTrustPolicy,
+    SignedQualificationAttestation,
     parse_qualification_trust_policy,
     parse_signed_qualification_attestation,
     verify_qualification_attestation,
 )
 from research.autotrade_research.artifacts.store import ArtifactStore
+from tools.check_nvda_qualification import (
+    NvdaQualificationError,
+    validate_release_artifact_binding,
+    validate_trusted_nvda_qualification,
+)
 
 DEFAULT_SPEC = ROOT / "docs" / "product" / "PRODUCT_SPEC_CANONICAL.txt"
 DEFAULT_BANK = ROOT / "control" / "work-packages" / "bank.json"
 DEFAULT_QUALIFICATION = ROOT / "control" / "qualification.json"
 DEFAULT_NVDA_STATUS = ROOT / "qualification" / "nvda" / "status.json"
+DEFAULT_NVDA_REQUIREMENTS = ROOT / "qualification" / "nvda" / "requirements.json"
 
 EXPECTED_SECTION_IDS = tuple(f"SECTION-{index:02d}" for index in range(1, 41))
 EXPECTED_PACKAGE_IDS = tuple(f"WP-{index:02d}" for index in range(1, 66))
@@ -62,7 +70,18 @@ EXPECTED_GATE_NAMES = frozenset(
 TERMINAL_PACKAGE_STATUS = "DONE"
 TERMINAL_OVERALL_STATUS = "FULL_PRODUCT_QUALIFIED"
 TERMINAL_GATE_STATUS = "QUALIFIED"
+_BANK_SCHEMA_VERSION = "1.0.0"
+_QUALIFICATION_SCHEMA_VERSION = "2.0.0"
+_SUPPORTED_QUALIFICATION_SCHEMA_VERSIONS = frozenset(
+    {"1.0.0", _QUALIFICATION_SCHEMA_VERSION}
+)
+_NVDA_STATUS_SCHEMA_VERSION = "1.0.0"
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+_SHA256_TEXT = re.compile(r"^sha256:[0-9a-f]{64}$")
+_UUID_TEXT = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
+_NVDA_TERMINAL_REASON = "QUALIFIED_SIGNED_REAL_NVDA_RELEASE"
 _WHOLE_PRODUCT_DOMAIN = "WHOLE_PRODUCT"
 _WHOLE_PRODUCT_GATE = "COMPLETION"
 _WHOLE_PRODUCT_PACKAGE = "WP-60"
@@ -76,6 +95,9 @@ class WholeProductEvidenceContext:
     policy: QualificationTrustPolicy
     expected_policy_id: str
     expected_policy_version: str
+    nvda_receipt: SignedQualificationAttestation | None = None
+    nvda_requirements_json: str | None = None
+    nvda_release_artifact: Path | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.evidence_store, ArtifactStore):
@@ -89,6 +111,37 @@ class WholeProductEvidenceContext:
             or not self.expected_policy_version
         ):
             raise ValueError("expected_policy_version is required")
+        nvda_values = (
+            self.nvda_receipt,
+            self.nvda_requirements_json,
+            self.nvda_release_artifact,
+        )
+        if any(value is not None for value in nvda_values) and not all(
+            value is not None for value in nvda_values
+        ):
+            raise ValueError(
+                "NVDA receipt, canonical requirements, and release artifact "
+                "must be supplied together"
+            )
+        if self.nvda_receipt is not None and not isinstance(
+            self.nvda_receipt,
+            SignedQualificationAttestation,
+        ):
+            raise TypeError("nvda_receipt must be SignedQualificationAttestation")
+        if self.nvda_requirements_json is not None:
+            if not isinstance(self.nvda_requirements_json, str):
+                raise TypeError("nvda_requirements_json must be text")
+            try:
+                requirements = json.loads(self.nvda_requirements_json)
+            except json.JSONDecodeError as error:
+                raise ValueError("NVDA requirements JSON is invalid") from error
+            if type(requirements) is not dict:
+                raise ValueError("NVDA requirements must be an object")
+        if self.nvda_release_artifact is not None and not isinstance(
+            self.nvda_release_artifact,
+            Path,
+        ):
+            raise TypeError("nvda_release_artifact must be a Path")
 
 
 class ProductCompletionError(ValueError):
@@ -118,27 +171,158 @@ def _load_text(path: Path, *, name: str) -> str:
 def _section_ids(spec_text: str) -> tuple[str, ...]:
     if not isinstance(spec_text, str) or not spec_text.strip():
         raise ProductCompletionError("canonical product spec must be non-empty text")
-    found: list[str] = []
-    seen: set[int] = set()
+    numbered: list[tuple[int, str]] = []
     for line in spec_text.splitlines():
         match = re.match(r"^\s*(\d+)\.\s+(.+?)\s*$", line)
         if match is None:
             continue
         number = int(match.group(1))
-        if 1 <= number <= 40 and number not in seen:
-            seen.add(number)
-            found.append(f"SECTION-{number:02d}")
-    if tuple(found) != EXPECTED_SECTION_IDS:
+        if 1 <= number <= 40:
+            numbered.append((number, match.group(2)))
+
+    expected_numbers = tuple(range(1, 41))
+    if len(numbered) != 80:
         raise ProductCompletionError(
-            "canonical product spec must expose ordered sections 1..40"
+            "canonical product spec must expose exactly one 1..40 table of "
+            "contents and one 1..40 body heading sequence"
         )
-    return tuple(found)
+    toc = numbered[:40]
+    body = numbered[40:]
+    if (
+        tuple(number for number, _title in toc) != expected_numbers
+        or tuple(number for number, _title in body) != expected_numbers
+    ):
+        raise ProductCompletionError(
+            "canonical product spec table of contents and body must each expose "
+            "ordered sections 1..40"
+        )
+    if tuple(title for _number, title in toc) != tuple(
+        title for _number, title in body
+    ):
+        raise ProductCompletionError(
+            "canonical product spec table of contents does not match body headings"
+        )
+    return EXPECTED_SECTION_IDS
 
 
 def _exact_source(value: object) -> str | None:
     if isinstance(value, str) and _GIT_SHA.fullmatch(value):
         return value
     return None
+
+
+def _terminal_nvda_status(
+    nvda_status: dict[str, Any],
+    *,
+    exact_source_sha: str | None,
+    evidence_context: WholeProductEvidenceContext | None,
+) -> bool:
+    """Reverify terminal NVDA truth instead of trusting a hand-authored status."""
+    if nvda_status.get("schema_version") != _NVDA_STATUS_SCHEMA_VERSION:
+        return False
+    if nvda_status.get("qualified") is not True:
+        return False
+    if nvda_status.get("reason") != _NVDA_TERMINAL_REASON:
+        return False
+    if exact_source_sha is None or nvda_status.get("source_sha") != exact_source_sha:
+        return False
+    for field in ("release_artifact_id", "attestation_id"):
+        value = nvda_status.get(field)
+        if not isinstance(value, str) or _UUID_TEXT.fullmatch(value) is None:
+            return False
+    for field in (
+        "artifact_sha256",
+        "evidence_sha256",
+        "attestation_digest",
+        "policy_id",
+        "trust_root_id",
+    ):
+        value = nvda_status.get(field)
+        if not isinstance(value, str) or _SHA256_TEXT.fullmatch(value) is None:
+            return False
+    if (
+        evidence_context is None
+        or evidence_context.nvda_receipt is None
+        or evidence_context.nvda_requirements_json is None
+        or evidence_context.nvda_release_artifact is None
+    ):
+        return False
+
+    receipt = evidence_context.nvda_receipt
+    matching_refs = tuple(
+        ref
+        for ref in receipt.attestation.evidence_refs
+        if (
+            ref.sha256 == nvda_status["evidence_sha256"]
+            and ref.evidence_kind == "NVDA_REAL_RUN"
+            and ref.source_sha == exact_source_sha
+        )
+    )
+    if len(matching_refs) != 1:
+        return False
+
+    try:
+        raw_evidence = evidence_context.evidence_store.read_bytes(
+            matching_refs[0].artifact_id
+        )
+        if (
+            "sha256:" + sha256(raw_evidence).hexdigest()
+            != nvda_status["evidence_sha256"]
+        ):
+            return False
+        evidence = json.loads(raw_evidence.decode("utf-8"))
+        requirements = json.loads(evidence_context.nvda_requirements_json)
+        if type(evidence) is not dict or type(requirements) is not dict:
+            return False
+        if evidence.get("source_sha") != exact_source_sha:
+            return False
+        if evidence.get("release_artifact_id") != nvda_status["release_artifact_id"]:
+            return False
+        if evidence.get("artifact_sha256") != nvda_status["artifact_sha256"]:
+            return False
+        actual_release_sha = validate_release_artifact_binding(
+            evidence,
+            evidence_context.nvda_release_artifact,
+        )
+        if actual_release_sha != nvda_status["artifact_sha256"]:
+            return False
+        verified = validate_trusted_nvda_qualification(
+            evidence,
+            requirements,
+            evidence_sha256=nvda_status["evidence_sha256"],
+            release_artifact_sha256=nvda_status["artifact_sha256"],
+            receipt=receipt,
+            policy=evidence_context.policy,
+            evidence_store=evidence_context.evidence_store,
+            expected_policy_id=evidence_context.expected_policy_id,
+            expected_policy_version=evidence_context.expected_policy_version,
+        )
+    except (
+        FileNotFoundError,
+        NvdaQualificationError,
+        QualificationTrustError,
+        TypeError,
+        UnicodeError,
+        ValueError,
+    ):
+        return False
+
+    for field in (
+        "source_sha",
+        "release_artifact_id",
+        "artifact_sha256",
+        "evidence_sha256",
+        "attestation_id",
+        "attestation_digest",
+        "policy_id",
+        "trust_root_id",
+    ):
+        if verified.get(field) != nvda_status.get(field):
+            return False
+    return (
+        verified.get("qualified") is True
+        and verified.get("reason") == _NVDA_TERMINAL_REASON
+    )
 
 
 def _independently_verified_evidence(
@@ -262,6 +446,24 @@ def evaluate_completion(
     exact_source_sha: str | None,
     evidence_context: WholeProductEvidenceContext | None = None,
 ) -> dict[str, Any]:
+    if bank.get("schema_version") != _BANK_SCHEMA_VERSION:
+        raise ProductCompletionError(
+            f"unsupported work-package bank schema_version: {bank.get('schema_version')!r}"
+        )
+    qualification_schema_version = qualification.get("schema_version")
+    if qualification_schema_version not in _SUPPORTED_QUALIFICATION_SCHEMA_VERSIONS:
+        raise ProductCompletionError(
+            "unsupported qualification schema_version: "
+            f"{qualification_schema_version!r}"
+        )
+    if (
+        qualification.get("overall_status") == TERMINAL_OVERALL_STATUS
+        and qualification_schema_version != _QUALIFICATION_SCHEMA_VERSION
+    ):
+        raise ProductCompletionError(
+            "FULL_PRODUCT_QUALIFIED requires qualification schema_version "
+            f"{_QUALIFICATION_SCHEMA_VERSION!r}"
+        )
     sections = _section_ids(spec_text)
     packages = bank.get("packages")
     if not isinstance(packages, list):
@@ -298,6 +500,12 @@ def evaluate_completion(
     if type(gates) is not dict or not gates:
         raise ProductCompletionError("qualification gates must be a non-empty object")
     missing_gates = sorted(EXPECTED_GATE_NAMES - set(gates))
+    unknown_gates = [name for name in gates if name not in EXPECTED_GATE_NAMES]
+    if unknown_gates:
+        raise ProductCompletionError(
+            "qualification gates contain unknown entries: "
+            + ", ".join(sorted(repr(name) for name in unknown_gates))
+        )
     nonterminal_gates = {
         str(name): value
         for name, value in sorted(gates.items())
@@ -315,9 +523,13 @@ def evaluate_completion(
         evidence_context=evidence_context,
     )
     overall_status = qualification.get("overall_status")
-    nvda_qualified = nvda_status.get("qualified") is True
     nvda_source_matches = (
         source_sha is not None and nvda_status.get("source_sha") == source_sha
+    )
+    nvda_qualified = _terminal_nvda_status(
+        nvda_status,
+        exact_source_sha=source_sha,
+        evidence_context=evidence_context,
     )
 
     blockers: list[str] = []
@@ -389,6 +601,8 @@ def main() -> int:
     parser.add_argument("--bank", type=Path, default=DEFAULT_BANK)
     parser.add_argument("--qualification", type=Path, default=DEFAULT_QUALIFICATION)
     parser.add_argument("--nvda-status", type=Path, default=DEFAULT_NVDA_STATUS)
+    parser.add_argument("--nvda-attestation", type=Path)
+    parser.add_argument("--nvda-release-artifact", type=Path)
     parser.add_argument("--source-sha")
     parser.add_argument("--evidence-store", type=Path)
     parser.add_argument("--qualification-policy", type=Path)
@@ -411,6 +625,19 @@ def main() -> int:
             raise ProductCompletionError(
                 "whole-product evidence trust inputs must be supplied together"
             )
+        nvda_inputs = (args.nvda_attestation, args.nvda_release_artifact)
+        if any(value is not None for value in nvda_inputs) and not all(
+            value is not None for value in nvda_inputs
+        ):
+            raise ProductCompletionError(
+                "NVDA attestation and release artifact must be supplied together"
+            )
+        if any(value is not None for value in nvda_inputs) and not all(
+            value is not None for value in trust_values
+        ):
+            raise ProductCompletionError(
+                "NVDA qualification requires the pinned qualification trust inputs"
+            )
         evidence_context = None
         if all(value is not None for value in trust_values):
             if not args.evidence_store.is_dir():
@@ -421,11 +648,29 @@ def main() -> int:
                 policy = parse_qualification_trust_policy(
                     _load(args.qualification_policy, name="qualification trust policy")
                 )
+                nvda_receipt = None
+                nvda_requirements_json = None
+                if args.nvda_attestation is not None:
+                    nvda_receipt = parse_signed_qualification_attestation(
+                        _load(args.nvda_attestation, name="signed NVDA attestation")
+                    )
+                    nvda_requirements_json = json.dumps(
+                        _load(
+                            DEFAULT_NVDA_REQUIREMENTS,
+                            name="canonical NVDA requirements",
+                        ),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    )
                 evidence_context = WholeProductEvidenceContext(
                     evidence_store=ArtifactStore(args.evidence_store),
                     policy=policy,
                     expected_policy_id=args.expected_policy_id,
                     expected_policy_version=args.expected_policy_version,
+                    nvda_receipt=nvda_receipt,
+                    nvda_requirements_json=nvda_requirements_json,
+                    nvda_release_artifact=args.nvda_release_artifact,
                 )
             except (QualificationTrustError, TypeError, ValueError) as error:
                 raise ProductCompletionError(

@@ -12,6 +12,7 @@ from mvp.autotrade_mvp.qualification_attestation import (
 from mvp.autotrade_mvp.science_qualification import (
     QualificationGate,
     ScientificQualificationInput,
+    _gate_assertion_requirement,
     qualify_scientific_learning,
 )
 from mvp.tests.test_qualification_attestation import (
@@ -79,6 +80,7 @@ def _signed_science_receipt(value):
             "uncertainty",
             "forward_evidence",
         )),
+        *(_gate_assertion_requirement(gate) for gate in value.gates),
     ]
     if value.population_coverage_hash is not None:
         requirement_ids.append(
@@ -261,6 +263,55 @@ class ScientificQualificationTests(unittest.TestCase):
         result = qualify(evidence(complete_gates(leakage="FAIL")))
         self.assertEqual(result.status, "FAIL")
         self.assertIn("X.LEAKAGE", result.reason_codes)
+
+    def test_signed_failed_gate_cannot_be_relabelled_pass(self):
+        original = evidence(complete_gates(leakage="FAIL"))
+        receipt, trust_policy = _signed_science_receipt(original)
+
+        tampered_gates = tuple(
+            gate("leakage", "PASS")
+            if item.gate_id == "leakage"
+            else item
+            for item in original.gates
+        )
+        tampered = ScientificQualificationInput(
+            original.candidate_hash,
+            original.frozen_protocol_hash,
+            original.input_snapshot_hash,
+            tampered_gates,
+            "ECONOMIC_EDGE_QUALIFIED",
+            False,
+            False,
+            original.population_coverage_hash,
+            original.source_sha,
+        )
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            store.publish_bytes(
+                artifact_id=_POPULATION_ID,
+                data=_POPULATION_BYTES,
+                media_type="application/vnd.autotrade.qualification-evidence",
+                rights={"storage": True, "export": False},
+                source_refs=[f"git:{SOURCE}"],
+                metadata={"evidence_kind": "SCIENCE_POPULATION_COVERAGE"},
+            )
+            result = qualify_scientific_learning(
+                tampered,
+                qualification_receipt=receipt,
+                qualification_policy=trust_policy,
+                evidence_store=store,
+                expected_policy_id=trust_policy.policy_id,
+                expected_policy_version=trust_policy.policy_version,
+            )
+
+        self.assertEqual(result.status, "FAIL")
+        self.assertFalse(result.economic_claim_accepted)
+        self.assertIn(
+            "SCIENCE.INDEPENDENT_ATTESTATION_BINDING_MISMATCH",
+            result.reason_codes,
+        )
 
     def test_holdout_reuse_for_tuning_is_hard_fail(self):
         result = qualify(evidence(holdout_used=True))

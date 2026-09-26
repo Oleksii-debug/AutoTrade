@@ -377,6 +377,50 @@ class JournalBackedHostApiTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "binding is incomplete"):
             self.store().snapshot()
 
+    def test_restart_rejects_action_payload_bound_to_different_command_identity(self):
+        journal = JournalStore(self.path)
+        action_payload = {
+            "schema_version": 1,
+            "command_id": "22222222-2222-4222-8222-222222222222",
+            "account_id": "paper-account-1",
+            "environment": "PAPER",
+            "expected_authority_epoch": "0",
+            "expected_authority_version": "0",
+            "reason_code": "OPERATOR_REQUEST",
+            "target_policies": [],
+        }
+        payload = {
+            "command_id": "11111111-1111-4111-8111-111111111111",
+            "operation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "action": "BLOCK_NEW_EXPOSURE",
+            "action_payload": action_payload,
+            "action_payload_hash": payload_digest(action_payload),
+            "actor": "alice",
+            "account_id": "paper-account-1",
+            "environment": "PAPER",
+            "phase": "QUEUED",
+            "started_at": "2026-09-24T18:00:00Z",
+            "updated_at": "2026-09-24T18:00:00Z",
+            "affected_refs": [],
+            "evidence": [],
+            "remaining_uncertainty": ["financial_outcome_not_completed"],
+        }
+        journal.append_event(
+            {
+                "event_id": "mismatched-action-command",
+                "event_type": "COMMAND_ACCEPTED",
+                "aggregate_type": JournalBackedHostCommandStore.AGGREGATE_TYPE,
+                "aggregate_id": JournalBackedHostCommandStore.AGGREGATE_ID,
+                "aggregate_version": "1",
+                "payload": payload,
+                "payload_hash": payload_digest(payload),
+                "committed_at": "2026-09-24T18:00:00Z",
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "command identity"):
+            self.store().snapshot()
+
+
     def test_restart_rejects_operation_update_without_accepted_origin(self):
         journal = JournalStore(self.path)
         journal.append_event(

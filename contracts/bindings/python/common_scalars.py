@@ -7,14 +7,14 @@ from __future__ import annotations
 
 import re
 
-CONTRACT_VERSION = "3.0.1"
+CONTRACT_VERSION = "4.0.0"
 
 _PATTERNS = {
-    "Decimal": re.compile('^(?:0|[1-9][0-9]*(?:\\.[0-9]*[1-9])?|0\\.[0-9]*[1-9]|-(?:[1-9][0-9]*(?:\\.[0-9]*[1-9])?|0\\.[0-9]*[1-9]))$'),
-    "Sequence": re.compile('^(0|[1-9][0-9]*)$'),
-    "Digest": re.compile('^sha256:[0-9a-f]{64}$'),
-    "CurrencyId": re.compile('^[A-Za-z0-9._:-]+$'),
-    "UnitId": re.compile('^[A-Za-z0-9._:/-]+$'),
+    "Decimal": re.compile('^(?:0|[1-9][0-9]*(?:\\.[0-9]*[1-9])?|0\\.[0-9]*[1-9]|-(?:[1-9][0-9]*(?:\\.[0-9]*[1-9])?|0\\.[0-9]*[1-9]))(?![\\s\\S])'),
+    "Sequence": re.compile('^(0|[1-9][0-9]*)(?![\\s\\S])'),
+    "Digest": re.compile('^sha256:[0-9a-f]{64}(?![\\s\\S])'),
+    "CurrencyId": re.compile('^[A-Za-z0-9._:-]+(?![\\s\\S])'),
+    "UnitId": re.compile('^[A-Za-z0-9._:/-]+(?![\\s\\S])'),
 }
 _LENGTHS = {
     "CurrencyId": (1, 32),

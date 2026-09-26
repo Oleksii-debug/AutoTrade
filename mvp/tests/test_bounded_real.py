@@ -1,6 +1,8 @@
+from dataclasses import replace
 import hashlib
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
@@ -212,8 +214,8 @@ def _all_refs(prerequisite_items, observed):
     )
 
 
-def _signed_bounded_receipt(bounded, refs):
-    trust_root = attestation_root(
+def _signed_bounded_receipt(bounded, refs, *, trust_root=None):
+    trust_root = trust_root or attestation_root(
         scopes=(QualificationScope("BOUNDED_REAL", "QUALIFICATION"),)
     )
     trust_policy = attestation_policy(trust_root)
@@ -321,16 +323,18 @@ class BoundedRealQualificationTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)
             _populate_bundle(store, prerequisite_items, observed)
-            result = assess_bounded_real_qualification(
-                envelope=bounded,
-                prerequisite_evidence=prerequisite_items,
-                observations=observed,
-                evidence_verifier=artifact_store_evidence_verifier(store),
-                qualification_receipt=receipt,
-                qualification_policy=trust_policy,
-                expected_policy_id=trust_policy.policy_id,
-                expected_policy_version=trust_policy.policy_version,
-            )
+            with patch(
+                "mvp.autotrade_mvp.qualification_attestation."
+                "load_canonical_qualification_trust_policy",
+                return_value=trust_policy,
+            ):
+                result = assess_bounded_real_qualification(
+                    envelope=bounded,
+                    prerequisite_evidence=prerequisite_items,
+                    observations=observed,
+                    evidence_verifier=artifact_store_evidence_verifier(store),
+                    qualification_receipt=receipt,
+                )
         self.assertTrue(result.complete)
         self.assertEqual(result.reason_codes, ())
         self.assertFalse(result.authorizes_trading)
@@ -343,6 +347,44 @@ class BoundedRealQualificationTests(unittest.TestCase):
             result.qualification_trust_root_id.startswith("sha256:")
         )
 
+    def test_self_selected_root_cannot_close_live_qualification_gate(self):
+        bounded = envelope()
+        prerequisite_items = prerequisites()
+        observed = observations()
+        refs = _all_refs(prerequisite_items, observed)
+        candidate_root = attestation_root(
+            scopes=(QualificationScope("BOUNDED_REAL", "QUALIFICATION"),)
+        )
+        receipt, _ = _signed_bounded_receipt(
+            bounded,
+            refs,
+            trust_root=candidate_root,
+        )
+        canonical_root = replace(
+            candidate_root,
+            producer_id="qualifier.canonical.bounded-real",
+        )
+        canonical_policy = attestation_policy(canonical_root)
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            _populate_bundle(store, prerequisite_items, observed)
+            with patch(
+                "mvp.autotrade_mvp.qualification_attestation."
+                "load_canonical_qualification_trust_policy",
+                return_value=canonical_policy,
+            ):
+                result = assess_bounded_real_qualification(
+                    envelope=bounded,
+                    prerequisite_evidence=prerequisite_items,
+                    observations=observed,
+                    evidence_verifier=artifact_store_evidence_verifier(store),
+                    qualification_receipt=receipt,
+                )
+        self.assertFalse(result.complete)
+        self.assertIn("independent_evidence_trust_invalid", result.reason_codes)
+        self.assertIsNone(result.qualification_policy_id)
+        self.assertFalse(result.authorizes_trading)
+
     def test_signed_bounded_real_receipt_must_cover_exact_evidence_set(self):
         bounded = envelope()
         prerequisite_items = prerequisites()
@@ -352,16 +394,18 @@ class BoundedRealQualificationTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)
             _populate_bundle(store, prerequisite_items, observed)
-            result = assess_bounded_real_qualification(
-                envelope=bounded,
-                prerequisite_evidence=prerequisite_items,
-                observations=observed,
-                evidence_verifier=artifact_store_evidence_verifier(store),
-                qualification_receipt=receipt,
-                qualification_policy=trust_policy,
-                expected_policy_id=trust_policy.policy_id,
-                expected_policy_version=trust_policy.policy_version,
-            )
+            with patch(
+                "mvp.autotrade_mvp.qualification_attestation."
+                "load_canonical_qualification_trust_policy",
+                return_value=trust_policy,
+            ):
+                result = assess_bounded_real_qualification(
+                    envelope=bounded,
+                    prerequisite_evidence=prerequisite_items,
+                    observations=observed,
+                    evidence_verifier=artifact_store_evidence_verifier(store),
+                    qualification_receipt=receipt,
+                )
         self.assertFalse(result.complete)
         self.assertIn(
             "independent_evidence_set_mismatch",

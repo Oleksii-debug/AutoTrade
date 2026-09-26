@@ -1307,6 +1307,21 @@ class UpdateProducerTests(unittest.TestCase):
                     "evidence_ref": evidence_ref,
                 },
             )
+            # The correction changes the supervised target, so the independent
+            # outcome authority must publish matching post-correction evidence.
+            # Production must not infer a corrected target from memory alone.
+            fixture.bind_outcome_evidence(
+                episode,
+                outcome_class="NULL",
+                label_available_at=datetime(
+                    2026, 10, 8, tzinfo=timezone.utc
+                ),
+                outcome_horizon_at=datetime(
+                    2026, 10, 8, tzinfo=timezone.utc
+                ),
+                target="1",
+                observed_at=correction_time,
+            )
             checkpoint = fixture.publish_checkpoint()
             test_ref = fixture.publish_test_evidence()
             calibration = fixture.publish_calibration_evidence()

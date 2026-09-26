@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 from typing import Iterable, Mapping
 from uuid import UUID
@@ -32,6 +33,29 @@ _CANONICAL_QUALIFICATION_TRUST_POLICY_PATH = Path(__file__).with_name(
 )
 
 _QUALIFICATION_TRUST_SOURCE_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _trusted_git_executable(*, source_root: Path) -> str:
+    """Resolve Git outside the candidate-controlled source checkout."""
+
+    candidate = shutil.which("git")
+    if candidate is None:
+        raise QualificationTrustUnavailable(
+            "qualification trust Git executable is unavailable"
+        )
+    try:
+        executable = Path(candidate).resolve(strict=True)
+    except OSError as error:
+        raise QualificationTrustUnavailable(
+            "qualification trust Git executable could not be resolved"
+        ) from error
+    try:
+        executable.relative_to(source_root)
+    except ValueError:
+        return os.fspath(executable)
+    raise QualificationTrustUnavailable(
+        "qualification trust Git executable originates from trusted source checkout"
+    )
 
 
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -662,9 +686,10 @@ def _canonical_qualification_trust_policy_bytes(
         raise QualificationTrustUnavailable(
             "canonical qualification trust policy is outside trusted source root"
         ) from error
+    git_executable = _trusted_git_executable(source_root=source_root)
     try:
         head = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            [git_executable, "rev-parse", "HEAD"],
             cwd=source_root,
             check=False,
             stdout=subprocess.PIPE,
@@ -688,7 +713,7 @@ def _canonical_qualification_trust_policy_bytes(
 
     try:
         completed = subprocess.run(
-            ["git", "cat-file", "blob", f"{source_sha}:{relative_policy}"],
+            [git_executable, "cat-file", "blob", f"{source_sha}:{relative_policy}"],
             cwd=source_root,
             check=False,
             stdout=subprocess.PIPE,

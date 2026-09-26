@@ -517,6 +517,51 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
                 at=NOW,
             )
 
+    def test_filter_step_alignment_is_relative_to_filter_minimum(self):
+        intent = BinanceUsdmOrderIntent.create(
+            instrument_version="BTCUSDT-PERP:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="LIMIT",
+            quantity="0.015",
+            price="40000.15",
+            time_in_force="GTC",
+        )
+        request = prepare_order_request(
+            intent,
+            client_order_id="at-usdm-filter-offsets",
+            capability=capability(),
+            symbol_rules=symbol_rules(
+                lot_min="0.005",
+                lot_step="0.01",
+                price_min="0.05",
+                tick_size="0.1",
+            ),
+            at=NOW,
+        )
+        self.assertEqual(request.body["quantity"], "0.015")
+        self.assertEqual(request.body["price"], "40000.15")
+
+    def test_reduce_only_is_exempt_from_min_notional_without_price_evidence(self):
+        intent = BinanceUsdmOrderIntent.create(
+            instrument_version="BTCUSDT-PERP:v1",
+            symbol="BTCUSDT",
+            side="SELL",
+            order_type="MARKET",
+            quantity="0.001",
+            position_side="BOTH",
+            reduce_only=True,
+        )
+        request = prepare_order_request(
+            intent,
+            client_order_id="at-usdm-reduce-min-notional",
+            capability=capability(position_mode="NET"),
+            symbol_rules=symbol_rules(min_notional="1000000"),
+            at=NOW,
+        )
+        self.assertEqual(request.body["reduceOnly"], "true")
+        self.assertIsNone(request.mark_price_source_sha256)
+
     def test_market_lot_size_overrides_limit_lot_size(self):
         intent = BinanceUsdmOrderIntent.create(
             instrument_version="BTCUSDT-PERP:v1",

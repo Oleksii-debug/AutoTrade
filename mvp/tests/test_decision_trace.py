@@ -121,12 +121,33 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 "encrypted_key_material": "-----BEGIN ENCRYPTED PRIVATE KEY-----\\nencrypted-secret\\n-----END ENCRYPTED PRIVATE KEY-----",
                 "token_text": "token=plain-token-secret",
                 "session_text": "session: plain-session-secret",
+                "json_message": (
+                    '{"Authorization":"Digest json-auth-secret",'
+                    '"api_key":"json-key-secret"}'
+                ),
+                "repr_message": (
+                    "{'Authorization': 'Custom repr-auth-secret', "
+                    "'api_key': 'repr-key-secret'}"
+                ),
                 "safe": "symbol=BTC",
             }
             store.append(item)
 
             raw = path.read_text(encoding="utf-8")
-            for leaked in ("abc123", "bearer-secret", "url-password", "hunter2", "plain-token-secret", "plain-session-secret", "\\nsecret\\n", "encrypted-secret"):
+            for leaked in (
+                "abc123",
+                "bearer-secret",
+                "url-password",
+                "hunter2",
+                "plain-token-secret",
+                "plain-session-secret",
+                "\\nsecret\\n",
+                "encrypted-secret",
+                "json-auth-secret",
+                "json-key-secret",
+                "repr-auth-secret",
+                "repr-key-secret",
+            ):
                 self.assertNotIn(leaked, raw)
             persisted = json.loads(raw)
             attrs = persisted["attributes"]
@@ -138,6 +159,12 @@ class DecisionTraceStoreTests(unittest.TestCase):
             self.assertEqual(attrs["encrypted_key_material"], "[REDACTED]")
             self.assertIn("token=[REDACTED]", attrs["token_text"])
             self.assertIn("session:[REDACTED]", attrs["session_text"])
+            self.assertNotIn("json-auth-secret", attrs["json_message"])
+            self.assertNotIn("json-key-secret", attrs["json_message"])
+            self.assertGreaterEqual(attrs["json_message"].count("[REDACTED]"), 2)
+            self.assertNotIn("repr-auth-secret", attrs["repr_message"])
+            self.assertNotIn("repr-key-secret", attrs["repr_message"])
+            self.assertGreaterEqual(attrs["repr_message"].count("[REDACTED]"), 2)
             self.assertEqual(attrs["safe"], "symbol=BTC")
 
     def test_non_finite_diagnostic_numbers_cannot_enter_durable_trace(self):

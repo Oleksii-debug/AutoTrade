@@ -1,7 +1,10 @@
 (() => {
   "use strict";
 
-  const API = "/api/v1";
+  const HOST_API = window.AutoTradeHostApi;
+  if (!HOST_API || typeof HOST_API.route !== "function") {
+    throw new Error("Canonical host API routes are unavailable");
+  }
   const MATERIAL_EVENTS = new Set([
     "COMMAND_ACCEPTED",
     "OPERATION_UPDATED",
@@ -361,7 +364,7 @@
   }
 
   async function submitCanonicalCommand(payload) {
-    const response = await fetch(API + "/commands", {
+    const response = await fetch(HOST_API.route("submitCommand"), {
       method: "POST",
       credentials: "same-origin",
       cache: "no-store",
@@ -620,7 +623,7 @@
 
   async function refreshOperation(operationId) {
     const raw = await jsonFetch(
-      `${API}/operations/${encodeURIComponent(operationId)}`);
+      HOST_API.route("getOperation", {operation_id: operationId}));
     const operation = parseOperationResult(raw, operationId);
     renderOperation(operation);
     return operation;
@@ -735,7 +738,7 @@
   }
 
   async function refreshSnapshot(options = {}) {
-    const snapshot = await jsonFetch(`${API}/state`);
+    const snapshot = await jsonFetch(HOST_API.route("getState"));
     renderSnapshot(snapshot, options);
   }
 
@@ -777,7 +780,8 @@
         await refreshSnapshot();
       }
       const response = await jsonFetch(
-        `${API}/events?after=${encodeURIComponent(state.cursor.toString())}`);
+        HOST_API.route("streamEvents") + "?after=" +
+          encodeURIComponent(state.cursor.toString()));
       const events = Array.isArray(response) ? response : (response.events || []);
       let expectedCursor = state.cursor + 1n;
       for (const event of events) {

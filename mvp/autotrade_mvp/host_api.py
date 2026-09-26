@@ -113,6 +113,20 @@ class HostCommandStore:
             raise ValueError("max_events must be positive")
         self.account_id = account_id
         self.environment = environment
+        scope_material = json.dumps(
+            {
+                "account_id": self.account_id,
+                "environment": self.environment,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        scope_digest = sha256(scope_material).hexdigest()
+        self._operation_namespace = (
+            f"https://operations.autotrade.local/host/{scope_digest}"
+        )
         self._session_validator = session_validator
         self._request_origin_provider = request_origin_provider
         self._max_events = max_events
@@ -235,7 +249,7 @@ class HostCommandStore:
             return result
 
         operation_id = str(
-            uuid5(NAMESPACE_URL, f"https://operations.autotrade.local/{command_id}")
+            uuid5(NAMESPACE_URL, f"{self._operation_namespace}/{command_id}")
         )
         self.state_version += 1
         now = self._now()

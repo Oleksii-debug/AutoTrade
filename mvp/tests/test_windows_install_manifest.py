@@ -10,6 +10,7 @@ import zipfile
 from tools.build_windows_bundle import build_bundle
 from tools.build_windows_install_manifest import (
     InstallerManifestError,
+    _verify_release_bundle_stream,
     build_installer_input_manifest,
     verify_release_bundle,
 )
@@ -190,6 +191,42 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
                 verify_release_bundle(bundle)
 
         self.assertTrue(swapped)
+
+    def test_release_bundle_same_inode_change_during_verification_fails_closed(self):
+        bundle = self.release_bundle("same-inode-release.zip")
+        before = os.stat(bundle, follow_symlinks=False)
+        changed = False
+
+        def verify_then_change_metadata(stream, digest):
+            nonlocal changed
+            verified = _verify_release_bundle_stream(stream, digest)
+            current = os.stat(bundle, follow_symlinks=False)
+            try:
+                os.utime(
+                    bundle,
+                    ns=(current.st_atime_ns, current.st_mtime_ns + 1_000_000_000),
+                )
+            except OSError as error:
+                self.skipTest(f"same-inode metadata mutation unavailable: {error}")
+            after = os.stat(bundle, follow_symlinks=False)
+            self.assertEqual(
+                (before.st_dev, before.st_ino),
+                (after.st_dev, after.st_ino),
+            )
+            changed = True
+            return verified
+
+        with patch(
+            "tools.build_windows_install_manifest._verify_release_bundle_stream",
+            side_effect=verify_then_change_metadata,
+        ):
+            with self.assertRaisesRegex(
+                InstallerManifestError,
+                "release bundle changed during verification",
+            ):
+                verify_release_bundle(bundle)
+
+        self.assertTrue(changed)
 
     def test_compressed_payload_is_rejected_as_noncanonical_bundle(self):
         source = self.release_bundle()

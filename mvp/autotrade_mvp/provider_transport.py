@@ -436,6 +436,12 @@ KRAKEN_SPOT_AUTHENTICATED_READ_ENDPOINTS: Mapping[
             data_entitlement="ORDERS",
             success_statuses=frozenset({200}),
         ),
+        "/0/private/QueryOrders": AuthenticatedReadEndpointRule(
+            surface=Surface.ACTIVITIES,
+            permission_scope="ORDER.READ",
+            data_entitlement="ORDERS",
+            success_statuses=frozenset({200}),
+        ),
         "/0/private/TradesHistory": AuthenticatedReadEndpointRule(
             surface=Surface.ACTIVITIES,
             permission_scope="TRADE.READ",
@@ -554,6 +560,15 @@ _KRAKEN_SPOT_AUTHENTICATED_READ_QUERY_FIELDS: Mapping[str, frozenset[str]] = (
                     "rebase_multiplier",
                 }
             ),
+            "/0/private/QueryOrders": frozenset(
+                {
+                    "txid",
+                    "trades",
+                    "userref",
+                    "consolidate_taker",
+                    "rebase_multiplier",
+                }
+            ),
             "/0/private/TradesHistory": frozenset(
                 {
                     "type",
@@ -659,6 +674,31 @@ def _validate_kraken_spot_authenticated_read_query(
             raise ProviderTransportScopeError(
                 "Kraken Spot cl_ord_id filter is invalid"
             ) from error
+    if binding.endpoint == "/0/private/QueryOrders":
+        raw_txids = binding.query.get("txid")
+        if raw_txids is None:
+            raise ProviderTransportScopeError(
+                "Kraken Spot QueryOrders requires txid"
+            )
+        txids = tuple(part.strip() for part in raw_txids.split(","))
+        if (
+            not txids
+            or len(txids) > 50
+            or any(not value for value in txids)
+            or len(set(txids)) != len(txids)
+        ):
+            raise ProviderTransportScopeError(
+                "Kraken Spot QueryOrders txid must contain 1..50 unique order ids"
+            )
+        for value in txids:
+            canonical = _canonical_text(
+                value,
+                name="Kraken Spot QueryOrders txid",
+            )
+            if any(character.isspace() for character in canonical):
+                raise ProviderTransportScopeError(
+                    "Kraken Spot QueryOrders txid contains whitespace"
+                )
 
     enum_fields = {
         "rebase_multiplier": frozenset({"rebased", "base"}),

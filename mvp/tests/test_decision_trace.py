@@ -237,6 +237,10 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 "header_text": "X-TXC-SIGNATURE: WHITEBIT-TEXT-SIGNATURE",
                 "sentinel_prefixed": "X-TXC-SIGNATURE=[REDACTED]WHITEBIT-SENTINEL-BYPASS",
                 "sentinel_spaced": "api_secret=[REDACTED] WHITEBIT-SPACED-SENTINEL-BYPASS",
+                "sentinel_bracket_suffix": "api_secret=[REDACTED]ABC]WHITEBIT-BRACKET-SUFFIX",
+                "plain_bracket_secret": "api_secret=ABC]WHITEBIT-PLAIN-BRACKET-SECRET",
+                "sentinel_brace_suffix": "api_secret=[REDACTED]ABC}WHITEBIT-BRACE-SUFFIX",
+                "plain_brace_secret": "api_secret=ABC}WHITEBIT-PLAIN-BRACE-SECRET",
                 "password_spaced": "password=TOP SECRET",
                 "api_secret_spaced": "api_secret=ABC DEF",
                 "signed_url": (
@@ -259,6 +263,10 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 "WHITEBIT-URL-SIGNATURE",
                 "WHITEBIT-SENTINEL-BYPASS",
                 "WHITEBIT-SPACED-SENTINEL-BYPASS",
+                "WHITEBIT-BRACKET-SUFFIX",
+                "WHITEBIT-PLAIN-BRACKET-SECRET",
+                "WHITEBIT-BRACE-SUFFIX",
+                "WHITEBIT-PLAIN-BRACE-SECRET",
                 "TOP SECRET",
                 "ABC DEF",
             ):
@@ -286,6 +294,10 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 attributes["sentinel_spaced"],
                 "api_secret=[REDACTED]",
             )
+            self.assertEqual(attributes["sentinel_bracket_suffix"], "api_secret=[REDACTED]")
+            self.assertEqual(attributes["plain_bracket_secret"], "api_secret=[REDACTED]")
+            self.assertEqual(attributes["sentinel_brace_suffix"], "api_secret=[REDACTED]")
+            self.assertEqual(attributes["plain_brace_secret"], "api_secret=[REDACTED]")
             self.assertEqual(
                 attributes["password_spaced"],
                 "password=[REDACTED]",

@@ -227,10 +227,18 @@ class DecisionTraceStoreTests(unittest.TestCase):
             item["attributes"] = {
                 "api_secret": "WHITEBIT-DIRECT-SECRET",
                 "api-secret": "WHITEBIT-HYPHEN-SECRET",
+                "X-TXC-APIKEY": "WHITEBIT-TXC-APIKEY",
+                "X-TXC-PAYLOAD": "WHITEBIT-TXC-PAYLOAD",
+                "X-TXC-SIGNATURE": "WHITEBIT-TXC-SIGNATURE",
                 "api_secret_rotation_count": 4,
                 "token_budget": 8,
                 "message": '{"api_secret":"WHITEBIT-JSON-SECRET","safe":"ok"}',
                 "repr_message": "{'api-secret': 'WHITEBIT-REPR-SECRET', 'safe': 'ok'}",
+                "header_text": "X-TXC-SIGNATURE: WHITEBIT-TEXT-SIGNATURE",
+                "signed_url": (
+                    "https://provider.test/private?"
+                    "X-TXC-SIGNATURE=WHITEBIT-URL-SIGNATURE&symbol=BTC"
+                ),
             }
             store.append(item)
 
@@ -238,18 +246,35 @@ class DecisionTraceStoreTests(unittest.TestCase):
             for leaked in (
                 "WHITEBIT-DIRECT-SECRET",
                 "WHITEBIT-HYPHEN-SECRET",
+                "WHITEBIT-TXC-APIKEY",
+                "WHITEBIT-TXC-PAYLOAD",
+                "WHITEBIT-TXC-SIGNATURE",
                 "WHITEBIT-JSON-SECRET",
                 "WHITEBIT-REPR-SECRET",
+                "WHITEBIT-TEXT-SIGNATURE",
+                "WHITEBIT-URL-SIGNATURE",
             ):
                 self.assertNotIn(leaked, raw)
 
             attributes = json.loads(raw)["attributes"]
             self.assertEqual(attributes["api_secret"], "[REDACTED]")
             self.assertEqual(attributes["api-secret"], "[REDACTED]")
+            self.assertEqual(attributes["X-TXC-APIKEY"], "[REDACTED]")
+            self.assertEqual(attributes["X-TXC-PAYLOAD"], "[REDACTED]")
+            self.assertEqual(attributes["X-TXC-SIGNATURE"], "[REDACTED]")
             self.assertEqual(attributes["api_secret_rotation_count"], 4)
             self.assertEqual(attributes["token_budget"], 8)
             self.assertIn("[REDACTED]", attributes["message"])
             self.assertIn("[REDACTED]", attributes["repr_message"])
+            self.assertEqual(
+                attributes["header_text"],
+                "X-TXC-SIGNATURE:[REDACTED]",
+            )
+            self.assertEqual(
+                attributes["signed_url"],
+                "https://provider.test/private?"
+                "X-TXC-SIGNATURE=[REDACTED]&symbol=BTC",
+            )
 
 
     def test_escaped_json_and_encoded_query_secret_keys_are_redacted(self):

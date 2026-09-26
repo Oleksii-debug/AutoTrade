@@ -10,6 +10,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
 
 GENESIS_HASH = "0" * 64
@@ -83,11 +84,61 @@ _PRIVATE_KEY_MARKERS = (
     "-----BEGIN OPENSSH PRIVATE KEY-----",
 )
 
+_URL_QUERY_SENSITIVE_KEYS = _SENSITIVE_KEYS | {
+    "credential",
+    "proxy_authorization",
+}
+
+
+def _redact_structured_json_text(value: str) -> str | None:
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(decoded, (dict, list)):
+        return None
+    redacted = _redact(decoded)
+    if redacted == decoded:
+        return None
+    return json.dumps(
+        redacted,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+
+
+def _redact_structured_url_query(value: str) -> str | None:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc or not parsed.query:
+        return None
+
+    changed = False
+    query_parts: list[str] = []
+    for part in parsed.query.split("&"):
+        raw_key, separator, raw_value = part.partition("=")
+        normalized = _normalized_key(unquote_plus(raw_key))
+        if normalized in _URL_QUERY_SENSITIVE_KEYS:
+            query_parts.append(f"{raw_key}{separator or '='}[REDACTED]")
+            changed = True
+        else:
+            query_parts.append(part)
+    if not changed:
+        return None
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, "&".join(query_parts), parsed.fragment)
+    )
+
 
 def _redact_embedded_secret_text(value: str) -> str:
     if any(marker in value for marker in _PRIVATE_KEY_MARKERS):
         return "[REDACTED]"
-    redacted = value
+    redacted = _redact_structured_json_text(value) or value
+    redacted = _redact_structured_url_query(redacted) or redacted
     for pattern in _EMBEDDED_SECRET_PATTERNS:
         def replacement(match: re.Match[str]) -> str:
             name = match.group(1)

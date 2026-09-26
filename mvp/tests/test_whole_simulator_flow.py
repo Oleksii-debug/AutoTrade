@@ -305,6 +305,7 @@ class WholeSimulatorFlowTests(unittest.TestCase):
             self.assertEqual(dispatched.status, "SENT")
             self.assertEqual(dispatched.response["outcome"], "ACKNOWLEDGED")
             self.assertEqual(provider.outbound_request_count, 1)
+            fill = provider.activity_fills()[0]
 
             orders = DurableOrderBookProjection(
                 journal,
@@ -320,12 +321,12 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 instrument=INSTRUMENT,
                 side="BUY",
                 requested_quantity="2",
+                quantity_unit=fill["last_quantity"]["unit"],
                 parent_intent_id="intent-1",
                 committed_at=NOW,
             )
             orders.sync_submission_attempt(attempt_id=attempt_id)
 
-            fill = provider.activity_fills()[0]
             fee = fill["fees"][0]
             order_fill = orders.ingest_execution_fill(
                 event_key="whole-flow-fill",
@@ -334,6 +335,7 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 execution_fill={
                     "fill_id": fill["provider_execution_id"],
                     "provider_execution_id": fill["provider_execution_id"],
+                    "order_ref": dispatched.client_order_id,
                     "instrument_version": fill["instrument_version"],
                     "side": fill["side"],
                     "last_quantity": fill["last_quantity"],

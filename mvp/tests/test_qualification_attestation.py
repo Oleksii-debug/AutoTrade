@@ -16,6 +16,7 @@ from mvp.autotrade_mvp.qualification_attestation import (
     QualificationScope,
     QualificationTrustError,
     QualificationTrustPolicy,
+    QualificationTrustUnavailable,
     SignedQualificationAttestation,
     TrustRoot,
     parse_qualification_trust_policy,
@@ -300,6 +301,44 @@ class QualificationAttestationTests(unittest.TestCase):
                             expected_release_artifact_id=RELEASE_A,
                             expected_release_artifact_sha256=RELEASE_A_SHA,
                         )
+
+    def test_canonical_policy_rejects_git_executable_from_source_checkout(self):
+        with TemporaryDirectory() as directory:
+            source_root = Path(directory) / "source"
+            policy_path = (
+                source_root
+                / "mvp"
+                / "autotrade_mvp"
+                / "qualification_trust_policy.json"
+            )
+            policy_path.parent.mkdir(parents=True)
+            policy_path.write_text("{}", encoding="utf-8")
+            candidate_git = source_root / "git.exe"
+            candidate_git.write_bytes(b"candidate-controlled executable")
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_QUALIFICATION_TRUST_SOURCE_ROOT",
+                    source_root,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_CANONICAL_QUALIFICATION_TRUST_POLICY_PATH",
+                    policy_path,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation.shutil.which",
+                    return_value=str(candidate_git),
+                ),
+                self.assertRaisesRegex(
+                    QualificationTrustUnavailable,
+                    "Git executable originates from trusted source checkout",
+                ),
+            ):
+                load_canonical_qualification_trust_policy(
+                    expected_source_sha="a" * 40
+                )
 
     def test_canonical_policy_ignores_git_replace_refs(self):
         canonical_root = root()

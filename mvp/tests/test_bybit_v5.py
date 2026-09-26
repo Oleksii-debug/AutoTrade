@@ -6,6 +6,7 @@ import unittest
 from uuid import uuid4
 
 from mvp.autotrade_mvp.bybit_v5 import (
+    BYBIT_ORDER_HISTORY_NO_FILL_RETENTION_POLICY_ID,
     build_order_payload,
     prepare_order_submission,
     prepare_order_read_query,
@@ -1734,6 +1735,39 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(coverage.coverage_start, "2026-09-23T20:00:00.000Z")
         self.assertEqual(coverage.coverage_end, "2026-09-24T20:00:00.000Z")
 
+    def test_order_history_exclusion_requires_exact_retention_policy(self):
+        observation = bound_order_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "",
+                    "list": [],
+                },
+            },
+            start_time_ms=1790193600000,
+            end_time_ms=1790280000000,
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "require the exact qualified retention policy",
+        ):
+            order_history_coverage_from_pages(
+                (observation,),
+                consistency_horizon_satisfied=True,
+                qualified_exclusion_semantics=True,
+            )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "unknown Bybit order-history retention qualification policy",
+        ):
+            order_history_coverage_from_pages(
+                (observation,),
+                consistency_horizon_satisfied=True,
+                qualified_exclusion_semantics=True,
+                retention_policy_id="BYBIT_V5_ORDER_HISTORY_UNVERSIONED",
+            )
+
     def test_order_history_absence_semantics_stop_at_no_fill_retention_boundary(self):
         def terminal_history(*, start_time_ms, end_time_ms):
             observation = bound_order_response(
@@ -1752,6 +1786,9 @@ class BybitV5AdapterTests(unittest.TestCase):
                 (observation,),
                 consistency_horizon_satisfied=True,
                 qualified_exclusion_semantics=True,
+                retention_policy_id=(
+                    BYBIT_ORDER_HISTORY_NO_FILL_RETENTION_POLICY_ID
+                ),
             )
 
         exact_boundary = terminal_history(

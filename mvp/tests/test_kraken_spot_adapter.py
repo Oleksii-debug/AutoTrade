@@ -868,7 +868,7 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                     "count": 3,
                 },
             },
-            query={"ofs": "0", "limit": "2", "type": "all"},
+            query={"ofs": "0", "limit": "2", "type": "all", "end": "1790385000"},
         )
         second_observation = trade_history_observation(
             {
@@ -878,7 +878,7 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                     "count": 3,
                 },
             },
-            query={"ofs": "2", "limit": "2", "type": "all"},
+            query={"ofs": "2", "limit": "2", "type": "all", "end": "1790385000"},
         )
         coverage = KrakenSpotPaginationCoverage(surface="EXECUTIONS")
         first = pagination_page_from_observation(
@@ -903,6 +903,41 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 second_observation.evidence_ref,
             ),
         )
+
+    def test_multi_page_kraken_coverage_without_end_boundary_stays_incomplete(self):
+        first = pagination_page_from_observation(
+            trade_history_observation(
+                {
+                    "error": [],
+                    "result": {
+                        "trades": {"T-1": {}, "T-2": {}},
+                        "count": 3,
+                    },
+                },
+                query={"ofs": "0", "limit": "2", "type": "all"},
+            ),
+            surface="EXECUTIONS",
+        )
+        second = pagination_page_from_observation(
+            trade_history_observation(
+                {
+                    "error": [],
+                    "result": {
+                        "trades": {"T-3": {}},
+                        "count": 3,
+                    },
+                },
+                query={"ofs": "2", "limit": "2", "type": "all"},
+            ),
+            surface="EXECUTIONS",
+        )
+        coverage = KrakenSpotPaginationCoverage(surface="EXECUTIONS")
+        coverage.add_page(first)
+        coverage.add_page(second)
+
+        self.assertFalse(coverage.has_stable_end_boundary)
+        self.assertFalse(coverage.complete)
+        self.assertEqual(coverage.next_offset, 3)
 
     def test_kraken_pagination_rejects_gap_filter_or_total_drift(self):
         first = pagination_page_from_observation(

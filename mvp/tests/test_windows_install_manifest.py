@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
+import research.autotrade_research.artifacts.durable_publish as durable_publish_module
 import tools.build_windows_install_manifest as installer_manifest_module
 from tools.build_windows_bundle import build_bundle
 from tools.build_windows_install_manifest import (
@@ -396,6 +397,42 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
 
         self.assertEqual(output.read_text(encoding="utf-8"), "old-manifest")
         self.assertEqual(victim.read_text(encoding="utf-8"), "do-not-touch")
+
+    def test_manifest_pair_failure_restores_existing_primary_and_digest(self):
+        bundle = self.release_bundle()
+        output = self.root / "installer-input.json"
+        digest_path = output.with_suffix(output.suffix + ".sha256")
+        output.write_bytes(b"old-manifest")
+        digest_path.write_bytes(b"old-digest\n")
+        original_replace = durable_publish_module.os.replace
+        injected = False
+
+        def replace_with_primary_failure(source, target):
+            nonlocal injected
+            if Path(target) == output and not injected:
+                injected = True
+                raise OSError("simulated installer primary replace failure")
+            return original_replace(source, target)
+
+        with patch.object(
+            durable_publish_module.os,
+            "replace",
+            side_effect=replace_with_primary_failure,
+        ):
+            with self.assertRaisesRegex(
+                InstallerManifestError,
+                "installer manifest publication failed closed",
+            ):
+                build_installer_input_manifest(
+                    bundle=bundle,
+                    output=output,
+                    target_framework="net10.0-windows",
+                    runtime_mode="SELF_CONTAINED",
+                )
+
+        self.assertTrue(injected)
+        self.assertEqual(output.read_bytes(), b"old-manifest")
+        self.assertEqual(digest_path.read_bytes(), b"old-digest\n")
 
     def test_release_bundle_produces_deterministic_fail_closed_install_inventory(self):
         bundle = self.release_bundle()

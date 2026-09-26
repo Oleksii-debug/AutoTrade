@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import ExitStack
 from hashlib import sha256
 import json
 import os
@@ -15,10 +14,7 @@ import zipfile
 
 from research.autotrade_research.artifacts.durable_publish import (
     DurablePublishLockError,
-    atomic_write_bytes,
-    atomic_write_stream,
-    durable_path_lock,
-    sha256_file,
+    atomic_write_stream_with_sha256_sidecar,
     validate_publication_destination,
 )
 
@@ -658,20 +654,12 @@ def build_bundle(
             for relative, _, data in files:
                 _write_entry(archive, f"payload/{relative}", data)
 
-    lock_paths = sorted(
-        (output, hash_path),
-        key=lambda path: str(path.resolve(strict=False)),
-    )
     try:
-        with ExitStack() as stack:
-            for path in lock_paths:
-                stack.enter_context(durable_path_lock(path))
-            atomic_write_stream(output, write_archive)
-            digest = sha256_file(output)
-            atomic_write_bytes(
-                hash_path,
-                f"{digest}  {output.name}\n".encode("utf-8"),
-            )
+        digest = atomic_write_stream_with_sha256_sidecar(
+            output,
+            hash_path,
+            write_archive,
+        )
     except (DurablePublishLockError, OSError) as error:
         raise BundleError(f"bundle publication failed closed: {error}") from error
     return {

@@ -10,8 +10,10 @@ from autotrade_research.artifacts import durable_publish
 from autotrade_research.artifacts.durable_publish import (
     DurablePublishLockError,
     atomic_write_bytes,
+    atomic_write_bytes_with_sha256_sidecar,
     atomic_write_json,
     atomic_write_stream,
+    atomic_write_stream_with_sha256_sidecar,
     durable_path_lock,
 )
 
@@ -63,6 +65,86 @@ class DurablePublishHardeningTests(unittest.TestCase):
             self.assertEqual(
                 list(destination.parent.glob(f".{destination.name}.*.tmp")),
                 [],
+            )
+
+    def test_sha256_pair_restores_old_sidecar_when_primary_replace_fails(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = root / "artifact.bin"
+            sidecar = root / "artifact.bin.sha256"
+            destination.write_bytes(b"old-primary")
+            sidecar.write_bytes(b"old-digest\n")
+            original_replace = durable_publish.os.replace
+            injected = False
+
+            def replace_with_primary_failure(source, target):
+                nonlocal injected
+                if Path(target) == destination and not injected:
+                    injected = True
+                    raise OSError("simulated primary replace failure")
+                return original_replace(source, target)
+
+            with patch.object(
+                durable_publish.os,
+                "replace",
+                side_effect=replace_with_primary_failure,
+            ):
+                with self.assertRaisesRegex(
+                    OSError,
+                    "simulated primary replace failure",
+                ):
+                    atomic_write_bytes_with_sha256_sidecar(
+                        destination,
+                        sidecar,
+                        b"new-primary",
+                    )
+
+            self.assertTrue(injected)
+            self.assertEqual(destination.read_bytes(), b"old-primary")
+            self.assertEqual(sidecar.read_bytes(), b"old-digest\n")
+            self.assertEqual(
+                list(root.glob(".*.tmp")),
+                [],
+            )
+
+    def test_sha256_pair_hashes_owned_staged_bytes_before_publication(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = root / "artifact.bin"
+            sidecar = root / "artifact.bin.sha256"
+            destination.write_bytes(b"old-primary")
+            expected = b"canonical-produced-bytes"
+            original_replace = durable_publish.os.replace
+            interfered = False
+
+            def replace_with_noncooperating_interference(source, target):
+                nonlocal interfered
+                result = original_replace(source, target)
+                if Path(target) == sidecar and not interfered:
+                    destination.write_bytes(b"noncooperating-replacement")
+                    interfered = True
+                return result
+
+            with patch.object(
+                durable_publish.os,
+                "replace",
+                side_effect=replace_with_noncooperating_interference,
+            ):
+                digest = atomic_write_stream_with_sha256_sidecar(
+                    destination,
+                    sidecar,
+                    lambda handle: handle.write(expected),
+                )
+
+            self.assertTrue(interfered)
+            self.assertEqual(destination.read_bytes(), expected)
+            self.assertEqual(
+                sidecar.read_text(encoding="utf-8"),
+                f"{digest}  {destination.name}\n",
+            )
+            self.assertEqual(
+                digest,
+                __import__("hashlib").sha256(expected).hexdigest(),
             )
 
     def test_nonfinite_json_never_reaches_replace(self):

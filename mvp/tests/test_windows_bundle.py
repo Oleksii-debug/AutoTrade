@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
+import research.autotrade_research.artifacts.durable_publish as durable_publish_module
 from tools.build_windows_bundle import BundleError, _windows_path_key, build_bundle
 
 
@@ -878,6 +879,43 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
 
         self.assertEqual(output.read_bytes(), b"old-bundle")
         self.assertEqual(victim.read_text(encoding="utf-8"), "do-not-touch")
+
+    def test_bundle_pair_failure_restores_existing_primary_and_digest(self):
+        output = self.root / "diagnostics.zip"
+        hash_path = output.with_suffix(output.suffix + ".sha256")
+        output.write_bytes(b"old-bundle")
+        hash_path.write_bytes(b"old-digest\n")
+        original_replace = durable_publish_module.os.replace
+        injected = False
+
+        def replace_with_primary_failure(source, target):
+            nonlocal injected
+            if Path(target) == output and not injected:
+                injected = True
+                raise OSError("simulated bundle primary replace failure")
+            return original_replace(source, target)
+
+        with patch.object(
+            durable_publish_module.os,
+            "replace",
+            side_effect=replace_with_primary_failure,
+        ):
+            with self.assertRaisesRegex(
+                BundleError,
+                "bundle publication failed closed",
+            ):
+                build_bundle(
+                    staging=self.staging,
+                    output=output,
+                    version="0.1.0-dev",
+                    source_sha=SOURCE_SHA,
+                    mode="diagnostics",
+                    provenance_path=self.provenance(eligible=False),
+                )
+
+        self.assertTrue(injected)
+        self.assertEqual(output.read_bytes(), b"old-bundle")
+        self.assertEqual(hash_path.read_bytes(), b"old-digest\n")
 
     def test_legacy_hash_temp_symlink_is_ignored_without_touching_target(self):
         output = self.root / "diagnostics.zip"

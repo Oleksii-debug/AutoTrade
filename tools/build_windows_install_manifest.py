@@ -8,7 +8,6 @@ policies instead of trusting an arbitrary staging directory.
 from __future__ import annotations
 
 import argparse
-from contextlib import ExitStack
 from hashlib import sha256
 import json
 import os
@@ -20,8 +19,7 @@ import zipfile
 
 from research.autotrade_research.artifacts.durable_publish import (
     DurablePublishLockError,
-    atomic_write_bytes,
-    durable_path_lock,
+    atomic_write_bytes_with_sha256_sidecar,
     validate_publication_destination,
 )
 
@@ -664,19 +662,12 @@ def build_installer_input_manifest(
     _cleanup_legacy_temporary(
         digest_path.with_name(digest_path.name + ".tmp")
     )
-    manifest_digest = sha256(payload).hexdigest()
-    digest_payload = f"{manifest_digest}  {output.name}\n".encode("utf-8")
-
-    lock_paths = sorted(
-        (output, digest_path),
-        key=lambda path: str(path.resolve(strict=False)),
-    )
     try:
-        with ExitStack() as stack:
-            for path in lock_paths:
-                stack.enter_context(durable_path_lock(path))
-            atomic_write_bytes(output, payload)
-            atomic_write_bytes(digest_path, digest_payload)
+        manifest_digest = atomic_write_bytes_with_sha256_sidecar(
+            output,
+            digest_path,
+            payload,
+        )
     except (DurablePublishLockError, OSError) as error:
         raise InstallerManifestError(
             f"installer manifest publication failed closed: {error}"

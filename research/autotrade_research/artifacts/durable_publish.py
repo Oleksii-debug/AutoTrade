@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import hashlib
 import json
 import os
@@ -242,6 +242,181 @@ def atomic_write_stream(
                 temporary.unlink()
             except FileNotFoundError:
                 pass
+
+
+def atomic_write_stream_with_sha256_sidecar(
+    path: str | Path,
+    sidecar_path: str | Path,
+    writer: Callable[[BinaryIO], None],
+) -> str:
+    """Publish bytes plus a matching SHA-256 sidecar without a final-path re-open.
+
+    Both payloads are fully staged and fsynced before either public destination
+    changes. The sidecar is replaced first and the primary object last, so a
+    process crash between replacements is fail-closed (old primary/new digest)
+    rather than a newly trusted primary paired with stale digest evidence.
+    Ordinary failures before primary publication restore the prior sidecar.
+    """
+
+    if not callable(writer):
+        raise TypeError("writer must be callable")
+
+    destination = Path(path)
+    sidecar = Path(sidecar_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    if _resolved_key(destination) == _resolved_key(sidecar):
+        raise DurablePublishLockError(
+            "primary publication and SHA-256 sidecar must be distinct paths"
+        )
+    _validate_publication_destination(destination)
+    _validate_publication_destination(sidecar)
+
+    primary_temp: Path | None = None
+    sidecar_temp: Path | None = None
+    rollback_temp: Path | None = None
+    old_sidecar_moved = False
+    sidecar_published = False
+    primary_published = False
+    preserve_rollback = False
+    digest_hex: str | None = None
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w+b",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            primary_temp = Path(handle.name)
+            writer(handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+            handle.seek(0)
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+            digest_hex = digest.hexdigest()
+
+        sidecar_payload = (
+            f"{digest_hex}  {destination.name}\n"
+        ).encode("utf-8")
+        with tempfile.NamedTemporaryFile(
+            "w+b",
+            dir=sidecar.parent,
+            prefix=f".{sidecar.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            sidecar_temp = Path(handle.name)
+            handle.write(sidecar_payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        lock_paths = sorted(
+            (destination, sidecar),
+            key=lambda item: _resolved_key(item),
+        )
+        with ExitStack() as stack:
+            for lock_path in lock_paths:
+                stack.enter_context(durable_path_lock(lock_path))
+            _validate_publication_destination(destination)
+            _validate_publication_destination(sidecar)
+
+            try:
+                try:
+                    os.stat(sidecar, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    with tempfile.NamedTemporaryFile(
+                        "w+b",
+                        dir=sidecar.parent,
+                        prefix=f".{sidecar.name}.rollback.",
+                        suffix=".tmp",
+                        delete=False,
+                    ) as rollback_handle:
+                        rollback_temp = Path(rollback_handle.name)
+                    os.replace(sidecar, rollback_temp)
+                    old_sidecar_moved = True
+                    _sync_parent_directory(sidecar)
+
+                os.replace(sidecar_temp, sidecar)
+                sidecar_temp = None
+                sidecar_published = True
+                _sync_parent_directory(sidecar)
+
+                os.replace(primary_temp, destination)
+                primary_temp = None
+                primary_published = True
+                _sync_parent_directory(destination)
+            except BaseException as primary_error:
+                if not primary_published and (
+                    old_sidecar_moved or sidecar_published
+                ):
+                    try:
+                        if old_sidecar_moved and rollback_temp is not None:
+                            os.replace(rollback_temp, sidecar)
+                            rollback_temp = None
+                        elif sidecar_published:
+                            try:
+                                sidecar.unlink()
+                            except FileNotFoundError:
+                                pass
+                        _sync_parent_directory(sidecar)
+                    except BaseException as rollback_error:
+                        preserve_rollback = rollback_temp is not None
+                        _add_secondary_failure_note(
+                            primary_error,
+                            "SHA-256 sidecar rollback also failed",
+                            rollback_error,
+                        )
+                raise
+
+            if rollback_temp is not None:
+                rollback_temp.unlink()
+                rollback_temp = None
+                _sync_parent_directory(sidecar)
+
+        if digest_hex is None:
+            raise DurablePublishLockError(
+                "SHA-256 digest was not produced for staged publication"
+            )
+        return digest_hex
+    finally:
+        for temporary in (primary_temp, sidecar_temp):
+            if temporary is None:
+                continue
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+        if rollback_temp is not None and not preserve_rollback:
+            try:
+                rollback_temp.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def atomic_write_bytes_with_sha256_sidecar(
+    path: str | Path,
+    sidecar_path: str | Path,
+    payload: bytes,
+) -> str:
+    """Publish exact bytes with a recovery-safe SHA-256 sidecar pair."""
+
+    if type(payload) is not bytes:
+        raise TypeError("payload must be bytes")
+
+    def write_payload(handle: BinaryIO) -> None:
+        handle.write(payload)
+
+    return atomic_write_stream_with_sha256_sidecar(
+        path,
+        sidecar_path,
+        write_payload,
+    )
 
 
 def atomic_write_bytes(path: str | Path, payload: bytes) -> None:

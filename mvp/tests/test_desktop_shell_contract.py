@@ -24,7 +24,7 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertEqual(len(package_references), 1)
         self.assertEqual(
             package_references[0].attrib,
-            {"Include": "Velopack", "Version": "1.2.158"},
+            {"Include": "Velopack", "Version": "[1.2.158]"},
         )
         self.assertEqual(project.tag, "Project")
 

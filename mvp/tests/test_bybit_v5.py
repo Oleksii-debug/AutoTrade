@@ -1553,6 +1553,54 @@ class BybitV5AdapterTests(unittest.TestCase):
                 )
             )
 
+    def test_order_pages_enforce_effective_symbol_filter(self):
+        row = {
+            "orderId": "provider-order-symbol",
+            "orderLinkId": "",
+            "symbol": "ETHUSDT",
+            "orderStatus": "New",
+            "leavesQty": "1",
+            "createdTime": "1790279999000",
+            "updatedTime": "1790280000000",
+        }
+        for surface in ("OPEN_ORDERS", "ORDER_HISTORY"):
+            with self.subTest(surface=surface), self.assertRaisesRegex(
+                ProviderCoreError,
+                "symbol response does not match",
+            ):
+                parse_order_page(
+                    bound_order_response(
+                        {
+                            "retCode": 0,
+                            "result": {
+                                "category": "spot",
+                                "nextPageCursor": "",
+                                "list": [row],
+                            },
+                        },
+                        surface=surface,
+                        symbol="BTCUSDT",
+                    )
+                )
+
+        identity_row = dict(row)
+        identity_row["orderLinkId"] = "client_effective"
+        page = parse_order_page(
+            bound_order_response(
+                {
+                    "retCode": 0,
+                    "result": {
+                        "category": "spot",
+                        "nextPageCursor": "",
+                        "list": [identity_row],
+                    },
+                },
+                client_order_id="client_effective",
+                symbol="BTCUSDT",
+            )
+        )
+        self.assertEqual(page.orders[0].symbol, "ETHUSDT")
+
     def test_order_page_rejects_conflicting_duplicate_order_identity(self):
         with self.assertRaisesRegex(ProviderCoreError, "conflicting state"):
             parse_order_page(
@@ -1648,6 +1696,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             "start_time_ms": 1790193600000,
             "end_time_ms": 1790280000000,
         }
+        capability = read_capability()
         first = bound_order_response(
             {
                 "retCode": 0,
@@ -1657,6 +1706,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                     "list": [],
                 },
             },
+            capability=capability,
             **common,
         )
         second = bound_order_response(
@@ -1669,6 +1719,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                 },
             },
             cursor="page-2",
+            capability=capability,
             **common,
         )
         coverage = order_history_coverage_from_pages(
@@ -1683,7 +1734,13 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(coverage.coverage_start, "2026-09-23T20:00:00.000Z")
         self.assertEqual(coverage.coverage_end, "2026-09-24T20:00:00.000Z")
 
-    def test_order_history_coverage_rejects_skipped_or_partial_cursor_chain(self):
+    def test_order_history_coverage_rejects_mixed_capability_snapshots(self):
+        first_capability = read_capability()
+        second_capability = read_capability()
+        self.assertNotEqual(
+            first_capability.snapshot_id,
+            second_capability.snapshot_id,
+        )
         common = {
             "start_time_ms": 1790193600000,
             "end_time_ms": 1790280000000,
@@ -1697,6 +1754,47 @@ class BybitV5AdapterTests(unittest.TestCase):
                     "list": [],
                 },
             },
+            capability=first_capability,
+            **common,
+        )
+        second = bound_order_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "",
+                    "list": [],
+                },
+            },
+            cursor="page-2",
+            capability=second_capability,
+            **common,
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "authenticated-read capability scope",
+        ):
+            order_history_coverage_from_pages(
+                (first, second),
+                consistency_horizon_satisfied=True,
+            )
+
+    def test_order_history_coverage_rejects_skipped_or_partial_cursor_chain(self):
+        common = {
+            "start_time_ms": 1790193600000,
+            "end_time_ms": 1790280000000,
+        }
+        capability = read_capability()
+        first = bound_order_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "page-2",
+                    "list": [],
+                },
+            },
+            capability=capability,
             **common,
         )
         wrong_second = bound_order_response(
@@ -1709,6 +1807,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                 },
             },
             cursor="page-3",
+            capability=capability,
             **common,
         )
         with self.assertRaisesRegex(ProviderCoreError, "cursor chain"):
@@ -1870,6 +1969,58 @@ class BybitV5AdapterTests(unittest.TestCase):
                 instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
             )
 
+    def test_execution_page_enforces_effective_symbol_filter(self):
+        row = {
+            "execId": "exec-symbol-filter",
+            "orderLinkId": "",
+            "symbol": "ETHUSDT",
+            "side": "Buy",
+            "execQty": "1",
+            "execPrice": "10",
+            "execFee": "0",
+            "feeCurrency": "USDT",
+            "execTime": "1790280000000",
+        }
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "symbol response does not match",
+        ):
+            parse_execution_page(
+                bound_execution_page_response(
+                    {
+                        "retCode": 0,
+                        "result": {
+                            "category": "spot",
+                            "nextPageCursor": "",
+                            "list": [row],
+                        },
+                    },
+                    symbol="BTCUSDT",
+                ),
+                provider_environment="TESTNET",
+                instrument_versions={"ETHUSDT": "ETHUSDT@v1"},
+            )
+
+        identity_row = dict(row)
+        identity_row["orderLinkId"] = "client_exec_effective"
+        page = parse_execution_page(
+            bound_execution_page_response(
+                {
+                    "retCode": 0,
+                    "result": {
+                        "category": "spot",
+                        "nextPageCursor": "",
+                        "list": [identity_row],
+                    },
+                },
+                client_order_id="client_exec_effective",
+                symbol="BTCUSDT",
+            ),
+            provider_environment="TESTNET",
+            instrument_versions={"ETHUSDT": "ETHUSDT@v1"},
+        )
+        self.assertEqual(page.fills[0].instrument, "ETHUSDT@v1")
+
     def test_next_execution_page_preserves_exact_capability_and_query(self):
         capability = read_capability()
         first = bound_execution_page_response(
@@ -1904,6 +2055,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             "start_time_ms": 1790193600000,
             "end_time_ms": 1790280000000,
         }
+        capability = read_capability()
         first = bound_execution_page_response(
             {
                 "retCode": 0,
@@ -1925,6 +2077,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                     ],
                 },
             },
+            capability=capability,
             **common,
         )
         second = bound_execution_page_response(
@@ -1949,6 +2102,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                 },
             },
             cursor="exec-page-2",
+            capability=capability,
             **common,
         )
         coverage = execution_history_coverage_from_pages(
@@ -1966,6 +2120,53 @@ class BybitV5AdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ProviderCoreError, "incomplete"):
             execution_history_coverage_from_pages(
                 (first,),
+                provider_environment="TESTNET",
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                consistency_horizon_satisfied=True,
+            )
+
+    def test_execution_history_coverage_rejects_mixed_capability_snapshots(self):
+        first_capability = read_capability()
+        second_capability = read_capability()
+        self.assertNotEqual(
+            first_capability.snapshot_id,
+            second_capability.snapshot_id,
+        )
+        common = {
+            "start_time_ms": 1790193600000,
+            "end_time_ms": 1790280000000,
+        }
+        first = bound_execution_page_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "exec-page-2",
+                    "list": [],
+                },
+            },
+            capability=first_capability,
+            **common,
+        )
+        second = bound_execution_page_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "",
+                    "list": [],
+                },
+            },
+            cursor="exec-page-2",
+            capability=second_capability,
+            **common,
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "authenticated-read capability scope",
+        ):
+            execution_history_coverage_from_pages(
+                (first, second),
                 provider_environment="TESTNET",
                 instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
                 consistency_horizon_satisfied=True,

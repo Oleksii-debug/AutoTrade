@@ -568,6 +568,35 @@ class SemanticWebClientContractTests(unittest.TestCase):
         )
         self.assertIn("bindAuthorityPolicyReviewInvalidation();", js)
 
+    def test_pending_privileged_retry_is_disabled_when_snapshot_scope_changes(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("function pendingCommandMatchesCurrentScope()", js)
+        self.assertIn(
+            "state.pendingCommand.account_id === state.accountId",
+            js,
+        )
+        self.assertIn(
+            "state.pendingCommand.environment === state.environment",
+            js,
+        )
+        self.assertIn(
+            "state.pendingCommand.actor === state.sessionIdentity.actor",
+            js,
+        )
+        self.assertIn(
+            "state.pendingCommand.session === state.sessionIdentity.session",
+            js,
+        )
+        availability = js[
+            js.index("function setCommandAvailability(enabled)"):
+            js.index("function freshnessText", js.index("function setCommandAvailability(enabled)"))
+        ]
+        self.assertIn(
+            "const pendingScopeMatches = pendingCommandMatchesCurrentScope();",
+            availability,
+        )
+        self.assertIn("!pendingScopeMatches", availability)
+
     def test_pending_authority_retry_restores_locks_and_reconfirms_exact_payload(self):
         js = APP.read_text(encoding="utf-8")
         self.assertIn("function renderPendingAuthorityPolicyForRetry()", js)

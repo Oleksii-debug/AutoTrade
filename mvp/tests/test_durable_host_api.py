@@ -583,7 +583,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
             if key != "account_id"
         }
         with self.assertRaisesRegex(
-            RuntimeError,
+            ValueError,
             "cannot be reactivated",
         ):
             store.submit(self.command(action="SET_AUTHORITY", payload=payload))

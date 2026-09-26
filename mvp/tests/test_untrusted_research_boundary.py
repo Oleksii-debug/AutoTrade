@@ -138,6 +138,11 @@ class UntrustedResearchBoundaryTests(unittest.TestCase):
             {"authorization": "Bearer injected"},
             {"nested": {"api-key": "secret"}},
             {"steps": [{"executionAuthority": "TRADE_ALLOWED"}]},
+            {"credential_handle_id": "trade-handle-1"},
+            {"session_token": "session-secret"},
+            {"owner_token": "durable-sender-token"},
+            {"client_secret": "provider-secret"},
+            {"secret_ref": "vault:trade"},
         ):
             with self.subTest(arguments=arguments), self.assertRaisesRegex(
                 PermissionError,
@@ -160,7 +165,7 @@ class UntrustedResearchBoundaryTests(unittest.TestCase):
                 capabilities=(ResearchCapability.COMPUTE_STATISTICS,),
                 arguments={
                     "analysis": {
-                        "private_key": "must-not-cross-boundary",
+                        "credential_handle": "trade-handle-opaque",
                     }
                 },
                 evidence_refs=("artifact:1",),

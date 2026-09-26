@@ -30,27 +30,39 @@ internal static class Program
             "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'",
             System.Globalization.CultureInfo.InvariantCulture);
     
-    static object Snapshot(string token, string version = "0") => new
+    static object Snapshot(
+        string token,
+        string version = "0",
+        string hostFreshness = "CURRENT",
+        string? freshnessAsOf = null)
     {
-        state_version = version,
-        event_cursor = version,
-        server_time = NowUtc(),
-        host_id = "host-local-1",
-        account_id = "paper-account-1",
-        environment = "PAPER",
-        permission_summary = new
+        string serverTime = NowUtc();
+        return new
         {
-            actor = "owner",
-            role = "OWNER",
-            session = AuthenticatedEmergencyHostClient.PublicSessionReference(token),
-        },
-        connection_freshness = new { host = "CURRENT", as_of = NowUtc() },
-        portfolio = new { },
-        risk = new { },
-        strategy = new { },
-        jobs = Array.Empty<object>(),
-        reason_codes = Array.Empty<string>(),
-    };
+            state_version = version,
+            event_cursor = version,
+            server_time = serverTime,
+            host_id = "host-local-1",
+            account_id = "paper-account-1",
+            environment = "PAPER",
+            permission_summary = new
+            {
+                actor = "owner",
+                role = "OWNER",
+                session = AuthenticatedEmergencyHostClient.PublicSessionReference(token),
+            },
+            connection_freshness = new
+            {
+                host = hostFreshness,
+                as_of = freshnessAsOf ?? serverTime,
+            },
+            portfolio = new { },
+            risk = new { },
+            strategy = new { },
+            jobs = Array.Empty<object>(),
+            reason_codes = Array.Empty<string>(),
+        };
+    }
     
     static void AssertAuth(HttpRequestMessage request, string token)
     {
@@ -164,6 +176,7 @@ internal static class Program
     
         EmergencyHostStatus status = await client.GetStatusAsync(CancellationToken.None);
         Check.True(status.Connected, "authenticated snapshot must be connected");
+        Check.True(status.IsCurrent, "CURRENT host freshness was not preserved");
         Check.True(status.HostId == "host-local-1", "host identity changed");
         Check.True(status.AccountId == "paper-account-1", "account identity changed");
         Check.True(status.Environment == "PAPER", "environment identity changed");
@@ -181,6 +194,245 @@ internal static class Program
             "operation success must not fabricate provider in-flight absence");
     }
     
+    static void StaleSuccessorMayCarryOlderEvidenceTimeTest()
+    {
+        EmergencyHostStatus current = new(
+            Connected: true,
+            HostId: "host-local-1",
+            AccountId: "paper-account-1",
+            Environment: "PAPER",
+            StateVersion: "7",
+            ObservedAtUtc: DateTimeOffset.Parse(
+                "2026-09-25T09:30:00Z",
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal
+                    | System.Globalization.DateTimeStyles.AdjustToUniversal),
+            Message: "current")
+        {
+            IsCurrent = true,
+        };
+        EmergencyHostStatus stale = new(
+            Connected: true,
+            HostId: "host-local-1",
+            AccountId: "paper-account-1",
+            Environment: "PAPER",
+            StateVersion: "8",
+            ObservedAtUtc: DateTimeOffset.Parse(
+                "2026-09-25T09:29:00Z",
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal
+                    | System.Globalization.DateTimeStyles.AdjustToUniversal),
+            Message: "stale")
+        {
+            IsCurrent = false,
+        };
+
+        EmergencyHostStatus accepted = stale.ValidateStaleSuccessorOf(current);
+        Check.True(
+            ReferenceEquals(accepted, stale),
+            "stale successor should preserve the validated observation");
+
+        bool normalSuccessorRejected = false;
+        try
+        {
+            stale.ValidateSuccessorOf(current);
+        }
+        catch (InvalidOperationException)
+        {
+            normalSuccessorRejected = true;
+        }
+        Check.True(
+            normalSuccessorRejected,
+            "current-evidence successor validation must still reject evidence-time regression");
+    }
+
+    static void StaleSuccessorRejectsDurableRegressionAndIdentityChangeTest()
+    {
+        DateTimeOffset observed = DateTimeOffset.Parse(
+            "2026-09-25T09:29:00Z",
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AssumeUniversal
+                | System.Globalization.DateTimeStyles.AdjustToUniversal);
+        EmergencyHostStatus staleNine = new(
+            Connected: true,
+            HostId: "host-local-1",
+            AccountId: "paper-account-1",
+            Environment: "PAPER",
+            StateVersion: "9",
+            ObservedAtUtc: observed,
+            Message: "stale-nine")
+        {
+            IsCurrent = false,
+        };
+
+        EmergencyHostStatus regressed = staleNine with
+        {
+            StateVersion = "8",
+            ObservedAtUtc = observed.AddMinutes(-1),
+            Message = "stale-eight",
+        };
+        bool versionRejected = false;
+        try
+        {
+            regressed.ValidateStaleSuccessorOf(staleNine);
+        }
+        catch (InvalidOperationException)
+        {
+            versionRejected = true;
+        }
+        Check.True(
+            versionRejected,
+            "stale-to-stale succession must reject durable state-version regression");
+
+        EmergencyHostStatus changedIdentity = staleNine with
+        {
+            HostId = "host-other",
+            StateVersion = "10",
+            ObservedAtUtc = observed.AddMinutes(-2),
+            Message = "stale-other-host",
+        };
+        bool identityRejected = false;
+        try
+        {
+            changedIdentity.ValidateStaleSuccessorOf(staleNine);
+        }
+        catch (InvalidOperationException)
+        {
+            identityRejected = true;
+        }
+        Check.True(
+            identityRejected,
+            "stale-to-stale succession must reject silent host authority identity change");
+    }
+
+    static async Task NonCurrentFreshnessRemainsExplicitTest()
+    {
+        const string token = "session-token-stale";
+        const string freshnessAsOf = "2026-09-25T09:29:00Z";
+        MutableSessionProvider sessions =
+            new(PairedSession(token));
+        DelegateHandler handler = new((request, _, _) =>
+        {
+            AssertAuth(request, token);
+            if (request.Method == HttpMethod.Get
+                && request.RequestUri!.AbsolutePath == "/api/v1/state")
+            {
+                return Task.FromResult(
+                    Json(
+                        HttpStatusCode.OK,
+                        Snapshot(
+                            token,
+                            "8",
+                            hostFreshness: "STALE",
+                            freshnessAsOf: freshnessAsOf)));
+            }
+
+            throw new InvalidOperationException(
+                "stale-status test issued an unexpected request");
+        });
+        AuthenticatedEmergencyHostClient client = new(
+            new HttpClient(handler),
+            HostOrigin,
+            sessions);
+
+        EmergencyHostStatus status =
+            await client.GetStatusAsync(CancellationToken.None);
+        Check.True(status.Connected, "stale authenticated snapshot lost host reachability");
+        Check.True(!status.IsCurrent, "STALE host freshness was fabricated as CURRENT");
+        Check.True(
+            status.StateVersion == "8",
+            "stale snapshot lost its durable state version");
+        Check.True(
+            status.ObservedAtUtc
+                == DateTimeOffset.Parse(
+                    freshnessAsOf,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AssumeUniversal
+                        | System.Globalization.DateTimeStyles.AdjustToUniversal),
+            "native last-evidence time did not use connection_freshness.as_of");
+        Check.True(
+            status.Message.Contains("STALE", StringComparison.Ordinal),
+            "non-current host freshness was not surfaced in status text");
+    }
+
+    static async Task StaleFreshnessDoesNotDisableEmergencyBlockTest()
+    {
+        const string token = "session-token-stale-emergency";
+        const string freshnessAsOf = "2026-09-25T09:29:00Z";
+        const string operationId = "23232323-2323-2323-2323-232323232323";
+        MutableSessionProvider sessions =
+            new(PairedSession(token));
+        int posts = 0;
+        DelegateHandler handler = new(async (request, _, cancellationToken) =>
+        {
+            AssertAuth(request, token);
+            if (request.Method == HttpMethod.Get
+                && request.RequestUri!.AbsolutePath == "/api/v1/state")
+            {
+                return Json(
+                    HttpStatusCode.OK,
+                    Snapshot(
+                        token,
+                        "0",
+                        hostFreshness: "STALE",
+                        freshnessAsOf: freshnessAsOf));
+            }
+
+            if (request.Method == HttpMethod.Post
+                && request.RequestUri!.AbsolutePath == "/api/v1/commands")
+            {
+                posts++;
+                string body =
+                    await request.Content!.ReadAsStringAsync(cancellationToken);
+                using JsonDocument parsed = JsonDocument.Parse(body);
+                return Json(
+                    HttpStatusCode.OK,
+                    new
+                    {
+                        command_id =
+                            parsed.RootElement.GetProperty("command_id").GetString(),
+                        status = "ACCEPTED",
+                        state_version = "1",
+                        reason_codes = Array.Empty<string>(),
+                        field_errors = Array.Empty<object>(),
+                        operation_id = operationId,
+                    });
+            }
+
+            if (request.Method == HttpMethod.Get
+                && request.RequestUri!.AbsolutePath
+                    == "/api/v1/operations/" + operationId)
+            {
+                return Json(
+                    HttpStatusCode.OK,
+                    new
+                    {
+                        operation_id = operationId,
+                        phase = "SUCCEEDED",
+                        started_at = NowUtc(),
+                        updated_at = NowUtc(),
+                        affected_refs = Array.Empty<string>(),
+                        evidence = Array.Empty<object>(),
+                        remaining_uncertainty = Array.Empty<string>(),
+                    });
+            }
+
+            throw new InvalidOperationException(
+                "stale-emergency test issued an unexpected request");
+        });
+        AuthenticatedEmergencyHostClient client = new(
+            new HttpClient(handler),
+            HostOrigin,
+            sessions);
+
+        EmergencyCommandResult result =
+            await client.BlockNewExposureAsync(CancellationToken.None);
+        Check.True(
+            result.Accepted && result.DurableBlockConfirmed,
+            "stale display freshness incorrectly disabled the risk-reducing emergency block");
+        Check.True(posts == 1, "emergency block was not submitted exactly once");
+    }
+
     static async Task AmbiguousPostExactRetryTest()
     {
         const string token = "session-token-b";
@@ -703,6 +955,10 @@ internal static class Program
         CredentialTargetIsOriginBoundTest();
         await PairedOriginMismatchFailsBeforeTransportTest();
         await CanonicalStatusAndOperationTest();
+        StaleSuccessorMayCarryOlderEvidenceTimeTest();
+        StaleSuccessorRejectsDurableRegressionAndIdentityChangeTest();
+        await NonCurrentFreshnessRemainsExplicitTest();
+        await StaleFreshnessDoesNotDisableEmergencyBlockTest();
         await AmbiguousPostExactRetryTest();
         await UncertainCommandCannotRetargetSessionTest();
         await UncertainCommandSurvivesDesktopRestartTest();

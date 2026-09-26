@@ -20,6 +20,10 @@ from mvp.autotrade_mvp.alpaca import (
     prepare_order_request as prepare_alpaca_order_request,
 )
 from mvp.autotrade_mvp.binance_spot import parse_account_trades
+from mvp.autotrade_mvp.kraken_futures import (
+    guarded_order_projection as kraken_futures_guarded_order_projection,
+    prepare_order_request as prepare_kraken_futures_order_request,
+)
 from mvp.autotrade_mvp.kraken_spot import parse_trade_history
 from mvp.autotrade_mvp.dispatch import (
     GuardedDispatcher,
@@ -46,7 +50,11 @@ from mvp.autotrade_mvp.provider_transport import (
     ProviderTransportError,
     ProviderTransportScopeError,
     TradingWireResponse,
+    KRAKEN_FUTURES_ENDPOINT_POLICIES,
     KRAKEN_SPOT_ENDPOINT_POLICIES,
+    KrakenFuturesDurableNonceAllocator,
+    KrakenFuturesHttpTransport,
+    KrakenFuturesSigner,
     KrakenSpotAuthenticatedReadSigner,
     KrakenSpotAuthenticatedReadTransport,
     KrakenSpotDurableNonceAllocator,
@@ -3366,6 +3374,456 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
                 )
                 self.assertEqual(len(resolver.calls), 1)
                 self.assertEqual(len(wire.requests), 1)
+
+
+
+KRAKEN_FUTURES_NOW = datetime(2026, 9, 26, 12, 0, tzinfo=timezone.utc)
+KRAKEN_FUTURES_SNAPSHOT_ID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+_KRAKEN_FUTURES_ARTIFACT_IDS = {
+    "DOCUMENTED": "71111111-1111-4111-8111-111111111111",
+    "API": "72222222-2222-4222-8222-222222222222",
+    "ACCOUNT": "73333333-3333-4333-8333-333333333333",
+    "INSTRUMENT": "74444444-4444-4444-8444-444444444444",
+}
+
+
+def kraken_futures_trade_handle(
+    *,
+    provider_environment="DEMO",
+    account_id="acct-kraken-futures",
+    handle_id="cred-kraken-futures-trade",
+    generation=1,
+):
+    runtime_environment = "PAPER" if provider_environment == "DEMO" else "LIVE"
+    return PersistentCredentialHandle(
+        handle_id=handle_id,
+        account_id=account_id,
+        provider="KRAKEN",
+        environment=runtime_environment,
+        purpose="TRADE",
+        generation=generation,
+    )
+
+
+def verified_kraken_futures_capability(
+    *,
+    snapshot_id=KRAKEN_FUTURES_SNAPSHOT_ID,
+    observed_at=KRAKEN_FUTURES_NOW - timedelta(minutes=1),
+    expires_at=KRAKEN_FUTURES_NOW + timedelta(minutes=10),
+    provider_environment="DEMO",
+):
+    runtime_environment = "PAPER" if provider_environment == "DEMO" else "LIVE"
+    claims = tuple(
+        CapabilityClaim(
+            source=source,
+            provider_id="KRAKEN",
+            account_id="acct-kraken-futures",
+            entity_id="kraken-futures-api",
+            environment=runtime_environment,
+            instrument_version="PF_XBTUSD@v1",
+            observed_at=observed_at,
+            expires_at=expires_at,
+            supported_order_types=frozenset({"LIMIT", "MARKET"}),
+            time_in_force=frozenset({"GTC"}),
+            permission_scopes=frozenset({"ORDER_WRITE"}),
+            position_mode="NET",
+            native_protection=frozenset(),
+            rate_limit_policy_id="kraken-futures-" + provider_environment.lower(),
+            data_entitlements=frozenset({"ORDERS"}),
+            evidence_ref={
+                "artifact_id": _KRAKEN_FUTURES_ARTIFACT_IDS[source],
+                "sha256": "sha256:" + "d" * 64,
+                "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
+            },
+        )
+        for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+    )
+    return derive_capability_snapshot(
+        snapshot_id=snapshot_id,
+        claims=claims,
+        observed_at=observed_at,
+        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    )
+
+
+def kraken_futures_prepared_request(
+    client_order_id="kraken-futures-1",
+    *,
+    capability=None,
+    provider_environment="DEMO",
+):
+    capability = capability or verified_kraken_futures_capability(
+        provider_environment=provider_environment
+    )
+    return prepare_kraken_futures_order_request(
+        capability=capability,
+        account_id="acct-kraken-futures",
+        provider_environment=provider_environment,
+        instrument_version="PF_XBTUSD@v1",
+        at=KRAKEN_FUTURES_NOW,
+        symbol="PF_XBTUSD",
+        side="BUY",
+        order_type="LIMIT",
+        size="1",
+        price="60000",
+        client_order_id=client_order_id,
+    )
+
+
+class KrakenFuturesGuardedTransportTests(unittest.TestCase):
+    @staticmethod
+    def credential_plaintext():
+        return json.dumps(
+            {
+                "api_key": "kraken-futures-key",
+                "api_secret": "dGVzdC1mdXR1cmVzLXNlY3JldA==",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def make_transport(
+        self,
+        *,
+        directory,
+        events,
+        capability=None,
+        capability_registry=None,
+        secret_resolver=None,
+        provider_environment="DEMO",
+        clock_utc=None,
+        quota_gate=None,
+        wire=None,
+        nonce_clock=None,
+    ):
+        capability = capability or verified_kraken_futures_capability(
+            provider_environment=provider_environment
+        )
+        registry = capability_registry or RecordingCapabilityRegistry(events)
+        if capability_registry is None:
+            registry.add(capability)
+        handle = kraken_futures_trade_handle(
+            provider_environment=provider_environment
+        )
+        runtime_environment = "PAPER" if provider_environment == "DEMO" else "LIVE"
+        allocator = KrakenFuturesDurableNonceAllocator(
+            journal=JournalStore(f"{directory}/journal.sqlite3"),
+            account_id="acct-kraken-futures",
+            environment=runtime_environment,
+            provider_environment=provider_environment,
+            credential_handle=handle,
+            clock_millis=nonce_clock
+            or (lambda: events.append("nonce") or 1_700_000_000_000),
+            clock_utc=lambda: KRAKEN_FUTURES_NOW,
+        )
+        resolver = secret_resolver or FakeSecretResolver(
+            events,
+            credential_plaintext=self.credential_plaintext(),
+        )
+        transport = KrakenFuturesHttpTransport(
+            policy=KRAKEN_FUTURES_ENDPOINT_POLICIES[provider_environment],
+            provider_environment=provider_environment,
+            account_id="acct-kraken-futures",
+            capability_snapshot_id=capability.snapshot_id,
+            capability_registry=registry,
+            secret_resolver=resolver,
+            credential_handle=handle,
+            session_token="session-kraken-futures",
+            origin="autotrade://execution",
+            execution_identity="sender-kraken-futures",
+            nonce_allocator=allocator,
+            clock_utc=clock_utc or (lambda: KRAKEN_FUTURES_NOW),
+            quota_gate=quota_gate,
+            wire_client=wire or RecordingWire(events),
+        )
+        return transport, resolver, allocator, registry
+
+    def test_signer_matches_current_url_encoded_derivatives_vector(self):
+        request = KrakenFuturesSigner.sign(
+            policy=KRAKEN_FUTURES_ENDPOINT_POLICIES["LIVE"],
+            provider_environment="LIVE",
+            endpoint="/derivatives/api/v3/sendorder",
+            body={
+                "orderType": "lmt",
+                "symbol": "PF_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "cliOrdId": "123e4567-e89b-12d3-a456-426614174000",
+                "limitPrice": "60000",
+                "reduceOnly": "true",
+            },
+            credential_plaintext=self.credential_plaintext(),
+            nonce=1_415_957_147_987,
+        )
+        self.assertEqual(
+            request.url,
+            "https://futures.kraken.com/derivatives/api/v3/sendorder",
+        )
+        self.assertEqual(
+            request.body,
+            b"cliOrdId=123e4567-e89b-12d3-a456-426614174000&limitPrice=60000&orderType=lmt&reduceOnly=true&side=buy&size=1&symbol=PF_XBTUSD",
+        )
+        self.assertEqual(request.headers["APIKey"], "kraken-futures-key")
+        self.assertEqual(request.headers["Nonce"], "1415957147987")
+        self.assertEqual(
+            request.headers["Authent"],
+            "7dE9gaKJpFC2q9UlWpTh4T0vTnhPHQ1EFCwR3SrNkx6rALljH3cAZSehQ92aY9Wj0Flz0HlcVysCZuUUMdx8mQ==",
+        )
+        self.assertNotIn("test-futures-secret", repr(request))
+        self.assertNotIn("dGVzdC1mdXR1cmVzLXNlY3JldA==", repr(request))
+
+    def test_demo_nonce_survives_restart_and_clock_regression(self):
+        provider_api_key = "shared-futures-key"
+        fixed = KRAKEN_FUTURES_NOW
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            handle = kraken_futures_trade_handle()
+            first = KrakenFuturesDurableNonceAllocator(
+                journal=JournalStore(path),
+                account_id="acct-kraken-futures",
+                environment="PAPER",
+                provider_environment="DEMO",
+                credential_handle=handle,
+                clock_millis=lambda: 1_700_000_000_000,
+                clock_utc=lambda: fixed,
+            )
+            first_domain = first.for_provider_api_key(provider_api_key)
+            self.assertEqual(first_domain.allocate(), 1_700_000_000_000)
+
+            reopened = KrakenFuturesDurableNonceAllocator(
+                journal=JournalStore(path),
+                account_id="acct-kraken-futures",
+                environment="PAPER",
+                provider_environment="DEMO",
+                credential_handle=handle,
+                clock_millis=lambda: 1_699_999_999_000,
+                clock_utc=lambda: fixed + timedelta(seconds=1),
+            )
+            reopened_domain = reopened.for_provider_api_key(provider_api_key)
+            self.assertEqual(reopened_domain.allocate(), 1_700_000_000_001)
+            events = JournalStore(path).load_events(
+                "provider_nonce",
+                reopened_domain.aggregate_id,
+            )
+            self.assertEqual(len(events), 2)
+            self.assertTrue(
+                all(item["payload"]["provider_environment"] == "DEMO" for item in events)
+            )
+            self.assertNotIn(provider_api_key, json.dumps(events, sort_keys=True))
+
+    def test_transport_orders_quota_capability_secret_nonce_guard_and_one_wire(self):
+        events = []
+        with TemporaryDirectory() as directory:
+            wire = RecordingWire(
+                events,
+                response=b'{"result":"success","sendStatus":{"order_id":"F-1"}}',
+                http_status=200,
+            )
+            transport, resolver, _allocator, _registry = self.make_transport(
+                directory=directory,
+                events=events,
+                wire=wire,
+                quota_gate=lambda provider, account, environment, purpose: (
+                    events.append("quota"),
+                    self.assertEqual(
+                        (provider, account, environment, purpose),
+                        (
+                            "KRAKEN",
+                            "acct-kraken-futures",
+                            "PAPER",
+                            "ORDER_WRITE",
+                        ),
+                    ),
+                )[-1],
+            )
+            prepared = kraken_futures_prepared_request()
+            response = transport(
+                prepared.body["cliOrdId"],
+                kraken_futures_guarded_order_projection(prepared),
+                lambda: events.append("guard"),
+            )
+
+            self.assertEqual(
+                events,
+                [
+                    "quota",
+                    "capability",
+                    "resolve",
+                    "nonce",
+                    "capability",
+                    "guard",
+                    "wire",
+                ],
+            )
+            self.assertEqual(response.http_status, 200)
+            self.assertEqual(
+                response.response_bytes,
+                b'{"result":"success","sendStatus":{"order_id":"F-1"}}',
+            )
+            self.assertEqual(len(resolver.calls), 1)
+            self.assertEqual(len(wire.requests), 1)
+            signed = wire.requests[0]
+            self.assertEqual(
+                signed.url,
+                "https://demo-futures.kraken.com/derivatives/api/v3/sendorder",
+            )
+            self.assertEqual(signed.headers["APIKey"], "kraken-futures-key")
+            self.assertNotIn("dGVzdC1mdXR1cmVzLXNlY3JldA==", repr(signed))
+
+    def test_expiry_during_quota_wait_blocks_before_secret_nonce_and_wire(self):
+        events = []
+        capability = verified_kraken_futures_capability()
+        with TemporaryDirectory() as directory:
+            wire = RecordingWire(events)
+            transport, resolver, allocator, _registry = self.make_transport(
+                directory=directory,
+                events=events,
+                capability=capability,
+                wire=wire,
+                quota_gate=lambda *_args: events.append("quota"),
+                clock_utc=lambda: capability.expires_at,
+            )
+            prepared = kraken_futures_prepared_request(capability=capability)
+            with self.assertRaisesRegex(
+                ProviderTransportScopeError,
+                "cannot be verified",
+            ):
+                transport(
+                    prepared.body["cliOrdId"],
+                    kraken_futures_guarded_order_projection(prepared),
+                    lambda: events.append("guard"),
+                )
+            self.assertEqual(events, ["quota", "capability"])
+            self.assertEqual(resolver.calls, [])
+            self.assertEqual(wire.requests, [])
+            self.assertEqual(
+                allocator.journal.load_events_by_aggregate_type("provider_nonce"),
+                [],
+            )
+
+    def test_capability_superseded_after_secret_resolution_blocks_wire(self):
+        events = []
+        capability = verified_kraken_futures_capability()
+        replacement = verified_kraken_futures_capability(
+            snapshot_id="ffffffff-ffff-4fff-8fff-ffffffffffff",
+            observed_at=KRAKEN_FUTURES_NOW + timedelta(milliseconds=500),
+            expires_at=KRAKEN_FUTURES_NOW + timedelta(minutes=20),
+        )
+        registry = RecordingCapabilityRegistry(events)
+        registry.add(capability)
+
+        def supersede():
+            registry.add(replacement)
+
+        resolver = FakeSecretResolver(
+            events,
+            on_resolve=supersede,
+            credential_plaintext=self.credential_plaintext(),
+        )
+        with TemporaryDirectory() as directory:
+            wire = RecordingWire(events)
+            transport, _resolver, allocator, _registry = self.make_transport(
+                directory=directory,
+                events=events,
+                capability=capability,
+                capability_registry=registry,
+                secret_resolver=resolver,
+                wire=wire,
+                clock_utc=lambda: KRAKEN_FUTURES_NOW + timedelta(seconds=1),
+            )
+            prepared = kraken_futures_prepared_request(capability=capability)
+            with self.assertRaisesRegex(
+                ProviderTransportScopeError,
+                "no longer valid",
+            ):
+                transport(
+                    prepared.body["cliOrdId"],
+                    kraken_futures_guarded_order_projection(prepared),
+                    lambda: events.append("guard"),
+                )
+            self.assertEqual(
+                events,
+                ["capability", "resolve", "nonce", "capability"],
+            )
+            self.assertEqual(len(resolver.calls), 1)
+            self.assertEqual(wire.requests, [])
+            self.assertEqual(
+                len(
+                    allocator.journal.load_events_by_aggregate_type(
+                        "provider_nonce"
+                    )
+                ),
+                1,
+            )
+
+    def test_wire_failure_after_guard_is_one_shot_and_propagates(self):
+        events = []
+        with TemporaryDirectory() as directory:
+            wire = RecordingWire(
+                events,
+                error=TimeoutError("response lost after possible send"),
+            )
+            transport, resolver, _allocator, _registry = self.make_transport(
+                directory=directory,
+                events=events,
+                wire=wire,
+            )
+            prepared = kraken_futures_prepared_request()
+            with self.assertRaisesRegex(
+                TimeoutError,
+                "response lost after possible send",
+            ):
+                transport(
+                    prepared.body["cliOrdId"],
+                    kraken_futures_guarded_order_projection(prepared),
+                    lambda: events.append("guard"),
+                )
+            self.assertEqual(
+                events,
+                [
+                    "capability",
+                    "resolve",
+                    "nonce",
+                    "capability",
+                    "guard",
+                    "wire",
+                ],
+            )
+            self.assertEqual(len(resolver.calls), 1)
+            self.assertEqual(len(wire.requests), 1)
+
+    def test_provider_environment_cannot_retarget_runtime_or_credential(self):
+        events = []
+        with TemporaryDirectory() as directory:
+            handle = kraken_futures_trade_handle(provider_environment="DEMO")
+            allocator = KrakenFuturesDurableNonceAllocator(
+                journal=JournalStore(f"{directory}/journal.sqlite3"),
+                account_id="acct-kraken-futures",
+                environment="PAPER",
+                provider_environment="DEMO",
+                credential_handle=handle,
+                clock_millis=lambda: 100,
+            )
+            with self.assertRaisesRegex(
+                ProviderTransportScopeError,
+                "policy does not match exact provider environment",
+            ):
+                KrakenFuturesHttpTransport(
+                    policy=KRAKEN_FUTURES_ENDPOINT_POLICIES["LIVE"],
+                    provider_environment="DEMO",
+                    account_id="acct-kraken-futures",
+                    capability_snapshot_id=KRAKEN_FUTURES_SNAPSHOT_ID,
+                    capability_registry=CapabilityRegistry(),
+                    secret_resolver=FakeSecretResolver(events),
+                    credential_handle=handle,
+                    session_token="session",
+                    origin="autotrade://execution",
+                    execution_identity="sender",
+                    nonce_allocator=allocator,
+                    clock_utc=lambda: KRAKEN_FUTURES_NOW,
+                    wire_client=RecordingWire(events),
+                )
+            self.assertEqual(events, [])
 
 
 if __name__ == "__main__":

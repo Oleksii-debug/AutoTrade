@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[2]
 XAML = ROOT / "src" / "AutoTrade.Desktop" / "MainWindow.xaml"
 CODE = ROOT / "src" / "AutoTrade.Desktop" / "MainWindow.xaml.cs"
+APP = ROOT / "src" / "AutoTrade.Desktop" / "App.xaml.cs"
 CLIENT = ROOT / "src" / "AutoTrade.Desktop" / "EmergencyHostClient.cs"
 PROJECT = ROOT / "src" / "AutoTrade.Desktop" / "AutoTrade.Desktop.csproj"
 WORKFLOW = ROOT / ".github" / "workflows" / "dotnet-foundation.yml"
@@ -19,6 +20,29 @@ class DesktopSafetyShellContractTests(unittest.TestCase):
         self.assertIn("<UseWPF>true</UseWPF>", text)
         self.assertNotIn("<PackageReference", text)
         self.assertEqual(project.tag, "Project")
+
+    def test_wpf_uses_an_explicit_early_bootstrap_entrypoint(self):
+        project_text = PROJECT.read_text(encoding="utf-8")
+        app_text = APP.read_text(encoding="utf-8")
+        self.assertIn(
+            "<StartupObject>AutoTrade.Desktop.App</StartupObject>",
+            project_text,
+        )
+        self.assertIn('<ApplicationDefinition Remove="App.xaml" />', project_text)
+        self.assertIn('<Page Include="App.xaml" />', project_text)
+        self.assertIn("[STAThread]", app_text)
+        self.assertIn("private static void Main(string[] args)", app_text)
+        self.assertLess(
+            app_text.index("private static void Main(string[] args)"),
+            app_text.index("protected override void OnStartup"),
+        )
+        main_body = app_text.split(
+            "private static void Main(string[] args)", 1
+        )[1].split("protected override void OnStartup", 1)[0]
+        self.assertIn("App app = new();", main_body)
+        self.assertIn("app.InitializeComponent();", main_body)
+        self.assertIn("app.Run();", main_body)
+        self.assertNotIn("OnStartup(", main_body)
 
     def test_native_surface_exposes_copyable_host_account_environment_and_evidence(self):
         text = XAML.read_text(encoding="utf-8")

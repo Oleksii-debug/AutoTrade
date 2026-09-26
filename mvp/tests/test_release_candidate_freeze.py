@@ -7,6 +7,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
 
+import mvp.autotrade_mvp.release_candidate as release_candidate_module
 from mvp.autotrade_mvp.qualification_attestation import (
     EvidenceArtifactRef,
     QualificationAttestation,
@@ -153,7 +154,10 @@ def _qualification(candidate, trust_root, *, artifacts=None, result="PASS"):
         package_id="WP-54",
         protocol_id="release-freeze-v1",
         protocol_version="1.0.0",
-        requirement_ids=("release-candidate-freeze",),
+        requirement_ids=(
+            "release-candidate-freeze",
+            release_candidate_module.release_candidate_subject_requirement(candidate),
+        ),
         evidence_refs=evidence,
         producer_id=trust_root.producer_id,
         verifier_id=trust_root.verifier_id,
@@ -358,6 +362,164 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                 manifest_sha256="sha256:" + "0" * 64,
             )
 
+    def test_direct_frozen_decision_cannot_replay_verified_manifest_as_authority(self):
+        decision = freeze_with_integrity_store(
+            self.candidate(),
+            with_attestation=True,
+        )
+
+        with self.assertRaisesRegex(
+            ReleaseCandidateError,
+            "requires verified factory authority",
+        ):
+            ReleaseCandidateDecision(
+                status="FROZEN",
+                reasons=(),
+                manifest_json=decision.manifest_json,
+                manifest_sha256=decision.manifest_sha256,
+                qualification_attestation_id=decision.qualification_attestation_id,
+                qualification_attestation_digest=decision.qualification_attestation_digest,
+                qualification_policy_id=decision.qualification_policy_id,
+                qualification_trust_root_id=decision.qualification_trust_root_id,
+            )
+
+    def test_imported_factory_token_cannot_bypass_signed_artifact_binding(self):
+        decision = freeze_with_integrity_store(
+            self.candidate(),
+            with_attestation=True,
+        )
+        body = json.loads(decision.manifest_json)
+        body["artifacts"][0]["artifact_id"] = str(
+            uuid5(NAMESPACE_URL, "wp54:forged-artifact-binding")
+        )
+        forged_json = json.dumps(
+            body,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        forged_sha = (
+            "sha256:" + sha256(forged_json.encode("utf-8")).hexdigest()
+        )
+
+        with self.assertRaisesRegex(
+            ReleaseCandidateError,
+            "does not cover exact artifact set",
+        ):
+            ReleaseCandidateDecision(
+                status="FROZEN",
+                reasons=(),
+                manifest_json=forged_json,
+                manifest_sha256=forged_sha,
+                qualification_attestation_id=decision.qualification_attestation_id,
+                qualification_attestation_digest=decision.qualification_attestation_digest,
+                qualification_policy_id=decision.qualification_policy_id,
+                qualification_trust_root_id=decision.qualification_trust_root_id,
+                _freeze_token=release_candidate_module._FROZEN_DECISION_TOKEN,
+            )
+
+    def test_imported_factory_token_cannot_bypass_signed_role_binding(self):
+        decision = freeze_with_integrity_store(
+            self.candidate(),
+            with_attestation=True,
+        )
+        body = json.loads(decision.manifest_json)
+        by_role = {item["role"]: item for item in body["artifacts"]}
+        sbom = by_role["SBOM"]
+        notices = by_role["LICENSE_NOTICES"]
+        sbom["role"], notices["role"] = notices["role"], sbom["role"]
+        body["artifacts"].sort(key=lambda item: item["role"])
+        forged_json = json.dumps(
+            body,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        forged_sha = (
+            "sha256:" + sha256(forged_json.encode("utf-8")).hexdigest()
+        )
+
+        with self.assertRaisesRegex(
+            ReleaseCandidateError,
+            "does not cover exact artifact set",
+        ):
+            ReleaseCandidateDecision(
+                status="FROZEN",
+                reasons=(),
+                manifest_json=forged_json,
+                manifest_sha256=forged_sha,
+                qualification_attestation_id=decision.qualification_attestation_id,
+                qualification_attestation_digest=decision.qualification_attestation_digest,
+                qualification_policy_id=decision.qualification_policy_id,
+                qualification_trust_root_id=decision.qualification_trust_root_id,
+                _freeze_token=release_candidate_module._FROZEN_DECISION_TOKEN,
+            )
+
+    def test_direct_frozen_decision_rejects_noncanonical_artifact_manifest(self):
+        decision = freeze_with_integrity_store(
+            self.candidate(),
+            with_attestation=True,
+        )
+        body = json.loads(decision.manifest_json)
+        body["artifacts"].append(
+            {
+                **body["artifacts"][0],
+                "role": "ARBITRARY_EXTENSION",
+            }
+        )
+        forged_json = json.dumps(
+            body,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        forged_sha = "sha256:" + sha256(forged_json.encode("utf-8")).hexdigest()
+
+        with self.assertRaisesRegex(
+            ReleaseCandidateError,
+            "artifact role set is not canonical",
+        ):
+            ReleaseCandidateDecision(
+                status="FROZEN",
+                reasons=(),
+                manifest_json=forged_json,
+                manifest_sha256=forged_sha,
+                qualification_attestation_id=decision.qualification_attestation_id,
+                qualification_attestation_digest=decision.qualification_attestation_digest,
+                qualification_policy_id=decision.qualification_policy_id,
+                qualification_trust_root_id=decision.qualification_trust_root_id,
+            )
+
+        body = json.loads(decision.manifest_json)
+        body["artifacts"].reverse()
+        reordered_json = json.dumps(
+            body,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        reordered_sha = (
+            "sha256:" + sha256(reordered_json.encode("utf-8")).hexdigest()
+        )
+        with self.assertRaisesRegex(
+            ReleaseCandidateError,
+            "canonical role order",
+        ):
+            ReleaseCandidateDecision(
+                status="FROZEN",
+                reasons=(),
+                manifest_json=reordered_json,
+                manifest_sha256=reordered_sha,
+                qualification_attestation_id=decision.qualification_attestation_id,
+                qualification_attestation_digest=decision.qualification_attestation_digest,
+                qualification_policy_id=decision.qualification_policy_id,
+                qualification_trust_root_id=decision.qualification_trust_root_id,
+            )
+
     def test_missing_required_artifact_blocks_freeze(self):
         artifacts = tuple(
             item for item in self.candidate().artifacts if item.role != "SBOM"
@@ -487,6 +649,32 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
         artifacts = self.candidate().artifacts
         with self.assertRaisesRegex(ReleaseCandidateError, "duplicate"):
             self.candidate(artifacts=artifacts + (artifacts[0],))
+
+    def test_unknown_artifact_role_is_rejected_before_attestation(self):
+        extra = artifact(
+            "ARBITRARY_EXTENSION",
+            signature_status="NOT_APPLICABLE",
+        )
+        base_artifacts = self.candidate().artifacts
+
+        with self.assertRaisesRegex(
+            ReleaseCandidateError,
+            "unsupported release artifact role: ARBITRARY_EXTENSION",
+        ):
+            self.candidate(artifacts=base_artifacts + (extra,))
+
+        with self.assertRaisesRegex(
+            ReleaseCandidateError,
+            "unsupported release artifact role: ARBITRARY_EXTENSION",
+        ):
+            ReleaseCandidateInput(
+                release_id="autotrade-rc-unknown-role",
+                source_sha=SOURCE,
+                baseline_hash=BASELINE,
+                schema_contract_hash=CONTRACTS,
+                artifacts=base_artifacts + (extra,),
+                unresolved_blockers=(),
+            )
 
     def test_binary_signature_cannot_be_not_applicable(self):
         with self.assertRaisesRegex(ReleaseCandidateError, "NOT_APPLICABLE"):

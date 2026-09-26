@@ -210,6 +210,22 @@ class JournalBackedHostCommandStore:
             return "stale_state_version"
         raise error
 
+    def _journal_idempotency_key(self, idempotency_key: str) -> str:
+        """Scope external retry identity to the active account/environment.
+
+        JournalStore intentionally owns durable dedupe, but its canonical scope is
+        actor + environment + idempotency_key.  A single host journal can serve
+        multiple accounts, so feed it a deterministic account-scoped key rather
+        than allowing one account to collide with another account's retry key.
+        """
+        return "host:" + payload_digest(
+            {
+                "account_id": self.account_id,
+                "environment": self.environment,
+                "idempotency_key": idempotency_key,
+            }
+        )
+
     def submit(self, command: Mapping[str, object]) -> CommandResult:
         if not isinstance(command, Mapping):
             raise TypeError("command must be a mapping")
@@ -251,7 +267,7 @@ class JournalBackedHostCommandStore:
                     command_id=command_id,
                     actor=actor,
                     environment=environment,
-                    idempotency_key=idempotency_key,
+                    idempotency_key=self._journal_idempotency_key(idempotency_key),
                     request=dict(command),
                     result=self._result_dict(conflict),
                     state_version=current,
@@ -303,7 +319,7 @@ class JournalBackedHostCommandStore:
                 command_id=command_id,
                 actor=actor,
                 environment=environment,
-                idempotency_key=idempotency_key,
+                idempotency_key=self._journal_idempotency_key(idempotency_key),
                 request=dict(command),
                 result=self._result_dict(result),
                 state_version=next_version,

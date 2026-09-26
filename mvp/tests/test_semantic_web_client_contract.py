@@ -729,7 +729,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
                 html,
             )
         self.assertIn("const TABLE_TOOLS = Object.freeze([", js)
-        self.assertIn("function applyTableFilter(tool)", js)
+        self.assertIn("function applyTableFilter(tool, {announce = true} = {})", js)
         self.assertIn("function copyVisibleTableRows(tool)", js)
         self.assertIn("function bindTableTools()", js)
         self.assertIn("bindTableTools();", js)
@@ -749,6 +749,37 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertNotIn("fetch(", filter_scope)
         self.assertNotIn("submitCanonicalCommand", filter_scope)
         self.assertNotIn("innerHTML", filter_scope)
+
+    def test_passive_live_refresh_does_not_spam_filter_live_status(self):
+        js = APP.read_text(encoding="utf-8")
+        apply_scope = js[
+            js.index("function applyTableFilter(tool, {announce = true} = {})"):
+            js.index("function reapplyTableFilter(bodyId)")
+        ]
+        self.assertIn("if (!announce) return;", apply_scope)
+
+        reapply_scope = js[
+            js.index("function reapplyTableFilter(bodyId)"):
+            js.index("function visibleTableRows(tool)")
+        ]
+        self.assertIn(
+            "applyTableFilter(tool, {announce: false})",
+            reapply_scope,
+        )
+
+        bind_scope = js[
+            js.index("function bindTableTools()"):
+            js.index("function announceLiveText", js.index("function bindTableTools()"))
+        ]
+        self.assertIn(
+            'filter.addEventListener("input", () => applyTableFilter(tool))',
+            bind_scope,
+        )
+        self.assertIn(
+            "applyTableFilter(tool, {announce: false})",
+            bind_scope,
+        )
+
 
     def test_copy_visible_rows_uses_only_rendered_text_and_fails_accessibly(self):
         html = INDEX.read_text(encoding="utf-8")

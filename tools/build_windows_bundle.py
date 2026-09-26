@@ -5,10 +5,18 @@ from __future__ import annotations
 import argparse
 from hashlib import sha256
 import json
+import os
+import stat
 from pathlib import Path, PurePosixPath
 import re
 import sys
 import zipfile
+
+from research.autotrade_research.artifacts.durable_publish import (
+    DurablePublishLockError,
+    atomic_write_stream_with_sha256_sidecar,
+    validate_publication_destination,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -136,9 +144,82 @@ def _reject_sensitive_content(relative: str, data: bytes) -> None:
         )
 
 
+def _assert_staged_file_identity(
+    path: Path,
+    stream,
+    *,
+    staging_resolved: Path,
+) -> os.stat_result:
+    try:
+        opened = os.fstat(stream.fileno())
+        current = os.stat(path, follow_symlinks=False)
+        resolved_path = path.resolve(strict=True)
+        resolved_current = os.stat(resolved_path, follow_symlinks=False)
+    except OSError as error:
+        raise BundleError(f"staged file identity cannot be verified: {path}") from error
+
+    for observed in (opened, current, resolved_current):
+        if not stat.S_ISREG(observed.st_mode):
+            raise BundleError(f"staged entry must remain a regular file: {path}")
+
+    try:
+        resolved_path.relative_to(staging_resolved)
+    except ValueError as error:
+        raise BundleError(f"staged file escaped staging directory: {path}") from error
+
+    identity = (opened.st_dev, opened.st_ino)
+    if identity != (current.st_dev, current.st_ino) or identity != (
+        resolved_current.st_dev,
+        resolved_current.st_ino,
+    ):
+        raise BundleError(f"staged file changed during collection: {path}")
+    if any(
+        observed.st_nlink > 1
+        for observed in (opened, current, resolved_current)
+    ):
+        raise BundleError(f"hardlinked staged files are forbidden: {path}")
+    if any(
+        observed.st_nlink != 1
+        for observed in (opened, current, resolved_current)
+    ):
+        raise BundleError(f"staged file changed during collection: {path}")
+    return opened
+
+
+def _read_staged_regular_file(path: Path, *, staging_resolved: Path) -> bytes:
+    try:
+        stream = path.open("rb")
+    except OSError as error:
+        raise BundleError(f"staged file cannot be opened: {path}") from error
+    with stream:
+        before = _assert_staged_file_identity(
+            path,
+            stream,
+            staging_resolved=staging_resolved,
+        )
+        data = stream.read()
+        after = os.fstat(stream.fileno())
+        if (
+            (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+            or before.st_size != after.st_size
+            or before.st_mtime_ns != after.st_mtime_ns
+            or before.st_ctime_ns != after.st_ctime_ns
+        ):
+            raise BundleError(f"staged file changed while being read: {path}")
+        _assert_staged_file_identity(
+            path,
+            stream,
+            staging_resolved=staging_resolved,
+        )
+        if len(data) != after.st_size:
+            raise BundleError(f"staged file size changed while being read: {path}")
+        return data
+
+
 def _collect(staging: Path) -> list[tuple[str, Path, bytes]]:
     if not staging.is_dir():
         raise BundleError("staging must be an existing directory")
+    staging_resolved = staging.resolve(strict=True)
     collected: list[tuple[str, Path, bytes]] = []
     windows_names: dict[str, str] = {}
     for path in sorted(staging.rglob("*"), key=lambda item: item.as_posix()):
@@ -159,7 +240,10 @@ def _collect(staging: Path) -> list[tuple[str, Path, bytes]]:
         windows_names[windows_key] = relative
         if _is_sensitive(PurePosixPath(relative)):
             raise BundleError(f"sensitive path is forbidden in bundles: {relative}")
-        data = path.read_bytes()
+        data = _read_staged_regular_file(
+            path,
+            staging_resolved=staging_resolved,
+        )
         _reject_sensitive_content(relative, data)
         collected.append((relative, path, data))
     if not collected:
@@ -419,6 +503,25 @@ def _write_entry(archive: zipfile.ZipFile, name: str, data: bytes) -> None:
     archive.writestr(info, data)
 
 
+
+def _validate_output_destination(path: Path, *, name: str) -> None:
+    try:
+        validate_publication_destination(path)
+    except (DurablePublishLockError, OSError) as error:
+        raise BundleError(f"{name} is unsafe: {error}") from error
+
+
+def _cleanup_legacy_temporary(path: Path) -> None:
+    try:
+        validate_publication_destination(path)
+    except (DurablePublishLockError, OSError):
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def build_bundle(
     *,
     staging: Path,
@@ -442,13 +545,31 @@ def build_bundle(
         raise BundleError("staging must be an existing directory") from error
     output_resolved = output.resolve(strict=False)
     hash_resolved = output.with_suffix(output.suffix + ".sha256").resolve(strict=False)
-    for candidate, name in ((output_resolved, "output"), (hash_resolved, "hash output")):
+    destinations = (
+        (output_resolved, "output"),
+        (hash_resolved, "hash output"),
+    )
+    for candidate, name in destinations:
         try:
             candidate.relative_to(staging_resolved)
         except ValueError:
             pass
         else:
             raise BundleError(f"{name} must be outside the staging directory")
+
+    protected_inputs = [
+        (provenance_path.resolve(strict=False), "release provenance input"),
+    ]
+    if composition_path is not None:
+        protected_inputs.append(
+            (composition_path.resolve(strict=False), "Windows composition input")
+        )
+    for candidate, name in destinations:
+        for protected, protected_name in protected_inputs:
+            if candidate == protected:
+                raise BundleError(
+                    f"{name} must not overwrite {protected_name}"
+                )
 
     provenance, provenance_sha256 = _load_provenance(provenance_path)
     blockers = provenance["blocking_issues"]
@@ -521,34 +642,26 @@ def build_bundle(
     ).encode("utf-8")
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_name(output.name + ".tmp")
-    if temporary.exists():
-        temporary.unlink()
-    try:
-        with zipfile.ZipFile(temporary, "w") as archive:
+    hash_path = output.with_suffix(output.suffix + ".sha256")
+    _validate_output_destination(output, name="bundle output")
+    _validate_output_destination(hash_path, name="bundle hash output")
+    _cleanup_legacy_temporary(output.with_name(output.name + ".tmp"))
+    _cleanup_legacy_temporary(hash_path.with_name(hash_path.name + ".tmp"))
+
+    def write_archive(stream) -> None:
+        with zipfile.ZipFile(stream, "w") as archive:
             _write_entry(archive, "bundle-manifest.json", manifest_bytes)
             for relative, _, data in files:
                 _write_entry(archive, f"payload/{relative}", data)
-        temporary.replace(output)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
 
-    digest = sha256(output.read_bytes()).hexdigest()
-    hash_path = output.with_suffix(output.suffix + ".sha256")
-    hash_temporary = hash_path.with_name(hash_path.name + ".tmp")
-    if hash_temporary.exists():
-        hash_temporary.unlink()
     try:
-        hash_temporary.write_text(
-            f"{digest}  {output.name}\n",
-            encoding="utf-8",
-            newline="\n",
+        digest = atomic_write_stream_with_sha256_sidecar(
+            output,
+            hash_path,
+            write_archive,
         )
-        hash_temporary.replace(hash_path)
-    finally:
-        if hash_temporary.exists():
-            hash_temporary.unlink()
+    except (DurablePublishLockError, OSError) as error:
+        raise BundleError(f"bundle publication failed closed: {error}") from error
     return {
         "output": str(output),
         "sha256": digest,

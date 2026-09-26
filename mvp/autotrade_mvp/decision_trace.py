@@ -5,10 +5,13 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime, timezone
 from hashlib import sha256
+from math import isfinite
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
 
 GENESIS_HASH = "0" * 64
@@ -39,7 +42,11 @@ _SENSITIVE_KEYS = {
     "refresh_token",
     "id_token",
     "api_key",
+    "api_secret",
     "x_api_key",
+    "x_txc_apikey",
+    "x_txc_payload",
+    "x_txc_signature",
     "private_key",
     "private_key_pem",
 }
@@ -56,7 +63,113 @@ def _normalized_key(value: object) -> str:
     )
 
 
+_EMBEDDED_SECRET_PATTERNS = (
+    re.compile(
+        r"""(?i)(?:["'])?\b(authorization|proxy-authorization)\b"""
+        r"""(?:["'])?\s*[:=]\s*(?!\[REDACTED\])"""
+        r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]+)"""
+    ),
+    re.compile(
+        r"(?i)\b(https?://)[^/@\s]+@"
+    ),
+    re.compile(
+        r"""(?i)(?:["'])?\b(api[_-]?key|x[_-]?txc[_-]?apikey|x[_-]?txc[_-]?payload|x[_-]?txc[_-]?signature|"""
+        r"""token|access[_-]?token|refresh[_-]?token|session|session[_-]?token|secret|credential|api[_-]?secret|"""
+        r"""client[_-]?secret|private[_-]?key|password)\b(?:["'])?\s*[:=]\s*(?!\[REDACTED\])"""
+        r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^&\s;,}\]]+)"""
+    ),
+)
+
+_PRIVATE_KEY_MARKERS = (
+    "-----BEGIN PRIVATE KEY-----",
+    "-----BEGIN ENCRYPTED PRIVATE KEY-----",
+    "-----BEGIN RSA PRIVATE KEY-----",
+    "-----BEGIN DSA PRIVATE KEY-----",
+    "-----BEGIN EC PRIVATE KEY-----",
+    "-----BEGIN OPENSSH PRIVATE KEY-----",
+)
+
+_URL_QUERY_SENSITIVE_KEYS = _SENSITIVE_KEYS | {
+    "credential",
+    "proxy_authorization",
+}
+
+
+def _redact_structured_json_text(value: str) -> str | None:
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(decoded, (dict, list)):
+        return None
+    redacted = _redact(decoded)
+    if redacted == decoded:
+        return None
+    return json.dumps(
+        redacted,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+
+
+def _redact_structured_url_query(value: str) -> str | None:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.netloc
+        or not parsed.query
+    ):
+        return None
+
+    changed = False
+    query_parts: list[str] = []
+    for part in parsed.query.split("&"):
+        raw_key, separator, _ = part.partition("=")
+        normalized = _normalized_key(unquote_plus(raw_key))
+        if normalized in _URL_QUERY_SENSITIVE_KEYS:
+            query_parts.append(f"{raw_key}{separator or '='}[REDACTED]")
+            changed = True
+        else:
+            query_parts.append(part)
+    if not changed:
+        return None
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, "&".join(query_parts), parsed.fragment)
+    )
+
+
+def _redact_embedded_secret_text(value: str) -> str:
+    if any(marker in value for marker in _PRIVATE_KEY_MARKERS):
+        return "[REDACTED]"
+    structured_json = _redact_structured_json_text(value)
+    if structured_json is not None:
+        # Structured redaction has already recursively sanitized every JSON value.
+        # Do not run the generic text regexes over the serialized JSON: those
+        # regexes intentionally normalize key/value syntax and would make the
+        # valid redacted JSON unparsable.
+        return structured_json
+    redacted = _redact_structured_url_query(value) or value
+    for pattern in _EMBEDDED_SECRET_PATTERNS:
+        def replacement(match: re.Match[str]) -> str:
+            name = match.group(1)
+            if name.lower() in {"authorization", "proxy-authorization"}:
+                return f"{name}: [REDACTED]"
+            if name.lower().startswith("http"):
+                return f"{name}[REDACTED]@"
+            separator = "=" if "=" in match.group(0) else ":"
+            return f"{name}{separator}[REDACTED]"
+        redacted = pattern.sub(replacement, redacted)
+    return redacted
+
+
 def _redact(value: Any) -> Any:
+    if isinstance(value, str):
+        return _redact_embedded_secret_text(value)
     if isinstance(value, Mapping):
         result: dict[str, Any] = {}
         for key, item in value.items():
@@ -327,6 +440,12 @@ class BoundedMetricBacklog:
     def record(self, name: str, value: float, **labels: Any) -> None:
         if not isinstance(name, str) or not name.strip():
             raise ValueError("metric name is required")
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not isfinite(value)
+        ):
+            raise ValueError("metric value must be a finite number")
         if len(self._items) == self._items.maxlen:
             self._dropped += 1
         self._items.append(

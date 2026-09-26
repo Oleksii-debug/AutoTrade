@@ -7,7 +7,12 @@
     <AssemblyName>AutoTrade.Desktop</AssemblyName>
     <RootNamespace>AutoTrade.Desktop</RootNamespace>
     <IsPackable>false</IsPackable>
+    <StartupObject>AutoTrade.Desktop.App</StartupObject>
   </PropertyGroup>
+  <ItemGroup>
+    <ApplicationDefinition Remove="App.xaml" />
+    <Page Include="App.xaml" />
+  </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../AutoTrade.Contracts/AutoTrade.Contracts.csproj" />
   </ItemGroup>

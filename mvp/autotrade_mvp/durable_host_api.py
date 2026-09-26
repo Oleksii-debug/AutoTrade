@@ -263,6 +263,7 @@ class JournalBackedHostCommandStore:
             self._journal,
             action,
             command["payload"],
+            command_id,
             account_id,
             environment,
         )
@@ -366,6 +367,13 @@ class JournalBackedHostCommandStore:
             account_id,
             environment,
         )
+        command_id = JournalBackedHostCommandStore._required_text(
+            payload, "command_id"
+        )
+        if canonical.get("command_id") != command_id:
+            raise ValueError(
+                "Host journal action payload command identity does not match accepted command"
+            )
         accepted_at = JournalBackedHostCommandStore._required_text(
             payload, "started_at"
         )

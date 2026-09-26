@@ -406,7 +406,10 @@ class ReleaseCandidateDecision:
                     "frozen release candidate manifest has unsupported structure"
                 )
             _text(manifest.get("release_id"), name="manifest.release_id")
-            _git_sha(manifest.get("source_sha"), name="manifest.source_sha")
+            manifest_source_sha = _git_sha(
+                manifest.get("source_sha"),
+                name="manifest.source_sha",
+            )
             _sha256(
                 manifest.get("baseline_hash"),
                 name="manifest.baseline_hash",
@@ -415,10 +418,81 @@ class ReleaseCandidateDecision:
                 manifest.get("schema_contract_hash"),
                 name="manifest.schema_contract_hash",
             )
-            if not isinstance(manifest.get("artifacts"), list):
+            artifacts_raw = manifest.get("artifacts")
+            if not isinstance(artifacts_raw, list):
                 raise ReleaseCandidateError(
                     "frozen release candidate artifacts must be a list"
                 )
+            artifact_fields = {
+                "role",
+                "artifact_id",
+                "artifact_sha256",
+                "source_sha",
+                "signature_status",
+                "evidence_status",
+            }
+            parsed_artifacts: list[ReleaseArtifactEvidence] = []
+            for raw in artifacts_raw:
+                if type(raw) is not dict or set(raw) != artifact_fields:
+                    raise ReleaseCandidateError(
+                        "frozen release candidate artifact structure is not canonical"
+                    )
+                try:
+                    artifact = ReleaseArtifactEvidence.create(**raw)
+                except (ReleaseCandidateError, TypeError) as error:
+                    raise ReleaseCandidateError(
+                        "frozen release candidate artifact is malformed"
+                    ) from error
+                canonical_artifact = {
+                    "role": artifact.role,
+                    "artifact_id": artifact.artifact_id,
+                    "artifact_sha256": artifact.artifact_sha256,
+                    "source_sha": artifact.source_sha,
+                    "signature_status": artifact.signature_status,
+                    "evidence_status": artifact.evidence_status,
+                }
+                if canonical_artifact != raw:
+                    raise ReleaseCandidateError(
+                        "frozen release candidate artifact values are not canonical"
+                    )
+                if artifact.source_sha != manifest_source_sha:
+                    raise ReleaseCandidateError(
+                        f"frozen release candidate artifact source mismatch: {artifact.role}"
+                    )
+                if artifact.evidence_status != "PASS":
+                    raise ReleaseCandidateError(
+                        f"frozen release candidate artifact is not PASS: {artifact.role}"
+                    )
+                if (
+                    artifact.role in _SIGNED_BINARY_ROLES
+                    and artifact.signature_status != "VERIFIED"
+                ):
+                    raise ReleaseCandidateError(
+                        f"frozen release candidate signature is not verified: {artifact.role}"
+                    )
+                if (
+                    artifact.role not in _SIGNED_BINARY_ROLES
+                    and artifact.signature_status in {"MISSING", "INVALID"}
+                ):
+                    raise ReleaseCandidateError(
+                        f"frozen release candidate signature state is unresolved: {artifact.role}"
+                    )
+                parsed_artifacts.append(artifact)
+
+            artifact_roles = [item.role for item in parsed_artifacts]
+            if len(set(artifact_roles)) != len(artifact_roles):
+                raise ReleaseCandidateError(
+                    "frozen release candidate contains duplicate artifact roles"
+                )
+            if set(artifact_roles) != _REQUIRED_ROLES:
+                raise ReleaseCandidateError(
+                    "frozen release candidate artifact role set is not canonical"
+                )
+            if artifact_roles != sorted(artifact_roles):
+                raise ReleaseCandidateError(
+                    "frozen release candidate artifacts are not in canonical role order"
+                )
+
             qualification = manifest.get("qualification")
             if type(qualification) is not dict or set(qualification) != {
                 "attestation_id",

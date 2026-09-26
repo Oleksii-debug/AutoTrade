@@ -61,6 +61,7 @@ class ExactJsonTransportResponse:
 
     response_bytes: bytes
     http_status: int | None = None
+    reconciliation_required: bool = False
 
     def __post_init__(self) -> None:
         raw = self.response_bytes
@@ -72,6 +73,8 @@ class ExactJsonTransportResponse:
             or self.http_status > 599
         ):
             raise ValueError("http_status must be an integer 100..599 when provided")
+        if type(self.reconciliation_required) is not bool:
+            raise ValueError("reconciliation_required must be boolean")
 
     @property
     def response_text(self) -> str:
@@ -922,6 +925,23 @@ class GuardedDispatcher:
                 if response.http_status is not None:
                     sent_payload["http_status"] = response.http_status
                 outcome_response = response.payload
+                if response.reconciliation_required:
+                    self._append(
+                        attempt_id=attempt_id,
+                        event_type="SubmissionUnknown",
+                        version=3,
+                        payload={
+                            **sent_payload,
+                            "reason": "provider_response_requires_reconciliation",
+                        },
+                        now=barrier_now,
+                    )
+                    return DispatchOutcome(
+                        "UNKNOWN",
+                        client_order_id,
+                        None,
+                        "provider_response_requires_reconciliation",
+                    )
             else:
                 sent_payload = {
                     "client_order_id": client_order_id,

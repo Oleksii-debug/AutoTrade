@@ -21,7 +21,8 @@
   ]);
   const HOST_ACTION_ROLES = Object.freeze({
     BLOCK_NEW_EXPOSURE: new Set(["OWNER", "OPERATOR"]),
-    REVOKE_AUTHORITY: new Set(["OWNER"])
+    REVOKE_AUTHORITY: new Set(["OWNER"]),
+    SET_AUTHORITY: new Set(["OWNER"])
   });
 
   const state = {
@@ -52,6 +53,15 @@
     "jobs-region",
     "event-history-region",
     "host-action",
+    "authority-policy-id",
+    "authority-instrument-id",
+    "authority-instrument-version",
+    "authority-actions",
+    "authority-max-notional",
+    "authority-valid-from",
+    "authority-expires-at",
+    "authority-policy-version",
+    "authority-policy-confirm",
     "submit-command",
     "refresh-state",
     "command-result"
@@ -193,18 +203,61 @@
     return allowedRoles instanceof Set && allowedRoles.has(role);
   }
 
+  function actionCanSubmitInCurrentScope(role, action) {
+    if (!roleCanSubmitAction(role, action)) return false;
+    if (action === "SET_AUTHORITY" && state.environment === "REPLAY") return false;
+    return true;
+  }
+
+  const AUTHORITY_POLICY_REQUIRED_FIELD_IDS = Object.freeze([
+    "authority-policy-id",
+    "authority-instrument-id",
+    "authority-instrument-version",
+    "authority-actions",
+    "authority-max-notional",
+    "authority-valid-from",
+    "authority-expires-at",
+    "authority-policy-version"
+  ]);
+
+  function syncAuthorityPolicyFields(action) {
+    const container = byId("authority-policy-fields");
+    if (!container) return;
+    const active = action === "SET_AUTHORITY";
+    container.hidden = !active;
+    for (const id of AUTHORITY_POLICY_REQUIRED_FIELD_IDS) {
+      const input = byId(id);
+      if (!input) continue;
+      input.required = active;
+      input.disabled = !active;
+    }
+    for (const id of [
+      "authority-autonomous",
+      "authority-protection-only",
+      "authority-policy-confirm"
+    ]) {
+      const input = byId(id);
+      if (!input) continue;
+      input.disabled = !active;
+      input.required = active && id === "authority-policy-confirm";
+    }
+    text("authority-policy-account", active ? state.accountId : null);
+    text("authority-policy-environment", active ? state.environment : null);
+  }
+
   function syncHostActionOptions(role) {
     const select = byId("host-action");
     if (!select) return false;
     let firstAllowed = null;
     for (const option of select.options) {
-      const allowed = roleCanSubmitAction(role, option.value);
+      const allowed = actionCanSubmitInCurrentScope(role, option.value);
       option.disabled = !allowed;
       if (allowed && firstAllowed === null) firstAllowed = option.value;
     }
-    if (!roleCanSubmitAction(role, select.value) && firstAllowed !== null) {
+    if (!actionCanSubmitInCurrentScope(role, select.value) && firstAllowed !== null) {
       select.value = firstAllowed;
     }
+    syncAuthorityPolicyFields(select.value);
     return firstAllowed !== null;
   }
 
@@ -343,7 +396,7 @@
       : (action === null ? null : action.value);
     const roleAllowed = state.sessionIdentity !== null &&
       effectiveAction !== null &&
-      roleCanSubmitAction(state.sessionIdentity.role, effectiveAction);
+      actionCanSubmitInCurrentScope(state.sessionIdentity.role, effectiveAction);
     if (button) button.disabled = !enabled || !roleAllowed;
   }
 
@@ -850,6 +903,98 @@
     }
   }
 
+  function requiredPolicyInput(id, name) {
+    const input = byId(id);
+    if (!input) throw new Error(name + " input is unavailable");
+    const value = requiredText(input.value, name);
+    if (value !== value.trim()) {
+      throw new Error(name + " must not contain surrounding whitespace");
+    }
+    return value;
+  }
+
+  function positiveSafeIntegerPolicyInput(id, name) {
+    const token = requiredPolicyInput(id, name);
+    if (!/^[1-9][0-9]*$/.test(token)) {
+      throw new Error(name + " must be a positive integer");
+    }
+    const value = Number(token);
+    if (!Number.isSafeInteger(value)) {
+      throw new Error(name + " exceeds the exact browser integer range");
+    }
+    return value;
+  }
+
+  function positiveDecimalPolicyInput(id, name) {
+    const token = requiredPolicyInput(id, name);
+    if (!/^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/.test(token) ||
+        !/[1-9]/.test(token.replace(".", ""))) {
+      throw new Error(name + " must be a positive canonical decimal");
+    }
+    return token;
+  }
+
+  function authorityPolicyActions() {
+    const raw = requiredPolicyInput("authority-actions", "allowed actions");
+    const actions = raw.split(",").map((item) => item.trim()).filter(Boolean);
+    if (actions.length === 0 || new Set(actions).size !== actions.length) {
+      throw new Error("allowed actions must be non-empty and unique");
+    }
+    if (actions.some((item) => item !== item.toUpperCase())) {
+      throw new Error("allowed actions must use canonical uppercase names");
+    }
+    return actions;
+  }
+
+  function authorityPolicyPayload() {
+    if (state.environment === "REPLAY") {
+      throw new Error("authority policy activation is unavailable in REPLAY");
+    }
+    if (!["SIMULATION", "PAPER", "LIVE"].includes(state.environment)) {
+      throw new Error("authority policy activation requires a canonical trading environment");
+    }
+    const confirmation = byId("authority-policy-confirm");
+    if (!confirmation || !confirmation.checked) {
+      throw new Error("review confirmation is required before authority policy submission");
+    }
+    const instrumentId = requiredPolicyInput(
+      "authority-instrument-id", "instrument ID");
+    if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/.test(
+      instrumentId)) {
+      throw new Error("instrument ID must be a canonical UUID");
+    }
+    const validFrom = requiredPolicyInput("authority-valid-from", "valid from");
+    const expiresAt = requiredPolicyInput("authority-expires-at", "expires at");
+    utcInstant(validFrom, "valid from");
+    utcInstant(expiresAt, "expires at");
+    if (Date.parse(expiresAt) <= Date.parse(validFrom)) {
+      throw new Error("authority policy expiry must be after valid from");
+    }
+    return Object.freeze({
+      policy_id: requiredPolicyInput("authority-policy-id", "policy ID"),
+      environments: Object.freeze([state.environment]),
+      instruments: Object.freeze([Object.freeze({
+        instrument_id: instrumentId.toLowerCase(),
+        version: positiveSafeIntegerPolicyInput(
+          "authority-instrument-version", "instrument version")
+      })]),
+      actions: Object.freeze(authorityPolicyActions()),
+      max_notional: positiveDecimalPolicyInput(
+        "authority-max-notional", "maximum notional"),
+      expires_at: expiresAt,
+      autonomous: byId("authority-autonomous").checked,
+      valid_from: validFrom,
+      protection_only: byId("authority-protection-only").checked,
+      version: positiveSafeIntegerPolicyInput(
+        "authority-policy-version", "policy version")
+    });
+  }
+
+  function commandActionPayload(action) {
+    if (action === "SET_AUTHORITY") return authorityPolicyPayload();
+    return Object.freeze({});
+  }
+
   function newCommandPayload(action) {
     const commandId = crypto.randomUUID();
     return Object.freeze({
@@ -861,7 +1006,7 @@
       account_id: state.accountId,
       environment: state.environment,
       action,
-      payload: Object.freeze({})
+      payload: commandActionPayload(action)
     });
   }
 
@@ -920,7 +1065,16 @@
       byId("command-result").focus();
       return;
     }
-    const payload = commandForSubmission(action);
+    let payload;
+    try {
+      payload = commandForSubmission(action);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "invalid authority command";
+      text("command-result", "Command was not submitted: " + message + ".");
+      byId("command-result").focus();
+      setCommandAvailability(state.snapshotReady && state.sessionIdentity !== null);
+      return;
+    }
     const commandId = payload.command_id;
     if (recovering && action !== payload.action) {
       byId("host-action").value = payload.action;
@@ -1019,6 +1173,7 @@
   async function start() {
     byId("host-command-form").addEventListener("submit", submitCommand);
     byId("host-action").addEventListener("change", () => {
+      syncAuthorityPolicyFields(byId("host-action").value);
       setCommandAvailability(state.snapshotReady && state.sessionIdentity !== null);
     });
     byId("refresh-state").addEventListener("click", refreshStateFromUser);

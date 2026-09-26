@@ -19,9 +19,9 @@ from research.autotrade_research.artifacts.store import (
 
 from mvp.autotrade_mvp.qualification_attestation import (
     QualificationTrustError,
-    QualificationTrustPolicy,
+    QualificationTrustUnavailable,
     SignedQualificationAttestation,
-    verify_qualification_attestation,
+    verify_canonical_qualification_attestation,
 )
 
 
@@ -241,34 +241,15 @@ def qualify_supply_chain(
     *,
     evidence_store: ArtifactStore | None = None,
     trust_receipt: SignedQualificationAttestation | None = None,
-    trust_policy: QualificationTrustPolicy | None = None,
-    expected_trust_policy_id: str | None = None,
-    expected_trust_policy_version: str | None = None,
 ) -> SupplyChainQualification:
     if not isinstance(evidence, SupplyChainEvidence):
         raise TypeError("evidence must be SupplyChainEvidence")
     if evidence_store is not None and not isinstance(evidence_store, ArtifactStore):
         raise TypeError("evidence_store must be ArtifactStore")
-    supplied_trust = (
-        trust_receipt,
-        trust_policy,
-        expected_trust_policy_id,
-        expected_trust_policy_version,
-    )
-    if any(item is not None for item in supplied_trust) and not all(
-        item is not None for item in supplied_trust
-    ):
-        raise ValueError(
-            "signed supply-chain trust requires receipt, policy, pinned policy id and version"
-        )
     if trust_receipt is not None and not isinstance(
         trust_receipt, SignedQualificationAttestation
     ):
         raise TypeError("trust_receipt must be SignedQualificationAttestation")
-    if trust_policy is not None and not isinstance(
-        trust_policy, QualificationTrustPolicy
-    ):
-        raise TypeError("trust_policy must be QualificationTrustPolicy")
     checks: list[tuple[str, str]] = []
     reasons: list[str] = []
 
@@ -420,16 +401,10 @@ def qualify_supply_chain(
             "SUPPLY_CHAIN.TRUST_EVIDENCE_STORE_MISSING",
         )
     else:
-        assert trust_policy is not None
-        assert expected_trust_policy_id is not None
-        assert expected_trust_policy_version is not None
         try:
-            accepted_trust = verify_qualification_attestation(
+            accepted_trust = verify_canonical_qualification_attestation(
                 trust_receipt,
-                policy=trust_policy,
                 evidence_store=evidence_store,
-                expected_policy_id=expected_trust_policy_id,
-                expected_policy_version=expected_trust_policy_version,
                 expected_source_sha=evidence.release_commit_sha,
                 expected_domain="SUPPLY_CHAIN",
                 expected_gate="RELEASE",
@@ -518,6 +493,12 @@ def qualify_supply_chain(
                     _INCONCLUSIVE,
                     "SUPPLY_CHAIN.INDEPENDENT_REVIEW_INCONCLUSIVE",
                 )
+        except QualificationTrustUnavailable:
+            record(
+                "independent_evidence_trust",
+                _INCONCLUSIVE,
+                "SUPPLY_CHAIN.TRUST_ANCHOR_UNAVAILABLE",
+            )
         except QualificationTrustError:
             record(
                 "independent_evidence_trust",

@@ -66,6 +66,236 @@ class ArtifactStoreTests(unittest.TestCase):
             with self.assertRaises(ArtifactIntegrityError):
                 store.read_bytes(artifact_id)
 
+    def test_read_rejects_oversized_swap_before_consuming_replacement(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"verified",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+            canonical = store._object_path(
+                manifest["sha256"].removeprefix("sha256:")
+            )
+            replacement = Path(directory) / "oversized-replacement.bin"
+            replacement.write_bytes(b"x" * 4096)
+            original_validate = store._validate_object_entry
+            swapped = False
+
+            def validate_then_swap(path):
+                nonlocal swapped
+                entry = original_validate(path)
+                if not swapped:
+                    swapped = True
+                    os.replace(replacement, canonical)
+                return entry
+
+            with patch.object(
+                store,
+                "_validate_object_entry",
+                side_effect=validate_then_swap,
+            ), patch(
+                "autotrade_research.artifacts.store.os.read"
+            ) as read_call:
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "size mismatch",
+                ):
+                    store.read_bytes(artifact_id)
+                read_call.assert_not_called()
+
+    def test_windows_object_open_reuses_canonical_no_follow_descriptor_helper(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"windows-safe-open",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+            canonical = store._object_path(
+                manifest["sha256"].removeprefix("sha256:")
+            )
+            real_descriptor = os.open(
+                canonical,
+                os.O_RDONLY | getattr(os, "O_BINARY", 0),
+            )
+            descriptor = None
+            try:
+                with patch(
+                    "autotrade_research.artifacts.store.os.name",
+                    "nt",
+                ), patch(
+                    "autotrade_research.artifacts.store._open_read_only_descriptor",
+                    return_value=real_descriptor,
+                ) as safe_open:
+                    descriptor, opened = store._open_object_descriptor(
+                        canonical,
+                        expected_bytes=len(b"windows-safe-open"),
+                    )
+                self.assertEqual(descriptor, real_descriptor)
+                self.assertEqual(opened.st_size, len(b"windows-safe-open"))
+                safe_open.assert_called_once_with(canonical)
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
+                else:
+                    os.close(real_descriptor)
+
+    @unittest.skipIf(os.name == "nt", "POSIX no-follow capability test")
+    def test_posix_object_open_fails_closed_without_no_follow_support(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"no-follow-required",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+            with patch(
+                "autotrade_research.artifacts.store.os.O_NOFOLLOW",
+                0,
+                create=True,
+            ):
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "opened safely",
+                ):
+                    store.read_bytes(artifact_id)
+
+    @unittest.skipIf(
+        os.name == "nt",
+        "open-object replacement semantics differ on Windows",
+    )
+    def test_read_holds_original_descriptor_across_path_replacement(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"verified",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+            canonical = store._object_path(
+                manifest["sha256"].removeprefix("sha256:")
+            )
+            replacement = Path(directory) / "same-size-replacement.bin"
+            replacement.write_bytes(b"attacker")
+            original_open = store._open_object_descriptor
+
+            def open_then_swap(path, *, expected_bytes):
+                descriptor, opened = original_open(
+                    path,
+                    expected_bytes=expected_bytes,
+                )
+                os.replace(replacement, canonical)
+                return descriptor, opened
+
+            with patch.object(
+                store,
+                "_open_object_descriptor",
+                side_effect=open_then_swap,
+            ):
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "path changed during descriptor read",
+                ):
+                    store.read_bytes(artifact_id)
+
+    @unittest.skipIf(
+        os.name == "nt",
+        "symlink creation is not reliably available on Windows CI",
+    )
+    def test_symlink_swap_before_open_is_rejected_before_read(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"verified",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+            canonical = store._object_path(
+                manifest["sha256"].removeprefix("sha256:")
+            )
+            external = Path(directory) / "external.bin"
+            external.write_bytes(b"x" * 4096)
+            original_validate = store._validate_object_entry
+            swapped = False
+
+            def validate_then_swap(path):
+                nonlocal swapped
+                entry = original_validate(path)
+                if not swapped:
+                    swapped = True
+                    canonical.unlink()
+                    canonical.symlink_to(external)
+                return entry
+
+            with patch.object(
+                store,
+                "_validate_object_entry",
+                side_effect=validate_then_swap,
+            ), patch(
+                "autotrade_research.artifacts.store.os.read"
+            ) as read_call:
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "opened safely",
+                ):
+                    store.read_bytes(artifact_id)
+                read_call.assert_not_called()
+
+    @unittest.skipUnless(
+        hasattr(os, "mkfifo") and os.name != "nt",
+        "FIFO replacement requires POSIX mkfifo",
+    )
+    def test_fifo_swap_before_open_is_rejected_without_blocking_read(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"verified",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+            canonical = store._object_path(
+                manifest["sha256"].removeprefix("sha256:")
+            )
+            original_validate = store._validate_object_entry
+            swapped = False
+
+            def validate_then_swap(path):
+                nonlocal swapped
+                entry = original_validate(path)
+                if not swapped:
+                    swapped = True
+                    canonical.unlink()
+                    os.mkfifo(canonical)
+                return entry
+
+            with patch.object(
+                store,
+                "_validate_object_entry",
+                side_effect=validate_then_swap,
+            ), patch(
+                "autotrade_research.artifacts.store.os.read"
+            ) as read_call:
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "descriptor must be a regular file",
+                ):
+                    store.read_bytes(artifact_id)
+                read_call.assert_not_called()
+
+
     def test_export_is_rights_aware(self):
         with TemporaryDirectory() as directory:
             authorized: set[tuple[str, str]] = set()
@@ -97,6 +327,52 @@ class ArtifactStoreTests(unittest.TestCase):
             authorized.add((allowed, allowed_manifest["sha256"]))
             target = store.export(allowed, Path(directory) / "out" / "allowed.txt")
             self.assertEqual(target.read_bytes(), b"public")
+
+    def test_export_rejects_oversized_swap_before_copy(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(
+                Path(directory) / "store",
+                export_authorizer=lambda _artifact_id, _digest: True,
+            )
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"exported",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": True},
+            )
+            canonical = store._object_path(
+                manifest["sha256"].removeprefix("sha256:")
+            )
+            replacement = Path(directory) / "oversized-export-replacement.bin"
+            replacement.write_bytes(b"x" * 4096)
+            target = Path(directory) / "out" / "artifact.bin"
+            original_validate = store._validate_object_entry
+            swapped = False
+
+            def validate_then_swap(path):
+                nonlocal swapped
+                entry = original_validate(path)
+                if not swapped:
+                    swapped = True
+                    os.replace(replacement, canonical)
+                return entry
+
+            with patch.object(
+                store,
+                "_validate_object_entry",
+                side_effect=validate_then_swap,
+            ), patch(
+                "autotrade_research.artifacts.store.os.read"
+            ) as read_call:
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "size mismatch",
+                ):
+                    store.export(artifact_id, target)
+                read_call.assert_not_called()
+            self.assertFalse(target.exists())
+
 
     def test_export_without_independent_authority_fails_closed(self):
         with TemporaryDirectory() as directory:
@@ -218,6 +494,141 @@ class ArtifactStoreTests(unittest.TestCase):
                 "unexpected authenticated fields",
             ):
                 store.load_manifest(artifact_id)
+
+    def test_manifest_replacement_during_read_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"manifest-read-boundary",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+                metadata={"kind": "before"},
+            )
+            manifest_path = store._manifest_path(artifact_id)
+            replacement = dict(manifest)
+            replacement["metadata"] = {"kind": "after"}
+            replacement["manifest_hash"] = _manifest_integrity_hash(replacement)
+            replacement_path = Path(directory) / "replacement-manifest.json"
+            atomic_write_json(replacement_path, replacement)
+
+            original_validate = store._validate_manifest_entry
+            validation_count = 0
+
+            def validate_then_replace(path):
+                nonlocal validation_count
+                entry = original_validate(path)
+                validation_count += 1
+                if validation_count == 1:
+                    os.replace(replacement_path, manifest_path)
+                return entry
+
+            with patch.object(
+                store,
+                "_validate_manifest_entry",
+                side_effect=validate_then_replace,
+            ):
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "manifest changed during read",
+                ):
+                    store.load_manifest(artifact_id)
+
+    def test_manifest_hard_link_alias_is_rejected_and_audited(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"manifest-alias",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+            manifest_path = store._manifest_path(artifact_id)
+            external_alias = Path(directory) / "manifest-hard-link.json"
+            os.link(manifest_path, external_alias)
+
+            with self.assertRaisesRegex(
+                ArtifactIntegrityError,
+                "manifest must not have hard-link aliases",
+            ):
+                store.load_manifest(artifact_id)
+
+            audit = store.audit()
+            self.assertIn(manifest_path.name, audit.corrupt_objects)
+
+    @unittest.skipIf(os.name == "nt", "symlink creation is not reliably available on Windows CI")
+    def test_manifest_symlink_is_rejected_without_following_external_bytes(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"manifest-symlink",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+            manifest_path = store._manifest_path(artifact_id)
+            external = Path(directory) / "external-manifest.json"
+            external.write_bytes(manifest_path.read_bytes())
+            manifest_path.unlink()
+            manifest_path.symlink_to(external)
+
+            with self.assertRaisesRegex(
+                ArtifactIntegrityError,
+                "manifest must not be a symlink",
+            ):
+                store.load_manifest(artifact_id)
+
+            audit = store.audit()
+            self.assertIn(manifest_path.name, audit.corrupt_objects)
+
+    @unittest.skipIf(os.name == "nt", "symlink creation is not reliably available on Windows CI")
+    def test_manifest_directory_alias_fails_before_object_publication(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            store.manifests.rmdir()
+            outside = Path(directory) / "outside-manifests"
+            outside.mkdir()
+            store.manifests.symlink_to(outside, target_is_directory=True)
+
+            with self.assertRaisesRegex(
+                ArtifactIntegrityError,
+                "manifest path escapes store namespace",
+            ):
+                store.publish_bytes(
+                    artifact_id=str(uuid4()),
+                    data=b"must-not-publish",
+                    media_type="application/octet-stream",
+                    rights={"storage": True, "export": False},
+                )
+
+            self.assertEqual(list(outside.iterdir()), [])
+            self.assertEqual(list(store.objects.glob("*/*")), [])
+
+    @unittest.skipIf(os.name == "nt", "symlink creation is not reliably available on Windows CI")
+    def test_staging_directory_alias_cannot_escape_store_namespace(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            store.staging.rmdir()
+            outside = Path(directory) / "outside-staging"
+            outside.mkdir()
+            store.staging.symlink_to(outside, target_is_directory=True)
+
+            with self.assertRaisesRegex(
+                ArtifactIntegrityError,
+                "staging path escapes store namespace",
+            ):
+                store.publish_bytes(
+                    artifact_id=str(uuid4()),
+                    data=b"must-stay-inside-store",
+                    media_type="application/octet-stream",
+                    rights={"storage": True, "export": False},
+                )
+
+            self.assertEqual(list(outside.iterdir()), [])
+            self.assertEqual(list(store.objects.glob("*/*")), [])
 
     def test_publish_preserves_canonical_rights_identity_and_rejects_extensions(self):
         with TemporaryDirectory() as directory:
@@ -416,6 +827,41 @@ class ArtifactStoreTests(unittest.TestCase):
             )
             self.assertEqual(store.read_bytes(artifact_id), b"legacy-evidence")
 
+    def test_recovery_preserves_all_objects_when_manifest_reference_is_unreadable(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"referenced-but-manifest-will-break",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+            referenced_digest = manifest["sha256"].removeprefix("sha256:")
+            referenced_object = store._object_path(referenced_digest)
+
+            orphan_data = b"otherwise-deletable-orphan"
+            orphan_digest = hashlib.sha256(orphan_data).hexdigest()
+            orphan = store._object_path(orphan_digest)
+            orphan.parent.mkdir(parents=True, exist_ok=True)
+            orphan.write_bytes(orphan_data)
+
+            manifest_path = store._manifest_path(artifact_id)
+            manifest_path.write_text("{not-valid-json", encoding="utf-8")
+
+            before = store.audit()
+            self.assertIn(manifest_path.name, before.corrupt_objects)
+            self.assertIn(referenced_digest, before.unreferenced_objects)
+            self.assertIn(orphan_digest, before.unreferenced_objects)
+
+            after = store.recover_orphans()
+
+            self.assertTrue(referenced_object.exists())
+            self.assertTrue(orphan.exists())
+            self.assertIn(manifest_path.name, after.corrupt_objects)
+            self.assertIn(referenced_digest, after.unreferenced_objects)
+            self.assertIn(orphan_digest, after.unreferenced_objects)
+
     def test_recovery_removes_only_unreferenced_objects(self):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)
@@ -443,6 +889,58 @@ class ArtifactStoreTests(unittest.TestCase):
             self.assertTrue(store._object_path(kept_digest).exists())
             self.assertEqual(list(store.staging.iterdir()), [])
 
+    @unittest.skipIf(os.name == "nt", "symlink creation is not reliably available on Windows CI")
+    def test_recovery_refuses_aliased_staging_directory_and_preserves_external_files(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            store.staging.rmdir()
+            outside = Path(directory) / "outside-staging-recovery"
+            outside.mkdir()
+            external = outside / "must-survive.tmp"
+            external.write_bytes(b"external")
+            store.staging.symlink_to(outside, target_is_directory=True)
+
+            with self.assertRaisesRegex(
+                ArtifactIntegrityError,
+                "staging path escapes store namespace",
+            ):
+                store.recover_orphans()
+
+            self.assertEqual(external.read_bytes(), b"external")
+
+    @unittest.skipIf(os.name == "nt", "symlink creation is not reliably available on Windows CI")
+    def test_recovery_revalidates_orphan_namespace_immediately_before_unlink(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            data = b"recoverable-orphan"
+            digest = hashlib.sha256(data).hexdigest()
+            orphan = store._object_path(digest)
+            orphan.parent.mkdir(parents=True, exist_ok=True)
+            orphan.write_bytes(data)
+
+            outside = Path(directory) / "outside-orphan-parent"
+            outside.mkdir()
+            external = outside / digest
+            external.write_bytes(b"external-must-survive")
+
+            original_audit = store.audit
+            audit_calls = 0
+
+            def audit_then_swap_namespace():
+                nonlocal audit_calls
+                result = original_audit()
+                audit_calls += 1
+                if audit_calls == 1:
+                    orphan.unlink()
+                    orphan.parent.rmdir()
+                    orphan.parent.symlink_to(outside, target_is_directory=True)
+                return result
+
+            with patch.object(store, "audit", side_effect=audit_then_swap_namespace):
+                store.recover_orphans()
+
+            self.assertEqual(external.read_bytes(), b"external-must-survive")
+
     def test_storage_without_rights_is_rejected_before_writing(self):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)
@@ -455,6 +953,50 @@ class ArtifactStoreTests(unittest.TestCase):
                 )
             self.assertEqual(store.audit().objects, 0)
 
+
+    def test_canonical_object_hard_link_alias_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            data = b"hard-linked-evidence"
+            digest = hashlib.sha256(data).hexdigest()
+            canonical = store._object_path(digest)
+            canonical.parent.mkdir(parents=True, exist_ok=True)
+            external = Path(directory) / "outside-hard-link.bin"
+            external.write_bytes(data)
+            os.link(external, canonical)
+
+            object_marker = "object:" + canonical.relative_to(store.root).as_posix()
+            audit = store.audit()
+            self.assertIn(object_marker, audit.corrupt_objects)
+            self.assertNotIn(digest, audit.unreferenced_objects)
+
+            with self.assertRaisesRegex(ArtifactIntegrityError, "hard-link aliases"):
+                store.publish_bytes(
+                    artifact_id=str(uuid4()),
+                    data=data,
+                    media_type="application/octet-stream",
+                    rights={"storage": True, "export": False},
+                )
+
+    @unittest.skipIf(os.name == "nt", "symlink creation is not reliably available on Windows CI")
+    def test_digest_directory_symlink_cannot_escape_store_namespace(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            data = b"escaped-evidence"
+            digest = hashlib.sha256(data).hexdigest()
+            digest_dir = store.objects / digest[:2]
+            outside = Path(directory) / "outside-digest-dir"
+            outside.mkdir()
+            digest_dir.symlink_to(outside, target_is_directory=True)
+
+            with self.assertRaisesRegex(ArtifactIntegrityError, "escapes store namespace"):
+                store.publish_bytes(
+                    artifact_id=str(uuid4()),
+                    data=data,
+                    media_type="application/octet-stream",
+                    rights={"storage": True, "export": False},
+                )
+            self.assertFalse((outside / digest).exists())
 
     @unittest.skipIf(os.name == "nt", "symlink creation is not reliably available on Windows CI")
     def test_canonical_object_symlink_is_never_accepted_as_artifact_content(self):

@@ -157,7 +157,10 @@ class ExactHeadCiEvidenceTests(unittest.TestCase):
         checked = []
         for path in sorted(workflow_dir.glob("*.y*ml")):
             text = path.read_text(encoding="utf-8")
-            if "pull_request:" not in text:
+            if (
+                "pull_request:" not in text
+                and "pull_request_target:" not in text
+            ):
                 continue
             relative = path.relative_to(ROOT).as_posix()
             checked.append(relative)
@@ -171,6 +174,10 @@ class ExactHeadCiEvidenceTests(unittest.TestCase):
         self.assertGreaterEqual(len(checked), 10)
         self.assertIn(
             ".github/workflows/zero-model-qualification.yml",
+            checked,
+        )
+        self.assertIn(
+            ".github/workflows/reconvergence-integrity.yml",
             checked,
         )
 

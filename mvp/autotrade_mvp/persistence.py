@@ -71,7 +71,7 @@ class JournalStore:
     publication intent; a separate qualified dispatcher must perform delivery.
     """
 
-    SCHEMA_VERSION = 6
+    SCHEMA_VERSION = 7
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -203,6 +203,18 @@ class JournalStore:
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_journal_sequence "
                 "ON events(journal_sequence)",
             )
+        if version == 7:
+            return (
+                """
+                CREATE TABLE IF NOT EXISTS global_projection_checkpoints (
+                    projection_name TEXT PRIMARY KEY,
+                    journal_sequence INTEGER NOT NULL CHECK (journal_sequence >= 0),
+                    state_json TEXT NOT NULL,
+                    state_hash TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """,
+            )
         raise ValueError(f"Unsupported journal migration version: {version}")
 
     @classmethod
@@ -232,6 +244,11 @@ class JournalStore:
             required["projection_checkpoints"] = frozenset({
                 "projection_name", "aggregate_type", "aggregate_id",
                 "aggregate_version", "state_json", "state_hash", "updated_at",
+            })
+        if cls.SCHEMA_VERSION >= 7:
+            required["global_projection_checkpoints"] = frozenset({
+                "projection_name", "journal_sequence",
+                "state_json", "state_hash", "updated_at",
             })
         return required
 
@@ -263,6 +280,10 @@ class JournalStore:
                 "projection_name",
                 "aggregate_type",
                 "aggregate_id",
+            )
+        if cls.SCHEMA_VERSION >= 7:
+            expected_primary_keys["global_projection_checkpoints"] = (
+                "projection_name",
             )
         expected_unique = {
             "events": {
@@ -554,6 +575,8 @@ class JournalStore:
                 }
                 if self.SCHEMA_VERSION >= 2:
                     required_tables.add("projection_checkpoints")
+                if self.SCHEMA_VERSION >= 7:
+                    required_tables.add("global_projection_checkpoints")
                 present_tables = {
                     str(row[0])
                     for row in connection.execute(
@@ -1176,6 +1199,140 @@ class JournalStore:
             "aggregate_type": aggregate_type,
             "aggregate_id": aggregate_id,
             "aggregate_version": int(row["aggregate_version"]),
+            "state": state,
+            "state_hash": row["state_hash"],
+            "updated_at": row["updated_at"],
+        }
+
+    def save_global_projection_checkpoint(
+        self,
+        *,
+        projection_name: str,
+        journal_sequence: int,
+        state: Any,
+    ) -> bool:
+        """Persist derived multi-aggregate state at one exact durable journal cut."""
+
+        projection_name = self._require_text(projection_name, "projection_name")
+        if type(journal_sequence) is not int or journal_sequence < 0:
+            raise ValueError("journal_sequence must be a non-negative integer")
+        state_json = canonical_json(state)
+        state_hash = payload_digest(
+            {
+                "projection_name": projection_name,
+                "journal_sequence": journal_sequence,
+                "state": state,
+            }
+        )
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                current = self._journal_sequence_value(connection)
+                if journal_sequence > current:
+                    raise ValueError(
+                        "global projection checkpoint cannot outrun the journal"
+                    )
+                existing = connection.execute(
+                    """
+                    SELECT journal_sequence, state_json, state_hash
+                    FROM global_projection_checkpoints
+                    WHERE projection_name = ?
+                    """,
+                    (projection_name,),
+                ).fetchone()
+                if existing is not None:
+                    existing_sequence = int(existing["journal_sequence"])
+                    exact = (
+                        existing_sequence == journal_sequence
+                        and existing["state_json"] == state_json
+                        and existing["state_hash"] == state_hash
+                    )
+                    if exact:
+                        connection.commit()
+                        return False
+                    if journal_sequence <= existing_sequence:
+                        raise ValueError(
+                            "global projection checkpoint cannot regress or change at the same journal cut"
+                        )
+
+                connection.execute(
+                    """
+                    INSERT INTO global_projection_checkpoints(
+                        projection_name, journal_sequence,
+                        state_json, state_hash, updated_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(projection_name)
+                    DO UPDATE SET
+                        journal_sequence = excluded.journal_sequence,
+                        state_json = excluded.state_json,
+                        state_hash = excluded.state_hash,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        projection_name,
+                        journal_sequence,
+                        state_json,
+                        state_hash,
+                        self._now(),
+                    ),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return True
+
+    def load_global_projection_checkpoint(
+        self,
+        *,
+        projection_name: str,
+    ) -> dict[str, Any] | None:
+        """Load and integrity-check a multi-aggregate projection checkpoint."""
+
+        projection_name = self._require_text(projection_name, "projection_name")
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT journal_sequence, state_json, state_hash, updated_at
+                FROM global_projection_checkpoints
+                WHERE projection_name = ?
+                """,
+                (projection_name,),
+            ).fetchone()
+            if row is None:
+                return None
+            current = self._journal_sequence_value(connection)
+
+        try:
+            state = json.loads(row["state_json"])
+        except (json.JSONDecodeError, TypeError) as error:
+            raise ValueError(
+                "global projection checkpoint state is not valid JSON"
+            ) from error
+        if canonical_json(state) != row["state_json"]:
+            raise ValueError(
+                "global projection checkpoint state is not canonical JSON"
+            )
+        journal_sequence = int(row["journal_sequence"])
+        expected_hash = payload_digest(
+            {
+                "projection_name": projection_name,
+                "journal_sequence": journal_sequence,
+                "state": state,
+            }
+        )
+        if expected_hash != row["state_hash"]:
+            raise ValueError(
+                "global projection checkpoint hash does not match identity, cut, and state"
+            )
+        if journal_sequence > current:
+            raise ValueError(
+                "global projection checkpoint is ahead of the journal"
+            )
+        return {
+            "projection_name": projection_name,
+            "journal_sequence": journal_sequence,
             "state": state,
             "state_hash": row["state_hash"],
             "updated_at": row["updated_at"],

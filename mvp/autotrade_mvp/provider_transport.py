@@ -16,7 +16,7 @@ another dispatcher.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import InitVar, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256, sha512
@@ -49,6 +49,7 @@ from .provider_core import (
     ProviderResponseObservation,
     Surface,
     observe_authenticated_json_response,
+    prepare_authenticated_read_query,
 )
 from .windows_secrets import PersistentCredentialHandle
 
@@ -1128,83 +1129,6 @@ class AuthenticatedReadWireResponse:
             raise ProviderTransportError(
                 "provider returned an empty or non-byte authenticated-read response"
             )
-
-
-_TRANSPORTED_PROVIDER_OBSERVATION_TOKEN = object()
-
-
-@dataclass(frozen=True)
-class TransportedProviderResponseObservation:
-    """Provider response whose exact bytes came through an allowlisted wire request."""
-
-    observation: ProviderResponseObservation
-    request_url: str
-    origin: str
-    request_url_sha256: str
-    _verification_token: InitVar[object | None] = None
-
-    def __post_init__(self, _verification_token: object | None) -> None:
-        if _verification_token is not _TRANSPORTED_PROVIDER_OBSERVATION_TOKEN:
-            raise ProviderTransportScopeError(
-                "transported provider observation must be issued by shared transport"
-            )
-        if not isinstance(self.observation, ProviderResponseObservation):
-            raise TypeError("observation must be ProviderResponseObservation")
-        binding = self.observation.query_binding
-        if binding.surface != Surface.PUBLIC_DATA:
-            raise ProviderTransportScopeError(
-                "transported public observation requires PUBLIC_DATA binding"
-            )
-        origin = _text(self.origin, name="origin")
-        origin_parts = urlsplit(origin)
-        if (
-            origin_parts.scheme != "https"
-            or not origin_parts.hostname
-            or origin_parts.username is not None
-            or origin_parts.password is not None
-            or origin_parts.path not in ("", "/")
-            or origin_parts.query
-            or origin_parts.fragment
-        ):
-            raise ProviderTransportScopeError(
-                "transported observation origin must be an HTTPS origin"
-            )
-        request_url = _text(self.request_url, name="request_url")
-        parsed = urlsplit(request_url)
-        expected_query = urlencode(sorted(binding.query.items()))
-        if (
-            parsed.scheme != "https"
-            or parsed.netloc != origin_parts.netloc
-            or parsed.path != binding.endpoint
-            or parsed.query != expected_query
-            or parsed.fragment
-            or parsed.username is not None
-            or parsed.password is not None
-        ):
-            raise ProviderTransportScopeError(
-                "transported observation request URL does not match exact binding"
-            )
-        expected_url = origin.rstrip("/") + binding.endpoint
-        if expected_query:
-            expected_url += "?" + expected_query
-        if request_url != expected_url:
-            raise ProviderTransportScopeError(
-                "transported observation request URL is not canonical"
-            )
-        digest = _canonical_text(
-            self.request_url_sha256,
-            name="request_url_sha256",
-        )
-        expected_digest = "sha256:" + sha256(
-            request_url.encode("utf-8")
-        ).hexdigest()
-        if digest != expected_digest:
-            raise ProviderTransportScopeError(
-                "transported observation request URL digest mismatch"
-            )
-        object.__setattr__(self, "origin", origin.rstrip("/"))
-        object.__setattr__(self, "request_url", request_url)
-        object.__setattr__(self, "request_url_sha256", digest)
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):
@@ -2767,7 +2691,12 @@ class KrakenSpotAuthenticatedReadTransport:
 
 
 class BinanceUsdmPublicDataTransport:
-    """Allowlisted one-shot USD-M public-data transport for order admission evidence."""
+    """Trusted USD-M public-data composition boundary for order admission.
+
+    Callers cannot inject a wire client or present a provenance wrapper.  This
+    composition owns the allowlisted HTTPS GET, exact response observation,
+    provider parsing, and deterministic order preparation as one operation.
+    """
 
     def __init__(
         self,
@@ -2778,7 +2707,6 @@ class BinanceUsdmPublicDataTransport:
         capability_registry: CapabilityRegistry,
         clock_utc: ClockUtc,
         quota_gate: QuotaGate | None = None,
-        wire_client: ProviderWireClient | None = None,
     ) -> None:
         if not isinstance(policy, ProviderEndpointPolicy):
             raise TypeError("policy must be ProviderEndpointPolicy")
@@ -2805,12 +2733,12 @@ class BinanceUsdmPublicDataTransport:
             raise TypeError("clock_utc must be callable")
         if quota_gate is not None and not callable(quota_gate):
             raise TypeError("quota_gate must be callable or None")
-        if wire_client is not None and not hasattr(wire_client, "send"):
-            raise TypeError("wire_client must implement send")
         self.capability_registry = capability_registry
         self.clock_utc = clock_utc
         self.quota_gate = quota_gate
-        self.wire_client = wire_client or UrllibJsonWireClient()
+        # Production composition deliberately has no caller-injected wire seam.
+        # Tests patch UrllibJsonWireClient.send at the class boundary.
+        self.__wire_client = UrllibJsonWireClient()
 
     def _require_current_capability(
         self,
@@ -2857,10 +2785,10 @@ class BinanceUsdmPublicDataTransport:
             )
         return current
 
-    def __call__(
+    def _observe(
         self,
         query_binding: AuthenticatedReadQueryBinding,
-    ) -> TransportedProviderResponseObservation:
+    ) -> tuple[ProviderResponseObservation, str, str]:
         if not isinstance(query_binding, AuthenticatedReadQueryBinding):
             raise TypeError(
                 "query_binding must be AuthenticatedReadQueryBinding"
@@ -2894,7 +2822,12 @@ class BinanceUsdmPublicDataTransport:
             headers=MappingProxyType({"Accept": "application/json"}),
             timeout_seconds=self.policy.timeout_seconds,
         )
-        wire_response = self.wire_client.send(request)
+        # Fail closed if production composition was mutated to another client.
+        if type(self.__wire_client) is not UrllibJsonWireClient:
+            raise ProviderTransportScopeError(
+                "USD-M public-data transport wire authority was substituted"
+            )
+        wire_response = self.__wire_client.send(request)
         if not isinstance(wire_response, AuthenticatedReadWireResponse):
             raise ProviderTransportError(
                 "public-data wire client must preserve HTTP status"
@@ -2911,14 +2844,140 @@ class BinanceUsdmPublicDataTransport:
             response_bytes=wire_response.body,
             observed_at=observed_at,
         )
-        return TransportedProviderResponseObservation(
+        request_url_sha256 = (
+            "sha256:" + sha256(request.url.encode("utf-8")).hexdigest()
+        )
+        return observation, request.url, request_url_sha256
+
+    def _binding(
+        self,
+        *,
+        capability: CapabilitySnapshot,
+        endpoint: str,
+        query: Mapping[str, str],
+        at: datetime,
+    ) -> AuthenticatedReadQueryBinding:
+        if not isinstance(capability, CapabilitySnapshot):
+            raise TypeError("capability must be CapabilitySnapshot")
+        if (
+            capability.snapshot_id != self.capability_snapshot_id
+            or capability.provider_id != "BINANCE"
+            or capability.account_id != self.account_id
+            or capability.environment != self.policy.environment
+        ):
+            raise ProviderTransportScopeError(
+                "USD-M public-data capability does not match transport composition"
+            )
+        return prepare_authenticated_read_query(
+            capability=capability,
+            surface=Surface.PUBLIC_DATA,
+            endpoint=endpoint,
+            query=query,
+            at=at,
+            permission_scope="ORDER_WRITE",
+        )
+
+    def fetch_exchange_info_rules(
+        self,
+        *,
+        capability: CapabilitySnapshot,
+        symbol: str,
+        at: datetime,
+    ):
+        from .binance_usdm import (
+            BINANCE_USDM_ENDPOINTS,
+            BinanceUsdmSymbolRules,
+        )
+
+        binding = self._binding(
+            capability=capability,
+            endpoint=BINANCE_USDM_ENDPOINTS["EXCHANGE_INFO"],
+            query={},
+            at=at,
+        )
+        observation, request_url, request_url_sha256 = self._observe(binding)
+        return BinanceUsdmSymbolRules._from_provider_observation(
             observation=observation,
-            request_url=request.url,
+            symbol=symbol,
             origin=self.policy.base_url,
-            request_url_sha256=(
-                "sha256:" + sha256(request.url.encode("utf-8")).hexdigest()
+            request_url=request_url,
+            request_url_sha256=request_url_sha256,
+        )
+
+    def fetch_mark_price(
+        self,
+        *,
+        capability: CapabilitySnapshot,
+        symbol: str,
+        at: datetime,
+    ):
+        from .binance_usdm import (
+            BINANCE_USDM_ENDPOINTS,
+            BinanceUsdmMarkPrice,
+        )
+
+        binding = self._binding(
+            capability=capability,
+            endpoint=BINANCE_USDM_ENDPOINTS["MARK_PRICE"],
+            query={"symbol": _canonical_text(symbol, name="symbol")},
+            at=at,
+        )
+        observation, request_url, request_url_sha256 = self._observe(binding)
+        return BinanceUsdmMarkPrice._from_provider_observation(
+            observation=observation,
+            symbol=symbol,
+            origin=self.policy.base_url,
+            request_url=request_url,
+            request_url_sha256=request_url_sha256,
+        )
+
+    def prepare_order_request(
+        self,
+        intent,
+        *,
+        client_order_id: str,
+        capability: CapabilitySnapshot,
+        at: datetime,
+        maximum_mark_price_age_seconds: int | None = None,
+    ):
+        from .binance_usdm import _prepare_order_request_with_rules
+
+        if getattr(intent, "symbol", None) is None:
+            raise TypeError("intent must provide canonical USD-M symbol")
+        rules = self.fetch_exchange_info_rules(
+            capability=capability,
+            symbol=intent.symbol,
+            at=at,
+        )
+        requires_mark = (
+            (
+                getattr(intent, "order_type", None) == "LIMIT"
+                and rules.percent_price_multiplier_up is not None
+                and rules.percent_price_multiplier_down is not None
+            )
+            or (
+                getattr(intent, "order_type", None) == "MARKET"
+                and rules.min_notional is not None
+                and getattr(intent, "reduce_only", None) is False
+            )
+        )
+        mark_price = None
+        if requires_mark:
+            mark_price = self.fetch_mark_price(
+                capability=capability,
+                symbol=intent.symbol,
+                at=at,
+            )
+        return _prepare_order_request_with_rules(
+            intent,
+            client_order_id=client_order_id,
+            capability=capability,
+            symbol_rules=rules,
+            at=at,
+            mark_price=mark_price,
+            maximum_mark_price_age_seconds=(
+                maximum_mark_price_age_seconds
             ),
-            _verification_token=_TRANSPORTED_PROVIDER_OBSERVATION_TOKEN,
         )
 
 

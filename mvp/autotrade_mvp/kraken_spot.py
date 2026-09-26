@@ -601,6 +601,7 @@ class KrakenSpotPageEvidence:
     offset: int
     limit: int
     record_count: int
+    record_ids: tuple[str, ...]
     total_count: int
     evidence_ref: str
     filter_items: tuple[tuple[str, str], ...]
@@ -639,6 +640,25 @@ class KrakenSpotPageEvidence:
             )
         if self.total_count < 0:
             raise KrakenSpotAdapterError("total_count cannot be negative")
+        if not isinstance(self.record_ids, tuple):
+            raise TypeError("record_ids must be a tuple")
+        normalized_record_ids = tuple(
+            _text(str(value), name="pagination record id")
+            for value in self.record_ids
+        )
+        if len(normalized_record_ids) != self.record_count:
+            raise KrakenSpotAdapterError(
+                "record_ids must exactly match the page record count"
+            )
+        if len(set(normalized_record_ids)) != len(normalized_record_ids):
+            raise KrakenSpotAdapterError(
+                "pagination record ids must be unique within one page"
+            )
+        if tuple(sorted(normalized_record_ids)) != normalized_record_ids:
+            raise KrakenSpotAdapterError(
+                "pagination record ids must be sorted canonically"
+            )
+        object.__setattr__(self, "record_ids", normalized_record_ids)
         if self.offset + self.record_count > self.total_count:
             raise KrakenSpotAdapterError(
                 "Kraken page extends beyond provider total count"
@@ -725,6 +745,15 @@ class KrakenSpotPaginationCoverage:
             if page.evidence_ref in {item.evidence_ref for item in self._pages}:
                 raise KrakenSpotAdapterError(
                     "Kraken pagination response evidence is duplicated"
+                )
+            existing_record_ids = {
+                record_id
+                for item in self._pages
+                for record_id in item.record_ids
+            }
+            if existing_record_ids.intersection(page.record_ids):
+                raise KrakenSpotAdapterError(
+                    "Kraken pagination record id is duplicated across pages"
                 )
         self._pages.append(page)
 
@@ -863,6 +892,12 @@ def pagination_page_from_observation(
         offset=offset,
         limit=limit,
         record_count=len(records),
+        record_ids=tuple(
+            sorted(
+                _text(str(value), name="pagination record id")
+                for value in records
+            )
+        ),
         total_count=total_count,
         evidence_ref=observation.evidence_ref,
         filter_items=tuple(

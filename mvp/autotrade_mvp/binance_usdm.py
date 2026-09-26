@@ -205,50 +205,78 @@ class BinanceUsdmOrderIntent:
 
 @dataclass(frozen=True)
 class BinanceUsdmMarkPrice:
-    """Provider-originated USD-M mark-price evidence for MARKET admission."""
+    """Exact provider-response-bound USD-M mark-price evidence."""
 
+    environment: str
     instrument_version: str
     symbol: str
     price: Decimal
     observed_at: datetime
     source_sha256: str
+    evidence_ref: str
+    query_digest: str
     _verification_token: InitVar[object | None] = None
 
     def __post_init__(self, _verification_token: object | None) -> None:
         if _verification_token is not _MARK_PRICE_TOKEN:
             raise BinanceUsdmAdapterError(
-                "mark price must come from canonical provider payload parsing"
+                "mark price must come from an exact provider response observation"
             )
+        environment = _text(self.environment, name="environment").upper()
         instrument = _text(self.instrument_version, name="instrument_version")
         symbol = _provider_symbol(self.symbol, name="mark-price symbol")
         price = _decimal(self.price, name="mark_price", positive=True)
         observed = _utc(self.observed_at, name="mark-price observed_at")
         digest = _text(self.source_sha256, name="mark-price source_sha256")
-        if (
-            len(digest) != 71
-            or not digest.startswith("sha256:")
-            or any(ch not in "0123456789abcdef" for ch in digest[7:])
-        ):
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
             raise BinanceUsdmAdapterError(
                 "mark-price source_sha256 must be canonical lowercase SHA-256"
             )
+        evidence_ref = _text(self.evidence_ref, name="mark-price evidence_ref")
+        if re.fullmatch(r"provider-read:sha256:[0-9a-f]{64}", evidence_ref) is None:
+            raise BinanceUsdmAdapterError(
+                "mark-price evidence_ref must identify an exact provider read"
+            )
+        query_digest = _text(self.query_digest, name="mark-price query_digest")
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", query_digest) is None:
+            raise BinanceUsdmAdapterError(
+                "mark-price query_digest must be canonical lowercase SHA-256"
+            )
+        object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "environment", environment)
         object.__setattr__(self, "instrument_version", instrument)
         object.__setattr__(self, "symbol", symbol)
         object.__setattr__(self, "price", price)
         object.__setattr__(self, "observed_at", observed)
         object.__setattr__(self, "source_sha256", digest)
+        object.__setattr__(self, "evidence_ref", evidence_ref)
+        object.__setattr__(self, "query_digest", query_digest)
 
     @classmethod
     def from_premium_index(
         cls,
         *,
-        instrument_version: str,
+        observation: ProviderResponseObservation,
         symbol: str,
-        payload: Mapping[str, object],
     ) -> "BinanceUsdmMarkPrice":
-        if not isinstance(payload, Mapping):
-            raise TypeError("mark-price payload must be a mapping")
+        if not isinstance(observation, ProviderResponseObservation):
+            raise TypeError("observation must be ProviderResponseObservation")
         requested_symbol = _provider_symbol(symbol, name="mark-price symbol")
+        observation.require_scope(
+            provider_id="BINANCE",
+            surface=Surface.PUBLIC_DATA,
+            endpoint=BINANCE_USDM_ENDPOINTS["MARK_PRICE"],
+        )
+        query = dict(observation.query_binding.query)
+        if query != {"symbol": requested_symbol}:
+            raise BinanceUsdmAdapterError(
+                "mark-price observation query must bind the exact requested symbol"
+            )
+        payload = observation.payload
+        if not isinstance(payload, Mapping):
+            raise BinanceUsdmAdapterError(
+                "mark-price provider response must be an object"
+            )
         provider_symbol = _provider_symbol(
             payload.get("symbol"),
             name="mark-price payload symbol",
@@ -263,45 +291,39 @@ class BinanceUsdmMarkPrice:
             positive=True,
         )
         timestamp = _millis(payload.get("time"), name="mark-price time")
-        observed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-        try:
-            canonical = json.dumps(
-                {
-                    "endpoint": BINANCE_USDM_ENDPOINTS["MARK_PRICE"],
-                    "symbol": provider_symbol,
-                    "payload": dict(payload),
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-                allow_nan=False,
-            ).encode("utf-8")
-        except (TypeError, ValueError) as error:
+        provider_observed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        response_observed = datetime.fromisoformat(
+            observation.observed_at.replace("Z", "+00:00")
+        )
+        if provider_observed > response_observed:
             raise BinanceUsdmAdapterError(
-                "mark-price payload must contain canonical JSON-compatible values"
-            ) from error
+                "mark-price provider timestamp is after exact response observation"
+            )
         return cls(
-            instrument_version=_text(
-                instrument_version,
-                name="instrument_version",
-            ),
+            environment=observation.environment,
+            instrument_version=observation.query_binding.instrument_version,
             symbol=provider_symbol,
             price=price,
-            observed_at=observed,
-            source_sha256="sha256:" + sha256(canonical).hexdigest(),
+            observed_at=provider_observed,
+            source_sha256=observation.response_sha256,
+            evidence_ref=observation.evidence_ref,
+            query_digest=observation.query_binding.query_digest,
             _verification_token=_MARK_PRICE_TOKEN,
         )
 
 
 @dataclass(frozen=True)
 class BinanceUsdmSymbolRules:
-    """Versioned USD-M exchangeInfo filters required before order preparation."""
+    """Versioned USD-M rules bound to one exact exchangeInfo response."""
 
+    environment: str
     instrument_version: str
     symbol: str
     status: str
     contract_type: str
     source_sha256: str
+    evidence_ref: str
+    query_digest: str
     supported_order_types: frozenset[str]
     supported_time_in_force: frozenset[str]
     lot_min_qty: Decimal
@@ -323,6 +345,7 @@ class BinanceUsdmSymbolRules:
             raise BinanceUsdmAdapterError(
                 "exchangeInfo rules must come from canonical provider payload parsing"
             )
+        environment = _text(self.environment, name="environment").upper()
         instrument = _text(self.instrument_version, name="instrument_version")
         symbol = _provider_symbol(self.symbol, name="exchangeInfo symbol")
         status = _text(self.status, name="exchangeInfo status").upper()
@@ -331,13 +354,19 @@ class BinanceUsdmSymbolRules:
             name="exchangeInfo contract_type",
         ).upper()
         digest = _text(self.source_sha256, name="source_sha256")
-        if (
-            len(digest) != 71
-            or not digest.startswith("sha256:")
-            or any(ch not in "0123456789abcdef" for ch in digest[7:])
-        ):
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
             raise BinanceUsdmAdapterError(
                 "source_sha256 must be canonical lowercase SHA-256"
+            )
+        evidence_ref = _text(self.evidence_ref, name="exchangeInfo evidence_ref")
+        if re.fullmatch(r"provider-read:sha256:[0-9a-f]{64}", evidence_ref) is None:
+            raise BinanceUsdmAdapterError(
+                "exchangeInfo evidence_ref must identify an exact provider read"
+            )
+        query_digest = _text(self.query_digest, name="exchangeInfo query_digest")
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", query_digest) is None:
+            raise BinanceUsdmAdapterError(
+                "exchangeInfo query_digest must be canonical lowercase SHA-256"
             )
         if (
             not isinstance(self.supported_order_types, frozenset)
@@ -428,6 +457,8 @@ class BinanceUsdmSymbolRules:
         object.__setattr__(self, "status", status)
         object.__setattr__(self, "contract_type", contract_type)
         object.__setattr__(self, "source_sha256", digest)
+        object.__setattr__(self, "evidence_ref", evidence_ref)
+        object.__setattr__(self, "query_digest", query_digest)
         object.__setattr__(self, "supported_order_types", order_types)
         object.__setattr__(self, "supported_time_in_force", time_in_force)
         object.__setattr__(self, "lot_min_qty", lot_min)
@@ -452,15 +483,57 @@ class BinanceUsdmSymbolRules:
     def from_exchange_info(
         cls,
         *,
-        instrument_version: str,
-        symbol_payload: Mapping[str, object],
+        observation: ProviderResponseObservation,
+        symbol: str,
     ) -> "BinanceUsdmSymbolRules":
-        if not isinstance(symbol_payload, Mapping):
-            raise TypeError("symbol_payload must be a mapping")
-        instrument = _text(instrument_version, name="instrument_version")
-        symbol = _provider_symbol(
-            symbol_payload.get("symbol"),
-            name="exchangeInfo symbol",
+        if not isinstance(observation, ProviderResponseObservation):
+            raise TypeError("observation must be ProviderResponseObservation")
+        requested_symbol = _provider_symbol(symbol, name="exchangeInfo symbol")
+        observation.require_scope(
+            provider_id="BINANCE",
+            surface=Surface.PUBLIC_DATA,
+            endpoint=BINANCE_USDM_ENDPOINTS["EXCHANGE_INFO"],
+        )
+        if dict(observation.query_binding.query):
+            raise BinanceUsdmAdapterError(
+                "exchangeInfo observation must bind the canonical empty query"
+            )
+        payload = observation.payload
+        if not isinstance(payload, Mapping):
+            raise BinanceUsdmAdapterError(
+                "exchangeInfo provider response must be an object"
+            )
+        symbols = payload.get("symbols")
+        if isinstance(symbols, (str, bytes)) or not isinstance(symbols, (list, tuple)):
+            raise BinanceUsdmAdapterError(
+                "exchangeInfo provider response symbols must be an array"
+            )
+        symbol_payload: Mapping[str, object] | None = None
+        seen_symbols: set[str] = set()
+        for item in symbols:
+            if not isinstance(item, Mapping):
+                raise BinanceUsdmAdapterError(
+                    "exchangeInfo symbol entry must be an object"
+                )
+            provider_symbol = _provider_symbol(
+                item.get("symbol"),
+                name="exchangeInfo symbol",
+            )
+            if provider_symbol in seen_symbols:
+                raise BinanceUsdmAdapterError(
+                    "exchangeInfo provider response contains duplicate symbols"
+                )
+            seen_symbols.add(provider_symbol)
+            if provider_symbol == requested_symbol:
+                symbol_payload = item
+        if symbol_payload is None:
+            raise BinanceUsdmAdapterError(
+                "exchangeInfo provider response does not contain requested symbol"
+            )
+
+        instrument = _text(
+            observation.query_binding.instrument_version,
+            name="instrument_version",
         )
         status = _text(
             symbol_payload.get("status"),
@@ -474,7 +547,7 @@ class BinanceUsdmSymbolRules:
         raw_order_types = symbol_payload.get("orderTypes")
         if (
             isinstance(raw_order_types, (str, bytes))
-            or not isinstance(raw_order_types, list)
+            or not isinstance(raw_order_types, (list, tuple))
             or not raw_order_types
         ):
             raise BinanceUsdmAdapterError(
@@ -492,7 +565,7 @@ class BinanceUsdmSymbolRules:
         raw_tif = symbol_payload.get("timeInForce")
         if (
             isinstance(raw_tif, (str, bytes))
-            or not isinstance(raw_tif, list)
+            or not isinstance(raw_tif, (list, tuple))
             or not raw_tif
         ):
             raise BinanceUsdmAdapterError(
@@ -508,7 +581,7 @@ class BinanceUsdmSymbolRules:
             )
 
         filters = symbol_payload.get("filters")
-        if isinstance(filters, (str, bytes)) or not isinstance(filters, list):
+        if isinstance(filters, (str, bytes)) or not isinstance(filters, (list, tuple)):
             raise BinanceUsdmAdapterError(
                 "exchangeInfo filters must be an array"
             )
@@ -619,24 +692,15 @@ class BinanceUsdmSymbolRules:
                 positive=True,
             )
 
-        try:
-            canonical = json.dumps(
-                symbol_payload,
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-                allow_nan=False,
-            ).encode("utf-8")
-        except (TypeError, ValueError) as error:
-            raise BinanceUsdmAdapterError(
-                "exchangeInfo symbol payload must contain canonical JSON-compatible values"
-            ) from error
         return cls(
+            environment=observation.environment,
             instrument_version=instrument,
-            symbol=symbol,
+            symbol=requested_symbol,
             status=status,
             contract_type=contract_type,
-            source_sha256="sha256:" + sha256(canonical).hexdigest(),
+            source_sha256=observation.response_sha256,
+            evidence_ref=observation.evidence_ref,
+            query_digest=observation.query_binding.query_digest,
             supported_order_types=order_types,
             supported_time_in_force=time_in_force,
             lot_min_qty=lot_min,
@@ -751,6 +815,10 @@ class BinanceUsdmSymbolRules:
                     "maximum_mark_price_age_seconds must be a non-negative integer"
                 )
             point = _utc(at, name="at")
+            if mark_price.environment != self.environment:
+                raise BinanceUsdmAdapterError(
+                    "mark-price environment does not match exchangeInfo evidence"
+                )
             if mark_price.instrument_version != intent.instrument_version:
                 raise BinanceUsdmAdapterError(
                     "mark-price instrument version does not match intent"
@@ -926,6 +994,10 @@ def prepare_order_request(
     if capability.instrument_version != intent.instrument_version:
         raise BinanceUsdmAdapterError(
             "capability instrument version does not match intent"
+        )
+    if symbol_rules.environment != capability.environment.upper():
+        raise BinanceUsdmAdapterError(
+            "exchangeInfo evidence environment does not match capability"
         )
     if not capability.admits(
         at=point,

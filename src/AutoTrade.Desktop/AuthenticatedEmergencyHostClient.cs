@@ -686,7 +686,8 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         string eventCursor = CanonicalSequence(
             RequiredString(value, "event_cursor"),
             "event_cursor");
-        DateTimeOffset observed = RequiredUtcInstant(value, "server_time");
+        DateTimeOffset serverObservedAt =
+            RequiredUtcInstant(value, "server_time");
 
         if (ContainsSecret(value, session.Token))
         {
@@ -729,15 +730,35 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                 "Host snapshot has no connection freshness evidence.");
         }
 
+        string hostFreshness = RequiredString(freshness, "host");
+        DateTimeOffset freshnessObservedAt =
+            RequiredUtcInstant(freshness, "as_of");
+        bool isCurrent = string.Equals(
+            hostFreshness,
+            "CURRENT",
+            StringComparison.Ordinal);
+        if (freshnessObservedAt > serverObservedAt)
+        {
+            throw new InvalidOperationException(
+                "Host freshness evidence cannot be later than host server time.");
+        }
+
         EmergencyHostStatus status = new EmergencyHostStatus(
             Connected: true,
             HostId: hostId,
             AccountId: accountId,
             Environment: environment,
             StateVersion: stateVersion,
-            ObservedAtUtc: observed,
-            Message: "Authenticated host state was refreshed from canonical version "
-                + stateVersion + ".").Validated();
+            ObservedAtUtc: freshnessObservedAt,
+            Message: isCurrent
+                ? "Authenticated host state was refreshed from canonical version "
+                    + stateVersion + "."
+                : "Authenticated host snapshot was received at canonical version "
+                    + stateVersion + ", but host freshness is "
+                    + hostFreshness + ".")
+        {
+            IsCurrent = isCurrent,
+        }.Validated();
         return new Snapshot(status, eventCursor);
     }
 

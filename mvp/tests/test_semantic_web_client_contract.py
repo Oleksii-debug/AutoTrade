@@ -743,7 +743,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn('reapplyTableFilter("event-history-body")', js)
         self.assertIn("reapplyTableFilter(bodyId)", js)
         filter_scope = js[
-            js.index("function applyTableFilter(tool)"):
+            js.index("function applyTableFilter(tool, {announce = true} = {})"):
             js.index("function reapplyTableFilter(bodyId)")
         ]
         self.assertNotIn("fetch(", filter_scope)
@@ -780,6 +780,29 @@ class SemanticWebClientContractTests(unittest.TestCase):
             bind_scope,
         )
 
+
+    def test_scope_transition_clears_all_table_filters_before_rendering_new_scope(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("function resetTableFiltersForScopeChange()", js)
+        reset = js[
+            js.index("function resetTableFiltersForScopeChange()"):
+            js.index("function visibleTableRows(tool)")
+        ]
+        self.assertIn("for (const tool of TABLE_TOOLS)", reset)
+        self.assertIn('filter.value = ""', reset)
+        self.assertIn(
+            'text(tool.statusId, "Filter cleared for new account/environment scope.")',
+            reset,
+        )
+        snapshot = js[
+            js.index("function renderSnapshot(snapshot"):
+            js.index("async function refreshSnapshot", js.index("function renderSnapshot(snapshot"))
+        ]
+        clear = snapshot.index("resetTableFiltersForScopeChange();")
+        events = snapshot.index("resetEventHistoryForScope();")
+        portfolio = snapshot.index('renderProjection(\n      "portfolio-body"')
+        self.assertLess(clear, events)
+        self.assertLess(clear, portfolio)
 
     def test_copy_visible_rows_uses_only_rendered_text_and_fails_accessibly(self):
         html = INDEX.read_text(encoding="utf-8")

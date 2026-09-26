@@ -197,10 +197,93 @@ def bound_execution_response(
         http_status=200,
         response_bytes=raw,
         observed_at=READ_AT,
+        provider_environment="TESTNET",
+    )
+
+
+def parse_test_executions(observation, **kwargs):
+    return parse_executions(
+        observation,
+        provider_environment="TESTNET",
+        **kwargs,
     )
 
 
 class BybitV5AdapterTests(unittest.TestCase):
+    def test_execution_parser_requires_exact_provider_environment_scope(self):
+        response = {
+            "retCode": 0,
+            "result": {
+                "list": [{
+                    "execId": "scope-provider-env",
+                    "orderLinkId": "",
+                    "symbol": "BTCUSDT",
+                    "side": "Buy",
+                    "execQty": "1",
+                    "execPrice": "10",
+                    "execFee": "0",
+                    "feeCurrency": "USDT",
+                    "execTime": "1790280000000",
+                }]
+            },
+        }
+        observation = bound_execution_response(response)
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "requires expected provider_environment",
+        ):
+            parse_executions(
+                observation,
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "provider-environment mismatch",
+        ):
+            parse_executions(
+                observation,
+                provider_environment="DEMO",
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+        fill = parse_executions(
+            observation,
+            provider_environment="TESTNET",
+            instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+        )[0]
+        self.assertEqual(fill.provider_environment, "TESTNET")
+
+    def test_authenticated_read_requires_explicit_provider_environment(self):
+        capability = read_capability()
+        query = prepare_authenticated_read_query(
+            capability=capability,
+            surface=Surface.AUTHENTICATED_READ,
+            endpoint="/v5/execution/list",
+            query={"category": "spot", "limit": "100"},
+            at=READ_AT,
+            permission_scope="ORDER.READ",
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "requires explicit provider_environment",
+        ):
+            observe_authenticated_json_response(
+                query_binding=query,
+                http_status=200,
+                response_bytes=b'{"retCode":0,"result":{"list":[]}}',
+                observed_at=READ_AT,
+            )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "must be MAINNET, TESTNET or DEMO",
+        ):
+            observe_authenticated_json_response(
+                query_binding=query,
+                http_status=200,
+                response_bytes=b'{"retCode":0,"result":{"list":[]}}',
+                observed_at=READ_AT,
+                provider_environment="PAPER",
+            )
+
     def test_spot_market_quantity_is_explicitly_base_coin(self):
         payload = build_order_payload(
             product_family="SPOT",
@@ -565,6 +648,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                         prepared.capability_snapshot_ids
                     ),
                     "instrument_versions": list(prepared.instrument_versions),
+                    "provider_environment": provider_environment,
                 },
             )
             self.assertEqual(outcome.status, "SENT")
@@ -581,6 +665,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                 prepared_request_sha256=prepared.body_sha256,
                 capability_snapshot_ids=prepared.capability_snapshot_ids,
                 instrument_versions=prepared.instrument_versions,
+                provider_environment=provider_environment,
             )
         return attempt, prepared, observation
 
@@ -642,6 +727,53 @@ class BybitV5AdapterTests(unittest.TestCase):
                     result["evidence"][0]["source_uri"],
                     source_uri,
                 )
+
+    def test_durable_write_observation_cannot_cross_testnet_and_demo(self):
+        base = {
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {
+                "orderId": "provider-env-fence",
+                "orderLinkId": "__CLIENT__",
+            },
+            "time": 1790280000123,
+        }
+        intent_id = "bybit-provider-environment-fence"
+        attempt, testnet_prepared, testnet_observation = (
+            self._durable_write_observation(
+                base,
+                provider_environment="TESTNET",
+                intent_id=intent_id,
+            )
+        )
+        _other_attempt, demo_prepared, _demo_observation = (
+            self._durable_write_observation(
+                base,
+                provider_environment="DEMO",
+                intent_id=intent_id,
+            )
+        )
+        self.assertEqual(
+            testnet_prepared.body_sha256,
+            demo_prepared.body_sha256,
+        )
+        self.assertEqual(
+            testnet_prepared.environment,
+            demo_prepared.environment,
+        )
+        self.assertNotEqual(
+            testnet_prepared.provider_environment,
+            demo_prepared.provider_environment,
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "provider-environment mismatch",
+        ):
+            parse_submission_response(
+                attempt_id=attempt,
+                prepared_request=demo_prepared,
+                observation=testnet_observation,
+            )
 
     def test_journal_observation_time_and_provider_time_are_distinct(self):
         attempt, prepared, observation = self._durable_write_observation(
@@ -858,7 +990,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             "time": 1790280001000,
         }
         observation = bound_execution_response(response)
-        fills = parse_executions(
+        fills = parse_test_executions(
             observation,
             instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
         )
@@ -887,7 +1019,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             "execTime": "1790280000000",
         }
         with self.assertRaisesRegex(ProviderCoreError, "side"):
-            parse_executions(
+            parse_test_executions(
                 bound_execution_response(
                     {"retCode": 0, "result": {"list": [base]}}
                 ),
@@ -898,7 +1030,7 @@ class BybitV5AdapterTests(unittest.TestCase):
         observation = bound_execution_response(
             {"retCode": 0, "result": {"list": [documented]}}
         )
-        fill = parse_executions(
+        fill = parse_test_executions(
             observation,
             instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
         )[0]
@@ -914,7 +1046,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             "feeCurrency": "USDT", "execTime": "1790280000000",
         }]}}
         observation = bound_execution_response(response, account_id="account-a")
-        fills = parse_executions(
+        fills = parse_test_executions(
             observation,
             instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
         )
@@ -930,8 +1062,8 @@ class BybitV5AdapterTests(unittest.TestCase):
         }]}}
         evidence = bound_execution_response(response, instrument_version="ETHPERP@v1")
         with self.assertRaisesRegex(ProviderCoreError, "fee currency is unresolved"):
-            parse_executions(evidence, instrument_versions={"ETHPERP": "ETHPERP@v1"})
-        fills = parse_executions(
+            parse_test_executions(evidence, instrument_versions={"ETHPERP": "ETHPERP@v1"})
+        fills = parse_test_executions(
             evidence,
             instrument_versions={"ETHPERP": "ETHPERP@v1"},
             qualified_fee_currencies={"ETHPERP@v1": "USDT"},
@@ -949,7 +1081,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             "execTime": "1790280000000",
         }]}}
         with self.assertRaisesRegex(ProviderCoreError, "extraFees"):
-            parse_executions(
+            parse_test_executions(
                 bound_execution_response(response),
                 instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
             )
@@ -964,7 +1096,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                 }
                 if extra_fees is not None:
                     row["extraFees"] = extra_fees
-                fills = parse_executions(
+                fills = parse_test_executions(
                     bound_execution_response({"retCode": 0, "result": {"list": [row]}}),
                     instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
                 )
@@ -976,7 +1108,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             {"execId": "same", "orderLinkId": "", "symbol": "BTCUSDT", "side": "Buy", "execQty": "2", "execPrice": "10", "execFee": "0", "feeCurrency": "USDT", "execTime": "1790280000000"},
         ]}}
         with self.assertRaisesRegex(ProviderCoreError, "conflicting"):
-            parse_executions(
+            parse_test_executions(
                 bound_execution_response(conflict),
                 instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
             )
@@ -986,7 +1118,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             "execTime": "1790280000000",
         }]}}
         with self.assertRaisesRegex(ProviderCoreError, "unmapped"):
-            parse_executions(bound_execution_response(unknown), instrument_versions={})
+            parse_test_executions(bound_execution_response(unknown), instrument_versions={})
 
     def test_auth_timestamp_window_matches_documented_boundaries(self):
         server = 1_000_000
@@ -1034,7 +1166,8 @@ class BybitV5AdapterTests(unittest.TestCase):
             consistency_horizon_satisfied=True,
         
             account_id="paper-1",
-            environment="PAPER",)
+            environment="PAPER",
+            provider_environment="TESTNET",)
         self.assertFalse(evidence.provider_semantics_exclude_execution)
         self.assertFalse(
             evidence.proves_absence_for(
@@ -1051,7 +1184,8 @@ class BybitV5AdapterTests(unittest.TestCase):
             qualified_exclusion_semantics=True,
         
             account_id="paper-1",
-            environment="PAPER",)
+            environment="PAPER",
+            provider_environment="TESTNET",)
         self.assertTrue(
             qualified.proves_absence_for(
                 datetime(2026, 9, 24, 20, tzinfo=timezone.utc)

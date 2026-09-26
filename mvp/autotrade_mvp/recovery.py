@@ -532,6 +532,7 @@ class RecoveryController:
         provider_id: str,
         account_id: str,
         environment: str,
+        provider_environment: str | None = None,
     ) -> dict[str, object]:
         """Derive durable readiness only from current owner-bound provider truth.
 
@@ -553,15 +554,35 @@ class RecoveryController:
                 "Reconciliation cannot establish readiness without durable journal"
             )
 
-        checkpoint = load_reconciliation_checkpoint_for_readiness(
-            self._owner_store,
-            reconciliation_id=reconciliation_id,
-            provider_id=provider_id,
-            account_id=account_id,
-            environment=environment,
-            host_id=self.owner.owner_id,
-            owner_epoch=str(self.owner.epoch),
-        )
+        if (
+            isinstance(provider_id, str)
+            and provider_id.strip().upper() == "BYBIT"
+            and provider_environment is None
+        ):
+            self.provider_reconciled = False
+            self.reason_codes.add("startup_reconciliation_required")
+            self.reason_codes.add("provider_uncertainty")
+            self._recompute_state()
+            raise PermissionError(
+                "BYBIT readiness requires explicit provider_environment"
+            )
+        try:
+            checkpoint = load_reconciliation_checkpoint_for_readiness(
+                self._owner_store,
+                reconciliation_id=reconciliation_id,
+                provider_id=provider_id,
+                account_id=account_id,
+                environment=environment,
+                host_id=self.owner.owner_id,
+                owner_epoch=str(self.owner.epoch),
+                provider_environment=provider_environment,
+            )
+        except ValueError:
+            self.provider_reconciled = False
+            self.reason_codes.add("startup_reconciliation_required")
+            self.reason_codes.add("provider_uncertainty")
+            self._recompute_state()
+            raise
         if checkpoint is None:
             self.provider_reconciled = False
             self.reason_codes.add("startup_reconciliation_required")
@@ -740,6 +761,10 @@ class RecoveryController:
             "journal_sequence": journal_sequence,
             "owner_id": self.owner.owner_id,
             "owner_epoch": self.owner.epoch,
+            "provider_environment": payload.get(
+                "provider_environment",
+                payload.get("environment"),
+            ),
         }
 
     def record_reconciliation(self, *, consistent: bool, uncertainty: Iterable[str] = ()) -> None:

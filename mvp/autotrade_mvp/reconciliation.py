@@ -45,6 +45,37 @@ def _environment(value: str) -> str:
     return normalized
 
 
+def _provider_environment(
+    *,
+    provider_id: str,
+    environment: str,
+    provider_environment: str | None,
+) -> str:
+    provider = _text(provider_id, name="provider_id").upper()
+    runtime_environment = _environment(environment)
+    if provider == "BYBIT" and provider_environment is None:
+        raise ValueError(
+            "BYBIT provider evidence requires explicit provider_environment"
+        )
+    normalized = (
+        runtime_environment
+        if provider_environment is None
+        else _text(
+            provider_environment,
+            name="provider_environment",
+        ).upper()
+    )
+    if provider == "BYBIT" and normalized not in {
+        "MAINNET",
+        "TESTNET",
+        "DEMO",
+    }:
+        raise ValueError(
+            "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
+        )
+    return normalized
+
+
 def _instant(value: str, *, name: str) -> datetime:
     text = _text(value, name=name)
     try:
@@ -67,6 +98,7 @@ class CoverageSurfaceEvidence:
     pagination_complete: bool
     consistency_horizon_satisfied: bool
     provider_semantics_exclude_execution: bool
+    provider_environment: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -77,6 +109,15 @@ class CoverageSurfaceEvidence:
         )
         object.__setattr__(
             self, "environment", _environment(self.environment)
+        )
+        object.__setattr__(
+            self,
+            "provider_environment",
+            _provider_environment(
+                provider_id=self.provider_id,
+                environment=self.environment,
+                provider_environment=self.provider_environment,
+            ),
         )
         object.__setattr__(
             self,
@@ -125,6 +166,7 @@ class SnapshotConsistencyEvidence:
     mode: str
     query_started_at: str
     query_completed_at: str
+    provider_environment: str | None = None
     buffered_stream_events: bool = False
     replay_complete: bool = False
     sequence_gap_detected: bool = False
@@ -138,6 +180,15 @@ class SnapshotConsistencyEvidence:
         )
         object.__setattr__(
             self, "environment", _environment(self.environment)
+        )
+        object.__setattr__(
+            self,
+            "provider_environment",
+            _provider_environment(
+                provider_id=self.provider_id,
+                environment=self.environment,
+                provider_environment=self.provider_environment,
+            ),
         )
         normalized = _text(self.mode, name="mode").upper()
         if normalized not in {"ATOMIC", "COMPOSED"}:
@@ -184,6 +235,7 @@ class ResourceAvailabilityEvidence:
     query_completed_at: str
     valid_until: str
     available_resources: Mapping[str, Decimal]
+    provider_environment: str | None = None
     provider_as_of: str | None = None
     evidence_refs: tuple[str, ...] = ()
     resource_details: Mapping[str, Mapping[str, str]] | None = None
@@ -196,6 +248,15 @@ class ResourceAvailabilityEvidence:
             self, "account_id", _text(self.account_id, name="account_id")
         )
         object.__setattr__(self, "environment", _environment(self.environment))
+        object.__setattr__(
+            self,
+            "provider_environment",
+            _provider_environment(
+                provider_id=self.provider_id,
+                environment=self.environment,
+                provider_environment=self.provider_environment,
+            ),
+        )
         object.__setattr__(
             self, "snapshot_id", _text(self.snapshot_id, name="snapshot_id")
         )
@@ -331,6 +392,7 @@ class ProviderWorkingOrderEvidence:
     client_order_id: str | None
     instrument: str
     remaining_quantity: Decimal
+    provider_environment: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -341,6 +403,15 @@ class ProviderWorkingOrderEvidence:
         )
         object.__setattr__(
             self, "environment", _environment(self.environment)
+        )
+        object.__setattr__(
+            self,
+            "provider_environment",
+            _provider_environment(
+                provider_id=self.provider_id,
+                environment=self.environment,
+                provider_environment=self.provider_environment,
+            ),
         )
         remaining = _decimal(self.remaining_quantity, name="remaining_quantity")
         if remaining <= 0:
@@ -377,6 +448,7 @@ class ProviderWorkingOrderEvidence:
         client_order_id: str | None,
         instrument: str,
         remaining_quantity,
+        provider_environment: str | None = None,
     ) -> "ProviderWorkingOrderEvidence":
         remaining = _decimal(remaining_quantity, name="remaining_quantity")
         if remaining <= 0:
@@ -385,6 +457,7 @@ class ProviderWorkingOrderEvidence:
             provider_id=_text(provider_id, name="provider_id").upper(),
             account_id=_text(account_id, name="account_id"),
             environment=_environment(environment),
+            provider_environment=provider_environment,
             provider_order_id=_text(provider_order_id, name="provider_order_id"),
             client_order_id=(
                 _text(client_order_id, name="client_order_id")
@@ -409,6 +482,7 @@ class ProviderFillEvidence:
     fee_amount: Decimal
     fee_currency: str
     trade_time: str
+    provider_environment: str | None = None
     side: str | None = None
     position_side: str | None = None
     position_effect: str | None = None
@@ -421,8 +495,32 @@ class ProviderFillEvidence:
         object.__setattr__(
             self, "account_id", _text(self.account_id, name="account_id")
         )
+        runtime_environment = _environment(self.environment)
+        object.__setattr__(self, "environment", runtime_environment)
+        if self.provider_id == "BYBIT" and self.provider_environment is None:
+            raise ValueError(
+                "BYBIT fill evidence requires explicit provider_environment"
+            )
+        provider_environment = (
+            runtime_environment
+            if self.provider_environment is None
+            else _text(
+                self.provider_environment,
+                name="provider_environment",
+            ).upper()
+        )
+        if self.provider_id == "BYBIT" and provider_environment not in {
+            "MAINNET",
+            "TESTNET",
+            "DEMO",
+        }:
+            raise ValueError(
+                "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
+            )
         object.__setattr__(
-            self, "environment", _environment(self.environment)
+            self,
+            "provider_environment",
+            provider_environment,
         )
         quantity = _decimal(self.quantity, name="quantity")
         price = _decimal(self.price, name="price")
@@ -503,6 +601,7 @@ class ProviderFillEvidence:
         fee_amount=0,
         fee_currency: str,
         trade_time: str,
+        provider_environment: str | None = None,
         side: str | None = None,
         position_side: str | None = None,
         position_effect: str | None = None,
@@ -532,6 +631,7 @@ class ProviderFillEvidence:
             fee_amount=fee,
             fee_currency=_text(fee_currency, name="fee_currency").upper(),
             trade_time=trade_time,
+            provider_environment=provider_environment,
             side=(_text(side, name="side").upper() if side is not None else None),
             position_side=(
                 _text(position_side, name="position_side").upper()
@@ -556,6 +656,7 @@ class ProviderActivityEvidence:
     activity_type: str
     origin: str
     occurred_at: str
+    provider_environment: str | None = None
     instrument: str | None = None
     currency: str | None = None
     client_order_id: str | None = None
@@ -578,6 +679,15 @@ class ProviderActivityEvidence:
             self,
             "environment",
             _environment(self.environment),
+        )
+        object.__setattr__(
+            self,
+            "provider_environment",
+            _provider_environment(
+                provider_id=self.provider_id,
+                environment=self.environment,
+                provider_environment=self.provider_environment,
+            ),
         )
         object.__setattr__(
             self,
@@ -632,6 +742,7 @@ class ProviderActivityEvidence:
         activity_type: str,
         origin: str,
         occurred_at: str,
+        provider_environment: str | None = None,
         instrument: str | None = None,
         currency: str | None = None,
         client_order_id: str | None = None,
@@ -647,6 +758,7 @@ class ProviderActivityEvidence:
             activity_type=activity_type,
             origin=origin,
             occurred_at=occurred_at,
+            provider_environment=provider_environment,
             instrument=instrument,
             currency=currency,
             client_order_id=client_order_id,
@@ -669,6 +781,7 @@ class UnknownSubmission:
     account_id: str
     environment: str
     started_at: str
+    provider_environment: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -695,6 +808,15 @@ class UnknownSubmission:
         object.__setattr__(
             self, "environment", _environment(self.environment)
         )
+        object.__setattr__(
+            self,
+            "provider_environment",
+            _provider_environment(
+                provider_id=self.provider_id,
+                environment=self.environment,
+                provider_environment=self.provider_environment,
+            ),
+        )
         _instant(self.started_at, name="started_at")
 
     @classmethod
@@ -708,6 +830,7 @@ class UnknownSubmission:
         account_id: str,
         environment: str,
         started_at: str,
+        provider_environment: str | None = None,
     ) -> "UnknownSubmission":
         _instant(started_at, name="started_at")
         return cls(
@@ -718,6 +841,7 @@ class UnknownSubmission:
             account_id=_text(account_id, name="account_id"),
             environment=_environment(environment),
             started_at=started_at,
+            provider_environment=provider_environment,
         )
 
 
@@ -737,6 +861,7 @@ class ReconciliationResult:
     provider_id: str
     account_id: str
     environment: str
+    provider_environment: str
     complete: bool
     matched_execution_ids: tuple[str, ...]
     unexpected_execution_ids: tuple[str, ...]
@@ -794,6 +919,7 @@ def _absence_coverage_index(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str,
 ) -> dict[str, CoverageSurfaceEvidence]:
     result: dict[str, CoverageSurfaceEvidence] = {}
     for item in evidence:
@@ -805,6 +931,7 @@ def _absence_coverage_index(
             item.provider_id != provider_id
             or item.account_id != account_id
             or item.environment != environment
+            or item.provider_environment != provider_environment
         ):
             raise ValueError("absence coverage scope mismatch")
         if item.surface in result:
@@ -842,6 +969,7 @@ def reconcile_account(
     provider_positions: Mapping[str, object],
     local_execution_ids: Sequence[str],
     provider_fills: Sequence[ProviderFillEvidence],
+    provider_environment: str | None = None,
     local_working_client_order_ids: Sequence[str] = (),
     provider_working_orders: Sequence[ProviderWorkingOrderEvidence] = (),
     snapshot_consistency: SnapshotConsistencyEvidence | None = None,
@@ -884,6 +1012,26 @@ def reconcile_account(
     provider_scope = _text(provider_id, name="provider_id").upper()
     account_scope = _text(account_id, name="account_id")
     environment_scope = _environment(environment)
+    if provider_scope == "BYBIT" and provider_environment is None:
+        raise ValueError(
+            "BYBIT reconciliation requires explicit provider_environment"
+        )
+    provider_environment_scope = (
+        environment_scope
+        if provider_environment is None
+        else _text(
+            provider_environment,
+            name="provider_environment",
+        ).upper()
+    )
+    if provider_scope == "BYBIT" and provider_environment_scope not in {
+        "MAINNET",
+        "TESTNET",
+        "DEMO",
+    }:
+        raise ValueError(
+            "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
+        )
     if not isinstance(pagination_complete, bool):
         raise TypeError("pagination_complete must be boolean")
     if not isinstance(require_activity_reconciliation, bool):
@@ -925,6 +1073,10 @@ def reconcile_account(
             raise ValueError("provider fill evidence account_id mismatch")
         if fill.environment != environment_scope:
             raise ValueError("provider fill evidence environment mismatch")
+        if fill.provider_environment != provider_environment_scope:
+            raise ValueError(
+                "provider fill evidence provider_environment mismatch"
+            )
         if fill.provider_execution_id in provider_by_id:
             if provider_by_id[fill.provider_execution_id] != fill:
                 raise ValueError("provider execution id has conflicting observations")
@@ -963,6 +1115,10 @@ def reconcile_account(
             raise ValueError("provider working-order evidence account_id mismatch")
         if order.environment != environment_scope:
             raise ValueError("provider working-order evidence environment mismatch")
+        if order.provider_environment != provider_environment_scope:
+            raise ValueError(
+                "provider working-order evidence provider_environment mismatch"
+            )
         existing_provider = provider_working_by_id.get(order.provider_order_id)
         if existing_provider is not None:
             if existing_provider != order:
@@ -1008,6 +1164,8 @@ def reconcile_account(
             snapshot_consistency.provider_id != provider_scope
             or snapshot_consistency.account_id != account_scope
             or snapshot_consistency.environment != environment_scope
+            or snapshot_consistency.provider_environment
+            != provider_environment_scope
         ):
             raise ValueError("provider snapshot consistency scope mismatch")
         snapshot_started = _instant(
@@ -1036,6 +1194,8 @@ def reconcile_account(
             resource_availability.provider_id != provider_scope
             or resource_availability.account_id != account_scope
             or resource_availability.environment != environment_scope
+            or resource_availability.provider_environment
+            != provider_environment_scope
         ):
             raise ValueError("resource availability scope mismatch")
         if snapshot_consistency is None:
@@ -1223,6 +1383,10 @@ def reconcile_account(
             raise ValueError("provider activity evidence account_id mismatch")
         if activity.environment != environment_scope:
             raise ValueError("provider activity evidence environment mismatch")
+        if activity.provider_environment != provider_environment_scope:
+            raise ValueError(
+                "provider activity evidence provider_environment mismatch"
+            )
         existing = provider_activity_by_id.get(activity.activity_id)
         if existing is not None:
             if existing != activity:
@@ -1258,6 +1422,7 @@ def reconcile_account(
         activity_coverage.provider_id != provider_scope
         or activity_coverage.account_id != account_scope
         or activity_coverage.environment != environment_scope
+        or activity_coverage.provider_environment != provider_environment_scope
     ):
         raise ValueError("provider activity coverage scope mismatch")
     activity_coverage_complete = True
@@ -1277,6 +1442,7 @@ def reconcile_account(
         provider_id=provider_scope,
         account_id=account_scope,
         environment=environment_scope,
+        provider_environment=provider_environment_scope,
     )
     # UNKNOWN submission identity is financial truth: one durable attempt may
     # appear at most once, and one provider-scoped client order id may belong
@@ -1293,6 +1459,7 @@ def reconcile_account(
             submission.provider_id != provider_scope
             or submission.account_id != account_scope
             or submission.environment != environment_scope
+            or submission.provider_environment != provider_environment_scope
         ):
             raise ValueError("unknown submission scope mismatch")
 
@@ -1533,6 +1700,7 @@ def reconcile_account(
         provider_id=provider_scope,
         account_id=account_scope,
         environment=environment_scope,
+        provider_environment=provider_environment_scope,
         complete=complete,
         matched_execution_ids=matched,
         unexpected_execution_ids=unexpected,

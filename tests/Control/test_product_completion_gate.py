@@ -174,7 +174,20 @@ def verified_completion_fixture(directory):
 
 
 def nvda(*, qualified=True, source_sha=SHA):
-    return {"qualified": qualified, "source_sha": source_sha}
+    if not qualified:
+        return {"qualified": False, "source_sha": source_sha}
+    return {
+        "qualified": True,
+        "reason": "QUALIFIED_SIGNED_REAL_NVDA_RELEASE",
+        "source_sha": source_sha,
+        "release_artifact_id": "11111111-1111-4111-8111-111111111111",
+        "artifact_sha256": "sha256:" + "1" * 64,
+        "evidence_sha256": "sha256:" + "2" * 64,
+        "attestation_id": "22222222-2222-4222-8222-222222222222",
+        "attestation_digest": "sha256:" + "3" * 64,
+        "policy_id": "sha256:" + "4" * 64,
+        "trust_root_id": "sha256:" + "5" * 64,
+    }
 
 
 def evaluate(
@@ -328,6 +341,28 @@ class ProductCompletionGateTests(unittest.TestCase):
         report = evaluate(nvda_status=nvda(source_sha="b" * 40))
         self.assertFalse(report["complete"])
         self.assertFalse(report["nvda_source_matches"])
+
+    def test_nvda_completion_requires_signed_release_identity(self):
+        required_fields = (
+            "release_artifact_id",
+            "artifact_sha256",
+            "evidence_sha256",
+            "attestation_id",
+            "attestation_digest",
+            "policy_id",
+            "trust_root_id",
+        )
+        for field in required_fields:
+            with self.subTest(field=field):
+                status = nvda()
+                status.pop(field)
+                report = evaluate(nvda_status=status)
+                self.assertFalse(report["nvda_qualified"])
+
+        status = nvda()
+        status["reason"] = "QUALIFIED"
+        report = evaluate(nvda_status=status)
+        self.assertFalse(report["nvda_qualified"])
 
     def test_missing_or_noncanonical_exact_source_sha_blocks_completion(self):
         report = evaluate(source_sha=None)

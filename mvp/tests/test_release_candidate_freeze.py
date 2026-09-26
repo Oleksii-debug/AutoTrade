@@ -488,6 +488,32 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
         with self.assertRaisesRegex(ReleaseCandidateError, "duplicate"):
             self.candidate(artifacts=artifacts + (artifacts[0],))
 
+    def test_unknown_artifact_role_is_rejected_before_attestation(self):
+        extra = artifact(
+            "ARBITRARY_EXTENSION",
+            signature_status="NOT_APPLICABLE",
+        )
+        base_artifacts = self.candidate().artifacts
+
+        with self.assertRaisesRegex(
+            ReleaseCandidateError,
+            "unsupported release artifact role: ARBITRARY_EXTENSION",
+        ):
+            self.candidate(artifacts=base_artifacts + (extra,))
+
+        with self.assertRaisesRegex(
+            ReleaseCandidateError,
+            "unsupported release artifact role: ARBITRARY_EXTENSION",
+        ):
+            ReleaseCandidateInput(
+                release_id="autotrade-rc-unknown-role",
+                source_sha=SOURCE,
+                baseline_hash=BASELINE,
+                schema_contract_hash=CONTRACTS,
+                artifacts=base_artifacts + (extra,),
+                unresolved_blockers=(),
+            )
+
     def test_binary_signature_cannot_be_not_applicable(self):
         with self.assertRaisesRegex(ReleaseCandidateError, "NOT_APPLICABLE"):
             artifact("HOST", signature_status="NOT_APPLICABLE")

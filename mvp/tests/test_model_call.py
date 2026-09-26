@@ -1308,6 +1308,65 @@ class ModelCallLifecycleTests(unittest.TestCase):
                 )
             self.assertEqual(calls, [])
 
+    def test_fallback_request_cannot_widen_parent_remote_privacy(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            parent_spec = spec()
+            parent_request = ModelRequest(
+                request_id=orchestrator.attempt_id(parent_spec),
+                allowed_model_ids=("model-a",),
+                privacy_remote_allowed=False,
+                budget_remaining=Decimal("2"),
+                deadline_utc=NOW + timedelta(hours=1),
+            )
+            policy = fixed_policy(allow_remote=True)
+            parent = orchestrator.execute(
+                spec=parent_spec,
+                policy=policy,
+                request=parent_request,
+                descriptors=[
+                    descriptor(
+                        provider_id="local-runtime",
+                        remote=False,
+                    )
+                ],
+                call=lambda *_args: observation(
+                    provider_id="local-runtime",
+                    incurred="0.1",
+                    unbilled="0",
+                    output={"invalid": True},
+                    billing_id=None,
+                ),
+                validate_result=lambda _value: False,
+                now_utc=NOW,
+            )
+            self.assertEqual(parent.status, "OBSERVED_INVALID")
+
+            fallback = spec(
+                fallback_parent_attempt_id=parent.attempt_id,
+                fallback_index=1,
+            )
+            widened_request = request_for(orchestrator, fallback)
+            calls = []
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "cannot widen remote privacy permission",
+            ):
+                orchestrator.execute(
+                    spec=fallback,
+                    policy=policy,
+                    request=widened_request,
+                    descriptors=[descriptor()],
+                    call=lambda *_args: calls.append(True),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
+            self.assertEqual(calls, [])
+
     def test_fallback_lineage_remains_local_only_when_policy_is_local_only(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)

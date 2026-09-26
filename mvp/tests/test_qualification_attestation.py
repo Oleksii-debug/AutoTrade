@@ -650,6 +650,65 @@ class QualificationAttestationTests(unittest.TestCase):
             self.assertEqual(loaded.roots, canonical_policy.roots)
             self.assertNotEqual(loaded.roots, hostile_policy.roots)
 
+    def test_canonical_policy_rejects_parent_repository_fallback(self):
+        canonical_policy = policy(root())
+        with TemporaryDirectory() as directory:
+            repository_root = Path(directory) / "parent-repository"
+            source_root = repository_root / "nested-source"
+            policy_path = (
+                repository_root
+                / "mvp"
+                / "autotrade_mvp"
+                / "qualification_trust_policy.json"
+            )
+            policy_path.parent.mkdir(parents=True)
+            source_root.mkdir(parents=True)
+            policy_path.write_text(
+                json.dumps(
+                    qualification_trust_policy_payload(canonical_policy),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-q"], cwd=repository_root, check=True)
+            subprocess.run(
+                ["git", "add", "mvp/autotrade_mvp/qualification_trust_policy.json"],
+                cwd=repository_root,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git", "-c", "user.name=AutoTrade Test",
+                    "-c", "user.email=autotrade-test@example.invalid",
+                    "commit", "-q", "-m", "parent repository policy",
+                ],
+                cwd=repository_root,
+                check=True,
+            )
+            source_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repository_root,
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_QUALIFICATION_TRUST_SOURCE_ROOT",
+                    source_root,
+                ),
+                self.assertRaisesRegex(
+                    QualificationTrustError,
+                    "source root is not the Git top-level",
+                ),
+            ):
+                load_canonical_qualification_trust_policy(
+                    expected_source_sha=source_sha
+                )
+
     def test_canonical_policy_rejects_caller_selected_historical_source(self):
         canonical_policy = policy(root())
         with TemporaryDirectory() as directory:

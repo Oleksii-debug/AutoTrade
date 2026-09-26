@@ -1,7 +1,9 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from hashlib import sha256
 import json
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 from mvp.autotrade_mvp.binance_usdm import (
@@ -12,7 +14,8 @@ from mvp.autotrade_mvp.binance_usdm import (
     coverage_evidence,
     parse_account_trades,
     parse_order_ack,
-    prepare_order_request,
+    _prepare_order_request_with_rules as prepare_order_request,
+    prepare_order_request as prepare_order_request_with_public_data,
 )
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
@@ -32,6 +35,7 @@ from mvp.autotrade_mvp.provider_transport import (
     AuthenticatedReadWireResponse,
     BinanceUsdmPublicDataTransport,
     ProviderTransportScopeError,
+    UrllibJsonWireClient,
 )
 
 
@@ -133,19 +137,6 @@ def capability(
 
 
 
-class PublicDataWire:
-    def __init__(self, response_bytes, *, http_status=200):
-        self.response_bytes = response_bytes
-        self.http_status = http_status
-        self.requests = []
-
-    def send(self, request):
-        self.requests.append(request)
-        return AuthenticatedReadWireResponse(
-            http_status=self.http_status,
-            body=self.response_bytes,
-        )
-
 
 def raw_public_observation(
     *,
@@ -159,7 +150,7 @@ def raw_public_observation(
     observed_at=NOW,
     response_bytes=None,
 ):
-    """Deliberately bypass transport for adversarial non-promotion tests."""
+    """Create parser-only exact bytes; never production admission authority."""
 
     binding = prepare_authenticated_read_query(
         capability=capability(
@@ -191,60 +182,20 @@ def raw_public_observation(
     )
 
 
-def public_observation(
-    *,
-    endpoint,
-    payload,
-    query,
-    provider_id="BINANCE",
-    account_id="account-1",
-    environment="PAPER",
-    instrument_version="BTCUSDT-PERP:v1",
-    observed_at=NOW,
-    response_bytes=None,
-    policy_environment=None,
-    return_wire=False,
-):
-    provider_capability = capability(
-        provider_id=provider_id,
-        account_id=account_id,
-        environment=environment,
-        instrument_version=instrument_version,
-    )
-    binding = prepare_authenticated_read_query(
-        capability=provider_capability,
-        surface=Surface.PUBLIC_DATA,
-        endpoint=endpoint,
-        query=query,
-        at=observed_at,
-        permission_scope="ORDER_WRITE",
-    )
-    raw = response_bytes
-    if raw is None:
-        raw = json.dumps(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-            allow_nan=False,
-        ).encode("utf-8")
+def public_source(*, environment, endpoint, query):
+    origin = {
+        "PAPER": "https://demo-fapi.binance.com",
+        "LIVE": "https://fapi.binance.com",
+    }[environment]
+    items = sorted(query.items())
+    suffix = ""
+    if items:
+        suffix = "?" + "&".join(f"{key}={value}" for key, value in items)
+    request_url = origin + endpoint + suffix
+    return origin, request_url, "sha256:" + sha256(
+        request_url.encode("utf-8")
+    ).hexdigest()
 
-    registry = CapabilityRegistry()
-    registry.add(provider_capability)
-    wire = PublicDataWire(raw)
-    policy_name = environment if policy_environment is None else policy_environment
-    transport = BinanceUsdmPublicDataTransport(
-        policy=BINANCE_USDM_ENDPOINT_POLICIES[policy_name],
-        account_id=account_id,
-        capability_snapshot_id=provider_capability.snapshot_id,
-        capability_registry=registry,
-        clock_utc=lambda: observed_at,
-        wire_client=wire,
-    )
-    observation = transport(binding)
-    if return_wire:
-        return observation, wire
-    return observation
 
 def exchange_info_observation(
     symbol_payload,
@@ -253,14 +204,16 @@ def exchange_info_observation(
     environment="PAPER",
     instrument_version="BTCUSDT-PERP:v1",
     query=None,
+    response_bytes=None,
 ):
-    return public_observation(
+    return raw_public_observation(
         endpoint="/fapi/v1/exchangeInfo",
         payload={"symbols": [symbol_payload]},
         query={} if query is None else query,
         provider_id=provider_id,
         environment=environment,
         instrument_version=instrument_version,
+        response_bytes=response_bytes,
     )
 
 
@@ -341,9 +294,17 @@ def symbol_rules(
         environment=environment,
         instrument_version=instrument_version,
     )
-    return BinanceUsdmSymbolRules.from_exchange_info(
+    origin, request_url, request_digest = public_source(
+        environment=environment,
+        endpoint="/fapi/v1/exchangeInfo",
+        query={},
+    )
+    return BinanceUsdmSymbolRules._from_provider_observation(
         observation=observation,
         symbol="BTCUSDT",
+        origin=origin,
+        request_url=request_url,
+        request_url_sha256=request_digest,
     )
 
 
@@ -358,6 +319,7 @@ def mark_price(
     query_symbol=None,
 ):
     timestamp_ms = int(observed_at.timestamp() * 1000)
+    query_value = symbol if query_symbol is None else query_symbol
     payload = {
         "symbol": symbol,
         "markPrice": price,
@@ -368,18 +330,26 @@ def mark_price(
         "nextFundingTime": timestamp_ms + 28_800_000,
         "time": timestamp_ms,
     }
-    observation = public_observation(
+    observation = raw_public_observation(
         endpoint="/fapi/v1/premiumIndex",
         payload=payload,
-        query={"symbol": symbol if query_symbol is None else query_symbol},
+        query={"symbol": query_value},
         provider_id=provider_id,
         environment=environment,
         instrument_version=instrument_version,
         observed_at=observed_at,
     )
-    return BinanceUsdmMarkPrice.from_premium_index(
+    origin, request_url, request_digest = public_source(
+        environment=environment,
+        endpoint="/fapi/v1/premiumIndex",
+        query={"symbol": query_value},
+    )
+    return BinanceUsdmMarkPrice._from_provider_observation(
         observation=observation,
         symbol=symbol,
+        origin=origin,
+        request_url=request_url,
+        request_url_sha256=request_digest,
     )
 
 

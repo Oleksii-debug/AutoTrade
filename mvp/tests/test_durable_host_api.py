@@ -775,6 +775,54 @@ class JournalBackedHostApiTests(unittest.TestCase):
         )
 
 
+    def test_repeated_block_reuses_existing_scope_fact_without_corrupting_replay(self):
+        first = self.store(now="2030-01-01T00:00:00Z")
+        first_accepted = first.submit(
+            self.command(payload={"reason_code": "EMERGENCY_STOP"})
+        )
+        first_done = first.execute_authority_operation(first_accepted.operation_id)
+        self.assertEqual(first_done.phase, "SUCCEEDED")
+        authority_events_before = JournalStore(self.path).load_events(
+            "authority_state",
+            "canonical",
+        )
+        self.assertEqual(
+            [item["event_type"] for item in authority_events_before],
+            ["AuthorityNewExposureBlocked"],
+        )
+
+        second = self.store(now="2030-01-01T00:00:01Z")
+        second_command = self.command(
+            command_id="33333333-3333-3333-3333-333333333333",
+            key="repeat-block",
+            version=second.snapshot()["state_version"],
+            payload={"reason_code": "EMERGENCY_STOP"},
+        )
+        second_accepted = second.submit(second_command)
+        self.assertEqual(second_accepted.status, "ACCEPTED")
+        second_done = second.execute_authority_operation(
+            second_accepted.operation_id
+        )
+        self.assertEqual(second_done.phase, "SUCCEEDED")
+        self.assertEqual(
+            second_done.affected_refs,
+            ("authority-new-exposure-block:paper-account-1:PAPER",),
+        )
+
+        authority_events_after = JournalStore(self.path).load_events(
+            "authority_state",
+            "canonical",
+        )
+        self.assertEqual(authority_events_after, authority_events_before)
+        restarted_authority = AuthorityService(JournalStore(self.path))
+        self.assertTrue(
+            restarted_authority.is_new_exposure_blocked(
+                "paper-account-1",
+                "PAPER",
+            )
+        )
+
+
     def test_revoke_authority_includes_protection_policies(self):
         journal = JournalStore(self.path)
         authority = AuthorityService(journal)

@@ -100,6 +100,14 @@ class DiagnosticTraceTests(unittest.TestCase):
             "encrypted_pem": "-----BEGIN ENCRYPTED PRIVATE KEY-----\\nencrypted-private-bytes",
             "token_text": "token=plain-token-secret",
             "session_text": "session: plain-session-secret",
+            "json_message": (
+                '{"Authorization":"Digest json-auth-secret",'
+                '"api_key":"json-key-secret"}'
+            ),
+            "repr_message": (
+                "{'Authorization': 'Custom repr-auth-secret', "
+                "'api_key': 'repr-key-secret'}"
+            ),
             "safe": "latency=12ms",
         }
         redacted = redact_diagnostic_value(payload)
@@ -110,6 +118,12 @@ class DiagnosticTraceTests(unittest.TestCase):
         self.assertNotIn("client123", redacted["connection"])
         self.assertNotIn("plain-token-secret", redacted["token_text"])
         self.assertNotIn("plain-session-secret", redacted["session_text"])
+        self.assertNotIn("json-auth-secret", redacted["json_message"])
+        self.assertNotIn("json-key-secret", redacted["json_message"])
+        self.assertGreaterEqual(redacted["json_message"].count("[REDACTED]"), 2)
+        self.assertNotIn("repr-auth-secret", redacted["repr_message"])
+        self.assertNotIn("repr-key-secret", redacted["repr_message"])
+        self.assertGreaterEqual(redacted["repr_message"].count("[REDACTED]"), 2)
         self.assertEqual(redacted["pem"], "[REDACTED]")
         self.assertEqual(redacted["encrypted_pem"], "[REDACTED]")
         self.assertEqual(redacted["safe"], "latency=12ms")

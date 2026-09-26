@@ -886,6 +886,52 @@ class JournalStoreTests(unittest.TestCase):
                     self.assertNotIn("envelope_json", event_columns)
                     self.assertNotIn("journal_sequence", event_columns)
 
+    def test_partial_schema_with_unrecorded_extra_column_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    """
+                    CREATE TABLE events(
+                        event_id TEXT PRIMARY KEY,
+                        event_type TEXT NOT NULL,
+                        aggregate_type TEXT NOT NULL,
+                        aggregate_id TEXT NOT NULL,
+                        aggregate_version INTEGER NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        payload_hash TEXT NOT NULL,
+                        committed_at TEXT NOT NULL,
+                        unexpected_shadow TEXT,
+                        UNIQUE (aggregate_type, aggregate_id, aggregate_version)
+                    )
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "has unexpected columns"):
+                JournalStore(path)
+
+            connection = sqlite3.connect(path)
+            try:
+                migration_table = connection.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'schema_migrations'"
+                ).fetchone()
+                event_columns = {
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info(events)")
+                }
+            finally:
+                connection.close()
+
+            self.assertIsNone(migration_table)
+            self.assertIn("unexpected_shadow", event_columns)
+            self.assertNotIn("envelope_json", event_columns)
+            self.assertNotIn("journal_sequence", event_columns)
+
     def test_v1_database_upgrades_atomically_without_losing_events(self):
         class LegacyJournalStore(JournalStore):
             SCHEMA_VERSION = 1

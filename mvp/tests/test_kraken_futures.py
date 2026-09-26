@@ -15,6 +15,7 @@ from mvp.autotrade_mvp.kraken_futures import (
     build_order_payload,
     coverage_evidence,
     futures_base_url,
+    guarded_order_projection,
     parse_position_executions,
     parse_submission_response,
     prepare_order_request,
@@ -304,6 +305,33 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
         self.assertEqual(demo.environment, "PAPER")
         self.assertEqual(live.provider_environment, "LIVE")
         self.assertEqual(live.environment, "LIVE")
+
+    def test_prepared_request_projects_exact_guarded_transport_scope(self):
+        prepared = prepared_futures_request("projection-1")
+        projection = guarded_order_projection(prepared)
+        self.assertEqual(projection["endpoint"], prepared.endpoint)
+        self.assertEqual(projection["account_id"], prepared.account_id)
+        self.assertEqual(projection["environment"], prepared.environment)
+        self.assertEqual(
+            projection["provider_environment"],
+            prepared.provider_environment,
+        )
+        self.assertEqual(
+            projection["capability_snapshot_id"],
+            prepared.capability_snapshot_id,
+        )
+        self.assertEqual(projection["entity_id"], "futures-trading")
+        self.assertEqual(
+            projection["capability_snapshot_ids"],
+            [prepared.capability_snapshot_id],
+        )
+        self.assertEqual(
+            projection["instrument_versions"],
+            [prepared.instrument_version],
+        )
+        self.assertEqual(projection["body_sha256"], prepared.body_sha256)
+        projection["body"]["size"] = "999"
+        self.assertEqual(prepared.body["size"], "1")
 
     def test_success_is_acknowledgement_not_fill(self):
         for index, send_status in enumerate(

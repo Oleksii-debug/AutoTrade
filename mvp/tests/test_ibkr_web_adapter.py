@@ -86,9 +86,24 @@ def ready_session(**overrides):
         established=True,
         competing=False,
         observed_at=NOW - timedelta(seconds=1),
+        initialization_id="init-generation-1",
     )
     values.update(overrides)
-    return IbkrBrokerageSessionStatus(**values)
+    environment = values.pop("environment")
+    observed_at = values.pop("observed_at")
+    initialization_id = values.pop("initialization_id")
+    return IbkrBrokerageSessionStatus.from_init_payload(
+        {
+            "connected": values["connected"],
+            "authenticated": values["authenticated"],
+            "established": values["established"],
+            "competing": values["competing"],
+            "message": "",
+        },
+        environment=environment,
+        initialization_id=initialization_id,
+        observed_at=observed_at,
+    )
 
 
 
@@ -99,7 +114,9 @@ def ready_accounts(
     is_paper=True,
     session_id="brokerage-session-1",
     observed_at=NOW - timedelta(seconds=1),
+    session=None,
 ):
+    bound_session = ready_session() if session is None else session
     return IbkrBrokerageAccountsObservation.from_iserver_accounts_payload(
         {
             "accounts": list(accounts),
@@ -107,6 +124,7 @@ def ready_accounts(
             "isPaper": is_paper,
             "sessionId": session_id,
         },
+        session=bound_session,
         observed_at=observed_at,
     )
 
@@ -121,9 +139,17 @@ def prepare_normalized_order(
     maximum_accounts_age_seconds=30,
     **kwargs,
 ):
+    session = kwargs.get("session")
+    if session is None:
+        session = ready_session()
+        kwargs["session"] = session
     return _prepare_normalized_order(
         intent,
-        accounts=ready_accounts() if accounts is None else accounts,
+        accounts=(
+            ready_accounts(session=session)
+            if accounts is None
+            else accounts
+        ),
         maximum_accounts_age_seconds=maximum_accounts_age_seconds,
         **kwargs,
     )
@@ -460,12 +486,80 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 maximum_session_age_seconds=30,
             )
 
+    def test_account_observation_cannot_cross_brokerage_session_generation(self):
+        session_a = ready_session(
+            initialization_id="init-generation-a",
+            observed_at=NOW - timedelta(seconds=5),
+        )
+        accounts_a = ready_accounts(
+            session=session_a,
+            session_id="session-before-reinit",
+            observed_at=NOW - timedelta(seconds=4),
+        )
+        session_b = ready_session(
+            initialization_id="init-generation-b",
+            observed_at=NOW - timedelta(seconds=1),
+        )
+        self.assertNotEqual(session_a.generation_id, session_b.generation_id)
+
+        intent = IbkrWebOrderIntent.create(
+            instrument_version="AAPL-CONID-265598:v1",
+            account_id="U1234567",
+            contract=IbkrContractIdentity(conid=265598),
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "superseded session generation",
+        ):
+            prepare_normalized_order(
+                intent,
+                client_order_id="at-session-generation-fence",
+                capability=capability(),
+                session=session_b,
+                accounts=accounts_a,
+                at=NOW,
+                maximum_session_age_seconds=30,
+            )
+
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "predates current session generation",
+        ):
+            ready_accounts(
+                session=session_b,
+                session_id="stale-session-id",
+                observed_at=NOW - timedelta(seconds=4),
+            )
+
+    def test_brokerage_session_status_requires_canonical_init_parsing(self):
+        parsed = ready_session()
+        with self.assertRaisesRegex(
+            IbkrWebAdapterError,
+            "canonical init payload parsing",
+        ):
+            IbkrBrokerageSessionStatus(
+                environment=parsed.environment,
+                connected=parsed.connected,
+                authenticated=parsed.authenticated,
+                established=parsed.established,
+                competing=parsed.competing,
+                observed_at=parsed.observed_at,
+                initialization_id=parsed.initialization_id,
+                generation_id=parsed.generation_id,
+                source_sha256=parsed.source_sha256,
+            )
+
     def test_provider_account_observation_is_fresh_exact_and_restart_safe(self):
         first = ready_accounts(
             accounts=("U1234567", "U7654321"),
             selected_account="U1234567",
             session_id="session-before-restart",
         )
+        replay_session = ready_session()
         replayed = IbkrBrokerageAccountsObservation.from_iserver_accounts_payload(
             {
                 "accounts": ["U1234567", "U7654321"],
@@ -473,6 +567,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 "isPaper": True,
                 "sessionId": "session-before-restart",
             },
+            session=replay_session,
             observed_at=NOW - timedelta(seconds=1),
         )
         self.assertEqual(first.source_sha256, replayed.source_sha256)
@@ -527,6 +622,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 selected_account=parsed.selected_account,
                 environment=parsed.environment,
                 session_id=parsed.session_id,
+                session_generation_id=parsed.session_generation_id,
                 observed_at=parsed.observed_at,
                 source_sha256=parsed.source_sha256,
             )
@@ -565,6 +661,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
             ):
                 IbkrBrokerageAccountsObservation.from_iserver_accounts_payload(
                     payload,
+                    session=ready_session(),
                     observed_at=NOW,
                 )
 

@@ -95,9 +95,9 @@ class DependencyCompositionGateTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn('- "requirements-dev.txt"', workflow)
         self.assertIn(
-            "run: python -m pip install --disable-pip-version-check "
+            'run: "python -m pip install --disable-pip-version-check '
             "--force-reinstall --no-deps --only-binary=:all: --require-hashes "
-            "-r requirements-dev.txt",
+            '-r requirements-dev.txt"',
             workflow,
         )
         self.assertIn(

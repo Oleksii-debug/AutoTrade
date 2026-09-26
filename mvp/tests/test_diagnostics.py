@@ -177,6 +177,8 @@ class DiagnosticTraceTests(unittest.TestCase):
             "encrypted_pem": "-----BEGIN ENCRYPTED PRIVATE KEY-----\\nencrypted-private-bytes",
             "token_text": "token=plain-token-secret",
             "session_text": "session: plain-session-secret",
+            "credential_note": "credential_id=embedded-credential-secret",
+            "credential_dash": "credential-id: embedded-dash-secret",
             "json_message": (
                 '{"Authorization":"Digest json-auth-secret",'
                 '"api_key":"json-key-secret"}'
@@ -195,6 +197,8 @@ class DiagnosticTraceTests(unittest.TestCase):
         self.assertNotIn("client123", redacted["connection"])
         self.assertNotIn("plain-token-secret", redacted["token_text"])
         self.assertNotIn("plain-session-secret", redacted["session_text"])
+        self.assertNotIn("embedded-credential-secret", redacted["credential_note"])
+        self.assertNotIn("embedded-dash-secret", redacted["credential_dash"])
         self.assertNotIn("json-auth-secret", redacted["json_message"])
         self.assertNotIn("json-key-secret", redacted["json_message"])
         self.assertGreaterEqual(redacted["json_message"].count("[REDACTED]"), 2)

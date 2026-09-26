@@ -43,11 +43,7 @@ from .kraken_spot import (
     spot_submission_requires_reconciliation,
     validate_spot_client_order_id,
 )
-from .whitebit import (
-    WhiteBitCredentialBoundary,
-    sign_private_request,
-    validate_client_order_id,
-)
+from .whitebit import sign_private_request, validate_client_order_id
 from .provider_core import (
     AuthenticatedReadQueryBinding,
     ProviderResponseObservation,
@@ -1644,7 +1640,6 @@ class WhiteBitHttpTransport:
         capability_snapshot_id: str,
         secret_resolver: ProviderSecretResolver,
         credential_handle: PersistentCredentialHandle,
-        credential_boundary: WhiteBitCredentialBoundary,
         session_token: str,
         origin: str,
         execution_identity: str,
@@ -1675,25 +1670,6 @@ class WhiteBitHttpTransport:
             raise ProviderTransportScopeError(
                 "credential handle account mismatch"
             )
-        if not isinstance(credential_boundary, WhiteBitCredentialBoundary):
-            raise TypeError(
-                "credential_boundary must be WhiteBitCredentialBoundary"
-            )
-        try:
-            credential_boundary.assert_autotrade_safe()
-        except ValueError as error:
-            raise ProviderTransportScopeError(str(error)) from error
-        if (
-            credential_boundary.account_id != account
-            or credential_boundary.credential_binding_id
-            != credential_handle.handle_id
-            or credential_boundary.credential_generation
-            != credential_handle.generation
-        ):
-            raise ProviderTransportScopeError(
-                "WhiteBIT credential boundary must bind exact account and "
-                "credential handle generation"
-            )
         if not hasattr(secret_resolver, "resolve_for_execution"):
             raise TypeError(
                 "secret_resolver must implement resolve_for_execution"
@@ -1722,7 +1698,6 @@ class WhiteBitHttpTransport:
         )
         self.secret_resolver = secret_resolver
         self.credential_handle = credential_handle
-        self.credential_boundary = credential_boundary
         self.session_token = _canonical_text(session_token, name="session_token")
         self.origin = _canonical_text(origin, name="origin")
         self.execution_identity = _canonical_text(

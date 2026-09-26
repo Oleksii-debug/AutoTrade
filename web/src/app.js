@@ -591,7 +591,7 @@
     return [...body.querySelectorAll('tr[data-filterable-row="true"]')];
   }
 
-  function applyTableFilter(tool) {
+  function applyTableFilter(tool, {announce = true} = {}) {
     const body = byId(tool.bodyId);
     const filter = byId(tool.filterId);
     if (!body || !filter) return;
@@ -603,6 +603,7 @@
       row.hidden = !matches;
       if (matches) visible += 1;
     }
+    if (!announce) return;
     if (rows.length === 0) {
       text(tool.statusId, "No host rows are available to filter.");
     } else if (query === "") {
@@ -617,7 +618,7 @@
 
   function reapplyTableFilter(bodyId) {
     const tool = toolForBody(bodyId);
-    if (tool !== null) applyTableFilter(tool);
+    if (tool !== null) applyTableFilter(tool, {announce: false});
   }
 
   function visibleTableRows(tool) {
@@ -667,7 +668,7 @@
       copy.addEventListener("click", () => {
         void copyVisibleTableRows(tool);
       });
-      applyTableFilter(tool);
+      applyTableFilter(tool, {announce: false});
     }
   }
 

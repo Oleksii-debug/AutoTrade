@@ -25,7 +25,11 @@ permissions:
 
 jobs:
   qualify:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     env:
       EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
@@ -46,6 +50,6 @@ jobs:
             --output "$RUNNER_TEMP/zero-model-evidence.json"
       - uses: actions/upload-artifact@v4
         with:
-          name: zero-model-qualification-${{ env.EXPECTED_SOURCE_SHA }}
+          name: zero-model-qualification-${{ runner.os }}-${{ env.EXPECTED_SOURCE_SHA }}
           path: ${{ runner.temp }}/zero-model-evidence.json
           if-no-files-found: error

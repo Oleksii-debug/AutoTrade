@@ -37,7 +37,8 @@ class SemanticWebClientContractTests(unittest.TestCase):
         ):
             self.assertIn(required, html)
         self.assertIn("function renderProjection(bodyId, record, emptyMessage)", js)
-        self.assertIn('renderProjection(\n      "permissions-body"', js)
+        self.assertIn("function renderPermissionSummary(permissionSummary)", js)
+        self.assertIn("renderPermissionSummary(parsed.permissionSummary)", js)
         self.assertIn('renderProjection(\n      "portfolio-body"', js)
         self.assertIn('renderProjection(\n      "risk-body"', js)
         self.assertIn('renderProjection(\n      "strategy-body"', js)
@@ -50,7 +51,8 @@ class SemanticWebClientContractTests(unittest.TestCase):
         js = APP.read_text(encoding="utf-8")
         self.assertIn("function stableProjectionValue(value)", js)
         self.assertIn("Object.keys(value).sort()", js)
-        self.assertIn("cell.textContent = projectionText(value)", js)
+        self.assertIn("rows.push([path, projectionText(value)])", js)
+        self.assertIn("cell.textContent = value", js)
         self.assertIn('header.scope = "row"', js)
         self.assertNotIn("innerHTML", js)
         for region in (
@@ -62,6 +64,59 @@ class SemanticWebClientContractTests(unittest.TestCase):
         ):
             self.assertIn(f'id="{region}" class="table-scroll" role="region"', html)
             self.assertIn(f'"{region}"', js)
+
+    def test_received_host_events_are_exposed_as_read_only_semantic_history(self):
+        html = INDEX.read_text(encoding="utf-8")
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn(
+            '<caption>Canonical host event history received by this session</caption>',
+            html,
+        )
+        self.assertIn(
+            'id="event-history-region" class="table-scroll" role="region"',
+            html,
+        )
+        self.assertIn('id="event-history-body"', html)
+        self.assertIn(
+            "missing events are not invented or reconstructed in the browser",
+            html,
+        )
+        self.assertIn('"event-history-region"', js)
+        self.assertIn("function renderHostEvent(event, cursor, stateVersion)", js)
+        self.assertIn("row.children[0].textContent = cursor.toString()", js)
+        self.assertIn("row.children[1].textContent = stateVersion.toString()", js)
+        self.assertIn("row.children[2].textContent = kind", js)
+        self.assertIn("row.children[3].textContent = projectionText(payload)", js)
+        self.assertIn("while (body.children.length > 100)", js)
+        self.assertNotIn("innerHTML", js)
+
+    def test_account_or_environment_scope_change_clears_history_and_counter_baseline(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("function resetEventHistoryForScope()", js)
+        self.assertIn("const scopeChanged = state.accountId !== null", js)
+        self.assertIn("parsed.accountId !== state.accountId", js)
+        self.assertIn("parsed.environment !== state.environment", js)
+        scope = js.index("if (scopeChanged)")
+        cursor_reset = js.index("state.cursor = 0n", scope)
+        version_reset = js.index("state.version = 0n", scope)
+        history_reset = js.index("resetEventHistoryForScope()", scope)
+        regression_check = js.index("host snapshot counters regressed", scope)
+        self.assertLess(cursor_reset, regression_check)
+        self.assertLess(version_reset, regression_check)
+        self.assertLess(history_reset, regression_check)
+        self.assertIn(
+            "No canonical host events received in this account/environment session.",
+            js,
+        )
+
+    def test_event_history_is_recorded_only_after_required_event_processing(self):
+        js = APP.read_text(encoding="utf-8")
+        poll = js.index("async function pollEvents()")
+        refresh = js.index("await refreshOperation(operationId)", poll)
+        history = js.index("renderHostEvent(event, cursor, version)", refresh)
+        cursor_commit = js.index("state.cursor = cursor", history)
+        self.assertLess(refresh, history)
+        self.assertLess(history, cursor_commit)
 
     def test_material_notifications_are_separate_from_market_tick_noise(self):
         js = APP.read_text(encoding="utf-8")
@@ -580,6 +635,82 @@ class SemanticWebClientContractTests(unittest.TestCase):
             "with its original idempotency identity. No new command is being created.",
             js,
         )
+
+    def test_permission_summary_matches_canonical_host_contract(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("function parsePermissionSummary(value)", js)
+        self.assertIn(
+            'const allowed = new Set(["actor", "session", "role", "capabilities"])',
+            js,
+        )
+        self.assertIn(
+            "permission_summary contains non-canonical field",
+            js,
+        )
+        self.assertIn(
+            "if (!/^sid-[0-9a-f]{64}$/.test(session))",
+            js,
+        )
+        self.assertIn(
+            "permission_summary.session must be a canonical public session reference",
+            js,
+        )
+        self.assertIn(
+            "permission_summary.capabilities must contain unique canonical strings",
+            js,
+        )
+        self.assertIn(
+            "const permissionSummary = parsePermissionSummary(",
+            js,
+        )
+        self.assertNotIn(
+            "if (actor === undefined && session === undefined) return null",
+            js,
+        )
+
+    def test_nested_host_projection_is_exposed_as_stable_semantic_rows(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("function flattenProjectionRows(record)", js)
+        self.assertIn(
+            'visit(item, path + "[" + String(index + 1) + "]")',
+            js,
+        )
+        self.assertIn(
+            'visit(value[key], path ? path + "." + key : key)',
+            js,
+        )
+        self.assertIn("const entries = flattenProjectionRows(record)", js)
+        render = js[js.index("function renderProjection("):]
+        render = render[:render.index("function renderPermissionSummary(")]
+        self.assertNotIn("Object.entries(record)", render)
+        self.assertNotIn("JSON.stringify(value)", render)
+
+    def test_permission_capabilities_are_individual_keyboard_readable_rows(self):
+        html = INDEX.read_text(encoding="utf-8")
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn(
+            'aria-label="Authenticated permission and capability evidence"',
+            html,
+        )
+        self.assertIn("function renderPermissionSummary(permissionSummary)", js)
+        self.assertIn(
+            'appendProjectionRow(body, "Actor", permissionSummary.actor)',
+            js,
+        )
+        self.assertIn(
+            'appendProjectionRow(body, "Session", permissionSummary.session)',
+            js,
+        )
+        self.assertIn(
+            'appendProjectionRow(body, "Role", permissionSummary.role)',
+            js,
+        )
+        self.assertIn(
+            'body, "Capability " + String(index + 1), capability',
+            js,
+        )
+        self.assertIn("renderPermissionSummary(parsed.permissionSummary)", js)
+
 
 if __name__ == "__main__":
     unittest.main()

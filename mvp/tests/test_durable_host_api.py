@@ -8,7 +8,11 @@ from mvp.autotrade_mvp.authority import (
     AuthorityService,
 )
 from mvp.autotrade_mvp.durable_host_api import JournalBackedHostCommandStore
-from mvp.autotrade_mvp.host_api import EventGap, HostCommandStore
+from mvp.autotrade_mvp.host_api import (
+    EventGap,
+    HostCommandStore,
+    scoped_host_operation_id,
+)
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 
 
@@ -275,6 +279,359 @@ class JournalBackedHostApiTests(unittest.TestCase):
             ("provider_response_pending",),
         )
 
+    def test_restart_fails_closed_on_unknown_scoped_host_event_type(self):
+        first = self.store()
+        accepted = first.submit(self.command())
+        payload = {
+            "operation_id": accepted.operation_id,
+            "reason": "future-event-with-unknown-semantics",
+        }
+        JournalStore(self.path).append_event(
+            {
+                "event_id": "future-host-event",
+                "event_type": "FUTURE_HOST_EVENT",
+                "aggregate_type": first.AGGREGATE_TYPE,
+                "aggregate_id": first.aggregate_id,
+                "aggregate_version": "2",
+                "payload": payload,
+                "payload_hash": payload_digest(payload),
+                "committed_at": "2026-09-24T18:00:01Z",
+            },
+            outbox_topic="ui.host-events",
+        )
+
+        restarted = self.store(now="2026-09-24T18:00:02Z")
+        for operation in (
+            lambda: restarted.state_version,
+            restarted.snapshot,
+            lambda: restarted.events_after(0),
+            lambda: restarted.get_operation(accepted.operation_id),
+        ):
+            with self.subTest(operation=operation), self.assertRaisesRegex(
+                ValueError,
+                "unsupported event type",
+            ):
+                operation()
+
+    def test_restart_fails_closed_on_unknown_fields_in_known_host_events(self):
+        source = self.store()
+        accepted = source.submit(self.command())
+        source.update_operation(
+            accepted.operation_id,
+            "RUNNING",
+            remaining_uncertainty=("provider_response_pending",),
+        )
+        source_events = JournalStore(self.path).load_events(
+            source.AGGREGATE_TYPE,
+            source.aggregate_id,
+        )
+        self.assertEqual(
+            [event["event_type"] for event in source_events],
+            ["COMMAND_ACCEPTED", "OPERATION_UPDATED"],
+        )
+
+        for target_index, event_type in (
+            (0, "COMMAND_ACCEPTED"),
+            (1, "OPERATION_UPDATED"),
+        ):
+            with self.subTest(event_type=event_type), TemporaryDirectory() as directory:
+                forged_path = f"{directory}/journal.sqlite3"
+                journal = JournalStore(forged_path)
+                forged = JournalBackedHostCommandStore(
+                    journal,
+                    account_id="paper-account-1",
+                    environment="PAPER",
+                    session_validator=lambda session, actor, origin, action: (
+                        session,
+                        actor,
+                    )
+                    in self.sessions,
+                    max_events=100,
+                    request_origin_provider=lambda: "https://local.autotrade.invalid",
+                    now=lambda: "2026-09-24T18:00:02Z",
+                )
+
+                for index, event in enumerate(source_events[: target_index + 1]):
+                    payload = dict(event["payload"])
+                    if index == target_index:
+                        payload["future_semantics"] = {
+                            "must_not_be_silently_ignored": True
+                        }
+                    journal.append_event(
+                        {
+                            "event_id": event["event_id"],
+                            "event_type": event["event_type"],
+                            "aggregate_type": event["aggregate_type"],
+                            "aggregate_id": event["aggregate_id"],
+                            "aggregate_version": event["aggregate_version"],
+                            "payload": payload,
+                            "payload_hash": payload_digest(payload),
+                            "committed_at": event["committed_at"],
+                        },
+                        outbox_topic="ui.host-events",
+                    )
+
+                for operation in (
+                    lambda: forged.state_version,
+                    forged.snapshot,
+                    lambda: forged.events_after(0),
+                    lambda: forged.get_operation(accepted.operation_id),
+                ):
+                    with self.subTest(operation=operation), self.assertRaisesRegex(
+                        ValueError,
+                        "unsupported payload fields",
+                    ):
+                        operation()
+
+    def test_restart_rejects_invalid_or_discontinuous_operation_timestamps(self):
+        source = self.store()
+        accepted = source.submit(self.command())
+        source.update_operation(
+            accepted.operation_id,
+            "RUNNING",
+            remaining_uncertainty=("provider_response_pending",),
+        )
+        source_events = JournalStore(self.path).load_events(
+            source.AGGREGATE_TYPE,
+            source.aggregate_id,
+        )
+        cases = (
+            (
+                "accepted-nonstring-started",
+                0,
+                "started_at",
+                123,
+                "canonical UTC instant",
+            ),
+            (
+                "accepted-backwards-updated",
+                0,
+                "updated_at",
+                "2026-09-24T17:59:59Z",
+                "cannot precede started_at",
+            ),
+            (
+                "update-changed-started",
+                1,
+                "started_at",
+                "2026-09-24T17:59:59Z",
+                "started_at changed",
+            ),
+            (
+                "update-backwards-updated",
+                1,
+                "updated_at",
+                "2026-09-24T17:59:59Z",
+                "updated_at moved backwards",
+            ),
+        )
+
+        for name, target_index, field, replacement, expected_error in cases:
+            with self.subTest(case=name), TemporaryDirectory() as directory:
+                journal = JournalStore(f"{directory}/journal.sqlite3")
+                forged = JournalBackedHostCommandStore(
+                    journal,
+                    account_id="paper-account-1",
+                    environment="PAPER",
+                    session_validator=lambda session, actor, origin, action: (
+                        session,
+                        actor,
+                    )
+                    in self.sessions,
+                    max_events=100,
+                    request_origin_provider=lambda: "https://local.autotrade.invalid",
+                    now=lambda: "2026-09-24T18:00:02Z",
+                )
+
+                for index, event in enumerate(source_events[: target_index + 1]):
+                    payload = dict(event["payload"])
+                    if index == target_index:
+                        payload[field] = replacement
+                    journal.append_event(
+                        {
+                            "event_id": event["event_id"],
+                            "event_type": event["event_type"],
+                            "aggregate_type": event["aggregate_type"],
+                            "aggregate_id": event["aggregate_id"],
+                            "aggregate_version": event["aggregate_version"],
+                            "payload": payload,
+                            "payload_hash": payload_digest(payload),
+                            "committed_at": event["committed_at"],
+                        },
+                        outbox_topic="ui.host-events",
+                    )
+
+                for operation in (
+                    lambda: forged.state_version,
+                    forged.snapshot,
+                    lambda: forged.events_after(0),
+                    lambda: forged.get_operation(accepted.operation_id),
+                ):
+                    with self.subTest(operation=operation), self.assertRaisesRegex(
+                        ValueError,
+                        expected_error,
+                    ):
+                        operation()
+
+    def test_restart_rejects_noncanonical_operation_identity(self):
+        store = self.store()
+        payload = {
+            "command_id": "22222222-2222-2222-2222-222222222222",
+            "operation_id": "forged-operation-id",
+            "actor": "alice",
+            "account_id": "paper-account-1",
+            "environment": "PAPER",
+            "phase": "QUEUED",
+            "started_at": "2026-09-24T18:00:00Z",
+            "updated_at": "2026-09-24T18:00:00Z",
+            "affected_refs": [],
+            "evidence": [],
+            "remaining_uncertainty": ["financial_outcome_not_completed"],
+        }
+        JournalStore(self.path).append_event(
+            {
+                "event_id": "forged-host-command-event",
+                "event_type": "COMMAND_ACCEPTED",
+                "aggregate_type": store.AGGREGATE_TYPE,
+                "aggregate_id": store.aggregate_id,
+                "aggregate_version": "1",
+                "payload": payload,
+                "payload_hash": payload_digest(payload),
+                "committed_at": "2026-09-24T18:00:00Z",
+            },
+            outbox_topic="ui.host-events",
+        )
+
+        restarted = self.store(now="2026-09-24T18:00:01Z")
+        for operation in (
+            lambda: restarted.state_version,
+            restarted.snapshot,
+            lambda: restarted.events_after(0),
+            lambda: restarted.get_operation("forged-operation-id"),
+        ):
+            with self.subTest(operation=operation), self.assertRaisesRegex(
+                ValueError,
+                "legacy operation identity must be a UUID",
+            ):
+                operation()
+
+    def test_restart_rejects_uuid_shaped_noncanonical_bound_operation_identity(self):
+        source = self.store()
+        accepted = source.submit(self.command())
+        source_event = JournalStore(self.path).load_events(
+            source.AGGREGATE_TYPE,
+            source.aggregate_id,
+        )[0]
+        payload = dict(source_event["payload"])
+        forged_operation_id = "22222222-2222-4222-8222-222222222222"
+        self.assertNotEqual(forged_operation_id, accepted.operation_id)
+        payload["operation_id"] = forged_operation_id
+
+        with TemporaryDirectory() as directory:
+            forged_path = f"{directory}/journal.sqlite3"
+            journal = JournalStore(forged_path)
+            forged = JournalBackedHostCommandStore(
+                journal,
+                account_id="paper-account-1",
+                environment="PAPER",
+                session_validator=lambda session, actor, origin, action: (
+                    session,
+                    actor,
+                )
+                in self.sessions,
+                max_events=100,
+                request_origin_provider=lambda: "https://local.autotrade.invalid",
+                now=lambda: "2026-09-24T18:00:01Z",
+            )
+            journal.append_event(
+                {
+                    "event_id": "forged-bound-host-command-event",
+                    "event_type": "COMMAND_ACCEPTED",
+                    "aggregate_type": forged.AGGREGATE_TYPE,
+                    "aggregate_id": forged.aggregate_id,
+                    "aggregate_version": "1",
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                    "committed_at": "2026-09-24T18:00:00Z",
+                },
+                outbox_topic="ui.host-events",
+            )
+
+            for operation in (
+                lambda: forged.state_version,
+                forged.snapshot,
+                lambda: forged.events_after(0),
+                lambda: forged.get_operation(forged_operation_id),
+            ):
+                with self.subTest(operation=operation), self.assertRaisesRegex(
+                    ValueError,
+                    "operation identity does not match canonical command scope",
+                ):
+                    operation()
+
+    def test_restart_preserves_uuid_shaped_legacy_operation_as_non_executable(self):
+        source = self.store()
+        accepted = source.submit(self.command())
+        source_event = JournalStore(self.path).load_events(
+            source.AGGREGATE_TYPE,
+            source.aggregate_id,
+        )[0]
+        payload = dict(source_event["payload"])
+        payload.pop("action_payload")
+        payload.pop("action_payload_hash")
+        legacy_operation_id = "22222222-2222-4222-8222-222222222222"
+        self.assertNotEqual(legacy_operation_id, accepted.operation_id)
+        payload["operation_id"] = legacy_operation_id
+
+        with TemporaryDirectory() as directory:
+            forged_path = f"{directory}/journal.sqlite3"
+            journal = JournalStore(forged_path)
+            legacy = JournalBackedHostCommandStore(
+                journal,
+                account_id="paper-account-1",
+                environment="PAPER",
+                session_validator=lambda session, actor, origin, action: (
+                    session,
+                    actor,
+                )
+                in self.sessions,
+                max_events=100,
+                request_origin_provider=lambda: "https://local.autotrade.invalid",
+                now=lambda: "2026-09-24T18:00:01Z",
+            )
+            journal.append_event(
+                {
+                    "event_id": "legacy-host-command-event",
+                    "event_type": "COMMAND_ACCEPTED",
+                    "aggregate_type": legacy.AGGREGATE_TYPE,
+                    "aggregate_id": legacy.aggregate_id,
+                    "aggregate_version": "1",
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                    "committed_at": "2026-09-24T18:00:00Z",
+                },
+                outbox_topic="ui.host-events",
+            )
+
+            self.assertEqual(legacy.state_version, 1)
+            self.assertEqual(
+                legacy.get_operation(legacy_operation_id).phase,
+                "QUEUED",
+            )
+            self.assertEqual(
+                legacy.snapshot()["operations"][legacy_operation_id],
+                "QUEUED",
+            )
+            self.assertEqual(
+                legacy.events_after(0)[0].payload["operation_id"],
+                legacy_operation_id,
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "predates durable action payload",
+            ):
+                legacy.execute_authority_operation(legacy_operation_id)
+
     def test_exact_retry_after_restart_returns_original_result_without_new_event(self):
         first = self.store()
         command = self.command()
@@ -339,9 +696,11 @@ class JournalBackedHostApiTests(unittest.TestCase):
     def test_legacy_accepted_authority_command_remains_visible_but_not_executable(self):
         journal = JournalStore(self.path)
         aggregate_id = self.store().aggregate_id
+        command_id = "11111111-1111-1111-1111-111111111111"
+        operation_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
         payload = {
-            "command_id": "11111111-1111-1111-1111-111111111111",
-            "operation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "command_id": command_id,
+            "operation_id": operation_id,
             "action": "BLOCK_NEW_EXPOSURE",
             "actor": "alice",
             "account_id": "paper-account-1",
@@ -377,9 +736,10 @@ class JournalBackedHostApiTests(unittest.TestCase):
     def test_legacy_unverifiable_success_is_projected_as_unknown(self):
         journal = JournalStore(self.path)
         aggregate_id = self.store().aggregate_id
+        command_id = "11111111-1111-1111-1111-111111111111"
         operation_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
         accepted = {
-            "command_id": "11111111-1111-1111-1111-111111111111",
+            "command_id": command_id,
             "operation_id": operation_id,
             "action": "BLOCK_NEW_EXPOSURE",
             "actor": "alice",

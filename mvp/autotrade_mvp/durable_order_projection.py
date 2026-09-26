@@ -916,6 +916,7 @@ class DurableOrderBookProjection:
         committed_at: str,
         provider_revision: str | None = None,
         evidence_refs: Sequence[Mapping[str, object]] | None = None,
+        canonical_execution_fill_hash: str | None = None,
     ) -> DurableOrderMutationResult:
         request = {
             "client_order_id": _text(client_order_id, name="client_order_id"),
@@ -931,6 +932,11 @@ class DurableOrderBookProjection:
                 name="provider_revision",
             ),
         }
+        if canonical_execution_fill_hash is not None:
+            request["canonical_execution_fill_hash"] = _text(
+                canonical_execution_fill_hash,
+                name="canonical_execution_fill_hash",
+            )
         return self._commit(
             event_key=event_key,
             operation="RECORD_FILL",
@@ -1108,6 +1114,53 @@ class DurableOrderBookProjection:
                 "canonical ExecutionFill settlement_date must be canonical YYYY-MM-DD"
             )
 
+        canonical_fill: dict[str, object] = {
+            "fill_id": _text(execution_fill.get("fill_id"), name="fill_id"),
+            "provider_execution_id": _text(
+                execution_fill.get("provider_execution_id"),
+                name="provider_execution_id",
+            ),
+            "instrument_version": order.instrument,
+            "side": fill_side,
+            "last_quantity": {
+                "value": quantity_value,
+                "unit": _text(
+                    execution_fill["last_quantity"].get("unit"),
+                    name="last_quantity.unit",
+                ),
+            },
+            "last_price": last_price,
+            "trade_time": trade_time,
+            "receipt_time": receipt_time,
+            "fees": [
+                {
+                    "amount": str(fee["amount"]),
+                    "currency": _text(
+                        fee["currency"],
+                        name=f"fees[{index}].currency",
+                    ),
+                }
+                for index, fee in enumerate(fees)
+            ],
+            "settlement_date": settlement_date,
+            "evidence": [
+                dict(ref) for ref in _canonical_evidence_refs(evidence)
+            ],
+        }
+        for optional in (
+            "provider_revision",
+            "order_ref",
+            "intent_ref",
+            "liquidity_flag",
+            "correction_reference",
+        ):
+            if execution_fill.get(optional) is not None:
+                canonical_fill[optional] = _text(
+                    execution_fill.get(optional),
+                    name=optional,
+                )
+        canonical_execution_fill_hash = payload_digest(canonical_fill)
+
         correction_reference = execution_fill.get("correction_reference")
         if correction_reference is not None:
             provider_revision = execution_fill.get("provider_revision")
@@ -1161,6 +1214,7 @@ class DurableOrderBookProjection:
                 ),
                 committed_at=committed,
                 evidence_refs=evidence,
+                canonical_execution_fill_hash=canonical_execution_fill_hash,
             )
 
         return self.record_fill(
@@ -1179,6 +1233,7 @@ class DurableOrderBookProjection:
             ),
             committed_at=committed,
             evidence_refs=evidence,
+            canonical_execution_fill_hash=canonical_execution_fill_hash,
         )
 
     def correct_fill(
@@ -1193,6 +1248,7 @@ class DurableOrderBookProjection:
         committed_at: str,
         correction_fill_id: str | None = None,
         evidence_refs: Sequence[Mapping[str, object]] | None = None,
+        canonical_execution_fill_hash: str | None = None,
     ) -> DurableOrderMutationResult:
         request = {
             "client_order_id": _text(client_order_id, name="client_order_id"),
@@ -1208,6 +1264,11 @@ class DurableOrderBookProjection:
                 name="correction_fill_id",
             ),
         }
+        if canonical_execution_fill_hash is not None:
+            request["canonical_execution_fill_hash"] = _text(
+                canonical_execution_fill_hash,
+                name="canonical_execution_fill_hash",
+            )
         return self._commit(
             event_key=event_key,
             operation="CORRECT_FILL",

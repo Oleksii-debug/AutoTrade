@@ -215,6 +215,63 @@ class QualificationAttestationTests(unittest.TestCase):
         ):
             self.assertNotIn(key, environment)
 
+    def test_canonical_policy_rejects_duplicate_json_keys(self):
+        with TemporaryDirectory() as directory:
+            source_root = Path(directory) / "source"
+            policy_path = (
+                source_root
+                / "mvp"
+                / "autotrade_mvp"
+                / "qualification_trust_policy.json"
+            )
+            policy_path.parent.mkdir(parents=True)
+            policy_path.write_text(
+                '{"policy_version":"first","policy_version":"second","roots":[]}',
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-q"], cwd=source_root, check=True)
+            subprocess.run(
+                ["git", "add", "mvp/autotrade_mvp/qualification_trust_policy.json"],
+                cwd=source_root,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git", "-c", "user.name=AutoTrade Test",
+                    "-c", "user.email=autotrade-test@example.invalid",
+                    "commit", "-q", "-m", "ambiguous policy",
+                ],
+                cwd=source_root,
+                check=True,
+            )
+            source_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=source_root,
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_QUALIFICATION_TRUST_SOURCE_ROOT",
+                    source_root,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_CANONICAL_QUALIFICATION_TRUST_POLICY_PATH",
+                    policy_path,
+                ),
+                self.assertRaisesRegex(
+                    QualificationTrustError,
+                    "duplicate JSON object key",
+                ),
+            ):
+                load_canonical_qualification_trust_policy(
+                    expected_source_sha=source_sha
+                )
+
     def test_canonical_policy_is_bound_to_exact_source_not_working_tree(self):
         canonical_root = root()
         canonical_policy = policy(canonical_root)

@@ -618,7 +618,7 @@ def parse_trade_history(
         raise TypeError("observation must be ProviderResponseObservation")
     observation.require_scope(
         provider_id="KRAKEN",
-        surface=Surface.AUTHENTICATED_READ,
+        surface=Surface.ACTIVITIES,
         endpoint="/0/private/TradesHistory",
     )
     response = observation.payload

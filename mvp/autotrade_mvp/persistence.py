@@ -510,7 +510,7 @@ class JournalStore:
                 for value in raw_sequences
             ) or raw_sequences != list(range(1, len(raw_sequences) + 1)):
                 raise ValueError(
-                    "Journal schema events journal_sequence is not contiguous"
+                    "journal sequence authority is not a contiguous canonical positive integer series"
                 )
 
         foreign_keys = [
@@ -1367,14 +1367,6 @@ class JournalStore:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                journal_version = self._aggregate_version_value(
-                    connection,
-                    aggregate_type,
-                    aggregate_id,
-                )
-                if aggregate_version > journal_version:
-                    raise ValueError("projection checkpoint cannot outrun the journal")
-
                 existing = connection.execute(
                     """
                     SELECT aggregate_version, state_json, state_hash
@@ -1391,6 +1383,41 @@ class JournalStore:
                         raise ValueError(
                             "projection checkpoint aggregate_version is not a canonical integer"
                         )
+                    try:
+                        existing_state = json.loads(existing["state_json"])
+                    except (json.JSONDecodeError, TypeError) as error:
+                        raise ValueError(
+                            "projection checkpoint state is not valid JSON"
+                        ) from error
+                    if canonical_json(existing_state) != existing["state_json"]:
+                        raise ValueError(
+                            "projection checkpoint state is not canonical JSON"
+                        )
+                    existing_hash = (
+                        _projection_checkpoint_digest(
+                            projection_name=projection_name,
+                            aggregate_type=aggregate_type,
+                            aggregate_id=aggregate_id,
+                            aggregate_version=existing_version,
+                            state=existing_state,
+                        )
+                        if self.SCHEMA_VERSION >= 8
+                        else payload_digest(existing_state)
+                    )
+                    if existing_hash != existing["state_hash"]:
+                        raise ValueError(
+                            "projection checkpoint hash does not match identity, version, and state"
+                        )
+
+                journal_version = self._aggregate_version_value(
+                    connection,
+                    aggregate_type,
+                    aggregate_id,
+                )
+                if aggregate_version > journal_version:
+                    raise ValueError("projection checkpoint cannot outrun the journal")
+
+                if existing is not None:
                     exact = (
                         existing_version == aggregate_version
                         and existing["state_json"] == state_json

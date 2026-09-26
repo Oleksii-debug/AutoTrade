@@ -247,6 +247,78 @@ class ArtifactStoreTests(unittest.TestCase):
             ):
                 store.load_manifest(artifact_id)
 
+    def test_manifest_hard_link_alias_is_rejected_and_audited(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"manifest-alias",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+            manifest_path = store._manifest_path(artifact_id)
+            external_alias = Path(directory) / "manifest-hard-link.json"
+            os.link(manifest_path, external_alias)
+
+            with self.assertRaisesRegex(
+                ArtifactIntegrityError,
+                "manifest must not have hard-link aliases",
+            ):
+                store.load_manifest(artifact_id)
+
+            audit = store.audit()
+            self.assertIn(manifest_path.name, audit.corrupt_objects)
+
+    @unittest.skipIf(os.name == "nt", "symlink creation is not reliably available on Windows CI")
+    def test_manifest_symlink_is_rejected_without_following_external_bytes(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"manifest-symlink",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+            manifest_path = store._manifest_path(artifact_id)
+            external = Path(directory) / "external-manifest.json"
+            external.write_bytes(manifest_path.read_bytes())
+            manifest_path.unlink()
+            manifest_path.symlink_to(external)
+
+            with self.assertRaisesRegex(
+                ArtifactIntegrityError,
+                "manifest must not be a symlink",
+            ):
+                store.load_manifest(artifact_id)
+
+            audit = store.audit()
+            self.assertIn(manifest_path.name, audit.corrupt_objects)
+
+    @unittest.skipIf(os.name == "nt", "symlink creation is not reliably available on Windows CI")
+    def test_manifest_directory_alias_fails_before_object_publication(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            store.manifests.rmdir()
+            outside = Path(directory) / "outside-manifests"
+            outside.mkdir()
+            store.manifests.symlink_to(outside, target_is_directory=True)
+
+            with self.assertRaisesRegex(
+                ArtifactIntegrityError,
+                "manifest path escapes store namespace",
+            ):
+                store.publish_bytes(
+                    artifact_id=str(uuid4()),
+                    data=b"must-not-publish",
+                    media_type="application/octet-stream",
+                    rights={"storage": True, "export": False},
+                )
+
+            self.assertEqual(list(outside.iterdir()), [])
+            self.assertEqual(list(store.objects.glob("*/*")), [])
+
     def test_publish_preserves_canonical_rights_identity_and_rejects_extensions(self):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(Path(directory) / "store")

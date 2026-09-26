@@ -664,15 +664,29 @@ class ArtifactStore:
 
     def recover_orphans(self) -> ArtifactAudit:
         with ResourceLock(self.lock_path):
+            self._validate_staging_namespace()
             before = self.audit()
             for digest in before.unreferenced_objects:
                 path = self._object_path(digest)
                 try:
+                    self._validate_object_entry(path)
+                except ArtifactIntegrityError:
+                    continue
+                try:
                     path.unlink()
                 except FileNotFoundError:
                     pass
+            self._validate_staging_namespace()
             for path in self.staging.glob("*"):
-                if path.is_file():
+                try:
+                    entry = os.stat(path, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                except OSError as error:
+                    raise ArtifactIntegrityError(
+                        "artifact staging entry cannot be inspected"
+                    ) from error
+                if stat.S_ISREG(entry.st_mode):
                     try:
                         path.unlink()
                     except FileNotFoundError:

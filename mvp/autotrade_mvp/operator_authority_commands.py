@@ -18,6 +18,7 @@ from .authority import (
 )
 from .host_actions import canonical_host_action
 from .persistence import JournalStore, payload_digest
+from .risk import _canonical_decimal_text
 
 
 AUTHORITY_TYPE = "authority_state"
@@ -67,11 +68,6 @@ def _keys(
 
 
 def _policy_payload(policy: AuthorityPolicy) -> dict[str, object]:
-    amount = (
-        "0"
-        if policy.max_notional == 0
-        else format(policy.max_notional.normalize(), "f")
-    )
     return {
         "policy_id": policy.policy_id,
         "account_id": policy.account_id,
@@ -81,7 +77,7 @@ def _policy_payload(policy: AuthorityPolicy) -> dict[str, object]:
             for item in sorted(policy.instruments)
         ],
         "actions": sorted(policy.actions),
-        "max_notional": amount,
+        "max_notional": _canonical_decimal_text(policy.max_notional),
         "expires_at": policy.expires_at,
         "autonomous": policy.autonomous,
         "valid_from": policy.valid_from,

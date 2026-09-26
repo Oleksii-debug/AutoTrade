@@ -13,6 +13,38 @@ from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 
 
 class JournalBackedHostApiTests(unittest.TestCase):
+    def test_operator_policy_payload_keeps_exact_high_precision_notional(self):
+        from mvp.autotrade_mvp.operator_authority_commands import (
+            _policy_from_mapping,
+            _policy_payload,
+        )
+
+        values = (
+            "1000.000000000000000000000000000001",
+            "1000.000000000000000000000000000002",
+        )
+        payloads = []
+        for value in values:
+            base = self.authority_policy("exact-notional")
+            policy = AuthorityPolicy.create(
+                policy_id=base.policy_id,
+                account_id=base.account_id,
+                environments=base.environments,
+                instruments=base.instruments,
+                actions=base.actions,
+                max_notional=value,
+                valid_from=base.valid_from,
+                expires_at=base.expires_at,
+                autonomous=base.autonomous,
+                protection_only=base.protection_only,
+                version=base.version,
+            )
+            payload = _policy_payload(policy)
+            self.assertEqual(payload["max_notional"], value)
+            self.assertEqual(_policy_from_mapping(payload).max_notional, policy.max_notional)
+            payloads.append(payload)
+        self.assertNotEqual(payload_digest(payloads[0]), payload_digest(payloads[1]))
+
     def setUp(self):
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

@@ -165,10 +165,11 @@ def context(**overrides):
         stress_scenarios=({"ABC": "-0.10", "XYZ": "-0.20"},),
         equivalent_exposure_per_unit={"ABC": "100", "XYZ": "50"},
         instrument_types={
-            "ABC": "EQUITY",
-            "XYZ": "EQUITY",
-            "CORE": "EQUITY",
-            "HEDGE": "EQUITY",
+            # ABC is the intent instrument in most legacy tests; its exact
+            # type comes from the RiskIntent under test, not a fixture guess.
+            "XYZ": "GENERIC",
+            "CORE": "GENERIC",
+            "HEDGE": "GENERIC",
         },
     )
     values.update(overrides)
@@ -2077,6 +2078,22 @@ class IndependentRiskTests(unittest.TestCase):
     def test_risk_decision_fingerprint_rejects_wrong_type(self):
         with self.assertRaises(TypeError):
             risk_decision_fingerprint({"admitted": True})
+
+    def test_stress_identity_keeps_digits_beyond_decimal_context_precision(self):
+        first = "0.100000000000000000000000000001"
+        second = "0.100000000000000000000000000002"
+        self.assertNotEqual(
+            _canonical_decimal_text(Decimal(first)),
+            _canonical_decimal_text(Decimal(second)),
+        )
+        self.assertNotEqual(
+            stress_scenario_digest({"ABC": first}),
+            stress_scenario_digest({"ABC": second}),
+        )
+        self.assertEqual(
+            stress_scenario_digest({"ABC": "0.1000"}),
+            stress_scenario_digest({"ABC": "0.1"}),
+        )
 
 
 if __name__ == "__main__":

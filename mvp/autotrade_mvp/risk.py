@@ -167,7 +167,10 @@ def _normalize_nested_mapping(values, *, name: str) -> dict[str, dict[str, Decim
 def _canonical_decimal_text(value: Decimal) -> str:
     if value == 0:
         return "0"
-    return format(value.normalize(), "f")
+    # normalize() rounds to the ambient Decimal context precision. Risk and
+    # authority evidence must retain every provider-supplied significant digit.
+    exact = format(value, "f")
+    return exact.rstrip("0").rstrip(".") if "." in exact else exact
 
 
 def stress_scenario_digest(scenario: Mapping[str, object]) -> str:

@@ -535,6 +535,54 @@ class ArtifactStoreTests(unittest.TestCase):
                 ):
                     store.load_manifest(artifact_id)
 
+    def test_manifest_path_and_descriptor_timestamp_views_need_not_match(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"manifest-cross-api-stat-boundary",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+                metadata={"kind": "portable-stat"},
+            )
+
+            original_validate = store._validate_manifest_entry
+
+            def validate_with_timestamp_representation_difference(path):
+                entry = original_validate(path)
+                values = list(entry)
+                values[8] = entry.st_mtime + 1.0
+                values[9] = entry.st_ctime + 1.0
+                return os.stat_result(values)
+
+            with patch.object(
+                store,
+                "_validate_manifest_entry",
+                side_effect=validate_with_timestamp_representation_difference,
+            ):
+                self.assertEqual(store.load_manifest(artifact_id), manifest)
+
+    @unittest.skipUnless(
+        os.name == "nt",
+        "Windows held-descriptor portability regression",
+    )
+    def test_windows_manifest_descriptor_accepts_unchanged_canonical_manifest(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            payload = b"windows-held-manifest-descriptor"
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=payload,
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+                metadata={"kind": "windows-descriptor"},
+            )
+
+            self.assertEqual(store.load_manifest(artifact_id), manifest)
+            self.assertEqual(store.read_bytes(artifact_id), payload)
+
     def test_manifest_aba_replacement_fails_before_transient_bytes_are_read(self):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(Path(directory) / "store")

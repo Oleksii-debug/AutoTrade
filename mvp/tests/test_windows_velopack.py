@@ -325,6 +325,33 @@ class WindowsVelopackPackagingTests(unittest.TestCase):
             )
         self.assertEqual(list(output.iterdir()), [])
 
+    def test_substring_package_version_is_rejected_before_publication(self):
+        bundle, manifest = self.release_inputs(version="1.2.3", stem="version-substring")
+        output = self.root / "version-substring-out"
+
+        def wrong_version_runner(command, **kwargs):
+            output_dir = Path(command[command.index("--outputDir") + 1])
+            (output_dir / "AutoTrade-Setup.exe").write_bytes(b"setup")
+            (output_dir / "AutoTrade-11.2.30-full.nupkg").write_bytes(b"package")
+            (output_dir / "releases.win.json").write_text(
+                '{"channel":"win"}\n',
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+        with self.assertRaisesRegex(
+            VelopackPackagingError,
+            "does not exactly bind the requested version",
+        ):
+            build_velopack_release(
+                bundle=bundle,
+                installer_manifest=manifest,
+                output_dir=output,
+                runner=wrong_version_runner,
+            )
+
+        self.assertEqual(list(output.iterdir()), [])
+
     def test_nonzero_vpk_exit_does_not_publish_partial_release(self):
         bundle, manifest = self.release_inputs(stem="failure")
         output = self.root / "failure-out"

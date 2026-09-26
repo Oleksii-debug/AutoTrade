@@ -606,6 +606,62 @@ class ArtifactStoreTests(unittest.TestCase):
             self.assertTrue(store._object_path(kept_digest).exists())
             self.assertEqual(list(store.staging.iterdir()), [])
 
+    @unittest.skipIf(os.name == "nt", "symlink creation is not reliably available on Windows CI")
+    def test_recovery_refuses_aliased_staging_directory_and_preserves_external_files(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            store.staging.rmdir()
+            outside = Path(directory) / "outside-staging-recovery"
+            outside.mkdir()
+            external = outside / "must-survive.tmp"
+            external.write_bytes(b"external")
+            store.staging.symlink_to(outside, target_is_directory=True)
+
+            with self.assertRaisesRegex(
+                ArtifactIntegrityError,
+                "staging path escapes store namespace",
+            ):
+                store.recover_orphans()
+
+            self.assertEqual(external.read_bytes(), b"external")
+
+    @unittest.skipIf(os.name == "nt", "symlink creation is not reliably available on Windows CI")
+    def test_recovery_revalidates_orphan_namespace_immediately_before_unlink(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            data = b"recoverable-orphan"
+            digest = hashlib.sha256(data).hexdigest()
+            orphan = store._object_path(digest)
+            orphan.parent.mkdir(parents=True, exist_ok=True)
+            orphan.write_bytes(data)
+
+            outside = Path(directory) / "outside-orphan-parent"
+            outside.mkdir()
+            external = outside / digest
+            external.write_bytes(b"external-must-survive")
+
+            original_audit = store.audit
+            audit_calls = 0
+
+            def audit_then_swap_namespace():
+                nonlocal audit_calls
+                result = original_audit()
+                audit_calls += 1
+                if audit_calls == 1:
+                    orphan.unlink()
+                    orphan.parent.rmdir()
+                    orphan.parent.symlink_to(outside, target_is_directory=True)
+                return result
+
+            with patch.object(store, "audit", side_effect=audit_then_swap_namespace):
+                recovered = store.recover_orphans()
+
+            self.assertEqual(external.read_bytes(), b"external-must-survive")
+            self.assertIn(
+                "object:" + orphan.relative_to(store.root).as_posix(),
+                recovered.corrupt_objects,
+            )
+
     def test_storage_without_rights_is_rejected_before_writing(self):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)

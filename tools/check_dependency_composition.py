@@ -420,6 +420,15 @@ def _rights_blockers(root: Path) -> list[str]:
                 path_field=path_field,
             )
             blockers.extend(evidence_blockers)
+
+        # Repository-local bytes prove content identity, not independent release
+        # authorization. Until the canonical qualification trust root is itself
+        # authenticated and a WP-03 receipt is verified against it, APPROVED must
+        # remain fail-closed rather than letting one candidate commit author both
+        # the evidence and the authority to distribute it.
+        blockers.append(
+            f"APPROVED_COMPONENT_INDEPENDENT_AUTHORITY_REQUIRED:{name}"
+        )
     return blockers
 
 

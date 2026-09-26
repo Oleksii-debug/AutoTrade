@@ -329,7 +329,13 @@ class DependencyCompositionGateTests(unittest.TestCase):
                 json.dumps({"components": [qualified]}),
                 encoding="utf-8",
             )
-            self.assertEqual(_rights_blockers(root), [])
+            self.assertEqual(
+                _rights_blockers(root),
+                [
+                    "APPROVED_COMPONENT_INDEPENDENT_AUTHORITY_REQUIRED:"
+                    "ApprovedCandidate"
+                ],
+            )
 
             forged = dict(qualified)
             forged["notice_sha256"] = "sha256:" + "2" * 64

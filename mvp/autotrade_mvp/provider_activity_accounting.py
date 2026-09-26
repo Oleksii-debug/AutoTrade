@@ -1919,10 +1919,15 @@ def commit_economic_correction_with_settlement_replacement(
             )
         rid = _text(reservation_id, name="reservation_id")
         binding_request = provider_fill_correction_binding.request
+        binding_provider_environment = binding_request.get(
+            "provider_environment",
+            binding_request.get("environment"),
+        )
         if (
             binding_request.get("provider_id") != economic_book.provider_id
             or binding_request.get("account_id") != economic_book.account_id
             or binding_request.get("environment") != economic_book.environment
+            or binding_provider_environment != economic_book.provider_environment
             or binding_request.get("reservation_id") != rid
         ):
             raise AccountingConflict(

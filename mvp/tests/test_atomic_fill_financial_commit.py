@@ -32,12 +32,14 @@ from mvp.autotrade_mvp.fill_accounting import (
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
     PreparedProviderFillBinding,
+    PreparedProviderFillCorrectionBinding,
     _legacy_book_id,
     _prepare_provider_fill_correction_binding,
     _provider_fill_binding_aggregate_id,
     _provider_fill_binding_payload,
     _provider_fill_correction_binding_aggregate_id,
     commit_economic_batch_with_reservation_consumption,
+    commit_economic_correction_with_settlement_replacement,
     commit_provider_fill_with_reservation_consumption,
 )
 from mvp.autotrade_mvp.reconciliation import ProviderFillEvidence
@@ -525,6 +527,75 @@ class ProviderFillBindingEnvironmentTests(unittest.TestCase):
             self.assertEqual(economics.transactions, ())
             self.assertEqual(
                 store.load_events("economic_book", economics.book_id),
+                [],
+            )
+
+    def test_correction_atomic_barrier_rejects_cross_provider_environment_binding(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = JournalStore(root / "journal.sqlite3")
+            economics = DurableProviderEconomicBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            reservations = DurableReservationBook(
+                store,
+                environment="PAPER",
+                account_id="bybit-account",
+            )
+            settlements = DurableSettlementBook(
+                store,
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                evidence_artifact_store=ArtifactStore(root / "settlement-evidence"),
+            )
+            binding = PreparedProviderFillCorrectionBinding(
+                aggregate_id="demo-correction-binding",
+                envelope=None,
+                request={
+                    "provider_id": "BYBIT",
+                    "account_id": "bybit-account",
+                    "environment": "PAPER",
+                    "provider_environment": "DEMO",
+                    "reservation_id": "reservation-1",
+                },
+                result={},
+                aggregate_version=1,
+                additional_usage_items=(),
+                reservation_cut_digest="sha256:" + "0" * 64,
+            )
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "provider fill correction binding scope does not match correction",
+            ):
+                commit_economic_correction_with_settlement_replacement(
+                    economics,
+                    settlements,
+                    command_id="cross-provider-environment-correction",
+                    idempotency_key="cross-provider-environment-correction",
+                    reversal=None,
+                    replacement=None,
+                    settlement_obligations=(),
+                    reservation_book=reservations,
+                    reservation_id="reservation-1",
+                    provider_fill_correction_binding=binding,
+                )
+
+            self.assertEqual(economics.transactions, ())
+            self.assertEqual(
+                store.load_events("economic_book", economics.book_id),
+                [],
+            )
+            self.assertEqual(
+                store.load_events(
+                    "provider_fill_reservation_correction_binding",
+                    binding.aggregate_id,
+                ),
                 [],
             )
 

@@ -3,11 +3,35 @@ import unittest
 from unittest.mock import patch
 
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.recovery import HostState, RecoveryController
 
 
 class DurableUnknownRestartTests(unittest.TestCase):
+    @staticmethod
+    def _append_submission_event(
+        store: JournalStore,
+        *,
+        aggregate_id: str,
+        event_type: str,
+        version: int,
+        suffix: str,
+    ) -> None:
+        payload = {"client_order_id": "manual-" + suffix}
+        store.append_event(
+            {
+                "event_id": "manual-" + suffix,
+                "event_type": event_type,
+                "aggregate_type": "submission_attempt",
+                "aggregate_id": aggregate_id,
+                "aggregate_version": str(version),
+                "payload": payload,
+                "payload_hash": payload_digest(payload),
+                "committed_at": "2026-09-25T20:01:00Z",
+                "owner_epoch": "1",
+            }
+        )
+
     def _unknown_dispatch(self, store: JournalStore, *, attempt_id: str = "attempt-1"):
         dispatcher = GuardedDispatcher(
             store,
@@ -87,6 +111,183 @@ class DurableUnknownRestartTests(unittest.TestCase):
 
             self.assertEqual(recovery.unresolved_attempts, set())
             self.assertEqual(recovery.state, HostState.RECOVERING)
+
+    def test_unknown_event_tail_after_send_barrier_blocks_restart(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="sender-a",
+                owner_epoch=1,
+            )
+
+            def crash_after_barrier(_client_id, _request, final_guard):
+                final_guard()
+                raise SystemExit("simulated process death")
+
+            with self.assertRaises(SystemExit):
+                dispatcher.dispatch(
+                    attempt_id="attempt-invalid-tail",
+                    intent_id="intent-invalid-tail",
+                    intent_hash="intent-hash-invalid-tail",
+                    provider="sim",
+                    request={"side": "BUY"},
+                    now="2026-09-25T20:00:00Z",
+                    authority_check=lambda _intent_hash, _now: (True, "allowed"),
+                    transport_send=crash_after_barrier,
+                )
+
+            events = store.load_events_by_aggregate_type("submission_attempt")
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionSending"],
+            )
+            aggregate_id = events[0]["aggregate_id"]
+            self._append_submission_event(
+                store,
+                aggregate_id=aggregate_id,
+                event_type="SubmissionUnexpected",
+                version=3,
+                suffix="invalid-tail",
+            )
+
+            recovery = RecoveryController(
+                owner_store=store,
+                owner_scope="SIMULATION:acct",
+            )
+            with self.assertRaisesRegex(RuntimeError, "transition sequence is invalid"):
+                recovery.start("host-restarted")
+            self.assertNotEqual(recovery.state, HostState.READY)
+
+    def test_sent_without_send_barrier_blocks_restart(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="sender-a",
+                owner_epoch=1,
+            )
+
+            def crash_before_barrier(_client_id, _request, _final_guard):
+                raise SystemExit("simulated process death")
+
+            with self.assertRaises(SystemExit):
+                dispatcher.dispatch(
+                    attempt_id="attempt-missing-barrier",
+                    intent_id="intent-missing-barrier",
+                    intent_hash="intent-hash-missing-barrier",
+                    provider="sim",
+                    request={"side": "BUY"},
+                    now="2026-09-25T20:00:00Z",
+                    authority_check=lambda _intent_hash, _now: (True, "allowed"),
+                    transport_send=crash_before_barrier,
+                )
+
+            events = store.load_events_by_aggregate_type("submission_attempt")
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared"],
+            )
+            aggregate_id = events[0]["aggregate_id"]
+            self._append_submission_event(
+                store,
+                aggregate_id=aggregate_id,
+                event_type="SubmissionSent",
+                version=2,
+                suffix="missing-barrier",
+            )
+
+            recovery = RecoveryController(
+                owner_store=store,
+                owner_scope="SIMULATION:acct",
+            )
+            with self.assertRaisesRegex(RuntimeError, "transition sequence is invalid"):
+                recovery.start("host-restarted")
+            self.assertNotEqual(recovery.state, HostState.READY)
+
+    def test_terminal_event_after_unknown_blocks_restart(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            self._unknown_dispatch(store, attempt_id="attempt-terminal-after-unknown")
+            events = store.load_events_by_aggregate_type("submission_attempt")
+            aggregate_id = events[0]["aggregate_id"]
+            self._append_submission_event(
+                store,
+                aggregate_id=aggregate_id,
+                event_type="SubmissionSent",
+                version=4,
+                suffix="terminal-after-unknown",
+            )
+
+            recovery = RecoveryController(
+                owner_store=store,
+                owner_scope="SIMULATION:acct",
+            )
+            with self.assertRaisesRegex(RuntimeError, "transition sequence is invalid"):
+                recovery.start("host-restarted")
+            self.assertNotEqual(recovery.state, HostState.READY)
+
+    def test_blocked_then_unknown_contract_violation_remains_ambiguous(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="sender-a",
+                owner_epoch=1,
+            )
+            authority_calls = 0
+
+            def authority(_intent_hash, _now):
+                nonlocal authority_calls
+                authority_calls += 1
+                if authority_calls == 1:
+                    return True, "allowed"
+                return False, "revoked_at_final_barrier"
+
+            def swallow_block(_client_id, _request, final_guard):
+                try:
+                    final_guard()
+                except Exception:
+                    return {"provider_order_id": "unsafe-wrapper-result"}
+                raise AssertionError("final guard should have blocked")
+
+            outcome = dispatcher.dispatch(
+                attempt_id="attempt-blocked-unknown",
+                intent_id="intent-blocked-unknown",
+                intent_hash="intent-hash-blocked-unknown",
+                provider="sim",
+                request={"side": "BUY"},
+                now="2026-09-25T20:00:00Z",
+                authority_check=authority,
+                transport_send=swallow_block,
+            )
+            self.assertEqual(outcome.status, "UNKNOWN")
+            events = store.load_events_by_aggregate_type("submission_attempt")
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                [
+                    "SubmissionPrepared",
+                    "SubmissionBlocked",
+                    "SubmissionUnknown",
+                ],
+            )
+
+            recovery = RecoveryController(
+                owner_store=store,
+                owner_scope="SIMULATION:acct",
+            )
+            recovery.start("host-restarted")
+            self.assertEqual(
+                recovery.unresolved_attempts,
+                {"attempt-blocked-unknown"},
+            )
+            self.assertEqual(recovery.state, HostState.DEGRADED)
 
     def test_exact_reconciliation_terminal_verdict_clears_recovered_unknown(self):
         with TemporaryDirectory() as directory:

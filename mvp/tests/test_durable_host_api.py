@@ -275,6 +275,82 @@ class JournalBackedHostApiTests(unittest.TestCase):
             ("provider_response_pending",),
         )
 
+    def test_restart_fails_closed_on_unknown_scoped_host_event_type(self):
+        first = self.store()
+        accepted = first.submit(self.command())
+        payload = {
+            "operation_id": accepted.operation_id,
+            "reason": "future-event-with-unknown-semantics",
+        }
+        JournalStore(self.path).append_event(
+            {
+                "event_id": "future-host-event",
+                "event_type": "FUTURE_HOST_EVENT",
+                "aggregate_type": first.AGGREGATE_TYPE,
+                "aggregate_id": first.aggregate_id,
+                "aggregate_version": "2",
+                "payload": payload,
+                "payload_hash": payload_digest(payload),
+                "committed_at": "2026-09-24T18:00:01Z",
+            },
+            outbox_topic="ui.host-events",
+        )
+
+        restarted = self.store(now="2026-09-24T18:00:02Z")
+        for operation in (
+            lambda: restarted.state_version,
+            restarted.snapshot,
+            lambda: restarted.events_after(0),
+            lambda: restarted.get_operation(accepted.operation_id),
+        ):
+            with self.subTest(operation=operation), self.assertRaisesRegex(
+                ValueError,
+                "unsupported event type",
+            ):
+                operation()
+
+    def test_restart_rejects_noncanonical_operation_identity(self):
+        store = self.store()
+        payload = {
+            "command_id": "22222222-2222-2222-2222-222222222222",
+            "operation_id": "forged-operation-id",
+            "actor": "alice",
+            "account_id": "paper-account-1",
+            "environment": "PAPER",
+            "phase": "QUEUED",
+            "started_at": "2026-09-24T18:00:00Z",
+            "updated_at": "2026-09-24T18:00:00Z",
+            "affected_refs": [],
+            "evidence": [],
+            "remaining_uncertainty": ["financial_outcome_not_completed"],
+        }
+        JournalStore(self.path).append_event(
+            {
+                "event_id": "forged-host-command-event",
+                "event_type": "COMMAND_ACCEPTED",
+                "aggregate_type": store.AGGREGATE_TYPE,
+                "aggregate_id": store.aggregate_id,
+                "aggregate_version": "1",
+                "payload": payload,
+                "payload_hash": payload_digest(payload),
+                "committed_at": "2026-09-24T18:00:00Z",
+            },
+            outbox_topic="ui.host-events",
+        )
+
+        restarted = self.store(now="2026-09-24T18:00:01Z")
+        for operation in (
+            lambda: restarted.state_version,
+            restarted.snapshot,
+            lambda: restarted.events_after(0),
+            lambda: restarted.get_operation("forged-operation-id"),
+        ):
+            with self.subTest(operation=operation), self.assertRaisesRegex(
+                ValueError,
+                "operation identity does not match canonical command scope",
+            ):
+                operation()
+
     def test_exact_retry_after_restart_returns_original_result_without_new_event(self):
         first = self.store()
         command = self.command()

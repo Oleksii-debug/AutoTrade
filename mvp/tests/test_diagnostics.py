@@ -170,5 +170,48 @@ class DiagnosticTraceTests(unittest.TestCase):
         self.assertIn("[REDACTED]", redacted["repr_message"])
 
 
+    def test_escaped_json_and_encoded_query_secret_keys_are_redacted(self):
+        payload = {
+            "escaped_json": (
+                '{"api\\u005fsecret":"WHITEBIT-ESCAPED-SECRET","safe":"ok"}'
+            ),
+            "escaped_json_array": (
+                '[{"api\\u005fsecret":"WHITEBIT-ARRAY-SECRET"},{"safe":"ok"}]'
+            ),
+            "encoded_url_upper": (
+                "https://provider.test/orders?"
+                "api%5Fsecret=WHITEBIT-PERCENT-UPPER&symbol=BTC"
+            ),
+            "encoded_url_lower": (
+                "https://provider.test/orders?"
+                "api%5fsecret=WHITEBIT-PERCENT-LOWER&symbol=ETH"
+            ),
+        }
+        redacted = redact_diagnostic_value(payload)
+        serialized = json.dumps(redacted, sort_keys=True)
+        for leaked in (
+            "WHITEBIT-ESCAPED-SECRET",
+            "WHITEBIT-ARRAY-SECRET",
+            "WHITEBIT-PERCENT-UPPER",
+            "WHITEBIT-PERCENT-LOWER",
+        ):
+            self.assertNotIn(leaked, serialized)
+
+        decoded_object = json.loads(redacted["escaped_json"])
+        self.assertEqual(decoded_object["api_secret"], "[REDACTED]")
+        self.assertEqual(decoded_object["safe"], "ok")
+        decoded_array = json.loads(redacted["escaped_json_array"])
+        self.assertEqual(decoded_array[0]["api_secret"], "[REDACTED]")
+        self.assertEqual(decoded_array[1]["safe"], "ok")
+        self.assertEqual(
+            redacted["encoded_url_upper"],
+            "https://provider.test/orders?api%5Fsecret=[REDACTED]&symbol=BTC",
+        )
+        self.assertEqual(
+            redacted["encoded_url_lower"],
+            "https://provider.test/orders?api%5fsecret=[REDACTED]&symbol=ETH",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

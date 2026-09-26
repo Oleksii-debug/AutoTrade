@@ -1,6 +1,8 @@
+from dataclasses import replace
 from hashlib import sha256
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
@@ -149,6 +151,8 @@ def qualify(
     omit_release_artifact=False,
     trusted=False,
     omit_attestation_scenarios=(),
+    signing_root_override=None,
+    canonical_policy_override=None,
 ):
     with TemporaryDirectory() as directory:
         store = ArtifactStore(directory)
@@ -180,11 +184,13 @@ def qualify(
             digest = manifest["sha256"].removeprefix("sha256:")
             (store.objects / digest[:2] / digest).write_bytes(b"corrupt")
         trust_kwargs = {}
+        canonical_trust_policy = None
         if trusted:
-            trust_root = attestation_root(
+            trust_root = signing_root_override or attestation_root(
                 scopes=(QualificationScope("RECOVERY", "RELEASE"),)
             )
             trust_policy = attestation_policy(trust_root)
+            canonical_trust_policy = canonical_policy_override or trust_policy
             attested_refs = tuple(
                 EvidenceArtifactRef(
                     artifact_id=item.evidence_artifact_id,
@@ -214,16 +220,24 @@ def qualify(
                 "qualification_receipt": SignedQualificationAttestation(
                     signed, sign(signed)
                 ),
-                "qualification_policy": trust_policy,
-                "expected_policy_id": trust_policy.policy_id,
-                "expected_policy_version": trust_policy.policy_version,
             }
-        return qualify_recovery_release(
-            policy=policy,
-            evidence=evidence,
-            evidence_store=store,
-            **trust_kwargs,
-        )
+
+        def evaluate():
+            return qualify_recovery_release(
+                policy=policy,
+                evidence=evidence,
+                evidence_store=store,
+                **trust_kwargs,
+            )
+
+        if canonical_trust_policy is None:
+            return evaluate()
+        with patch(
+            "mvp.autotrade_mvp.qualification_attestation."
+            "load_canonical_qualification_trust_policy",
+            return_value=canonical_trust_policy,
+        ):
+            return evaluate()
 
 
 class RecoveryReleaseQualificationTests(unittest.TestCase):
@@ -383,6 +397,30 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
         self.assertTrue(
             decision.qualification_trust_root_id.startswith("sha256:")
         )
+        self.assertFalse(decision.authorizes_trading)
+
+    def test_self_selected_root_cannot_authorize_terminal_recovery_pass(self):
+        candidate_root = attestation_root(
+            scopes=(QualificationScope("RECOVERY", "RELEASE"),)
+        )
+        canonical_root = replace(
+            candidate_root,
+            producer_id="qualifier.canonical.recovery",
+        )
+        canonical_policy = attestation_policy(canonical_root)
+        decision = qualify(
+            policy=policy(),
+            evidence=complete_evidence(),
+            trusted=True,
+            signing_root_override=candidate_root,
+            canonical_policy_override=canonical_policy,
+        )
+        self.assertNotEqual(decision.status, RecoveryEvidenceStatus.PASS)
+        self.assertIn(
+            "independent_evidence_trust_invalid",
+            decision.blockers,
+        )
+        self.assertIsNone(decision.qualification_policy_id)
         self.assertFalse(decision.authorizes_trading)
 
     def test_signed_attestation_must_cover_exact_scenario_evidence_set(self):

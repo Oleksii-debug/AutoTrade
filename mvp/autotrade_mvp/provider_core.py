@@ -82,6 +82,7 @@ class Surface(StrEnum):
 
 _PREPARED_READ_TOKEN = object()
 _OBSERVED_RESPONSE_TOKEN = object()
+_PRIVATE_STREAM_OBSERVATION_TOKEN = object()
 _SUBMISSION_OBSERVED_RESPONSE_TOKEN = object()
 
 
@@ -521,6 +522,243 @@ def observe_authenticated_json_response(
 
 
 
+
+@dataclass(frozen=True)
+class ProviderPrivateStreamObservation:
+    """Immutable exact-frame identity issued from verified provider stream scope."""
+
+    provider_id: str
+    account_id: str
+    entity_id: str
+    environment: str
+    provider_environment: str
+    capability_snapshot_id: str
+    instrument_version: str
+    permission_scope: str
+    stream_name: str
+    connection_id: str
+    provider_event_id: str
+    sequence: str
+    observed_at: str
+    frame_sha256: str
+    evidence_ref: str
+    _observation_token: InitVar[object | None] = None
+
+    def __post_init__(self, _observation_token: object | None) -> None:
+        if _observation_token is not _PRIVATE_STREAM_OBSERVATION_TOKEN:
+            raise ProviderCoreError(
+                "private-stream observations must come from exact provider frame bytes"
+            )
+        provider = _text(self.provider_id, "provider_id").upper()
+        if provider not in PROVIDERS:
+            raise ProviderCoreError("unknown provider")
+        object.__setattr__(self, "provider_id", provider)
+        object.__setattr__(self, "account_id", _text(self.account_id, "account_id"))
+        object.__setattr__(self, "entity_id", _text(self.entity_id, "entity_id"))
+        object.__setattr__(
+            self, "environment", _text(self.environment, "environment").upper()
+        )
+        object.__setattr__(
+            self,
+            "provider_environment",
+            _text(self.provider_environment, "provider_environment").upper(),
+        )
+        object.__setattr__(
+            self,
+            "capability_snapshot_id",
+            _text(self.capability_snapshot_id, "capability_snapshot_id"),
+        )
+        object.__setattr__(
+            self,
+            "instrument_version",
+            _text(self.instrument_version, "instrument_version"),
+        )
+        object.__setattr__(
+            self,
+            "permission_scope",
+            _text(self.permission_scope, "permission_scope"),
+        )
+        object.__setattr__(self, "stream_name", _text(self.stream_name, "stream_name"))
+        object.__setattr__(
+            self, "connection_id", _text(self.connection_id, "connection_id")
+        )
+        object.__setattr__(
+            self,
+            "provider_event_id",
+            _text(self.provider_event_id, "provider_event_id"),
+        )
+        if (
+            not isinstance(self.sequence, str)
+            or re.fullmatch(r"(?:0|[1-9][0-9]*)", self.sequence) is None
+        ):
+            raise ProviderCoreError(
+                "private-stream sequence must be a canonical non-negative integer string"
+            )
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", self.frame_sha256) is None:
+            raise ProviderCoreError(
+                "private-stream frame_sha256 must be a canonical SHA-256 digest"
+            )
+        if re.fullmatch(
+            r"provider-stream:sha256:[0-9a-f]{64}",
+            self.evidence_ref,
+        ) is None:
+            raise ProviderCoreError(
+                "private-stream evidence_ref must be canonical"
+            )
+        observed = _text(self.observed_at, "observed_at")
+        try:
+            point = datetime.fromisoformat(observed.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ProviderCoreError(
+                "private-stream observed_at must be an ISO timestamp"
+            ) from error
+        if point.tzinfo is None or not observed.endswith("Z"):
+            raise ProviderCoreError(
+                "private-stream observed_at must be canonical UTC text"
+            )
+        canonical = point.astimezone(timezone.utc).isoformat().replace(
+            "+00:00", "Z"
+        )
+        if canonical != observed:
+            raise ProviderCoreError(
+                "private-stream observed_at must be canonical UTC text"
+            )
+
+    def require_scope(
+        self,
+        *,
+        provider_id: str,
+        account_id: str,
+        environment: str,
+        provider_environment: str,
+        stream_name: str,
+        connection_id: str,
+    ) -> None:
+        expected = (
+            _text(provider_id, "provider_id").upper(),
+            _text(account_id, "account_id"),
+            _text(environment, "environment").upper(),
+            _text(provider_environment, "provider_environment").upper(),
+            _text(stream_name, "stream_name"),
+            _text(connection_id, "connection_id"),
+        )
+        actual = (
+            self.provider_id,
+            self.account_id,
+            self.environment,
+            self.provider_environment,
+            self.stream_name,
+            self.connection_id,
+        )
+        if actual != expected:
+            raise ProviderCoreError(
+                "private-stream provenance scope or connection mismatch"
+            )
+
+
+def observe_private_stream_frame(
+    *,
+    capability: CapabilitySnapshot,
+    provider_environment: str | None,
+    stream_name: str,
+    connection_id: str,
+    provider_event_id: str,
+    sequence: str,
+    frame_bytes: bytes,
+    observed_at: datetime,
+    permission_scope: str = "ORDER.READ",
+) -> ProviderPrivateStreamObservation:
+    """Issue immutable stream provenance from verified scope and exact frame bytes."""
+
+    if not isinstance(capability, CapabilitySnapshot):
+        raise TypeError("capability must be CapabilitySnapshot")
+    point = _utc(observed_at, "observed_at")
+    scope = _text(permission_scope, "permission_scope")
+    if (
+        capability.status != "VERIFIED"
+        or not (capability.observed_at <= point < capability.expires_at)
+        or scope not in capability.permission_scopes
+    ):
+        raise ProviderCoreError(
+            "exact verified capability does not admit private provider stream evidence"
+        )
+    if type(frame_bytes) is not bytes or not frame_bytes:
+        raise ProviderCoreError(
+            "private-stream frame bytes must be non-empty exact bytes"
+        )
+    provider = capability.provider_id.upper()
+    if provider not in PROVIDERS:
+        raise ProviderCoreError("unknown provider")
+    if provider_environment is None and provider == "BYBIT":
+        raise ProviderCoreError(
+            "BYBIT private stream requires explicit provider_environment"
+        )
+    provider_env = (
+        capability.environment
+        if provider_environment is None
+        else _text(provider_environment, "provider_environment").upper()
+    )
+    if provider == "BYBIT" and provider_env not in {
+        "MAINNET",
+        "TESTNET",
+        "DEMO",
+    }:
+        raise ProviderCoreError(
+            "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
+        )
+    stream = _text(stream_name, "stream_name")
+    connection = _text(connection_id, "connection_id")
+    event_id = _text(provider_event_id, "provider_event_id")
+    if (
+        not isinstance(sequence, str)
+        or re.fullmatch(r"(?:0|[1-9][0-9]*)", sequence) is None
+    ):
+        raise ProviderCoreError(
+            "private-stream sequence must be a canonical non-negative integer string"
+        )
+    observed = _utc_text(point, "observed_at")
+    frame_digest = "sha256:" + sha256(frame_bytes).hexdigest()
+    material = json.dumps(
+        {
+            "provider_id": provider,
+            "account_id": capability.account_id,
+            "entity_id": capability.entity_id,
+            "environment": capability.environment,
+            "provider_environment": provider_env,
+            "capability_snapshot_id": capability.snapshot_id,
+            "instrument_version": capability.instrument_version,
+            "permission_scope": scope,
+            "stream_name": stream,
+            "connection_id": connection,
+            "provider_event_id": event_id,
+            "sequence": sequence,
+            "observed_at": observed,
+            "frame_sha256": frame_digest,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    evidence_ref = "provider-stream:sha256:" + sha256(material).hexdigest()
+    return ProviderPrivateStreamObservation(
+        provider_id=provider,
+        account_id=capability.account_id,
+        entity_id=capability.entity_id,
+        environment=capability.environment,
+        provider_environment=provider_env,
+        capability_snapshot_id=capability.snapshot_id,
+        instrument_version=capability.instrument_version,
+        permission_scope=scope,
+        stream_name=stream,
+        connection_id=connection,
+        provider_event_id=event_id,
+        sequence=sequence,
+        observed_at=observed,
+        frame_sha256=frame_digest,
+        evidence_ref=evidence_ref,
+        _observation_token=_PRIVATE_STREAM_OBSERVATION_TOKEN,
+    )
 
 def _thaw_json(value: object) -> object:
     if isinstance(value, Mapping):

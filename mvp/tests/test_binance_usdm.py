@@ -138,6 +138,8 @@ def symbol_rules(
     market_min="0.001",
     market_max="1000",
     market_step="0.001",
+    percent_price_up=None,
+    percent_price_down=None,
     min_notional=None,
     price_precision=0,
     quantity_precision=0,
@@ -162,6 +164,17 @@ def symbol_rules(
             "stepSize": market_step,
         },
     ]
+    if (percent_price_up is None) != (percent_price_down is None):
+        raise ValueError("percent price helper requires both multipliers")
+    if percent_price_up is not None:
+        filters.append(
+            {
+                "filterType": "PERCENT_PRICE",
+                "multiplierUp": percent_price_up,
+                "multiplierDown": percent_price_down,
+                "multiplierDecimal": 4,
+            }
+        )
     if min_notional is not None:
         filters.append(
             {
@@ -582,6 +595,101 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
                     market_step="0.01",
                 ),
                 at=NOW,
+            )
+
+    def test_limit_percent_price_requires_fresh_mark_price_and_enforces_side_bounds(self):
+        rules = symbol_rules(
+            percent_price_up="1.05",
+            percent_price_down="0.95",
+        )
+        buy = BinanceUsdmOrderIntent.create(
+            instrument_version="BTCUSDT-PERP:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="LIMIT",
+            quantity="0.01",
+            price="42000",
+            time_in_force="GTC",
+        )
+        with self.assertRaisesRegex(
+            BinanceUsdmAdapterError,
+            "PERCENT_PRICE admission requires canonical mark-price evidence",
+        ):
+            prepare_order_request(
+                buy,
+                client_order_id="at-usdm-percent-no-mark",
+                capability=capability(),
+                symbol_rules=rules,
+                at=NOW,
+            )
+
+        provider_mark = mark_price(price="40000")
+        accepted = prepare_order_request(
+            buy,
+            client_order_id="at-usdm-percent-cap",
+            capability=capability(),
+            symbol_rules=rules,
+            at=NOW,
+            mark_price=provider_mark,
+            maximum_mark_price_age_seconds=30,
+        )
+        self.assertEqual(
+            accepted.mark_price_source_sha256,
+            provider_mark.source_sha256,
+        )
+
+        too_high = BinanceUsdmOrderIntent.create(
+            instrument_version="BTCUSDT-PERP:v1",
+            symbol="BTCUSDT",
+            side="BUY",
+            order_type="LIMIT",
+            quantity="0.01",
+            price="42000.05",
+            time_in_force="GTC",
+        )
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "PERCENT_PRICE cap"):
+            prepare_order_request(
+                too_high,
+                client_order_id="at-usdm-percent-high",
+                capability=capability(),
+                symbol_rules=rules,
+                at=NOW,
+                mark_price=provider_mark,
+                maximum_mark_price_age_seconds=30,
+            )
+
+        too_low = BinanceUsdmOrderIntent.create(
+            instrument_version="BTCUSDT-PERP:v1",
+            symbol="BTCUSDT",
+            side="SELL",
+            order_type="LIMIT",
+            quantity="0.01",
+            price="37999.95",
+            time_in_force="GTC",
+        )
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "PERCENT_PRICE floor"):
+            prepare_order_request(
+                too_low,
+                client_order_id="at-usdm-percent-low",
+                capability=capability(),
+                symbol_rules=rules,
+                at=NOW,
+                mark_price=provider_mark,
+                maximum_mark_price_age_seconds=30,
+            )
+
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "stale"):
+            prepare_order_request(
+                buy,
+                client_order_id="at-usdm-percent-stale",
+                capability=capability(),
+                symbol_rules=rules,
+                at=NOW,
+                mark_price=mark_price(
+                    price="40000",
+                    observed_at=NOW - timedelta(seconds=31),
+                ),
+                maximum_mark_price_age_seconds=30,
             )
 
     def test_market_min_notional_requires_fresh_bound_mark_price_evidence(self):

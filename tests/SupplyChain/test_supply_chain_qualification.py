@@ -24,6 +24,7 @@ from mvp.autotrade_mvp.supply_chain_qualification import (
     ModelDataRightsEvidence,
     SupplyChainEvidence,
     qualify_supply_chain,
+    supply_chain_subject_requirement,
 )
 
 
@@ -340,7 +341,10 @@ def _signed_review(value, *, refs=None, result="PASS", root=None):
         package_id="WP-64",
         protocol_id="supply-chain-review-v1",
         protocol_version="1.0.0",
-        requirement_ids=("independent-supply-chain-review",),
+        requirement_ids=(
+            "independent-supply-chain-review",
+            supply_chain_subject_requirement(value),
+        ),
         evidence_refs=_evidence_refs(value) if refs is None else tuple(refs),
         producer_id=root.producer_id,
         verifier_id=root.verifier_id,
@@ -480,6 +484,28 @@ class SupplyChainQualificationTests(unittest.TestCase):
             result.reason_codes,
         )
 
+
+    def test_signed_review_cannot_replay_semantic_claim_upgrade(self):
+        reviewed = evidence(comp=component(license_status="BLOCKED"))
+        receipt, policy = _signed_review(reviewed)
+
+        upgraded = evidence(comp=component(license_status="APPROVED"))
+        self.assertEqual(_evidence_refs(reviewed), _evidence_refs(upgraded))
+        self.assertNotEqual(
+            supply_chain_subject_requirement(reviewed),
+            supply_chain_subject_requirement(upgraded),
+        )
+
+        result = qualify_signed(
+            upgraded,
+            receipt=receipt,
+            canonical_policy=policy,
+        )
+        self.assertEqual(result.status, "FAIL")
+        self.assertIn(
+            "SUPPLY_CHAIN.TRUST_SUBJECT_MISMATCH",
+            result.reason_codes,
+        )
 
     def test_signed_review_must_cover_exact_supply_chain_evidence_set(self):
         value = evidence()

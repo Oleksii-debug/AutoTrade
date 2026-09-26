@@ -104,6 +104,14 @@
     return value;
   }
 
+  function canonicalId(value, name) {
+    const token = requiredText(value, name);
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(token)) {
+      throw new Error(name + " must be a canonical UUID");
+    }
+    return token;
+  }
+
   function requiredObject(value, name) {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
       throw new Error(name + " must be an object");
@@ -258,7 +266,7 @@
     for (const key of Object.keys(result)) {
       if (!allowed.has(key)) throw new Error("CommandResult contains non-canonical field " + key);
     }
-    const commandId = requiredText(result.command_id, "command_id");
+    const commandId = canonicalId(result.command_id, "command_id");
     if (commandId !== expectedCommandId) {
       throw new Error("CommandResult command_id does not match the submitted command");
     }
@@ -270,7 +278,7 @@
     }
     const operationId = result.operation_id === undefined
       ? null
-      : requiredText(result.operation_id, "operation_id");
+      : canonicalId(result.operation_id, "operation_id");
     if (result.status === "ACCEPTED" && operationId === null) {
       throw new Error("ACCEPTED command must provide operation_id for durable tracking");
     }
@@ -295,7 +303,7 @@
         throw new Error("OperationResult contains non-canonical field " + key);
       }
     }
-    const operationId = requiredText(result.operation_id, "operation_id");
+    const operationId = canonicalId(result.operation_id, "operation_id");
     if (operationId !== expectedOperationId) {
       throw new Error("OperationResult operation_id does not match");
     }

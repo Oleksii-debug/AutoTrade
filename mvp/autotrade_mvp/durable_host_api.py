@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Callable, Mapping
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from contracts.bindings.python.common_scalars import is_valid_common_scalar
 
@@ -614,7 +614,19 @@ class JournalBackedHostCommandStore:
                     environment=self.environment,
                     command_id=command_id,
                 )
-                if operation_id != expected_operation_id:
+                if authority_contract is None:
+                    # Pre-action-payload records were intentionally kept readable
+                    # by the merged WP-17 recovery contract. They cannot execute
+                    # because _accepted_authority_contract() fails closed, but
+                    # their historical UUID must not be rewritten into a newer
+                    # account-scoped identity during replay.
+                    try:
+                        UUID(operation_id)
+                    except (ValueError, AttributeError) as error:
+                        raise ValueError(
+                            "Host journal legacy operation identity must be a UUID"
+                        ) from error
+                elif operation_id != expected_operation_id:
                     raise ValueError(
                         "Host journal operation identity does not match canonical command scope"
                     )

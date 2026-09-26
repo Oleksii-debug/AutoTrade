@@ -340,15 +340,34 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
                 ("control/tools/reconvergence_integrity.py",),
             )
 
-    def test_canonical_workflow_enforces_pr_scope_and_reruns_on_body_edit(self):
+    def test_canonical_workflow_enforces_scope_from_trusted_base_revision(self):
         workflow = Path(
             ".github/workflows/reconvergence-integrity.yml"
         ).read_text(encoding="utf-8")
+        self.assertIn("pull_request_target:", workflow)
+        self.assertNotIn("\n  pull_request:\n", workflow)
         self.assertIn(
             "types: [opened, synchronize, reopened, edited, ready_for_review]",
             workflow,
         )
+        self.assertIn(
+            "ref: ${{ github.event.pull_request.base.sha || github.sha }}",
+            workflow,
+        )
+        self.assertIn("persist-credentials: false", workflow)
+        self.assertIn(
+            'git fetch --no-tags origin "pull/${{ github.event.pull_request.number }}/head"',
+            workflow,
+        )
+        self.assertIn(
+            'test "$(git rev-parse FETCH_HEAD)" = "${{ github.event.pull_request.head.sha }}"',
+            workflow,
+        )
         self.assertIn('--pull-request-event "$GITHUB_EVENT_PATH"', workflow)
+        self.assertNotIn(
+            "ref: ${{ github.event.pull_request.head.sha }}",
+            workflow,
+        )
 
 
 if __name__ == "__main__":

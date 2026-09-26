@@ -4,6 +4,7 @@ from decimal import Decimal
 from hashlib import sha256
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
@@ -89,7 +90,7 @@ def adapter_map():
     }
 
 
-def trusted_qualify(evidence):
+def trusted_qualify(evidence, *, signing_root=None, canonical_policy=None):
     evidence = tuple(evidence)
     with TemporaryDirectory() as directory:
         store = ArtifactStore(directory)
@@ -102,7 +103,7 @@ def trusted_qualify(evidence):
                 source_refs=[f"git:{item.source_sha}"],
                 metadata=lifecycle_evidence_payload(item),
             )
-        trust_root = attestation_root(
+        trust_root = signing_root or attestation_root(
             scopes=(
                 QualificationScope(
                     "ASSET_PROVIDER_CROSSWALK",
@@ -111,6 +112,7 @@ def trusted_qualify(evidence):
             )
         )
         trust_policy = attestation_policy(trust_root)
+        canonical_policy = canonical_policy or trust_policy
         signed = attestation(
             trust_root,
             source_sha=SOURCE,
@@ -132,19 +134,21 @@ def trusted_qualify(evidence):
             ),
             result="PASS",
         )
-        return qualify_asset_provider_crosswalk(
-            evidence,
-            exact_source_sha=SOURCE,
-            exact_adapter_shas=adapter_map(),
-            evidence_store=store,
-            qualification_receipt=SignedQualificationAttestation(
-                signed,
-                sign(signed),
-            ),
-            qualification_policy=trust_policy,
-            expected_policy_id=trust_policy.policy_id,
-            expected_policy_version=trust_policy.policy_version,
-        )
+        with patch(
+            "mvp.autotrade_mvp.qualification_attestation."
+            "load_canonical_qualification_trust_policy",
+            return_value=canonical_policy,
+        ):
+            return qualify_asset_provider_crosswalk(
+                evidence,
+                exact_source_sha=SOURCE,
+                exact_adapter_shas=adapter_map(),
+                evidence_store=store,
+                qualification_receipt=SignedQualificationAttestation(
+                    signed,
+                    sign(signed),
+                ),
+            )
 
 
 class AssetProviderCrosswalkTests(unittest.TestCase):
@@ -170,6 +174,32 @@ class AssetProviderCrosswalkTests(unittest.TestCase):
         self.assertEqual(verdict.status, "PASS")
         self.assertEqual(verdict.missing_keys, ())
         self.assertEqual(verdict.invalid_keys, ())
+        self.assertFalse(verdict.trading_authority_granted)
+
+    def test_self_selected_root_cannot_authorize_crosswalk_pass(self):
+        evidence = [complete_evidence(key) for key in advertised_lifecycle_keys()]
+        candidate_root = attestation_root(
+            scopes=(
+                QualificationScope(
+                    "ASSET_PROVIDER_CROSSWALK",
+                    "INTEGRATION",
+                ),
+            )
+        )
+        canonical_root = replace(
+            candidate_root,
+            producer_id="qualifier.canonical.crosswalk",
+        )
+        verdict = trusted_qualify(
+            evidence,
+            signing_root=candidate_root,
+            canonical_policy=attestation_policy(canonical_root),
+        )
+        self.assertEqual(verdict.status, "INCOMPLETE")
+        self.assertIn(
+            "independent_evidence_trust_invalid",
+            verdict.reason_codes,
+        )
         self.assertFalse(verdict.trading_authority_granted)
 
     def test_self_asserted_complete_matrix_is_not_terminal_pass(self):

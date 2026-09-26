@@ -29,6 +29,7 @@ UPDATE_EXE = "Update.exe"
 CANONICAL_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 THUMBPRINT = re.compile(r"^[0-9A-F]{40}$")
+MAX_VERIFIED_PE_BYTES = 512 * 1024 * 1024
 POLICY_FIELDS = {
     "schema_version",
     "enabled",
@@ -382,11 +383,18 @@ def _snapshot_file_to_private_copy(
         flags |= os.O_BINARY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    descriptor = os.open(source, flags)
+    try:
+        descriptor = os.open(source, flags)
+    except OSError as error:
+        raise AuthenticodeSigningError(
+            "signed artifact could not be opened safely"
+        ) from error
     try:
         before = os.fstat(descriptor)
         if (
-            (before.st_dev, before.st_ino) != (before_path.st_dev, before_path.st_ino)
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or (before.st_dev, before.st_ino) != (before_path.st_dev, before_path.st_ino)
             or before.st_size != expected_size
         ):
             raise AuthenticodeSigningError("signed artifact identity changed")
@@ -400,7 +408,16 @@ def _snapshot_file_to_private_copy(
             target.flush()
             os.fsync(target.fileno())
         after = os.fstat(descriptor)
-        after_path = os.lstat(source)
+        try:
+            after_path = os.lstat(source)
+        except OSError as error:
+            raise AuthenticodeSigningError(
+                "signed artifact path changed during verification"
+            ) from error
+        if after.st_nlink != 1 or after_path.st_nlink != 1:
+            raise AuthenticodeSigningError(
+                "signed artifact gained a hard-link alias during verification"
+            )
         identity = lambda value: (
             value.st_dev,
             value.st_ino,
@@ -490,6 +507,10 @@ def verify_velopack_authenticode(
                 if info.is_dir() or info.flag_bits & 0x1:
                     raise AuthenticodeSigningError(
                         f"signed package {pure.name} is not a readable regular entry"
+                    )
+                if info.file_size < 1 or info.file_size > MAX_VERIFIED_PE_BYTES:
+                    raise AuthenticodeSigningError(
+                        f"signed package {pure.name} exceeds the bounded verification size"
                     )
                 matches[pure.name] = info
             if set(matches) != {MAIN_EXE, UPDATE_EXE}:

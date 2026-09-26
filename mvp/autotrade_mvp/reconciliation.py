@@ -561,7 +561,10 @@ def provider_fill_identity_payload(fill: ProviderFillEvidence) -> dict[str, obje
     def decimal_text(value: Decimal) -> str:
         if value == 0:
             return "0"
-        return format(value.normalize(), "f")
+        # Decimal.normalize() applies the ambient context precision and can
+        # round distinct provider observations to the same checkpoint identity.
+        exact = format(value, "f")
+        return exact.rstrip("0").rstrip(".") if "." in exact else exact
 
     trade_time = (
         _instant(fill.trade_time, name="provider_fill.trade_time")

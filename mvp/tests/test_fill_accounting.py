@@ -1442,8 +1442,11 @@ class FillAccountingTests(unittest.TestCase):
             conflicting_fills = (
                 self._unexpected_fill(side="SELL"),
                 self._unexpected_fill(quantity="3"),
+                self._unexpected_fill(quantity="2.000000000000000000000000000001"),
                 self._unexpected_fill(price="101"),
+                self._unexpected_fill(price="100.000000000000000000000000000001"),
                 self._unexpected_fill(fee="2"),
+                self._unexpected_fill(fee="1.000000000000000000000000000001"),
                 self._unexpected_fill(trade_time="2026-01-01T00:00:01Z"),
                 self._unexpected_fill(evidence_refs=("sha256:other-provider-read",)),
                 self._unexpected_fill(position_side="BOTH"),

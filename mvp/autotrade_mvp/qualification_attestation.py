@@ -721,6 +721,36 @@ def _canonical_qualification_trust_policy_bytes(
     relative_policy = _CANONICAL_QUALIFICATION_TRUST_POLICY_GIT_PATH
     git_executable = _trusted_git_executable(source_root=source_root)
     try:
+        top_level = subprocess.run(
+            [git_executable, "rev-parse", "--show-toplevel"],
+            cwd=source_root,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+            env=_trusted_git_environment(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise QualificationTrustUnavailable(
+            "qualification trust source repository root is unavailable"
+        ) from error
+    if top_level.returncode != 0:
+        raise QualificationTrustUnavailable(
+            "qualification trust source repository root could not be verified"
+        )
+    try:
+        resolved_top_level = Path(top_level.stdout.strip()).resolve(strict=True)
+    except OSError as error:
+        raise QualificationTrustUnavailable(
+            "qualification trust source repository root is unavailable"
+        ) from error
+    if resolved_top_level != source_root:
+        raise QualificationTrustError(
+            "qualification trust source root is not the Git top-level"
+        )
+
+    try:
         head = subprocess.run(
             [git_executable, "rev-parse", "HEAD"],
             cwd=source_root,

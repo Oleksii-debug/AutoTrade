@@ -1622,7 +1622,12 @@ class JournalStoreTests(unittest.TestCase):
             path = f"{directory}/journal.sqlite3"
             store = JournalStore(path)
             store.append_event(event())
+            store.append_event(
+                event("evt-2", 2, {"kind": "fill", "quantity": "2"})
+            )
 
+            # Keep an integer MAX(sequence)=2 so a max-only integrity check would
+            # incorrectly hide the corrupted earlier authority row.
             connection = sqlite3.connect(path)
             try:
                 connection.execute(
@@ -1635,19 +1640,41 @@ class JournalStoreTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 ValueError,
-                "journal sequence authority is not a canonical positive integer",
+                "contiguous canonical positive integer series",
             ):
                 JournalStore(path).current_journal_sequence()
 
             with self.assertRaisesRegex(
                 ValueError,
-                "journal sequence authority is not a canonical positive integer",
+                "contiguous canonical positive integer series",
             ):
                 JournalStore(path).save_global_projection_checkpoint(
                     projection_name="portfolio",
-                    journal_sequence=1,
+                    journal_sequence=2,
                     state={"net": "1"},
                 )
+
+    def test_missing_interior_journal_sequence_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+            store.append_event(
+                event("evt-2", 2, {"kind": "fill", "quantity": "2"})
+            )
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute("DELETE FROM events WHERE event_id = 'evt-1'")
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "contiguous canonical positive integer series",
+            ):
+                JournalStore(path).current_journal_sequence()
 
     def test_global_projection_checkpoint_fractional_cut_tamper_fails_closed(self):
         with TemporaryDirectory() as directory:

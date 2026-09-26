@@ -1157,6 +1157,37 @@ class IndependentRiskTests(unittest.TestCase):
                 policy(max_single_notional="10000"),
             )
 
+    def test_same_symbol_derivative_exposure_requires_equivalent_evidence(self):
+        intent = RiskIntent.create(
+            symbol="ABC", side="BUY", quantity="1", price="5",
+            expected_state_version=7, instrument_type="OPTION",
+        )
+        for positions, reservations in (
+            ({"ABC": "2"}, {}),
+            ({"ABC": "0"}, {"ABC": "2"}),
+            ({"ABC": "2"}, {"ABC": "-2"}),
+        ):
+            with self.subTest(positions=positions, reservations=reservations):
+                decision = evaluate_risk(
+                    intent,
+                    context(
+                        positions=positions,
+                        reserved_position_delta=reservations,
+                        marks={"ABC": "5"},
+                        instrument_types={"ABC": "OPTION"},
+                        equivalent_exposure_per_unit={},
+                        stress_scenarios=({"ABC": "-0.10"},),
+                    ),
+                    policy(max_single_notional="10000"),
+                )
+                rule = next(
+                    item for item in decision.rules
+                    if item.rule == "derivative_equivalent_exposure"
+                )
+                self.assertFalse(rule.passed)
+                self.assertEqual(rule.observed, "MISSING:ABC")
+                self.assertFalse(decision.admitted)
+
     def test_zero_pre_intent_position_may_use_intent_family(self):
         decision = evaluate_risk(
             RiskIntent.create(

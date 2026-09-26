@@ -33,7 +33,42 @@
       "detail": "Exact release dependency graph has no qualified vulnerability/advisory review."
     }
   ],
-  "dotnet_package_dependencies": [],
+  "dotnet_lock_graph": [
+    {
+      "dependencies": {
+        "net10.0": {}
+      },
+      "lock_blob_sha": "b9dcfe10e383ea12f3e6db7629982cf0a533c7ea",
+      "lock_file": "src/AutoTrade.Contracts/packages.lock.json",
+      "project": "src/AutoTrade.Contracts/AutoTrade.Contracts.csproj",
+      "version": 1
+    },
+    {
+      "dependencies": {
+        "net10.0-windows7.0": {
+          "Velopack": {
+            "contentHash": "wQN38beVrAf0WzFMnZtl7UmwxqwaJ7xVYypqITdOI4YUTYch2UvE+xAjg9msfaitVDtgfWeIcGsjRNQ65C03ZQ==",
+            "requested": "[1.2.158]",
+            "resolved": "1.2.158",
+            "type": "Direct"
+          },
+          "autotrade.contracts": {
+            "type": "Project"
+          }
+        }
+      },
+      "lock_blob_sha": "b1e7d7b540398b95d24dd9c1b134884ed4a197e0",
+      "lock_file": "src/AutoTrade.Desktop/packages.lock.json",
+      "project": "src/AutoTrade.Desktop/AutoTrade.Desktop.csproj",
+      "version": 1
+    }
+  ],
+  "dotnet_package_dependencies": [
+    {
+      "name": "Velopack",
+      "version": "1.2.158"
+    }
+  ],
   "dotnet_sdk": "10.0.100",
   "inspected_components": [
     {
@@ -121,6 +156,10 @@
   "schema_version": "1.0.0",
   "source_inventory": {
     "components_blob_sha": "cba907e56f9442e2be0073955d97c5b52fbeac60",
+    "dotnet_lock_blob_shas": {
+      "src/AutoTrade.Contracts/packages.lock.json": "b9dcfe10e383ea12f3e6db7629982cf0a533c7ea",
+      "src/AutoTrade.Desktop/packages.lock.json": "b1e7d7b540398b95d24dd9c1b134884ed4a197e0"
+    },
     "global_json_blob_sha": "b4ffa1877d371d285f4a7ddf850071845a8dfe27",
     "requirements_dev_blob_sha": "e0a5663bec1c2618986eeb27e91a72c6e3b2d054"
   }

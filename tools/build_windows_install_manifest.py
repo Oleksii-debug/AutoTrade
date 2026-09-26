@@ -458,6 +458,50 @@ def verify_release_bundle(bundle: Path) -> dict[str, object]:
     }
 
 
+
+def _prepare_atomic_destination(path: Path, *, name: str) -> Path:
+    """Validate a release-tool output and clear only a stale regular temp file."""
+
+    if path.is_symlink():
+        raise InstallerManifestError(f"{name} cannot be a symlink")
+    if path.exists() and not path.is_file():
+        raise InstallerManifestError(f"{name} must be a regular file or absent")
+    temporary = path.with_name(path.name + ".tmp")
+    if temporary.is_symlink():
+        raise InstallerManifestError(f"{name} temporary path cannot be a symlink")
+    if temporary.exists():
+        if not temporary.is_file():
+            raise InstallerManifestError(
+                f"{name} temporary path must be a regular file or absent"
+            )
+        temporary.unlink()
+    return temporary
+
+
+def _write_prepared_atomic(
+    destination: Path,
+    temporary: Path,
+    data: bytes,
+    *,
+    name: str,
+) -> None:
+    """Write through an exclusive temp file, then replace the destination."""
+
+    try:
+        try:
+            with temporary.open("xb") as stream:
+                stream.write(data)
+                stream.flush()
+        except FileExistsError as error:
+            raise InstallerManifestError(
+                f"{name} temporary path changed before creation"
+            ) from error
+        temporary.replace(destination)
+    finally:
+        if temporary.exists() or temporary.is_symlink():
+            temporary.unlink()
+
+
 def build_installer_input_manifest(
     *,
     bundle: Path,
@@ -522,22 +566,30 @@ def build_installer_input_manifest(
         "files": verified["files"],
     }
     payload = _canonical_bytes(manifest)
-    if output.exists() and output.is_dir():
-        raise InstallerManifestError("installer manifest output cannot be a directory")
     output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_name(output.name + ".tmp")
-    try:
-        temporary.write_bytes(payload)
-        temporary.replace(output)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
-    manifest_digest = sha256(payload).hexdigest()
     digest_path = output.with_suffix(output.suffix + ".sha256")
-    digest_path.write_text(
-        f"{manifest_digest}  {output.name}\n",
-        encoding="utf-8",
-        newline="\n",
+    temporary = _prepare_atomic_destination(
+        output,
+        name="installer manifest output",
+    )
+    digest_temporary = _prepare_atomic_destination(
+        digest_path,
+        name="installer manifest digest output",
+    )
+    manifest_digest = sha256(payload).hexdigest()
+    digest_payload = f"{manifest_digest}  {output.name}\n".encode("utf-8")
+
+    _write_prepared_atomic(
+        output,
+        temporary,
+        payload,
+        name="installer manifest output",
+    )
+    _write_prepared_atomic(
+        digest_path,
+        digest_temporary,
+        digest_payload,
+        name="installer manifest digest output",
     )
     return {
         "output": str(output),

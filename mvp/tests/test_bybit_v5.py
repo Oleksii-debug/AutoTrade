@@ -1814,6 +1814,89 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertTrue(future_end.pagination_complete)
         self.assertFalse(future_end.provider_semantics_exclude_execution)
 
+    def test_offline_recovery_past_no_fill_retention_stays_unknown(self):
+        observation = bound_order_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "",
+                    "list": [],
+                },
+            },
+            start_time_ms=1790190000000,
+            end_time_ms=1790280000000,
+            client_order_id="client_retention_expired",
+        )
+        order_history = order_history_coverage_from_pages(
+            (observation,),
+            consistency_horizon_satisfied=True,
+            qualified_exclusion_semantics=True,
+            retention_policy_id=BYBIT_ORDER_HISTORY_NO_FILL_RETENTION_POLICY_ID,
+        )
+        self.assertFalse(order_history.provider_semantics_exclude_execution)
+
+        common = {
+            "account_id": "paper-1",
+            "environment": "PAPER",
+            "provider_environment": "TESTNET",
+            "coverage_start": "2026-09-23T19:00:00Z",
+            "coverage_end": "2026-09-24T20:00:00Z",
+            "pagination_complete": True,
+            "consistency_horizon_satisfied": True,
+            "qualified_exclusion_semantics": True,
+        }
+        absence_coverage = (
+            coverage_evidence(surface="OPEN_ORDERS", **common),
+            order_history,
+            coverage_evidence(surface="EXECUTIONS", **common),
+            coverage_evidence(surface="ACTIVITIES", **common),
+        )
+        unknown = UnknownSubmission.create(
+            attempt_id="attempt-retention-expired",
+            intent_id="intent-retention-expired",
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+            provider_environment="TESTNET",
+            client_order_id="client_retention_expired",
+            started_at="2026-09-23T19:00:00Z",
+        )
+        result = reconcile_account(
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+            provider_environment="TESTNET",
+            local_cash={},
+            provider_cash={},
+            local_positions={},
+            provider_positions={},
+            local_execution_ids=(),
+            provider_fills=(),
+            snapshot_consistency=SnapshotConsistencyEvidence(
+                provider_id="BYBIT",
+                account_id="paper-1",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                mode="ATOMIC",
+                query_started_at="2026-09-24T19:59:00Z",
+                query_completed_at="2026-09-24T20:00:00Z",
+            ),
+            unknown_submissions=(unknown,),
+            searched_client_order_ids=("client_retention_expired",),
+            coverage_start="2026-09-23T19:00:00Z",
+            coverage_end="2026-09-24T20:00:00Z",
+            pagination_complete=True,
+            absence_coverage=absence_coverage,
+        )
+        resolution = result.submission_resolutions[0]
+        self.assertEqual(resolution.outcome, "UNKNOWN")
+        self.assertEqual(
+            resolution.evidence_reason,
+            "absence_surface_evidence_incomplete",
+        )
+        self.assertTrue(result.blocks_new_risk)
+
     def test_order_history_coverage_rejects_mixed_capability_snapshots(self):
         first_capability = read_capability()
         second_capability = read_capability()

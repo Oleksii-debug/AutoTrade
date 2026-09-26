@@ -494,6 +494,9 @@ class JournalBackedHostApiTests(unittest.TestCase):
         journal = JournalStore(self.path)
         action_payload = {
             "schema_version": 1,
+            "command_id": "manual-command",
+            "account_id": "paper-account-1",
+            "environment": "PAPER",
             "expected_authority_epoch": "0",
             "expected_authority_version": "0",
             "reason_code": "OPERATOR_REQUEST",
@@ -982,6 +985,69 @@ class JournalBackedHostApiTests(unittest.TestCase):
             len(journal.load_events("authority_state", "canonical")),
             authority_event_count,
         )
+
+    def test_restart_resumes_after_scope_block_committed_before_policy_revocation(self):
+        journal = JournalStore(self.path)
+        AuthorityService(journal).register_policy(
+            self.authority_policy("exposure-policy")
+        )
+        store = self.store(now="2030-01-01T00:00:00Z")
+        accepted = store.submit(
+            self.command(payload={"reason_code": "EMERGENCY_STOP"})
+        )
+        event = store.events_after(0)[0]
+        action_payload = event.payload["action_payload"]
+        reason = "host_operator_command:BLOCK_NEW_EXPOSURE:EMERGENCY_STOP"
+
+        AuthorityService(JournalStore(self.path)).block_new_exposure(
+            account_id=event.payload["account_id"],
+            environment=event.payload["environment"],
+            reason=reason,
+            blocked_at=event.payload["started_at"],
+            command_id=event.payload["command_id"],
+        )
+        before = JournalStore(self.path).load_events(
+            "authority_state",
+            "canonical",
+        )
+        self.assertEqual(
+            [item["event_type"] for item in before],
+            ["AuthorityPolicyRegistered", "AuthorityNewExposureBlocked"],
+        )
+
+        restarted = self.store(now="2030-01-01T00:00:01Z")
+        completed = restarted.execute_authority_operation(accepted.operation_id)
+        self.assertEqual(completed.phase, "SUCCEEDED")
+        self.assertEqual(
+            completed.affected_refs,
+            (
+                "authority-new-exposure-block:paper-account-1:PAPER",
+                "authority-policy:exposure-policy",
+            ),
+        )
+        after = JournalStore(self.path).load_events(
+            "authority_state",
+            "canonical",
+        )
+        self.assertEqual(
+            [item["event_type"] for item in after],
+            [
+                "AuthorityPolicyRegistered",
+                "AuthorityNewExposureBlocked",
+                "AuthorityPolicyRevoked",
+            ],
+        )
+        block_events = [
+            item
+            for item in after
+            if item["event_type"] == "AuthorityNewExposureBlocked"
+        ]
+        self.assertEqual(len(block_events), 1)
+        self.assertEqual(
+            block_events[0]["payload"]["command_id"],
+            action_payload["command_id"],
+        )
+
 
     def test_success_cannot_forge_affected_refs_with_real_authority_evidence(self):
         journal = JournalStore(self.path)

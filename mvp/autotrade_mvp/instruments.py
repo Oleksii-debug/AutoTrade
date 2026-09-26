@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from hashlib import sha256
+import json
 import re
 from types import MappingProxyType
 from typing import Iterable, Mapping
@@ -563,6 +565,25 @@ class InstrumentVersion:
             ]
         return payload
 
+    def metadata_evidence_binding(self) -> str:
+        """Digest the exact canonical instrument-version facts evidenced by metadata.
+
+        The evidence references themselves are excluded to avoid circular identity:
+        an immutable ArtifactStore manifest binds to these economic/version facts,
+        and InstrumentRegistry separately verifies that manifest and object.
+        """
+
+        payload = self.to_contract_dict()
+        payload.pop("metadata_evidence", None)
+        canonical = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        return "sha256:" + sha256(canonical).hexdigest()
+
 
 class InstrumentRegistry:
     """Append-only registry whose history remains stable across metadata changes."""
@@ -737,6 +758,23 @@ class InstrumentRegistry:
             if manifest.get("sha256") != expected_digest:
                 raise InstrumentRegistryError(
                     "instrument metadata evidence digest mismatch"
+                )
+            if (
+                manifest.get("media_type")
+                != "application/vnd.autotrade.instrument-metadata+json"
+            ):
+                raise InstrumentRegistryError(
+                    "instrument metadata evidence media type is invalid"
+                )
+            metadata = manifest.get("metadata")
+            if (
+                type(metadata) is not dict
+                or metadata.get("kind") != "instrument-metadata"
+                or metadata.get("instrument_version_binding")
+                != version.metadata_evidence_binding()
+            ):
+                raise InstrumentRegistryError(
+                    "instrument metadata evidence is not bound to this instrument version"
                 )
             committed_raw = manifest.get("created_at")
             if not isinstance(committed_raw, str):

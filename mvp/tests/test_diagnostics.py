@@ -165,6 +165,10 @@ class DiagnosticTraceTests(unittest.TestCase):
             "header_text": "X-TXC-SIGNATURE: WHITEBIT-TEXT-SIGNATURE",
             "sentinel_prefixed": "X-TXC-SIGNATURE=[REDACTED]WHITEBIT-SENTINEL-BYPASS",
             "sentinel_spaced": "api_secret=[REDACTED] WHITEBIT-SPACED-SENTINEL-BYPASS",
+            "sentinel_bracket_suffix": "api_secret=[REDACTED]ABC]WHITEBIT-BRACKET-SUFFIX",
+            "plain_bracket_secret": "api_secret=ABC]WHITEBIT-PLAIN-BRACKET-SECRET",
+            "sentinel_brace_suffix": "api_secret=[REDACTED]ABC}WHITEBIT-BRACE-SUFFIX",
+            "plain_brace_secret": "api_secret=ABC}WHITEBIT-PLAIN-BRACE-SECRET",
             "password_spaced": "password=TOP SECRET",
             "api_secret_spaced": "api_secret=ABC DEF",
             "signed_url": (
@@ -196,6 +200,14 @@ class DiagnosticTraceTests(unittest.TestCase):
         self.assertNotIn(
             "WHITEBIT-SPACED-SENTINEL-BYPASS", redacted["sentinel_spaced"]
         )
+        self.assertEqual(redacted["sentinel_bracket_suffix"], "api_secret=[REDACTED]")
+        self.assertEqual(redacted["plain_bracket_secret"], "api_secret=[REDACTED]")
+        self.assertEqual(redacted["sentinel_brace_suffix"], "api_secret=[REDACTED]")
+        self.assertEqual(redacted["plain_brace_secret"], "api_secret=[REDACTED]")
+        self.assertNotIn("WHITEBIT-BRACKET-SUFFIX", redacted["sentinel_bracket_suffix"])
+        self.assertNotIn("WHITEBIT-PLAIN-BRACKET-SECRET", redacted["plain_bracket_secret"])
+        self.assertNotIn("WHITEBIT-BRACE-SUFFIX", redacted["sentinel_brace_suffix"])
+        self.assertNotIn("WHITEBIT-PLAIN-BRACE-SECRET", redacted["plain_brace_secret"])
         self.assertEqual(redacted["password_spaced"], "password=[REDACTED]")
         self.assertEqual(redacted["api_secret_spaced"], "api_secret=[REDACTED]")
         self.assertNotIn("TOP SECRET", redacted["password_spaced"])

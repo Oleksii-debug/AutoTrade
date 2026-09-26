@@ -167,7 +167,10 @@ def _normalize_nested_mapping(values, *, name: str) -> dict[str, dict[str, Decim
 def _canonical_decimal_text(value: Decimal) -> str:
     if value == 0:
         return "0"
-    return format(value.normalize(), "f")
+    # normalize() rounds to the ambient Decimal context precision. Risk and
+    # authority evidence must retain every provider-supplied significant digit.
+    exact = format(value, "f")
+    return exact.rstrip("0").rstrip(".") if "." in exact else exact
 
 
 def stress_scenario_digest(scenario: Mapping[str, object]) -> str:
@@ -759,6 +762,8 @@ class RiskContext:
     option_exercise_cash_required: Decimal | None = None
     option_exercise_cash_available: Decimal | None = None
     futures_delivery_headroom_seconds: Mapping[str, Decimal] | None = None
+    equivalent_exposure_per_unit: Mapping[str, Decimal] | None = None
+    instrument_types: Mapping[str, str] | None = None
 
     @classmethod
     def create(
@@ -796,6 +801,8 @@ class RiskContext:
         option_exercise_cash_required=None,
         option_exercise_cash_available=None,
         futures_delivery_headroom_seconds: Mapping[str, object] | None = None,
+        equivalent_exposure_per_unit: Mapping[str, object] | None = None,
+        instrument_types: Mapping[str, str] | None = None,
     ) -> "RiskContext":
         if not isinstance(state_version, int) or isinstance(state_version, bool) or state_version < 0:
             raise ValueError("state_version must be a non-negative integer")
@@ -834,6 +841,26 @@ class RiskContext:
             venues or {},
             name="venues",
         )
+        normalized_instrument_types = _normalize_text_mapping(
+            instrument_types or {},
+            name="instrument_types",
+        )
+        normalized_instrument_types = {
+            symbol: value.upper()
+            for symbol, value in normalized_instrument_types.items()
+        }
+        invalid_instrument_types = sorted(
+            {
+                value
+                for value in normalized_instrument_types.values()
+                if value not in RISK_INSTRUMENT_TYPES
+            }
+        )
+        if invalid_instrument_types:
+            raise ValueError(
+                "Unsupported context instrument type(s): "
+                + ", ".join(invalid_instrument_types)
+            )
         normalized_liquidity = _normalize_mapping(
             liquidity_capacity or {},
             name="liquidity_capacity",
@@ -900,6 +927,16 @@ class RiskContext:
                 name=f"futures delivery headroom {key}",
             ),
         )
+        normalized_equivalent_exposure = _normalize_mapping(
+            equivalent_exposure_per_unit or {},
+            name="equivalent_exposure_per_unit",
+            parser=lambda value, key: _decimal(
+                value,
+                name=f"equivalent exposure per unit {key}",
+            ),
+        )
+        if any(value == 0 for value in normalized_equivalent_exposure.values()):
+            raise ValueError("equivalent exposure per unit cannot be zero")
         if not isinstance(stress_scenarios, Sequence) or isinstance(
             stress_scenarios,
             (str, bytes),
@@ -1068,6 +1105,8 @@ class RiskContext:
             option_exercise_cash_required=normalized_exercise_required,
             option_exercise_cash_available=normalized_exercise_available,
             futures_delivery_headroom_seconds=normalized_delivery_headroom,
+            equivalent_exposure_per_unit=normalized_equivalent_exposure,
+            instrument_types=normalized_instrument_types,
         )
 
 
@@ -1408,6 +1447,8 @@ def evaluate_risk(
         option_exercise_cash_required=context.option_exercise_cash_required,
         option_exercise_cash_available=context.option_exercise_cash_available,
         futures_delivery_headroom_seconds=context.futures_delivery_headroom_seconds,
+        equivalent_exposure_per_unit=context.equivalent_exposure_per_unit,
+        instrument_types=context.instrument_types,
     )
     policy = RiskPolicy.create(
         max_abs_position=policy.max_abs_position,
@@ -1446,6 +1487,76 @@ def evaluate_risk(
     if intent.symbol not in context.marks:
         raise ValueError(f"Missing mark for {intent.symbol}")
     signed = intent.quantity if intent.side == "BUY" else -intent.quantity
+    derivative_requires_equivalent_exposure = intent.instrument_type in {
+        "FUTURE",
+        "PERPETUAL",
+        "OPTION",
+    }
+    equivalent_exposure_map = context.equivalent_exposure_per_unit or {}
+    derivative_instrument_types = {"FUTURE", "PERPETUAL", "OPTION"}
+    context_instrument_types = context.instrument_types or {}
+    declared_intent_type = context_instrument_types.get(intent.symbol)
+    if declared_intent_type is not None and declared_intent_type != intent.instrument_type:
+        raise ValueError(
+            "context instrument type does not match intent instrument_type"
+        )
+    directional_positive_types = {"FUTURE", "PERPETUAL"}
+    for symbol, instrument_type in context_instrument_types.items():
+        if (
+            instrument_type in directional_positive_types
+            and symbol in equivalent_exposure_map
+            and equivalent_exposure_map[symbol] <= 0
+        ):
+            raise ValueError(
+                f"{instrument_type} equivalent exposure per unit must be positive for {symbol}"
+            )
+    if (
+        intent.instrument_type in directional_positive_types
+        and intent.symbol in equivalent_exposure_map
+        and equivalent_exposure_map[intent.symbol] <= 0
+    ):
+        raise ValueError(
+            f"{intent.instrument_type} equivalent exposure per unit must be positive for {intent.symbol}"
+        )
+    scoped_position_quantities = {
+        **context.positions,
+        **{
+            symbol: context.positions.get(symbol, Decimal("0")) + delta
+            for symbol, delta in context.reserved_position_delta.items()
+        },
+    }
+    exposed_symbols = {
+        symbol
+        for symbol, quantity in scoped_position_quantities.items()
+        if quantity != 0
+    }
+    missing_instrument_type_symbols = tuple(
+        sorted(
+            symbol
+            for symbol in exposed_symbols
+            if symbol != intent.symbol
+            and symbol not in context_instrument_types
+        )
+    )
+    required_equivalent_symbols = {
+        symbol
+        for symbol in exposed_symbols
+        if (
+            intent.instrument_type
+            if symbol == intent.symbol
+            else context_instrument_types.get(symbol)
+        )
+        in derivative_instrument_types
+    }
+    if derivative_requires_equivalent_exposure:
+        required_equivalent_symbols.add(intent.symbol)
+    missing_equivalent_symbols = tuple(
+        sorted(required_equivalent_symbols - set(equivalent_exposure_map))
+    )
+    derivative_exposure_evidenced = (
+        not missing_instrument_type_symbols
+        and not missing_equivalent_symbols
+    )
     current = context.positions.get(intent.symbol, Decimal("0"))
     reserved = context.reserved_position_delta.get(intent.symbol, Decimal("0"))
     base_position = current + reserved
@@ -1461,13 +1572,23 @@ def evaluate_risk(
     if missing_marks:
         raise ValueError(f"Missing marks for positions: {', '.join(sorted(missing_marks))}")
 
+    def exposure_per_unit(symbol: str) -> Decimal:
+        instrument_type = (
+            intent.instrument_type
+            if symbol == intent.symbol
+            else context_instrument_types.get(symbol)
+        )
+        if instrument_type in derivative_instrument_types:
+            return equivalent_exposure_map.get(symbol, context.marks[symbol])
+        return context.marks[symbol]
+
     base_notionals = {
-        symbol: qty * context.marks[symbol]
+        symbol: qty * exposure_per_unit(symbol)
         for symbol, qty in base_positions.items()
         if qty != 0
     }
     notionals = {
-        symbol: qty * context.marks[symbol]
+        symbol: qty * exposure_per_unit(symbol)
         for symbol, qty in projected_positions.items()
         if qty != 0
     }
@@ -1477,8 +1598,11 @@ def evaluate_risk(
     net = abs(sum(notionals.values(), Decimal("0")))
     gross_leverage = gross / context.equity
     net_leverage = net / context.equity
-    mark_notional = abs(resulting * context.marks[intent.symbol])
-    intent_notional = intent.quantity * intent.price
+    mark_notional = abs(resulting * exposure_per_unit(intent.symbol))
+    intent_notional = max(
+        intent.quantity * intent.price,
+        abs(intent.quantity * exposure_per_unit(intent.symbol)),
+    )
     single_notional = max(mark_notional, intent_notional)
 
     asset_concentration = Decimal("0")
@@ -1751,6 +1875,36 @@ def evaluate_risk(
     )
 
     rules: list[RiskRuleResult] = []
+    rules.append(
+        RiskRuleResult(
+            "derivative_equivalent_exposure",
+            derivative_exposure_evidenced,
+            (
+                _canonical_decimal_text(equivalent_exposure_map[intent.symbol])
+                if derivative_exposure_evidenced
+                and derivative_requires_equivalent_exposure
+                else (
+                    "MISSING_TYPE:" + ",".join(missing_instrument_type_symbols)
+                    if missing_instrument_type_symbols
+                    else (
+                        "MISSING:" + ",".join(missing_equivalent_symbols)
+                        if missing_equivalent_symbols
+                        else "NOT_REQUIRED"
+                    )
+                )
+            ),
+            "REQUIRED_FOR_DERIVATIVE",
+            (
+                "instrument family and derivative equivalent exposure are evidenced"
+                if derivative_exposure_evidenced
+                else (
+                    "nonzero portfolio exposure lacks canonical instrument family"
+                    if missing_instrument_type_symbols
+                    else "derivative leverage cannot use premium/mark as exposure proxy"
+                )
+            ),
+        )
+    )
 
     def add(rule: str, passed: bool, observed, limit, reason: str) -> None:
         observed_text = (

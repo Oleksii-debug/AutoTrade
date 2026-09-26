@@ -163,6 +163,14 @@ def context(**overrides):
         capability_allowed=True,
         borrow_available=True,
         stress_scenarios=({"ABC": "-0.10", "XYZ": "-0.20"},),
+        equivalent_exposure_per_unit={"ABC": "100", "XYZ": "50"},
+        instrument_types={
+            # ABC is the intent instrument in most legacy tests; its exact
+            # type comes from the RiskIntent under test, not a fixture guess.
+            "XYZ": "GENERIC",
+            "CORE": "GENERIC",
+            "HEDGE": "GENERIC",
+        },
     )
     values.update(overrides)
     return RiskContext.create(**values)
@@ -982,6 +990,243 @@ class IndependentRiskTests(unittest.TestCase):
             context(option_deliverable_verified="true")
         with self.assertRaises(TypeError):
             policy(require_option_exercise_evidence="true")
+
+    def test_derivative_equivalent_exposure_blocks_missing_evidence_and_drives_leverage(self):
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="1",
+            price="5",
+            expected_state_version=7,
+            instrument_type="OPTION",
+        )
+
+        missing = evaluate_risk(
+            intent,
+            context(
+                positions={"ABC": "0"},
+                marks={"ABC": "5"},
+                equivalent_exposure_per_unit={},
+                stress_scenarios=({"ABC": "-0.10"},),
+            ),
+            policy(
+                max_single_notional="1000",
+                max_gross_leverage="1",
+                max_net_leverage="1",
+            ),
+        )
+        missing_rule = next(
+            item
+            for item in missing.rules
+            if item.rule == "derivative_equivalent_exposure"
+        )
+        self.assertFalse(missing_rule.passed)
+        self.assertEqual(missing_rule.observed, "MISSING:ABC")
+        self.assertFalse(missing.admitted)
+
+        evidenced = evaluate_risk(
+            intent,
+            context(
+                equity="1000",
+                positions={"ABC": "0"},
+                marks={"ABC": "5"},
+                equivalent_exposure_per_unit={"ABC": "750"},
+                stress_scenarios=({"ABC": "-0.10"},),
+            ),
+            policy(
+                max_single_notional="1000",
+                max_gross_leverage="1",
+                max_net_leverage="1",
+            ),
+        )
+        self.assertTrue(
+            next(
+                item
+                for item in evidenced.rules
+                if item.rule == "derivative_equivalent_exposure"
+            ).passed
+        )
+        self.assertEqual(evidenced.gross_leverage, Decimal("0.75"))
+        self.assertEqual(evidenced.net_leverage, Decimal("0.75"))
+        self.assertEqual(evidenced.worst_stress_loss, Decimal("75"))
+        self.assertTrue(evidenced.admitted)
+
+    def test_existing_derivative_position_without_equivalent_exposure_fails_closed(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="1",
+                price="100",
+                expected_state_version=7,
+                instrument_type="EQUITY",
+            ),
+            context(
+                positions={"ABC": "0", "XYZ": "10"},
+                marks={"ABC": "100", "XYZ": "1"},
+                instrument_types={"XYZ": "OPTION"},
+                equivalent_exposure_per_unit={"ABC": "100"},
+                stress_scenarios=({"ABC": "-0.10", "XYZ": "-0.10"},),
+            ),
+            policy(
+                max_single_notional="10000",
+                max_gross_leverage="10",
+                max_net_leverage="10",
+            ),
+        )
+        rule = next(
+            item
+            for item in decision.rules
+            if item.rule == "derivative_equivalent_exposure"
+        )
+        self.assertFalse(rule.passed)
+        self.assertEqual(rule.observed, "MISSING:XYZ")
+        self.assertFalse(decision.admitted)
+
+    def test_existing_position_without_instrument_type_cannot_use_mark_as_exposure(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="1",
+                price="100",
+                expected_state_version=7,
+                instrument_type="EQUITY",
+            ),
+            context(
+                positions={"ABC": "0", "XYZ": "10"},
+                marks={"ABC": "100", "XYZ": "1"},
+                instrument_types={"ABC": "EQUITY"},
+                equivalent_exposure_per_unit={"ABC": "100"},
+                stress_scenarios=({"ABC": "-0.10", "XYZ": "-0.10"},),
+            ),
+            policy(
+                max_single_notional="10000",
+                max_gross_leverage="10",
+                max_net_leverage="10",
+            ),
+        )
+        rule = next(
+            item
+            for item in decision.rules
+            if item.rule == "derivative_equivalent_exposure"
+        )
+        self.assertFalse(rule.passed)
+        self.assertEqual(rule.observed, "MISSING_TYPE:XYZ")
+        self.assertFalse(decision.admitted)
+
+    def test_derivative_equivalent_exposure_rejects_context_type_mismatch(self):
+        intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="1",
+            price="5",
+            expected_state_version=7,
+            instrument_type="OPTION",
+        )
+        with self.assertRaisesRegex(ValueError, "context instrument type"):
+            evaluate_risk(
+                intent,
+                context(
+                    positions={"ABC": "0"},
+                    marks={"ABC": "5"},
+                    instrument_types={"ABC": "FUTURE"},
+                    equivalent_exposure_per_unit={"ABC": "100"},
+                    stress_scenarios=({"ABC": "-0.10"},),
+                ),
+                policy(),
+            )
+
+    def test_future_and_perpetual_equivalent_exposure_cannot_reverse_direction(self):
+        for instrument_type in ("FUTURE", "PERPETUAL"):
+            with self.subTest(instrument_type=instrument_type):
+                intent = RiskIntent.create(
+                    symbol="ABC",
+                    side="BUY",
+                    quantity="1",
+                    price="100",
+                    expected_state_version=7,
+                    instrument_type=instrument_type,
+                )
+                with self.assertRaisesRegex(ValueError, "must be positive"):
+                    evaluate_risk(
+                        intent,
+                        context(
+                            positions={"ABC": "0"},
+                            marks={"ABC": "100"},
+                            instrument_types={"ABC": instrument_type},
+                            equivalent_exposure_per_unit={"ABC": "-100"},
+                            stress_scenarios=({"ABC": "-0.10"},),
+                        ),
+                        policy(),
+                    )
+
+    def test_derivative_equivalent_exposure_can_reverse_direction_for_put_delta(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="2",
+                price="4",
+                expected_state_version=7,
+                instrument_type="OPTION",
+            ),
+            context(
+                positions={"ABC": "0"},
+                marks={"ABC": "4"},
+                equivalent_exposure_per_unit={"ABC": "-300"},
+                stress_scenarios=({"ABC": "-0.10"},),
+            ),
+            policy(
+                max_single_notional="1000",
+                max_gross_leverage="1",
+                max_net_leverage="1",
+            ),
+        )
+        self.assertEqual(decision.gross_leverage, Decimal("0.6"))
+        self.assertEqual(decision.net_leverage, Decimal("0.6"))
+        # Signed equivalent exposure makes a negative underlying shock profitable
+        # for this simplified put-delta exposure, so worst loss is zero.
+        self.assertEqual(decision.worst_stress_loss, Decimal("0"))
+        self.assertTrue(decision.admitted)
+
+    def test_equivalent_exposure_rejects_float_and_zero(self):
+        with self.assertRaises(TypeError):
+            context(equivalent_exposure_per_unit={"ABC": 100.0})
+        with self.assertRaisesRegex(ValueError, "cannot be zero"):
+            context(equivalent_exposure_per_unit={"ABC": "0"})
+
+    def test_cash_instrument_cannot_reduce_risk_with_equivalent_exposure_override(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="1",
+                price="100",
+                expected_state_version=7,
+                instrument_type="EQUITY",
+            ),
+            context(
+                equity="1000",
+                positions={"ABC": "0"},
+                marks={"ABC": "100"},
+                equivalent_exposure_per_unit={"ABC": "1"},
+                stress_scenarios=({"ABC": "-0.10"},),
+            ),
+            policy(
+                max_single_notional="50",
+                max_gross_leverage="10",
+                max_net_leverage="10",
+            ),
+        )
+        self.assertEqual(decision.gross_leverage, Decimal("0.1"))
+        self.assertEqual(decision.net_leverage, Decimal("0.1"))
+        single_notional = next(
+            item for item in decision.rules if item.rule == "single_notional"
+        )
+        self.assertFalse(single_notional.passed)
+        self.assertEqual(single_notional.observed, "100")
+        self.assertFalse(decision.admitted)
 
     def test_future_new_risk_requires_delivery_headroom_evidence(self):
         intent = RiskIntent.create(
@@ -1833,6 +2078,22 @@ class IndependentRiskTests(unittest.TestCase):
     def test_risk_decision_fingerprint_rejects_wrong_type(self):
         with self.assertRaises(TypeError):
             risk_decision_fingerprint({"admitted": True})
+
+    def test_stress_identity_keeps_digits_beyond_decimal_context_precision(self):
+        first = "0.100000000000000000000000000001"
+        second = "0.100000000000000000000000000002"
+        self.assertNotEqual(
+            _canonical_decimal_text(Decimal(first)),
+            _canonical_decimal_text(Decimal(second)),
+        )
+        self.assertNotEqual(
+            stress_scenario_digest({"ABC": first}),
+            stress_scenario_digest({"ABC": second}),
+        )
+        self.assertEqual(
+            stress_scenario_digest({"ABC": "0.1000"}),
+            stress_scenario_digest({"ABC": "0.1"}),
+        )
 
 
 if __name__ == "__main__":

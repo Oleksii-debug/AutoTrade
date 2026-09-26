@@ -15,6 +15,7 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "provenance" / "release-dependency-manifest.json"
 PIN = re.compile(r"^([A-Za-z0-9_.-]+)==([^=\s]+)$")
+EXACT_NUGET_VERSION = re.compile(r"^\[([0-9][A-Za-z0-9.+-]*)\]$")
 GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 GIT_OBJECT_ID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 REPOSITORY_SLUG = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")

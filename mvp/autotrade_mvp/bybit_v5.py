@@ -683,6 +683,7 @@ def _submission_evidence(
         instrument_versions=prepared_request.instrument_versions,
         account_id=prepared_request.account_id,
         environment=prepared_request.environment,
+        provider_environment=prepared_request.provider_environment,
         client_order_id=_client_order_id(
             prepared_request.body.get("orderLinkId")
         ),

@@ -409,6 +409,56 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
                     release_artifact_store=release_store(directory),
                 )
 
+    def test_runtime_qualification_rejects_release_artifact_with_wrong_provenance(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(samples=1)
+            current_plan = plan(spec, "fin-1")
+            cut = begin_runtime_campaign(
+                journal=journal,
+                spec=spec,
+                plan=current_plan,
+                monotonic_ns=lambda: 1_000_000_000,
+            )
+            journal.append_event(envelope("fin-1"))
+            evidence = collect_runtime_campaign_evidence(
+                journal=journal,
+                spec=spec,
+                plan=current_plan,
+                cut=cut,
+                financial_latency_us=(100,),
+                financial_staleness_us=(80,),
+                research_interference_us=(50,),
+                resource_evidence_hash=RESOURCE,
+                resource_metrics={"cpu_peak_millis": 500},
+                monotonic_ns=lambda: 1_900_000_000,
+            )
+
+            store = ArtifactStore(f"{directory}/wrong-release")
+            store.publish_bytes(
+                artifact_id=RELEASE_ARTIFACT_ID,
+                data=RELEASE_ARTIFACT_BYTES,
+                media_type="application/vnd.autotrade.release-artifact",
+                rights={"storage": True, "export": False},
+                source_refs=["git:" + ("f" * 40)],
+                metadata={
+                    "evidence_kind": "DELIVERED_RELEASE",
+                    "source_sha": "f" * 40,
+                },
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeBudgetError,
+                "manifest does not bind canonical release provenance",
+            ):
+                evaluate_runtime_campaign(
+                    spec,
+                    evidence,
+                    expected_release_artifact_id=RELEASE_ARTIFACT_ID,
+                    expected_release_artifact_sha256=RELEASE_ARTIFACT_SHA256,
+                    release_artifact_store=store,
+                )
+
     def test_release_artifact_identity_is_all_or_none_and_bound_into_evidence(self):
         with TemporaryDirectory() as directory:
             journal = JournalStore(f"{directory}/journal.sqlite3")

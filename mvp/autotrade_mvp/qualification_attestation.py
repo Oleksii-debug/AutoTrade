@@ -47,6 +47,21 @@ _CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256: str | None = None
 _MAX_QUALIFICATION_TRUST_POLICY_BYTES = 1_048_576
 
 
+def canonical_packaged_qualification_trust_policy_digest() -> str | None:
+    """Return the source-controlled release-policy digest, when configured.
+
+    Packaging may consume this value to prove that the exact policy bytes are
+    part of the release composition.  Callers cannot override the value used by
+    canonical verification; a missing pin intentionally means packaged terminal
+    trust is unavailable.
+    """
+
+    value = _CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256
+    if value is None:
+        return None
+    return _digest(value, name="packaged qualification trust policy digest")
+
+
 def _trusted_git_candidate_paths() -> tuple[Path, ...]:
     """Return fail-closed OS-managed Git locations without consulting PATH."""
 

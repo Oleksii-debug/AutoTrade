@@ -28,6 +28,113 @@ KRAKEN_SPOT_EXECUTIONS_SUBSCRIPTION: Mapping[str, object] = MappingProxyType(
     }
 )
 
+
+@dataclass(frozen=True)
+class KrakenSpotExecutionsSubscriptionBinding:
+    """Non-secret proof of the exact qualified subscription profile."""
+
+    account_id: str
+    environment: str
+    req_id: int
+    profile_items: tuple[tuple[str, object], ...]
+    evidence_ref: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        account_id: str,
+        req_id: int,
+        environment: str = "LIVE",
+    ) -> "KrakenSpotExecutionsSubscriptionBinding":
+        account = _canonical_text(account_id, name="account_id")
+        normalized_environment = _canonical_text(
+            environment,
+            name="environment",
+        ).upper()
+        if normalized_environment != "LIVE":
+            raise KrakenSpotStreamError(
+                "Kraken Spot stream foundation permits LIVE only"
+            )
+        if isinstance(req_id, bool) or not isinstance(req_id, int):
+            raise KrakenSpotStreamError(
+                "Kraken executions subscription req_id must be an integer"
+            )
+        profile_items = tuple(
+            sorted(KRAKEN_SPOT_EXECUTIONS_SUBSCRIPTION.items())
+        )
+        canonical = json.dumps(
+            {
+                "account_id": account,
+                "environment": normalized_environment,
+                "req_id": req_id,
+                "profile": dict(profile_items),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        return cls(
+            account_id=account,
+            environment=normalized_environment,
+            req_id=req_id,
+            profile_items=profile_items,
+            evidence_ref=(
+                "provider-stream-subscription:sha256:"
+                + sha256(canonical).hexdigest()
+            ),
+        )
+
+    def __post_init__(self) -> None:
+        account = _canonical_text(self.account_id, name="account_id")
+        object.__setattr__(self, "account_id", account)
+        environment = _canonical_text(
+            self.environment,
+            name="environment",
+        ).upper()
+        if environment != "LIVE":
+            raise KrakenSpotStreamError(
+                "Kraken Spot stream foundation permits LIVE only"
+            )
+        object.__setattr__(self, "environment", environment)
+        if isinstance(self.req_id, bool) or not isinstance(self.req_id, int):
+            raise KrakenSpotStreamError(
+                "Kraken executions subscription req_id must be an integer"
+            )
+        expected_profile = tuple(
+            sorted(KRAKEN_SPOT_EXECUTIONS_SUBSCRIPTION.items())
+        )
+        if self.profile_items != expected_profile:
+            raise KrakenSpotStreamError(
+                "Kraken executions subscription profile is not canonical"
+            )
+        canonical = json.dumps(
+            {
+                "account_id": account,
+                "environment": environment,
+                "req_id": self.req_id,
+                "profile": dict(expected_profile),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        expected_ref = (
+            "provider-stream-subscription:sha256:"
+            + sha256(canonical).hexdigest()
+        )
+        evidence_ref = _canonical_text(
+            self.evidence_ref,
+            name="evidence_ref",
+        )
+        if evidence_ref != expected_ref:
+            raise KrakenSpotStreamError(
+                "Kraken subscription binding evidence_ref is invalid"
+            )
+
+
 _ALLOWED_FRAME_TYPES = frozenset({"snapshot", "update"})
 _ALLOWED_EXEC_TYPES = frozenset(
     {
@@ -126,6 +233,7 @@ class KrakenSpotExecutionsSubscriptionAck:
 
     account_id: str
     environment: str
+    subscription_binding: KrakenSpotExecutionsSubscriptionBinding
     evidence_ref: str
     response_bytes: bytes = field(repr=False, compare=False)
 
@@ -144,6 +252,21 @@ class KrakenSpotExecutionsSubscriptionAck:
                 "Kraken Spot stream foundation permits LIVE only"
             )
         object.__setattr__(self, "environment", environment)
+        if not isinstance(
+            self.subscription_binding,
+            KrakenSpotExecutionsSubscriptionBinding,
+        ):
+            raise TypeError(
+                "subscription_binding must be "
+                "KrakenSpotExecutionsSubscriptionBinding"
+            )
+        if (
+            self.subscription_binding.account_id != self.account_id
+            or self.subscription_binding.environment != self.environment
+        ):
+            raise KrakenSpotStreamError(
+                "Kraken subscription binding scope mismatch"
+            )
         if type(self.response_bytes) is not bytes:
             raise TypeError("response_bytes must be bytes")
         expected_ref = (
@@ -163,11 +286,18 @@ class KrakenSpotExecutionsSubscriptionAck:
 def parse_executions_subscription_ack(
     response_bytes: object,
     *,
-    account_id: str,
-    environment: str = "LIVE",
+    subscription_binding: KrakenSpotExecutionsSubscriptionBinding,
 ) -> KrakenSpotExecutionsSubscriptionAck:
-    """Bind the exact server ACK to the required executions snapshot profile."""
+    """Bind the exact server ACK to the qualified outbound subscription."""
 
+    if not isinstance(
+        subscription_binding,
+        KrakenSpotExecutionsSubscriptionBinding,
+    ):
+        raise TypeError(
+            "subscription_binding must be "
+            "KrakenSpotExecutionsSubscriptionBinding"
+        )
     raw = _decode_exact_json(response_bytes)
     allowed_root = {
         "method",
@@ -185,6 +315,11 @@ def parse_executions_subscription_ack(
     if raw.get("method") != "subscribe":
         raise KrakenSpotStreamError(
             "Kraken subscription acknowledgement method must be subscribe"
+        )
+    if raw.get("req_id") != subscription_binding.req_id:
+        raise KrakenSpotStreamError(
+            "Kraken subscription acknowledgement req_id does not match "
+            "the qualified request"
         )
     if raw.get("success") is not True:
         raise KrakenSpotStreamError(
@@ -226,8 +361,9 @@ def parse_executions_subscription_ack(
 
     exact = response_bytes
     return KrakenSpotExecutionsSubscriptionAck(
-        account_id=account_id,
-        environment=environment,
+        account_id=subscription_binding.account_id,
+        environment=subscription_binding.environment,
+        subscription_binding=subscription_binding,
         evidence_ref=(
             "provider-stream:sha256:" + sha256(exact).hexdigest()
         ),
@@ -449,6 +585,7 @@ class KrakenSpotStreamRecoveryEvidence:
     environment: str
     connection_generation: int
     phase: str
+    subscription_binding_evidence_ref: str | None
     subscription_ack_evidence_ref: str | None
     snapshot_sequence: int | None
     last_sequence: int | None
@@ -508,6 +645,7 @@ class KrakenSpotExecutionStreamRecovery:
         self.max_buffered_updates = max_buffered_updates
         self.connection_generation = 0
         self.phase = self.DISCONNECTED
+        self._subscription_binding_evidence_ref: str | None = None
         self._subscription_ack_evidence_ref: str | None = None
         self._snapshot_sequence: int | None = None
         self._last_sequence: int | None = None
@@ -526,6 +664,7 @@ class KrakenSpotExecutionStreamRecovery:
 
         self.connection_generation += 1
         self.phase = self.AWAITING_SUBSCRIPTION_ACK
+        self._subscription_binding_evidence_ref = None
         self._subscription_ack_evidence_ref = None
         self._snapshot_sequence = None
         self._last_sequence = None
@@ -544,6 +683,7 @@ class KrakenSpotExecutionStreamRecovery:
         """Invalidate all stream-local state; stale orders are never reusable."""
 
         self.phase = self.DISCONNECTED
+        self._subscription_binding_evidence_ref = None
         self._subscription_ack_evidence_ref = None
         self._snapshot_sequence = None
         self._last_sequence = None
@@ -581,7 +721,13 @@ class KrakenSpotExecutionStreamRecovery:
             raise KrakenSpotStreamError(
                 "Kraken subscription acknowledgement scope mismatch"
             )
+        self._subscription_binding_evidence_ref = (
+            acknowledgement.subscription_binding.evidence_ref
+        )
         self._subscription_ack_evidence_ref = acknowledgement.evidence_ref
+        self._crosscheck_evidence_refs.append(
+            acknowledgement.subscription_binding.evidence_ref
+        )
         self._crosscheck_evidence_refs.append(acknowledgement.evidence_ref)
         self._recovery_reason = "fresh_snapshot_required"
         self.phase = self.AWAITING_SNAPSHOT
@@ -749,6 +895,9 @@ class KrakenSpotExecutionStreamRecovery:
             environment=self.environment,
             connection_generation=self.connection_generation,
             phase=self.phase,
+            subscription_binding_evidence_ref=(
+                self._subscription_binding_evidence_ref
+            ),
             subscription_ack_evidence_ref=self._subscription_ack_evidence_ref,
             snapshot_sequence=self._snapshot_sequence,
             last_sequence=self._last_sequence,

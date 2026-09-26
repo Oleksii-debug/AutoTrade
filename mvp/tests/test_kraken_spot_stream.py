@@ -253,6 +253,7 @@ class KrakenSpotExecutionFrameTests(unittest.TestCase):
             KrakenSpotExecutionsSubscriptionBinding(
                 account_id=valid.account_id,
                 environment=valid.environment,
+                connection_generation=valid.connection_generation,
                 req_id=valid.req_id,
                 profile_items=(
                     ("channel", "executions"),
@@ -331,12 +332,15 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
     def parse(
         self,
         *,
+        recovery,
         frame_type,
         sequence,
         reports=None,
         account_id="spot-live-1",
-        connection_generation=1,
+        connection_generation=None,
     ):
+        if connection_generation is None:
+            connection_generation = recovery.connection_generation
         return parse_execution_frame(
             frame_bytes(
                 frame_type=frame_type,
@@ -365,7 +369,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
             "requires subscription acknowledgement",
         ):
             recovery.apply_frame(
-                self.parse(frame_type="update", sequence=1)
+                self.parse(recovery=recovery, frame_type="update", sequence=1)
             )
 
         acknowledgement = self.acknowledge(recovery)
@@ -390,10 +394,10 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
             "requires snapshot before updates",
         ):
             recovery.apply_frame(
-                self.parse(frame_type="update", sequence=1)
+                self.parse(recovery=recovery, frame_type="update", sequence=1)
             )
 
-        snapshot = self.parse(
+        snapshot = self.parse(recovery=recovery, 
             frame_type="snapshot",
             sequence=7,
             reports=[
@@ -434,7 +438,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
         recovery = self.make_recovery()
         recovery.begin_connection()
         self.acknowledge(recovery)
-        terminal = self.parse(
+        terminal = self.parse(recovery=recovery, 
             frame_type="snapshot",
             sequence=1,
             reports=[
@@ -456,9 +460,9 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
         recovery.begin_connection()
         self.acknowledge(recovery)
         recovery.apply_frame(
-            self.parse(frame_type="snapshot", sequence=10)
+            self.parse(recovery=recovery, frame_type="snapshot", sequence=10)
         )
-        update_11 = self.parse(
+        update_11 = self.parse(recovery=recovery, 
             frame_type="update",
             sequence=11,
             reports=[
@@ -470,7 +474,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
                 }
             ],
         )
-        update_12 = self.parse(
+        update_12 = self.parse(recovery=recovery, 
             frame_type="update",
             sequence=12,
             reports=[
@@ -503,9 +507,9 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
                 recovery.begin_connection()
                 self.acknowledge(recovery)
                 recovery.apply_frame(
-                    self.parse(frame_type="snapshot", sequence=10)
+                    self.parse(recovery=recovery, frame_type="snapshot", sequence=10)
                 )
-                gap = self.parse(
+                gap = self.parse(recovery=recovery, 
                     frame_type="update",
                     sequence=observed,
                 )
@@ -537,7 +541,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
                     "gap requires a fresh connection",
                 ):
                     recovery.apply_frame(
-                        self.parse(frame_type="update", sequence=11)
+                        self.parse(recovery=recovery, frame_type="update", sequence=11)
                     )
 
     def test_reconnect_discards_stale_generation_and_requires_new_snapshot(self):
@@ -545,10 +549,10 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
         self.assertEqual(recovery.begin_connection(), 1)
         self.acknowledge(recovery)
         recovery.apply_frame(
-            self.parse(frame_type="snapshot", sequence=20)
+            self.parse(recovery=recovery, frame_type="snapshot", sequence=20)
         )
         recovery.apply_frame(
-            self.parse(frame_type="update", sequence=21)
+            self.parse(recovery=recovery, frame_type="update", sequence=21)
         )
 
         self.assertEqual(recovery.begin_connection(), 2)
@@ -572,7 +576,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
             "requires subscription acknowledgement",
         ):
             recovery.apply_frame(
-                self.parse(frame_type="update", sequence=22)
+                self.parse(recovery=recovery, frame_type="update", sequence=22)
             )
         self.acknowledge(recovery)
         with self.assertRaisesRegex(
@@ -580,9 +584,9 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
             "requires snapshot before updates",
         ):
             recovery.apply_frame(
-                self.parse(frame_type="update", sequence=22)
+                self.parse(recovery=recovery, frame_type="update", sequence=22)
             )
-        fresh = self.parse(
+        fresh = self.parse(recovery=recovery, 
             frame_type="snapshot",
             sequence=1,
             reports=[],
@@ -604,12 +608,12 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
             ack_bytes(req_id=91),
             subscription_binding=stale_binding,
         )
-        stale_snapshot = self.parse(
+        stale_snapshot = self.parse(recovery=recovery, 
             frame_type="snapshot",
             sequence=10,
             connection_generation=1,
         )
-        stale_update = self.parse(
+        stale_update = self.parse(recovery=recovery, 
             frame_type="update",
             sequence=11,
             reports=[
@@ -641,7 +645,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
             recovery.apply_frame(stale_snapshot)
         self.assertEqual(recovery.evidence(), awaiting_snapshot)
 
-        fresh_snapshot = self.parse(
+        fresh_snapshot = self.parse(recovery=recovery, 
             frame_type="snapshot",
             sequence=10,
             connection_generation=2,
@@ -664,7 +668,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
         recovery.begin_connection()
         self.acknowledge(recovery)
         recovery.apply_frame(
-            self.parse(frame_type="snapshot", sequence=2)
+            self.parse(recovery=recovery, frame_type="snapshot", sequence=2)
         )
         recovery.disconnect()
         evidence = recovery.evidence()
@@ -677,7 +681,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
             "while disconnected",
         ):
             recovery.apply_frame(
-                self.parse(frame_type="snapshot", sequence=3)
+                self.parse(recovery=recovery, frame_type="snapshot", sequence=3)
             )
 
     def test_cross_account_subscription_ack_is_rejected_before_state_mutation(self):
@@ -700,7 +704,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
         recovery = self.make_recovery()
         recovery.begin_connection()
         self.acknowledge(recovery)
-        wrong = self.parse(
+        wrong = self.parse(recovery=recovery, 
             frame_type="snapshot",
             sequence=1,
             account_id="other-account",
@@ -726,7 +730,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
             }
             for index in range(51)
         ]
-        snapshot = self.parse(
+        snapshot = self.parse(recovery=recovery, 
             frame_type="snapshot",
             sequence=5,
             reports=reports,
@@ -772,7 +776,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
         recovery = self.make_recovery()
         recovery.begin_connection()
         acknowledgement = self.acknowledge(recovery)
-        snapshot = self.parse(
+        snapshot = self.parse(recovery=recovery, 
             frame_type="snapshot",
             sequence=10,
             reports=[
@@ -783,7 +787,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
                 }
             ],
         )
-        update = self.parse(
+        update = self.parse(recovery=recovery, 
             frame_type="update",
             sequence=11,
             reports=[
@@ -794,7 +798,7 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
                 }
             ],
         )
-        gap = self.parse(
+        gap = self.parse(recovery=recovery, 
             frame_type="update",
             sequence=13,
             reports=[
@@ -847,12 +851,12 @@ class KrakenSpotExecutionStreamRecoveryTests(unittest.TestCase):
         recovery.begin_connection()
         self.acknowledge(recovery)
         recovery.apply_frame(
-            self.parse(frame_type="snapshot", sequence=100)
+            self.parse(recovery=recovery, frame_type="snapshot", sequence=100)
         )
         recovery.apply_frame(
-            self.parse(frame_type="update", sequence=101)
+            self.parse(recovery=recovery, frame_type="update", sequence=101)
         )
-        overflow = self.parse(frame_type="update", sequence=102)
+        overflow = self.parse(recovery=recovery, frame_type="update", sequence=102)
         recovery.apply_frame(overflow)
         evidence = recovery.evidence()
         self.assertEqual(

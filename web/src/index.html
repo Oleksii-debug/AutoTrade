@@ -79,6 +79,12 @@
     <section id="portfolio" aria-labelledby="portfolio-heading">
       <h2 id="portfolio-heading">Portfolio and orders</h2>
       <p>Financial values remain host-authoritative. Accepted commands are not fills.</p>
+      <div class="table-tools" aria-label="Portfolio table tools">
+        <label for="portfolio-filter">Filter portfolio rows</label>
+        <input id="portfolio-filter" type="search" autocomplete="off" spellcheck="false">
+        <button id="portfolio-copy" type="button">Copy visible rows</button>
+        <output id="portfolio-filter-status" for="portfolio-filter" role="status" aria-live="polite">No host rows are available to filter.</output>
+      </div>
       <div id="portfolio-region" class="table-scroll" role="region" aria-label="Portfolio projection" tabindex="0">
         <table>
           <caption>Portfolio projection</caption>

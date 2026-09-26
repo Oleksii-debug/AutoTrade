@@ -13,6 +13,7 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import re
+import subprocess
 import sys
 from typing import Any
 
@@ -23,11 +24,9 @@ if str(ROOT) not in sys.path:
 
 from mvp.autotrade_mvp.qualification_attestation import (
     QualificationTrustError,
-    QualificationTrustPolicy,
     SignedQualificationAttestation,
-    parse_qualification_trust_policy,
     parse_signed_qualification_attestation,
-    verify_qualification_attestation,
+    verify_canonical_qualification_attestation,
 )
 from research.autotrade_research.artifacts.store import ArtifactStore
 from tools.check_nvda_qualification import (
@@ -41,6 +40,9 @@ DEFAULT_BANK = ROOT / "control" / "work-packages" / "bank.json"
 DEFAULT_QUALIFICATION = ROOT / "control" / "qualification.json"
 DEFAULT_NVDA_STATUS = ROOT / "qualification" / "nvda" / "status.json"
 DEFAULT_NVDA_REQUIREMENTS = ROOT / "qualification" / "nvda" / "requirements.json"
+DEFAULT_QUALIFICATION_TRUST_POLICY = (
+    ROOT / "mvp" / "autotrade_mvp" / "qualification_trust_policy.json"
+)
 
 EXPECTED_SECTION_IDS = tuple(f"SECTION-{index:02d}" for index in range(1, 41))
 EXPECTED_PACKAGE_IDS = tuple(f"WP-{index:02d}" for index in range(1, 66))
@@ -92,9 +94,6 @@ _WHOLE_PRODUCT_PROTOCOL_VERSION = "1.0.0"
 @dataclass(frozen=True)
 class WholeProductEvidenceContext:
     evidence_store: ArtifactStore
-    policy: QualificationTrustPolicy
-    expected_policy_id: str
-    expected_policy_version: str
     nvda_receipt: SignedQualificationAttestation | None = None
     nvda_requirements_json: str | None = None
     nvda_release_artifact: Path | None = None
@@ -102,15 +101,6 @@ class WholeProductEvidenceContext:
     def __post_init__(self) -> None:
         if not isinstance(self.evidence_store, ArtifactStore):
             raise TypeError("evidence_store must be ArtifactStore")
-        if not isinstance(self.policy, QualificationTrustPolicy):
-            raise TypeError("policy must be QualificationTrustPolicy")
-        if not isinstance(self.expected_policy_id, str) or not self.expected_policy_id:
-            raise ValueError("expected_policy_id is required")
-        if (
-            not isinstance(self.expected_policy_version, str)
-            or not self.expected_policy_version
-        ):
-            raise ValueError("expected_policy_version is required")
         nvda_values = (
             self.nvda_receipt,
             self.nvda_requirements_json,
@@ -166,6 +156,82 @@ def _load_text(path: Path, *, name: str) -> str:
     if not value.strip():
         raise ProductCompletionError(f"{name} is empty")
     return value
+
+
+def _verify_exact_source_checkout(
+    source_sha: str | None,
+    *,
+    canonical_paths: tuple[Path, ...],
+) -> None:
+    """Bind terminal inputs to the exact clean Git checkout named by source_sha."""
+    if source_sha is None:
+        return
+    if _exact_source(source_sha) is None:
+        return
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as error:
+        raise ProductCompletionError(
+            "exact-source checkout verification is unavailable"
+        ) from error
+    if head.returncode != 0:
+        raise ProductCompletionError(
+            "exact-source checkout verification failed"
+        )
+    if head.stdout.strip() != source_sha:
+        raise ProductCompletionError(
+            "exact source SHA does not match checkout HEAD"
+        )
+
+    try:
+        relative_paths = tuple(
+            path.resolve().relative_to(ROOT.resolve()).as_posix()
+            for path in canonical_paths
+        )
+    except (OSError, ValueError) as error:
+        raise ProductCompletionError(
+            "canonical completion inputs are outside the repository checkout"
+        ) from error
+
+    # Inspect the complete working-tree state for every release-controlled
+    # verification input. Unlike git diff, status also exposes an untracked
+    # canonical file at a path that does not exist in HEAD (notably the
+    # separately installed qualification trust policy). Ignored substitution
+    # is equally non-canonical and must fail closed.
+    try:
+        status = subprocess.run(
+            [
+                "git",
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "--ignored=matching",
+                "--",
+                *relative_paths,
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as error:
+        raise ProductCompletionError(
+            "exact-source checkout verification is unavailable"
+        ) from error
+    if status.returncode != 0:
+        raise ProductCompletionError(
+            "exact-source checkout verification failed"
+        )
+    if status.stdout.strip():
+        raise ProductCompletionError(
+            "canonical completion inputs differ from exact source checkout"
+        )
 
 
 def _section_ids(spec_text: str) -> tuple[str, ...]:
@@ -292,10 +358,8 @@ def _terminal_nvda_status(
             evidence_sha256=nvda_status["evidence_sha256"],
             release_artifact_sha256=nvda_status["artifact_sha256"],
             receipt=receipt,
-            policy=evidence_context.policy,
             evidence_store=evidence_context.evidence_store,
-            expected_policy_id=evidence_context.expected_policy_id,
-            expected_policy_version=evidence_context.expected_policy_version,
+            canonical_trust=True,
         )
     except (
         FileNotFoundError,
@@ -325,9 +389,16 @@ def _terminal_nvda_status(
     )
 
 
+def _signed_requirement_id(kind: str, requirement_id: str) -> str:
+    """Bind the signed whole-product assertion to requirement kind and identity."""
+
+    return f"{kind}/{requirement_id}"
+
+
 def _independently_verified_evidence(
     item: dict[str, Any],
     *,
+    kind: str,
     requirement_id: str,
     exact_source_sha: str | None,
     evidence_context: WholeProductEvidenceContext | None,
@@ -340,26 +411,23 @@ def _independently_verified_evidence(
         receipt = parse_signed_qualification_attestation(receipt_payload)
         if evidence_ref != receipt.attestation.attestation_id:
             return False
-        accepted = verify_qualification_attestation(
+        accepted = verify_canonical_qualification_attestation(
             receipt,
-            policy=evidence_context.policy,
             evidence_store=evidence_context.evidence_store,
-            expected_policy_id=evidence_context.expected_policy_id,
-            expected_policy_version=evidence_context.expected_policy_version,
             expected_source_sha=exact_source_sha,
             expected_domain=_WHOLE_PRODUCT_DOMAIN,
             expected_gate=_WHOLE_PRODUCT_GATE,
             expected_package_id=_WHOLE_PRODUCT_PACKAGE,
             expected_protocol_id=_WHOLE_PRODUCT_PROTOCOL,
             expected_protocol_version=_WHOLE_PRODUCT_PROTOCOL_VERSION,
-            expected_requirement_id=requirement_id,
+            expected_requirement_id=_signed_requirement_id(kind, requirement_id),
         )
     except (QualificationTrustError, TypeError, ValueError):
         return False
     return (
         accepted.result == "PASS"
         and accepted.source_sha == exact_source_sha
-        and accepted.requirement_id == requirement_id
+        and accepted.requirement_id == _signed_requirement_id(kind, requirement_id)
         and accepted.attestation_id == evidence_ref
     )
 
@@ -369,11 +437,13 @@ def _evidence_matrix(
     *,
     exact_source_sha: str | None,
     evidence_context: WholeProductEvidenceContext | None,
-) -> tuple[list[str], list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str], list[str]]:
     required = {
         ("PRODUCT_SECTION", section) for section in EXPECTED_SECTION_IDS
     } | {
         ("WORK_PACKAGE", package) for package in EXPECTED_PACKAGE_IDS
+    } | {
+        ("QUALIFICATION_GATE", gate) for gate in EXPECTED_GATE_NAMES
     }
     raw = qualification.get("whole_product_evidence")
     if raw is None:
@@ -419,6 +489,11 @@ def _evidence_matrix(
         for package in EXPECTED_PACKAGE_IDS
         if ("WORK_PACKAGE", package) not in by_key
     ]
+    missing_gates = [
+        gate
+        for gate in sorted(EXPECTED_GATE_NAMES)
+        if ("QUALIFICATION_GATE", gate) not in by_key
+    ]
     nonpassing: list[str] = []
     for (kind, requirement_id), item in sorted(by_key.items()):
         if item.get("status") != "PASS":
@@ -427,6 +502,7 @@ def _evidence_matrix(
             nonpassing.append(f"{kind}:{requirement_id}:source_sha")
         if not _independently_verified_evidence(
             item,
+            kind=kind,
             requirement_id=requirement_id,
             exact_source_sha=exact_source_sha,
             evidence_context=evidence_context,
@@ -434,7 +510,7 @@ def _evidence_matrix(
             nonpassing.append(
                 f"{kind}:{requirement_id}:independent_verification"
             )
-    return missing_sections, missing_packages, nonpassing
+    return missing_sections, missing_packages, missing_gates, nonpassing
 
 
 def evaluate_completion(
@@ -517,7 +593,12 @@ def evaluate_completion(
     qualification_source_matches = (
         source_sha is not None and qualification_source_sha == source_sha
     )
-    missing_sections, missing_evidence_packages, nonpassing_evidence = _evidence_matrix(
+    (
+        missing_sections,
+        missing_evidence_packages,
+        missing_evidence_gates,
+        nonpassing_evidence,
+    ) = _evidence_matrix(
         qualification,
         exact_source_sha=source_sha,
         evidence_context=evidence_context,
@@ -563,6 +644,10 @@ def evaluate_completion(
         blockers.append(
             f"{len(missing_evidence_packages)} work packages lack exact-source PASS evidence"
         )
+    if missing_evidence_gates:
+        blockers.append(
+            f"{len(missing_evidence_gates)} qualification gates lack exact-source PASS evidence"
+        )
     if nonpassing_evidence:
         blockers.append(
             f"{len(nonpassing_evidence)} whole-product evidence checks are nonpassing or stale"
@@ -588,6 +673,7 @@ def evaluate_completion(
         "nonterminal_gates": nonterminal_gates,
         "missing_section_evidence": missing_sections,
         "missing_package_evidence": missing_evidence_packages,
+        "missing_gate_evidence": missing_evidence_gates,
         "nonpassing_evidence": nonpassing_evidence,
         "nvda_qualified": nvda_qualified,
         "nvda_source_matches": nvda_source_matches,
@@ -611,19 +697,44 @@ def main() -> int:
     parser.add_argument("--require-complete", action="store_true")
     args = parser.parse_args()
 
+    canonical_cli_inputs = (
+        ("product spec", args.spec, DEFAULT_SPEC),
+        ("work-package bank", args.bank, DEFAULT_BANK),
+        ("qualification", args.qualification, DEFAULT_QUALIFICATION),
+        ("NVDA status", args.nvda_status, DEFAULT_NVDA_STATUS),
+    )
+    overridden_inputs = [
+        name
+        for name, supplied, canonical in canonical_cli_inputs
+        if supplied.resolve() != canonical.resolve()
+    ]
+
     try:
+        if overridden_inputs:
+            raise ProductCompletionError(
+                "caller-selected canonical completion inputs are forbidden: "
+                + ", ".join(overridden_inputs)
+            )
+        _verify_exact_source_checkout(
+            args.source_sha,
+            canonical_paths=(
+                args.spec,
+                args.bank,
+                args.qualification,
+                args.nvda_status,
+                DEFAULT_QUALIFICATION_TRUST_POLICY,
+                DEFAULT_NVDA_REQUIREMENTS,
+            ),
+        )
         qualification = _load(args.qualification, name="qualification")
-        trust_values = (
-            args.evidence_store,
+        caller_selected_trust = (
             args.qualification_policy,
             args.expected_policy_id,
             args.expected_policy_version,
         )
-        if any(value is not None for value in trust_values) and not all(
-            value is not None for value in trust_values
-        ):
+        if any(value is not None for value in caller_selected_trust):
             raise ProductCompletionError(
-                "whole-product evidence trust inputs must be supplied together"
+                "caller-selected qualification trust policy is forbidden for terminal completion"
             )
         nvda_inputs = (args.nvda_attestation, args.nvda_release_artifact)
         if any(value is not None for value in nvda_inputs) and not all(
@@ -632,22 +743,17 @@ def main() -> int:
             raise ProductCompletionError(
                 "NVDA attestation and release artifact must be supplied together"
             )
-        if any(value is not None for value in nvda_inputs) and not all(
-            value is not None for value in trust_values
-        ):
+        if any(value is not None for value in nvda_inputs) and args.evidence_store is None:
             raise ProductCompletionError(
-                "NVDA qualification requires the pinned qualification trust inputs"
+                "NVDA qualification requires the immutable evidence store"
             )
         evidence_context = None
-        if all(value is not None for value in trust_values):
+        if args.evidence_store is not None:
             if not args.evidence_store.is_dir():
                 raise ProductCompletionError(
                     "whole-product evidence store must be an existing directory"
                 )
             try:
-                policy = parse_qualification_trust_policy(
-                    _load(args.qualification_policy, name="qualification trust policy")
-                )
                 nvda_receipt = None
                 nvda_requirements_json = None
                 if args.nvda_attestation is not None:
@@ -665,9 +771,6 @@ def main() -> int:
                     )
                 evidence_context = WholeProductEvidenceContext(
                     evidence_store=ArtifactStore(args.evidence_store),
-                    policy=policy,
-                    expected_policy_id=args.expected_policy_id,
-                    expected_policy_version=args.expected_policy_version,
                     nvda_receipt=nvda_receipt,
                     nvda_requirements_json=nvda_requirements_json,
                     nvda_release_artifact=args.nvda_release_artifact,

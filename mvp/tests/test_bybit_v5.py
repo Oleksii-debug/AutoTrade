@@ -2831,10 +2831,12 @@ class BybitV5AdapterTests(unittest.TestCase):
             )
 
     def test_position_projection_requires_complete_one_way_cursor_chain(self):
+        capability = read_capability(permission_scopes=("ACCOUNT.READ",))
         common = dict(
             category="linear",
             symbol=None,
             settle_coin="USDT",
+            capability=capability,
         )
         first = bound_position_response(
             {

@@ -538,6 +538,37 @@ class ProductCompletionGateTests(unittest.TestCase):
                     source_sha,
                     canonical_paths=(trust_policy, requirements),
                 )
+    def test_exact_source_rejects_git_executable_from_candidate_checkout(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "source"
+            root.mkdir()
+            source_sha, requirements = _initialize_exact_source_test_repo(root)
+            trust_policy = (
+                root
+                / "mvp"
+                / "autotrade_mvp"
+                / "qualification_trust_policy.json"
+            )
+            candidate_git = root / "git.exe"
+            candidate_git.write_bytes(b"candidate-controlled executable")
+
+            with (
+                patch.object(completion_gate, "ROOT", root),
+                patch.object(
+                    completion_gate.shutil,
+                    "which",
+                    return_value=str(candidate_git),
+                ),
+                self.assertRaisesRegex(
+                    ProductCompletionError,
+                    "Git executable originates from candidate checkout",
+                ),
+            ):
+                completion_gate._verify_exact_source_checkout(
+                    source_sha,
+                    canonical_paths=(trust_policy, requirements),
+                )
+
     def test_exact_source_rejects_dirty_nvda_requirements(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

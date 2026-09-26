@@ -132,6 +132,26 @@ class ExactHeadCiEvidenceTests(unittest.TestCase):
         self.assertIn("actions/upload-artifact@v4", workflow)
         self.assertNotIn("${{ secrets.", workflow)
 
+    def test_futures_qualification_persists_exact_head_evidence(self):
+        workflow = (ROOT / ".github" / "workflows" / "futures-qualification.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}",
+            workflow,
+        )
+        self.assertIn(
+            "AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}",
+            workflow,
+        )
+        self.assertIn(
+            "ref: ${{ github.event.pull_request.head.sha || github.sha }}",
+            workflow,
+        )
+        self.assertIn("python tools/write_ci_evidence.py", workflow)
+        self.assertIn("actions/upload-artifact@v4", workflow)
+        self.assertNotIn("${{ secrets.", workflow)
+
     def test_all_ci_workflows_cancel_stale_runs_for_the_same_pr_or_ref(self):
         for relative in (
             ".github/workflows/baseline.yml",

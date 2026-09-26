@@ -651,6 +651,81 @@ def execute_operator_authority_action(
     return resolved
 
 
+def observed_authority_operation_effects(
+    journal: JournalStore,
+    action: object,
+    action_payload: object,
+    action_payload_hash: object,
+    account_id: str,
+    environment: str,
+    accepted_at: str,
+) -> AuthorityExecutionResult:
+    """Return only durable authority effects attributable to this accepted action."""
+
+    action_name = canonical_host_action(action)
+    accepted = _text(accepted_at, "accepted_at")
+    payload = validate_persisted_payload(
+        action_name,
+        action_payload,
+        action_payload_hash,
+        account_id,
+        environment,
+    )
+    events = _events(journal)
+    expected_version = _seq(
+        payload["expected_authority_version"],
+        "expected_authority_version",
+    )
+
+    if action_name == "SET_AUTHORITY":
+        raw_policy = payload.get("policy")
+        assert isinstance(raw_policy, Mapping)
+        policy = _policy_from_mapping(raw_policy)
+        event = _find(events, "AuthorityPolicyRegistered", policy.policy_id)
+        if (
+            event is None
+            or event.get("payload") != dict(raw_policy)
+            or int(event["aggregate_version"]) <= expected_version
+        ):
+            return AuthorityExecutionResult((), ())
+        return AuthorityExecutionResult(
+            ("authority-policy:" + policy.policy_id,),
+            (_evidence(event),),
+        )
+
+    targets = payload.get("target_policies")
+    assert isinstance(targets, list)
+    reason = "host_operator_command:" + action_name + ":" + _text(
+        payload.get("reason_code"), "reason_code"
+    )
+    affected: list[str] = []
+    evidence: list[Mapping[str, object]] = []
+    for target in targets:
+        assert isinstance(target, Mapping)
+        policy_id = str(target["policy_id"])
+        registered = _find(events, "AuthorityPolicyRegistered", policy_id)
+        if (
+            registered is None
+            or not isinstance(registered.get("payload"), Mapping)
+            or registered["payload"].get("version") != target["policy_version"]
+            or payload_digest(dict(registered["payload"])) != target["policy_hash"]
+        ):
+            continue
+        revoked = _find(events, "AuthorityPolicyRevoked", policy_id)
+        if revoked is None:
+            continue
+        raw = revoked.get("payload")
+        if (
+            isinstance(raw, Mapping)
+            and raw.get("reason") == reason
+            and raw.get("revoked_at") == accepted
+            and int(revoked["aggregate_version"]) > expected_version
+        ):
+            affected.append("authority-policy:" + policy_id)
+            evidence.append(_evidence(revoked))
+    return AuthorityExecutionResult(tuple(affected), tuple(evidence))
+
+
 def validate_authority_success_evidence(
     journal: JournalStore,
     action: object,

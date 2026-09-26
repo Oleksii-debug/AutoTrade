@@ -1784,9 +1784,10 @@ with open(path, "a+b") as stream:
             )
             self.assertEqual(binding.response_bytes, raw)
             self.assertEqual(
-                binding.payload,
-                {"error": ["EService:Deadline elapsed"], "result": None},
+                binding.payload["error"],
+                ("EService:Deadline elapsed",),
             )
+            self.assertIsNone(binding.payload["result"])
             terminal = store.load_events(
                 "submission_attempt",
                 binding.aggregate_id,
@@ -2874,6 +2875,20 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
             )
             observation = transport(binding)
 
+            nonce_events = allocator.journal.load_events(
+                "provider_nonce",
+                allocator.aggregate_id_for_provider_api_key("key"),
+            )
+            self.assertEqual(len(nonce_events), 1)
+            fingerprint = allocator.provider_api_key_fingerprint("key")
+            self.assertEqual(
+                nonce_events[0]["payload"]["provider_api_key_fingerprint"],
+                fingerprint,
+            )
+            self.assertNotIn("credential_handle_id", nonce_events[0]["payload"])
+            self.assertNotIn("credential_generation", nonce_events[0]["payload"])
+            self.assertNotIn('"key"', json.dumps(nonce_events, sort_keys=True))
+
         self.assertEqual(
             events,
             ["quota", "capability", "resolve", "nonce", "capability", "wire"],
@@ -2898,19 +2913,6 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
         self.assertEqual(observation.query_binding, binding)
         self.assertEqual(observation.payload["error"], ())
         self.assertTrue(observation.evidence_ref.startswith("provider-read:sha256:"))
-        nonce_events = allocator.journal.load_events(
-            "provider_nonce",
-            allocator.aggregate_id_for_provider_api_key("key"),
-        )
-        self.assertEqual(len(nonce_events), 1)
-        fingerprint = allocator.provider_api_key_fingerprint("key")
-        self.assertEqual(
-            nonce_events[0]["payload"]["provider_api_key_fingerprint"],
-            fingerprint,
-        )
-        self.assertNotIn("credential_handle_id", nonce_events[0]["payload"])
-        self.assertNotIn("credential_generation", nonce_events[0]["payload"])
-        self.assertNotIn('"key"', json.dumps(nonce_events, sort_keys=True))
     def test_trades_history_pagination_query_flows_into_existing_fill_parser(self):
         events = []
         capability = verified_kraken_read_capability(
@@ -3172,6 +3174,15 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
                         capability=capability,
                     )
                 )
+            self.assertEqual(
+                len(
+                    allocator.journal.load_events(
+                        "provider_nonce",
+                        allocator.aggregate_id_for_provider_api_key("key"),
+                    )
+                ),
+                1,
+            )
 
         self.assertEqual(
             events,
@@ -3179,15 +3190,6 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
         )
         self.assertEqual(len(resolver.calls), 1)
         self.assertEqual(wire.requests, [])
-        self.assertEqual(
-            len(
-                allocator.journal.load_events(
-                    "provider_nonce",
-                    allocator.aggregate_id_for_provider_api_key("key"),
-                )
-            ),
-            1,
-        )
     def test_trade_credential_cannot_be_reused_for_private_read(self):
         events = []
         handle = kraken_trade_handle()

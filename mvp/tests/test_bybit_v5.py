@@ -3205,6 +3205,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             "start_time_ms": 1790193600000,
             "end_time_ms": 1790280000000,
         }
+        capability = read_capability(permission_scopes=("ACCOUNT.READ",))
         first = bound_activity_response(
             {
                 "retCode": 0,
@@ -3213,6 +3214,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                     "list": [],
                 },
             },
+            capability=capability,
             **common,
         )
         second = bound_activity_response(
@@ -3224,6 +3226,7 @@ class BybitV5AdapterTests(unittest.TestCase):
                 },
             },
             cursor="activity-page-2",
+            capability=capability,
             **common,
         )
         coverage = activity_coverage_from_pages(
@@ -3240,6 +3243,54 @@ class BybitV5AdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ProviderCoreError, "incomplete"):
             activity_coverage_from_pages(
                 (first,),
+                instrument_versions={},
+                consistency_horizon_satisfied=True,
+            )
+
+    def test_activity_coverage_rejects_mixed_capability_snapshots(self):
+        first_capability = read_capability(
+            permission_scopes=("ACCOUNT.READ",)
+        )
+        second_capability = read_capability(
+            permission_scopes=("ACCOUNT.READ",)
+        )
+        self.assertNotEqual(
+            first_capability.snapshot_id,
+            second_capability.snapshot_id,
+        )
+        common = {
+            "start_time_ms": 1790193600000,
+            "end_time_ms": 1790280000000,
+        }
+        first = bound_activity_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "nextPageCursor": "activity-page-2",
+                    "list": [],
+                },
+            },
+            capability=first_capability,
+            **common,
+        )
+        second = bound_activity_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "nextPageCursor": "",
+                    "list": [],
+                },
+            },
+            cursor="activity-page-2",
+            capability=second_capability,
+            **common,
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "authenticated-read capability scope",
+        ):
+            activity_coverage_from_pages(
+                (first, second),
                 instrument_versions={},
                 consistency_horizon_satisfied=True,
             )

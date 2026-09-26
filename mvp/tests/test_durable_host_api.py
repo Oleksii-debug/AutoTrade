@@ -357,10 +357,19 @@ class JournalBackedHostApiTests(unittest.TestCase):
 
     def test_restart_rejects_non_object_command_acceptance_evidence(self):
         journal = JournalStore(self.path)
+        action_payload = {
+            "schema_version": 1,
+            "expected_authority_epoch": "0",
+            "expected_authority_version": "0",
+            "reason": "operator_block_new_exposure",
+            "target_policies": [],
+        }
         payload = {
             "command_id": "manual-command",
             "operation_id": "manual-operation",
             "action": "BLOCK_NEW_EXPOSURE",
+            "action_payload": action_payload,
+            "action_payload_hash": payload_digest(action_payload),
             "actor": "alice",
             "account_id": "paper-account-1",
             "environment": "PAPER",

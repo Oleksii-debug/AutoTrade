@@ -254,6 +254,15 @@ class ProductCompletionGateTests(unittest.TestCase):
         self.assertFalse(report["complete"])
         self.assertIn("economic_edge", report["missing_required_gates"])
 
+    def test_unknown_qualification_gate_is_protocol_error(self):
+        qualification = complete_qualification()
+        qualification["gates"]["future_unreviewed_gate"] = "QUALIFIED"
+        with self.assertRaisesRegex(
+            ProductCompletionError,
+            "qualification gates contain unknown entries",
+        ):
+            evaluate(qualification=qualification)
+
     def test_unproven_economic_edge_or_release_blocks_completion(self):
         qualification = complete_qualification()
         qualification["gates"]["economic_edge"] = "UNPROVEN"

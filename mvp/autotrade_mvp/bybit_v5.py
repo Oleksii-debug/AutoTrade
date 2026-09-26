@@ -110,6 +110,9 @@ _BYBIT_KNOWN_ORDER_STATUSES = (
 )
 _MAX_ORDER_HISTORY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 _BYBIT_NO_FILL_ORDER_RETENTION = timedelta(hours=24)
+BYBIT_ORDER_HISTORY_NO_FILL_RETENTION_POLICY_ID = (
+    "BYBIT_V5_ORDER_HISTORY_NO_FILL_24H_2026_09_26"
+)
 
 
 def _text(value: object, *, name: str) -> str:
@@ -1295,6 +1298,7 @@ def order_history_coverage_from_pages(
     *,
     consistency_horizon_satisfied: bool,
     qualified_exclusion_semantics: bool = False,
+    retention_policy_id: str | None = None,
 ) -> CoverageSurfaceEvidence:
     """Derive bounded history coverage only from a contiguous exact cursor chain.
 
@@ -1313,6 +1317,27 @@ def order_history_coverage_from_pages(
     ):
         if type(value) is not bool:
             raise ProviderCoreError(f"{name} must be boolean")
+    if retention_policy_id is not None:
+        retention_policy_id = _text(
+            retention_policy_id,
+            name="retention_policy_id",
+        )
+        if (
+            retention_policy_id
+            != BYBIT_ORDER_HISTORY_NO_FILL_RETENTION_POLICY_ID
+        ):
+            raise ProviderCoreError(
+                "unknown Bybit order-history retention qualification policy"
+            )
+    if (
+        qualified_exclusion_semantics
+        and retention_policy_id
+        != BYBIT_ORDER_HISTORY_NO_FILL_RETENTION_POLICY_ID
+    ):
+        raise ProviderCoreError(
+            "Bybit order-history exclusion semantics require the exact "
+            "qualified retention policy"
+        )
 
     pages = tuple(parse_order_page(observation) for observation in observations)
     if any(page.surface != "ORDER_HISTORY" for page in pages):

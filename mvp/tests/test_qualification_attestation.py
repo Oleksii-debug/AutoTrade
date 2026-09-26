@@ -271,6 +271,51 @@ class QualificationAttestationTests(unittest.TestCase):
         self.assertEqual(loaded.policy_version, canonical.policy_version)
         self.assertNotEqual(loaded.policy_id, hostile.policy_id)
 
+    def test_canonical_policy_rejects_historical_caller_selected_source(self):
+        canonical = policy(root())
+        with TemporaryDirectory() as directory:
+            repository_root = Path(directory)
+            historical_sha, _ = _initialize_exact_source_policy_repo(
+                repository_root,
+                canonical,
+            )
+            (repository_root / "README.md").write_text(
+                "advance trusted checkout\n",
+                encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "add", "README.md"],
+                cwd=repository_root,
+                capture_output=True,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=AutoTrade Test",
+                    "-c",
+                    "user.email=autotrade-test@example.invalid",
+                    "commit",
+                    "-m",
+                    "advance exact source",
+                ],
+                cwd=repository_root,
+                capture_output=True,
+                check=True,
+            )
+            with patch.object(
+                qualification_trust,
+                "_QUALIFICATION_TRUST_REPOSITORY_ROOT",
+                repository_root,
+            ), self.assertRaisesRegex(
+                QualificationTrustError,
+                "source SHA does not match checkout HEAD",
+            ):
+                qualification_trust.load_canonical_qualification_trust_policy(
+                    expected_source_sha=historical_sha,
+                )
+
     def test_untracked_policy_cannot_become_canonical_trust_root(self):
         hostile = policy(root())
         with TemporaryDirectory() as directory:

@@ -7,6 +7,8 @@ from typing import Any
 _JSON_WHITESPACE_BYTES = b" \t\r\n"
 _JSON_INTEGER_MAX_DIGITS = 640
 _JSON_MAX_NESTING_DEPTH = 128
+_JSON_MAX_DOCUMENT_CHARS = 1_000_000
+_JSON_MAX_DECODED_NODES = 100_000
 
 
 class DuplicateJsonKeyError(ValueError):
@@ -53,8 +55,14 @@ def _parse_bounded_json_integer(value: str) -> int:
 
 def _validate_strict_json_value(root: object) -> None:
     stack = [(root, 0)]
+    visited = 0
     while stack:
         value, depth = stack.pop()
+        visited += 1
+        if visited > _JSON_MAX_DECODED_NODES:
+            raise InvalidJsonDomainError(
+                f"JSON decoded domain exceeds {_JSON_MAX_DECODED_NODES} nodes"
+            )
         if isinstance(value, str):
             try:
                 value.encode("utf-8")
@@ -98,6 +106,10 @@ def strict_json_loads(text: str) -> Any:
     """Decode one JSON value and reject ambiguous/non-canonical decoded domains."""
     if not isinstance(text, str):
         raise TypeError("text must be str; decode bytes explicitly at the boundary")
+    if len(text) > _JSON_MAX_DOCUMENT_CHARS:
+        raise InvalidJsonDomainError(
+            f"JSON document exceeds {_JSON_MAX_DOCUMENT_CHARS} characters"
+        )
     raw = json.loads(
         text,
         object_pairs_hook=_unique_json_object,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from hashlib import sha256
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -14,6 +15,9 @@ from research.autotrade_research.learning.online import (
     OnlineUpdateEnvelope,
     ParameterRule,
 )
+from research.autotrade_research.learning.population_coverage import (
+    build_population_coverage,
+)
 from research.autotrade_research.learning.update_producer import (
     OnlineUpdateRuntimeState,
     UpdateProducerConfig,
@@ -21,10 +25,12 @@ from research.autotrade_research.learning.update_producer import (
     publish_online_update_result,
 )
 from research.autotrade_research.memory.episodes import ExperienceMemory
+from research.autotrade_research.science.registry import ScientificRegistry
 
 
 SOURCE_SHA = "a" * 40
 FEATURE_SCHEMA = "sha256:" + "f" * 64
+PROTOCOL_ID = "00000000-0000-0000-0000-000000000901"
 CALIBRATION_CUTOFF = datetime(2026, 10, 5, tzinfo=timezone.utc)
 UPDATE_CUTOFF = datetime(2026, 10, 10, tzinfo=timezone.utc)
 DECISION = datetime(2026, 10, 1, tzinfo=timezone.utc)
@@ -50,6 +56,10 @@ class ProducerFixture:
         )
         self.artifacts = ArtifactStore(self.root / "artifacts")
         self.jobs = ResearchJobStore(self.root / "jobs.sqlite3")
+        self.science = ScientificRegistry(self.root / "science.sqlite3")
+        self.protocol_registration = None
+        self.reconciliation_evidence = {}
+        self.outcome_evidence = {}
         self._episode_counter = 0
         self._physical_evidence_refs = {}
 
@@ -83,6 +93,79 @@ class ProducerFixture:
         self._physical_evidence_refs[key] = reference
         return reference
 
+    def resolve_reconciliation_evidence(self, episode_id):
+        return self.reconciliation_evidence[episode_id]
+
+    def resolve_outcome_evidence(self, episode_id):
+        return self.outcome_evidence[episode_id]
+
+    def bind_outcome_evidence(
+        self,
+        episode_id,
+        *,
+        outcome_class,
+        label_available_at,
+        outcome_horizon_at,
+        target,
+        label_version="label-v1",
+        observed_at=None,
+        current_scope=True,
+    ):
+        observed = observed_at or label_available_at
+        material = {
+            "episode_id": episode_id,
+            "outcome_class": outcome_class,
+            "label_version": label_version,
+            "label_available_at": label_available_at.isoformat().replace(
+                "+00:00", "Z"
+            ),
+            "outcome_horizon_at": outcome_horizon_at.isoformat().replace(
+                "+00:00", "Z"
+            ),
+            "target": str(target),
+            "observed_at": observed.isoformat().replace("+00:00", "Z"),
+        }
+        self.outcome_evidence[episode_id] = {
+            **material,
+            "evidence_ref": f"outcome-evidence:{episode_id}",
+            "evidence_digest": "sha256:" + sha256(
+                canonical_bytes(material)
+            ).hexdigest(),
+            "current_scope": current_scope,
+        }
+
+    def bind_reconciliation_evidence(
+        self,
+        episode_id,
+        *,
+        observed_at,
+        outcome="OBSERVED_EXECUTION",
+    ):
+        execution_ids = (
+            [f"execution-{episode_id}"]
+            if outcome == "OBSERVED_EXECUTION"
+            else []
+        )
+        self.reconciliation_evidence[episode_id] = {
+            "episode_id": episode_id,
+            "checkpoint_event_id": f"checkpoint-{episode_id}",
+            "checkpoint_payload_hash": "sha256:" + "9" * 64,
+            "checkpoint_aggregate_id": f"account-reconciliation:{episode_id}",
+            "checkpoint_aggregate_version": 1,
+            "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
+            "provider_id": "TEST",
+            "account_id": "paper-account",
+            "environment": "PAPER",
+            "attempt_id": f"attempt-{episode_id}",
+            "intent_id": f"intent-{episode_id}",
+            "client_order_id": f"client-{episode_id}",
+            "outcome": outcome,
+            "evidence_reason": "authority-backed unit-test reconciliation",
+            "provider_order_ids": [],
+            "provider_execution_ids": execution_ids,
+            "current_scope": True,
+        }
+
     def append_learning(
         self,
         *,
@@ -97,6 +180,11 @@ class ProducerFixture:
         decision_time=None,
         evidence_ref=None,
         regime="stable",
+        outcome_class="NULL",
+        canonical_label_mature=True,
+        canonical_reconciliation_state="RECONCILED",
+        intended_side="NO_TRADE",
+        bind_outcome_evidence=True,
     ):
         self._episode_counter += 1
         decision = decision_time or (
@@ -109,9 +197,16 @@ class ProducerFixture:
         )
         payload = {
             "evidence_refs": [physical_evidence],
-            "intended_action": {"kind": "NO_TRADE"},
+            "intended_action": {
+                "kind": "NO_TRADE",
+                "side": intended_side,
+            },
             "actual_execution": {"kind": "NO_TRADE"},
-            "outcome": {"class": "NULL"},
+            "outcome": {
+                "class": outcome_class,
+                "label_mature": canonical_label_mature,
+                "reconciliation_state": canonical_reconciliation_state,
+            },
             "costs": {"total": "0"},
             "learning": {
                 "observation_id": observation_id,
@@ -129,7 +224,7 @@ class ProducerFixture:
                 "target": str(target),
             },
         }
-        return self.memory.append_episode(
+        stored_episode_id = self.memory.append_episode(
             decision_time=decision,
             information_cutoff=decision,
             task=task,
@@ -139,6 +234,15 @@ class ProducerFixture:
             payload=payload,
             episode_id=episode_id,
         )[0]
+        if bind_outcome_evidence:
+            self.bind_outcome_evidence(
+                stored_episode_id,
+                outcome_class=outcome_class,
+                label_available_at=label_available_at,
+                outcome_horizon_at=horizon,
+                target=target,
+            )
+        return stored_episode_id
 
     def seed_calibration(self, values=("0", "1", "2", "3")):
         for index, value in enumerate(values):
@@ -163,7 +267,63 @@ class ProducerFixture:
             ),
         )
 
-    def publish_checkpoint(self):
+
+    def register_protocol(self):
+        snapshot = self.memory.coverage_population_snapshot(
+            causal_cutoff=CALIBRATION_CUTOFF,
+            granted_permissions={"research"},
+            task="calibration",
+            instrument_family="equity",
+        )
+        payload = {
+            "hypothesis": "bounded update preregistered before candidate publication",
+            "strategy": "bounded-linear-gradient-v1",
+            "features": ["x"],
+            "search_space": {"learning_rate": ["1"]},
+            "train_period": {"start": "2024-01-01", "end": "2024-12-31"},
+            "validation_period": {"start": "2025-01-01", "end": "2025-06-30"},
+            "test_period": {"start": "2025-07-01", "end": "2025-12-31"},
+            "forward_period": {"start": "2026-01-01", "end": "2026-06-30"},
+            "labels": ["label-v1"],
+            "horizons": ["1d"],
+            "purge_embargo": {"purge": "1d", "embargo": "1d"},
+            "universe": ["equity"],
+            "cost_fill_model": "test-cost-v1",
+            "baselines": ["zero-update"],
+            "primary_metrics": ["bounded-loss"],
+            "secondary_metrics": ["drift"],
+            "trial_budget": 3,
+            "stopping_rules": "fail closed on evidence gaps",
+            "statistical_estimator": "deterministic",
+            "multiplicity_treatment": "registered",
+            "minimum_practical_effect": "0.001",
+            "risk_constraints": {"max_update": "bounded"},
+            "retention_tolerances": {"prior_regime_loss": "0"},
+            "promotion_rule": "independent downstream gates",
+            "online_update_registration": {
+                "schema_version": "1.0.0",
+                "calibration_population_root_hash": snapshot.root_hash,
+                "calibration_cutoff": CALIBRATION_CUTOFF.isoformat().replace(
+                    "+00:00", "Z"
+                ),
+                "update_task": "update",
+                "calibration_task": "calibration",
+                "instrument_family": "equity",
+                "permission_classes": ["research"],
+                "feature_schema_hash": FEATURE_SCHEMA,
+                "label_version": "label-v1",
+                "source_sha": SOURCE_SHA,
+            },
+        }
+        self.protocol_registration = self.science.register_protocol(
+            payload,
+            protocol_id=PROTOCOL_ID,
+        )
+        return self.protocol_registration
+
+    def publish_checkpoint(self, *, preregister=True):
+        if preregister and self.protocol_registration is None:
+            self.register_protocol()
         payload = {
             "schema_version": "1.0.0",
             "artifact_kind": "BOUNDED_LINEAR_CHECKPOINT",
@@ -249,6 +409,7 @@ class ProducerFixture:
         max_compute_units="100",
         source_sha=SOURCE_SHA,
         learning_rate="1",
+        protocol_id=PROTOCOL_ID,
     ):
         return UpdateProducerConfig(
             source_sha=source_sha,
@@ -264,6 +425,7 @@ class ProducerFixture:
             calibration_task="calibration",
             test_evidence_refs=(test_ref,),
             instrument_family="equity",
+            protocol_id=protocol_id,
         )
 
     @staticmethod
@@ -289,6 +451,56 @@ class ProducerFixture:
             max_drift_score="100",
         )
 
+
+    def population_manifest(
+        self,
+        *,
+        checkpoint_ref,
+        task,
+        cutoff,
+        extra_exclusions=None,
+        frozen_protocol_hash=None,
+    ):
+        if frozen_protocol_hash is None:
+            if self.protocol_registration is None:
+                raise RuntimeError("protocol must be registered before population manifest")
+            frozen_protocol_hash = self.protocol_registration.protocol_hash
+        snapshot = self.memory.coverage_population_snapshot(
+            causal_cutoff=cutoff,
+            granted_permissions={"research"},
+            task=task,
+            instrument_family="equity",
+        )
+        exclusions = {
+            row["episode_id"]: "TOMBSTONED"
+            for row in snapshot.rows
+            if row["tombstone_lineage"]
+        }
+        for episode_id, reason in (extra_exclusions or {}).items():
+            exclusions[episode_id] = reason
+        included = [
+            row["episode_id"]
+            for row in snapshot.rows
+            if row["episode_id"] not in exclusions
+        ]
+        candidate_hash = (
+            "sha256:" + checkpoint_ref.rsplit("@sha256:", 1)[1]
+        )
+        return build_population_coverage(
+            snapshot,
+            candidate_hash=candidate_hash,
+            frozen_protocol_hash=frozen_protocol_hash,
+            input_snapshot_hash=snapshot.root_hash,
+            causal_cutoff=cutoff,
+            permission_classes=["research"],
+            included_episode_ids=included,
+            exclusions=exclusions,
+            reconciliation_evidence_resolver=self.resolve_reconciliation_evidence,
+            outcome_evidence_resolver=self.resolve_outcome_evidence,
+            task=task,
+            instrument_family="equity",
+        )
+
     def produce(
         self,
         *,
@@ -300,7 +512,24 @@ class ProducerFixture:
         update_cutoff=UPDATE_CUTOFF,
         runtime_state=None,
         granted_permissions=None,
+        with_population_manifests=True,
+        update_population_manifest=None,
+        calibration_population_manifest=None,
     ):
+        permissions = granted_permissions or {"research"}
+        if with_population_manifests:
+            if update_population_manifest is None:
+                update_population_manifest = self.population_manifest(
+                    checkpoint_ref=checkpoint_ref,
+                    task=config.update_task,
+                    cutoff=update_cutoff,
+                )
+            if calibration_population_manifest is None:
+                calibration_population_manifest = self.population_manifest(
+                    checkpoint_ref=checkpoint_ref,
+                    task=config.calibration_task,
+                    cutoff=calibration_cutoff,
+                )
         return produce_bounded_online_update(
             memory=self.memory,
             artifact_store=self.artifacts,
@@ -314,7 +543,12 @@ class ProducerFixture:
             ),
             update_cutoff=update_cutoff,
             calibration_cutoff=calibration_cutoff,
-            granted_permissions=granted_permissions or {"research"},
+            granted_permissions=permissions,
+            update_population_manifest=update_population_manifest,
+            calibration_population_manifest=calibration_population_manifest,
+            scientific_registry=self.science,
+            reconciliation_evidence_resolver=self.resolve_reconciliation_evidence,
+            outcome_evidence_resolver=self.resolve_outcome_evidence,
         )
 
 
@@ -373,6 +607,18 @@ class UpdateProducerTests(unittest.TestCase):
             self.assertFalse(
                 artifact["online_gate"]["grants_trading_authority"]
             )
+            self.assertEqual(
+                artifact["scientific_registration"]["protocol_id"],
+                PROTOCOL_ID,
+            )
+            self.assertEqual(
+                artifact["scientific_registration"]["protocol_hash"],
+                fixture.protocol_registration.protocol_hash,
+            )
+            self.assertEqual(
+                artifact["producer_config"]["protocol_id"],
+                PROTOCOL_ID,
+            )
 
             self.assertEqual(
                 artifact["producer_config"]["learning_rate"],
@@ -408,6 +654,398 @@ class UpdateProducerTests(unittest.TestCase):
             )
             self.assertTrue(
                 artifact["online_envelope_sha256"].startswith("sha256:")
+            )
+
+
+    def test_scientific_preregistration_is_required_before_update(self):
+        with TemporaryDirectory() as directory:
+            fixture, checkpoint, test_ref, calibration, envelope = (
+                self.ready_fixture(directory)
+            )
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=envelope,
+                config=fixture.config(test_ref, protocol_id=None),
+            )
+            self.assertEqual(produced.status, "NO_UPDATE")
+            self.assertIsNone(produced.proposed_parameters)
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertIn(
+                "LEARNING.SCIENTIFIC_PREREGISTRATION_REQUIRED",
+                artifact["reasons"],
+            )
+            self.assertIsNone(artifact["scientific_registration"])
+
+    def test_protocol_registered_after_checkpoint_is_too_late(self):
+        with TemporaryDirectory() as directory:
+            fixture = ProducerFixture(directory)
+            fixture.seed_calibration()
+            fixture.seed_update()
+            checkpoint = fixture.publish_checkpoint(preregister=False)
+            fixture.register_protocol()
+            test_ref = fixture.publish_test_evidence()
+            calibration = fixture.publish_calibration_evidence()
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=fixture.envelope(checkpoint),
+                config=fixture.config(test_ref),
+            )
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertEqual(produced.status, "NO_UPDATE")
+            self.assertIn(
+                "LEARNING.SCIENTIFIC_PREREGISTRATION_LATE",
+                artifact["reasons"],
+            )
+            self.assertIsNone(artifact["scientific_registration"])
+
+    def test_frozen_protocol_rejects_later_calibration_population_change(self):
+        with TemporaryDirectory() as directory:
+            fixture = ProducerFixture(directory)
+            fixture.seed_calibration()
+            fixture.register_protocol()
+            fixture.append_learning(
+                task="calibration",
+                feature="4",
+                target="0",
+                observation_id="post-freeze-calibration",
+                label_available_at=datetime(
+                    2026, 10, 3, 13, tzinfo=timezone.utc
+                ),
+            )
+            fixture.seed_update()
+            checkpoint = fixture.publish_checkpoint()
+            test_ref = fixture.publish_test_evidence()
+            calibration = fixture.publish_calibration_evidence()
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=fixture.envelope(checkpoint),
+                config=fixture.config(test_ref, min_calibration_episodes=5),
+            )
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertEqual(produced.status, "NO_UPDATE")
+            self.assertIn(
+                "LEARNING.SCIENTIFIC_PREREGISTRATION_SCOPE_MISMATCH",
+                artifact["reasons"],
+            )
+            self.assertIsNone(artifact["scientific_registration"])
+
+    def test_population_manifest_protocol_hash_must_be_registry_issued(self):
+        with TemporaryDirectory() as directory:
+            fixture, checkpoint, test_ref, calibration, envelope = (
+                self.ready_fixture(directory)
+            )
+            forged = "sha256:" + "d" * 64
+            update_manifest = fixture.population_manifest(
+                checkpoint_ref=checkpoint,
+                task="update",
+                cutoff=UPDATE_CUTOFF,
+                frozen_protocol_hash=forged,
+            )
+            calibration_manifest = fixture.population_manifest(
+                checkpoint_ref=checkpoint,
+                task="calibration",
+                cutoff=CALIBRATION_CUTOFF,
+                frozen_protocol_hash=forged,
+            )
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=envelope,
+                config=fixture.config(test_ref),
+                update_population_manifest=update_manifest,
+                calibration_population_manifest=calibration_manifest,
+            )
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertEqual(produced.status, "NO_UPDATE")
+            self.assertIn(
+                "LEARNING.SCIENTIFIC_PREREGISTRATION_HASH_MISMATCH",
+                artifact["reasons"],
+            )
+            self.assertIsNone(artifact["scientific_registration"])
+
+    def test_population_authority_is_required_before_any_update_proposal(self):
+        with TemporaryDirectory() as directory:
+            fixture, checkpoint, test_ref, calibration, envelope = (
+                self.ready_fixture(directory)
+            )
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=envelope,
+                config=fixture.config(test_ref),
+                with_population_manifests=False,
+            )
+            self.assertEqual(produced.status, "NO_UPDATE")
+            self.assertIsNone(produced.proposed_parameters)
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertIn(
+                "LEARNING.UPDATE_POPULATION_COVERAGE_REQUIRED",
+                artifact["reasons"],
+            )
+            self.assertIn(
+                "LEARNING.CALIBRATION_POPULATION_COVERAGE_REQUIRED",
+                artifact["reasons"],
+            )
+            self.assertIsNone(
+                artifact["evidence"]["population_authority"][
+                    "update_manifest_digest"
+                ]
+            )
+
+    def test_valid_episode_cannot_be_omitted_by_favorable_population_manifest(self):
+        with TemporaryDirectory() as directory:
+            fixture, checkpoint, test_ref, calibration, envelope = (
+                self.ready_fixture(directory)
+            )
+            omitted = fixture.append_learning(
+                task="update",
+                feature="-9",
+                target="-10",
+                observation_id="negative-evidence",
+                label_available_at=datetime(
+                    2026, 10, 8, 1, tzinfo=timezone.utc
+                ),
+                outcome_class="NEGATIVE",
+                intended_side="BUY",
+            )
+            forged_manifest = fixture.population_manifest(
+                checkpoint_ref=checkpoint,
+                task="update",
+                cutoff=UPDATE_CUTOFF,
+                extra_exclusions={
+                    omitted: "CALLER_SELECTED_FAVORABLE_SUBSET",
+                },
+            )
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=envelope,
+                config=fixture.config(test_ref),
+                update_population_manifest=forged_manifest,
+            )
+            self.assertEqual(produced.status, "NO_UPDATE")
+            self.assertIsNone(produced.proposed_parameters)
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertIn(
+                "LEARNING.UPDATE_POPULATION_COVERAGE_MISMATCH",
+                artifact["reasons"],
+            )
+
+    def test_caller_payload_maturity_cannot_replace_missing_outcome_authority(self):
+        with TemporaryDirectory() as directory:
+            fixture, checkpoint, test_ref, calibration, envelope = (
+                self.ready_fixture(directory)
+            )
+            fixture.append_learning(
+                task="update",
+                feature="2",
+                target="1",
+                observation_id="caller-claims-mature",
+                label_available_at=datetime(
+                    2026, 10, 8, 2, tzinfo=timezone.utc
+                ),
+                canonical_label_mature=True,
+                canonical_reconciliation_state="RECONCILED",
+                bind_outcome_evidence=False,
+            )
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=envelope,
+                config=fixture.config(test_ref),
+            )
+            self.assertEqual(produced.status, "NO_UPDATE")
+            self.assertIsNone(produced.proposed_parameters)
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertIn(
+                "OUTCOME_EVIDENCE_UNVERIFIED",
+                {
+                    reason
+                    for _episode_id, reason
+                    in artifact["population"]["update_exclusions"]
+                },
+            )
+            self.assertIn(
+                "LEARNING.UPDATE_POPULATION_COVERAGE_MISMATCH",
+                artifact["reasons"],
+            )
+
+    def test_forged_reconciled_trade_without_authority_proof_is_no_update(self):
+        with TemporaryDirectory() as directory:
+            fixture, checkpoint, test_ref, calibration, envelope = (
+                self.ready_fixture(directory)
+            )
+            forged = fixture.append_learning(
+                task="update",
+                feature="2",
+                target="1",
+                observation_id="forged-reconciled-trade",
+                label_available_at=datetime(
+                    2026, 10, 8, 3, tzinfo=timezone.utc
+                ),
+                outcome_class="POSITIVE",
+                canonical_label_mature=True,
+                canonical_reconciliation_state="RECONCILED",
+                intended_side="BUY",
+            )
+            exact_manifest = fixture.population_manifest(
+                checkpoint_ref=checkpoint,
+                task="update",
+                cutoff=UPDATE_CUTOFF,
+                extra_exclusions={
+                    forged: "RECONCILIATION_EVIDENCE_UNVERIFIED",
+                },
+            )
+            self.assertFalse(exact_manifest.complete)
+
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=envelope,
+                config=fixture.config(test_ref),
+                update_population_manifest=exact_manifest,
+            )
+
+            self.assertEqual(produced.status, "NO_UPDATE")
+            self.assertIsNone(produced.proposed_parameters)
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertIn(
+                "LEARNING.UPDATE_POPULATION_COVERAGE_INCOMPLETE",
+                artifact["reasons"],
+            )
+            self.assertIn(
+                [forged, "RECONCILIATION_EVIDENCE_UNVERIFIED"],
+                artifact["population"]["update_exclusions"],
+            )
+
+    def test_reconciliation_proof_for_different_episode_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            fixture, checkpoint, test_ref, calibration, envelope = (
+                self.ready_fixture(directory)
+            )
+            episode_id = fixture.append_learning(
+                task="update",
+                feature="2",
+                target="1",
+                observation_id="wrong-episode-reconciliation",
+                label_available_at=datetime(
+                    2026, 10, 8, 4, tzinfo=timezone.utc
+                ),
+                outcome_class="POSITIVE",
+                intended_side="BUY",
+            )
+            fixture.bind_reconciliation_evidence(
+                episode_id,
+                observed_at=datetime(
+                    2026, 10, 8, 3, 59, tzinfo=timezone.utc
+                ),
+            )
+            fixture.reconciliation_evidence[episode_id]["episode_id"] = (
+                "00000000-0000-4000-8000-000000000099"
+            )
+
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=envelope,
+                config=fixture.config(test_ref),
+            )
+
+            self.assertEqual(produced.status, "NO_UPDATE")
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertIn(
+                [episode_id, "RECONCILIATION_EVIDENCE_INVALID"],
+                artifact["population"]["update_exclusions"],
+            )
+
+    def test_authority_reconciliation_proof_is_bound_into_learning_row(self):
+        with TemporaryDirectory() as directory:
+            fixture, checkpoint, test_ref, calibration, envelope = (
+                self.ready_fixture(directory)
+            )
+            episode_id = fixture.append_learning(
+                task="update",
+                feature="2",
+                target="1",
+                observation_id="authority-backed-trade",
+                label_available_at=datetime(
+                    2026, 10, 8, 4, tzinfo=timezone.utc
+                ),
+                outcome_class="POSITIVE",
+                intended_side="BUY",
+            )
+            fixture.bind_reconciliation_evidence(
+                episode_id,
+                observed_at=datetime(
+                    2026, 10, 8, 3, 59, tzinfo=timezone.utc
+                ),
+            )
+
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=envelope,
+                config=fixture.config(test_ref),
+            )
+
+            self.assertEqual(produced.status, "UPDATE_PROPOSED")
+            artifact = json.loads(produced.artifact_bytes)
+            row = next(
+                item
+                for item in artifact["population"]["update_included"]
+                if item["episode_id"] == episode_id
+            )
+            proof = row["reconciliation_evidence"]
+            self.assertEqual(proof["status"], "VERIFIED")
+            self.assertEqual(
+                proof["checkpoint_event_id"],
+                f"checkpoint-{episode_id}",
+            )
+            self.assertEqual(proof["checkpoint_aggregate_version"], 1)
+            self.assertEqual(
+                proof["observed_at"],
+                "2026-10-08T03:59:00+00:00",
+            )
+            self.assertTrue(proof["current_scope"])
+
+    def test_population_protocol_identity_must_match_across_update_and_calibration(self):
+        with TemporaryDirectory() as directory:
+            fixture, checkpoint, test_ref, calibration, envelope = (
+                self.ready_fixture(directory)
+            )
+            update_manifest = fixture.population_manifest(
+                checkpoint_ref=checkpoint,
+                task="update",
+                cutoff=UPDATE_CUTOFF,
+                frozen_protocol_hash=fixture.protocol_registration.protocol_hash,
+            )
+            calibration_manifest = fixture.population_manifest(
+                checkpoint_ref=checkpoint,
+                task="calibration",
+                cutoff=CALIBRATION_CUTOFF,
+                frozen_protocol_hash="sha256:" + "d" * 64,
+            )
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=envelope,
+                config=fixture.config(test_ref),
+                update_population_manifest=update_manifest,
+                calibration_population_manifest=calibration_manifest,
+            )
+            self.assertEqual(produced.status, "NO_UPDATE")
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertIn(
+                "LEARNING.POPULATION_PROTOCOL_MISMATCH",
+                artifact["reasons"],
+            )
+            self.assertIsNone(
+                artifact["evidence"]["population_authority"][
+                    "frozen_protocol_hash"
+                ]
             )
 
     def test_early_no_update_still_binds_full_config_envelope_and_runtime(self):
@@ -491,6 +1129,50 @@ class UpdateProducerTests(unittest.TestCase):
                 "0.5",
             )
 
+    def test_physical_evidence_availability_cannot_be_backdated_by_label(self):
+        with TemporaryDirectory() as directory:
+            fixture, checkpoint, test_ref, calibration, envelope = (
+                self.ready_fixture(directory)
+            )
+            backdated = fixture.append_learning(
+                task="update",
+                feature="2",
+                target="1",
+                observation_id="backdated-evidence",
+                label_available_at=datetime(
+                    2026, 9, 1, tzinfo=timezone.utc
+                ),
+            )
+            exact_manifest = fixture.population_manifest(
+                checkpoint_ref=checkpoint,
+                task="update",
+                cutoff=UPDATE_CUTOFF,
+                extra_exclusions={
+                    backdated: "PHYSICAL_EVIDENCE_NOT_CAUSALLY_AVAILABLE",
+                },
+            )
+            self.assertFalse(exact_manifest.complete)
+
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=envelope,
+                config=fixture.config(test_ref),
+                update_population_manifest=exact_manifest,
+            )
+
+            self.assertEqual(produced.status, "NO_UPDATE")
+            self.assertIsNone(produced.proposed_parameters)
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertIn(
+                "LEARNING.UPDATE_POPULATION_COVERAGE_INCOMPLETE",
+                artifact["reasons"],
+            )
+            self.assertIn(
+                [backdated, "PHYSICAL_EVIDENCE_NOT_CAUSALLY_AVAILABLE"],
+                artifact["population"]["update_exclusions"],
+            )
+
     def test_future_label_is_excluded_and_cannot_change_proposal(self):
         with TemporaryDirectory() as directory:
             fixture, checkpoint, test_ref, calibration, envelope = (
@@ -518,10 +1200,9 @@ class UpdateProducerTests(unittest.TestCase):
                 envelope=envelope,
                 config=config,
             )
-            self.assertEqual(
-                baseline.proposed_parameters,
-                with_future.proposed_parameters,
-            )
+            self.assertEqual(baseline.status, "UPDATE_PROPOSED")
+            self.assertEqual(with_future.status, "NO_UPDATE")
+            self.assertIsNone(with_future.proposed_parameters)
             artifact = json.loads(with_future.artifact_bytes)
             self.assertIn(
                 "LABEL_NOT_CAUSALLY_MATURE",
@@ -530,6 +1211,63 @@ class UpdateProducerTests(unittest.TestCase):
                     for _episode, reason
                     in artifact["population"]["update_exclusions"]
                 },
+            )
+            self.assertIn(
+                "LEARNING.UPDATE_POPULATION_COVERAGE_MISMATCH",
+                artifact["reasons"],
+            )
+
+    def test_exact_matching_manifest_cannot_hide_excluded_unresolved_episode(self):
+        with TemporaryDirectory() as directory:
+            fixture, checkpoint, test_ref, calibration, envelope = (
+                self.ready_fixture(directory)
+            )
+            config = fixture.config(test_ref)
+            unresolved = fixture.append_learning(
+                task="update",
+                feature="9",
+                target="99",
+                observation_id="future-pending",
+                label_available_at=UPDATE_CUTOFF + timedelta(days=1),
+                outcome_horizon_at=UPDATE_CUTOFF + timedelta(days=1),
+                execution_reconciled_at=UPDATE_CUTOFF + timedelta(days=1),
+                outcome_class="PENDING",
+                intended_side="BUY",
+                canonical_label_mature=False,
+                canonical_reconciliation_state="PENDING",
+            )
+            exact_manifest = fixture.population_manifest(
+                checkpoint_ref=checkpoint,
+                task="update",
+                cutoff=UPDATE_CUTOFF,
+                extra_exclusions={
+                    unresolved: "LABEL_NOT_CAUSALLY_MATURE",
+                },
+            )
+            self.assertFalse(exact_manifest.complete)
+
+            produced = fixture.produce(
+                checkpoint_ref=checkpoint,
+                calibration_ref=calibration,
+                envelope=envelope,
+                config=config,
+                update_population_manifest=exact_manifest,
+            )
+
+            self.assertEqual(produced.status, "NO_UPDATE")
+            self.assertIsNone(produced.proposed_parameters)
+            artifact = json.loads(produced.artifact_bytes)
+            self.assertNotIn(
+                "LEARNING.UPDATE_POPULATION_COVERAGE_MISMATCH",
+                artifact["reasons"],
+            )
+            self.assertIn(
+                "LEARNING.UPDATE_POPULATION_COVERAGE_INCOMPLETE",
+                artifact["reasons"],
+            )
+            self.assertIn(
+                [unresolved, "LABEL_NOT_CAUSALLY_MATURE"],
+                artifact["population"]["update_exclusions"],
             )
 
     def test_visible_correction_is_applied_once_and_lineage_is_bound(self):
@@ -568,6 +1306,21 @@ class UpdateProducerTests(unittest.TestCase):
                     },
                     "evidence_ref": evidence_ref,
                 },
+            )
+            # The correction changes the supervised target, so the independent
+            # outcome authority must publish matching post-correction evidence.
+            # Production must not infer a corrected target from memory alone.
+            fixture.bind_outcome_evidence(
+                episode,
+                outcome_class="NULL",
+                label_available_at=datetime(
+                    2026, 10, 8, tzinfo=timezone.utc
+                ),
+                outcome_horizon_at=datetime(
+                    2026, 10, 8, tzinfo=timezone.utc
+                ),
+                target="1",
+                observed_at=correction_time,
             )
             checkpoint = fixture.publish_checkpoint()
             test_ref = fixture.publish_test_evidence()

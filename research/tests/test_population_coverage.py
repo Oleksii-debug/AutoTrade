@@ -21,6 +21,7 @@ H2 = "sha256:" + "2" * 64
 H3 = "sha256:" + "3" * 64
 DECISION = datetime(2026, 9, 25, 12, tzinfo=timezone.utc)
 CUTOFF = datetime(2030, 1, 1, tzinfo=timezone.utc)
+_AUTO_OUTCOME_RESOLVER = object()
 
 
 def correction_evidence_time(evidence_ref):
@@ -29,6 +30,28 @@ def correction_evidence_time(evidence_ref):
         "artifact:correction": datetime(2029, 1, 1, tzinfo=timezone.utc),
     }
     return evidence_times[evidence_ref]
+
+
+def reconciliation_evidence(episode_id):
+    return {
+        "episode_id": episode_id,
+        "checkpoint_event_id": f"checkpoint-{episode_id}",
+        "checkpoint_payload_hash": H3,
+        "checkpoint_aggregate_id": f"account-reconciliation:{episode_id}",
+        "checkpoint_aggregate_version": 1,
+        "observed_at": "2029-01-01T00:00:00Z",
+        "provider_id": "TEST",
+        "account_id": "paper-account",
+        "environment": "PAPER",
+        "attempt_id": f"attempt-{episode_id}",
+        "intent_id": f"intent-{episode_id}",
+        "client_order_id": f"client-{episode_id}",
+        "outcome": "OBSERVED_EXECUTION",
+        "evidence_reason": "authority-backed unit-test reconciliation",
+        "provider_order_ids": [],
+        "provider_execution_ids": [f"execution-{episode_id}"],
+        "current_scope": True,
+    }
 
 
 def episode_payload(outcome_class, *, side="BUY", label_mature=True, label="observed"):
@@ -88,13 +111,45 @@ class PopulationCoverageTests(unittest.TestCase):
         )
         return store, negative, no_trade
 
-    def _manifest(self, store, included, exclusions=None):
+    def _manifest(
+        self,
+        store,
+        included,
+        exclusions=None,
+        reconciliation_evidence_resolver=reconciliation_evidence,
+        outcome_evidence_resolver=_AUTO_OUTCOME_RESOLVER,
+    ):
         population = store.coverage_population_snapshot(
             causal_cutoff=CUTOFF,
             granted_permissions={"research"},
             task="research",
             instrument_family="equity",
         )
+        if outcome_evidence_resolver is _AUTO_OUTCOME_RESOLVER:
+            rows = {
+                row["episode_id"]: row
+                for row in population.rows
+            }
+
+            def outcome_evidence_resolver(episode_id):
+                outcome = rows[episode_id]["effective_payload"]["outcome"]
+                mature = outcome.get("label_mature") is True
+                available_at = (
+                    "2029-01-01T00:00:00Z"
+                    if mature
+                    else "2031-01-01T00:00:00Z"
+                )
+                return {
+                    "episode_id": episode_id,
+                    "evidence_ref": f"outcome-evidence:{episode_id}",
+                    "evidence_digest": H2,
+                    "observed_at": available_at,
+                    "label_available_at": available_at,
+                    "outcome_horizon_at": "2028-01-01T00:00:00Z",
+                    "outcome_class": outcome["class"],
+                    "current_scope": True,
+                }
+
         return build_population_coverage(
             population,
             candidate_hash=H1,
@@ -104,6 +159,8 @@ class PopulationCoverageTests(unittest.TestCase):
             permission_classes=["research"],
             included_episode_ids=included,
             exclusions=exclusions or {},
+            reconciliation_evidence_resolver=reconciliation_evidence_resolver,
+            outcome_evidence_resolver=outcome_evidence_resolver,
             task="research",
             instrument_family="equity",
         )
@@ -479,6 +536,84 @@ class PopulationCoverageTests(unittest.TestCase):
             )
             self.assertEqual(result.status, "INCONCLUSIVE")
             self.assertFalse(result.promotable)
+
+
+    def test_payload_maturity_flag_without_outcome_authority_is_not_complete(self):
+        with TemporaryDirectory() as directory:
+            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            episode_id, _ = store.append_episode(
+                episode_id="44444444-4444-4444-8444-444444444444",
+                decision_time=DECISION,
+                information_cutoff=DECISION,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=episode_payload(
+                    "NULL",
+                    side="NO_TRADE",
+                    label_mature=True,
+                    label="caller-claims-mature",
+                ),
+            )
+            manifest = self._manifest(
+                store,
+                [episode_id],
+                outcome_evidence_resolver=None,
+            )
+            self.assertTrue(manifest.complete)
+            self.assertFalse(
+                dict(manifest.included_labels_complete_by_regime)["calm"]
+            )
+
+    def test_mature_trade_without_authority_reconciliation_is_not_complete(self):
+        with TemporaryDirectory() as directory:
+            store = ExperienceMemory(Path(directory) / "memory.sqlite3")
+            payload = episode_payload(
+                "POSITIVE",
+                side="BUY",
+                label_mature=True,
+                label="mature-without-authority-proof",
+            )
+            payload["outcome"]["reconciliation_state"] = "RECONCILED"
+            episode_id, _ = store.append_episode(
+                episode_id="88888888-8888-4888-8888-888888888888",
+                decision_time=DECISION,
+                information_cutoff=DECISION,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload,
+            )
+            manifest = self._manifest(
+                store,
+                [episode_id],
+                reconciliation_evidence_resolver=None,
+            )
+            self.assertFalse(
+                dict(manifest.included_labels_complete_by_regime)["calm"]
+            )
+            metrics = {
+                "calm": RegimeMetric.create(
+                    regime="calm",
+                    champion_net_score="0.10",
+                    candidate_net_score="0.11",
+                    observations=1,
+                    label_complete=True,
+                )
+            }
+            result = evaluate_population_bound_retention(
+                metrics,
+                retention_policy(),
+                manifest,
+            )
+            self.assertEqual(result.status, "INCONCLUSIVE")
+            self.assertFalse(result.promotable)
+            self.assertIn(
+                "population label-completeness mismatch for regime calm",
+                result.reasons,
+            )
 
 
 if __name__ == "__main__":

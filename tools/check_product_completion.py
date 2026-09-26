@@ -11,6 +11,7 @@ import argparse
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -138,6 +139,18 @@ class ProductCompletionError(ValueError):
     pass
 
 
+def _trusted_git_environment() -> dict[str, str]:
+    """Run terminal source checks without caller-selected Git authority."""
+
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.upper().startswith("GIT_")
+    }
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    return environment
+
+
 def _load(path: Path, *, name: str) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -175,6 +188,7 @@ def _verify_exact_source_checkout(
             capture_output=True,
             text=True,
             check=False,
+            env=_trusted_git_environment(),
         )
     except OSError as error:
         raise ProductCompletionError(
@@ -219,6 +233,7 @@ def _verify_exact_source_checkout(
             capture_output=True,
             text=True,
             check=False,
+            env=_trusted_git_environment(),
         )
     except OSError as error:
         raise ProductCompletionError(

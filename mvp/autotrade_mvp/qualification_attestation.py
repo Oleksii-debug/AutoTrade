@@ -42,6 +42,7 @@ _QUALIFICATION_TRUST_SOURCE_ROOT = Path(__file__).resolve().parents[2]
 # authenticates this pin as part of the executable/source payload, while the
 # mutable packaged JSON remains data only.  None means terminal packaged trust is
 # intentionally unavailable; callers cannot provide or override this value.
+_CANONICAL_PACKAGED_QUALIFICATION_TRUST_SOURCE_SHA: str | None = None
 _CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256: str | None = None
 _MAX_QUALIFICATION_TRUST_POLICY_BYTES = 1_048_576
 
@@ -817,11 +818,25 @@ def _canonical_packaged_qualification_trust_policy_bytes(
     acquiring trust by matching a release pin.
     """
 
-    _git_sha(expected_source_sha, name="expected_source_sha")
+    source_sha = _git_sha(expected_source_sha, name="expected_source_sha")
     source_root = _QUALIFICATION_TRUST_SOURCE_ROOT.resolve()
     if (source_root / ".git").exists():
         raise QualificationTrustUnavailable(
             "packaged qualification trust policy is forbidden in a source checkout"
+        )
+
+    expected_packaged_source_sha = _CANONICAL_PACKAGED_QUALIFICATION_TRUST_SOURCE_SHA
+    if expected_packaged_source_sha is None:
+        raise QualificationTrustUnavailable(
+            "packaged qualification trust source SHA is not pinned by release composition"
+        )
+    expected_packaged_source_sha = _git_sha(
+        expected_packaged_source_sha,
+        name="packaged qualification trust source SHA",
+    )
+    if source_sha != expected_packaged_source_sha:
+        raise QualificationTrustError(
+            "packaged qualification trust source SHA does not match signed release pin"
         )
 
     expected_digest = _CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256

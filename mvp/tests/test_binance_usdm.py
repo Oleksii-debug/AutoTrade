@@ -474,6 +474,16 @@ class BinanceUsdmFoundationTests(unittest.TestCase):
                 client_ids_by_order_id={42: "bad client id with spaces"},
             )
 
+        with self.assertRaisesRegex(BinanceUsdmAdapterError, "multiple provider order ids"):
+            parse_account_trades(
+                observation,
+                instrument_versions={"BTCUSDT": "BTCUSDT-PERP:v1"},
+                client_ids_by_order_id={
+                    43: "at-usdm-same-client",
+                    44: "at-usdm-same-client",
+                },
+            )
+
     def test_instrument_identity_map_is_fully_validated_before_fill_mapping(self):
         row = {
             "commission": "0.01",

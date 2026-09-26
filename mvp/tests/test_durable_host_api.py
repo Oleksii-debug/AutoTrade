@@ -638,7 +638,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
                 remaining_uncertainty=("cancel_ack_not_completion",),
             )
 
-    def test_block_new_exposure_persists_canonical_targets_and_evidence(self):
+    def test_block_new_exposure_persists_scope_block_without_revoking_policies(self):
         journal = JournalStore(self.path)
         authority = AuthorityService(journal)
         authority.register_policy(self.authority_policy("exposure-policy"))
@@ -652,10 +652,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
         )
         event = store.events_after(0)[0]
         action_payload = event.payload["action_payload"]
-        self.assertEqual(
-            [item["policy_id"] for item in action_payload["target_policies"]],
-            ["exposure-policy"],
-        )
+        self.assertEqual(action_payload["target_policies"], [])
         self.assertNotIn("session", action_payload)
         self.assertNotIn("actor", action_payload)
         self.assertTrue(
@@ -666,14 +663,11 @@ class JournalBackedHostApiTests(unittest.TestCase):
         self.assertEqual(completed.phase, "SUCCEEDED")
         self.assertEqual(
             completed.affected_refs,
-            (
-                "authority-new-exposure-block:paper-account-1:PAPER",
-                "authority-policy:exposure-policy",
-            ),
+            ("authority-new-exposure-block:paper-account-1:PAPER",),
         )
         self.assertEqual(
             [item["event_type"] for item in completed.evidence],
-            ["AuthorityNewExposureBlocked", "AuthorityPolicyRevoked"],
+            ["AuthorityNewExposureBlocked"],
         )
 
         restored_service = AuthorityService(JournalStore(self.path))
@@ -684,8 +678,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
             )
         )
         restored = restored_service.export_state()
-        revoked = {item["policy_id"] for item in restored["revocations"]}
-        self.assertEqual(revoked, {"exposure-policy"})
+        self.assertEqual(restored["revocations"], [])
         self.assertEqual(
             restored["new_exposure_blocks"],
             [
@@ -703,6 +696,130 @@ class JournalBackedHostApiTests(unittest.TestCase):
             .get_operation(accepted.operation_id)
             .phase,
             "SUCCEEDED",
+        )
+
+    def test_block_restart_restore_preserves_existing_policy_identity(self):
+        journal = JournalStore(self.path)
+        original_policy = self.authority_policy(
+            "restorable-policy",
+            environment="SIMULATION",
+        )
+        AuthorityService(journal).register_policy(original_policy)
+
+        host = self.store(
+            environment="SIMULATION",
+            now="2030-01-01T00:00:00Z",
+        )
+        blocked = host.submit(
+            self.command(
+                environment="SIMULATION",
+                payload={"reason_code": "EMERGENCY_STOP"},
+            )
+        )
+        self.assertEqual(
+            host.execute_authority_operation(blocked.operation_id).phase,
+            "SUCCEEDED",
+        )
+
+        after_block = AuthorityService(JournalStore(self.path))
+        state = after_block.export_state()
+        self.assertEqual(state["revocations"], [])
+        self.assertTrue(
+            after_block.is_new_exposure_blocked(
+                "paper-account-1",
+                "SIMULATION",
+            )
+        )
+        denied = after_block._admit_unverified(
+            admission_id="existing-policy-blocked",
+            policy_id="restorable-policy",
+            intent_hash="existing-policy-risk",
+            account_id="paper-account-1",
+            environment="SIMULATION",
+            instrument_id="11111111-1111-4111-8111-111111111111",
+            instrument_version=1,
+            action="ORDER.SUBMIT",
+            notional="10",
+            state_version=1,
+            risk_admitted=True,
+            risk_reducing=False,
+            now="2030-01-01T00:00:01Z",
+        )
+        self.assertEqual(denied.outcome, "REJECTED")
+        self.assertEqual(denied.reason, "new_exposure_blocked")
+
+        registered = next(
+            item
+            for item in state["policies"]
+            if item["policy_id"] == "restorable-policy"
+        )
+        restore_payload = {
+            key: value
+            for key, value in registered.items()
+            if key != "account_id"
+        }
+        restore_payload.update(
+            {
+                "restore_new_exposure": True,
+                "reason_code": "POLICY_REVIEW",
+            }
+        )
+        restarted_host = self.store(
+            environment="SIMULATION",
+            now="2030-01-01T00:00:02Z",
+        )
+        restore = restarted_host.submit(
+            self.command(
+                command_id="66666666-6666-4666-8666-666666666666",
+                key="restore-existing-policy",
+                version=restarted_host.snapshot()["state_version"],
+                environment="SIMULATION",
+                action="SET_AUTHORITY",
+                payload=restore_payload,
+            )
+        )
+        self.assertEqual(
+            restarted_host.execute_authority_operation(restore.operation_id).phase,
+            "SUCCEEDED",
+        )
+
+        restarted_authority = AuthorityService(JournalStore(self.path))
+        restored_state = restarted_authority.export_state()
+        self.assertEqual(restored_state["revocations"], [])
+        self.assertFalse(
+            restarted_authority.is_new_exposure_blocked(
+                "paper-account-1",
+                "SIMULATION",
+            )
+        )
+        admitted = restarted_authority._admit_unverified(
+            admission_id="existing-policy-restored",
+            policy_id="restorable-policy",
+            intent_hash="restored-existing-policy-risk",
+            account_id="paper-account-1",
+            environment="SIMULATION",
+            instrument_id="11111111-1111-4111-8111-111111111111",
+            instrument_version=1,
+            action="ORDER.SUBMIT",
+            notional="10",
+            state_version=2,
+            risk_admitted=True,
+            risk_reducing=False,
+            now="2030-01-01T00:00:03Z",
+        )
+        self.assertEqual(admitted.outcome, "ADMITTED")
+        self.assertEqual(
+            restarted_authority.dispatch_allowed(
+                admitted.admission_id,
+                intent_hash="restored-existing-policy-risk",
+                account_id="paper-account-1",
+                environment="SIMULATION",
+                instrument_id="11111111-1111-4111-8111-111111111111",
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                now="2030-01-01T00:00:04Z",
+            ),
+            (True, "allowed"),
         )
 
     def test_block_survives_restart_and_fresh_set_authority_cannot_reopen_risk(self):
@@ -1204,7 +1321,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
         )
 
 
-    def test_repeated_block_reuses_scope_fact_and_revokes_new_exposure_policy(self):
+    def test_repeated_block_reuses_scope_fact_without_revoking_new_policy(self):
         first = self.store(now="2030-01-01T00:00:00Z")
         first_accepted = first.submit(
             self.command(payload={"reason_code": "EMERGENCY_STOP"})
@@ -1255,8 +1372,8 @@ class JournalBackedHostApiTests(unittest.TestCase):
         )
         second_event = second.events_after(0)[-1]
         self.assertEqual(
-            [item["policy_id"] for item in second_event.payload["action_payload"]["target_policies"]],
-            ["post-block-policy"],
+            second_event.payload["action_payload"]["target_policies"],
+            [],
         )
         second_done = second.execute_authority_operation(
             second_accepted.operation_id
@@ -1264,10 +1381,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
         self.assertEqual(second_done.phase, "SUCCEEDED")
         self.assertEqual(
             second_done.affected_refs,
-            (
-                "authority-new-exposure-block:paper-account-1:PAPER",
-                "authority-policy:post-block-policy",
-            ),
+            ("authority-new-exposure-block:paper-account-1:PAPER",),
         )
 
         authority_events = JournalStore(self.path).load_events(
@@ -1282,10 +1396,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
             1,
         )
         restored = AuthorityService(JournalStore(self.path)).export_state()
-        self.assertEqual(
-            {item["policy_id"] for item in restored["revocations"]},
-            {"post-block-policy"},
-        )
+        self.assertEqual(restored["revocations"], [])
         self.assertEqual(len(restored["new_exposure_blocks"]), 1)
 
 
@@ -1553,7 +1664,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
             authority_event_count,
         )
 
-    def test_restart_resumes_after_scope_block_committed_before_policy_revocation(self):
+    def test_restart_resumes_after_scope_block_commit_without_duplicate(self):
         journal = JournalStore(self.path)
         AuthorityService(journal).register_policy(
             self.authority_policy("exposure-policy")
@@ -1587,10 +1698,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
         self.assertEqual(completed.phase, "SUCCEEDED")
         self.assertEqual(
             completed.affected_refs,
-            (
-                "authority-new-exposure-block:paper-account-1:PAPER",
-                "authority-policy:exposure-policy",
-            ),
+            ("authority-new-exposure-block:paper-account-1:PAPER",),
         )
         after = JournalStore(self.path).load_events(
             "authority_state",
@@ -1601,7 +1709,6 @@ class JournalBackedHostApiTests(unittest.TestCase):
             [
                 "AuthorityPolicyRegistered",
                 "AuthorityNewExposureBlocked",
-                "AuthorityPolicyRevoked",
             ],
         )
         block_events = [
@@ -1666,13 +1773,13 @@ class JournalBackedHostApiTests(unittest.TestCase):
         authority.register_policy(self.authority_policy("a-policy"))
         authority.register_policy(self.authority_policy("b-policy"))
         store = self.store(now="2030-01-01T00:00:00Z")
-        accepted = store.submit(self.command())
+        accepted = store.submit(self.command(action="REVOKE_AUTHORITY"))
         accepted_event = store.events_after(0)[0]
         accepted_at = accepted_event.payload["started_at"]
 
         AuthorityService(JournalStore(self.path)).revoke_policy(
             "a-policy",
-            reason="host_operator_command:BLOCK_NEW_EXPOSURE:OPERATOR_REQUEST",
+            reason="host_operator_command:REVOKE_AUTHORITY:OPERATOR_REQUEST",
             revoked_at=accepted_at,
         )
         AuthorityService(JournalStore(self.path)).register_policy(

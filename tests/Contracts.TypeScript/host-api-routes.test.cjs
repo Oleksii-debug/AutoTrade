@@ -30,6 +30,16 @@ if (escaped !== "/api/v1/operations/a%2Fb%3Fc%3Dd") {
   throw new Error("Path parameter was not encoded exactly.");
 }
 
+const strictEscaped = api.route(
+  "getOperation",
+  {operation_id: "!\'()*~"}
+);
+if (strictEscaped !== "/api/v1/operations/%21%27%28%29%2A~") {
+  throw new Error(
+    "Web path encoding must match RFC 3986 / Uri.EscapeDataString semantics."
+  );
+}
+
 for (const invalid of ["", " ", " padded "]) {
   let failed = false;
   try {

@@ -11,7 +11,11 @@ from mvp.autotrade_mvp.bybit_v5 import (
     prepare_order_read_query,
     prepare_next_order_read_query,
     order_history_coverage_from_pages,
+    prepare_execution_read_query,
+    prepare_next_execution_read_query,
+    execution_history_coverage_from_pages,
     coverage_evidence,
+    parse_execution_page,
     parse_executions,
     parse_order_page,
     parse_submission_response,
@@ -210,6 +214,56 @@ def parse_test_executions(observation, **kwargs):
         observation,
         provider_environment="TESTNET",
         **kwargs,
+    )
+
+
+def bound_execution_page_response(
+    response,
+    *,
+    category="spot",
+    client_order_id=None,
+    symbol=None,
+    cursor=None,
+    limit=100,
+    start_time_ms=None,
+    end_time_ms=None,
+    account_id="paper-1",
+    environment="PAPER",
+    provider_environment="TESTNET",
+    capability=None,
+):
+    read_scope = (
+        capability
+        if capability is not None
+        else read_capability(
+            account_id=account_id,
+            environment=environment,
+        )
+    )
+    query = prepare_execution_read_query(
+        capability=read_scope,
+        at=READ_AT,
+        category=category,
+        client_order_id=client_order_id,
+        symbol=symbol,
+        cursor=cursor,
+        limit=limit,
+        start_time_ms=start_time_ms,
+        end_time_ms=end_time_ms,
+    )
+    raw = json.dumps(
+        response,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return observe_authenticated_json_response(
+        query_binding=query,
+        http_status=200,
+        response_bytes=raw,
+        observed_at=READ_AT,
+        provider_environment=provider_environment,
     )
 
 
@@ -1534,6 +1588,218 @@ class BybitV5AdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ProviderCoreError, "explicit startTime"):
             order_history_coverage_from_pages(
                 (implicit,),
+                consistency_horizon_satisfied=True,
+            )
+
+
+    def test_execution_read_query_binds_exact_identity_window_and_cursor(self):
+        binding = prepare_execution_read_query(
+            capability=read_capability(),
+            at=READ_AT,
+            category="SPOT",
+            client_order_id="client_exec",
+            symbol="BTCUSDT",
+            cursor="exec%3Acursor",
+            limit=100,
+            start_time_ms=1790193600000,
+            end_time_ms=1790280000000,
+        )
+        self.assertEqual(binding.endpoint, "/v5/execution/list")
+        self.assertEqual(binding.query["category"], "spot")
+        self.assertEqual(binding.query["orderLinkId"], "client_exec")
+        self.assertEqual(binding.query["symbol"], "BTCUSDT")
+        self.assertEqual(binding.query["cursor"], "exec%3Acursor")
+        self.assertEqual(binding.query["limit"], "100")
+        with self.assertRaisesRegex(ProviderCoreError, "seven days"):
+            prepare_execution_read_query(
+                capability=read_capability(),
+                at=READ_AT,
+                category="spot",
+                start_time_ms=0,
+                end_time_ms=(7 * 24 * 60 * 60 * 1000) + 1,
+            )
+
+    def test_execution_page_preserves_fill_provenance_and_exact_cursor(self):
+        observation = bound_execution_page_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "exec-next",
+                    "list": [
+                        {
+                            "execId": "exec-page-1",
+                            "orderLinkId": "client_exec",
+                            "symbol": "BTCUSDT",
+                            "side": "Buy",
+                            "execQty": "0.5",
+                            "execPrice": "65000",
+                            "execFee": "1.25",
+                            "feeCurrency": "USDT",
+                            "execTime": "1790280000000",
+                        }
+                    ],
+                },
+            },
+            client_order_id="client_exec",
+            start_time_ms=1790193600000,
+            end_time_ms=1790280000000,
+        )
+        page = parse_execution_page(
+            observation,
+            provider_environment="TESTNET",
+            instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+        )
+        self.assertEqual(page.category, "spot")
+        self.assertEqual(page.provider_environment, "TESTNET")
+        self.assertEqual(page.next_cursor, "exec-next")
+        self.assertFalse(page.pagination_complete)
+        self.assertEqual(len(page.fills), 1)
+        self.assertEqual(page.fills[0].provider_execution_id, "exec-page-1")
+        self.assertEqual(page.fills[0].evidence_refs, (observation.evidence_ref,))
+
+    def test_execution_page_rejects_category_or_client_identity_mismatch(self):
+        base_row = {
+            "execId": "exec-mismatch",
+            "orderLinkId": "wrong_client",
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "execQty": "1",
+            "execPrice": "10",
+            "execFee": "0",
+            "feeCurrency": "USDT",
+            "execTime": "1790280000000",
+        }
+        with self.assertRaisesRegex(ProviderCoreError, "category"):
+            parse_execution_page(
+                bound_execution_page_response(
+                    {
+                        "retCode": 0,
+                        "result": {
+                            "category": "linear",
+                            "nextPageCursor": "",
+                            "list": [],
+                        },
+                    }
+                ),
+                provider_environment="TESTNET",
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+        with self.assertRaisesRegex(ProviderCoreError, "orderLinkId"):
+            parse_execution_page(
+                bound_execution_page_response(
+                    {
+                        "retCode": 0,
+                        "result": {
+                            "category": "spot",
+                            "nextPageCursor": "",
+                            "list": [base_row],
+                        },
+                    },
+                    client_order_id="expected_client",
+                ),
+                provider_environment="TESTNET",
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+
+    def test_next_execution_page_preserves_exact_capability_and_query(self):
+        capability = read_capability()
+        first = bound_execution_page_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "exec-page-2",
+                    "list": [],
+                },
+            },
+            client_order_id="client_exec",
+            start_time_ms=1790193600000,
+            end_time_ms=1790280000000,
+            capability=capability,
+        )
+        next_binding = prepare_next_execution_read_query(
+            observation=first,
+            capability=capability,
+            provider_environment="TESTNET",
+            instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            at=READ_AT,
+        )
+        self.assertIsNotNone(next_binding)
+        self.assertEqual(next_binding.query["cursor"], "exec-page-2")
+        self.assertEqual(next_binding.query["orderLinkId"], "client_exec")
+        self.assertEqual(next_binding.query["startTime"], "1790193600000")
+        self.assertEqual(next_binding.query["endTime"], "1790280000000")
+
+    def test_execution_history_coverage_is_derived_from_complete_cursor_chain(self):
+        common = {
+            "start_time_ms": 1790193600000,
+            "end_time_ms": 1790280000000,
+        }
+        first = bound_execution_page_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "exec-page-2",
+                    "list": [
+                        {
+                            "execId": "exec-cover-1",
+                            "orderLinkId": "",
+                            "symbol": "BTCUSDT",
+                            "side": "Buy",
+                            "execQty": "1",
+                            "execPrice": "10",
+                            "execFee": "0",
+                            "feeCurrency": "USDT",
+                            "execTime": "1790279999000",
+                        }
+                    ],
+                },
+            },
+            **common,
+        )
+        second = bound_execution_page_response(
+            {
+                "retCode": 0,
+                "result": {
+                    "category": "spot",
+                    "nextPageCursor": "",
+                    "list": [
+                        {
+                            "execId": "exec-cover-2",
+                            "orderLinkId": "",
+                            "symbol": "BTCUSDT",
+                            "side": "Sell",
+                            "execQty": "1",
+                            "execPrice": "11",
+                            "execFee": "0",
+                            "feeCurrency": "USDT",
+                            "execTime": "1790279998000",
+                        }
+                    ],
+                },
+            },
+            cursor="exec-page-2",
+            **common,
+        )
+        coverage = execution_history_coverage_from_pages(
+            (first, second),
+            provider_environment="TESTNET",
+            instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            consistency_horizon_satisfied=True,
+        )
+        self.assertTrue(coverage.pagination_complete)
+        self.assertFalse(coverage.provider_semantics_exclude_execution)
+        self.assertEqual(coverage.provider_environment, "TESTNET")
+        self.assertEqual(coverage.coverage_start, "2026-09-23T20:00:00.000Z")
+        self.assertEqual(coverage.coverage_end, "2026-09-24T20:00:00.000Z")
+
+        with self.assertRaisesRegex(ProviderCoreError, "incomplete"):
+            execution_history_coverage_from_pages(
+                (first,),
+                provider_environment="TESTNET",
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
                 consistency_horizon_satisfied=True,
             )
 

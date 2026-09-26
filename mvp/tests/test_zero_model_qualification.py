@@ -1,4 +1,6 @@
 from decimal import Decimal
+from pathlib import Path
+import platform
 import unittest
 
 from qualification.zero_model.qualify import (
@@ -9,12 +11,34 @@ from qualification.zero_model.qualify import (
 )
 
 
+ROOT = Path(__file__).resolve().parents[2]
+
+
 class ZeroModelQualificationTests(unittest.TestCase):
+    def test_qualification_workflow_runs_on_windows_and_ubuntu_with_distinct_evidence(self):
+        workflow = (
+            ROOT / ".github" / "workflows" / "zero-model-qualification.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("os: [ubuntu-latest, windows-latest]", workflow)
+        self.assertIn("runs-on: ${{ matrix.os }}", workflow)
+        self.assertIn(
+            "zero-model-qualification-${{ runner.os }}-${{ env.EXPECTED_SOURCE_SHA }}",
+            workflow,
+        )
+
     def test_zero_model_slice_is_replayable_reconciled_and_cost_free(self):
         observed = _observed_source_sha()
         evidence = qualify(observed)
 
         self.assertEqual(evidence["qualification"], "WP-62_ZERO_MODEL_FOUNDATION")
+        self.assertEqual(
+            evidence["execution_platform"],
+            {
+                "system": platform.system(),
+                "python_implementation": platform.python_implementation(),
+                "python_version": platform.python_version(),
+            },
+        )
         self.assertEqual(evidence["source_sha"], observed)
         self.assertEqual(evidence["observed_source_sha"], observed)
         self.assertRegex(evidence["qualifier_sha256"], r"^sha256:[0-9a-f]{64}$")

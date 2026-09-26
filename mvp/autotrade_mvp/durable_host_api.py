@@ -21,6 +21,7 @@ from .host_api import (
     HostEvent,
     OperationResult,
     command_result_payload,
+    scoped_host_operation_id,
 )
 from .persistence import JournalStore, payload_digest
 
@@ -29,7 +30,7 @@ class JournalBackedHostCommandStore:
     """Durable host API semantics over the canonical journal."""
 
     AGGREGATE_TYPE = "HOST_CONTROL"
-    AGGREGATE_ID = "host"
+    LEGACY_AGGREGATE_ID = "host"
     TERMINAL_PHASES = {"SUCCEEDED", "FAILED", "CANCELLED"}
     UPDATE_PHASES = {"RUNNING", "WAITING_EXTERNAL", "UNKNOWN", *TERMINAL_PHASES}
 
@@ -46,7 +47,7 @@ class JournalBackedHostCommandStore:
     ) -> None:
         if not isinstance(journal, JournalStore):
             raise TypeError("journal must be a JournalStore")
-        if not isinstance(account_id, str) or not account_id:
+        if not isinstance(account_id, str) or not account_id.strip():
             raise ValueError("account_id must be a non-empty string")
         if not is_valid_common_scalar("Environment", environment):
             raise ValueError("environment must be a canonical Environment")
@@ -57,8 +58,23 @@ class JournalBackedHostCommandStore:
         if not isinstance(max_events, int) or isinstance(max_events, bool) or max_events < 1:
             raise ValueError("max_events must be positive")
         self._journal = journal
-        self.account_id = account_id
+        self.account_id = account_id.strip()
         self.environment = environment
+        self.aggregate_id = "host:" + payload_digest(
+            {
+                "account_id": self.account_id,
+                "environment": self.environment,
+            }
+        ).removeprefix("sha256:")
+        legacy = self._journal.load_events(
+            self.AGGREGATE_TYPE,
+            self.LEGACY_AGGREGATE_ID,
+        )
+        if legacy:
+            raise ValueError(
+                "legacy unscoped host journal requires explicit migration before "
+                "account-scoped host state can be opened"
+            )
         self._session_validator = session_validator
         self._request_origin_provider = request_origin_provider
         self._max_events = max_events
@@ -153,7 +169,7 @@ class JournalBackedHostCommandStore:
         return tuple(dict(item) for item in values)
 
     def _events(self) -> list[dict[str, object]]:
-        return self._journal.load_events(self.AGGREGATE_TYPE, self.AGGREGATE_ID)
+        return self._journal.load_events(self.AGGREGATE_TYPE, self.aggregate_id)
 
     @property
     def state_version(self) -> int:
@@ -177,7 +193,7 @@ class JournalBackedHostCommandStore:
             "event_id": event_id,
             "event_type": event_type,
             "aggregate_type": self.AGGREGATE_TYPE,
-            "aggregate_id": self.AGGREGATE_ID,
+            "aggregate_id": self.aggregate_id,
             "aggregate_version": str(aggregate_version),
             "payload": body,
             "payload_hash": payload_digest(body),
@@ -194,6 +210,38 @@ class JournalBackedHostCommandStore:
         if "aggregate_version" in message:
             return "stale_state_version"
         raise error
+
+    def _journal_idempotency_key(self, idempotency_key: str) -> str:
+        """Scope external retry identity to the active account/environment.
+
+        JournalStore intentionally owns durable dedupe, but its canonical scope is
+        actor + environment + idempotency_key.  A single host journal can serve
+        multiple accounts, so feed it a deterministic account-scoped key rather
+        than allowing one account to collide with another account's retry key.
+        """
+        return "host:" + payload_digest(
+            {
+                "account_id": self.account_id,
+                "environment": self.environment,
+                "idempotency_key": idempotency_key,
+            }
+        )
+
+    def _scoped_command_uuid(self, command_id: str, *, purpose: str) -> str:
+        """Derive one durable identity inside the active host account scope."""
+        scope_digest = payload_digest(
+            {
+                "account_id": self.account_id,
+                "environment": self.environment,
+                "command_id": command_id,
+            }
+        )
+        return str(
+            uuid5(
+                NAMESPACE_URL,
+                f"https://{purpose}.autotrade.local/host/{scope_digest}",
+            )
+        )
 
     def submit(self, command: Mapping[str, object]) -> CommandResult:
         if not isinstance(command, Mapping):
@@ -233,10 +281,13 @@ class JournalBackedHostCommandStore:
             )
             try:
                 stored, _ = self._journal.record_command(
-                    command_id=command_id,
+                    command_id=self._scoped_command_uuid(
+                        command_id,
+                        purpose="commands",
+                    ),
                     actor=actor,
                     environment=environment,
-                    idempotency_key=idempotency_key,
+                    idempotency_key=self._journal_idempotency_key(idempotency_key),
                     request=dict(command),
                     result=self._result_dict(conflict),
                     state_version=current,
@@ -250,8 +301,10 @@ class JournalBackedHostCommandStore:
                 )
             return self._command_result(stored)
 
-        operation_id = str(
-            uuid5(NAMESPACE_URL, f"https://operations.autotrade.local/{command_id}")
+        operation_id = scoped_host_operation_id(
+            account_id=self.account_id,
+            environment=self.environment,
+            command_id=command_id,
         )
         next_version = current + 1
         result = CommandResult(
@@ -260,8 +313,9 @@ class JournalBackedHostCommandStore:
             state_version=str(next_version),
             operation_id=operation_id,
         )
-        event_id = str(
-            uuid5(NAMESPACE_URL, f"https://events.autotrade.local/command/{command_id}")
+        event_id = self._scoped_command_uuid(
+            command_id,
+            purpose="command-events",
         )
         operation_time = self._now()
         envelope = self._event_envelope(
@@ -285,10 +339,13 @@ class JournalBackedHostCommandStore:
         )
         try:
             stored, inserted, _ = self._journal.commit_command(
-                command_id=command_id,
+                command_id=self._scoped_command_uuid(
+                    command_id,
+                    purpose="commands",
+                ),
                 actor=actor,
                 environment=environment,
-                idempotency_key=idempotency_key,
+                idempotency_key=self._journal_idempotency_key(idempotency_key),
                 request=dict(command),
                 result=self._result_dict(result),
                 state_version=next_version,

@@ -1,23 +1,36 @@
 "use strict";
 
-// TypeScript-consumable runtime binding for the canonical common scalar subset.
-// Values remain strings; no Number/BigInt coercion is allowed.
-const CONTRACT_VERSION = "3.0.0";
+// AUTO-GENERATED from contracts/jsonschema/common.schema.json. DO NOT EDIT.
+// Run python tools/generate_common_scalar_bindings.py to regenerate.
+const CONTRACT_VERSION = "3.0.1";
 
 const patterns = Object.freeze({
   Decimal: /^(?:0|[1-9][0-9]*(?:\.[0-9]*[1-9])?|0\.[0-9]*[1-9]|-(?:[1-9][0-9]*(?:\.[0-9]*[1-9])?|0\.[0-9]*[1-9]))$/,
   Sequence: /^(0|[1-9][0-9]*)$/,
   Digest: /^sha256:[0-9a-f]{64}$/,
-  CurrencyId: /^[A-Za-z0-9._:-]{1,32}$/,
-  UnitId: /^[A-Za-z0-9._:/-]{1,64}$/,
+  CurrencyId: /^[A-Za-z0-9._:-]+$/,
+  UnitId: /^[A-Za-z0-9._:\/-]+$/,
 });
-const environments = new Set(["REPLAY", "SIMULATION", "PAPER", "LIVE"]);
+const lengths = Object.freeze({
+  CurrencyId: Object.freeze([1, 32]),
+  UnitId: Object.freeze([1, 64]),
+});
+const enums = Object.freeze({
+  Environment: new Set(["REPLAY", "SIMULATION", "PAPER", "LIVE"]),
+});
 
 function isValidCommonScalar(kind, value) {
   if (typeof value !== "string") return false;
-  if (kind === "Environment") return environments.has(value);
+  const enumValues = enums[kind];
+  if (enumValues) return enumValues.has(value);
   const pattern = patterns[kind];
-  if (!pattern) throw new RangeError(`unsupported common scalar kind: ${kind}`);
+  if (!pattern) throw new RangeError("unsupported common scalar kind: " + kind);
+  const limit = lengths[kind];
+  if (limit) {
+    const [minimum, maximum] = limit;
+    if (minimum !== null && value.length < minimum) return false;
+    if (maximum !== null && value.length > maximum) return false;
+  }
   return pattern.test(value);
 }
 

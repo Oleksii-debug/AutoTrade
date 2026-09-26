@@ -383,6 +383,96 @@ class JournalBackedHostApiTests(unittest.TestCase):
                     ):
                         operation()
 
+    def test_restart_rejects_invalid_or_discontinuous_operation_timestamps(self):
+        source = self.store()
+        accepted = source.submit(self.command())
+        source.update_operation(
+            accepted.operation_id,
+            "RUNNING",
+            remaining_uncertainty=("provider_response_pending",),
+        )
+        source_events = JournalStore(self.path).load_events(
+            source.AGGREGATE_TYPE,
+            source.aggregate_id,
+        )
+        cases = (
+            (
+                "accepted-nonstring-started",
+                0,
+                "started_at",
+                123,
+                "canonical UTC instant",
+            ),
+            (
+                "accepted-backwards-updated",
+                0,
+                "updated_at",
+                "2026-09-24T17:59:59Z",
+                "cannot precede started_at",
+            ),
+            (
+                "update-changed-started",
+                1,
+                "started_at",
+                "2026-09-24T17:59:59Z",
+                "started_at changed",
+            ),
+            (
+                "update-backwards-updated",
+                1,
+                "updated_at",
+                "2026-09-24T17:59:59Z",
+                "updated_at moved backwards",
+            ),
+        )
+
+        for name, target_index, field, replacement, expected_error in cases:
+            with self.subTest(case=name), TemporaryDirectory() as directory:
+                journal = JournalStore(f"{directory}/journal.sqlite3")
+                forged = JournalBackedHostCommandStore(
+                    journal,
+                    account_id="paper-account-1",
+                    environment="PAPER",
+                    session_validator=lambda session, actor, origin, action: (
+                        session,
+                        actor,
+                    )
+                    in self.sessions,
+                    max_events=100,
+                    request_origin_provider=lambda: "https://local.autotrade.invalid",
+                    now=lambda: "2026-09-24T18:00:02Z",
+                )
+
+                for index, event in enumerate(source_events[: target_index + 1]):
+                    payload = dict(event["payload"])
+                    if index == target_index:
+                        payload[field] = replacement
+                    journal.append_event(
+                        {
+                            "event_id": event["event_id"],
+                            "event_type": event["event_type"],
+                            "aggregate_type": event["aggregate_type"],
+                            "aggregate_id": event["aggregate_id"],
+                            "aggregate_version": event["aggregate_version"],
+                            "payload": payload,
+                            "payload_hash": payload_digest(payload),
+                            "committed_at": event["committed_at"],
+                        },
+                        outbox_topic="ui.host-events",
+                    )
+
+                for operation in (
+                    lambda: forged.state_version,
+                    forged.snapshot,
+                    lambda: forged.events_after(0),
+                    lambda: forged.get_operation(accepted.operation_id),
+                ):
+                    with self.subTest(operation=operation), self.assertRaisesRegex(
+                        ValueError,
+                        expected_error,
+                    ):
+                        operation()
+
     def test_restart_rejects_noncanonical_operation_identity(self):
         store = self.store()
         payload = {

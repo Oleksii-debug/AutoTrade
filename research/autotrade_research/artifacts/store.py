@@ -358,10 +358,31 @@ class ArtifactStore:
             )
 
     def _load_manifest_path(self, path: Path) -> dict[str, Any]:
-        self._validate_manifest_entry(path)
+        before = self._validate_manifest_entry(path)
         try:
-            value = strict_json_loads(path.read_text(encoding="utf-8"))
+            raw = path.read_text(encoding="utf-8")
         except (OSError, UnicodeError, ValueError) as error:
+            raise ArtifactIntegrityError(f"invalid artifact manifest: {path.name}") from error
+        after = self._validate_manifest_entry(path)
+        before_identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if before_identity != after_identity:
+            raise ArtifactIntegrityError("artifact manifest changed during read")
+        try:
+            value = strict_json_loads(raw)
+        except (UnicodeError, ValueError) as error:
             raise ArtifactIntegrityError(f"invalid artifact manifest: {path.name}") from error
         if type(value) is not dict:
             raise ArtifactIntegrityError(f"unsupported artifact manifest: {path.name}")

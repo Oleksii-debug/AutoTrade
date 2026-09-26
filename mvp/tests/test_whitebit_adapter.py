@@ -1678,6 +1678,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
     def test_credential_boundary_admits_only_info_trading_live_key(self):
         evidence = WhiteBitCredentialBoundary(
             credential_binding_id="credential-binding:whitebit:account-1",
+            credential_generation=1,
+            account_id="acct-wb",
             permissions=frozenset({"Info", "Trading"}),
             ip_whitelist_enabled=True,
             environment="live",
@@ -1688,11 +1690,29 @@ class WhiteBitAdapterTests(unittest.TestCase):
         self.assertEqual(evidence.permissions, frozenset({"INFO", "TRADING"}))
         self.assertEqual(evidence.environment, "LIVE")
 
+    def test_credential_boundary_rejects_invalid_generation(self):
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "credential_generation must be a positive integer",
+        ):
+            WhiteBitCredentialBoundary(
+                credential_binding_id="credential-binding:whitebit:invalid",
+                credential_generation=0,
+                account_id="acct-wb",
+                permissions=frozenset({"INFO", "TRADING"}),
+                ip_whitelist_enabled=True,
+                environment="LIVE",
+                observed_at=NOW,
+                evidence_ref="https://docs.whitebit.com/best-practices/security",
+            )
+
     def test_credential_boundary_rejects_fund_movement_authority(self):
         for extra in ("DEPOSIT", "WITHDRAW"):
             with self.subTest(extra=extra):
                 evidence = WhiteBitCredentialBoundary(
                     credential_binding_id="credential-binding:whitebit:unsafe",
+                    credential_generation=1,
+                    account_id="acct-wb",
                     permissions=frozenset({"INFO", "TRADING", extra}),
                     ip_whitelist_enabled=True,
                     environment="LIVE",
@@ -1708,6 +1728,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
     def test_credential_boundary_rejects_unqualified_environment_and_open_ip(self):
         paper = WhiteBitCredentialBoundary(
             credential_binding_id="credential-binding:whitebit:paper",
+            credential_generation=1,
+            account_id="acct-wb",
             permissions=frozenset({"INFO", "TRADING"}),
             ip_whitelist_enabled=True,
             environment="PAPER",
@@ -1719,6 +1741,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
 
         unrestricted = WhiteBitCredentialBoundary(
             credential_binding_id="credential-binding:whitebit:live",
+            credential_generation=1,
+            account_id="acct-wb",
             permissions=frozenset({"INFO", "TRADING"}),
             ip_whitelist_enabled=False,
             environment="LIVE",

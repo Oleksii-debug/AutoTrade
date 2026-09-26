@@ -55,7 +55,8 @@ No test, demo, paper, or local result may be promoted to LIVE evidence.
 
 The branch includes a machine-checked `WhiteBitCredentialBoundary` policy model requiring the intended minimum AutoTrade trading authority:
 
-- exact non-secret credential-binding identity;
+- exact non-secret persistent credential handle identity and generation;
+- exact account binding;
 - `INFO` + `TRADING` only;
 - `DEPOSIT` / `WITHDRAW` fund-movement authority forbidden;
 - unknown permission names fail closed;
@@ -63,7 +64,12 @@ The branch includes a machine-checked `WhiteBitCredentialBoundary` policy model 
 - IP allowlisting required by AutoTrade policy;
 - secrets never enter this evidence model.
 
-This is a policy/test contract. It is **not runtime proof** that any configured WhiteBIT credential currently satisfies those restrictions. Endpoint-level restriction and actual account capability still require provider/account evidence.
+The guarded WhiteBIT transport now requires this boundary and rejects unsafe,
+stale-generation, or cross-account evidence before secret resolution, nonce
+allocation, or wire I/O. This is still **not proof** that any configured real
+WhiteBIT credential currently satisfies those restrictions: the evidence object
+must come from the trusted qualification path, and endpoint/account capability
+still requires provider/account evidence.
 
 ## Capability matrix
 

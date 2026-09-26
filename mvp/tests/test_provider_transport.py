@@ -57,7 +57,10 @@ from mvp.autotrade_mvp.provider_transport import (
     WhiteBitHttpTransport,
     _DurableProviderNonceAllocator,
 )
-from mvp.autotrade_mvp.whitebit import WhiteBitPreparedRequest
+from mvp.autotrade_mvp.whitebit import (
+    WhiteBitCredentialBoundary,
+    WhiteBitPreparedRequest,
+)
 from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
 
 
@@ -238,6 +241,32 @@ def whitebit_trade_handle(*, account_id="acct-wb"):
         environment="LIVE",
         purpose="TRADE",
         generation=1,
+    )
+
+
+def whitebit_credential_boundary(
+    *,
+    handle=None,
+    credential_generation=None,
+    account_id=None,
+    permissions=frozenset({"INFO", "TRADING"}),
+    ip_whitelist_enabled=True,
+    environment="LIVE",
+):
+    handle = handle or whitebit_trade_handle()
+    return WhiteBitCredentialBoundary(
+        credential_binding_id=handle.handle_id,
+        credential_generation=(
+            handle.generation
+            if credential_generation is None
+            else credential_generation
+        ),
+        account_id=handle.account_id if account_id is None else account_id,
+        permissions=permissions,
+        ip_whitelist_enabled=ip_whitelist_enabled,
+        environment=environment,
+        observed_at=datetime(2026, 9, 26, 12, 0, tzinfo=timezone.utc),
+        evidence_ref="fixture:whitebit-credential-boundary",
     )
 
 
@@ -692,6 +721,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 capability_snapshot_id="wb-cap-1",
                 secret_resolver=resolver,
                 credential_handle=whitebit_trade_handle(),
+                credential_boundary=whitebit_credential_boundary(),
                 session_token="session-1",
                 origin="autotrade://execution",
                 execution_identity="sender-1",
@@ -723,6 +753,82 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
             self.assertEqual(body["request"], "/api/v4/order/new")
             self.assertEqual(body["nonce"], 1_700_000_000_000)
             self.assertIn("X-TXC-SIGNATURE", signed.headers)
+
+    def test_whitebit_transport_rejects_withdraw_boundary_before_authority_work(self):
+        fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+        calls = []
+        with TemporaryDirectory() as directory:
+            handle = whitebit_trade_handle()
+            allocator = WhiteBitDurableNonceAllocator(
+                journal=JournalStore(f"{directory}/journal.sqlite3"),
+                account_id="acct-wb",
+                environment="LIVE",
+                clock_millis=lambda: calls.append("nonce") or 1_700_000_000_000,
+                clock_utc=lambda: fixed,
+            )
+            with self.assertRaisesRegex(
+                ProviderTransportScopeError,
+                "deposit/withdraw authority is forbidden",
+            ):
+                WhiteBitHttpTransport(
+                    policy=WHITEBIT_ENDPOINT_POLICIES["LIVE"],
+                    account_id="acct-wb",
+                    capability_snapshot_id="wb-cap-1",
+                    secret_resolver=FakeSecretResolver(calls),
+                    credential_handle=handle,
+                    credential_boundary=whitebit_credential_boundary(
+                        handle=handle,
+                        permissions=frozenset({"INFO", "TRADING", "WITHDRAW"}),
+                    ),
+                    session_token="session-1",
+                    origin="autotrade://execution",
+                    execution_identity="sender-1",
+                    nonce_allocator=allocator,
+                    wire_client=RecordingWire(calls),
+                )
+            self.assertEqual(calls, [])
+
+    def test_whitebit_transport_rejects_stale_or_cross_account_boundary(self):
+        fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+        with TemporaryDirectory() as directory:
+            handle = whitebit_trade_handle()
+            allocator = WhiteBitDurableNonceAllocator(
+                journal=JournalStore(f"{directory}/journal.sqlite3"),
+                account_id="acct-wb",
+                environment="LIVE",
+                clock_millis=lambda: 1_700_000_000_000,
+                clock_utc=lambda: fixed,
+            )
+            for boundary in (
+                whitebit_credential_boundary(
+                    handle=handle,
+                    credential_generation=handle.generation + 1,
+                ),
+                whitebit_credential_boundary(
+                    handle=handle,
+                    account_id="acct-other",
+                ),
+            ):
+                calls = []
+                with self.subTest(boundary=boundary):
+                    with self.assertRaisesRegex(
+                        ProviderTransportScopeError,
+                        "exact account and credential handle generation",
+                    ):
+                        WhiteBitHttpTransport(
+                            policy=WHITEBIT_ENDPOINT_POLICIES["LIVE"],
+                            account_id="acct-wb",
+                            capability_snapshot_id="wb-cap-1",
+                            secret_resolver=FakeSecretResolver(calls),
+                            credential_handle=handle,
+                            credential_boundary=boundary,
+                            session_token="session-1",
+                            origin="autotrade://execution",
+                            execution_identity="sender-1",
+                            nonce_allocator=allocator,
+                            wire_client=RecordingWire(calls),
+                        )
+                    self.assertEqual(calls, [])
 
     def test_whitebit_concurrent_sends_cannot_overtake_nonce_order(self):
         fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
@@ -774,6 +880,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                     capability_snapshot_id="wb-cap-1",
                     secret_resolver=FakeSecretResolver(events),
                     credential_handle=whitebit_trade_handle(),
+                    credential_boundary=whitebit_credential_boundary(),
                     session_token="session-1",
                     origin="autotrade://execution",
                     execution_identity=sender,
@@ -835,6 +942,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 capability_snapshot_id="wb-cap-1",
                 secret_resolver=FakeSecretResolver(events),
                 credential_handle=whitebit_trade_handle(),
+                credential_boundary=whitebit_credential_boundary(),
                 session_token="session-1",
                 origin="autotrade://execution",
                 execution_identity="sender-1",
@@ -873,6 +981,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 capability_snapshot_id="wb-cap-1",
                 secret_resolver=FakeSecretResolver(calls),
                 credential_handle=whitebit_trade_handle(),
+                credential_boundary=whitebit_credential_boundary(),
                 session_token="session-1",
                 origin="autotrade://execution",
                 execution_identity="sender-1",
@@ -917,6 +1026,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 capability_snapshot_id="wb-cap-1",
                 secret_resolver=FakeSecretResolver(calls),
                 credential_handle=whitebit_trade_handle(),
+                credential_boundary=whitebit_credential_boundary(),
                 session_token="session-1",
                 origin="autotrade://execution",
                 execution_identity="sender-1",
@@ -959,6 +1069,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 capability_snapshot_id="wb-cap-1",
                 secret_resolver=FakeSecretResolver(events),
                 credential_handle=whitebit_trade_handle(),
+                credential_boundary=whitebit_credential_boundary(),
                 session_token="session-1",
                 origin="autotrade://execution",
                 execution_identity="sender-1",

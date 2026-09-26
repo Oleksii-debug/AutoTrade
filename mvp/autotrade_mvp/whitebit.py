@@ -1600,6 +1600,8 @@ class WhiteBitCredentialBoundary:
     """
 
     credential_binding_id: str
+    credential_generation: int
+    account_id: str
     permissions: frozenset[str]
     ip_whitelist_enabled: bool
     environment: str
@@ -1611,6 +1613,15 @@ class WhiteBitCredentialBoundary:
             self.credential_binding_id,
             name="credential_binding_id",
         )
+        if (
+            isinstance(self.credential_generation, bool)
+            or not isinstance(self.credential_generation, int)
+            or self.credential_generation < 1
+        ):
+            raise WhiteBitAdapterError(
+                "credential_generation must be a positive integer"
+            )
+        account = _text(self.account_id, name="account_id")
         if not isinstance(self.permissions, frozenset):
             raise TypeError("permissions must be a frozenset")
         normalized = frozenset(
@@ -1628,6 +1639,7 @@ class WhiteBitCredentialBoundary:
         observed = _instant(self.observed_at, name="observed_at")
         evidence = _text(self.evidence_ref, name="evidence_ref")
         object.__setattr__(self, "credential_binding_id", binding)
+        object.__setattr__(self, "account_id", account)
         object.__setattr__(self, "permissions", normalized)
         object.__setattr__(self, "environment", environment)
         object.__setattr__(self, "observed_at", observed)

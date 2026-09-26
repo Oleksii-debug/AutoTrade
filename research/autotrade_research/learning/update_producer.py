@@ -628,7 +628,11 @@ def _extract_learning_rows(
             exclusions.append((episode_id, "OUTCOME_EVIDENCE_INVALID"))
             continue
         if resolved_outcome.get("status") != "VERIFIED":
-            exclusions.append((episode_id, "OUTCOME_EVIDENCE_UNVERIFIED"))
+            reason = resolved_outcome.get("reason")
+            if reason == "OUTCOME_EVIDENCE_AFTER_CAUSAL_CUTOFF":
+                exclusions.append((episode_id, "LABEL_NOT_CAUSALLY_MATURE"))
+            else:
+                exclusions.append((episode_id, "OUTCOME_EVIDENCE_UNVERIFIED"))
             continue
         try:
             authority_label_version = _text(

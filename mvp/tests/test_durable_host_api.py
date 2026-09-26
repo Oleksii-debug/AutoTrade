@@ -195,10 +195,10 @@ class JournalBackedHostApiTests(unittest.TestCase):
 
     def test_changed_payload_under_same_idempotency_key_conflicts_after_restart(self):
         first = self.store()
-        first.submit(self.command(payload={"reason": "reason-a"}))
+        first.submit(self.command(payload={"reason_code": "EMERGENCY_STOP"}))
 
         restarted = self.store()
-        conflict = restarted.submit(self.command(payload={"reason": "reason-b"}))
+        conflict = restarted.submit(self.command(payload={"reason_code": "POLICY_REVIEW"}))
         self.assertEqual(conflict.status, "CONFLICT")
         self.assertIn("idempotency_key_conflict", conflict.reason_codes)
         self.assertEqual(restarted.state_version, 1)
@@ -361,7 +361,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
             "schema_version": 1,
             "expected_authority_epoch": "0",
             "expected_authority_version": "0",
-            "reason": "operator_block_new_exposure",
+            "reason_code": "OPERATOR_REQUEST",
             "target_policies": [],
         }
         payload = {
@@ -461,7 +461,7 @@ class JournalBackedHostApiTests(unittest.TestCase):
         store = self.store(now="2030-01-01T00:00:00Z")
 
         accepted = store.submit(
-            self.command(payload={"reason": "operator emergency block"})
+            self.command(payload={"reason_code": "EMERGENCY_STOP"})
         )
         event = store.events_after(0)[0]
         action_payload = event.payload["action_payload"]
@@ -588,13 +588,25 @@ class JournalBackedHostApiTests(unittest.TestCase):
             store.submit(self.command(action="SET_AUTHORITY", payload=payload))
         self.assertEqual(store.state_version, 0)
 
+    def test_free_text_reason_is_rejected_before_journal_write(self):
+        store = self.store(now="2030-01-01T00:00:00Z")
+        with self.assertRaisesRegex(ValueError, "unsupported fields"):
+            store.submit(self.command(payload={"reason": "token-or-free-text"}))
+        self.assertEqual(store.events_after(0), ())
+
+    def test_reason_code_must_be_canonical(self):
+        store = self.store(now="2030-01-01T00:00:00Z")
+        with self.assertRaisesRegex(ValueError, "canonical operator reason"):
+            store.submit(self.command(payload={"reason_code": "emergency_stop"}))
+        self.assertEqual(store.events_after(0), ())
+
     def test_unknown_payload_fields_never_enter_durable_operator_event(self):
         store = self.store(now="2030-01-01T00:00:00Z")
         with self.assertRaisesRegex(ValueError, "unsupported fields"):
             store.submit(
                 self.command(
                     payload={
-                        "reason": "block",
+                        "reason_code": "EMERGENCY_STOP",
                         "session_secret": "must-not-be-persisted",
                     }
                 )

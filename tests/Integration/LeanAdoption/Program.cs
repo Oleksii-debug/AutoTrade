@@ -286,6 +286,27 @@ ExpectFailure<InvalidDataException>(
     () => LeanCallbackCharacterizer.RestoreRestartState(tamperedRestartCheckpoint),
     "tampered LEAN callback restart economics must fail integrity verification");
 
+Require(
+    restartCheckpoint.StartsWith("{", StringComparison.Ordinal),
+    "Restart checkpoint must serialize as a JSON object.");
+var checkpointWithUnknownTopLevel = restartCheckpoint.Insert(
+    1,
+    "\"UnexpectedTopLevel\":\"forbidden\",");
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(checkpointWithUnknownTopLevel),
+    "unknown top-level restart state fields must fail closed");
+
+var checkpointWithUnknownCallbackField = restartCheckpoint.Replace(
+    "\"OrderId\":73",
+    "\"UnexpectedCallbackField\":true,\"OrderId\":73",
+    StringComparison.Ordinal);
+Require(
+    checkpointWithUnknownCallbackField != restartCheckpoint,
+    "Restart schema regression did not mutate the callback object.");
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(checkpointWithUnknownCallbackField),
+    "unknown callback restart state fields must fail closed");
+
 var engineIdentity = LeanEngineAssemblyProbe.GetIdentity();
 Require(
     engineIdentity.TypeName == "QuantConnect.Lean.Engine.Engine",

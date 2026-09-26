@@ -28,6 +28,11 @@ _MAX_INTEGER_BITS = 4_096
 
 
 def _utf8_size(value: str, *, label: str) -> int:
+    # Every Unicode code point needs at least one UTF-8 byte.  Reject obviously
+    # oversized text before encoding so the boundary never allocates a second
+    # attacker-sized byte buffer just to discover that the input is too large.
+    if len(value) > _MAX_STRING_UTF8_BYTES:
+        return _MAX_STRING_UTF8_BYTES + 1
     try:
         return len(value.encode("utf-8"))
     except UnicodeEncodeError as error:

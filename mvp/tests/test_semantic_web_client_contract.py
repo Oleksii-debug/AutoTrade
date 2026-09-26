@@ -750,6 +750,15 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertNotIn("submitCanonicalCommand", filter_scope)
         self.assertNotIn("innerHTML", filter_scope)
 
+    def test_projection_filter_case_normalization_is_locale_deterministic(self):
+        js = APP.read_text(encoding="utf-8")
+        filter_scope = js[
+            js.index("function normalizedTableQuery(value)"):
+            js.index("function reapplyTableFilter(bodyId)")
+        ]
+        self.assertIn("toLowerCase()", filter_scope)
+        self.assertNotIn("toLocaleLowerCase()", filter_scope)
+
     def test_passive_live_refresh_does_not_spam_filter_live_status(self):
         js = APP.read_text(encoding="utf-8")
         apply_scope = js[

@@ -800,7 +800,11 @@ class ExperienceMemory:
             rows = con.execute("SELECT * FROM episodes ORDER BY episode_id").fetchall()
             for row in rows:
                 verified = self._verified_episode(row)
-                if verified["cutoff"] > cutoff or verified["decision"] > cutoff:
+                if (
+                    verified["cutoff"] > cutoff
+                    or verified["decision"] > cutoff
+                    or verified["created"] > cutoff
+                ):
                     continue
                 if normalized_task is not None and verified["task"] != normalized_task:
                     continue
@@ -821,10 +825,18 @@ class ExperienceMemory:
                     "SELECT * FROM tombstones WHERE episode_id=? ORDER BY created_at,tombstone_id",
                     (row["episode_id"],),
                 ).fetchall()
-                tombstones = [
-                    self._verified_tombstone(item, episode_id=row["episode_id"])
-                    for item in tombstone_rows
-                ]
+                tombstones: list[dict[str, str]] = []
+                for tombstone_row in tombstone_rows:
+                    tombstone = self._verified_tombstone(
+                        tombstone_row,
+                        episode_id=row["episode_id"],
+                    )
+                    tombstone_time = _stored_time(
+                        tombstone_row["created_at"],
+                        name="tombstone created_at",
+                    )
+                    if tombstone_time <= cutoff:
+                        tombstones.append(tombstone)
                 if tombstones and not include_tombstoned:
                     continue
 
@@ -895,8 +907,14 @@ class ExperienceMemory:
             if row is None:
                 raise KeyError(identifier)
             verified = self._verified_episode(row)
-            if verified["cutoff"] > cutoff or verified["decision"] > cutoff:
-                raise PermissionError("episode is not causally available at information_cutoff")
+            if (
+                verified["cutoff"] > cutoff
+                or verified["decision"] > cutoff
+                or verified["created"] > cutoff
+            ):
+                raise PermissionError(
+                    "episode is not causally available at information_cutoff"
+                )
             if not self._permission_allowed(
                 verified["permission_class"],
                 normalized_permissions,
@@ -907,10 +925,18 @@ class ExperienceMemory:
                 "SELECT * FROM tombstones WHERE episode_id=? ORDER BY created_at,tombstone_id",
                 (identifier,),
             ).fetchall()
-            tombstones = [
-                self._verified_tombstone(item, episode_id=identifier)
-                for item in tombstone_rows
-            ]
+            tombstones: list[dict[str, str]] = []
+            for tombstone_row in tombstone_rows:
+                tombstone = self._verified_tombstone(
+                    tombstone_row,
+                    episode_id=identifier,
+                )
+                tombstone_time = _stored_time(
+                    tombstone_row["created_at"],
+                    name="tombstone created_at",
+                )
+                if tombstone_time <= cutoff:
+                    tombstones.append(tombstone)
             if tombstones and not include_tombstoned:
                 raise PermissionError("episode is tombstoned")
 

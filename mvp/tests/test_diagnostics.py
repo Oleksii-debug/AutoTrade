@@ -90,5 +90,148 @@ class DiagnosticTraceTests(unittest.TestCase):
         self.assertEqual(redacted["rows"][0]["password"], "[REDACTED]")
 
 
+    def test_embedded_secret_text_is_redacted_even_under_safe_keys(self):
+        payload = {
+            "url": "https://provider.test/path?access_token=token123&mode=read",
+            "message": "proxy-authorization=CustomScheme c2VjcmV0",
+            "userinfo_url": "https://api-user:url-password@provider.test/path",
+            "connection": "server=db;client_secret=client123;database=main",
+            "pem": "-----BEGIN OPENSSH PRIVATE KEY-----\\nprivate-bytes",
+            "encrypted_pem": "-----BEGIN ENCRYPTED PRIVATE KEY-----\\nencrypted-private-bytes",
+            "token_text": "token=plain-token-secret",
+            "session_text": "session: plain-session-secret",
+            "json_message": (
+                '{"Authorization":"Digest json-auth-secret",'
+                '"api_key":"json-key-secret"}'
+            ),
+            "repr_message": (
+                "{'Authorization': 'Custom repr-auth-secret', "
+                "'api_key': 'repr-key-secret'}"
+            ),
+            "safe": "latency=12ms",
+        }
+        redacted = redact_diagnostic_value(payload)
+        self.assertNotIn("token123", redacted["url"])
+        self.assertNotIn("c2VjcmV0", redacted["message"])
+        self.assertNotIn("url-password", redacted["userinfo_url"])
+        self.assertEqual(redacted["userinfo_url"], "https://[REDACTED]@provider.test/path")
+        self.assertNotIn("client123", redacted["connection"])
+        self.assertNotIn("plain-token-secret", redacted["token_text"])
+        self.assertNotIn("plain-session-secret", redacted["session_text"])
+        self.assertNotIn("json-auth-secret", redacted["json_message"])
+        self.assertNotIn("json-key-secret", redacted["json_message"])
+        self.assertGreaterEqual(redacted["json_message"].count("[REDACTED]"), 2)
+        self.assertNotIn("repr-auth-secret", redacted["repr_message"])
+        self.assertNotIn("repr-key-secret", redacted["repr_message"])
+        self.assertGreaterEqual(redacted["repr_message"].count("[REDACTED]"), 2)
+        self.assertEqual(redacted["pem"], "[REDACTED]")
+        self.assertEqual(redacted["encrypted_pem"], "[REDACTED]")
+        self.assertEqual(redacted["safe"], "latency=12ms")
+
+    def test_compound_and_quoted_embedded_credentials_are_fully_redacted(self):
+        payload = {
+            "digest_header": (
+                'Authorization: Digest username="api", realm="trade", '
+                'response="digest-comma-secret"'
+            ),
+            "json_digest": (
+                '{"Authorization":"Digest username=\\\"api\\\", '
+                'response=\\\"json-comma-secret\\\"","safe":"ok"}'
+            ),
+            "quoted_key_with_spaces": (
+                '{"api_key":"secret value with spaces","safe":"ok"}'
+            ),
+        }
+        redacted = redact_diagnostic_value(payload)
+        self.assertNotIn("digest-comma-secret", redacted["digest_header"])
+        self.assertNotIn("json-comma-secret", redacted["json_digest"])
+        self.assertNotIn(
+            "secret value with spaces",
+            redacted["quoted_key_with_spaces"],
+        )
+        self.assertIn("[REDACTED]", redacted["digest_header"])
+        self.assertIn("[REDACTED]", redacted["json_digest"])
+        self.assertIn("[REDACTED]", redacted["quoted_key_with_spaces"])
+
+
+    def test_whitebit_api_secret_is_redacted_directly_and_inside_safe_strings(self):
+        payload = {
+            "api_secret": "WHITEBIT-DIRECT-SECRET",
+            "X-TXC-APIKEY": "WHITEBIT-TXC-APIKEY",
+            "X-TXC-PAYLOAD": "WHITEBIT-TXC-PAYLOAD",
+            "X-TXC-SIGNATURE": "WHITEBIT-TXC-SIGNATURE",
+            "message": '{"api_secret":"WHITEBIT-JSON-SECRET","safe":"ok"}',
+            "repr_message": "{'api-secret': 'WHITEBIT-REPR-SECRET', 'safe': 'ok'}",
+            "header_text": "X-TXC-SIGNATURE: WHITEBIT-TEXT-SIGNATURE",
+            "signed_url": (
+                "https://provider.test/private?"
+                "X-TXC-PAYLOAD=WHITEBIT-URL-PAYLOAD&symbol=BTC"
+            ),
+            "safe": "visible",
+        }
+        redacted = redact_diagnostic_value(payload)
+        self.assertEqual(redacted["api_secret"], "[REDACTED]")
+        self.assertEqual(redacted["X-TXC-APIKEY"], "[REDACTED]")
+        self.assertEqual(redacted["X-TXC-PAYLOAD"], "[REDACTED]")
+        self.assertEqual(redacted["X-TXC-SIGNATURE"], "[REDACTED]")
+        self.assertEqual(redacted["safe"], "visible")
+        self.assertNotIn("WHITEBIT-JSON-SECRET", redacted["message"])
+        self.assertNotIn("WHITEBIT-REPR-SECRET", redacted["repr_message"])
+        self.assertIn("[REDACTED]", redacted["message"])
+        self.assertIn("[REDACTED]", redacted["repr_message"])
+        self.assertEqual(
+            redacted["header_text"],
+            "X-TXC-SIGNATURE:[REDACTED]",
+        )
+        self.assertEqual(
+            redacted["signed_url"],
+            "https://provider.test/private?"
+            "X-TXC-PAYLOAD=[REDACTED]&symbol=BTC",
+        )
+
+
+    def test_escaped_json_and_encoded_query_secret_keys_are_redacted(self):
+        payload = {
+            "escaped_json": (
+                '{"api\\u005fsecret":"WHITEBIT-ESCAPED-SECRET","safe":"ok"}'
+            ),
+            "escaped_json_array": (
+                '[{"api\\u005fsecret":"WHITEBIT-ARRAY-SECRET"},{"safe":"ok"}]'
+            ),
+            "encoded_url_upper": (
+                "https://provider.test/orders?"
+                "api%5Fsecret=WHITEBIT-PERCENT-UPPER&symbol=BTC"
+            ),
+            "encoded_url_lower": (
+                "https://provider.test/orders?"
+                "api%5fsecret=WHITEBIT-PERCENT-LOWER&symbol=ETH"
+            ),
+        }
+        redacted = redact_diagnostic_value(payload)
+        serialized = json.dumps(redacted, sort_keys=True)
+        for leaked in (
+            "WHITEBIT-ESCAPED-SECRET",
+            "WHITEBIT-ARRAY-SECRET",
+            "WHITEBIT-PERCENT-UPPER",
+            "WHITEBIT-PERCENT-LOWER",
+        ):
+            self.assertNotIn(leaked, serialized)
+
+        decoded_object = json.loads(redacted["escaped_json"])
+        self.assertEqual(decoded_object["api_secret"], "[REDACTED]")
+        self.assertEqual(decoded_object["safe"], "ok")
+        decoded_array = json.loads(redacted["escaped_json_array"])
+        self.assertEqual(decoded_array[0]["api_secret"], "[REDACTED]")
+        self.assertEqual(decoded_array[1]["safe"], "ok")
+        self.assertEqual(
+            redacted["encoded_url_upper"],
+            "https://provider.test/orders?api%5Fsecret=[REDACTED]&symbol=BTC",
+        )
+        self.assertEqual(
+            redacted["encoded_url_lower"],
+            "https://provider.test/orders?api%5fsecret=[REDACTED]&symbol=ETH",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

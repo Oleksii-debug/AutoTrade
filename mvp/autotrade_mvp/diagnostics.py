@@ -8,8 +8,10 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
+import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
 from .persistence import JournalStore
 
@@ -23,6 +25,8 @@ _REDACTION_MARKERS = (
     "credential",
     "cookie",
     "privatekey",
+    "xtxcpayload",
+    "xtxcsignature",
 )
 
 
@@ -30,14 +34,118 @@ def _normalized_key(value: object) -> str:
     return "".join(character for character in str(value).lower() if character.isalnum())
 
 
-def redact_diagnostic_value(value: Any) -> Any:
-    """Recursively redact credential-shaped fields from diagnostic payloads."""
+def _is_sensitive_key(value: object) -> bool:
+    normalized = _normalized_key(value)
+    return any(marker in normalized for marker in _REDACTION_MARKERS)
 
+
+_EMBEDDED_SECRET_PATTERNS = (
+    re.compile(
+        r"""(?i)(?:["'])?\b(authorization|proxy-authorization)\b"""
+        r"""(?:["'])?\s*[:=]\s*(?!\[REDACTED\])"""
+        r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]+)"""
+    ),
+    re.compile(
+        r"(?i)\b(https?://)[^/@\s]+@"
+    ),
+    re.compile(
+        r"""(?i)(?:["'])?\b(api[_-]?key|x[_-]?txc[_-]?apikey|x[_-]?txc[_-]?payload|x[_-]?txc[_-]?signature|"""
+        r"""token|access[_-]?token|refresh[_-]?token|session|session[_-]?token|secret|credential|api[_-]?secret|"""
+        r"""client[_-]?secret|private[_-]?key|password)\b(?:["'])?\s*[:=]\s*(?!\[REDACTED\])"""
+        r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^&\s;,}\]]+)"""
+    ),
+)
+
+_PRIVATE_KEY_MARKERS = (
+    "-----BEGIN PRIVATE KEY-----",
+    "-----BEGIN ENCRYPTED PRIVATE KEY-----",
+    "-----BEGIN RSA PRIVATE KEY-----",
+    "-----BEGIN DSA PRIVATE KEY-----",
+    "-----BEGIN EC PRIVATE KEY-----",
+    "-----BEGIN OPENSSH PRIVATE KEY-----",
+)
+
+
+def _redact_structured_json_text(value: str) -> str | None:
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(decoded, (dict, list)):
+        return None
+    redacted = redact_diagnostic_value(decoded)
+    if redacted == decoded:
+        return None
+    return json.dumps(
+        redacted,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+
+
+def _redact_structured_url_query(value: str) -> str | None:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.netloc
+        or not parsed.query
+    ):
+        return None
+
+    changed = False
+    query_parts: list[str] = []
+    for part in parsed.query.split("&"):
+        raw_key, separator, _ = part.partition("=")
+        if _is_sensitive_key(unquote_plus(raw_key)):
+            query_parts.append(f"{raw_key}{separator or '='}[REDACTED]")
+            changed = True
+        else:
+            query_parts.append(part)
+    if not changed:
+        return None
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, "&".join(query_parts), parsed.fragment)
+    )
+
+
+def _redact_embedded_secret_text(value: str) -> str:
+    if any(marker in value for marker in _PRIVATE_KEY_MARKERS):
+        return "[REDACTED]"
+    structured_json = _redact_structured_json_text(value)
+    if structured_json is not None:
+        # Structured redaction has already recursively sanitized every JSON value.
+        # Do not run the generic text regexes over the serialized JSON: those
+        # regexes intentionally normalize key/value syntax and would make the
+        # valid redacted JSON unparsable.
+        return structured_json
+    redacted = _redact_structured_url_query(value) or value
+    for pattern in _EMBEDDED_SECRET_PATTERNS:
+        def replacement(match: re.Match[str]) -> str:
+            name = match.group(1)
+            if name.lower() in {"authorization", "proxy-authorization"}:
+                return f"{name}: [REDACTED]"
+            if name.lower().startswith("http"):
+                return f"{name}[REDACTED]@"
+            separator = "=" if "=" in match.group(0) else ":"
+            return f"{name}{separator}[REDACTED]"
+        redacted = pattern.sub(replacement, redacted)
+    return redacted
+
+
+def redact_diagnostic_value(value: Any) -> Any:
+    """Recursively redact credential-shaped keys and embedded secret text."""
+
+    if isinstance(value, str):
+        return _redact_embedded_secret_text(value)
     if isinstance(value, dict):
         result = {}
         for key, child in value.items():
-            normalized = _normalized_key(key)
-            if any(marker in normalized for marker in _REDACTION_MARKERS):
+            if _is_sensitive_key(key):
                 result[key] = "[REDACTED]"
             else:
                 result[key] = redact_diagnostic_value(child)

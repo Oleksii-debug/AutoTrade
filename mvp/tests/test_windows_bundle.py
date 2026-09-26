@@ -1,10 +1,13 @@
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 import zipfile
 
+import research.autotrade_research.artifacts.durable_publish as durable_publish_module
 from tools.build_windows_bundle import BundleError, _windows_path_key, build_bundle
 
 
@@ -24,6 +27,82 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
             '{"version":"1.0.0"}\n',
             encoding="utf-8",
         )
+
+    def _symlink_or_skip(self, link: Path, target: Path):
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError) as error:
+            self.skipTest(f"symlink creation unavailable: {error}")
+
+    def _hardlink_or_skip(self, link: Path, target: Path):
+        try:
+            os.link(target, link)
+        except (OSError, NotImplementedError) as error:
+            self.skipTest(f"hardlink creation unavailable: {error}")
+
+    def test_hardlinked_staged_file_is_rejected_without_reading_alias(self):
+        staged = self.staging / "AutoTrade.exe"
+        staged.unlink()
+        victim = self.root / "external-runtime.exe"
+        victim.write_bytes(b"external-runtime")
+        self._hardlink_or_skip(staged, victim)
+
+        with self.assertRaisesRegex(
+            BundleError,
+            "hardlinked staged files are forbidden",
+        ):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "hardlink.zip",
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+
+        self.assertEqual(victim.read_bytes(), b"external-runtime")
+
+    def test_staged_path_swap_during_open_fails_closed(self):
+        staged = self.staging / "AutoTrade.exe"
+        replacement = self.root / "replacement.exe"
+        replacement.write_bytes(b"replacement")
+        original_open = Path.open
+        swapped = False
+
+        def open_then_swap(path_obj, *args, **kwargs):
+            nonlocal swapped
+            handle = original_open(path_obj, *args, **kwargs)
+            mode = args[0] if args else kwargs.get("mode", "r")
+            if Path(path_obj) == staged and mode == "rb" and not swapped:
+                try:
+                    os.replace(replacement, staged)
+                except OSError as error:
+                    handle.close()
+                    self.skipTest(f"open-file replacement unavailable: {error}")
+                swapped = True
+            return handle
+
+        with patch.object(
+            Path,
+            "open",
+            autospec=True,
+            side_effect=open_then_swap,
+        ):
+            with self.assertRaisesRegex(
+                BundleError,
+                "staged file changed during collection",
+            ):
+                build_bundle(
+                    staging=self.staging,
+                    output=self.root / "swapped.zip",
+                    version="0.1.0-dev",
+                    source_sha=SOURCE_SHA,
+                    mode="diagnostics",
+                    provenance_path=self.provenance(eligible=False),
+                )
+
+        self.assertTrue(swapped)
+        self.assertFalse((self.root / "swapped.zip").exists())
 
     def provenance(self, *, eligible=False, source_sha=None):
         path = self.root / "provenance.json"
@@ -624,6 +703,243 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
         self.assertIn(
             "runtime.bin",
             {item["path"] for item in result["manifest"]["files"]},
+        )
+
+    def test_bundle_outputs_cannot_overwrite_release_evidence_inputs(self):
+        provenance = self.provenance(eligible=False)
+        provenance_bytes = provenance.read_bytes()
+        with self.assertRaisesRegex(
+            BundleError,
+            "output must not overwrite release provenance input",
+        ):
+            build_bundle(
+                staging=self.staging,
+                output=provenance,
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=provenance,
+            )
+        self.assertEqual(provenance.read_bytes(), provenance_bytes)
+
+        composition = self.composition()
+        composition_bytes = composition.read_bytes()
+        with self.assertRaisesRegex(
+            BundleError,
+            "output must not overwrite Windows composition input",
+        ):
+            build_bundle(
+                staging=self.staging,
+                output=composition,
+                version="1.0.0",
+                source_sha=SOURCE_SHA,
+                mode="release",
+                provenance_path=self.provenance(eligible=True),
+                composition_path=composition,
+            )
+        self.assertEqual(composition.read_bytes(), composition_bytes)
+
+    def test_bundle_hash_output_cannot_overwrite_provenance_input(self):
+        output = self.root / "evidence"
+        provenance = output.with_suffix(".sha256")
+        provenance.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0.0",
+                    "release_eligible": False,
+                    "blocking_issues": [{"code": "QUALIFICATION_PENDING"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        before = provenance.read_bytes()
+
+        with self.assertRaisesRegex(
+            BundleError,
+            "hash output must not overwrite release provenance input",
+        ):
+            build_bundle(
+                staging=self.staging,
+                output=output,
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=provenance,
+            )
+
+        self.assertFalse(output.exists())
+        self.assertEqual(provenance.read_bytes(), before)
+
+    def test_bundle_output_hardlink_is_rejected_without_touching_alias(self):
+        victim = self.root / "victim-bundle-hardlink.bin"
+        victim.write_bytes(b"do-not-touch")
+        output = self.root / "diagnostics.zip"
+        self._hardlink_or_skip(output, victim)
+
+        with self.assertRaisesRegex(BundleError, "bundle output is unsafe"):
+            build_bundle(
+                staging=self.staging,
+                output=output,
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+
+        self.assertEqual(victim.read_bytes(), b"do-not-touch")
+        self.assertEqual(output.read_bytes(), b"do-not-touch")
+
+    def test_bundle_output_symlink_is_rejected_without_touching_target(self):
+        victim = self.root / "victim-bundle.bin"
+        victim.write_bytes(b"do-not-touch")
+        output = self.root / "diagnostics.zip"
+        self._symlink_or_skip(output, victim)
+
+        with self.assertRaisesRegex(BundleError, "bundle output is unsafe"):
+            build_bundle(
+                staging=self.staging,
+                output=output,
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+
+        self.assertEqual(victim.read_bytes(), b"do-not-touch")
+
+    def test_legacy_bundle_temp_symlink_is_ignored_without_touching_target(self):
+        victim = self.root / "victim-bundle-temp.bin"
+        victim.write_bytes(b"do-not-touch")
+        output = self.root / "diagnostics.zip"
+        legacy_temp = output.with_name(output.name + ".tmp")
+        self._symlink_or_skip(legacy_temp, victim)
+
+        result = build_bundle(
+            staging=self.staging,
+            output=output,
+            version="0.1.0-dev",
+            source_sha=SOURCE_SHA,
+            mode="diagnostics",
+            provenance_path=self.provenance(eligible=False),
+        )
+
+        self.assertTrue(output.exists())
+        self.assertTrue(legacy_temp.is_symlink())
+        self.assertEqual(victim.read_bytes(), b"do-not-touch")
+        self.assertEqual(
+            output.with_suffix(".zip.sha256").read_text(encoding="utf-8").split()[0],
+            result["sha256"],
+        )
+
+    def test_bundle_hash_hardlink_is_rejected_before_bundle_mutation(self):
+        output = self.root / "diagnostics.zip"
+        output.write_bytes(b"old-bundle")
+        victim = self.root / "victim-bundle-hash-hardlink.txt"
+        victim.write_text("do-not-touch", encoding="utf-8")
+        hash_path = output.with_suffix(output.suffix + ".sha256")
+        self._hardlink_or_skip(hash_path, victim)
+
+        with self.assertRaisesRegex(
+            BundleError,
+            "bundle hash output is unsafe",
+        ):
+            build_bundle(
+                staging=self.staging,
+                output=output,
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+
+        self.assertEqual(output.read_bytes(), b"old-bundle")
+        self.assertEqual(victim.read_text(encoding="utf-8"), "do-not-touch")
+        self.assertEqual(hash_path.read_text(encoding="utf-8"), "do-not-touch")
+
+    def test_bundle_hash_symlink_is_rejected_before_bundle_mutation(self):
+        output = self.root / "diagnostics.zip"
+        output.write_bytes(b"old-bundle")
+        victim = self.root / "victim-bundle-hash.txt"
+        victim.write_text("do-not-touch", encoding="utf-8")
+        hash_path = output.with_suffix(output.suffix + ".sha256")
+        self._symlink_or_skip(hash_path, victim)
+
+        with self.assertRaisesRegex(
+            BundleError,
+            "bundle hash output is unsafe",
+        ):
+            build_bundle(
+                staging=self.staging,
+                output=output,
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+
+        self.assertEqual(output.read_bytes(), b"old-bundle")
+        self.assertEqual(victim.read_text(encoding="utf-8"), "do-not-touch")
+
+    def test_bundle_pair_failure_restores_existing_primary_and_digest(self):
+        output = self.root / "diagnostics.zip"
+        hash_path = output.with_suffix(output.suffix + ".sha256")
+        output.write_bytes(b"old-bundle")
+        hash_path.write_bytes(b"old-digest\n")
+        original_replace = durable_publish_module.os.replace
+        injected = False
+
+        def replace_with_primary_failure(source, target):
+            nonlocal injected
+            if Path(target) == output and not injected:
+                injected = True
+                raise OSError("simulated bundle primary replace failure")
+            return original_replace(source, target)
+
+        with patch.object(
+            durable_publish_module.os,
+            "replace",
+            side_effect=replace_with_primary_failure,
+        ):
+            with self.assertRaisesRegex(
+                BundleError,
+                "bundle publication failed closed",
+            ):
+                build_bundle(
+                    staging=self.staging,
+                    output=output,
+                    version="0.1.0-dev",
+                    source_sha=SOURCE_SHA,
+                    mode="diagnostics",
+                    provenance_path=self.provenance(eligible=False),
+                )
+
+        self.assertTrue(injected)
+        self.assertEqual(output.read_bytes(), b"old-bundle")
+        self.assertEqual(hash_path.read_bytes(), b"old-digest\n")
+
+    def test_legacy_hash_temp_symlink_is_ignored_without_touching_target(self):
+        output = self.root / "diagnostics.zip"
+        victim = self.root / "victim-bundle-hash-temp.txt"
+        victim.write_text("do-not-touch", encoding="utf-8")
+        hash_path = output.with_suffix(output.suffix + ".sha256")
+        legacy_temp = hash_path.with_name(hash_path.name + ".tmp")
+        self._symlink_or_skip(legacy_temp, victim)
+
+        result = build_bundle(
+            staging=self.staging,
+            output=output,
+            version="0.1.0-dev",
+            source_sha=SOURCE_SHA,
+            mode="diagnostics",
+            provenance_path=self.provenance(eligible=False),
+        )
+
+        self.assertTrue(output.exists())
+        self.assertTrue(legacy_temp.is_symlink())
+        self.assertEqual(victim.read_text(encoding="utf-8"), "do-not-touch")
+        self.assertEqual(
+            hash_path.read_text(encoding="utf-8").split()[0],
+            result["sha256"],
         )
 
     def test_hash_sidecar_publish_removes_stale_temporary_file(self):

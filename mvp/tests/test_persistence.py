@@ -827,6 +827,165 @@ class JournalStoreTests(unittest.TestCase):
                 connection.close()
             self.assertIsNone(migration_table)
 
+    def test_partial_unique_index_does_not_satisfy_identity_contract(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    """
+                    CREATE TABLE events(
+                        event_id TEXT PRIMARY KEY,
+                        event_type TEXT NOT NULL,
+                        aggregate_type TEXT NOT NULL,
+                        aggregate_id TEXT NOT NULL,
+                        aggregate_version INTEGER NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        payload_hash TEXT NOT NULL,
+                        committed_at TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE UNIQUE INDEX forged_events_identity
+                    ON events(aggregate_type, aggregate_id, aggregate_version)
+                    WHERE 0
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "aggregate_type,aggregate_id,aggregate_version",
+            ):
+                JournalStore(path)
+
+            connection = sqlite3.connect(path)
+            try:
+                migration_table = connection.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'schema_migrations'"
+                ).fetchone()
+                index_rows = {
+                    row[1]: (bool(row[2]), bool(row[4]))
+                    for row in connection.execute("PRAGMA index_list(events)")
+                }
+            finally:
+                connection.close()
+
+            # Initialization is atomic: the adversarial pre-existing index remains
+            # visible as partial, while migration metadata/DDL is rolled back.
+            self.assertIsNone(migration_table)
+            self.assertEqual(index_rows["forged_events_identity"], (True, True))
+
+    def test_partial_schema_with_matching_names_but_weakened_column_contract_is_rejected(self):
+        cases = (
+            ("payload_hash BLOB NOT NULL", "invalid declared type"),
+            ("payload_hash TEXT", "invalid NOT NULL contract"),
+        )
+        for payload_hash_column, expected_error in cases:
+            with self.subTest(payload_hash_column=payload_hash_column):
+                with TemporaryDirectory() as directory:
+                    path = f"{directory}/journal.sqlite3"
+                    connection = sqlite3.connect(path)
+                    try:
+                        connection.execute(
+                            f"""
+                            CREATE TABLE events(
+                                event_id TEXT PRIMARY KEY,
+                                event_type TEXT NOT NULL,
+                                aggregate_type TEXT NOT NULL,
+                                aggregate_id TEXT NOT NULL,
+                                aggregate_version INTEGER NOT NULL,
+                                payload_json TEXT NOT NULL,
+                                {payload_hash_column},
+                                committed_at TEXT NOT NULL,
+                                UNIQUE (aggregate_type, aggregate_id, aggregate_version)
+                            )
+                            """
+                        )
+                        connection.commit()
+                    finally:
+                        connection.close()
+
+                    with self.assertRaisesRegex(ValueError, expected_error):
+                        JournalStore(path)
+
+                    connection = sqlite3.connect(path)
+                    try:
+                        migration_table = connection.execute(
+                            "SELECT name FROM sqlite_master "
+                            "WHERE type = 'table' AND name = 'schema_migrations'"
+                        ).fetchone()
+                        event_columns = {
+                            row[1]: (str(row[2]).upper(), bool(row[3]))
+                            for row in connection.execute("PRAGMA table_info(events)")
+                        }
+                    finally:
+                        connection.close()
+
+                    # Initialization is one transaction. Detection of the
+                    # weakened pre-existing contract must not leave migration
+                    # metadata or partially upgraded columns behind.
+                    self.assertIsNone(migration_table)
+                    expected_type = "BLOB" if "BLOB" in payload_hash_column else "TEXT"
+                    expected_not_null = payload_hash_column.endswith("NOT NULL")
+                    self.assertEqual(
+                        event_columns["payload_hash"],
+                        (expected_type, expected_not_null),
+                    )
+                    self.assertNotIn("envelope_json", event_columns)
+                    self.assertNotIn("journal_sequence", event_columns)
+
+    def test_partial_schema_with_unrecorded_extra_column_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    """
+                    CREATE TABLE events(
+                        event_id TEXT PRIMARY KEY,
+                        event_type TEXT NOT NULL,
+                        aggregate_type TEXT NOT NULL,
+                        aggregate_id TEXT NOT NULL,
+                        aggregate_version INTEGER NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        payload_hash TEXT NOT NULL,
+                        committed_at TEXT NOT NULL,
+                        unexpected_shadow TEXT,
+                        UNIQUE (aggregate_type, aggregate_id, aggregate_version)
+                    )
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "has unexpected columns"):
+                JournalStore(path)
+
+            connection = sqlite3.connect(path)
+            try:
+                migration_table = connection.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'schema_migrations'"
+                ).fetchone()
+                event_columns = {
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info(events)")
+                }
+            finally:
+                connection.close()
+
+            self.assertIsNone(migration_table)
+            self.assertIn("unexpected_shadow", event_columns)
+            self.assertNotIn("envelope_json", event_columns)
+            self.assertNotIn("journal_sequence", event_columns)
+
     def test_v1_database_upgrades_atomically_without_losing_events(self):
         class LegacyJournalStore(JournalStore):
             SCHEMA_VERSION = 1
@@ -838,7 +997,7 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(legacy.current_schema_version(), 1)
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 6)
+            self.assertEqual(upgraded.current_schema_version(), 7)
             self.assertEqual(
                 upgraded.load_events("account", "paper-1")[0]["event_id"],
                 "evt-1",
@@ -875,7 +1034,7 @@ class JournalStoreTests(unittest.TestCase):
                 connection.close()
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 6)
+            self.assertEqual(upgraded.current_schema_version(), 7)
             with self.assertRaisesRegex(ValueError, "legacy unscoped"):
                 upgraded.record_command(
                     actor="alice",
@@ -939,7 +1098,7 @@ class JournalStoreTests(unittest.TestCase):
                 connection.close()
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 6)
+            self.assertEqual(upgraded.current_schema_version(), 7)
             replayed, inserted = upgraded.record_command(
                 actor="alice",
                 environment="PAPER",
@@ -1224,11 +1383,11 @@ class JournalStoreTests(unittest.TestCase):
 
     def test_failed_migration_rolls_back_schema_and_data_changes(self):
         class BrokenMigrationStore(JournalStore):
-            SCHEMA_VERSION = 7
+            SCHEMA_VERSION = 8
 
             @classmethod
             def _migration_statements(cls, version):
-                if version == 7:
+                if version == 8:
                     return (
                         "CREATE TABLE migration_probe(value TEXT NOT NULL)",
                         "CREATE TABL definitely_invalid(statement TEXT)",
@@ -1239,7 +1398,7 @@ class JournalStoreTests(unittest.TestCase):
             path = f"{directory}/journal.sqlite3"
             healthy = JournalStore(path)
             healthy.append_event(event())
-            self.assertEqual(healthy.current_schema_version(), 6)
+            self.assertEqual(healthy.current_schema_version(), 7)
 
             with self.assertRaises(sqlite3.OperationalError):
                 BrokenMigrationStore(path)
@@ -1262,7 +1421,7 @@ class JournalStoreTests(unittest.TestCase):
             finally:
                 connection.close()
 
-            self.assertEqual(versions, [1, 2, 3, 4, 5, 6])
+            self.assertEqual(versions, [1, 2, 3, 4, 5, 6, 7])
             self.assertIsNone(probe)
             self.assertEqual(event_count, 1)
 
@@ -1324,6 +1483,164 @@ class JournalStoreTests(unittest.TestCase):
                 if item["payload"].get("kind") == "fill"
             )
             self.assertEqual(str(rebuilt), checkpoint["state"]["net_quantity"])
+
+    def test_global_projection_checkpoint_replays_exact_multi_aggregate_tail(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+            second = event("evt-2", 1, {"kind": "fill", "quantity": "2"})
+            second["aggregate_id"] = "paper-2"
+            second["payload_hash"] = payload_digest(second["payload"])
+            store.append_event(second)
+
+            cut = store.current_journal_sequence()
+            self.assertEqual(cut, 2)
+            self.assertTrue(
+                store.save_global_projection_checkpoint(
+                    projection_name="portfolio",
+                    journal_sequence=cut,
+                    state={"paper-1": "1", "paper-2": "2"},
+                )
+            )
+
+            third = event("evt-3", 2, {"kind": "fill", "quantity": "3"})
+            store.append_event(third)
+
+            reopened = JournalStore(path)
+            checkpoint = reopened.load_global_projection_checkpoint(
+                projection_name="portfolio"
+            )
+            self.assertEqual(checkpoint["journal_sequence"], 2)
+            self.assertEqual(
+                checkpoint["state"],
+                {"paper-1": "1", "paper-2": "2"},
+            )
+            tail = reopened.load_events_after_journal_sequence(
+                checkpoint["journal_sequence"]
+            )
+            self.assertEqual(
+                [item["journal_sequence"] for item in tail],
+                [3],
+            )
+            rebuilt = dict(checkpoint["state"])
+            for item in tail:
+                if item["payload"].get("kind") == "fill":
+                    rebuilt[item["aggregate_id"]] = str(
+                        int(rebuilt.get(item["aggregate_id"], "0"))
+                        + int(item["payload"]["quantity"])
+                    )
+            self.assertEqual(
+                rebuilt,
+                {"paper-1": "4", "paper-2": "2"},
+            )
+
+    def test_global_projection_checkpoint_is_monotonic_and_fail_closed(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+            self.assertTrue(
+                store.save_global_projection_checkpoint(
+                    projection_name="portfolio",
+                    journal_sequence=1,
+                    state={"net": "1"},
+                )
+            )
+            self.assertFalse(
+                store.save_global_projection_checkpoint(
+                    projection_name=" portfolio ",
+                    journal_sequence=1,
+                    state={"net": "1"},
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "cannot outrun"):
+                store.save_global_projection_checkpoint(
+                    projection_name="portfolio",
+                    journal_sequence=2,
+                    state={"net": "2"},
+                )
+            with self.assertRaisesRegex(ValueError, "cannot regress or change"):
+                store.save_global_projection_checkpoint(
+                    projection_name="portfolio",
+                    journal_sequence=1,
+                    state={"net": "999"},
+                )
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE global_projection_checkpoints SET state_json = ? "
+                    "WHERE projection_name = ?",
+                    ('{"net":"999"}', "portfolio"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "hash does not match"):
+                JournalStore(path).load_global_projection_checkpoint(
+                    projection_name="portfolio"
+                )
+
+    def test_global_projection_checkpoint_cut_tamper_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+            second = event("evt-2", 2, {"kind": "fill", "quantity": "2"})
+            store.append_event(second)
+            self.assertTrue(
+                store.save_global_projection_checkpoint(
+                    projection_name="portfolio",
+                    journal_sequence=2,
+                    state={"net": "3"},
+                )
+            )
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE global_projection_checkpoints "
+                    "SET journal_sequence = 1 WHERE projection_name = ?",
+                    ("portfolio",),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "hash does not match identity, cut, and state",
+            ):
+                JournalStore(path).load_global_projection_checkpoint(
+                    projection_name="portfolio"
+                )
+
+    def test_v6_upgrade_adds_global_projection_checkpoint_without_losing_journal(self):
+        class V6JournalStore(JournalStore):
+            SCHEMA_VERSION = 6
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            legacy = V6JournalStore(path)
+            legacy.append_event(event(), outbox_topic="events")
+            self.assertEqual(legacy.current_schema_version(), 6)
+
+            upgraded = JournalStore(path)
+            self.assertEqual(upgraded.current_schema_version(), 7)
+            self.assertEqual(
+                [item["event_id"] for item in upgraded.load_events_after_journal_sequence(0)],
+                ["evt-1"],
+            )
+            self.assertEqual(len(upgraded.pending_outbox()), 1)
+            self.assertTrue(
+                upgraded.save_global_projection_checkpoint(
+                    projection_name="portfolio",
+                    journal_sequence=1,
+                    state={"net": "1"},
+                )
+            )
 
     def test_projection_checkpoint_identity_cannot_split_on_whitespace(self):
         with TemporaryDirectory() as directory:

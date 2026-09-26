@@ -23,6 +23,7 @@ from .persistence import JournalStore, payload_digest
 AUTHORITY_TYPE = "authority_state"
 AUTHORITY_ID = "canonical"
 PAYLOAD_SCHEMA = 1
+REASON_CODES = frozenset({"OPERATOR_REQUEST", "EMERGENCY_STOP", "POLICY_REVIEW"})
 
 
 class OperatorAuthorityConflict(RuntimeError):
@@ -283,14 +284,14 @@ def canonical_operator_payload(
         base["policy_hash"] = payload_digest(canonical)
         return base
 
-    _keys(raw_payload, set(), {"reason"})
-    default_reason = (
-        "operator_block_new_exposure"
-        if action_name == "BLOCK_NEW_EXPOSURE"
-        else "operator_revoke_authority"
+    _keys(raw_payload, set(), {"reason_code"})
+    reason_code = _text(
+        raw_payload.get("reason_code", "OPERATOR_REQUEST"),
+        "reason_code",
     )
-    reason = _text(raw_payload.get("reason", default_reason), "reason")
-    base["reason"] = reason
+    if reason_code not in REASON_CODES:
+        raise ValueError("reason_code must be a canonical operator reason")
+    base["reason_code"] = reason_code
     base["target_policies"] = _active_targets(
         state,
         account,
@@ -337,8 +338,10 @@ def validate_persisted_payload(
             raise ValueError("persisted SET_AUTHORITY policy hash mismatch")
         return value
 
-    _keys(value, common | {"reason", "target_policies"})
-    _text(value.get("reason"), "reason")
+    _keys(value, common | {"reason_code", "target_policies"})
+    reason_code = _text(value.get("reason_code"), "reason_code")
+    if reason_code not in REASON_CODES:
+        raise ValueError("persisted reason_code is not canonical")
     targets = value.get("target_policies")
     if not isinstance(targets, list):
         raise ValueError("target_policies must be an array")
@@ -457,7 +460,9 @@ def _resolved(
             (_cut_evidence(events, expected_version, expected_epoch),),
         )
 
-    reason = _text(payload.get("reason"), "reason")
+    reason = "host_operator_command:" + action + ":" + _text(
+        payload.get("reason_code"), "reason_code"
+    )
     affected: list[str] = []
     evidence: list[Mapping[str, object]] = []
     for target in targets:
@@ -552,7 +557,12 @@ def execute_operator_authority_action(
             assert resolved is not None
             return resolved
 
-        reason = _text(payload["reason"], "reason")
+        reason = (
+            "host_operator_command:"
+            + action_name
+            + ":"
+            + _text(payload["reason_code"], "reason_code")
+        )
         exact_done = 0
         missing: list[str] = []
         target_ids = {str(item["policy_id"]) for item in targets}

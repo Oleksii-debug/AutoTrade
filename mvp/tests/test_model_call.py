@@ -1266,7 +1266,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
                     now_utc=NOW,
                 )
 
-    def test_fallback_lineage_remains_local_only_when_policy_is_local_only(self):
+    def test_fallback_policy_cannot_widen_under_same_policy_id(self):
         with TemporaryDirectory() as directory:
             _journal, budget = open_budget(directory)
             orchestrator = orchestrator_for(
@@ -1276,11 +1276,71 @@ class ModelCallLifecycleTests(unittest.TestCase):
             parent_spec = spec()
             parent = orchestrator.execute(
                 spec=parent_spec,
-                policy=fixed_policy(),
+                policy=fixed_policy(maximum_cost="2"),
                 request=request_for(orchestrator, parent_spec),
                 descriptors=[descriptor()],
+                call=lambda *_args: observation(
+                    incurred="0.2",
+                    unbilled="0",
+                    output={"invalid": True},
+                ),
+                validate_result=lambda _value: False,
+                now_utc=NOW,
+            )
+            self.assertEqual(parent.status, "OBSERVED_INVALID")
+            fallback = spec(
+                fallback_parent_attempt_id=parent.attempt_id,
+                fallback_index=1,
+            )
+            calls = []
+            with self.assertRaisesRegex(
+                ModelCallError,
+                "fallback policy must match",
+            ):
+                orchestrator.execute(
+                    spec=fallback,
+                    policy=fixed_policy(maximum_cost="3"),
+                    request=request_for(orchestrator, fallback),
+                    descriptors=[descriptor()],
+                    call=lambda *_args: calls.append(True),
+                    validate_result=lambda _value: True,
+                    now_utc=NOW,
+                )
+            self.assertEqual(calls, [])
+
+    def test_fallback_lineage_remains_local_only_when_policy_is_local_only(self):
+        with TemporaryDirectory() as directory:
+            _journal, budget = open_budget(directory)
+            orchestrator = orchestrator_for(
+                budget=budget,
+                clock=MutableClock(),
+            )
+            local_policy = local_only_policy("local-a", "remote-only")
+            parent_spec = spec()
+            parent = orchestrator.execute(
+                spec=parent_spec,
+                policy=local_policy,
+                request=request_for(
+                    orchestrator,
+                    parent_spec,
+                    allowed_model_ids=("local-a", "remote-only"),
+                ),
+                descriptors=[
+                    descriptor(
+                        model_id="local-a",
+                        provider_id="local-runtime",
+                        remote=False,
+                        cost="0",
+                    ),
+                    descriptor(
+                        model_id="remote-only",
+                        provider_id="remote-provider",
+                        remote=True,
+                        cost="0.1",
+                    ),
+                ],
                 call=lambda *_args: (_ for _ in ()).throw(
-                    ModelCallNotSent("provider boundary was not crossed")
+                    ModelCallNotSent("local boundary was not crossed")
                 ),
                 validate_result=lambda _value: True,
                 now_utc=NOW,
@@ -1298,7 +1358,7 @@ class ModelCallLifecycleTests(unittest.TestCase):
             calls = []
             outcome = orchestrator.execute(
                 spec=fallback,
-                policy=local_only_policy("remote-only"),
+                policy=local_policy,
                 request=request,
                 descriptors=[
                     descriptor(

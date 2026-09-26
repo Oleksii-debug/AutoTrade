@@ -990,11 +990,18 @@ class DurableModelCallOrchestrator:
             )
         return evidence
 
-    def _validate_fallback_lineage(self, spec: ModelCallSpec) -> None:
-        """Require fallback to descend from one durable, safely terminal attempt."""
+    def _validate_fallback_lineage(
+        self,
+        spec: ModelCallSpec,
+        policy: RoutingPolicy,
+        request: ModelRequest,
+    ) -> None:
+        """Require fallback to remain inside one durable, safely terminal envelope."""
 
         if spec.fallback_index == 0:
             return
+        if not isinstance(policy, RoutingPolicy):
+            raise TypeError("policy must be RoutingPolicy")
         parent_attempt_id = _canonical_text(
             spec.fallback_parent_attempt_id,
             name="fallback_parent_attempt_id",
@@ -1040,6 +1047,90 @@ class DurableModelCallOrchestrator:
         ):
             raise ModelCallError(
                 "fallback index must directly follow the durable parent attempt"
+            )
+
+        route_events = self.journal.load_events(
+            "model_budget",
+            self.budget.budget_id,
+        )
+        matching_routes = [
+            event
+            for event in route_events
+            if event.get("event_type") == "ModelRouteReserved"
+            and isinstance(event.get("payload"), Mapping)
+            and event["payload"].get("request_id") == parent_attempt_id
+        ]
+        if len(matching_routes) != 1:
+            raise ModelCallError(
+                "fallback parent durable route reservation is not unique"
+            )
+        routing_input = matching_routes[0]["payload"].get("routing_input")
+        if not isinstance(routing_input, Mapping):
+            raise ModelCallError(
+                "fallback parent durable routing envelope is invalid"
+            )
+        parent_policy = routing_input.get("policy")
+        current_policy = {
+            "mode": policy.mode.value,
+            "allowed_model_ids": list(policy.allowed_model_ids),
+            "fixed_model_id": policy.fixed_model_id,
+            "allow_remote": policy.allow_remote,
+            "maximum_cost": str(policy.maximum_cost),
+            "maximum_latency_ms": policy.maximum_latency_ms,
+        }
+        if parent_policy != current_policy:
+            raise ModelCallError(
+                "fallback policy must match the durable parent routing policy"
+            )
+
+        parent_request = routing_input.get("request")
+        if not isinstance(parent_request, Mapping):
+            raise ModelCallError(
+                "fallback parent durable request envelope is invalid"
+            )
+        parent_allowed = parent_request.get("allowed_model_ids")
+        if (
+            not isinstance(parent_allowed, list)
+            or any(not isinstance(value, str) for value in parent_allowed)
+            or not set(request.allowed_model_ids).issubset(set(parent_allowed))
+        ):
+            raise ModelCallError(
+                "fallback request model allowlist widens the durable parent request"
+            )
+        parent_privacy_remote = parent_request.get("privacy_remote_allowed")
+        if type(parent_privacy_remote) is not bool:
+            raise ModelCallError(
+                "fallback parent privacy envelope is invalid"
+            )
+        if request.privacy_remote_allowed and not parent_privacy_remote:
+            raise ModelCallError(
+                "fallback request cannot widen remote privacy permission"
+            )
+        try:
+            parent_budget_cap = _exact_decimal(
+                parent_request.get("budget_cap"),
+                name="parent fallback budget_cap",
+            )
+            parent_deadline = datetime.fromisoformat(
+                _canonical_text(
+                    parent_request.get("deadline_utc"),
+                    name="parent fallback deadline_utc",
+                )
+            )
+        except ValueError as error:
+            raise ModelCallError(
+                "fallback parent request budget/deadline envelope is invalid"
+            ) from error
+        if request.budget_remaining > parent_budget_cap:
+            raise ModelCallError(
+                "fallback request cannot widen the durable parent budget cap"
+            )
+        if (
+            parent_deadline.tzinfo is None
+            or request.deadline_utc > parent_deadline
+        ):
+            raise ModelCallError(
+                "fallback request cannot extend the durable parent deadline"
             )
 
         terminal = next(
@@ -1111,7 +1202,7 @@ class DurableModelCallOrchestrator:
                 "ModelRequest.request_id must equal the deterministic model attempt id"
             )
 
-        self._validate_fallback_lineage(spec)
+        self._validate_fallback_lineage(spec, policy, request)
         existing = self._events(attempt_id)
         if existing and existing[-1].get("event_type") in {
             "ModelCallNotSent",

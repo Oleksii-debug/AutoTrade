@@ -573,14 +573,14 @@
   }
 
   function normalizedTableQuery(value) {
-    return String(value ?? "").trim().toLocaleLowerCase();
+    return String(value ?? "").trim().toLowerCase();
   }
 
   function tableSearchText(row) {
     return [...row.cells]
       .map((cell) => cell.textContent.replace(/\s+/g, " ").trim())
       .join(" ")
-      .toLocaleLowerCase();
+      .toLowerCase();
   }
 
   function toolForBody(bodyId) {

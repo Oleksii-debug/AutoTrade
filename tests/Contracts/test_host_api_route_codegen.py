@@ -195,6 +195,8 @@ paths:
         - in: path
           name: other_id
           required: true
+          schema:
+            type: string
       responses: {}
 """,
                 "do not match",
@@ -213,6 +215,23 @@ paths:
       responses: {}
 """,
                 "must be required: true",
+            ),
+            (
+                "wrong-schema-type",
+                """openapi: 3.1.0
+paths:
+  /api/v1/operations/{operation_id}:
+    get:
+      operationId: getOperation
+      parameters:
+        - in: path
+          name: operation_id
+          required: true
+          schema:
+            type: integer
+      responses: {}
+""",
+                "must use schema type: string",
             ),
         )
         for name, document, message in cases:

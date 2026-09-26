@@ -621,6 +621,14 @@
     if (tool !== null) applyTableFilter(tool, {announce: false});
   }
 
+  function resetTableFiltersForScopeChange() {
+    for (const tool of TABLE_TOOLS) {
+      const filter = byId(tool.filterId);
+      if (filter) filter.value = "";
+      text(tool.statusId, "Filter cleared for new account/environment scope.");
+    }
+  }
+
   function visibleTableRows(tool) {
     const body = byId(tool.bodyId);
     if (!body) return [];
@@ -831,6 +839,7 @@
     if (scopeChanged) {
       state.cursor = 0n;
       state.version = 0n;
+      resetTableFiltersForScopeChange();
       resetEventHistoryForScope();
     }
     if (parsed.version < state.version || parsed.cursor < state.cursor) {

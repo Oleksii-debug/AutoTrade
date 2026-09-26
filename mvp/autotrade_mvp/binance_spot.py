@@ -175,11 +175,11 @@ class BinanceSpotReferencePrice:
 
     instrument_version: str
     symbol: str
-    price: Decimal
+    price: Decimal | None
     observed_at: datetime
     source_sha256: str
     reference_kind: str
-    averaging_window_minutes: int
+    averaging_window_minutes: int | None
     _verification_token: InitVar[object | None] = None
 
     def __post_init__(self, _verification_token: object | None) -> None:
@@ -191,7 +191,11 @@ class BinanceSpotReferencePrice:
         symbol = _text(self.symbol, name="symbol")
         if symbol != symbol.upper():
             raise BinanceSpotAdapterError("reference-price symbol must be uppercase")
-        price = _decimal(self.price, name="reference_price", positive=True)
+        price = (
+            None
+            if self.price is None
+            else _decimal(self.price, name="reference_price", positive=True)
+        )
         observed_at = _utc(self.observed_at, name="reference_price observed_at")
         digest = _text(self.source_sha256, name="reference_price source_sha256")
         if (
@@ -203,20 +207,33 @@ class BinanceSpotReferencePrice:
                 "reference_price source_sha256 must be canonical lowercase SHA-256"
             )
         kind = _text(self.reference_kind, name="reference_kind").upper()
-        if kind not in {"AVERAGE", "LAST"}:
-            raise BinanceSpotAdapterError("reference_kind must be AVERAGE or LAST")
-        window = _nonnegative_int(
-            self.averaging_window_minutes,
-            name="averaging_window_minutes",
-        )
-        if kind == "AVERAGE" and window == 0:
+        if kind not in {"REFERENCE", "AVERAGE", "LAST"}:
             raise BinanceSpotAdapterError(
-                "AVERAGE reference price requires a positive averaging window"
+                "reference_kind must be REFERENCE, AVERAGE or LAST"
             )
-        if kind == "LAST" and window != 0:
-            raise BinanceSpotAdapterError(
-                "LAST reference price requires zero averaging window"
+        if kind == "REFERENCE":
+            if self.averaging_window_minutes is not None:
+                raise BinanceSpotAdapterError(
+                    "REFERENCE price observation must not carry an averaging window"
+                )
+            window = None
+        else:
+            if price is None:
+                raise BinanceSpotAdapterError(
+                    f"{kind} reference price requires a provider price"
+                )
+            window = _nonnegative_int(
+                self.averaging_window_minutes,
+                name="averaging_window_minutes",
             )
+            if kind == "AVERAGE" and window == 0:
+                raise BinanceSpotAdapterError(
+                    "AVERAGE reference price requires a positive averaging window"
+                )
+            if kind == "LAST" and window != 0:
+                raise BinanceSpotAdapterError(
+                    "LAST reference price requires zero averaging window"
+                )
         object.__setattr__(self, "instrument_version", instrument)
         object.__setattr__(self, "symbol", symbol)
         object.__setattr__(self, "price", price)
@@ -244,6 +261,70 @@ class BinanceSpotReferencePrice:
             allow_nan=False,
         ).encode("utf-8")
         return "sha256:" + sha256(canonical).hexdigest()
+
+    @classmethod
+    def from_reference_price_payload(
+        cls,
+        *,
+        instrument_version: str,
+        symbol: str,
+        payload: Mapping[str, object],
+    ) -> "BinanceSpotReferencePrice":
+        """Parse GET /api/v3/referencePrice without inventing null fallback."""
+
+        if not isinstance(payload, Mapping):
+            raise TypeError("reference-price payload must be a mapping")
+        if set(payload) != {"symbol", "referencePrice", "timestamp"}:
+            raise BinanceSpotAdapterError(
+                "reference-price payload fields are not canonical"
+            )
+        requested_symbol = _text(symbol, name="reference-price symbol")
+        if requested_symbol != requested_symbol.upper():
+            raise BinanceSpotAdapterError(
+                "reference-price symbol must be uppercase"
+            )
+        provider_symbol = _text(
+            payload.get("symbol"),
+            name="reference-price payload symbol",
+        )
+        if provider_symbol != requested_symbol:
+            raise BinanceSpotAdapterError(
+                "reference-price payload symbol does not match requested symbol"
+            )
+        raw_price = payload.get("referencePrice")
+        price = (
+            None
+            if raw_price is None
+            else _decimal(
+                raw_price,
+                name="provider reference price",
+                positive=True,
+            )
+        )
+        timestamp_text = _millis(
+            payload.get("timestamp"),
+            name="reference-price timestamp",
+        )
+        observed_at = datetime.fromisoformat(
+            timestamp_text.replace("Z", "+00:00")
+        )
+        return cls(
+            instrument_version=_text(
+                instrument_version,
+                name="instrument_version",
+            ),
+            symbol=provider_symbol,
+            price=price,
+            observed_at=observed_at,
+            source_sha256=cls._source_digest(
+                symbol=provider_symbol,
+                endpoint="/api/v3/referencePrice",
+                payload=payload,
+            ),
+            reference_kind="REFERENCE",
+            averaging_window_minutes=None,
+            _verification_token=_REFERENCE_PRICE_TOKEN,
+        )
 
     @classmethod
     def from_average_price_payload(
@@ -576,9 +657,10 @@ class BinanceSpotSymbolRules:
         intent: BinanceSpotOrderIntent,
         *,
         at: datetime,
+        reference_price_observation: BinanceSpotReferencePrice | None = None,
         market_reference: BinanceSpotReferencePrice | None = None,
         maximum_market_reference_age_seconds: int | None = None,
-    ) -> None:
+    ) -> BinanceSpotReferencePrice | None:
         if self.instrument_version != intent.instrument_version:
             raise BinanceSpotAdapterError(
                 "exchangeInfo rules instrument version does not match intent"
@@ -605,6 +687,7 @@ class BinanceSpotSymbolRules:
             self._require_step(intent.quantity, step, name="quantity")
 
         effective_price = intent.price
+        selected_market_reference: BinanceSpotReferencePrice | None = None
         if intent.order_type == "LIMIT":
             if effective_price is None:
                 raise BinanceSpotAdapterError("LIMIT price is required")
@@ -617,32 +700,6 @@ class BinanceSpotSymbolRules:
             self.min_notional_applies_to_market
             or self.max_notional_applies_to_market
         ):
-            if not isinstance(market_reference, BinanceSpotReferencePrice):
-                raise BinanceSpotAdapterError(
-                    "market notional filter requires provider reference-price evidence"
-                )
-            if market_reference.instrument_version != intent.instrument_version:
-                raise BinanceSpotAdapterError(
-                    "reference-price instrument version does not match intent"
-                )
-            if market_reference.symbol != intent.symbol:
-                raise BinanceSpotAdapterError(
-                    "reference-price symbol does not match intent"
-                )
-            required_window = self.notional_avg_price_mins
-            if required_window is None:
-                raise BinanceSpotAdapterError(
-                    "market notional filter is missing avgPriceMins"
-                )
-            if market_reference.averaging_window_minutes != required_window:
-                raise BinanceSpotAdapterError(
-                    "reference-price averaging window does not match exchangeInfo avgPriceMins"
-                )
-            expected_kind = "LAST" if required_window == 0 else "AVERAGE"
-            if market_reference.reference_kind != expected_kind:
-                raise BinanceSpotAdapterError(
-                    "reference-price semantics do not match exchangeInfo avgPriceMins"
-                )
             if (
                 isinstance(maximum_market_reference_age_seconds, bool)
                 or not isinstance(maximum_market_reference_age_seconds, int)
@@ -652,15 +709,76 @@ class BinanceSpotSymbolRules:
                     "maximum_market_reference_age_seconds must be a non-negative integer"
                 )
             point = _utc(at, name="at")
-            if market_reference.observed_at > point:
+
+            def require_bound_reference(
+                reference: object,
+                *,
+                role: str,
+            ) -> BinanceSpotReferencePrice:
+                if not isinstance(reference, BinanceSpotReferencePrice):
+                    raise BinanceSpotAdapterError(
+                        f"{role} requires canonical provider reference-price evidence"
+                    )
+                if reference.instrument_version != intent.instrument_version:
+                    raise BinanceSpotAdapterError(
+                        f"{role} instrument version does not match intent"
+                    )
+                if reference.symbol != intent.symbol:
+                    raise BinanceSpotAdapterError(
+                        f"{role} symbol does not match intent"
+                    )
+                if reference.observed_at > point:
+                    raise BinanceSpotAdapterError(
+                        f"{role} evidence is from the future"
+                    )
+                if point - reference.observed_at > timedelta(
+                    seconds=maximum_market_reference_age_seconds
+                ):
+                    raise BinanceSpotAdapterError(f"{role} evidence is stale")
+                return reference
+
+            provider_reference = require_bound_reference(
+                reference_price_observation,
+                role="provider reference-price observation",
+            )
+            if provider_reference.reference_kind != "REFERENCE":
                 raise BinanceSpotAdapterError(
-                    "reference-price evidence is from the future"
+                    "provider reference-price observation must come from "
+                    "/api/v3/referencePrice"
                 )
-            if point - market_reference.observed_at > timedelta(
-                seconds=maximum_market_reference_age_seconds
-            ):
-                raise BinanceSpotAdapterError("reference-price evidence is stale")
-            effective_price = market_reference.price
+
+            if provider_reference.price is not None:
+                selected_market_reference = provider_reference
+                effective_price = provider_reference.price
+            else:
+                fallback = require_bound_reference(
+                    market_reference,
+                    role="null reference-price fallback",
+                )
+                required_window = self.notional_avg_price_mins
+                if required_window is None:
+                    raise BinanceSpotAdapterError(
+                        "market notional filter is missing avgPriceMins"
+                    )
+                if fallback.averaging_window_minutes != required_window:
+                    raise BinanceSpotAdapterError(
+                        "reference-price averaging window does not match "
+                        "exchangeInfo avgPriceMins"
+                    )
+                expected_kind = (
+                    "LAST" if required_window == 0 else "AVERAGE"
+                )
+                if fallback.reference_kind != expected_kind:
+                    raise BinanceSpotAdapterError(
+                        "reference-price semantics do not match "
+                        "exchangeInfo avgPriceMins"
+                    )
+                if fallback.price is None:
+                    raise BinanceSpotAdapterError(
+                        "null reference-price fallback lacks a provider price"
+                    )
+                selected_market_reference = fallback
+                effective_price = fallback.price
 
         if effective_price is not None:
             notional = intent.quantity * effective_price
@@ -673,6 +791,8 @@ class BinanceSpotSymbolRules:
             ) and notional > self.max_notional:
                 raise BinanceSpotAdapterError("notional exceeds exchangeInfo maximum")
 
+        return selected_market_reference
+
 
 @dataclass(frozen=True)
 class BinanceSpotPreparedRequest:
@@ -680,6 +800,7 @@ class BinanceSpotPreparedRequest:
     body: Mapping[str, str]
     capability_snapshot_id: str
     filter_source_sha256: str
+    reference_price_observation_source_sha256: str | None = None
     market_reference_source_sha256: str | None = None
     market_reference_kind: str | None = None
     market_reference_window_minutes: int | None = None
@@ -694,6 +815,24 @@ class BinanceSpotPreparedRequest:
             raise BinanceSpotAdapterError(
                 "filter_source_sha256 must be canonical lowercase SHA-256"
             )
+        observation_digest = self.reference_price_observation_source_sha256
+        if observation_digest is not None:
+            observation_digest = _text(
+                observation_digest,
+                name="reference_price_observation_source_sha256",
+            )
+            if (
+                len(observation_digest) != 71
+                or not observation_digest.startswith("sha256:")
+                or any(
+                    ch not in "0123456789abcdef"
+                    for ch in observation_digest[7:]
+                )
+            ):
+                raise BinanceSpotAdapterError(
+                    "reference_price_observation_source_sha256 must be "
+                    "canonical lowercase SHA-256"
+                )
         reference_digest = self.market_reference_source_sha256
         if reference_digest is not None:
             reference_digest = _text(
@@ -720,23 +859,34 @@ class BinanceSpotPreparedRequest:
                 reference_kind,
                 name="market_reference_kind",
             ).upper()
-            if reference_kind not in {"AVERAGE", "LAST"}:
+            if reference_kind not in {"REFERENCE", "AVERAGE", "LAST"}:
                 raise BinanceSpotAdapterError(
-                    "market_reference_kind must be AVERAGE or LAST"
+                    "market_reference_kind must be REFERENCE, AVERAGE or LAST"
                 )
-            reference_window = _nonnegative_int(
-                reference_window,
-                name="market_reference_window_minutes",
-            )
-            if (
-                (reference_kind == "AVERAGE" and reference_window == 0)
-                or (reference_kind == "LAST" and reference_window != 0)
-            ):
-                raise BinanceSpotAdapterError(
-                    "market reference kind/window combination is invalid"
+            if reference_kind == "REFERENCE":
+                if reference_window is not None:
+                    raise BinanceSpotAdapterError(
+                        "REFERENCE market price must not carry an averaging window"
+                    )
+            else:
+                reference_window = _nonnegative_int(
+                    reference_window,
+                    name="market_reference_window_minutes",
                 )
+                if (
+                    (reference_kind == "AVERAGE" and reference_window == 0)
+                    or (reference_kind == "LAST" and reference_window != 0)
+                ):
+                    raise BinanceSpotAdapterError(
+                        "market reference kind/window combination is invalid"
+                    )
         object.__setattr__(self, "body", MappingProxyType(dict(self.body)))
         object.__setattr__(self, "filter_source_sha256", digest)
+        object.__setattr__(
+            self,
+            "reference_price_observation_source_sha256",
+            observation_digest,
+        )
         object.__setattr__(
             self,
             "market_reference_source_sha256",
@@ -757,6 +907,7 @@ def prepare_order_request(
     capability: CapabilitySnapshot,
     symbol_rules: BinanceSpotSymbolRules,
     at: datetime,
+    reference_price_observation: BinanceSpotReferencePrice | None = None,
     market_reference: BinanceSpotReferencePrice | None = None,
     maximum_market_reference_age_seconds: int | None = None,
 ) -> BinanceSpotPreparedRequest:
@@ -786,9 +937,10 @@ def prepare_order_request(
     ):
         raise BinanceSpotAdapterError("exact capability evidence does not admit this order")
 
-    symbol_rules.validate(
+    selected_market_reference = symbol_rules.validate(
         intent,
         at=point,
+        reference_price_observation=reference_price_observation,
         market_reference=market_reference,
         maximum_market_reference_age_seconds=maximum_market_reference_age_seconds,
     )
@@ -813,16 +965,25 @@ def prepare_order_request(
         body=body,
         capability_snapshot_id=capability.snapshot_id,
         filter_source_sha256=symbol_rules.source_sha256,
+        reference_price_observation_source_sha256=(
+            None
+            if reference_price_observation is None
+            else reference_price_observation.source_sha256
+        ),
         market_reference_source_sha256=(
-            None if market_reference is None else market_reference.source_sha256
+            None
+            if selected_market_reference is None
+            else selected_market_reference.source_sha256
         ),
         market_reference_kind=(
-            None if market_reference is None else market_reference.reference_kind
+            None
+            if selected_market_reference is None
+            else selected_market_reference.reference_kind
         ),
         market_reference_window_minutes=(
             None
-            if market_reference is None
-            else market_reference.averaging_window_minutes
+            if selected_market_reference is None
+            else selected_market_reference.averaging_window_minutes
         ),
     )
 

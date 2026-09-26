@@ -15,6 +15,7 @@ from mvp.autotrade_mvp.kraken_futures import (
     build_order_payload,
     coverage_evidence,
     futures_base_url,
+    parse_execution_events,
     parse_position_executions,
     parse_submission_response,
     prepare_order_request,
@@ -74,7 +75,13 @@ def futures_read_capability(*, account_id="paper-1"):
     )
 
 
-def futures_position_observation(payload, *, account_id="paper-1", endpoint="/api/history/v3/positions"):
+def futures_position_observation(
+    payload,
+    *,
+    account_id="paper-1",
+    endpoint="/api/history/v3/positions",
+    provider_environment="DEMO",
+):
     binding = prepare_authenticated_read_query(
         capability=futures_read_capability(account_id=account_id),
         surface=Surface.AUTHENTICATED_READ,
@@ -91,6 +98,34 @@ def futures_position_observation(payload, *, account_id="paper-1", endpoint="/ap
             separators=(",", ":"),
         ).encode("utf-8"),
         observed_at=NOW_DT,
+        provider_environment=provider_environment,
+    )
+
+
+def futures_execution_observation(
+    payload,
+    *,
+    account_id="paper-1",
+    endpoint="/api/history/v3/executions",
+    provider_environment="DEMO",
+):
+    binding = prepare_authenticated_read_query(
+        capability=futures_read_capability(account_id=account_id),
+        surface=Surface.AUTHENTICATED_READ,
+        endpoint=endpoint,
+        query={},
+        at=NOW_DT,
+    )
+    return observe_authenticated_json_response(
+        query_binding=binding,
+        http_status=200,
+        response_bytes=json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+        observed_at=NOW_DT,
+        provider_environment=provider_environment,
     )
 
 
@@ -441,6 +476,224 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                 observation={"result": "success"},
             )
 
+    def _execution_event(
+        self,
+        *,
+        execution_id="exec-event-1",
+        direction="Buy",
+        client_id="hedge-009",
+        fee="1.25",
+        quantity="0.25",
+        price="65000.10",
+    ):
+        return {
+            "uid": "event-1",
+            "timestamp": 1790280000123,
+            "event": {
+                "Execution": {
+                    "execution": {
+                        "uid": execution_id,
+                        "order": {
+                            "uid": "provider-order-1",
+                            "accountUid": "provider-account-1",
+                            "tradeable": "PI_XBTUSD",
+                            "direction": direction,
+                            "quantity": "1",
+                            "filled": quantity,
+                            "timestamp": 1790280000000,
+                            "limitPrice": price,
+                            "orderType": "Limit",
+                            "clientId": client_id,
+                            "reduceOnly": False,
+                            "lastUpdateTimestamp": 1790280000123,
+                            "positionUid": "position-1",
+                        },
+                        "timestamp": 1790280000123,
+                        "quantity": quantity,
+                        "price": price,
+                        "markPrice": price,
+                        "executionType": "maker",
+                        "limitFilled": False,
+                        "usdValue": "16250.025",
+                        "orderData": {
+                            "fee": fee,
+                            "positionSize": "0.25",
+                            "realizedPnl": "0",
+                        },
+                    },
+                    "takerReducedQuantity": "0",
+                }
+            },
+        }
+
+    def test_execution_history_binds_provider_side_fee_and_exact_observation(self):
+        for provider_side, expected_side in (("Buy", "BUY"), ("Sell", "SELL")):
+            with self.subTest(provider_side=provider_side):
+                observation = futures_execution_observation(
+                    {
+                        "accountUid": "provider-account-1",
+                        "len": 1,
+                        "elements": [
+                            self._execution_event(
+                                execution_id=f"exec-{expected_side.lower()}",
+                                direction=provider_side,
+                            )
+                        ],
+                    }
+                )
+                fills = parse_execution_events(
+                    observation,
+                    provider_environment="DEMO",
+                    instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
+                    qualified_fee_currencies={"PI_XBTUSD": "USD"},
+                )
+                self.assertEqual(len(fills), 1)
+                fill = fills[0]
+                self.assertEqual(fill.environment, "PAPER")
+                self.assertEqual(fill.provider_environment, "DEMO")
+                self.assertEqual(fill.provider_execution_id, f"exec-{expected_side.lower()}")
+                self.assertEqual(fill.client_order_id, "hedge-009")
+                self.assertEqual(fill.instrument, "PI_XBTUSD@v1")
+                self.assertEqual(fill.side, expected_side)
+                self.assertEqual(fill.quantity, Decimal("0.25"))
+                self.assertEqual(fill.price, Decimal("65000.10"))
+                self.assertEqual(fill.fee_amount, Decimal("1.25"))
+                self.assertEqual(fill.fee_currency, "USD")
+                self.assertEqual(fill.trade_time, "2026-09-24T20:00:00.123Z")
+                self.assertEqual(fill.evidence_refs, (observation.evidence_ref,))
+
+    def test_execution_history_refuses_missing_or_ambiguous_direction_and_fee(self):
+        base = self._execution_event()
+
+        missing_direction = json.loads(json.dumps(base))
+        del missing_direction["event"]["Execution"]["execution"]["order"]["direction"]
+        with self.assertRaisesRegex(ProviderCoreError, "order.direction"):
+            parse_execution_events(
+                futures_execution_observation(
+                    {"accountUid": "provider-account-1", "len": 1, "elements": [missing_direction]}
+                ),
+                provider_environment="DEMO",
+                instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
+                qualified_fee_currencies={"PI_XBTUSD": "USD"},
+            )
+
+        for invalid in ("buy", "sell", "BUY", "SELL", "Unknown"):
+            with self.subTest(direction=invalid):
+                event = self._execution_event(direction=invalid)
+                with self.assertRaisesRegex(
+                    ProviderCoreError,
+                    "provider-evidenced Buy or Sell",
+                ):
+                    parse_execution_events(
+                        futures_execution_observation(
+                            {"accountUid": "provider-account-1", "len": 1, "elements": [event]}
+                        ),
+                        provider_environment="DEMO",
+                        instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
+                        qualified_fee_currencies={"PI_XBTUSD": "USD"},
+                    )
+
+        missing_fee = json.loads(json.dumps(base))
+        del missing_fee["event"]["Execution"]["execution"]["orderData"]["fee"]
+        with self.assertRaisesRegex(ProviderCoreError, "missing provider fee amount"):
+            parse_execution_events(
+                futures_execution_observation(
+                    {"accountUid": "provider-account-1", "len": 1, "elements": [missing_fee]}
+                ),
+                provider_environment="DEMO",
+                instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
+                qualified_fee_currencies={"PI_XBTUSD": "USD"},
+            )
+
+        with self.assertRaisesRegex(ProviderCoreError, "unqualified Kraken Futures fee currency"):
+            parse_execution_events(
+                futures_execution_observation(
+                    {"accountUid": "provider-account-1", "len": 1, "elements": [base]}
+                ),
+                provider_environment="DEMO",
+                instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
+                qualified_fee_currencies={},
+            )
+
+    def test_execution_history_requires_documented_event_case_and_account_uid_consistency(self):
+        lower_case = self._execution_event()
+        lower_case["event"]["execution"] = lower_case["event"].pop("Execution")
+        with self.assertRaisesRegex(ProviderCoreError, "event.Execution"):
+            parse_execution_events(
+                futures_execution_observation(
+                    {"accountUid": "provider-account-1", "len": 1, "elements": [lower_case]}
+                ),
+                provider_environment="DEMO",
+                instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
+                qualified_fee_currencies={"PI_XBTUSD": "USD"},
+            )
+
+        wrong_account = self._execution_event()
+        wrong_account["event"]["Execution"]["execution"]["order"]["accountUid"] = (
+            "provider-account-2"
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "accountUid does not match"):
+            parse_execution_events(
+                futures_execution_observation(
+                    {"accountUid": "provider-account-1", "len": 1, "elements": [wrong_account]}
+                ),
+                provider_environment="DEMO",
+                instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
+                qualified_fee_currencies={"PI_XBTUSD": "USD"},
+            )
+
+    def test_execution_history_requires_exact_bound_endpoint(self):
+        observation = futures_execution_observation(
+            {"accountUid": "provider-account-1", "len": 0, "elements": []},
+            endpoint="/derivatives/api/v3/fills",
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "endpoint mismatch"):
+            parse_execution_events(
+                observation,
+                provider_environment="DEMO",
+                instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
+                qualified_fee_currencies={"PI_XBTUSD": "USD"},
+            )
+
+    def test_execution_history_rejects_cross_provider_environment_scope(self):
+        observation = futures_execution_observation(
+            {
+                "accountUid": "provider-account-1",
+                "len": 1,
+                "elements": [self._execution_event()],
+            },
+            provider_environment="DEMO",
+        )
+        self.assertEqual(observation.environment, "PAPER")
+        self.assertEqual(observation.provider_environment, "DEMO")
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "provider-environment mismatch",
+        ):
+            parse_execution_events(
+                observation,
+                provider_environment="LIVE",
+                instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
+                qualified_fee_currencies={"PI_XBTUSD": "USD"},
+            )
+
+    def test_execution_history_conflicting_duplicate_id_fails_closed(self):
+        first = self._execution_event(execution_id="same", direction="Buy")
+        second = self._execution_event(execution_id="same", direction="Sell")
+        with self.assertRaisesRegex(ProviderCoreError, "conflicting economic content"):
+            parse_execution_events(
+                futures_execution_observation(
+                    {
+                        "accountUid": "provider-account-1",
+                        "len": 2,
+                        "elements": [first, second],
+                    }
+                ),
+                provider_environment="DEMO",
+                instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
+                qualified_fee_currencies={"PI_XBTUSD": "USD"},
+            )
+
     def test_position_history_maps_only_trade_execution_facts(self):
         fills = parse_position_executions(
             futures_position_observation({
@@ -477,6 +730,27 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
         self.assertEqual(fill.trade_time, "2026-09-24T20:00:00.123Z")
         self.assertEqual(fill.account_id, "paper-1")
         self.assertEqual(fill.environment, "PAPER")
+        self.assertEqual(fill.provider_environment, "DEMO")
+
+    def test_position_history_never_invents_missing_fee(self):
+        event = {
+            "tradeable": "PI_XBTUSD",
+            "fillTime": 1790280000123,
+            "feeCurrency": "USD",
+            "executionUid": "exec-no-fee",
+            "executionPrice": "65000.10",
+            "executionSize": "0.25",
+            "timestamp": 1790280000123,
+            "updateReason": "trade",
+        }
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "missing provider fee amount",
+        ):
+            parse_position_executions(
+                futures_position_observation({"elements": [event]}),
+                instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
+            )
 
     def test_position_history_requires_exact_bound_endpoint(self):
         observation = futures_position_observation(

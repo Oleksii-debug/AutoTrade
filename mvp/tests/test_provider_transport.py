@@ -7,6 +7,7 @@ import sys
 from threading import Event
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
@@ -49,7 +50,7 @@ from mvp.autotrade_mvp.provider_transport import (
     ProviderTransportScopeError,
     PublicDataHttpRequest,
     TradingWireResponse,
-    TransportedProviderResponseObservation,
+    UrllibJsonWireClient,
     KRAKEN_SPOT_ENDPOINT_POLICIES,
     KrakenSpotAuthenticatedReadSigner,
     KrakenSpotAuthenticatedReadTransport,
@@ -422,7 +423,6 @@ class BinanceUsdmPublicDataTransportTests(unittest.TestCase):
         events,
         capability=None,
         policy=None,
-        wire=None,
         clock_utc=None,
     ):
         final_capability = capability or verified_read_capability(
@@ -431,43 +431,41 @@ class BinanceUsdmPublicDataTransportTests(unittest.TestCase):
         registry = RecordingCapabilityRegistry(events)
         registry.add(final_capability)
         selected_policy = policy or BINANCE_USDM_ENDPOINT_POLICIES["PAPER"]
-        selected_wire = wire or RecordingWire(
-            events,
-            response=b'{"symbols":[]}',
-        )
         transport = BinanceUsdmPublicDataTransport(
             policy=selected_policy,
             account_id="acct-1",
             capability_snapshot_id=final_capability.snapshot_id,
             capability_registry=registry,
             clock_utc=clock_utc or (lambda: READ_NOW + timedelta(seconds=1)),
-            wire_client=selected_wire,
         )
-        return transport, selected_wire
+        return transport
 
     def test_public_data_transport_binds_exact_origin_query_status_and_bytes(self):
         events = []
-        body = b'{"symbol":"BTCUSDT","markPrice":"40000","time":1789773600000}'
+        timestamp_ms = int(READ_NOW.timestamp() * 1000)
+        body = (
+            '{"symbol":"BTCUSDT","markPrice":"40000","time":'
+            + str(timestamp_ms)
+            + "}"
+        ).encode("utf-8")
         wire = RecordingWire(events, response=body)
         capability = verified_read_capability(
             permission_scopes=frozenset({"ORDER_WRITE"}),
         )
-        transport, wire = self.make_transport(
+        transport = self.make_transport(
             events=events,
             capability=capability,
-            wire=wire,
         )
-        observation = transport(
-            public_data_binding(
-                endpoint="/fapi/v1/premiumIndex",
-                query={"symbol": "BTCUSDT"},
+        with patch.object(
+            UrllibJsonWireClient,
+            "send",
+            side_effect=wire.send,
+        ):
+            point = transport.fetch_mark_price(
                 capability=capability,
+                symbol="BTCUSDT",
+                at=READ_NOW,
             )
-        )
-        self.assertIsInstance(
-            observation,
-            TransportedProviderResponseObservation,
-        )
         self.assertEqual(events, ["capability", "wire"])
         self.assertEqual(len(wire.requests), 1)
         request = wire.requests[0]
@@ -476,16 +474,28 @@ class BinanceUsdmPublicDataTransportTests(unittest.TestCase):
             request.url,
             "https://demo-fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT",
         )
+        self.assertEqual(point.origin, "https://demo-fapi.binance.com")
         self.assertEqual(
-            observation.origin,
-            "https://demo-fapi.binance.com",
+            point.source_sha256,
+            "sha256:" + __import__("hashlib").sha256(body).hexdigest(),
         )
-        self.assertEqual(observation.observation.http_status, 200)
-        self.assertEqual(observation.observation.response_bytes, body)
-        self.assertEqual(
-            observation.observation.query_binding.query,
-            {"symbol": "BTCUSDT"},
+
+    def test_public_data_constructor_rejects_arbitrary_wire_client(self):
+        events = []
+        capability = verified_read_capability(
+            permission_scopes=frozenset({"ORDER_WRITE"}),
         )
+        registry = RecordingCapabilityRegistry(events)
+        registry.add(capability)
+        with self.assertRaisesRegex(TypeError, "wire_client"):
+            BinanceUsdmPublicDataTransport(
+                policy=BINANCE_USDM_ENDPOINT_POLICIES["PAPER"],
+                account_id="acct-1",
+                capability_snapshot_id=capability.snapshot_id,
+                capability_registry=registry,
+                clock_utc=lambda: READ_NOW,
+                wire_client=RecordingWire(events),
+            )
 
     def test_public_data_wrong_environment_fails_before_wire(self):
         events = []
@@ -493,17 +503,25 @@ class BinanceUsdmPublicDataTransportTests(unittest.TestCase):
             permission_scopes=frozenset({"ORDER_WRITE"}),
         )
         wire = RecordingWire(events, response=b'{"symbols":[]}')
-        transport, wire = self.make_transport(
+        transport = self.make_transport(
             events=events,
             capability=capability,
             policy=BINANCE_USDM_ENDPOINT_POLICIES["LIVE"],
-            wire=wire,
         )
-        with self.assertRaisesRegex(
-            ProviderTransportScopeError,
-            "query scope mismatch",
+        with patch.object(
+            UrllibJsonWireClient,
+            "send",
+            side_effect=wire.send,
         ):
-            transport(public_data_binding(capability=capability))
+            with self.assertRaisesRegex(
+                ProviderTransportScopeError,
+                "does not match transport composition",
+            ):
+                transport.fetch_exchange_info_rules(
+                    capability=capability,
+                    symbol="BTCUSDT",
+                    at=READ_NOW,
+                )
         self.assertEqual(events, [])
         self.assertEqual(wire.requests, [])
 
@@ -512,34 +530,37 @@ class BinanceUsdmPublicDataTransportTests(unittest.TestCase):
         capability = verified_read_capability(
             permission_scopes=frozenset({"ORDER_WRITE"}),
         )
-        transport, wire = self.make_transport(
+        wire = RecordingWire(events)
+        transport = self.make_transport(
             events=events,
             capability=capability,
         )
-        with self.assertRaisesRegex(
-            ProviderTransportScopeError,
-            "not explicitly allowed",
+        with patch.object(
+            UrllibJsonWireClient,
+            "send",
+            side_effect=wire.send,
         ):
-            transport(
-                public_data_binding(
-                    endpoint="/fapi/v1/order",
-                    capability=capability,
+            with self.assertRaisesRegex(
+                ProviderTransportScopeError,
+                "not explicitly allowed",
+            ):
+                transport._observe(
+                    public_data_binding(
+                        endpoint="/fapi/v1/order",
+                        capability=capability,
+                    )
                 )
-            )
-        self.assertEqual(events, [])
-        self.assertEqual(wire.requests, [])
-
-        with self.assertRaisesRegex(
-            ProviderTransportScopeError,
-            "query does not match endpoint policy",
-        ):
-            transport(
-                public_data_binding(
-                    endpoint="/fapi/v1/exchangeInfo",
-                    query={"symbol": "BTCUSDT"},
-                    capability=capability,
+            with self.assertRaisesRegex(
+                ProviderTransportScopeError,
+                "query does not match endpoint policy",
+            ):
+                transport._observe(
+                    public_data_binding(
+                        endpoint="/fapi/v1/exchangeInfo",
+                        query={"symbol": "BTCUSDT"},
+                        capability=capability,
+                    )
                 )
-            )
         self.assertEqual(events, [])
         self.assertEqual(wire.requests, [])
 
@@ -553,16 +574,22 @@ class BinanceUsdmPublicDataTransportTests(unittest.TestCase):
             response=b'{"code":-1000,"msg":"error"}',
             http_status=400,
         )
-        transport, wire = self.make_transport(
+        transport = self.make_transport(
             events=events,
             capability=capability,
-            wire=wire,
         )
-        with self.assertRaisesRegex(
-            ProviderTransportError,
-            "unexpected HTTP status 400",
+        with patch.object(
+            UrllibJsonWireClient,
+            "send",
+            side_effect=wire.send,
         ):
-            transport(public_data_binding(capability=capability))
+            with self.assertRaisesRegex(
+                ProviderTransportError,
+                "unexpected HTTP status 400",
+            ):
+                transport._observe(
+                    public_data_binding(capability=capability)
+                )
         self.assertEqual(events, ["capability", "wire"])
         self.assertEqual(len(wire.requests), 1)
 

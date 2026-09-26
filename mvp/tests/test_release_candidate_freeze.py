@@ -7,6 +7,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
 
+import mvp.autotrade_mvp.release_candidate as release_candidate_module
 from mvp.autotrade_mvp.qualification_attestation import (
     EvidenceArtifactRef,
     QualificationAttestation,
@@ -377,6 +378,42 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                 qualification_attestation_digest=decision.qualification_attestation_digest,
                 qualification_policy_id=decision.qualification_policy_id,
                 qualification_trust_root_id=decision.qualification_trust_root_id,
+            )
+
+    def test_imported_factory_token_cannot_bypass_signed_artifact_binding(self):
+        decision = freeze_with_integrity_store(
+            self.candidate(),
+            with_attestation=True,
+        )
+        body = json.loads(decision.manifest_json)
+        body["artifacts"][0]["artifact_id"] = str(
+            uuid5(NAMESPACE_URL, "wp54:forged-artifact-binding")
+        )
+        forged_json = json.dumps(
+            body,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        forged_sha = (
+            "sha256:" + sha256(forged_json.encode("utf-8")).hexdigest()
+        )
+
+        with self.assertRaisesRegex(
+            ReleaseCandidateError,
+            "does not cover exact artifact set",
+        ):
+            ReleaseCandidateDecision(
+                status="FROZEN",
+                reasons=(),
+                manifest_json=forged_json,
+                manifest_sha256=forged_sha,
+                qualification_attestation_id=decision.qualification_attestation_id,
+                qualification_attestation_digest=decision.qualification_attestation_digest,
+                qualification_policy_id=decision.qualification_policy_id,
+                qualification_trust_root_id=decision.qualification_trust_root_id,
+                _freeze_token=release_candidate_module._FROZEN_DECISION_TOKEN,
             )
 
     def test_direct_frozen_decision_rejects_noncanonical_artifact_manifest(self):

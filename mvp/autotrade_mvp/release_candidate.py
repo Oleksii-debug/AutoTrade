@@ -407,16 +407,19 @@ class ReleaseCandidateDecision:
                 raise ReleaseCandidateError(
                     "frozen release candidate manifest has unsupported structure"
                 )
-            _text(manifest.get("release_id"), name="manifest.release_id")
+            manifest_release_id = _text(
+                manifest.get("release_id"),
+                name="manifest.release_id",
+            )
             manifest_source_sha = _git_sha(
                 manifest.get("source_sha"),
                 name="manifest.source_sha",
             )
-            _sha256(
+            manifest_baseline_hash = _sha256(
                 manifest.get("baseline_hash"),
                 name="manifest.baseline_hash",
             )
-            _sha256(
+            manifest_schema_contract_hash = _sha256(
                 manifest.get("schema_contract_hash"),
                 name="manifest.schema_contract_hash",
             )
@@ -538,6 +541,22 @@ class ReleaseCandidateDecision:
             ):
                 raise ReleaseCandidateError(
                     "frozen release candidate qualification receipt identity mismatch"
+                )
+            reconstructed_candidate = ReleaseCandidateInput.create(
+                release_id=manifest_release_id,
+                source_sha=manifest_source_sha,
+                baseline_hash=manifest_baseline_hash,
+                schema_contract_hash=manifest_schema_contract_hash,
+                artifacts=tuple(parsed_artifacts),
+                unresolved_blockers=(),
+            )
+            if not _qualification_covers_exact_candidate(
+                receipt,
+                reconstructed_candidate,
+            ):
+                raise ReleaseCandidateError(
+                    "frozen release candidate qualification receipt "
+                    "does not cover exact artifact set"
                 )
             if _freeze_token is not _FROZEN_DECISION_TOKEN:
                 raise ReleaseCandidateError(

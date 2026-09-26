@@ -363,15 +363,19 @@ class AllocationTests(unittest.TestCase):
         self.assertLessEqual(result.worst_stress_loss, Decimal("100"))
 
     def test_incomplete_stress_scenario_fails_closed(self):
-        with self.assertRaisesRegex(ValueError, "missing explicit shocks"):
-            allocate_targets(
-                [
-                    self.candidate("AAA", desired="500", price="10"),
-                    self.candidate("BBB", desired="500", price="10"),
-                ],
-                self.policy(cash_available="2000", max_gross_notional="2000"),
-                stress_scenarios={"partial": {"AAA": "-0.20"}},
-            )
+        result = allocate_targets(
+            [
+                self.candidate("AAA", desired="500", price="10"),
+                self.candidate("BBB", desired="500", price="10"),
+            ],
+            self.policy(cash_available="2000", max_gross_notional="2000"),
+            stress_scenarios={"partial": {"AAA": "-0.20"}},
+        )
+        self.assertEqual(result.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(result.gross_notional, Decimal("0"))
+        self.assertEqual(result.turnover_notional, Decimal("0"))
+        self.assertEqual(result.worst_stress_loss, Decimal("0"))
+        self.assertIn("missing explicit shocks", result.reason)
 
     def test_minimum_lot_can_force_cash_fallback(self):
         result = allocate_targets(
@@ -1186,8 +1190,15 @@ class AllocationTests(unittest.TestCase):
         self.assertEqual(result.expected_net_utility, Decimal("50"))
         self.assertEqual(
             tuple(target.symbol for target in result.allocation.targets),
-            ("CHEAP_LOWER",),
+            ("EXPENSIVE_HIGH", "CHEAP_LOWER"),
         )
+        targets = {
+            target.symbol: target
+            for target in result.allocation.targets
+        }
+        self.assertEqual(targets["EXPENSIVE_HIGH"].notional, Decimal("0"))
+        self.assertEqual(targets["EXPENSIVE_HIGH"].turnover_notional, Decimal("0"))
+        self.assertEqual(targets["CHEAP_LOWER"].notional, Decimal("1000"))
 
     def test_objective_budget_covers_complete_subset_space(self):
         result = allocate_objective_targets(

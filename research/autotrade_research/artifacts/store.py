@@ -911,30 +911,37 @@ class ArtifactStore:
             manifest_count += 1
             try:
                 manifest = self._load_manifest_path(manifest_path)
-                digest = manifest["sha256"].removeprefix("sha256:")
-                referenced.add(digest)
+                # Recovery may delete objects that are not referenced by any
+                # trusted manifest. A legacy/hashless or otherwise unauthenticated
+                # manifest therefore cannot contribute a recovery reference.
+                _verify_manifest_integrity(manifest, required=True)
+            except (
+                ArtifactIntegrityError,
+                FileNotFoundError,
+                KeyError,
+                AttributeError,
+                ValueError,
+            ):
+                corrupt.append(manifest_path.name)
+                continue
+
+            digest = manifest["sha256"].removeprefix("sha256:")
+            referenced.add(digest)
+            object_path = self._object_path(digest)
+            try:
+                self._validate_object_namespace(object_path)
+                os.stat(object_path, follow_symlinks=False)
+            except FileNotFoundError:
+                missing.append(manifest_path.name)
+                continue
+            except (ArtifactIntegrityError, OSError):
+                corrupt.append(manifest_path.name)
+                continue
+
+            try:
                 self._verify_manifest_object(manifest)
-            except (ArtifactIntegrityError, KeyError, AttributeError, ValueError):
-                try:
-                    self._validate_manifest_entry(manifest_path)
-                except (ArtifactIntegrityError, FileNotFoundError):
-                    corrupt.append(manifest_path.name)
-                    continue
-                try:
-                    value = json.loads(manifest_path.read_text(encoding="utf-8"))
-                    digest_value = value.get("sha256") if isinstance(value, dict) else None
-                    digest = digest_value.removeprefix("sha256:") if isinstance(digest_value, str) else ""
-                    if digest:
-                        referenced.add(digest)
-                        path = self._object_path(digest)
-                        if not path.exists():
-                            missing.append(manifest_path.name)
-                        else:
-                            corrupt.append(manifest_path.name)
-                    else:
-                        corrupt.append(manifest_path.name)
-                except Exception:
-                    corrupt.append(manifest_path.name)
+            except ArtifactIntegrityError:
+                corrupt.append(manifest_path.name)
 
         object_digests: set[str] = set()
         for path in self.objects.glob("*/*"):

@@ -976,6 +976,147 @@ class ArtifactStoreTests(unittest.TestCase):
             )
             self.assertEqual(store.read_bytes(artifact_id), b"legacy-evidence")
 
+    def test_audit_never_reopens_failed_manifest_by_path_after_safe_load_error(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"descriptor-safe-audit",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+            manifest_path = store._manifest_path(artifact_id)
+
+            orphan_data = b"must-survive-failed-manifest-audit"
+            orphan_digest = hashlib.sha256(orphan_data).hexdigest()
+            orphan = store._object_path(orphan_digest)
+            orphan.parent.mkdir(parents=True, exist_ok=True)
+            orphan.write_bytes(orphan_data)
+
+            invalid_current = dict(manifest)
+            invalid_current["metadata"] = {"tampered": True}
+            manifest_path.write_text(
+                json.dumps(invalid_current),
+                encoding="utf-8",
+            )
+
+            missing_digest = hashlib.sha256(b"missing-raced-object").hexdigest()
+            raced = dict(manifest)
+            raced["sha256"] = "sha256:" + missing_digest
+            replacement_path = Path(directory) / "raced-manifest.json"
+            atomic_write_json(replacement_path, raced)
+
+            original_load = store._load_manifest_path
+            swapped = False
+
+            def fail_safe_load_then_swap(path):
+                nonlocal swapped
+                try:
+                    return original_load(path)
+                except ArtifactIntegrityError:
+                    if not swapped:
+                        swapped = True
+                        os.replace(replacement_path, manifest_path)
+                    raise
+
+            with patch.object(
+                store,
+                "_load_manifest_path",
+                side_effect=fail_safe_load_then_swap,
+            ), patch.object(
+                Path,
+                "read_text",
+                side_effect=AssertionError(
+                    "audit must not reopen a failed manifest by pathname"
+                ),
+            ) as pathname_read:
+                before = store.audit()
+
+            pathname_read.assert_not_called()
+            self.assertTrue(swapped)
+            self.assertIn(manifest_path.name, before.corrupt_objects)
+            self.assertNotIn(manifest_path.name, before.missing_objects)
+            self.assertIn(orphan_digest, before.unreferenced_objects)
+
+            after = store.recover_orphans()
+            self.assertTrue(orphan.exists())
+            self.assertIn(manifest_path.name, after.corrupt_objects)
+            self.assertNotIn(manifest_path.name, after.missing_objects)
+
+    def test_recovery_treats_untrusted_missing_digest_manifest_as_corrupt(self):
+        for defect in ("integrity", "contract"):
+            with self.subTest(defect=defect), TemporaryDirectory() as directory:
+                store = ArtifactStore(Path(directory) / "store")
+                artifact_id = str(uuid4())
+                manifest = store.publish_bytes(
+                    artifact_id=artifact_id,
+                    data=b"trusted-before-tamper",
+                    media_type="application/octet-stream",
+                    rights={"storage": True, "export": False},
+                )
+                manifest_path = store._manifest_path(artifact_id)
+
+                orphan_data = ("unrelated-orphan-" + defect).encode("utf-8")
+                orphan_digest = hashlib.sha256(orphan_data).hexdigest()
+                orphan = store._object_path(orphan_digest)
+                orphan.parent.mkdir(parents=True, exist_ok=True)
+                orphan.write_bytes(orphan_data)
+
+                missing_digest = hashlib.sha256(
+                    ("missing-" + defect).encode("utf-8")
+                ).hexdigest()
+                tampered = dict(manifest)
+                tampered["sha256"] = "sha256:" + missing_digest
+                if defect == "contract":
+                    tampered["rights"] = {
+                        "storage": True,
+                        "export": "yes",
+                    }
+                    tampered["manifest_hash"] = _manifest_integrity_hash(tampered)
+                atomic_write_json(manifest_path, tampered)
+
+                before = store.audit()
+                self.assertIn(manifest_path.name, before.corrupt_objects)
+                self.assertNotIn(manifest_path.name, before.missing_objects)
+                self.assertIn(orphan_digest, before.unreferenced_objects)
+
+                after = store.recover_orphans()
+                self.assertTrue(orphan.exists())
+                self.assertIn(manifest_path.name, after.corrupt_objects)
+                self.assertNotIn(manifest_path.name, after.missing_objects)
+
+    def test_authenticated_manifest_with_missing_object_is_reported_as_missing(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"trusted-object-will-be-missing",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+            manifest_path = store._manifest_path(artifact_id)
+            referenced_digest = manifest["sha256"].removeprefix("sha256:")
+            store._object_path(referenced_digest).unlink()
+
+            orphan_data = b"deletable-unrelated-orphan"
+            orphan_digest = hashlib.sha256(orphan_data).hexdigest()
+            orphan = store._object_path(orphan_digest)
+            orphan.parent.mkdir(parents=True, exist_ok=True)
+            orphan.write_bytes(orphan_data)
+
+            before = store.audit()
+            self.assertIn(manifest_path.name, before.missing_objects)
+            self.assertNotIn(manifest_path.name, before.corrupt_objects)
+            self.assertNotIn(referenced_digest, before.unreferenced_objects)
+            self.assertIn(orphan_digest, before.unreferenced_objects)
+
+            after = store.recover_orphans()
+            self.assertFalse(orphan.exists())
+            self.assertIn(manifest_path.name, after.missing_objects)
+            self.assertNotIn(manifest_path.name, after.corrupt_objects)
+
     def test_recovery_preserves_all_objects_when_manifest_reference_is_unreadable(self):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(Path(directory) / "store")

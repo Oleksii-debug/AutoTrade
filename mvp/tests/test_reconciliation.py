@@ -85,6 +85,7 @@ def resource_availability(**overrides):
 
 class ReconciliationTests(unittest.TestCase):
     def base(self, **overrides):
+        provider_environment = overrides.get("provider_environment")
         values = dict(
             provider_id="TEST_PROVIDER",
             account_id="test-account",
@@ -99,6 +100,7 @@ class ReconciliationTests(unittest.TestCase):
                 provider_id="TEST_PROVIDER",
                 account_id="test-account",
                 environment="PAPER",
+                provider_environment=provider_environment,
                 mode="ATOMIC",
                 query_started_at="2026-09-24T17:00:00Z",
                 query_completed_at="2026-09-24T19:00:00Z",

@@ -156,7 +156,7 @@ class NvdaQualificationGateTests(unittest.TestCase):
             trust_root_id="sha256:" + "3" * 64,
         )
         with patch(
-            "tools.check_nvda_qualification.verify_qualification_attestation",
+            "tools.check_nvda_qualification.verify_canonical_qualification_attestation",
             return_value=accepted,
         ) as verify:
             result = validate_trusted_nvda_qualification(
@@ -165,10 +165,7 @@ class NvdaQualificationGateTests(unittest.TestCase):
                 evidence_sha256=evidence_sha,
                 release_artifact_sha256=release_sha,
                 receipt=receipt,
-                policy=SimpleNamespace(),
                 evidence_store=SimpleNamespace(),
-                expected_policy_id="sha256:" + "4" * 64,
-                expected_policy_version="2026.09",
             )
         self.assertTrue(result["qualified"])
         self.assertEqual(result["attestation_id"], accepted.attestation_id)
@@ -189,10 +186,7 @@ class NvdaQualificationGateTests(unittest.TestCase):
                 evidence_sha256=evidence_sha,
                 release_artifact_sha256=release_sha,
                 receipt=bad_receipt,
-                policy=SimpleNamespace(),
                 evidence_store=SimpleNamespace(),
-                expected_policy_id="sha256:" + "4" * 64,
-                expected_policy_version="2026.09",
             )
 
         wrong_release_receipt = SimpleNamespace(
@@ -210,11 +204,28 @@ class NvdaQualificationGateTests(unittest.TestCase):
                 evidence_sha256=evidence_sha,
                 release_artifact_sha256=release_sha,
                 receipt=wrong_release_receipt,
-                policy=SimpleNamespace(),
                 evidence_store=SimpleNamespace(),
-                expected_policy_id="sha256:" + "4" * 64,
-                expected_policy_version="2026.09",
             )
+
+    def test_cli_rejects_caller_selected_nvda_trust_policy(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "tools/check_nvda_qualification.py",
+                "--check-status",
+                "--qualification-policy",
+                "caller-controlled-policy.json",
+                "--expected-policy-id",
+                "sha256:" + "0" * 64,
+                "--expected-policy-version",
+                "caller-selected",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unrecognized arguments", result.stderr)
 
     def test_workflow_evidence_is_bound_to_exact_requirement_revision(self):
         evidence = complete_evidence()

@@ -560,12 +560,10 @@ class WholeSimulatorFlowTests(unittest.TestCase):
         )
         self.assertEqual(queried["time_window"]["start"], "2026-09-24T17:00:00Z")
         self.assertEqual(queried["time_window"]["end"], "2026-09-24T19:00:00Z")
-        self.assertEqual(queried["verdict"], "INCONCLUSIVE")
+        self.assertEqual(queried["verdict"], "FOUND")
+        self.assertEqual(queried["order"]["status"], "WORKING")
         self.assertEqual(queried["consistency_horizon"], LATER)
-        self.assertEqual(
-            queried["reason_codes"],
-            ["coverage_end_after_query_time"],
-        )
+        self.assertNotIn("reason_codes", queried)
         self.assertEqual(provider.health(now="2026-09-24T20:01:00+02:00")["as_of"], LATER)
 
     def test_timeout_after_send_keeps_unknown_reservation_and_never_blindly_retries(self):

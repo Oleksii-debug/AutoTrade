@@ -342,13 +342,16 @@ class SimulatedProviderContractHarness:
             raise ValueError("coverage_end must not precede coverage_start")
         if not isinstance(pagination_complete, bool):
             raise TypeError("pagination_complete must be boolean")
-        if end > current:
+        horizon = (current if end > current else end).isoformat().replace(
+            "+00:00", "Z"
+        )
+        if cid not in self.provider.orders and end > current:
             core = {
                 "verdict": "INCONCLUSIVE",
                 "searched_surfaces": ["orders-by-client-id", "activity-fills"],
                 "time_window": {"start": coverage_start, "end": coverage_end},
                 "pagination_complete": pagination_complete,
-                "consistency_horizon": coverage_end,
+                "consistency_horizon": horizon,
                 "reason_codes": ["coverage_end_after_query_time"],
             }
             return {
@@ -364,7 +367,7 @@ class SimulatedProviderContractHarness:
                     "searched_surfaces": ["orders-by-client-id", "activity-fills"],
                     "time_window": {"start": coverage_start, "end": coverage_end},
                     "pagination_complete": pagination_complete,
-                    "consistency_horizon": coverage_end,
+                    "consistency_horizon": horizon,
                     "reason_codes": ["submission_outside_coverage"],
                     "submission_started_at": submission_started_at,
                 }

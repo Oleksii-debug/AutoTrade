@@ -672,7 +672,8 @@ class SimulatedProvider:
             "start": canonical_start,
             "end": canonical_end,
         }
-        if end > current:
+        order = self.orders.get(cid)
+        if order is None and end > current:
             core = {
                 "verdict": "INCONCLUSIVE",
                 "searched_surfaces": searched,
@@ -687,7 +688,6 @@ class SimulatedProvider:
                     _evidence("query-order", cid, canonical_now, core)
                 ],
             }
-        order = self.orders.get(cid)
         if order is not None:
             verdict = "FOUND"
             filled = self._filled_quantity(order)
@@ -725,7 +725,9 @@ class SimulatedProvider:
             "searched_surfaces": searched,
             "time_window": window,
             "pagination_complete": pagination_complete,
-            "consistency_horizon": canonical_end,
+            "consistency_horizon": (
+                canonical_now if end > current else canonical_end
+            ),
         }
         if order_payload is not None:
             core["order"] = order_payload

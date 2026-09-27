@@ -19,6 +19,7 @@ from autotrade_research.artifacts.store import (
 class ArtifactNamespaceGuardTests(unittest.TestCase):
     def test_guard_is_installed_for_direct_store_import(self):
         self.assertTrue(ArtifactStore._root_anchored_namespace_guard)
+        self.assertTrue(ArtifactStore._retained_namespace_authority)
 
     def test_manifest_intermediate_swap_cannot_escape_held_store_root(self):
         with TemporaryDirectory() as directory:
@@ -198,6 +199,133 @@ class ArtifactNamespaceGuardTests(unittest.TestCase):
             self.assertEqual(external.read_bytes(), b"outside-must-survive")
             self.assertTrue(orphan.exists())
             self.assertIn(digest, store.audit().unreferenced_objects)
+
+    def test_ordinary_manifest_child_replacement_is_not_new_authority(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "store"
+            store = ArtifactStore(root)
+            artifact_id = str(uuid4())
+            store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"retained-manifest-authority",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+                metadata={"origin": "canonical"},
+            )
+            manifest_path = store._manifest_path(artifact_id)
+            canonical_bytes = manifest_path.read_bytes()
+            detached = root / "canonical-manifests"
+            os.replace(store.manifests, detached)
+            store.manifests.mkdir()
+            (store.manifests / manifest_path.name).write_bytes(canonical_bytes)
+            try:
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "manifests namespace changed",
+                ):
+                    store.load_manifest(artifact_id)
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "manifests namespace changed",
+                ):
+                    store.read_authenticated_snapshot(artifact_id)
+            finally:
+                for entry in store.manifests.iterdir():
+                    entry.unlink()
+                store.manifests.rmdir()
+                os.replace(detached, store.manifests)
+
+            self.assertEqual(
+                store.load_manifest(artifact_id)["metadata"],
+                {"origin": "canonical"},
+            )
+
+    def test_ordinary_object_child_replacement_cannot_supply_bytes(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "store"
+            store = ArtifactStore(root)
+            artifact_id = str(uuid4())
+            data = b"retained-object-authority"
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=data,
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+            digest = manifest["sha256"].removeprefix("sha256:")
+            detached = root / "objects" / "canonical-sha256"
+            os.replace(store.objects, detached)
+            store.objects.mkdir()
+            replacement = store._object_path(digest)
+            replacement.parent.mkdir()
+            replacement.write_bytes(data)
+            try:
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "objects namespace changed",
+                ):
+                    store.read_bytes(artifact_id)
+            finally:
+                replacement.unlink()
+                replacement.parent.rmdir()
+                store.objects.rmdir()
+                os.replace(detached, store.objects)
+
+            self.assertEqual(store.read_bytes(artifact_id), data)
+
+    def test_hidden_manifest_namespace_cannot_authorize_false_orphan_delete(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "store"
+            store = ArtifactStore(root)
+            artifact_id = str(uuid4())
+            data = b"referenced-object-must-survive"
+            manifest = store.publish_bytes(
+                artifact_id=artifact_id,
+                data=data,
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+            digest = manifest["sha256"].removeprefix("sha256:")
+            canonical_object = store._object_path(digest)
+            detached = root / "canonical-manifests"
+            os.replace(store.manifests, detached)
+            store.manifests.mkdir()
+            try:
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "manifests namespace changed",
+                ):
+                    store.recover_orphans()
+                self.assertTrue(canonical_object.exists())
+                self.assertEqual(canonical_object.read_bytes(), data)
+            finally:
+                store.manifests.rmdir()
+                os.replace(detached, store.manifests)
+
+            self.assertEqual(store.read_bytes(artifact_id), data)
+
+    def test_persistent_child_replacement_blocks_publication(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "store"
+            store = ArtifactStore(root)
+            detached = root / "canonical-manifests"
+            os.replace(store.manifests, detached)
+            store.manifests.mkdir()
+            try:
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "manifests namespace changed",
+                ):
+                    store.publish_bytes(
+                        artifact_id=str(uuid4()),
+                        data=b"must-not-publish-into-replacement",
+                        media_type="application/octet-stream",
+                        rights={"storage": True, "export": False},
+                    )
+                self.assertEqual(list(store.manifests.iterdir()), [])
+            finally:
+                store.manifests.rmdir()
+                os.replace(detached, store.manifests)
 
 
 if __name__ == "__main__":

@@ -875,10 +875,17 @@ def project_equity_position(
             corrected,
             instrument=symbol,
         )
-        fill_terms = _canonical_equity_fill_terms(
-            corrected,
-            instrument=symbol,
-            settlement_currency=settlement,
+        # A canonical split has a POSITION posting but deliberately has no
+        # trade cash or equity-fill clearing. Classify it before invoking the
+        # stricter fill parser, which must still reject malformed fill shapes.
+        fill_terms = (
+            None
+            if split_terms is not None
+            else _canonical_equity_fill_terms(
+                corrected,
+                instrument=symbol,
+                settlement_currency=settlement,
+            )
         )
         if split_terms is not None or fill_terms is not None:
             position_corrections.append(transaction)

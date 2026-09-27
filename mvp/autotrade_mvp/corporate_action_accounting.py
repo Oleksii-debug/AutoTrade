@@ -167,7 +167,11 @@ def _canonical_entitlement_position_proof(
             raise AccountingConflict(
                 "canonical position history contains invalid entitlement timestamps"
             ) from error
-        if effective <= event.effective_at and observed <= observed_cut:
+        if effective == event.effective_at and observed <= observed_cut:
+            raise AccountingConflict(
+                "same-effective-time position and corporate action lack qualified causal order"
+            )
+        if effective < event.effective_at and observed <= observed_cut:
             quantity += sum(
                 (posting.signed_amount for posting in position_postings),
                 Decimal("0"),
@@ -805,4 +809,3 @@ def commit_authoritative_corporate_action(
         transaction_ids=tuple(item.transaction_id for item in transactions),
         economically_active=True,
     )
-

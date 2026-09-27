@@ -958,6 +958,8 @@ def project_equity_position(
 
     if has_position_correction or has_split:
         ordering: set[tuple[datetime, str]] = set()
+        split_times: set[datetime] = set()
+        fill_times: set[datetime] = set()
         for kind, transaction, _terms in position_events:
             if (
                 transaction.economic_effective_at is None
@@ -974,11 +976,19 @@ def project_equity_position(
                 ),
                 transaction.economic_order_key,
             )
+            if kind == "SPLIT":
+                split_times.add(key[0])
+            else:
+                fill_times.add(key[0])
             if key in ordering:
                 raise AccountingConflict(
                     "Corrected/split FIFO history has ambiguous economic ordering"
                 )
             ordering.add(key)
+        if split_times & fill_times:
+            raise AccountingConflict(
+                "same-effective-time fill and split lack qualified causal order"
+            )
         position_events.sort(
             key=lambda item: (
                 _instant_value(

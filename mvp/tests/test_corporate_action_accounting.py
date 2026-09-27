@@ -547,6 +547,82 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
                 1,
             )
 
+    def test_equal_time_fill_cannot_authorize_split_before_causal_phase_is_proven(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            durable_evidence = evidence_store(store)
+            economics = DurableProviderEconomicBook(
+                store,
+                provider_id="BINANCE",
+                account_id="acct-1",
+                environment="PAPER",
+            )
+            accepted = resolve_action(sealed_action(kind="SPLIT"))
+            economics.append(
+                book_equity_fill(
+                    transaction_id="at-split-boundary",
+                    cause_event_id="provider-fill:at-split-boundary",
+                    instrument="BTCUSDT",
+                    settlement_currency="USDT",
+                    side="BUY",
+                    quantity="10",
+                    price="100",
+                    economic_effective_at=accepted.event.effective_at.isoformat().replace("+00:00", "Z"),
+                    economic_order_key="provider:BINANCE:execution:at-split-boundary",
+                    observed_at=(READ_NOW + timedelta(seconds=1)).isoformat().replace("+00:00", "Z"),
+                )
+            )
+            with self.assertRaisesRegex(AccountingConflict, "qualified causal order"):
+                commit_authoritative_corporate_action(
+                    store=store,
+                    evidence_store=durable_evidence,
+                    economic_book=economics,
+                    corporate_book=pure_book(),
+                    accepted=accepted,
+                )
+            self.assertEqual(economics.position("BTCUSDT"), Decimal("10"))
+            self.assertEqual(
+                store.load_events("corporate_action_evidence", durable_evidence.aggregate_id),
+                [],
+            )
+            self.assertEqual(
+                len(economic_book(JournalStore(path)).transactions), 1
+            )
+
+    def test_fifo_rejects_equal_time_fill_independent_of_order_key_spelling(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            economics = economic_book(store)
+            accepted = resolve_action(sealed_action(kind="SPLIT"))
+            commit_authoritative_corporate_action(
+                store=store,
+                evidence_store=evidence_store(store),
+                economic_book=economics,
+                corporate_book=pure_book(),
+                accepted=accepted,
+            )
+            for prefix in ("aaa", "zzz"):
+                with self.subTest(order_key=prefix):
+                    at_boundary = book_equity_fill(
+                        transaction_id=f"late-{prefix}",
+                        cause_event_id=f"provider-fill:late-{prefix}",
+                        instrument="BTCUSDT",
+                        settlement_currency="USDT",
+                        side="BUY",
+                        quantity="1",
+                        price="100",
+                        economic_effective_at=accepted.event.effective_at.isoformat().replace("+00:00", "Z"),
+                        economic_order_key=f"{prefix}:unqualified",
+                        observed_at=(READ_NOW + timedelta(seconds=3)).isoformat().replace("+00:00", "Z"),
+                    )
+                    with self.assertRaisesRegex(AccountingConflict, "qualified causal order"):
+                        project_equity_position(
+                            EconomicBook((*economics.transactions, at_boundary)),
+                            instrument="BTCUSDT",
+                            settlement_currency="USDT",
+                        )
+
     def test_split_restart_and_exact_retry_do_not_double_apply(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

@@ -181,6 +181,7 @@ def _risk_context(*, reserved="-30", borrow_available=True):
         capability_allowed=True,
         borrow_available=borrow_available,
         stress_scenarios=({"ABC": "0.10"},),
+        instrument_types={"ABC": "EQUITY"},
     )
 
 

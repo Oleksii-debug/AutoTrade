@@ -1,12 +1,14 @@
 from decimal import Decimal
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 from mvp.autotrade_mvp.accounting import (
-    book_equity_fill,
+    AccountingConflict,
     book_external_cash_flow,
 )
 from mvp.autotrade_mvp.authority import (
@@ -20,8 +22,9 @@ from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
-    commit_economic_batch_with_reservation_consumption,
+    commit_provider_fill_with_reservation_consumption,
 )
+from mvp.autotrade_mvp.fill_accounting import ProjectedFillEvidence
 from mvp.autotrade_mvp.reconciliation import (
     ProviderFillEvidence,
     ResourceAvailabilityEvidence,
@@ -353,7 +356,7 @@ class WholeSimulatorFlowTests(unittest.TestCase):
             self.assertEqual(orders.order(dispatched.client_order_id).state, "PENDING")
             orders.sync_submission_attempt(attempt_id=attempt_id)
 
-            order_fill = orders.ingest_execution_fill(
+            order_fill_plan = orders.ingest_execution_fill(
                 event_key="whole-flow-fill",
                 client_order_id=dispatched.client_order_id,
                 committed_at=LATER,
@@ -372,39 +375,24 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                     "settlement_date": "2026-09-24",
                     "evidence": [],
                 },
+                _prepare_only=True,
             )
-            self.assertEqual(order_fill.snapshot.state, "FILLED")
-            self.assertEqual(order_fill.snapshot.submission_attempt_id, attempt_id)
-            self.assertIsNotNone(order_fill.canonical_execution_fill)
-            canonical_fill = order_fill.canonical_execution_fill
+            self.assertEqual(order_fill_plan.snapshot.state, "FILLED")
+            self.assertEqual(order_fill_plan.snapshot.submission_attempt_id, attempt_id)
+            self.assertEqual(orders.order(dispatched.client_order_id).state, "WORKING")
+            self.assertIsNotNone(order_fill_plan.canonical_execution_fill)
+            canonical_fill = order_fill_plan.canonical_execution_fill
             fee = canonical_fill["fees"][0]
-
-            commit_economic_batch_with_reservation_consumption(
-                economic,
-                reservations,
-                command_id="fill-financial-commit-1",
-                idempotency_key="fill-financial-commit-1",
-                reservation_id="reservation-1",
-                usage={"CASH:USD": "200.2"},
-                transactions=(
-                    book_equity_fill(
-                        transaction_id="economic-fill-1",
-                        cause_event_id=canonical_fill["provider_execution_id"],
-                        instrument=canonical_fill["instrument_version"],
-                        settlement_currency="USD",
-                        side=canonical_fill["side"],
-                        quantity=canonical_fill["last_quantity"]["value"],
-                        price=canonical_fill["last_price"],
-                        fee=fee["amount"],
-                        fee_currency=fee["currency"],
-                    ),
-                ),
-                committed_at=LATER,
+            projected_fill = ProjectedFillEvidence(
+                fill_id=canonical_fill["fill_id"],
+                provider_execution_id=canonical_fill["provider_execution_id"],
+                intent_id=canonical_fill["intent_ref"],
+                client_order_id=dispatched.client_order_id,
+                side=canonical_fill["side"],
+                quantity=Decimal(canonical_fill["last_quantity"]["value"]),
+                price=Decimal(canonical_fill["last_price"]),
+                provider_revision=canonical_fill.get("provider_revision"),
             )
-            self.assertEqual(economic.cash("USD"), Decimal("799.8"))
-            self.assertEqual(economic.position(INSTRUMENT), Decimal("2"))
-
-            snapshot = provider.account_snapshot(now=LATER)
             provider_fill = ProviderFillEvidence.create(
                 provider_id="SIMULATED",
                 account_id="sim-account",
@@ -417,7 +405,133 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 fee_amount=fee["amount"],
                 fee_currency=fee["currency"],
                 trade_time=fill["trade_time"],
+                side=fill["side"],
             )
+            atomic_fill_arguments = {
+                "command_id": "fill-financial-commit-1",
+                "idempotency_key": "fill-financial-commit-1",
+                "reservation_id": "reservation-1",
+                "projected_fill": projected_fill,
+                "provider_fill": provider_fill,
+                "expected_instrument": INSTRUMENT,
+                "settlement_currency": "USD",
+                "committed_at": LATER,
+                "observed_at": LATER,
+                "order_book": orders,
+                "order_mutation": order_fill_plan,
+            }
+            mismatched_fill = dict(canonical_fill)
+            mismatched_fill["intent_ref"] = "different-intent"
+            with self.assertRaisesRegex(AccountingConflict, "differs from provider/projected"):
+                commit_provider_fill_with_reservation_consumption(
+                    economic,
+                    reservations,
+                    **{
+                        **atomic_fill_arguments,
+                        "order_mutation": replace(
+                            order_fill_plan,
+                            canonical_execution_fill=mismatched_fill,
+                        ),
+                    },
+                )
+            self.assertEqual(orders.order(dispatched.client_order_id).state, "WORKING")
+            self.assertEqual(economic.cash("USD"), Decimal("1000"))
+            self.assertEqual(reservations.total_reserved("CASH:USD"), Decimal("200.2"))
+            with patch.object(
+                journal,
+                "commit_command",
+                side_effect=RuntimeError("simulated transaction abort"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "transaction abort"):
+                    commit_provider_fill_with_reservation_consumption(
+                        economic,
+                        reservations,
+                        **atomic_fill_arguments,
+                    )
+            self.assertEqual(orders.order(dispatched.client_order_id).state, "WORKING")
+            self.assertEqual(orders.effective_fills(), ())
+            self.assertEqual(economic.cash("USD"), Decimal("1000"))
+            self.assertEqual(reservations.total_reserved("CASH:USD"), Decimal("200.2"))
+
+            inserted = commit_provider_fill_with_reservation_consumption(
+                economic,
+                reservations,
+                **atomic_fill_arguments,
+            )
+            self.assertTrue(inserted)
+            self.assertEqual(orders.order(dispatched.client_order_id).state, "FILLED")
+            self.assertEqual(economic.cash("USD"), Decimal("799.8"))
+            self.assertEqual(economic.position(INSTRUMENT), Decimal("2"))
+
+            restarted_store = JournalStore(f"{directory}/journal.sqlite3")
+            restarted_orders = DurableOrderBookProjection(
+                restarted_store,
+                provider_id="SIMULATED",
+                account_id="sim-account",
+                environment="SIMULATION",
+                host_id="sim-host-after-atomic-fill",
+                owner_epoch="2",
+            )
+            restarted_economic = DurableProviderEconomicBook(
+                restarted_store,
+                provider_id="SIMULATED",
+                account_id="sim-account",
+                environment="SIMULATION",
+            )
+            restarted_reservations = DurableReservationBook(
+                restarted_store,
+                environment="SIMULATION",
+                account_id="sim-account",
+                resolution_artifact_store=artifacts,
+            )
+            self.assertEqual(
+                restarted_orders.order(dispatched.client_order_id).state,
+                "FILLED",
+            )
+            self.assertEqual(restarted_economic.cash("USD"), Decimal("799.8"))
+            self.assertEqual(restarted_economic.position(INSTRUMENT), Decimal("2"))
+            self.assertEqual(
+                restarted_reservations.get("reservation-1").state,
+                "WORKING",
+            )
+            self.assertEqual(
+                restarted_reservations.total_reserved("CASH:USD"),
+                Decimal("0"),
+            )
+
+            committed_event_counts = (
+                len(journal.load_events("order_projection_book", orders.aggregate_id)),
+                len(journal.load_events("economic_book", economic.book_id)),
+                len(journal.load_events("reservation_book", reservations.scope_id)),
+            )
+            retry_order_plan = orders.ingest_execution_fill(
+                event_key="whole-flow-fill",
+                client_order_id=dispatched.client_order_id,
+                committed_at=LATER,
+                execution_fill=order_fill_plan.canonical_execution_fill,
+                _prepare_only=True,
+            )
+            retry_arguments = {
+                **atomic_fill_arguments,
+                "order_mutation": retry_order_plan,
+            }
+            self.assertFalse(
+                commit_provider_fill_with_reservation_consumption(
+                    economic,
+                    reservations,
+                    **retry_arguments,
+                )
+            )
+            self.assertEqual(
+                (
+                    len(journal.load_events("order_projection_book", orders.aggregate_id)),
+                    len(journal.load_events("economic_book", economic.book_id)),
+                    len(journal.load_events("reservation_book", reservations.scope_id)),
+                ),
+                committed_event_counts,
+            )
+
+            snapshot = provider.account_snapshot(now=LATER)
             unresolved_submission = UnknownSubmission.create(
                 attempt_id=attempt_id,
                 intent_id="intent-1",

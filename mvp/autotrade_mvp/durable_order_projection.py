@@ -265,6 +265,19 @@ class DurableOrderMutationResult:
     canonical_execution_fill: dict[str, object] | None = None
 
 
+@dataclass(frozen=True)
+class PreparedDurableOrderMutation:
+    """Validated order event awaiting an enclosing JournalStore transaction."""
+
+    envelope: dict[str, object] | None
+    event_id: str
+    request: dict[str, object]
+    snapshot: OrderSnapshot
+    aggregate_version: int
+    already_committed: bool
+    canonical_execution_fill: dict[str, object] | None = None
+
+
 class DurableOrderBookProjection:
     """Crash-recoverable adapter over the single canonical OrderBookProjection."""
 
@@ -787,6 +800,29 @@ class DurableOrderBookProjection:
             self._canonical_fill_hashes,
         ) = self._replay(self._events())
 
+    def refresh(self) -> None:
+        """Rebuild after a surrounding multi-aggregate JournalStore commit."""
+        self._reload()
+
+    def _prepared_existing(
+        self,
+        result: DurableOrderMutationResult,
+    ) -> PreparedDurableOrderMutation:
+        event = self.store.get_event(result.event_id)
+        if event is None:
+            raise RuntimeError("prepared order retry event disappeared")
+        payload = event.get("payload")
+        request = payload.get("request") if isinstance(payload, dict) else None
+        return PreparedDurableOrderMutation(
+            envelope=None,
+            event_id=result.event_id,
+            request=dict(request) if isinstance(request, dict) else {},
+            snapshot=result.snapshot,
+            aggregate_version=int(event["aggregate_version"]),
+            already_committed=True,
+            canonical_execution_fill=result.canonical_execution_fill,
+        )
+
     def _canonical_execution_fill_for_event(
         self,
         event_id: str,
@@ -859,7 +895,8 @@ class DurableOrderBookProjection:
         request: dict[str, object],
         committed_at: str,
         evidence_refs: Sequence[Mapping[str, object]] | None = None,
-    ) -> DurableOrderMutationResult:
+        prepare_only: bool = False,
+    ) -> DurableOrderMutationResult | PreparedDurableOrderMutation:
         key = _text(event_key, name="event_key")
         timestamp = _instant(committed_at, name="committed_at")
         request_hash = payload_digest(request)
@@ -883,7 +920,7 @@ class DurableOrderBookProjection:
                 raise OrderProjectionConflict(
                     "event_key was already used for a different order request"
                 )
-            return DurableOrderMutationResult(
+            result = DurableOrderMutationResult(
                 event_id=prior[2],
                 inserted=False,
                 snapshot=prior[1],
@@ -891,6 +928,20 @@ class DurableOrderBookProjection:
                     prior[2]
                 ),
             )
+            if prepare_only:
+                event = self.store.get_event(prior[2])
+                if event is None:
+                    raise RuntimeError("prepared order retry event disappeared")
+                return PreparedDurableOrderMutation(
+                    envelope=None,
+                    event_id=prior[2],
+                    request=dict(request),
+                    snapshot=prior[1],
+                    aggregate_version=int(event["aggregate_version"]),
+                    already_committed=True,
+                    canonical_execution_fill=result.canonical_execution_fill,
+                )
+            return result
 
         events = self._events()
         candidate, _, _, execution_owners, canonical_fill_hashes = self._replay(events)
@@ -960,6 +1011,21 @@ class DurableOrderBookProjection:
             "payload_hash": payload_digest(payload),
             "evidence_refs": [dict(ref) for ref in verified_evidence],
         }
+        if prepare_only:
+            canonical_fill = request.get("canonical_execution_fill")
+            return PreparedDurableOrderMutation(
+                envelope=envelope,
+                event_id=event_id,
+                request=dict(request),
+                snapshot=snapshot,
+                aggregate_version=version,
+                already_committed=False,
+                canonical_execution_fill=(
+                    dict(canonical_fill)
+                    if isinstance(canonical_fill, dict)
+                    else None
+                ),
+            )
         try:
             append_result = self.store.append_event(
                 envelope,
@@ -1284,7 +1350,8 @@ class DurableOrderBookProjection:
         canonical_execution_fill_hash: str | None = None,
         canonical_execution_fill: Mapping[str, object] | None = None,
         _canonical_ingest_token: object | None = None,
-    ) -> DurableOrderMutationResult:
+        _prepare_only: bool = False,
+    ) -> DurableOrderMutationResult | PreparedDurableOrderMutation:
         self._require_canonical_execution_ingest(
             _canonical_ingest_token,
             operation="fill recording",
@@ -1318,6 +1385,7 @@ class DurableOrderBookProjection:
             request=request,
             committed_at=committed_at,
             evidence_refs=evidence_refs,
+            prepare_only=_prepare_only,
         )
 
     def ingest_execution_fill(
@@ -1327,7 +1395,8 @@ class DurableOrderBookProjection:
         execution_fill: Mapping[str, object],
         event_key: str,
         committed_at: str,
-    ) -> DurableOrderMutationResult:
+        _prepare_only: bool = False,
+    ) -> DurableOrderMutationResult | PreparedDurableOrderMutation:
         """Apply one canonical ExecutionFill through the existing order authority.
 
         Provider adapters and reconciliation normalize provider-specific payloads
@@ -1569,7 +1638,11 @@ class DurableOrderBookProjection:
                 evidence_refs=evidence,
             )
             if exact_retry is not None:
-                return exact_retry
+                return (
+                    self._prepared_existing(exact_retry)
+                    if _prepare_only
+                    else exact_retry
+                )
             target_observation = next(
                 (
                     item
@@ -1640,6 +1713,7 @@ class DurableOrderBookProjection:
                 canonical_execution_fill_hash=canonical_execution_fill_hash,
                 canonical_execution_fill=canonical_fill,
                 _canonical_ingest_token=_CANONICAL_EXECUTION_FILL_INGEST,
+                _prepare_only=_prepare_only,
             )
 
         return self.record_fill(
@@ -1661,6 +1735,7 @@ class DurableOrderBookProjection:
             canonical_execution_fill_hash=canonical_execution_fill_hash,
             canonical_execution_fill=canonical_fill,
             _canonical_ingest_token=_CANONICAL_EXECUTION_FILL_INGEST,
+            _prepare_only=_prepare_only,
         )
 
     def correct_fill(
@@ -1679,7 +1754,8 @@ class DurableOrderBookProjection:
         canonical_execution_fill_hash: str | None = None,
         canonical_execution_fill: Mapping[str, object] | None = None,
         _canonical_ingest_token: object | None = None,
-    ) -> DurableOrderMutationResult:
+        _prepare_only: bool = False,
+    ) -> DurableOrderMutationResult | PreparedDurableOrderMutation:
         self._require_canonical_execution_ingest(
             _canonical_ingest_token,
             operation="fill correction",
@@ -1717,6 +1793,7 @@ class DurableOrderBookProjection:
             request=request,
             committed_at=committed_at,
             evidence_refs=evidence_refs,
+            prepare_only=_prepare_only,
         )
 
     def bust_fill(

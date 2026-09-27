@@ -33,9 +33,10 @@ class SimulatedProviderTests(unittest.TestCase):
             side="BUY",
             quantity="2",
             price="100",
-            now="2026-09-24T18:00:00Z",
+            now="2026-09-24T20:05:00+02:00",
         )
         self.assertEqual(first, second)
+        self.assertEqual(first["provider_received_at"], "2026-09-24T18:00:00Z")
         self.assertEqual(len(provider.activity_fills()), 1)
         snapshot = provider.account_snapshot(now="2026-09-24T18:01:00Z")
         self.assertEqual(snapshot["balances"][0]["total"], "799.8")

@@ -18,6 +18,10 @@ from .persistence import JournalStore, canonical_json, payload_digest
 AuthorityCheck = Callable[[str, str], tuple[bool, str]]
 SenderCheck = Callable[[str, int], None]
 TransportSend = Callable[[str, Mapping[str, Any], Callable[[], None]], Any]
+PrepareOrder = Callable[
+    [str, str, str, str, Mapping[str, Any], Mapping[str, Any], str],
+    None,
+]
 
 _SUBMISSION_RESPONSE_BINDING_TOKEN = object()
 
@@ -605,6 +609,7 @@ class GuardedDispatcher:
         final_barrier_clock: Callable[[], str] | None = None,
         sender_check: SenderCheck | None = None,
         submission_scope: Mapping[str, Any] | None = None,
+        prepare_order: PrepareOrder | None = None,
     ) -> DispatchOutcome:
         for value, name in (
             (attempt_id, "attempt_id"),
@@ -719,6 +724,36 @@ class GuardedDispatcher:
                 now=now,
             )
             return DispatchOutcome("BLOCKED", client_order_id, None, reason)
+
+        if prepare_order is not None:
+            try:
+                # The order projection must exist durably before the transport
+                # can cross its final send barrier. Callers should make this
+                # callback idempotent using the stable client/attempt IDs.
+                prepare_order(
+                    client_order_id,
+                    attempt_id,
+                    intent_id,
+                    provider,
+                    request_frozen,
+                    scope_dict,
+                    now,
+                )
+            except Exception as error:
+                reason = f"durable_order_preparation_failed_before_send:{type(error).__name__}"
+                self._append(
+                    attempt_id=attempt_id,
+                    event_type="SubmissionBlocked",
+                    version=2,
+                    payload={"client_order_id": client_order_id, "reason": reason},
+                    now=now,
+                )
+                return DispatchOutcome(
+                    "BLOCKED",
+                    client_order_id,
+                    None,
+                    "durable_order_preparation_failed_before_send",
+                )
 
         guard_called = False
         barrier_passed = False

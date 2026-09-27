@@ -125,6 +125,12 @@ WP-19 now carries `submission_attempt_id` and the explicit `SEND_STARTED` state 
 
 The adapter is read-only with respect to WP-18: it never sends, retries, edits or replaces dispatch events. A different outbound attempt trying to bind the same external order after send-start fails closed.
 
+## Pre-send canonical order preparation
+
+`GuardedDispatcher.dispatch()` accepts an idempotent `prepare_order` callback for the already-authorized request. It runs after the durable `SubmissionPrepared` fact and authority check, but before transport is invoked. The callback receives the stable client-order ID, attempt and intent IDs, immutable request, canonical submission scope, and preparation timestamp. It should durably create the canonical order in the existing WP-19 projection. If preparation raises, the dispatcher records `SubmissionBlocked` and does not invoke transport.
+
+The whole-simulator path and process-death-after-send regression use this hook. The order identity therefore exists before any outbound request, and an UNKNOWN attempt can be projected into that same order after restart. The dispatcher and order projection still use separate JournalStore aggregates: a crash between durable order preparation and WP-18 send-start can leave a pending order for an attempt that never sent. Reconciliation and cross-aggregate transaction composition remain necessary; this hook does not claim atomicity.
+
 
 ## Canonical ExecutionFill ingestion increment
 

@@ -951,6 +951,59 @@ class DispatchTests(unittest.TestCase):
                 "authority_check_failed_before_send:RuntimeError",
             )
 
+    def test_order_preparation_is_durable_before_transport_and_failure_blocks_send(self):
+        for fail in (False, True):
+            with self.subTest(fail=fail), TemporaryDirectory() as directory:
+                store = self.store(directory)
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    owner_token="owner",
+                )
+                calls = []
+
+                def prepare_order(*args):
+                    calls.append(("prepare", args[0], args[1]))
+                    if fail:
+                        raise OSError("order journal unavailable")
+
+                def transport(client_id, _request, final_guard):
+                    calls.append(("transport", client_id, None))
+                    self.assertFalse(fail)
+                    final_guard()
+                    return {"provider_order_id": "provider-1"}
+
+                result = dispatcher.dispatch(
+                    attempt_id="pre-send-order",
+                    intent_id="intent-1",
+                    intent_hash="hash-1",
+                    provider="sim",
+                    request={"quantity": "1"},
+                    now="2026-09-24T18:00:00Z",
+                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    transport_send=transport,
+                    prepare_order=prepare_order,
+                )
+                self.assertEqual(calls[0][0], "prepare")
+                if fail:
+                    self.assertEqual(result.status, "BLOCKED")
+                    self.assertEqual(
+                        result.reason,
+                        "durable_order_preparation_failed_before_send",
+                    )
+                    self.assertEqual(calls, [("prepare", result.client_order_id, "pre-send-order")])
+                    self.assertEqual(
+                        [event["event_type"] for event in store.load_events(
+                            "submission_attempt",
+                            dispatcher._aggregate_id("pre-send-order"),
+                        )],
+                        ["SubmissionPrepared", "SubmissionBlocked"],
+                    )
+                else:
+                    self.assertEqual(result.status, "SENT")
+                    self.assertEqual(calls[1][0], "transport")
+
     def test_final_authority_exception_is_blocked_without_outbound_request(self):
         with TemporaryDirectory() as directory:
             store = self.store(directory)

@@ -1,4 +1,5 @@
 from decimal import Decimal
+from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -280,6 +281,38 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 )
 
             attempt_id = str(uuid4())
+            orders = DurableOrderBookProjection(
+                journal,
+                provider_id="SIMULATED",
+                account_id="sim-account",
+                environment="SIMULATION",
+                host_id="sim-host",
+                owner_epoch="1",
+            )
+
+            def prepare_order(
+                client_order_id,
+                submission_attempt_id,
+                submission_intent_id,
+                _provider,
+                request,
+                scope,
+                prepared_at,
+            ):
+                self.assertEqual(request["instrument_version"], scope["instrument"])
+                self.assertEqual(request["side"], scope["side"])
+                self.assertEqual(request["quantity"], scope["requested_quantity"])
+                orders.create_order(
+                    event_key=f"dispatch-order:{submission_attempt_id}",
+                    client_order_id=client_order_id,
+                    instrument=scope["instrument"],
+                    side=scope["side"],
+                    requested_quantity=scope["requested_quantity"],
+                    quantity_unit=scope["quantity_unit"],
+                    origin_intent_id=submission_intent_id,
+                    committed_at=prepared_at,
+                )
+
             dispatcher = GuardedDispatcher(
                 journal,
                 environment="SIMULATION",
@@ -302,30 +335,22 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 now=NOW,
                 authority_check=final_authority_check,
                 transport_send=provider.transport_send,
+                submission_scope={
+                    "instrument": INSTRUMENT,
+                    "side": "BUY",
+                    "requested_quantity": "2",
+                    "quantity_unit": "unit:contract:" + sha256(
+                        INSTRUMENT.encode("utf-8")
+                    ).hexdigest()[:16],
+                },
+                prepare_order=prepare_order,
             )
             self.assertEqual(dispatched.status, "SENT")
             self.assertEqual(dispatched.response["outcome"], "ACKNOWLEDGED")
             self.assertEqual(provider.outbound_request_count, 1)
             fill = provider.activity_fills()[0]
 
-            orders = DurableOrderBookProjection(
-                journal,
-                provider_id="SIMULATED",
-                account_id="sim-account",
-                environment="SIMULATION",
-                host_id="sim-host",
-                owner_epoch="1",
-            )
-            orders.create_order(
-                event_key="whole-flow-order",
-                client_order_id=dispatched.client_order_id,
-                instrument=INSTRUMENT,
-                side="BUY",
-                requested_quantity="2",
-                quantity_unit=fill["last_quantity"]["unit"],
-                origin_intent_id="intent-1",
-                committed_at=NOW,
-            )
+            self.assertEqual(orders.order(dispatched.client_order_id).state, "PENDING")
             orders.sync_submission_attempt(attempt_id=attempt_id)
 
             order_fill = orders.ingest_execution_fill(
@@ -808,6 +833,34 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 account_id="sim-account",
                 owner_token="process-one",
             )
+            orders = DurableOrderBookProjection(
+                JournalStore(journal_path),
+                provider_id="SIMULATED",
+                account_id="sim-account",
+                environment="SIMULATION",
+                host_id="sim-host",
+                owner_epoch="1",
+            )
+
+            def prepare_order(
+                client_order_id,
+                submission_attempt_id,
+                submission_intent_id,
+                _provider,
+                outbound,
+                scope,
+                prepared_at,
+            ):
+                orders.create_order(
+                    event_key=f"dispatch-order:{submission_attempt_id}",
+                    client_order_id=client_order_id,
+                    instrument=scope["instrument"],
+                    side=scope["side"],
+                    requested_quantity=scope["requested_quantity"],
+                    quantity_unit=scope["quantity_unit"],
+                    origin_intent_id=submission_intent_id,
+                    committed_at=prepared_at,
+                )
 
             def crash_after_provider_accepts(client_order_id, outbound, final_guard):
                 final_guard()
@@ -834,10 +887,21 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                     now=NOW,
                     authority_check=lambda _intent_hash, _now: (True, "allowed"),
                     transport_send=crash_after_provider_accepts,
+                    submission_scope={
+                        "instrument": INSTRUMENT,
+                        "side": "BUY",
+                        "requested_quantity": "1",
+                        "quantity_unit": "unit:contract:" + sha256(
+                            INSTRUMENT.encode("utf-8")
+                        ).hexdigest()[:16],
+                    },
+                    prepare_order=prepare_order,
                 )
 
             self.assertEqual(provider.outbound_request_count, 1)
             self.assertEqual(len(provider.account_snapshot(now=LATER)["open_orders"]), 1)
+            self.assertEqual(len(orders.snapshots), 1)
+            self.assertEqual(orders.snapshots[0].state, "PENDING")
 
             restarted = GuardedDispatcher(
                 JournalStore(journal_path),
@@ -858,6 +922,14 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 now=LATER,
                 authority_check=lambda _intent_hash, _now: (True, "allowed"),
                 transport_send=forbidden_retry,
+                submission_scope={
+                    "instrument": INSTRUMENT,
+                    "side": "BUY",
+                    "requested_quantity": "1",
+                    "quantity_unit": "unit:contract:" + sha256(
+                        INSTRUMENT.encode("utf-8")
+                    ).hexdigest()[:16],
+                },
             )
             self.assertEqual(recovered.status, "UNKNOWN")
             self.assertEqual(
@@ -865,6 +937,17 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 "recovered_after_send_barrier_without_terminal_result",
             )
             self.assertEqual(provider.outbound_request_count, 1)
+
+            restarted_orders = DurableOrderBookProjection(
+                JournalStore(journal_path),
+                provider_id="SIMULATED",
+                account_id="sim-account",
+                environment="SIMULATION",
+                host_id="sim-host-restarted",
+                owner_epoch="2",
+            )
+            restarted_orders.sync_submission_attempt(attempt_id=attempt_id)
+            self.assertEqual(restarted_orders.snapshots[0].state, "UNKNOWN")
 
             events = JournalStore(journal_path).load_events(
                 "submission_attempt",

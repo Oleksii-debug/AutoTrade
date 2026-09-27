@@ -118,6 +118,11 @@ from ._retained_coordination import install_retained_coordination
 install_retained_coordination()
 del install_retained_coordination
 
+from ._generation_bound_read import install_generation_bound_reads
+
+install_generation_bound_reads()
+del install_generation_bound_reads
+
 from ._root_authority import install_root_authority
 
 install_root_authority()

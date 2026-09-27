@@ -49,6 +49,7 @@ from mvp.autotrade_mvp.provider_transport import (
     ProviderEndpointPolicy,
     ProviderTransportError,
     ProviderTransportScopeError,
+    SignedHttpRequest,
     TradingWireResponse,
     KRAKEN_FUTURES_ENDPOINT_POLICIES,
     KRAKEN_SPOT_ENDPOINT_POLICIES,
@@ -67,6 +68,48 @@ from mvp.autotrade_mvp.provider_transport import (
 )
 from mvp.autotrade_mvp.whitebit import WhiteBitPreparedRequest
 from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
+
+
+class SignedWriteEnvelopeTests(unittest.TestCase):
+    def test_signed_post_rejects_query_and_body_together(self):
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "exactly one payload channel",
+        ):
+            SignedHttpRequest(
+                method="POST",
+                url="https://example.invalid/order?symbol=ABC",
+                headers={},
+                body=b'{"symbol":"ABC"}',
+                timeout_seconds=1,
+            )
+
+    def test_signed_post_rejects_missing_query_and_body(self):
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "exactly one payload channel",
+        ):
+            SignedHttpRequest(
+                method="POST",
+                url="https://example.invalid/order",
+                headers={},
+                body=b"",
+                timeout_seconds=1,
+            )
+
+    def test_signed_post_admits_query_only_payload(self):
+        request = SignedHttpRequest(
+            method="POST",
+            url="https://example.invalid/order?symbol=ABC",
+            headers={},
+            body=b"",
+            timeout_seconds=1,
+        )
+        self.assertEqual(request.body, b"")
+        self.assertEqual(
+            request.url,
+            "https://example.invalid/order?symbol=ABC",
+        )
 
 
 class FakeSecretResolver:

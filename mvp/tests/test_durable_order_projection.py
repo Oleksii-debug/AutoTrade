@@ -123,6 +123,517 @@ class DurableOrderProjectionTests(unittest.TestCase):
             self.assertEqual(restarted.order("c1").filled_quantity, Decimal("2"))
             self.assertEqual(len(restarted.effective_fills()), 1)
 
+    def test_canonical_execution_fill_ingest_rebuilds_after_restart(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store)
+            book.create_order(
+                event_key="create",
+                client_order_id="c1",
+                instrument="instrument-v1",
+                side="BUY",
+                requested_quantity="2",
+                quantity_unit="unit",
+                parent_intent_id="intent-1",
+                committed_at=T0,
+            )
+            result = book.ingest_execution_fill(
+                event_key="canonical-fill",
+                client_order_id="c1",
+                committed_at=T2,
+                execution_fill={
+                    "fill_id": "fill-1",
+                    "provider_execution_id": "exec-1",
+                    "provider_revision": "rev-1",
+                    "order_ref": "c1",
+                    "intent_ref": "intent-1",
+                    "instrument_version": "instrument-v1",
+                    "side": "BUY",
+                    "last_quantity": {"value": "1.25", "unit": "unit"},
+                    "last_price": "101.5",
+                    "trade_time": T1,
+                    "receipt_time": T2,
+                    "fees": [],
+                    "settlement_date": "2026-09-27",
+                    "evidence": [],
+                },
+            )
+            self.assertEqual(result.snapshot.filled_quantity, Decimal("1.25"))
+            restarted = durable(store)
+            self.assertEqual(
+                restarted.order("c1").filled_quantity,
+                Decimal("1.25"),
+            )
+            self.assertEqual(
+                restarted.order("c1").fill_history[0].provider_execution_id,
+                "exec-1",
+            )
+
+    def test_canonical_execution_fill_scope_mismatch_fails_before_mutation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store)
+            book.create_order(
+                event_key="create",
+                client_order_id="c1",
+                instrument="instrument-v1",
+                side="BUY",
+                requested_quantity="2",
+                quantity_unit="unit",
+                committed_at=T0,
+            )
+            base_fill = {
+                "fill_id": "fill-1",
+                "provider_execution_id": "exec-1",
+                "order_ref": "c1",
+                "instrument_version": "instrument-v1",
+                "side": "BUY",
+                "last_quantity": {"value": "1", "unit": "unit"},
+                    "last_price": "100",
+                "trade_time": T1,
+                "receipt_time": T2,
+                "fees": [],
+                "settlement_date": "2026-09-27",
+                "evidence": [],
+            }
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "instrument differs",
+            ):
+                book.ingest_execution_fill(
+                    event_key="bad-instrument",
+                    client_order_id="c1",
+                    committed_at=T2,
+                    execution_fill={
+                        **base_fill,
+                        "instrument_version": "instrument-v2",
+                    },
+                )
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "unsupported fields",
+            ):
+                book.ingest_execution_fill(
+                    event_key="unknown-field",
+                    client_order_id="c1",
+                    committed_at=T2,
+                    execution_fill={**base_fill, "raw_provider_status": "filled"},
+                )
+            self.assertEqual(book.order("c1").filled_quantity, Decimal("0"))
+            self.assertEqual(
+                len(store.load_events("order_projection_book", book.aggregate_id)),
+                1,
+            )
+
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "side must be BUY or SELL",
+            ):
+                book.ingest_execution_fill(
+                    event_key="lowercase-side",
+                    client_order_id="c1",
+                    committed_at=T2,
+                    execution_fill={**base_fill, "side": "buy"},
+                )
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "settlement_date must be an ISO calendar date",
+            ):
+                book.ingest_execution_fill(
+                    event_key="invalid-settlement-date",
+                    client_order_id="c1",
+                    committed_at=T2,
+                    execution_fill={**base_fill, "settlement_date": "2026-02-30"},
+                )
+
+            before_invalid_evidence = len(
+                store.load_events("order_projection_book", book.aggregate_id)
+            )
+            invalid_evidence = {
+                "artifact_id": str(uuid4()),
+                "sha256": "sha256:" + "a" * 64,
+                "source_uri": "not a canonical URI",
+                "observed_at": T2,
+            }
+            with self.assertRaisesRegex(ValueError, "source_uri must be an absolute URI"):
+                book.ingest_execution_fill(
+                    event_key="invalid-evidence-uri",
+                    client_order_id="c1",
+                    committed_at=T2,
+                    execution_fill={**base_fill, "evidence": [invalid_evidence]},
+                )
+            self.assertEqual(
+                len(store.load_events("order_projection_book", book.aggregate_id)),
+                before_invalid_evidence,
+            )
+            restarted = durable(store)
+            self.assertEqual(restarted.order("c1").filled_quantity, Decimal("0"))
+            self.assertEqual(book.order("c1").filled_quantity, Decimal("0"))
+
+    def test_canonical_execution_fill_cannot_redirect_order_or_change_quantity_unit(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store)
+            for order_id in ("c1", "c2"):
+                book.create_order(
+                    event_key=f"create-{order_id}",
+                    client_order_id=order_id,
+                    instrument="instrument-v1",
+                    side="BUY",
+                    requested_quantity="2",
+                    quantity_unit="unit",
+                    committed_at=T0,
+                )
+
+            canonical = {
+                "fill_id": "fill-identity-1",
+                "provider_execution_id": "exec-identity-1",
+                "order_ref": "c1",
+                "instrument_version": "instrument-v1",
+                "side": "BUY",
+                "last_quantity": {"value": "1", "unit": "unit"},
+                "last_price": "100",
+                "trade_time": T1,
+                "receipt_time": T2,
+                "fees": [],
+                "settlement_date": "2026-09-27",
+                "evidence": [],
+            }
+
+            missing_ref = dict(canonical)
+            missing_ref.pop("order_ref")
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "missing required fields: order_ref",
+            ):
+                book.ingest_execution_fill(
+                    event_key="missing-order-ref",
+                    client_order_id="c2",
+                    committed_at=T2,
+                    execution_fill=missing_ref,
+                )
+
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "order_ref differs from target order",
+            ):
+                book.ingest_execution_fill(
+                    event_key="redirected-order-ref",
+                    client_order_id="c2",
+                    committed_at=T2,
+                    execution_fill=canonical,
+                )
+
+            wrong_unit = {
+                **canonical,
+                "last_quantity": {"value": "2", "unit": "contracts"},
+            }
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "quantity unit differs from target order",
+            ):
+                book.ingest_execution_fill(
+                    event_key="wrong-quantity-unit",
+                    client_order_id="c1",
+                    committed_at=T2,
+                    execution_fill=wrong_unit,
+                )
+
+            self.assertEqual(book.order("c1").filled_quantity, Decimal("0"))
+            self.assertEqual(book.order("c2").filled_quantity, Decimal("0"))
+            self.assertEqual(
+                len(store.load_events("order_projection_book", book.aggregate_id)),
+                2,
+            )
+            restarted = durable(store)
+            self.assertEqual(restarted.order("c1").filled_quantity, Decimal("0"))
+            self.assertEqual(restarted.order("c2").filled_quantity, Decimal("0"))
+
+    def test_canonical_execution_fill_event_key_binds_full_fill_content(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store)
+            book.create_order(
+                event_key="create",
+                client_order_id="c1",
+                instrument="instrument-v1",
+                side="BUY",
+                requested_quantity="2",
+                quantity_unit="unit",
+                committed_at=T0,
+            )
+            fill = {
+                "fill_id": "fill-1",
+                "provider_execution_id": "exec-1",
+                "order_ref": "c1",
+                "instrument_version": "instrument-v1",
+                "side": "BUY",
+                "last_quantity": {"value": "1", "unit": "unit"},
+                "last_price": "100",
+                "trade_time": T1,
+                "receipt_time": T2,
+                "fees": [],
+                "settlement_date": "2026-09-27",
+                "evidence": [],
+            }
+            first = book.ingest_execution_fill(
+                event_key="canonical-fill-1",
+                client_order_id="c1",
+                committed_at=T2,
+                execution_fill=fill,
+            )
+            exact_retry = book.ingest_execution_fill(
+                event_key="canonical-fill-1",
+                client_order_id="c1",
+                committed_at=T2,
+                execution_fill=dict(fill),
+            )
+            self.assertFalse(exact_retry.inserted)
+            self.assertEqual(exact_retry.event_id, first.event_id)
+
+            changed = dict(fill)
+            changed["fees"] = [{"amount": "1", "currency": "USD"}]
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "event_key was already used",
+            ):
+                book.ingest_execution_fill(
+                    event_key="canonical-fill-1",
+                    client_order_id="c1",
+                    committed_at=T2,
+                    execution_fill=changed,
+                )
+
+            event = store.load_events(
+                "order_projection_book",
+                book.aggregate_id,
+            )[-1]
+            self.assertTrue(
+                event["payload"]["request"]["canonical_execution_fill_hash"].startswith(
+                    "sha256:"
+                )
+            )
+            self.assertEqual(
+                durable(store).order("c1").filled_quantity,
+                Decimal("1"),
+            )
+
+    def test_canonical_execution_fill_correction_uses_existing_fill_lineage(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store)
+            book.create_order(
+                event_key="create",
+                client_order_id="c1",
+                instrument="instrument-v1",
+                side="BUY",
+                requested_quantity="2",
+                quantity_unit="unit",
+                committed_at=T0,
+            )
+            book.ingest_execution_fill(
+                event_key="fill-r1",
+                client_order_id="c1",
+                committed_at=T2,
+                execution_fill={
+                    "fill_id": "fill-1",
+                    "provider_execution_id": "exec-1",
+                    "order_ref": "c1",
+                    "provider_revision": "r1",
+                    "instrument_version": "instrument-v1",
+                    "side": "BUY",
+                    "last_quantity": {"value": "1", "unit": "unit"},
+                    "last_price": "100",
+                    "trade_time": T1,
+                    "receipt_time": T2,
+                    "fees": [],
+                    "settlement_date": "2026-09-27",
+                    "evidence": [],
+                },
+            )
+            corrected = book.ingest_execution_fill(
+                event_key="fill-r2",
+                client_order_id="c1",
+                committed_at=T4,
+                execution_fill={
+                    "fill_id": "fill-1-r2",
+                    "provider_execution_id": "exec-1",
+                    "order_ref": "c1",
+                    "provider_revision": "r2",
+                    "instrument_version": "instrument-v1",
+                    "side": "BUY",
+                    "last_quantity": {"value": "1.5", "unit": "unit"},
+                    "last_price": "101",
+                    "trade_time": T1,
+                    "receipt_time": T3,
+                    "fees": [],
+                    "settlement_date": "2026-09-27",
+                    "correction_reference": "fill-1",
+                    "evidence": [],
+                },
+            )
+            self.assertEqual(corrected.snapshot.filled_quantity, Decimal("1.5"))
+            restarted = durable(store)
+            self.assertEqual(
+                [item.fill_id for item in restarted.order("c1").fill_history],
+                ["fill-1", "fill-1-r2"],
+            )
+
+    def test_canonical_execution_fill_supports_chained_correction_reference(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store)
+            book.create_order(
+                event_key="create",
+                client_order_id="c1",
+                instrument="instrument-v1",
+                side="BUY",
+                requested_quantity="2",
+                quantity_unit="unit",
+                committed_at=T0,
+            )
+            book.ingest_execution_fill(
+                event_key="fill-r1",
+                client_order_id="c1",
+                committed_at=T2,
+                execution_fill={
+                    "fill_id": "fill-1",
+                    "provider_execution_id": "exec-1",
+                    "order_ref": "c1",
+                    "provider_revision": "r1",
+                    "instrument_version": "instrument-v1",
+                    "side": "BUY",
+                    "last_quantity": {"value": "1", "unit": "unit"},
+                    "last_price": "100",
+                    "trade_time": T1,
+                    "receipt_time": T2,
+                    "fees": [],
+                    "settlement_date": "2026-09-27",
+                    "evidence": [],
+                },
+            )
+            book.ingest_execution_fill(
+                event_key="fill-r2",
+                client_order_id="c1",
+                committed_at=T4,
+                execution_fill={
+                    "fill_id": "fill-1-r2",
+                    "provider_execution_id": "exec-1",
+                    "order_ref": "c1",
+                    "provider_revision": "r2",
+                    "instrument_version": "instrument-v1",
+                    "side": "BUY",
+                    "last_quantity": {"value": "1.5", "unit": "unit"},
+                    "last_price": "101",
+                    "trade_time": T1,
+                    "receipt_time": T3,
+                    "fees": [],
+                    "settlement_date": "2026-09-27",
+                    "correction_reference": "fill-1",
+                    "evidence": [],
+                },
+            )
+            corrected = book.ingest_execution_fill(
+                event_key="fill-r3",
+                client_order_id="c1",
+                committed_at="2026-09-25T00:00:05Z",
+                execution_fill={
+                    "fill_id": "fill-1-r3",
+                    "provider_execution_id": "exec-1",
+                    "order_ref": "c1",
+                    "provider_revision": "r3",
+                    "instrument_version": "instrument-v1",
+                    "side": "BUY",
+                    "last_quantity": {"value": "0.75", "unit": "unit"},
+                    "last_price": "99",
+                    "trade_time": T1,
+                    "receipt_time": T4,
+                    "fees": [],
+                    "settlement_date": "2026-09-27",
+                    "correction_reference": "fill-1-r2",
+                    "evidence": [],
+                },
+            )
+
+            self.assertEqual(corrected.snapshot.filled_quantity, Decimal("0.75"))
+            restarted = durable(store)
+            self.assertEqual(restarted.order("c1").filled_quantity, Decimal("0.75"))
+            self.assertEqual(
+                [item.fill_id for item in restarted.order("c1").fill_history],
+                ["fill-1", "fill-1-r2", "fill-1-r3"],
+            )
+
+    def test_canonical_execution_fill_correction_rejects_cross_execution_identity(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store)
+            book.create_order(
+                event_key="create",
+                client_order_id="c1",
+                instrument="instrument-v1",
+                side="BUY",
+                requested_quantity="2",
+                quantity_unit="unit",
+                committed_at=T0,
+            )
+            book.ingest_execution_fill(
+                event_key="fill-r1",
+                client_order_id="c1",
+                committed_at=T2,
+                execution_fill={
+                    "fill_id": "fill-1",
+                    "provider_execution_id": "exec-1",
+                    "order_ref": "c1",
+                    "provider_revision": "r1",
+                    "instrument_version": "instrument-v1",
+                    "side": "BUY",
+                    "last_quantity": {"value": "1", "unit": "unit"},
+                    "last_price": "100",
+                    "trade_time": T1,
+                    "receipt_time": T2,
+                    "fees": [],
+                    "settlement_date": "2026-09-27",
+                    "evidence": [],
+                },
+            )
+            before_events = len(
+                store.load_events("order_projection_book", book.aggregate_id)
+            )
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "provider_execution_id differs",
+            ):
+                book.ingest_execution_fill(
+                    event_key="fill-cross-exec",
+                    client_order_id="c1",
+                    committed_at=T4,
+                    execution_fill={
+                        "fill_id": "fill-1-r2",
+                        "provider_execution_id": "exec-other",
+                        "order_ref": "c1",
+                        "provider_revision": "r2",
+                        "instrument_version": "instrument-v1",
+                        "side": "BUY",
+                        "last_quantity": {"value": "1.5", "unit": "unit"},
+                    "last_price": "101",
+                        "trade_time": T1,
+                        "receipt_time": T3,
+                        "fees": [],
+                        "settlement_date": "2026-09-27",
+                        "correction_reference": "fill-1",
+                        "evidence": [],
+                    },
+                )
+            self.assertEqual(book.order("c1").filled_quantity, Decimal("1"))
+            self.assertEqual(
+                len(store.load_events("order_projection_book", book.aggregate_id)),
+                before_events,
+            )
+            self.assertEqual(
+                durable(store).order("c1").fill_history[0].provider_execution_id,
+                "exec-1",
+            )
+
     def test_exact_event_retry_is_idempotent_and_conflict_fails_closed(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

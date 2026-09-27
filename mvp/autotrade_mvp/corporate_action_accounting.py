@@ -651,6 +651,10 @@ def commit_authoritative_corporate_action(
             economically_active=False,
         )
 
+    # The position proof and the final commit must share one durable read cut.
+    # An action with no economic postings has no aggregate-version fence of
+    # its own, so a concurrent fill must still invalidate the activation.
+    journal_read_cut = store.current_journal_sequence()
     candidate, transition = _candidate_book(corporate_book, accepted)
     entitlement_position = _canonical_entitlement_position_proof(
         economic_book,
@@ -663,6 +667,10 @@ def commit_authoritative_corporate_action(
             or accepted.external_event_id
         ),
     )
+    if store.current_journal_sequence() != journal_read_cut:
+        raise AccountingConflict(
+            "corporate-action entitlement journal changed during projection"
+        )
     evidence_plan = evidence_store.prepare_record_mutation(accepted)
     activation_text = activation_cut.isoformat().replace("+00:00", "Z")
     transactions = _economic_transactions(
@@ -794,6 +802,7 @@ def commit_authoritative_corporate_action(
                 0 if economic_plan is None else economic_plan.aggregate_version,
             ),
             events=events,
+            expected_journal_sequence=journal_read_cut,
         )
     except Exception:
         economic_book.refresh()

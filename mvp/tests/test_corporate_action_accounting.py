@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.accounting import (
     AccountingConflict,
@@ -588,6 +589,51 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
             )
             self.assertEqual(
                 len(economic_book(JournalStore(path)).transactions), 1
+            )
+
+    def test_zero_effect_split_rejects_concurrent_fill_after_position_proof(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            economics = DurableProviderEconomicBook(
+                store,
+                provider_id="BINANCE",
+                account_id="acct-1",
+                environment="PAPER",
+            )
+            durable_evidence = evidence_store(store)
+            accepted = resolve_action(sealed_action(kind="SPLIT"))
+            concurrent_fill = book_equity_fill(
+                transaction_id="concurrent-entitlement-fill",
+                cause_event_id="provider-fill:concurrent-entitlement-fill",
+                instrument="BTCUSDT",
+                settlement_currency="USDT",
+                side="BUY",
+                quantity="1",
+                price="100",
+                economic_effective_at=(READ_NOW - timedelta(minutes=2)).isoformat().replace("+00:00", "Z"),
+                economic_order_key="provider:BINANCE:execution:concurrent-entitlement-fill",
+                observed_at=(READ_NOW - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+            )
+            commit = store.commit_command
+
+            def race(*args, **kwargs):
+                if kwargs.get("actor") == "corporate-action-financial-integration":
+                    economics.append(concurrent_fill)
+                return commit(*args, **kwargs)
+
+            with patch.object(store, "commit_command", side_effect=race):
+                with self.assertRaisesRegex(ValueError, "journal sequence changed"):
+                    commit_authoritative_corporate_action(
+                        store=store,
+                        evidence_store=durable_evidence,
+                        economic_book=economics,
+                        corporate_book=pure_book(quantity="0"),
+                        accepted=accepted,
+                    )
+            self.assertEqual(economics.position("BTCUSDT"), Decimal("1"))
+            self.assertEqual(
+                store.load_events("corporate_action_evidence", durable_evidence.aggregate_id),
+                [],
             )
 
     def test_fifo_rejects_equal_time_fill_independent_of_order_key_spelling(self):

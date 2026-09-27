@@ -386,9 +386,18 @@ def evaluate_runtime_budget(
         ):
             reasons.append("declared_throughput_not_met")
 
-    if len(observation.financial_latency_us) < spec.min_financial_samples:
+    latency_count = len(observation.financial_latency_us)
+    staleness_count = len(observation.financial_staleness_us)
+    metrics["financial_latency_sample_count"] = latency_count
+    metrics["financial_staleness_sample_count"] = staleness_count
+
+    if latency_count != observation.recovered_financial_events:
+        insufficient.append("incomplete_financial_latency_coverage")
+    if staleness_count != observation.recovered_financial_events:
+        insufficient.append("incomplete_financial_staleness_coverage")
+    if latency_count < spec.min_financial_samples:
         insufficient.append("insufficient_financial_latency_samples")
-    if len(observation.financial_staleness_us) < spec.min_financial_samples:
+    if staleness_count < spec.min_financial_samples:
         insufficient.append("insufficient_staleness_samples")
     if len(observation.research_interference_us) < spec.min_research_samples:
         insufficient.append("insufficient_research_interference_samples")

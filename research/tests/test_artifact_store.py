@@ -583,6 +583,183 @@ class ArtifactStoreTests(unittest.TestCase):
             self.assertEqual(store.load_manifest(artifact_id), manifest)
             self.assertEqual(store.read_bytes(artifact_id), payload)
 
+    def test_manifest_descriptor_reparse_point_is_rejected_before_read(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"reparse-manifest",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+            real_fstat = os.fstat
+
+            def reparse_fstat(descriptor):
+                entry = real_fstat(descriptor)
+
+                class ReparseEntry:
+                    st_mode = entry.st_mode
+                    st_nlink = entry.st_nlink
+                    st_size = entry.st_size
+                    st_file_attributes = 0x400
+
+                return ReparseEntry()
+
+            with patch(
+                "autotrade_research.artifacts.store.os.fstat",
+                side_effect=reparse_fstat,
+            ), patch(
+                "autotrade_research.artifacts.store.os.read"
+            ) as read_call:
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "reparse point",
+                ):
+                    store.load_manifest(artifact_id)
+                read_call.assert_not_called()
+
+    def test_windows_missing_reparse_attributes_fail_closed(self):
+        store = ArtifactStore.__new__(ArtifactStore)
+
+        class AttributeLessEntry:
+            pass
+
+        with patch(
+            "autotrade_research.artifacts.store.os.name",
+            "nt",
+        ):
+            with self.assertRaisesRegex(
+                ArtifactIntegrityError,
+                "reparse-point attributes are unavailable",
+            ):
+                store._reject_reparse_point(
+                    AttributeLessEntry(),
+                    subject="artifact manifest",
+                )
+
+    def test_authenticated_snapshot_rejects_persistent_manifest_swap_during_object_read(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            canonical_id = str(uuid4())
+            replacement_id = str(uuid4())
+            canonical = store.publish_bytes(
+                artifact_id=canonical_id,
+                data=b"canonical-snapshot-bytes",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+                metadata={"kind": "canonical"},
+            )
+            replacement = store.publish_bytes(
+                artifact_id=replacement_id,
+                data=b"replacement-snapshot-bytes",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+                metadata={"kind": "replacement"},
+            )
+            replacement_for_same_id = dict(replacement)
+            replacement_for_same_id["artifact_id"] = canonical_id
+            replacement_for_same_id["manifest_hash"] = (
+                _manifest_integrity_hash(replacement_for_same_id)
+            )
+
+            manifest_path = store._manifest_path(canonical_id)
+            canonical_backup = Path(directory) / "canonical-held.json"
+            replacement_path = Path(directory) / "replacement.json"
+            atomic_write_json(replacement_path, replacement_for_same_id)
+            original_read = store._read_verified_object_bytes
+
+            def replace_manifest_then_read(manifest):
+                os.replace(manifest_path, canonical_backup)
+                os.replace(replacement_path, manifest_path)
+                return original_read(manifest)
+
+            with patch.object(
+                store,
+                "_read_verified_object_bytes",
+                side_effect=replace_manifest_then_read,
+            ):
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "manifest changed during read",
+                ):
+                    store.read_authenticated_snapshot(canonical_id)
+
+            current = store.load_manifest(canonical_id)
+            self.assertEqual(current["metadata"], {"kind": "replacement"})
+            self.assertEqual(
+                current["sha256"],
+                replacement["sha256"],
+            )
+            self.assertNotEqual(current["sha256"], canonical["sha256"])
+
+    def test_authenticated_snapshot_transient_aba_cannot_mix_manifest_and_object(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            canonical_id = str(uuid4())
+            replacement_id = str(uuid4())
+            canonical_data = b"canonical-aba-snapshot"
+            canonical = store.publish_bytes(
+                artifact_id=canonical_id,
+                data=canonical_data,
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+                metadata={"kind": "canonical"},
+            )
+            replacement = store.publish_bytes(
+                artifact_id=replacement_id,
+                data=b"replacement-aba-snapshot",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+                metadata={"kind": "replacement"},
+            )
+            replacement_for_same_id = dict(replacement)
+            replacement_for_same_id["artifact_id"] = canonical_id
+            replacement_for_same_id["manifest_hash"] = (
+                _manifest_integrity_hash(replacement_for_same_id)
+            )
+
+            manifest_path = store._manifest_path(canonical_id)
+            canonical_backup = Path(directory) / "canonical-held.json"
+            replacement_path = Path(directory) / "replacement.json"
+            replacement_backup = Path(directory) / "replacement-held.json"
+            atomic_write_json(replacement_path, replacement_for_same_id)
+            original_read = store._read_verified_object_bytes
+
+            def aba_manifest_then_read(manifest):
+                os.replace(manifest_path, canonical_backup)
+                os.replace(replacement_path, manifest_path)
+                os.replace(manifest_path, replacement_backup)
+                os.replace(canonical_backup, manifest_path)
+                return original_read(manifest)
+
+            with patch.object(
+                store,
+                "_read_verified_object_bytes",
+                side_effect=aba_manifest_then_read,
+            ):
+                manifest, data = store.read_authenticated_snapshot(
+                    canonical_id
+                )
+
+            self.assertEqual(manifest["metadata"], {"kind": "canonical"})
+            self.assertEqual(manifest["sha256"], canonical["sha256"])
+            self.assertEqual(data, canonical_data)
+            self.assertNotEqual(manifest["sha256"], replacement["sha256"])
+
+    def test_read_bytes_delegates_to_authenticated_snapshot(self):
+        store = ArtifactStore.__new__(ArtifactStore)
+        artifact_id = str(uuid4())
+        manifest = {"artifact_id": artifact_id}
+
+        with patch.object(
+            store,
+            "read_authenticated_snapshot",
+            return_value=(manifest, b"bound-data"),
+        ) as snapshot:
+            self.assertEqual(store.read_bytes(artifact_id), b"bound-data")
+        snapshot.assert_called_once_with(artifact_id)
+
     def test_manifest_aba_replacement_fails_before_transient_bytes_are_read(self):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(Path(directory) / "store")

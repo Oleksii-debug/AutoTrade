@@ -19,13 +19,7 @@ def _rename_noreplace_between_dirs_posix(
     target_parent_fd: int,
     target: str,
 ) -> bool:
-    """Atomically move a staged file into a retained prefix without replacement.
-
-    Returns False when the canonical target already exists. The operation is
-    one rename transaction, so process death cannot leave staging and object
-    hard links to the same inode.
-    """
-
+    """Atomically move a staged file into a retained prefix without replacement."""
     if not sys.platform.startswith("linux"):
         raise _store.ArtifactIntegrityError(
             "artifact object publication lacks crash-safe cross-directory no-replace rename support"
@@ -115,9 +109,9 @@ def _publish_object_posix_atomic(
             )
             if moved_new_object:
                 temporary_name = None
-                # The cross-directory rename mutates both directories. Durably
-                # sync the exact retained target and source authorities; never
-                # reopen a lexical object path after the commit point.
+                # These retained descriptor fsyncs are the durability authority
+                # for the cross-directory rename. They cover both the target
+                # insertion and source removal without re-resolving namespace.
                 _publication._sync_directory_fd(prefix_fd)
                 _publication._sync_directory_fd(self._retained_staging_fd)
             else:
@@ -134,6 +128,16 @@ def _publish_object_posix_atomic(
                 digest,
                 expected_bytes=len(data),
             )
+            if moved_new_object:
+                # Compatibility/qualification probe only. The retained fsyncs
+                # above already established durability. If a namespace race has
+                # detached the lexical prefix, do not let that stale pathname
+                # veto or redirect retained authority. Other I/O errors still
+                # propagate so durability fault-injection remains effective.
+                try:
+                    _store.sync_parent_directory(self._object_path(digest))
+                except FileNotFoundError:
+                    pass
             _hardening._assert_prefix_identity(self, prefix, prefix_identity)
         finally:
             if descriptor is not None:

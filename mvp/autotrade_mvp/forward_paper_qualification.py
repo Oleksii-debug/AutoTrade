@@ -228,8 +228,7 @@ def _store_matches(
     artifact_sha256: str,
 ) -> bool:
     try:
-        manifest = store.load_manifest(artifact_id)
-        data = store.read_bytes(artifact_id)
+        manifest, data = store.read_authenticated_snapshot(artifact_id)
     except (
         ArtifactIntegrityError,
         FileNotFoundError,

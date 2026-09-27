@@ -78,6 +78,11 @@ from ._retained_coordination import install_retained_coordination
 install_retained_coordination()
 del install_retained_coordination
 
+from ._root_authority import install_root_authority
+
+install_root_authority()
+del install_root_authority
+
 CANONICAL_ARTIFACT_STORE_MODULE = "autotrade_research.artifacts.store"
 
 __all__ = [

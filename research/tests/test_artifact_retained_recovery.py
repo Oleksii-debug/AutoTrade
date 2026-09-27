@@ -33,18 +33,22 @@ class RetainedRecoveryDetachmentTests(unittest.TestCase):
             external = outside_prefix / digest
             external.write_bytes(b"external-must-survive")
 
-            real_unlink = recovery.os.unlink
+            real_unlink_bound = recovery._unlink_bound_object
             swapped = False
 
-            def swap_then_unlink(name, *, dir_fd=None):
+            def swap_then_unlink_bound(bound_store, candidate_digest):
                 nonlocal swapped
-                if not swapped and name == digest and dir_fd is not None:
+                if not swapped and candidate_digest == digest:
                     swapped = True
                     os.replace(store.objects, detached)
                     store.objects.symlink_to(outside, target_is_directory=True)
-                return real_unlink(name, dir_fd=dir_fd)
+                return real_unlink_bound(bound_store, candidate_digest)
 
-            with patch.object(recovery.os, "unlink", side_effect=swap_then_unlink):
+            with patch.object(
+                recovery,
+                "_unlink_bound_object",
+                side_effect=swap_then_unlink_bound,
+            ):
                 after = store.recover_orphans()
 
             self.assertTrue(swapped)
@@ -52,7 +56,7 @@ class RetainedRecoveryDetachmentTests(unittest.TestCase):
             self.assertFalse((detached / digest[:2] / digest).exists())
             self.assertNotIn(digest, after.unreferenced_objects)
 
-    def test_staging_child_swap_at_destructive_unlink_returns_retained_report(self):
+    def test_staging_child_swap_at_cleanup_stays_bound_to_retained_generation(self):
         with TemporaryDirectory() as directory:
             root = Path(directory) / "store"
             store = ArtifactStore(root)
@@ -66,18 +70,22 @@ class RetainedRecoveryDetachmentTests(unittest.TestCase):
             external = outside / staged.name
             external.write_bytes(b"external-must-survive")
 
-            real_unlink = recovery.os.unlink
+            real_cleanup_bound = recovery._cleanup_bound_staging
             swapped = False
 
-            def swap_then_unlink(name, *, dir_fd=None):
+            def swap_then_cleanup_bound(bound_store):
                 nonlocal swapped
-                if not swapped and name == staged.name and dir_fd is not None:
+                if not swapped:
                     swapped = True
                     os.replace(store.staging, detached)
                     store.staging.symlink_to(outside, target_is_directory=True)
-                return real_unlink(name, dir_fd=dir_fd)
+                return real_cleanup_bound(bound_store)
 
-            with patch.object(recovery.os, "unlink", side_effect=swap_then_unlink):
+            with patch.object(
+                recovery,
+                "_cleanup_bound_staging",
+                side_effect=swap_then_cleanup_bound,
+            ):
                 after = store.recover_orphans()
 
             self.assertTrue(swapped)

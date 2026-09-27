@@ -496,7 +496,7 @@ class QualificationAttestationTests(unittest.TestCase):
             ):
                 _trusted_git_executable(source_root=source_root)
 
-    def test_packaged_policy_uses_source_pinned_digest_without_git(self):
+    def test_packaged_policy_pin_alone_cannot_enable_non_git_trust(self):
         canonical_policy = policy(root())
         raw = json.dumps(
             qualification_trust_policy_payload(canonical_policy),
@@ -536,6 +536,60 @@ class QualificationAttestationTests(unittest.TestCase):
                     "_trusted_git_candidate_paths",
                     return_value=(),
                 ),
+                self.assertRaisesRegex(
+                    QualificationTrustUnavailable,
+                    "independently authenticated packaged source identity is unavailable",
+                ),
+            ):
+                load_canonical_qualification_trust_policy(
+                    expected_source_sha=SOURCE
+                )
+
+    def test_packaged_policy_loads_only_after_independent_source_identity_matches(self):
+        canonical_policy = policy(root())
+        raw = json.dumps(
+            qualification_trust_policy_payload(canonical_policy),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        with TemporaryDirectory() as directory:
+            source_root = Path(directory) / "installed-runtime"
+            policy_path = (
+                source_root
+                / "mvp"
+                / "autotrade_mvp"
+                / "qualification_trust_policy.json"
+            )
+            policy_path.parent.mkdir(parents=True)
+            policy_path.write_bytes(raw)
+            digest = "sha256:" + sha256(raw).hexdigest()
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_QUALIFICATION_TRUST_SOURCE_ROOT",
+                    source_root,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_CANONICAL_QUALIFICATION_TRUST_POLICY_PATH",
+                    policy_path,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256",
+                    digest,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_trusted_git_candidate_paths",
+                    return_value=(),
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_independently_authenticated_packaged_source_sha",
+                    return_value=SOURCE,
+                ),
             ):
                 loaded = load_canonical_qualification_trust_policy(
                     expected_source_sha=SOURCE
@@ -543,6 +597,60 @@ class QualificationAttestationTests(unittest.TestCase):
 
         self.assertEqual(loaded.policy_id, canonical_policy.policy_id)
         self.assertEqual(loaded.roots, canonical_policy.roots)
+
+    def test_packaged_policy_rejects_independent_source_identity_mismatch(self):
+        canonical_policy = policy(root())
+        raw = json.dumps(
+            qualification_trust_policy_payload(canonical_policy),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        with TemporaryDirectory() as directory:
+            source_root = Path(directory) / "installed-runtime"
+            policy_path = (
+                source_root
+                / "mvp"
+                / "autotrade_mvp"
+                / "qualification_trust_policy.json"
+            )
+            policy_path.parent.mkdir(parents=True)
+            policy_path.write_bytes(raw)
+            digest = "sha256:" + sha256(raw).hexdigest()
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_QUALIFICATION_TRUST_SOURCE_ROOT",
+                    source_root,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_CANONICAL_QUALIFICATION_TRUST_POLICY_PATH",
+                    policy_path,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256",
+                    digest,
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_trusted_git_candidate_paths",
+                    return_value=(),
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_independently_authenticated_packaged_source_sha",
+                    return_value="b" * 40,
+                ),
+                self.assertRaisesRegex(
+                    QualificationTrustError,
+                    "packaged source identity does not match expected_source_sha",
+                ),
+            ):
+                load_canonical_qualification_trust_policy(
+                    expected_source_sha=SOURCE
+                )
 
     def test_packaged_policy_rejects_valid_but_unpinned_policy_bytes(self):
         canonical_root = root()
@@ -598,6 +706,11 @@ class QualificationAttestationTests(unittest.TestCase):
                     "mvp.autotrade_mvp.qualification_attestation."
                     "_trusted_git_candidate_paths",
                     return_value=(),
+                ),
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "_independently_authenticated_packaged_source_sha",
+                    return_value=SOURCE,
                 ),
                 self.assertRaisesRegex(
                     QualificationTrustError,

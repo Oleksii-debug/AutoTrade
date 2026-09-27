@@ -9,8 +9,9 @@ import unittest
 from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
-from research.autotrade_research.artifacts.store import ArtifactStore
+from research.autotrade_research.artifacts.store import ArtifactIntegrityError, ArtifactStore
 
+import mvp.autotrade_mvp.qualification_attestation as qualification_attestation_module
 from mvp.autotrade_mvp.qualification_attestation import (
     EvidenceArtifactRef,
     QualificationAttestation,
@@ -179,7 +180,68 @@ def verify(receipt, store, trust_policy, **overrides):
     )
 
 
+class _SnapshotOnlyQualificationStore:
+    def __init__(self, manifest, data, *, fail_snapshot=False):
+        self.manifest = manifest
+        self.data = data
+        self.fail_snapshot = fail_snapshot
+        self.snapshot_calls = []
+        self.legacy_calls = []
+
+    def read_authenticated_snapshot(self, artifact_id):
+        self.snapshot_calls.append(artifact_id)
+        if self.fail_snapshot:
+            raise ArtifactIntegrityError("authenticated snapshot changed")
+        return self.manifest, self.data
+
+    def load_manifest(self, artifact_id):
+        self.legacy_calls.append(("load_manifest", artifact_id))
+        return self.manifest
+
+    def read_bytes(self, artifact_id):
+        self.legacy_calls.append(("read_bytes", artifact_id))
+        return b"legacy-second-lookup-bytes"
+
+
 class QualificationAttestationTests(unittest.TestCase):
+    def test_evidence_resolution_uses_one_authenticated_snapshot_only(self):
+        ref = evidence_ref()
+        manifest = {
+            "manifest_hash": "sha256:" + "e" * 64,
+            "artifact_id": ref.artifact_id,
+            "sha256": ref.sha256,
+            "media_type": ref.media_type,
+            "source_refs": [f"git:{ref.source_sha}"],
+            "metadata": {"evidence_kind": ref.evidence_kind},
+        }
+        store = _SnapshotOnlyQualificationStore(manifest, EVIDENCE)
+        qualification_attestation_module._resolve_evidence(store, ref)
+        self.assertEqual(store.snapshot_calls, [ref.artifact_id])
+        self.assertEqual(store.legacy_calls, [])
+
+    def test_evidence_resolution_rejects_snapshot_replacement_without_legacy_fallback(self):
+        ref = evidence_ref()
+        manifest = {
+            "manifest_hash": "sha256:" + "f" * 64,
+            "artifact_id": ref.artifact_id,
+            "sha256": ref.sha256,
+            "media_type": ref.media_type,
+            "source_refs": [f"git:{ref.source_sha}"],
+            "metadata": {"evidence_kind": ref.evidence_kind},
+        }
+        store = _SnapshotOnlyQualificationStore(
+            manifest,
+            EVIDENCE,
+            fail_snapshot=True,
+        )
+        with self.assertRaisesRegex(
+            QualificationTrustError,
+            "cannot be resolved with integrity",
+        ):
+            qualification_attestation_module._resolve_evidence(store, ref)
+        self.assertEqual(store.snapshot_calls, [ref.artifact_id])
+        self.assertEqual(store.legacy_calls, [])
+
     def test_trusted_git_environment_drops_caller_loader_and_config_authority(self):
         hostile = {
             "PATH": "/attacker/bin",
@@ -717,10 +779,15 @@ class QualificationAttestationTests(unittest.TestCase):
             ).stdout.strip()
 
             policy_path.unlink()
+            relative_hostile = os.path.relpath(
+                hostile_path,
+                start=policy_path.parent,
+            )
             try:
-                policy_path.symlink_to("../../provenance/hostile-policy.json")
+                policy_path.symlink_to(relative_hostile)
             except OSError as error:
                 self.skipTest(f"working-tree symlink unavailable: {error}")
+            self.assertEqual(os.readlink(policy_path), relative_hostile)
             self.assertIn("candidate.self", policy_path.read_text(encoding="utf-8"))
 
             with (

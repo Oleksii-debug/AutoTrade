@@ -36,6 +36,11 @@ from ._retained_namespace import install_retained_namespace_authority
 install_retained_namespace_authority()
 del install_retained_namespace_authority
 
+from ._retained_path_compat import install_retained_path_compatibility
+
+install_retained_path_compatibility()
+del install_retained_path_compatibility
+
 from ._retained_namespace_hardening import install_retained_namespace_hardening
 
 install_retained_namespace_hardening()

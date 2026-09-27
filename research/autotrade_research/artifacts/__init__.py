@@ -68,6 +68,11 @@ from ._windows_retained_publication_hardening import (
 install_windows_retained_publication_hardening()
 del install_windows_retained_publication_hardening
 
+from ._retained_coordination import install_retained_coordination
+
+install_retained_coordination()
+del install_retained_coordination
+
 CANONICAL_ARTIFACT_STORE_MODULE = "autotrade_research.artifacts.store"
 
 __all__ = [

@@ -148,6 +148,8 @@ Focused tests cover normal canonical fill ingestion, restart reconstruction, sco
 
 For PAPER/LIVE, the reduced durable `record_fill()` and `correct_fill()` entry points fail closed; provider fill facts must enter through canonical `ExecutionFill` ingestion. Provider evidence metadata binds to the complete normalized observation body, excluding only its attached evidence references and derived digest to avoid self-reference. Direct durable bust commands are blocked in PAPER/LIVE until a canonical provider bust observation exists. Simulation and replay retain the lower-level lifecycle operations for deterministic testing and reconstruction.
 
+New PAPER/LIVE order creation requires an explicit canonical quantity unit. Legacy orders without one remain replayable but cannot accept canonical fills until an audited `BIND_QUANTITY_UNIT` event supplies the instrument-qualified unit. Binding is rejected if any fill history already exists because its historical quantity unit cannot be inferred safely. Such legacy orders require manual reconciliation/migration evidence before they can return to financial authority.
+
 
 ## Whole-simulator terminal reservation integration
 

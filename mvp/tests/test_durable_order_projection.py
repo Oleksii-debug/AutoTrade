@@ -311,6 +311,128 @@ class DurableOrderProjectionTests(unittest.TestCase):
             )
             self.assertEqual(restarted.order("c1").origin_intent_id, "intent-1")
 
+    def test_legacy_unfilled_order_can_bind_unit_before_canonical_fill(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store)
+            book.create_order(
+                event_key="legacy-create",
+                client_order_id="legacy-order",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="2",
+                origin_intent_id="intent-legacy",
+                committed_at=T0,
+            )
+            bound = book.bind_legacy_quantity_unit(
+                event_key="legacy-unit-bind",
+                client_order_id="legacy-order",
+                quantity_unit="share:ABC",
+                committed_at=T1,
+            )
+            self.assertEqual(bound.snapshot.client_order_id, "legacy-order")
+            filled = book.ingest_execution_fill(
+                event_key="legacy-fill",
+                client_order_id="legacy-order",
+                committed_at=T3,
+                execution_fill={
+                    "fill_id": "legacy-fill",
+                    "provider_execution_id": "legacy-execution",
+                    "order_ref": "legacy-order",
+                    "intent_ref": "intent-legacy",
+                    "instrument_version": "ABC",
+                    "side": "BUY",
+                    "last_quantity": {"value": "1", "unit": "share:ABC"},
+                    "last_price": "100",
+                    "trade_time": T1,
+                    "receipt_time": T2,
+                    "fees": [],
+                    "settlement_date": "2026-09-25",
+                    "evidence": [],
+                },
+            )
+            self.assertEqual(filled.snapshot.filled_quantity, Decimal("1"))
+            restarted = durable(store)
+            self.assertEqual(restarted.order("legacy-order").filled_quantity, Decimal("1"))
+            self.assertEqual(
+                restarted.ingest_execution_fill(
+                    event_key="legacy-fill-retry",
+                    client_order_id="legacy-order",
+                    committed_at=T4,
+                    execution_fill={
+                        "fill_id": "legacy-fill-2",
+                        "provider_execution_id": "legacy-execution-2",
+                        "order_ref": "legacy-order",
+                        "intent_ref": "intent-legacy",
+                        "instrument_version": "ABC",
+                        "side": "BUY",
+                        "last_quantity": {"value": "0.5", "unit": "share:ABC"},
+                        "last_price": "101",
+                        "trade_time": T1,
+                        "receipt_time": T2,
+                        "fees": [],
+                        "settlement_date": "2026-09-25",
+                        "evidence": [],
+                    },
+                ).snapshot.filled_quantity,
+                Decimal("1.5"),
+            )
+
+    def test_legacy_order_with_fill_history_cannot_guess_missing_unit(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store)
+            book.create_order(
+                event_key="legacy-create",
+                client_order_id="legacy-order",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="2",
+                committed_at=T0,
+            )
+            book.record_fill(
+                event_key="legacy-fill-without-unit",
+                client_order_id="legacy-order",
+                fill_id="legacy-fill",
+                provider_execution_id="legacy-execution",
+                quantity="1",
+                price="100",
+                committed_at=T1,
+            )
+            before = len(store.load_events("order_projection_book", book.aggregate_id))
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "with fill history cannot be assigned",
+            ):
+                book.bind_legacy_quantity_unit(
+                    event_key="unsafe-legacy-unit-bind",
+                    client_order_id="legacy-order",
+                    quantity_unit="share:ABC",
+                    committed_at=T2,
+                )
+            self.assertEqual(
+                len(store.load_events("order_projection_book", book.aggregate_id)),
+                before,
+            )
+
+    def test_paper_order_creation_requires_canonical_quantity_unit(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store, environment="PAPER")
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "requires a canonical quantity unit",
+            ):
+                book.create_order(
+                    event_key="paper-create-without-unit",
+                    client_order_id="paper-order",
+                    instrument="ABC",
+                    side="BUY",
+                    requested_quantity="1",
+                    committed_at=T0,
+                )
+            self.assertEqual(book.snapshots, ())
+
     def test_amendment_parent_order_and_originating_intent_are_distinct(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
@@ -1226,6 +1348,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 instrument="ABC",
                 side="BUY",
                 requested_quantity="1",
+                quantity_unit="unit:ABC",
                 committed_at=T0,
             )
             unknown = book.acknowledge(
@@ -1439,6 +1562,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 instrument="ABC",
                 side="BUY",
                 requested_quantity="1",
+                quantity_unit="unit:ABC",
                 committed_at=T0,
             )
             unknown = book.acknowledge(
@@ -1474,6 +1598,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 instrument="ABC",
                 side="BUY",
                 requested_quantity="1",
+                quantity_unit="unit:ABC",
                 committed_at=T0,
             )
             second = stale.create_order(
@@ -1509,6 +1634,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 instrument="ABC",
                 side="BUY",
                 requested_quantity="1",
+                quantity_unit="unit:ABC",
                 committed_at=T0,
             )
             connection = sqlite3.connect(store.path)
@@ -1537,6 +1663,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 instrument="ABC",
                 side="BUY",
                 requested_quantity="1",
+                quantity_unit="unit:ABC",
                 committed_at=T0,
             )
             request = {"client_order_id": "known"}
@@ -1625,6 +1752,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 instrument="ABC",
                 side="BUY",
                 requested_quantity="1",
+                quantity_unit="unit:ABC",
                 committed_at=T0,
             )
             book.request_cancel(
@@ -1687,6 +1815,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 instrument="ABC",
                 side="BUY",
                 requested_quantity="1",
+                quantity_unit="unit:ABC",
                 committed_at=T0,
             )
             with self.assertRaisesRegex(
@@ -1715,6 +1844,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 instrument="ABC",
                 side="BUY",
                 requested_quantity="1",
+                quantity_unit="unit:ABC",
                 committed_at=T0,
             )
             forged = {
@@ -1751,6 +1881,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 instrument="ABC",
                 side="BUY",
                 requested_quantity="1",
+                quantity_unit="unit:ABC",
                 committed_at=T0,
             )
             request = {
@@ -1945,6 +2076,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 instrument="ABC",
                 side="BUY",
                 requested_quantity="1",
+                quantity_unit="unit:ABC",
                 committed_at=T0,
             )
             request = {
@@ -2004,6 +2136,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 instrument="ABC",
                 side="BUY",
                 requested_quantity="1",
+                quantity_unit="unit:ABC",
                 committed_at=T0,
             )
             unknown = book.acknowledge(
@@ -2031,6 +2164,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 instrument="ABC",
                 side="BUY",
                 requested_quantity="1",
+                quantity_unit="unit:ABC",
                 committed_at=T0,
             )
             request = {"client_order_id": "paper-1"}

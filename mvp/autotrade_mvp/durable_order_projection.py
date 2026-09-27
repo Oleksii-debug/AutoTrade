@@ -477,6 +477,8 @@ class DurableOrderBookProjection:
             return order.snapshot()
 
         order = book.order(client_order_id)
+        if operation == "BIND_QUANTITY_UNIT":
+            return order.snapshot()
         if operation == "MARK_SEND_STARTED":
             order.mark_send_started(attempt_id=request.get("attempt_id"))
         elif operation == "ACKNOWLEDGE":
@@ -678,6 +680,23 @@ class DurableOrderBookProjection:
                         "durable order quantity unit changed across replay"
                     )
                 quantity_units[order_id] = unit
+            elif operation == "BIND_QUANTITY_UNIT":
+                order_id = _text(
+                    request.get("client_order_id"),
+                    name="client_order_id",
+                )
+                if order_id in quantity_units:
+                    raise OrderProjectionConflict(
+                        "legacy order quantity unit is already bound"
+                    )
+                if book.order(order_id).fill_history:
+                    raise OrderProjectionConflict(
+                        "legacy order with fill history cannot be assigned a quantity unit"
+                    )
+                quantity_units[order_id] = _text(
+                    request.get("quantity_unit"),
+                    name="quantity_unit",
+                )
             idempotency[event_key] = (
                 mutation_hash,
                 snapshot,
@@ -885,6 +904,16 @@ class DurableOrderBookProjection:
             operation,
             request,
         )
+        if operation == "BIND_QUANTITY_UNIT":
+            order_id = _text(request.get("client_order_id"), name="client_order_id")
+            if order_id in self._quantity_units:
+                raise OrderProjectionConflict(
+                    "order already has a canonical quantity unit"
+                )
+            if candidate.order(order_id).fill_history:
+                raise OrderProjectionConflict(
+                    "legacy order with fill history cannot be assigned a quantity unit"
+                )
         snapshot = self._apply(candidate, operation, request)
         payload = {
             "schema_version": "1.0.0",
@@ -982,6 +1011,10 @@ class DurableOrderBookProjection:
         parent_intent_id: str | None = None,
         origin_intent_id: str | None = None,
     ) -> DurableOrderMutationResult:
+        if self.environment in {"PAPER", "LIVE"} and quantity_unit is None:
+            raise OrderProjectionConflict(
+                "PAPER/LIVE order creation requires a canonical quantity unit"
+            )
         request = {
             "client_order_id": _text(client_order_id, name="client_order_id"),
             "instrument": _text(instrument, name="instrument"),
@@ -1009,6 +1042,25 @@ class DurableOrderBookProjection:
             event_key=event_key,
             operation="CREATE",
             request=request,
+            committed_at=committed_at,
+        )
+
+    def bind_legacy_quantity_unit(
+        self,
+        *,
+        event_key: str,
+        client_order_id: str,
+        quantity_unit: str,
+        committed_at: str,
+    ) -> DurableOrderMutationResult:
+        """Explicitly qualify a legacy unfilled order's previously absent unit."""
+        return self._commit(
+            event_key=event_key,
+            operation="BIND_QUANTITY_UNIT",
+            request={
+                "client_order_id": _text(client_order_id, name="client_order_id"),
+                "quantity_unit": _text(quantity_unit, name="quantity_unit"),
+            },
             committed_at=committed_at,
         )
 

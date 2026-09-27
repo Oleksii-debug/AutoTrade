@@ -39,6 +39,7 @@ from urllib.request import (
 from .capabilities import CapabilityRegistry, CapabilitySnapshot
 from .dispatch import ExactJsonTransportResponse
 from .persistence import JournalStore, payload_digest
+from .kraken_futures import validate_futures_client_order_id
 from .kraken_spot import (
     spot_submission_requires_reconciliation,
     validate_spot_client_order_id,
@@ -294,6 +295,26 @@ WHITEBIT_ENDPOINT_POLICIES: Mapping[str, ProviderEndpointPolicy] = (
                 environment="LIVE",
                 base_url="https://whitebit.com",
                 allowed_hosts=frozenset({"whitebit.com"}),
+            ),
+        }
+    )
+)
+
+
+KRAKEN_FUTURES_ENDPOINT_POLICIES: Mapping[str, ProviderEndpointPolicy] = (
+    MappingProxyType(
+        {
+            "LIVE": ProviderEndpointPolicy(
+                provider_id="KRAKEN",
+                environment="LIVE",
+                base_url="https://futures.kraken.com",
+                allowed_hosts=frozenset({"futures.kraken.com"}),
+            ),
+            "DEMO": ProviderEndpointPolicy(
+                provider_id="KRAKEN",
+                environment="PAPER",
+                base_url="https://demo-futures.kraken.com",
+                allowed_hosts=frozenset({"demo-futures.kraken.com"}),
             ),
         }
     )
@@ -831,9 +852,15 @@ class SignedHttpRequest:
             or parsed.fragment
         ):
             raise ProviderTransportScopeError("signed request URL is invalid")
-        if type(self.body) is not bytes or not self.body:
+        if type(self.body) is not bytes:
             raise ProviderTransportScopeError(
-                "signed request body must be non-empty exact bytes"
+                "signed request body must be exact bytes"
+            )
+        has_query = bool(parsed.query)
+        has_body = bool(self.body)
+        if has_query == has_body:
+            raise ProviderTransportScopeError(
+                "signed POST requires exactly one payload channel: URL query or body"
             )
         if not isinstance(self.headers, Mapping):
             raise ProviderTransportScopeError("headers must be a mapping")
@@ -994,7 +1021,7 @@ class UrllibJsonWireClient:
                 "request must be SignedHttpRequest or AuthenticatedReadHttpRequest"
             )
         if isinstance(request, SignedHttpRequest):
-            data = request.body
+            data = request.body or None
             method = request.method
         else:
             data = request.body or None
@@ -1162,6 +1189,7 @@ class _DurableProviderNonceAllocator:
         nonce_domain_name: str = "positive integer",
         aggregate_identity_material: str | None = None,
         initial_nonce_floor: int = 0,
+        allowed_environments: frozenset[str] = frozenset({"LIVE"}),
     ) -> None:
         if not isinstance(journal, JournalStore):
             raise TypeError("journal must be JournalStore")
@@ -1169,9 +1197,18 @@ class _DurableProviderNonceAllocator:
         label = _canonical_text(display_name, name="display_name")
         account = _canonical_text(account_id, name="account_id")
         env = _canonical_environment(environment)
-        if env != "LIVE":
+        if (
+            not isinstance(allowed_environments, frozenset)
+            or not allowed_environments
+            or any(item not in {"PAPER", "LIVE"} for item in allowed_environments)
+        ):
             raise ProviderTransportScopeError(
-                f"{label} durable nonce allocation is qualified only for LIVE"
+                "allowed_environments must be a non-empty frozenset of PAPER/LIVE"
+            )
+        if env not in allowed_environments:
+            allowed = "/".join(sorted(allowed_environments))
+            raise ProviderTransportScopeError(
+                f"{label} durable nonce allocation is qualified only for {allowed}"
             )
         if not callable(clock_millis):
             raise TypeError("clock_millis must be callable")

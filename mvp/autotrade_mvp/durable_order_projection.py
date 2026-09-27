@@ -36,6 +36,7 @@ _PROVIDER_EVIDENCE_OPERATIONS = frozenset(
         "CORRECT_FILL",
         "BUST_FILL",
         "CONFIRM_CANCEL",
+        "REJECT_CANCEL",
         "CONFIRM_EXPIRED",
     }
 )
@@ -411,6 +412,11 @@ class DurableOrderBookProjection:
             order.request_cancel(command_id=request.get("command_id"))
         elif operation == "CONFIRM_CANCEL":
             order.confirm_cancel()
+        elif operation == "REJECT_CANCEL":
+            order.reject_cancel(
+                command_id=request.get("command_id"),
+                reason_code=request.get("reason_code"),
+            )
         elif operation == "REQUEST_REPLACE":
             order.request_replace(command_id=request.get("command_id"))
         elif operation == "CONFIRM_EXPIRED":
@@ -1010,6 +1016,31 @@ class DurableOrderBookProjection:
 
     def confirm_cancel(self, **kwargs) -> DurableOrderMutationResult:
         return self._simple(operation="CONFIRM_CANCEL", **kwargs)
+
+    def reject_cancel(
+        self,
+        *,
+        event_key: str,
+        client_order_id: str,
+        command_id: str,
+        reason_code: str,
+        committed_at: str,
+        evidence_refs: Sequence[Mapping[str, object]] | None = None,
+    ) -> DurableOrderMutationResult:
+        return self._commit(
+            event_key=event_key,
+            operation="REJECT_CANCEL",
+            request={
+                "client_order_id": _text(
+                    client_order_id,
+                    name="client_order_id",
+                ),
+                "command_id": _text(command_id, name="command_id"),
+                "reason_code": _text(reason_code, name="reason_code"),
+            },
+            committed_at=committed_at,
+            evidence_refs=evidence_refs,
+        )
 
     def request_replace(
         self,

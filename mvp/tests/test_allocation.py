@@ -1292,5 +1292,156 @@ class AllocationTests(unittest.TestCase):
         self.assertEqual(result.expected_net_utility, Decimal("50"))
         self.assertEqual(result.objective_version, "deterministic-net-utility-v3")
 
+class DiscreteAllocationSearchTests(unittest.TestCase):
+    policy = AllocationTests.policy
+    candidate = AllocationTests.candidate
+    # Reuse canonical factories; the independent oracle below does not call any
+    # allocator search/evaluation helper.
+    def loose_policy(self, **changes):
+        values = dict(cash_available="10000", max_gross_notional="10000",
+                      max_net_notional="10000", max_symbol_notional="10000",
+                      max_total_cost="10000", max_stress_loss="10000",
+                      max_turnover_notional="10000")
+        values.update(changes)
+        return self.policy(**values)
+
+    def position(self, symbol, current, desired, **changes):
+        return self.candidate(symbol, price="1", current_quantity=str(current),
+                              desired=str(desired), turnover_cost_rate="0",
+                              holding_cost_rate="0", **changes)
+
+    def capped_pair(self):
+        return [self.position("A", 1000, -1000, max_executable_notional="200"),
+                self.position("B", 1000, -3000)]
+
+    def test_post_liquidity_cap_net_interval_is_found(self):
+        result = allocate_targets(self.capped_pair(), self.loose_policy(max_net_notional="50"))
+        self.assertEqual(result.status, "ALLOCATED")
+        self.assertEqual(tuple(x.notional for x in result.targets), (Decimal("800"), Decimal("-850")))
+        self.assertEqual(result.net_notional, Decimal("50"))
+        self.assertEqual(result.scale, Decimal("0.4625"))
+
+    def test_post_liquidity_cap_stress_envelope_is_found(self):
+        result = allocate_targets(self.capped_pair(), self.loose_policy(max_stress_loss="5"),
+                                  stress_scenarios={"up": {"A": ".1", "B": ".1"},
+                                                    "down": {"A": "-.1", "B": "-.1"}})
+        self.assertEqual(result.status, "ALLOCATED")
+        self.assertEqual(result.worst_stress_loss, Decimal("5"))
+        self.assertEqual(result.scale, Decimal("0.4625"))
+
+    def test_discrete_neutral_interval_missed_by_continuous_roots_is_found(self):
+        result = allocate_targets([self.position("A", -20, -10, lot="3"),
+                                   self.position("B", -20, 20, lot="2")],
+                                  self.loose_policy(max_net_notional="0"))
+        self.assertEqual(result.status, "ALLOCATED")
+        self.assertEqual(result.scale, Decimal(".85"))
+        self.assertEqual(tuple(x.quantity for x in result.targets), (Decimal("-14"), Decimal("14")))
+        self.assertEqual(result.turnover_notional, Decimal("40"))
+
+    def test_minimum_notional_activation_and_non_lot_cap(self):
+        candidate = self.position("A", 0, 30, lot="3", min_notional="8",
+                                  max_executable_notional="11")
+        result = allocate_targets([candidate], self.loose_policy(max_gross_notional="9"))
+        self.assertEqual(result.status, "ALLOCATED")
+        self.assertEqual(result.targets[0].quantity, Decimal("9"))
+        blocked = allocate_targets([candidate], self.loose_policy(max_gross_notional="8"))
+        self.assertEqual(blocked.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(blocked.turnover_notional, Decimal("0"))
+
+    def test_recurring_transition_scale_keeps_exact_lot_and_replays(self):
+        from mvp.autotrade_mvp.allocation import _evaluate
+        candidate = self.position("A", 0, 3)
+        policy = self.loose_policy(max_gross_notional="1")
+        result = allocate_targets([candidate], policy)
+        self.assertEqual(result.targets[0].quantity, Decimal("1"))
+        self.assertEqual(_evaluate([candidate], policy, {}, result.scale).targets, result.targets)
+        self.assertGreaterEqual(result.scale, Decimal(".3333333333333333333333333333"))
+        self.assertLess(result.scale, Decimal(".334"))
+
+    def test_search_budget_is_explicit_and_does_not_claim_infeasibility(self):
+        result = allocate_targets([self.position("A", 2, "1e30")],
+                                  self.loose_policy(max_execution_states=20))
+        self.assertEqual(result.status, "NO_INCREASE_FALLBACK")
+        self.assertIn("budget exceeded; feasibility not established", result.reason)
+        self.assertEqual(result.targets[0].quantity, Decimal("2"))
+        self.assertIsNone(result.worst_stress_loss)
+
+    def test_search_budget_counts_before_materializing_and_accepts_exact_bound(self):
+        candidate = self.position("A", 0, 10)
+        for budget, expected in [(9, "NO_INCREASE_FALLBACK"), (10, "ALLOCATED")]:
+            result = allocate_targets([candidate], self.loose_policy(max_gross_notional="9",
+                                                                    max_execution_states=budget))
+            self.assertEqual(result.status, expected)
+        for invalid in (0, -1, True, 2.5):
+            with self.assertRaisesRegex(ValueError, "max_execution_states"):
+                self.loose_policy(max_execution_states=invalid)
+
+    def test_objective_does_not_treat_unsearched_subset_as_infeasible(self):
+        candidate = ObjectiveCandidate(candidate=self.position("A", 0, 100),
+                                              expected_return_rate=".1", risk_penalty_rate="0")
+        result = allocate_objective_targets([candidate],
+                    self.loose_policy(max_gross_notional="10", max_execution_states=5))
+        self.assertEqual(result.allocation.status, "NO_INCREASE_FALLBACK")
+        self.assertIn("feasibility not established", result.reason)
+        self.assertEqual(result.selected_symbols, ())
+
+    def test_complete_close_is_an_executable_allocation_not_preserved_holding(self):
+        result = allocate_targets([self.position("A", 7, 0)], self.loose_policy())
+        self.assertEqual(result.status, "ALLOCATED")
+        self.assertEqual(result.targets[0].quantity, Decimal("0"))
+        self.assertEqual(result.turnover_notional, Decimal("7"))
+
+    def test_stress_does_not_require_invented_shock_for_zero_unchanged_symbol(self):
+        result = allocate_targets([self.position("A", 0, 10), self.position("B", 0, 0)],
+                                  self.loose_policy(), stress_scenarios={"down": {"A": "-.1"}})
+        self.assertEqual(result.status, "ALLOCATED")
+        self.assertEqual(result.worst_stress_loss, Decimal("1"))
+
+    def test_bounded_integer_portfolios_match_independent_exhaustive_oracle(self):
+        from fractions import Fraction
+        from math import lcm
+        from random import Random
+        rng = Random(796)
+        for case in range(120):
+            current = [rng.randint(-10, 10) for _ in range(2)]
+            desired = [rng.randint(-15, 15) for _ in range(2)]
+            lots = [rng.randint(1, 4) for _ in range(2)]
+            minima = [rng.randint(0, 5) for _ in range(2)]
+            caps = [rng.randint(1, 20) for _ in range(2)]
+            net_limit, gross_limit = rng.randint(0, 10), rng.randint(2, 25)
+            turnover_limit = rng.randint(1, 25)
+            candidates = [self.position(chr(65+i), current[i], desired[i], lot=str(lots[i]),
+                                       min_notional=str(minima[i]), max_executable_notional=str(caps[i]))
+                          for i in range(2)]
+            # A uniform rational grid at lcm(changes) includes every integer
+            # order transition; independent integer arithmetic supplies truth.
+            denom = lcm(*(abs(desired[i]-current[i]) or 1 for i in range(2)))
+            expected = None
+            for step in range(denom, -1, -1):
+                targets, turnover = [], 0
+                for i in range(2):
+                    change = desired[i] - current[i]
+                    raw = min(Fraction(abs(change)*step, denom), caps[i])
+                    delta = int(raw // lots[i])*lots[i]
+                    if delta < minima[i]:
+                        delta = 0
+                    delta *= 1 if change >= 0 else -1
+                    targets.append(current[i]+delta)
+                    turnover += abs(delta)
+                if (abs(sum(targets)) <= net_limit and sum(map(abs, targets)) <= gross_limit
+                        and turnover <= turnover_limit and (turnover > 0 or desired == current)):
+                    expected = tuple(map(Decimal, targets))
+                    break
+            result = allocate_targets(candidates, self.loose_policy(max_net_notional=str(net_limit),
+                        max_gross_notional=str(gross_limit), max_turnover_notional=str(turnover_limit)))
+            with self.subTest(case=case, current=current, desired=desired):
+                if expected is None:
+                    self.assertEqual(result.status, "NO_INCREASE_FALLBACK")
+                    self.assertEqual(tuple(x.quantity for x in result.targets), tuple(map(Decimal, current)))
+                else:
+                    self.assertEqual(result.status, "ALLOCATED")
+                    self.assertEqual(tuple(x.quantity for x in result.targets), expected)
+
+
 if __name__ == "__main__":
     unittest.main()

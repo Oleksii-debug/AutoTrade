@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_DOWN, localcontext
+from fractions import Fraction
 from hashlib import sha256
 import json
 from types import MappingProxyType
@@ -375,8 +376,15 @@ class AllocationPolicy:
     min_scale_tolerance: Decimal = Decimal("0.000001")
     require_adverse_stress_evidence: bool = True
     require_fresh_stress_evidence: bool = True
+    max_execution_states: int = 10000
 
     def __post_init__(self) -> None:
+        if (
+            not isinstance(self.max_execution_states, int)
+            or isinstance(self.max_execution_states, bool)
+            or self.max_execution_states < 1
+        ):
+            raise ValueError("max_execution_states must be a positive integer")
         for field_name in (
             "cash_available",
             "max_gross_notional",
@@ -442,6 +450,7 @@ class AllocationPolicy:
         min_scale_tolerance="0.000001",
         require_adverse_stress_evidence: bool = True,
         require_fresh_stress_evidence: bool = True,
+        max_execution_states: int = 10000,
     ) -> "AllocationPolicy":
         if not isinstance(max_iterations, int) or isinstance(max_iterations, bool) or max_iterations < 1:
             raise ValueError("max_iterations must be a positive integer")
@@ -479,6 +488,7 @@ class AllocationPolicy:
             min_scale_tolerance=_positive(min_scale_tolerance, name="min_scale_tolerance"),
             require_adverse_stress_evidence=require_adverse_stress_evidence,
             require_fresh_stress_evidence=require_fresh_stress_evidence,
+            max_execution_states=max_execution_states,
         )
 
 
@@ -613,12 +623,13 @@ def _evaluate(
 
     for candidate in candidates:
         current_notional = candidate.current_quantity * candidate.price
-        scaled = current_notional + (
-            candidate.desired_notional - current_notional
-        ) * scale
-        raw_delta_notional = scaled - current_notional
+        # Exact ratios avoid losing a lot at recurring transition scales (e.g.
+        # 1/3) or when subtracting a small delta from a large current holding.
+        raw_delta_notional = (
+            Fraction(candidate.desired_notional) - Fraction(current_notional)
+        ) * Fraction(scale)
         if candidate.max_executable_notional is not None:
-            cap = candidate.max_executable_notional
+            cap = Fraction(candidate.max_executable_notional)
             if abs(raw_delta_notional) > cap:
                 raw_delta_notional = (
                     cap if raw_delta_notional > 0 else -cap
@@ -629,10 +640,9 @@ def _evaluate(
         # odd/fractional legacy positions exactly while ensuring every new order
         # increment is executable and cannot overshoot a liquidity cap after
         # target rounding.
-        delta_quantity = _round_quantity(
-            raw_delta_notional,
-            candidate.price,
-            candidate.lot_size,
+        lot_notional = Fraction(candidate.price) * Fraction(candidate.lot_size)
+        delta_quantity = (
+            Decimal(int(raw_delta_notional / lot_notional)) * candidate.lot_size
         )
         executable_delta_notional = delta_quantity * candidate.price
         if (
@@ -686,6 +696,7 @@ def _evaluate(
             (
                 notional * scenario[symbol]
                 for symbol, notional in notionals.items()
+                if notional != 0
             ),
             Decimal("0"),
         )
@@ -821,6 +832,63 @@ def _cash_fallback(
     )
 
 
+class _ExecutionSearchBudgetExceeded(Exception):
+    pass
+
+
+def _execution_state_scales(
+    candidates: Sequence[AllocationCandidate], budget: int,
+) -> set[Fraction]:
+    """Enumerate a bounded union of exact order-lot activation thresholds.
+
+    Count candidate transitions before allocating them. Counting duplicates
+    conservatively avoids work proportional to an unbounded lot count even if
+    several symbols happen to have identical thresholds. 0/1 are sentinels and
+    do not consume the transition budget. Legacy max_iterations/tolerance remain
+    accepted configuration fields; they cannot truncate this complete search.
+    """
+    ranges: list[tuple[Fraction, Fraction, int, int]] = []
+    count = 0
+    for candidate in candidates:
+        current = candidate.current_quantity * candidate.price
+        change = abs(Fraction(candidate.desired_notional) - Fraction(current))
+        if change == 0:
+            continue
+        lot = Fraction(candidate.price) * Fraction(candidate.lot_size)
+        extent = change
+        if candidate.max_executable_notional is not None:
+            extent = min(extent, Fraction(candidate.max_executable_notional))
+        last = int(extent // lot)
+        minimum_lots = Fraction(candidate.min_notional) / lot
+        first = max(1, -(-minimum_lots.numerator // minimum_lots.denominator))
+        count += max(0, last - first + 1)
+        if count > budget:
+            raise _ExecutionSearchBudgetExceeded
+        ranges.append((lot, change, first, last))
+    scales = {Fraction(0), Fraction(1)}
+    for lot, change, first, last in ranges:
+        scales.update(k * lot / change for k in range(first, last + 1))
+    return scales
+
+
+def _execution_scale_witness(lower: Fraction, upper: Fraction) -> Decimal:
+    """A finite Decimal in [lower, upper), without rounding below a lot step.
+
+    Distinct rational endpoints are separated by at least 1/(q1*q2).
+    The bit-length-derived decimal precision is conservatively larger than
+    both denominators' decimal sizes, so upward rounding stays in this cell.
+    The explicit rational check keeps the guarantee independent of context.
+    """
+    bits = lower.denominator.bit_length() + upper.denominator.bit_length()
+    with localcontext() as ctx:
+        ctx.prec = max(28, bits + 4)
+        ctx.rounding = ROUND_CEILING
+        witness = Decimal(lower.numerator) / Decimal(lower.denominator)
+    if not lower <= Fraction(witness) < upper:
+        raise ValueError("execution scale cannot represent the selected state")
+    return witness
+
+
 def allocate_targets(
     candidates: Sequence[AllocationCandidate],
     policy: AllocationPolicy,
@@ -829,10 +897,11 @@ def allocate_targets(
     stress_evidence: Sequence[StressScenarioEvidence] = (),
     decision_time: str | None = None,
 ) -> AllocationResult:
-    """Return the largest uniformly scaled feasible target set.
+    """Return the highest reachable feasible executed target state.
 
-    When no positive lot can be proven feasible inside the bounded search,
-    returns an explicit all-cash no-increase fallback.
+    Scale is a deterministic witness for discrete order quantities. If complete
+    search exceeds policy.max_execution_states, preserve the current portfolio
+    with explicit unestablished feasibility instead of asserting infeasibility.
     """
 
     if not candidates:
@@ -943,7 +1012,7 @@ def allocate_targets(
                     "constraints; preserve the current portfolio"
                 ),
             )
-        if requested.gross_notional > 0:
+        if requested.gross_notional > 0 or requested.turnover_notional > 0:
             return requested
         return _cash_fallback(
             candidates,
@@ -954,128 +1023,40 @@ def allocate_targets(
             ),
         )
 
-    low = Decimal("0")
-    high = Decimal("1")
-    best = _evaluate(candidates, policy, normalized_stress, low)
-
-    # Uniform scaling is not globally monotone around absolute-value risk
-    # surfaces.  A feasible interior can exist even when scale 0, 0.5 and 1 are
-    # all infeasible.  Seed the search at deterministic extrema/corners of the
-    # continuous risk functions before using bisection for the upper feasible
-    # boundary.  In particular, portfolio net zero is independent of any one
-    # position crossing zero.
-    critical_scales: set[Decimal] = set()
-
-    def add_interior_root(constant: Decimal, slope: Decimal) -> None:
-        if slope == 0:
-            return
-        crossing = -constant / slope
-        if Decimal("0") < crossing < Decimal("1"):
-            critical_scales.add(crossing)
-
-    current_notionals: dict[str, Decimal] = {}
-    notional_changes: dict[str, Decimal] = {}
-    for candidate in candidates:
-        current_notional = candidate.current_quantity * candidate.price
-        change = candidate.desired_notional - current_notional
-        current_notionals[candidate.symbol] = current_notional
-        notional_changes[candidate.symbol] = change
-        add_interior_root(current_notional, change)
-
-        # A liquidity cap changes the affine target path into a flat segment.
-        # Probe the saturation corner as another deterministic piecewise point.
-        if candidate.max_executable_notional is not None and change != 0:
-            saturation = candidate.max_executable_notional / abs(change)
-            if Decimal("0") < saturation < Decimal("1"):
-                critical_scales.add(saturation)
-
-    add_interior_root(
-        sum(current_notionals.values(), Decimal("0")),
-        sum(notional_changes.values(), Decimal("0")),
-    )
-
-    # Worst stress loss is the upper envelope of affine scenario-loss lines.
-    # Its interior minimum can occur where two scenarios exchange dominance,
-    # not only where one scenario P&L crosses zero.  Probe both roots and all
-    # pairwise intersections so a V-shaped feasible stress interval is not
-    # discarded by an infeasible midpoint.
-    stress_lines: list[tuple[Decimal, Decimal]] = []
-    for scenario in normalized_stress.values():
-        current_pnl = sum(
-            (
-                current_notionals[candidate.symbol] * scenario[candidate.symbol]
-                for candidate in candidates
-            ),
-            Decimal("0"),
+    try:
+        scales = _execution_state_scales(candidates, policy.max_execution_states)
+    except _ExecutionSearchBudgetExceeded:
+        return _cash_fallback(
+            candidates,
+            stress_scenarios=normalized_stress,
+            reason="execution-state search budget exceeded; feasibility not established",
         )
-        pnl_change = sum(
-            (
-                notional_changes[candidate.symbol] * scenario[candidate.symbol]
-                for candidate in candidates
-            ),
-            Decimal("0"),
-        )
-        add_interior_root(current_pnl, pnl_change)
-        stress_lines.append((current_pnl, pnl_change))
 
-    for index, (left_constant, left_slope) in enumerate(stress_lines):
-        for right_constant, right_slope in stress_lines[index + 1 :]:
-            add_interior_root(
-                left_constant - right_constant,
-                left_slope - right_slope,
+    # Every executed portfolio is constant between consecutive lot transitions.
+    # Descending evaluation finds the highest reachable feasible executed state,
+    # including disconnected intervals caused by net/stress/fee-floor gates.
+    upper = Fraction(1)
+    for lower in sorted(scales, reverse=True):
+        if lower == 1:
+            continue  # The full request was already evaluated above.
+        scale = _execution_scale_witness(lower, upper)
+        upper = lower
+        result = _evaluate(candidates, policy, normalized_stress, scale)
+        if result.status == "ALLOCATED" and result.turnover_notional > 0:
+            return replace(
+                result,
+                reason=(
+                    "highest feasible executed target state; scale is a "
+                    "deterministic witness, not a continuous optimum"
+                ),
             )
 
-    for scale in sorted(critical_scales):
-        probe = _evaluate(candidates, policy, normalized_stress, scale)
-        if probe.status == "ALLOCATED" and (
-            best.status != "ALLOCATED" or scale > best.scale
-        ):
-            best = probe
-            low = scale
-
-    for _ in range(policy.max_iterations):
-        if high - low <= policy.min_scale_tolerance:
-            break
-        mid = (low + high) / Decimal("2")
-        result = _evaluate(candidates, policy, normalized_stress, mid)
-        if result.status == "ALLOCATED":
-            best = result
-            low = mid
-        else:
-            high = mid
-
-    if best.turnover_notional == 0 and requested_change:
-        return _cash_fallback(
-            candidates,
-            stress_scenarios=normalized_stress,
-            reason=(
-                "bounded search found no positive-turnover feasible allocation; "
-                "preserve the current portfolio without increasing risk"
-            ),
-        )
-    if best.gross_notional == 0:
-        return _cash_fallback(
-            candidates,
-            stress_scenarios=normalized_stress,
-            reason=(
-                "bounded search found no positive-lot feasible allocation; "
-                "remain in cash"
-            ),
-        )
-
-    return AllocationResult(
-        status="ALLOCATED",
-        scale=best.scale,
-        targets=best.targets,
-        gross_notional=best.gross_notional,
-        net_notional=best.net_notional,
-        estimated_cost=best.estimated_cost,
-        worst_stress_loss=best.worst_stress_loss,
-        cash_required=best.cash_required,
-        turnover_notional=best.turnover_notional,
+    return _cash_fallback(
+        candidates,
+        stress_scenarios=normalized_stress,
         reason=(
-            "requested allocation was infeasible; uniformly reduced to the "
-            "largest verified feasible target found"
+            "complete bounded execution-state search found no positive-turnover "
+            "feasible allocation; preserve the current portfolio"
         ),
     )
 
@@ -1255,6 +1236,19 @@ def allocate_objective_targets(
             stress_evidence=normalized_evidence,
             decision_time=decision_time,
         )
+        if "execution-state search budget exceeded" in result.reason:
+            fallback = _cash_fallback(
+                allocation_candidates,
+                stress_scenarios=normalized_stress,
+                reason=result.reason,
+            )
+            return ObjectiveAllocationResult(
+                allocation=fallback,
+                selected_symbols=(),
+                expected_net_utility=Decimal("0"),
+                objective_version="deterministic-net-utility-v3",
+                reason=result.reason,
+            )
         if result.status != "ALLOCATED":
             continue
         subset_objective = {
@@ -2292,4 +2286,3 @@ def revalidate_evidence_bound_allocation(
     if expected_digest != result.decision_digest:
         raise ValueError("allocation decision digest does not match result content")
     return True
-

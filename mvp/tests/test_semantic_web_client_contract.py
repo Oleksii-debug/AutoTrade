@@ -214,7 +214,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
     def test_poll_auto_recovers_snapshot_when_previous_refresh_failed(self):
         js = APP.read_text(encoding="utf-8")
         poll = js.index("async function pollEvents()")
-        event_fetch = js.index("${API}/events?after=", poll)
+        event_fetch = js.index('HOST_API.route("streamEvents") + "?after="', poll)
         recovery = js.index("if (!state.snapshotReady)", poll)
         snapshot = js.index("await refreshSnapshot();", recovery)
         self.assertLess(recovery, event_fetch)
@@ -358,6 +358,32 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("field_errors must be an array", js)
         self.assertIn("response.status !== 200 && response.status !== 409", js)
 
+    def test_operation_identity_is_canonical_uuid_before_route_use(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("function canonicalId(value, name)", js)
+        self.assertIn(
+            "/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/",
+            js,
+        )
+        self.assertIn(
+            'const commandId = canonicalId(result.command_id, "command_id")',
+            js,
+        )
+        self.assertIn(
+            ': canonicalId(result.operation_id, "operation_id")',
+            js,
+        )
+        self.assertIn(
+            'const operationId = canonicalId(result.operation_id, "operation_id")',
+            js,
+        )
+        parse_command = js.index("function parseCommandResult(value, expectedCommandId)")
+        command_route = js.index('HOST_API.route("getOperation"', parse_command)
+        self.assertLess(
+            js.index('canonicalId(result.operation_id, "operation_id")', parse_command),
+            command_route,
+        )
+
     def test_accepted_command_requires_durable_operation_identity(self):
         js = APP.read_text(encoding="utf-8")
         self.assertIn(
@@ -386,7 +412,7 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("Remaining uncertainty", html)
         self.assertIn("function parseOperationResult(value, expectedOperationId)", js)
         self.assertIn(
-            "${API}/operations/${encodeURIComponent(operationId)}",
+            'HOST_API.route("getOperation", {operation_id: operationId})',
             js,
         )
         self.assertIn("OperationResult operation_id does not match", js)

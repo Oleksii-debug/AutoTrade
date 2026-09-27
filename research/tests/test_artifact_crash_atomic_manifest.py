@@ -66,6 +66,40 @@ class CrashAtomicManifestTests(unittest.TestCase):
             ):
                 reopened.read_authenticated_snapshot(artifact_id)
 
+    def test_hashless_prepared_v2_manifest_cannot_drive_retry_rollback(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "store"
+            store = ArtifactStore(root)
+            artifact_id = str(uuid4())
+            payload = b"hashless-prepared-must-not-rollback"
+            store.publish_bytes(
+                artifact_id=artifact_id,
+                data=payload,
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+
+            manifest_path = root / "manifests" / f"{artifact_id}.json"
+            raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+            raw["publication_state"] = "PREPARED"
+            raw.pop("manifest_hash")
+            forged = json.dumps(raw, sort_keys=True, separators=(",", ":")) + "\n"
+            manifest_path.write_text(forged, encoding="utf-8")
+            forged_bytes = manifest_path.read_bytes()
+
+            reopened = ArtifactStore(root)
+            with self.assertRaisesRegex(
+                ArtifactIntegrityError,
+                "lacks integrity binding",
+            ):
+                reopened.publish_bytes(
+                    artifact_id=artifact_id,
+                    data=payload,
+                    media_type="application/octet-stream",
+                    rights={"storage": True, "export": False},
+                )
+            self.assertEqual(manifest_path.read_bytes(), forged_bytes)
+
     @unittest.skipIf(
         sys.platform == "win32",
         "same-bytes prefix replacement regression uses POSIX directory rename semantics",

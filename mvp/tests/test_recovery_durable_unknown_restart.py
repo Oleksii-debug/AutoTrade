@@ -21,8 +21,11 @@ class DurableUnknownRestartTests(unittest.TestCase):
         event_type: str,
         version: int,
         suffix: str,
+        payload: dict[str, object] | None = None,
+        owner_epoch: str = "1",
     ) -> None:
-        payload = {"client_order_id": "manual-" + suffix}
+        if payload is None:
+            payload = {"client_order_id": "manual-" + suffix}
         store.append_event(
             {
                 "event_id": "manual-" + suffix,
@@ -33,9 +36,42 @@ class DurableUnknownRestartTests(unittest.TestCase):
                 "payload": payload,
                 "payload_hash": payload_digest(payload),
                 "committed_at": "2026-09-25T20:01:00Z",
-                "owner_epoch": "1",
+                "owner_epoch": owner_epoch,
             }
         )
+
+    def _prepared_only_dispatch(
+        self,
+        store: JournalStore,
+        *,
+        attempt_id: str,
+    ) -> dict[str, object]:
+        dispatcher = GuardedDispatcher(
+            store,
+            environment="SIMULATION",
+            account_id="acct",
+            owner_token="sender-a",
+            owner_epoch=1,
+        )
+
+        def stop_before_send(_client_id, _request, _final_guard):
+            raise SystemExit("stop after durable Prepared")
+
+        with self.assertRaises(SystemExit):
+            dispatcher.dispatch(
+                attempt_id=attempt_id,
+                intent_id="intent-1",
+                intent_hash="intent-hash-1",
+                provider="sim",
+                request={"side": "BUY"},
+                now="2026-09-25T20:00:00Z",
+                authority_check=lambda _intent_hash, _now: (True, "allowed"),
+                transport_send=stop_before_send,
+            )
+        events = store.load_events_by_aggregate_type("submission_attempt")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event_type"], "SubmissionPrepared")
+        return events[0]
 
     def _unknown_dispatch(self, store: JournalStore, *, attempt_id: str = "attempt-1"):
         dispatcher = GuardedDispatcher(
@@ -62,6 +98,98 @@ class DurableUnknownRestartTests(unittest.TestCase):
         )
         self.assertEqual(outcome.status, "UNKNOWN")
         return outcome
+
+    def test_restart_rejects_sender_identity_mutations_before_state_mutation(self):
+        cases = (
+            ("sending-envelope-epoch", "2", None, None, None, "1", None),
+            ("sending-payload-epoch", "1", 2, None, None, "1", None),
+            ("sending-owner-token", "1", None, "sender-b", None, "1", None),
+            ("sending-client-order-id", "1", None, None, "swapped-client", "1", None),
+            ("unknown-envelope-epoch", "1", None, None, None, "2", None),
+            ("unknown-client-order-id", "1", None, None, None, "1", "swapped-client"),
+        )
+        for (
+            name,
+            sending_envelope_epoch,
+            sending_payload_epoch,
+            sending_owner_token,
+            sending_client_order_id,
+            unknown_envelope_epoch,
+            unknown_client_order_id,
+        ) in cases:
+            with self.subTest(case=name), TemporaryDirectory() as directory:
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                prepared = self._prepared_only_dispatch(
+                    store,
+                    attempt_id="attempt-" + name,
+                )
+                aggregate_id = prepared["aggregate_id"]
+                prepared_payload = prepared["payload"]
+                self.assertIsInstance(prepared_payload, dict)
+                client_order_id = prepared_payload["client_order_id"]
+                owner_token = prepared_payload["owner_token"]
+                owner_epoch = prepared_payload["owner_epoch"]
+
+                sending_payload = {
+                    "client_order_id": (
+                        client_order_id
+                        if sending_client_order_id is None
+                        else sending_client_order_id
+                    ),
+                    "owner_token": (
+                        owner_token
+                        if sending_owner_token is None
+                        else sending_owner_token
+                    ),
+                    "owner_epoch": (
+                        owner_epoch
+                        if sending_payload_epoch is None
+                        else sending_payload_epoch
+                    ),
+                    "reason": "final_send_barrier_passed",
+                }
+                self._append_submission_event(
+                    store,
+                    aggregate_id=aggregate_id,
+                    event_type="SubmissionSending",
+                    version=2,
+                    suffix=name + "-sending",
+                    payload=sending_payload,
+                    owner_epoch=sending_envelope_epoch,
+                )
+                self._append_submission_event(
+                    store,
+                    aggregate_id=aggregate_id,
+                    event_type="SubmissionUnknown",
+                    version=3,
+                    suffix=name + "-unknown",
+                    payload={
+                        "client_order_id": (
+                            client_order_id
+                            if unknown_client_order_id is None
+                            else unknown_client_order_id
+                        ),
+                        "reason": "ambiguous",
+                    },
+                    owner_epoch=unknown_envelope_epoch,
+                )
+
+                recovery = RecoveryController(
+                    owner_store=store,
+                    owner_scope="SIMULATION:acct",
+                )
+                with self.assertRaises(RuntimeError):
+                    recovery.recover_durable_submission_uncertainty(
+                        environment="SIMULATION",
+                        account_id="acct",
+                    )
+
+                self.assertEqual(recovery.state, HostState.STOPPED)
+                self.assertEqual(recovery.reason_codes, set())
+                self.assertEqual(recovery.unresolved_attempts, set())
+                self.assertEqual(recovery._unresolved_send_attempts, set())
+                self.assertEqual(recovery._unresolved_send_bindings, {})
+                self.assertEqual(recovery._recovered_unknown_identities, {})
 
     def test_restart_rebuilds_durable_unknown_before_ready(self):
         with TemporaryDirectory() as directory:

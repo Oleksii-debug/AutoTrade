@@ -414,7 +414,7 @@ class DurableReservationBookTests(unittest.TestCase):
         before = book.total_reserved("CASH:USD")
         with self.assertRaisesRegex(
             ReservationConflict,
-            "lacks canonical reconciliation semantics",
+            "requires canonical durable order projection",
         ):
             book.mark_terminal(
                 command_id="cmd-terminal-filled",

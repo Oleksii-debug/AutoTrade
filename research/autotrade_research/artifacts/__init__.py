@@ -83,6 +83,11 @@ from ._windows_retained_rename_fix import install_windows_retained_rename_fix
 install_windows_retained_rename_fix()
 del install_windows_retained_rename_fix
 
+from ._publication_transaction_fix import install_publication_transaction_fix
+
+install_publication_transaction_fix()
+del install_publication_transaction_fix
+
 from ._publication_contract_compat import install_publication_contract_compatibility
 
 install_publication_contract_compatibility()

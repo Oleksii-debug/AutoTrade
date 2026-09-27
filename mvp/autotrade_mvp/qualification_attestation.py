@@ -1084,7 +1084,7 @@ def _resolve_evidence(
     store: ArtifactStore, ref: EvidenceArtifactRef
 ) -> None:
     try:
-        manifest = store.load_manifest(ref.artifact_id)
+        manifest, data = store.read_authenticated_snapshot(ref.artifact_id)
         if "manifest_hash" not in manifest:
             raise QualificationTrustError(
                 "evidence manifest lacks integrity binding"
@@ -1113,7 +1113,6 @@ def _resolve_evidence(
             raise QualificationTrustError(
                 "evidence is not bound to the attested source SHA"
             )
-        data = store.read_bytes(ref.artifact_id)
     except (FileNotFoundError, ArtifactIntegrityError) as error:
         raise QualificationTrustError(
             "evidence artifact cannot be resolved with integrity"

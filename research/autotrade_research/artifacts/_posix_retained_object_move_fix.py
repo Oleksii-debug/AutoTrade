@@ -115,6 +115,9 @@ def _publish_object_posix_atomic(
             )
             if moved_new_object:
                 temporary_name = None
+                # The cross-directory rename mutates both directories. Durably
+                # sync the exact retained target and source authorities; never
+                # reopen a lexical object path after the commit point.
                 _publication._sync_directory_fd(prefix_fd)
                 _publication._sync_directory_fd(self._retained_staging_fd)
             else:
@@ -131,10 +134,6 @@ def _publish_object_posix_atomic(
                 digest,
                 expected_bytes=len(data),
             )
-            if moved_new_object:
-                # Descriptor fsyncs above are authoritative. Preserve the
-                # historical instrumentation seam for qualification evidence.
-                _store.sync_parent_directory(self._object_path(digest))
             _hardening._assert_prefix_identity(self, prefix, prefix_identity)
         finally:
             if descriptor is not None:
@@ -152,9 +151,6 @@ def _publish_object_posix_atomic(
 def install_posix_retained_object_move_fix() -> None:
     if getattr(_store.ArtifactStore, "_posix_retained_object_move_fix", False):
         return
-    # _publish_bytes_posix in the hardening module resolves this global at call
-    # time, so update both the canonical publication seam and that module's
-    # global without introducing a second ArtifactStore implementation.
     _hardening._publish_object_posix = _publish_object_posix_atomic
     _publication._publish_object_posix = _publish_object_posix_atomic
     _store.ArtifactStore._posix_retained_object_move_fix = True

@@ -521,15 +521,12 @@ class ArtifactStore:
     def _manifest_descriptor_snapshot(entry: os.stat_result) -> tuple[int, ...]:
         """Return descriptor metadata that must remain stable while bytes are read."""
 
-        # ctime changes on a pure rename on POSIX. The manifest descriptor keeps
-        # the immutable bytes pinned while the pathname may transiently move and
-        # return, so ctime is not a content-integrity signal here. Mode, link
-        # count, size and mtime still detect metadata/content mutation.
         return (
             entry.st_mode,
             entry.st_nlink,
             entry.st_size,
             entry.st_mtime_ns,
+            entry.st_ctime_ns,
         )
 
     def _open_manifest_descriptor(

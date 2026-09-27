@@ -112,13 +112,15 @@ def _verify_manifest_integrity_v2_commit(
 
 def _load_manifest_committed(self, artifact_id: str):
     manifest = _ORIGINAL_LOAD_MANIFEST(self, artifact_id)
-    if (
-        manifest.get("schema_version") == 2
-        and manifest.get("publication_state") != "COMMITTED"
-    ):
-        raise _store.ArtifactIntegrityError(
-            "artifact manifest publication is not committed"
-        )
+    if manifest.get("schema_version") == 2:
+        if manifest.get("publication_state") != "COMMITTED":
+            raise _store.ArtifactIntegrityError(
+                "artifact manifest publication is not committed"
+            )
+        # Schema v2 is an authenticated publication protocol. A hashless v2
+        # record must never become metadata authority merely because its state
+        # string says COMMITTED; legacy hashless compatibility is v1-only.
+        _store._verify_manifest_integrity(manifest, required=True)
     # A durable COMMITTED marker is not sufficient authority by itself. Rebind
     # the manifest to the exact retained object-prefix generation before any
     # caller can observe it as committed metadata after a process/power crash.

@@ -123,6 +123,23 @@ class CrashAtomicManifestTests(unittest.TestCase):
                     "publication is not committed",
                 ):
                     after_swap.read_bytes(artifact_id)
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "object generation changed after publication",
+                ):
+                    after_swap.publish_bytes(
+                        artifact_id=artifact_id,
+                        data=payload,
+                        media_type="application/octet-stream",
+                        rights={"storage": True, "export": False},
+                    )
+                # The interrupted PREPARED record remains a forensic barrier;
+                # retry must not erase/rebind it around a same-bytes replacement.
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "publication is not committed",
+                ):
+                    after_swap.load_manifest(artifact_id)
             finally:
                 for entry in prefix.iterdir():
                     entry.unlink()

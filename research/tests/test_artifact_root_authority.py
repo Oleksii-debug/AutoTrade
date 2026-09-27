@@ -28,6 +28,10 @@ class ArtifactRootAuthorityTests(unittest.TestCase):
             rights={"storage": True, "export": False},
         )
 
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "retained Windows root HANDLE prevents lexical root replacement",
+    )
     def test_whole_root_replacement_invalidates_old_store_generation(self):
         with TemporaryDirectory() as directory:
             root = Path(directory) / "store"
@@ -52,6 +56,10 @@ class ArtifactRootAuthorityTests(unittest.TestCase):
                 del second
                 gc.collect()
 
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "retained Windows root HANDLE prevents lexical root replacement",
+    )
     def test_configured_path_lock_does_not_split_when_root_is_replaced(self):
         with TemporaryDirectory() as directory:
             root = Path(directory) / "store"
@@ -136,42 +144,44 @@ class ArtifactRootAuthorityTests(unittest.TestCase):
                 gc.collect()
 
     @unittest.skipUnless(sys.platform == "win32", "real Windows HANDLE semantics required")
-    def test_root_swap_after_windows_manifest_commit_cannot_return_success(self):
+    def test_retained_windows_root_handle_blocks_root_replacement_after_manifest_commit(self):
         with TemporaryDirectory() as directory:
             root = Path(directory) / "store"
             detached = Path(directory) / "store-detached"
             store = ArtifactStore(root)
             real_publish_manifest = windows_publication._publish_manifest_windows
-            swapped = False
+            replacement_blocked = False
 
-            def commit_then_swap(self, *, manifest, replace_existing):
-                nonlocal swapped
+            def commit_then_attempt_root_swap(self, *, manifest, replace_existing):
+                nonlocal replacement_blocked
                 result = real_publish_manifest(
                     self,
                     manifest=manifest,
                     replace_existing=replace_existing,
                 )
-                if not swapped:
-                    swapped = True
+                try:
                     os.replace(root, detached)
-                    root.mkdir()
+                except PermissionError:
+                    replacement_blocked = True
+                else:
+                    raise AssertionError(
+                        "retained Windows root HANDLE unexpectedly allowed root replacement"
+                    )
                 return result
 
             try:
                 with patch.object(
                     windows_publication,
                     "_publish_manifest_windows",
-                    side_effect=commit_then_swap,
+                    side_effect=commit_then_attempt_root_swap,
                 ):
-                    with self.assertRaisesRegex(
-                        ArtifactIntegrityError,
-                        "root changed after initialization",
-                    ):
-                        self._publish(store, b"windows-root-swap-after-commit")
-
-                self.assertTrue(swapped)
-                self.assertEqual(list(root.glob("manifests/*.json")), [])
-                self.assertEqual(len(list(detached.glob("manifests/*.json"))), 1)
+                    manifest = self._publish(
+                        store,
+                        b"windows-root-handle-blocks-swap",
+                    )
+                self.assertTrue(replacement_blocked)
+                self.assertTrue(store._manifest_path(manifest["artifact_id"]).exists())
+                self.assertFalse(detached.exists())
             finally:
                 del store
                 gc.collect()

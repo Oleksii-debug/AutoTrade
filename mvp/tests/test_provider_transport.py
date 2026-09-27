@@ -3570,7 +3570,7 @@ class KrakenFuturesGuardedTransportTests(unittest.TestCase):
         self.assertEqual(request.headers["Nonce"], "1415957147987")
         self.assertEqual(
             request.headers["Authent"],
-            "7dE9gaKJpFC2q9UlWpTh4T0vTnhPHQ1EFCwR3SrNkx6rALljH3cAZSehQ92aY9Wj0Flz0HlcVysCZuUUMdx8mQ==",
+            "Dx7wkm8YwJNpIwhewi4P97983BAGM3iy5iLzUS1kGNPnWQUH6e21X4NjvXUj1FPNfhvEx39t8ZgzSoK4vj5K2Q==",
         )
         self.assertNotIn("test-futures-secret", repr(request))
         self.assertNotIn("dGVzdC1mdXR1cmVzLXNlY3JldA==", repr(request))

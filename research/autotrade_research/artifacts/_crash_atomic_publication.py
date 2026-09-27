@@ -8,7 +8,6 @@ from typing import Any
 from . import _crash_atomic_manifest as _contract
 from . import _namespace_guard as _guard
 from . import _publication_contract_compat as _compat
-from . import _publication_transaction_fix as _transaction
 from . import _retained_namespace as _retained
 from . import _retained_publication_hardening as _posix
 from . import _windows_retained_publication_hardening as _windows
@@ -42,6 +41,9 @@ def _immutable_inputs(
 
 
 def _legacy_rebind(self, immutable, *, windows: bool):
+    # Legacy v1 remains a compatibility read format. This compatibility path is
+    # intentionally isolated from the v2 PREPARED/COMMITTED restart protocol;
+    # it must never be used to retire a v2 transaction state.
     rebound = {
         "schema_version": 1,
         **immutable,
@@ -58,34 +60,54 @@ def _legacy_rebind(self, immutable, *, windows: bool):
     return rebound
 
 
+def _commit_prepared(self, prepared: dict[str, Any], *, windows: bool):
+    """Resume an authenticated PREPARED transaction without unlink-by-name.
+
+    PREPARED is durable recovery evidence, not garbage. Once its exact object
+    generation and object bytes are re-proven, retry may finish the existing
+    transaction by replacing PREPARED with COMMITTED. If anything fails before
+    or after that replace, leave the durable state in place. A fresh process can
+    then classify PREPARED as fail-closed or independently validate COMMITTED;
+    no safety argument depends on deleting a pathname after validating another
+    inode generation.
+    """
+
+    _contract._verify_generation(self, prepared)
+    self._verify_manifest_object(prepared)
+    _retained._assert_all_continuity(self)
+    committed = _committed_manifest(prepared)
+    publisher = (
+        _windows._publish_manifest_windows
+        if windows
+        else _posix._publish_manifest_posix
+    )
+    publisher(self, manifest=committed, replace_existing=True)
+    _retained._assert_all_continuity(self)
+    self._verify_manifest_object(committed)
+    return committed
+
+
 def _handle_existing(self, existing, immutable, *, windows: bool):
     if existing is None:
         return None
-    if existing.get("schema_version") == 2:
+
+    schema = existing.get("schema_version")
+    if schema == 2:
         # Every v2 record is part of the authenticated publication protocol.
-        # Verify its integrity without applying COMMITTED-only admissibility yet,
-        # because an interrupted PREPARED record is a valid forensic barrier.
+        # Verify the record before it can influence retry or recovery behavior.
         _contract._ORIGINAL_VERIFY_MANIFEST_INTEGRITY(existing, required=True)
-    if existing.get("schema_version") == 2 and existing.get("publication_state") == "PREPARED":
-        # A PREPARED manifest is a durable forensic barrier after an interrupted
-        # publication. Never erase it before proving that the exact object-prefix
-        # generation recorded before the crash is still authoritative. Otherwise
-        # a same-bytes replacement prefix could be accepted on retry and promoted
-        # under a fresh COMMITTED manifest, defeating crash-atomic generation
-        # binding. A mismatch deliberately remains fail-closed and leaves the
-        # PREPARED manifest in place for audit/recovery rather than guessing.
-        _contract._verify_generation(self, existing)
-        rollback = (
-            _transaction._rollback_new_manifest_windows
-            if windows
-            else _transaction._rollback_new_manifest_posix
-        )
-        rollback(self, existing["artifact_id"], (existing,))
-        return None
+
+    # Immutable caller intent must agree before either a PREPARED transaction is
+    # resumed or an existing COMMITTED transaction is returned. A crash barrier
+    # must never be silently reused for a different publication request.
     if any(existing.get(key) != value for key, value in immutable.items()):
         raise _store.ArtifactConflict(
             "artifact_id is already committed with different content or metadata"
         )
+
+    if schema == 2 and existing.get("publication_state") == "PREPARED":
+        return _commit_prepared(self, existing, windows=windows)
+
     self._verify_manifest_object(existing)
     if not _store._verify_manifest_integrity(existing, required=False):
         return _legacy_rebind(self, immutable, windows=windows)
@@ -110,21 +132,6 @@ def _committed_manifest(prepared):
     committed["publication_state"] = "COMMITTED"
     committed["manifest_hash"] = _store._manifest_integrity_hash(committed)
     return committed
-
-
-def _rollback_expected(
-    self,
-    expected_manifests: tuple[dict[str, Any], ...],
-    failure: BaseException,
-    *,
-    windows: bool,
-) -> None:
-    _transaction._rollback_or_raise(
-        self,
-        expected_manifests,
-        failure,
-        windows=windows,
-    )
 
 
 def _validated_inputs(self, *, artifact_id, data, media_type, rights, source_refs, metadata):
@@ -186,16 +193,15 @@ def _publish_posix(
     _retained._assert_all_continuity(self)
 
     prepared = _prepared_manifest(immutable, generation)
-    try:
-        _posix._publish_manifest_posix(
-            self, manifest=prepared, replace_existing=False
-        )
-        _posix._assert_prefix_identity(self, prefix, prefix_identity)
-        _retained._assert_all_continuity(self)
-        self._verify_manifest_object(prepared)
-    except BaseException as failure:
-        _rollback_expected(self, (prepared,), failure, windows=False)
-        raise
+    # Once PREPARED becomes durable it is deliberately retained on every later
+    # failure. It is authenticated, non-readable transaction evidence that can
+    # only be resumed when the exact recorded object generation is still valid.
+    _posix._publish_manifest_posix(
+        self, manifest=prepared, replace_existing=False
+    )
+    _posix._assert_prefix_identity(self, prefix, prefix_identity)
+    _retained._assert_all_continuity(self)
+    self._verify_manifest_object(prepared)
 
     committed = _committed_manifest(prepared)
     try:
@@ -206,20 +212,12 @@ def _publish_posix(
         self._verify_manifest_object(committed)
         return committed
     except _compat.LegacyPostCommitFault:
-        # This isolated compatibility signal is emitted only after the retained
-        # COMMITTED manifest is already durable. It models a process death after
-        # the commit point, so rolling the committed authority back would invert
-        # the historical contract the probe is characterizing.
+        # Historical crash characterization: the COMMITTED bytes are already
+        # durable and must remain restart-verifiable.
         raise
-    except BaseException as failure:
-        # Replacement helpers may fail either before or after their rename
-        # commit point. Both durable bytes are admissible rollback identities.
-        _rollback_expected(
-            self,
-            (prepared, committed),
-            failure,
-            windows=False,
-        )
+    except BaseException:
+        # Do not unlink a pathname after validating a possibly different inode.
+        # The durable PREPARED/COMMITTED state is the recovery authority.
         raise
 
 
@@ -262,21 +260,17 @@ def _publish_windows(
         )
         _retained._assert_all_continuity(self)
         prepared = _prepared_manifest(immutable, generation)
-        try:
-            _windows._publish_manifest_windows(
-                self, manifest=prepared, replace_existing=False
-            )
-            _windows._verify_bound_windows_object(
-                self, prefix_handle, digest, expected_bytes=len(data)
-            )
-            _windows._assert_windows_prefix_identity(
-                self, prefix_name, prefix_identity
-            )
-            _retained._assert_all_continuity(self)
-            self._verify_manifest_object(prepared)
-        except BaseException as failure:
-            _rollback_expected(self, (prepared,), failure, windows=True)
-            raise
+        _windows._publish_manifest_windows(
+            self, manifest=prepared, replace_existing=False
+        )
+        _windows._verify_bound_windows_object(
+            self, prefix_handle, digest, expected_bytes=len(data)
+        )
+        _windows._assert_windows_prefix_identity(
+            self, prefix_name, prefix_identity
+        )
+        _retained._assert_all_continuity(self)
+        self._verify_manifest_object(prepared)
 
         committed = _committed_manifest(prepared)
         try:
@@ -288,13 +282,9 @@ def _publish_windows(
             return committed
         except _compat.LegacyPostCommitFault:
             raise
-        except BaseException as failure:
-            _rollback_expected(
-                self,
-                (prepared, committed),
-                failure,
-                windows=True,
-            )
+        except BaseException:
+            # Keep cross-platform restart semantics identical: the durable
+            # protocol state, not best-effort cleanup, decides admissibility.
             raise
     finally:
         _guard._close_windows_handle(prefix_handle)

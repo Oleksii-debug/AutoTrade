@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from hashlib import sha256
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -30,6 +31,40 @@ class CrashAtomicManifestTests(unittest.TestCase):
             self.assertEqual(manifest["publication_state"], "COMMITTED")
             self.assertIn("object_generation", manifest)
             self.assertEqual(store.read_bytes(artifact_id), payload)
+
+    def test_hashless_committed_v2_manifest_is_not_metadata_authority(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "store"
+            store = ArtifactStore(root)
+            artifact_id = str(uuid4())
+            store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"authenticated-v2-only",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+
+            manifest_path = root / "manifests" / f"{artifact_id}.json"
+            raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(raw["schema_version"], 2)
+            self.assertEqual(raw["publication_state"], "COMMITTED")
+            raw.pop("manifest_hash")
+            manifest_path.write_text(
+                json.dumps(raw, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+
+            reopened = ArtifactStore(root)
+            with self.assertRaisesRegex(
+                ArtifactIntegrityError,
+                "lacks integrity binding",
+            ):
+                reopened.load_manifest(artifact_id)
+            with self.assertRaisesRegex(
+                ArtifactIntegrityError,
+                "lacks integrity binding",
+            ):
+                reopened.read_authenticated_snapshot(artifact_id)
 
     @unittest.skipIf(
         sys.platform == "win32",

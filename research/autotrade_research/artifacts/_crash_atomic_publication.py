@@ -7,6 +7,7 @@ from typing import Any
 
 from . import _crash_atomic_manifest as _contract
 from . import _namespace_guard as _guard
+from . import _publication_contract_compat as _compat
 from . import _publication_transaction_fix as _transaction
 from . import _retained_namespace as _retained
 from . import _retained_publication_hardening as _posix
@@ -199,6 +200,12 @@ def _publish_posix(
         _retained._assert_all_continuity(self)
         self._verify_manifest_object(committed)
         return committed
+    except _compat.LegacyPostCommitFault:
+        # This isolated compatibility signal is emitted only after the retained
+        # COMMITTED manifest is already durable. It models a process death after
+        # the commit point, so rolling the committed authority back would invert
+        # the historical contract the probe is characterizing.
+        raise
     except BaseException as failure:
         # Replacement helpers may fail either before or after their rename
         # commit point. Both durable bytes are admissible rollback identities.
@@ -274,6 +281,8 @@ def _publish_windows(
             _retained._assert_all_continuity(self)
             self._verify_manifest_object(committed)
             return committed
+        except _compat.LegacyPostCommitFault:
+            raise
         except BaseException as failure:
             _rollback_expected(
                 self,

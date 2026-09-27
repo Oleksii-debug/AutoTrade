@@ -3548,21 +3548,24 @@ class KrakenFuturesGuardedTransportTests(unittest.TestCase):
                 "symbol": "PF_XBTUSD",
                 "side": "buy",
                 "size": "1",
-                "cliOrdId": "123e4567-e89b-12d3-a456-426614174000",
+                "cliOrdId": "client+id",
                 "limitPrice": "60000",
                 "reduceOnly": "true",
             },
             credential_plaintext=self.credential_plaintext(),
             nonce=1_415_957_147_987,
         )
+        exact_query = (
+            "cliOrdId=client%2Bid&limitPrice=60000&orderType=lmt&"
+            "reduceOnly=true&side=buy&size=1&symbol=PF_XBTUSD"
+        )
         self.assertEqual(
             request.url,
-            "https://futures.kraken.com/derivatives/api/v3/sendorder",
+            "https://futures.kraken.com/derivatives/api/v3/sendorder?"
+            + exact_query,
         )
-        self.assertEqual(
-            request.body,
-            b"cliOrdId=123e4567-e89b-12d3-a456-426614174000&limitPrice=60000&orderType=lmt&reduceOnly=true&side=buy&size=1&symbol=PF_XBTUSD",
-        )
+        self.assertEqual(request.body, b"")
+        self.assertNotIn("Content-Type", request.headers)
         self.assertEqual(request.headers["APIKey"], "kraken-futures-key")
         self.assertEqual(request.headers["Nonce"], "1415957147987")
         self.assertEqual(
@@ -3663,10 +3666,12 @@ class KrakenFuturesGuardedTransportTests(unittest.TestCase):
             self.assertEqual(len(resolver.calls), 1)
             self.assertEqual(len(wire.requests), 1)
             signed = wire.requests[0]
-            self.assertEqual(
-                signed.url,
-                "https://demo-futures.kraken.com/derivatives/api/v3/sendorder",
+            self.assertTrue(
+                signed.url.startswith(
+                    "https://demo-futures.kraken.com/derivatives/api/v3/sendorder?"
+                )
             )
+            self.assertEqual(signed.body, b"")
             self.assertEqual(signed.headers["APIKey"], "kraken-futures-key")
             self.assertNotIn("dGVzdC1mdXR1cmVzLXNlY3JldA==", repr(signed))
 

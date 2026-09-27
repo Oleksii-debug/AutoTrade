@@ -1,4 +1,5 @@
 from hashlib import sha256
+import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -12,7 +13,7 @@ from autotrade_research.artifacts import _retained_publication_hardening as publ
 
 @unittest.skipIf(os.name == "nt", "POSIX retained-prefix transaction regression")
 class PublicationTransactionTests(unittest.TestCase):
-    def test_post_last_check_prefix_swap_rolls_back_manifest_and_retry_is_clean(self):
+    def test_post_last_check_prefix_swap_leaves_prepared_barrier_until_generation_restored(self):
         with TemporaryDirectory() as directory:
             root = Path(directory) / "store"
             store = ArtifactStore(root)
@@ -53,13 +54,31 @@ class PublicationTransactionTests(unittest.TestCase):
                         )
 
                 self.assertTrue(swapped)
-                self.assertFalse(store._manifest_path(artifact_id).exists())
+                manifest_path = store._manifest_path(artifact_id)
+                raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+                self.assertEqual(raw["schema_version"], 2)
+                self.assertEqual(raw["publication_state"], "PREPARED")
+                prepared_bytes = manifest_path.read_bytes()
                 self.assertTrue((detached / digest).exists())
                 self.assertEqual(list(prefix.iterdir()), [])
 
                 reopened = ArtifactStore(root)
-                with self.assertRaises(FileNotFoundError):
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "publication is not committed",
+                ):
                     reopened.load_manifest(artifact_id)
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "object generation changed after publication",
+                ):
+                    reopened.publish_bytes(
+                        artifact_id=artifact_id,
+                        data=payload,
+                        media_type="application/octet-stream",
+                        rights={"storage": True, "export": False},
+                    )
+                self.assertEqual(manifest_path.read_bytes(), prepared_bytes)
 
                 prefix.rmdir()
                 os.replace(detached, prefix)
@@ -71,7 +90,8 @@ class PublicationTransactionTests(unittest.TestCase):
                 )
                 self.assertEqual(manifest["artifact_id"], artifact_id)
                 self.assertEqual(manifest["sha256"], f"sha256:{digest}")
-                self.assertTrue(reopened._manifest_path(artifact_id).exists())
+                self.assertEqual(manifest["publication_state"], "COMMITTED")
+                self.assertEqual(reopened.read_bytes(artifact_id), payload)
             finally:
                 if detached.exists() and not prefix.exists():
                     os.replace(detached, prefix)

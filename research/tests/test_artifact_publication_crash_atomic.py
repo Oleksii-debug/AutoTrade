@@ -93,6 +93,7 @@ raise AssertionError("publication unexpectedly survived hard-crash seam")
             raw = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(raw["schema_version"], 2)
             self.assertEqual(raw["publication_state"], "PREPARED")
+            prepared_bytes = manifest_path.read_bytes()
 
             reopened = ArtifactStore(root)
             with self.assertRaisesRegex(
@@ -109,6 +110,23 @@ raise AssertionError("publication unexpectedly survived hard-crash seam")
             audit = reopened.audit()
             self.assertIn(manifest_path.name, audit.corrupt_objects)
             self.assertEqual(audit.manifests, 1)
+
+            # Equal bytes in a replacement prefix are not enough to recover an
+            # interrupted publication. Retry must honor the generation recorded
+            # by PREPARED and leave that durable forensic barrier untouched.
+            with self.assertRaisesRegex(
+                ArtifactIntegrityError,
+                "object generation changed after publication",
+            ):
+                reopened.publish_bytes(
+                    artifact_id=artifact_id,
+                    data=payload,
+                    media_type="application/octet-stream",
+                    rights={"storage": True, "export": False},
+                )
+            self.assertEqual(manifest_path.read_bytes(), prepared_bytes)
+            still_prepared = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(still_prepared["publication_state"], "PREPARED")
 
     def test_process_death_after_durable_committed_manifest_rejects_replacement_prefix_on_reopen(self):
         with TemporaryDirectory() as directory:

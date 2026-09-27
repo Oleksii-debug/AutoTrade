@@ -16,6 +16,14 @@ _STATE_COLLECTION_KEYS = {
     "confirmations": "confirmation_id",
     "admissions": "admission_id",
 }
+_NEW_EXPOSURE_BLOCK_FIELDS = {
+    "account_id",
+    "environment",
+    "command_id",
+    "reason",
+    "blocked_at",
+}
+_SUPPORTED_ENVIRONMENTS = {"SIMULATION", "PAPER", "LIVE"}
 
 
 def _indexed_collection(state: dict, name: str, identity_key: str) -> dict[str, dict]:
@@ -35,7 +43,132 @@ def _indexed_collection(state: dict, name: str, identity_key: str) -> dict[str, 
     return indexed
 
 
-def _assert_monotonic_authority_state(previous: dict, candidate: dict) -> None:
+def _indexed_new_exposure_blocks(
+    state: dict,
+) -> dict[tuple[str, str], dict[str, str]]:
+    values = state.get("new_exposure_blocks")
+    if not isinstance(values, list):
+        raise ValueError("authority state new_exposure_blocks must be a list")
+    indexed: dict[tuple[str, str], dict[str, str]] = {}
+    for item in values:
+        if not isinstance(item, dict) or set(item) != _NEW_EXPOSURE_BLOCK_FIELDS:
+            raise ValueError(
+                "authority state new_exposure_blocks entry has invalid structure"
+            )
+        normalized: dict[str, str] = {}
+        for field in _NEW_EXPOSURE_BLOCK_FIELDS:
+            value = item.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(
+                    f"authority state new_exposure_blocks entry has invalid {field}"
+                )
+            normalized[field] = value.strip()
+        environment = normalized["environment"].upper()
+        if environment not in _SUPPORTED_ENVIRONMENTS:
+            raise ValueError(
+                "authority state new_exposure_blocks entry has unsupported environment"
+            )
+        normalized["environment"] = environment
+        scope = (normalized["account_id"], environment)
+        if scope in indexed:
+            raise ValueError(
+                "authority state new_exposure_blocks contains duplicate scope"
+            )
+        indexed[scope] = normalized
+    return indexed
+
+
+def _has_exact_durable_restore(
+    store: JournalStore,
+    *,
+    scope: tuple[str, str],
+    block: dict[str, str],
+) -> bool:
+    """Return whether canonical authority journal durably restored this exact block."""
+
+    account_id, environment = scope
+    exact_block_seen = False
+    for event in store.load_events("authority_state", "canonical"):
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        event_type = event.get("event_type")
+        if event_type == "AuthorityNewExposureBlocked":
+            if payload == {
+                "command_id": block["command_id"],
+                "account_id": account_id,
+                "environment": environment,
+                "reason": block["reason"],
+                "blocked_at": block["blocked_at"],
+            }:
+                exact_block_seen = True
+        elif event_type == "AuthorityNewExposureRestored" and exact_block_seen:
+            if (
+                payload.get("account_id") == account_id
+                and payload.get("environment") == environment
+                and payload.get("blocked_command_id") == block["command_id"]
+                and payload.get("blocked_reason") == block["reason"]
+                and payload.get("blocked_at") == block["blocked_at"]
+            ):
+                return True
+    return False
+
+
+def _assert_monotonic_new_exposure_blocks(
+    previous: dict,
+    candidate: dict,
+    *,
+    store: JournalStore,
+) -> None:
+    """Allow an active block to disappear/change only after exact durable restore."""
+
+    old = _indexed_new_exposure_blocks(previous)
+    new = _indexed_new_exposure_blocks(candidate)
+    changed = {
+        scope: block
+        for scope, block in old.items()
+        if new.get(scope) != block
+    }
+    if not changed:
+        return
+
+    for scope, block in changed.items():
+        if not _has_exact_durable_restore(store, scope=scope, block=block):
+            if scope not in new:
+                raise ValueError(
+                    "authority snapshot is stale: new-exposure block was removed "
+                    "without exact durable restore"
+                )
+            raise ValueError(
+                "authority snapshot rewrites durable new-exposure block without "
+                "exact restore and re-block authority"
+            )
+
+    # A restore proof for an old block is necessary but not sufficient. The
+    # candidate must also equal a fresh replay of the canonical authority
+    # journal, so caller-authored removal/replacement cannot borrow an unrelated
+    # historical restore as authority.
+    try:
+        replayed = AuthorityService(store).export_state()
+        replayed_blocks = _indexed_new_exposure_blocks(replayed)
+    except Exception as error:
+        raise ValueError(
+            "authority snapshot new-exposure transition cannot be proven by "
+            "canonical authority replay"
+        ) from error
+    if new != replayed_blocks:
+        raise ValueError(
+            "authority snapshot new-exposure blocks do not match canonical "
+            "authority journal replay"
+        )
+
+
+def _assert_monotonic_authority_state(
+    previous: dict,
+    candidate: dict,
+    *,
+    store: JournalStore,
+) -> None:
     """Reject snapshots that forget or rewrite any durable authority fact."""
     if not isinstance(previous, dict) or not isinstance(candidate, dict):
         raise ValueError("authority state must be an object")
@@ -67,6 +200,8 @@ def _assert_monotonic_authority_state(previous: dict, candidate: dict) -> None:
                 raise ValueError(
                     f"authority snapshot rewrites durable {name} fact {identity}"
                 )
+
+    _assert_monotonic_new_exposure_blocks(previous, candidate, store=store)
 
     old_used = previous.get("used_confirmations")
     new_used = candidate.get("used_confirmations")
@@ -127,7 +262,7 @@ def persist_authority_snapshot(
             )
             if not isinstance(previous_state, dict):
                 raise ValueError("latest authority journal payload state is invalid")
-            _assert_monotonic_authority_state(previous_state, state)
+            _assert_monotonic_authority_state(previous_state, state, store=store)
 
     payload = {
         "authority_id": authority_id,

@@ -61,6 +61,11 @@ from ._retained_publication_hardening import install_retained_publication_harden
 install_retained_publication_hardening()
 del install_retained_publication_hardening
 
+from ._posix_retained_object_move_fix import install_posix_retained_object_move_fix
+
+install_posix_retained_object_move_fix()
+del install_posix_retained_object_move_fix
+
 from ._windows_retained_publication import install_windows_retained_publication
 
 install_windows_retained_publication()

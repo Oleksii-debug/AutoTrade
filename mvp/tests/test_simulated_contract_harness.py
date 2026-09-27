@@ -410,9 +410,10 @@ class SimulatedProviderContractHarnessTests(unittest.TestCase):
             correction_id="fee-1",
             provider_execution_id=execution_id,
             fee_delta=Decimal("0.25"),
-            now="2026-09-24T18:01:00Z",
+            now="2026-09-24T20:01:00+02:00",
         )
         self.assertEqual(first, second)
+        self.assertEqual(first["observed_at"], "2026-09-24T18:01:00Z")
         self.assertEqual(provider.cash, cash_before - Decimal("0.25"))
         self.assertEqual(dict(provider.activity_fills()[0]), fill_before)
         self.assertEqual(len(harness.activity_corrections()), 1)

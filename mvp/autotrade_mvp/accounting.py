@@ -508,6 +508,73 @@ def book_equity_fill(
     return transaction
 
 
+def book_equity_split_adjustment(
+    *,
+    transaction_id: str,
+    cause_event_id: str,
+    instrument: str,
+    pre_split_quantity: Decimal | str | int,
+    numerator: Decimal | str | int,
+    denominator: Decimal | str | int,
+    economic_effective_at: str,
+    economic_order_key: str,
+    observed_at: str,
+    corrects_transaction_id: str | None = None,
+) -> JournalTransaction:
+    """Book a canonical zero-cash equity split quantity transformation.
+
+    The ratio is encoded in the clearing account so a downstream projection can
+    independently reconstruct and validate the exact lot transformation from
+    immutable journal history. Fractional transformations that cannot be
+    represented exactly by the current Decimal lot model fail closed.
+    """
+
+    symbol = _name(instrument, field="instrument")
+    before = _decimal(pre_split_quantity, name="pre_split_quantity")
+    num = _decimal(numerator, name="numerator")
+    den = _decimal(denominator, name="denominator")
+    if (
+        num <= 0
+        or den <= 0
+        or num != num.to_integral_value()
+        or den != den.to_integral_value()
+    ):
+        raise ValueError("split numerator and denominator must be positive integers")
+    if before == 0:
+        raise ValueError("split adjustment requires a non-zero pre-split position")
+
+    target = before * num
+    after = target / den
+    if after * den != target:
+        raise AccountingConflict(
+            "split quantity cannot be represented exactly by the Decimal position model"
+        )
+    delta = after - before
+    if delta == 0:
+        raise ValueError("split adjustment must change position quantity")
+
+    num_text = format(num.quantize(Decimal("1")), "f")
+    den_text = format(den.quantize(Decimal("1")), "f")
+    transaction = JournalTransaction(
+        transaction_id=_name(transaction_id, field="transaction_id"),
+        cause_event_id=_name(cause_event_id, field="cause_event_id"),
+        postings=(
+            posting(f"POSITION:{symbol}", symbol, delta),
+            posting(
+                f"CORPORATE_ACTION_SPLIT_CLEARING:{symbol}:{num_text}:{den_text}",
+                symbol,
+                -delta,
+            ),
+        ),
+        economic_effective_at=economic_effective_at,
+        economic_order_key=economic_order_key,
+        observed_at=observed_at,
+        corrects_transaction_id=corrects_transaction_id,
+    )
+    validate_transaction(transaction)
+    return transaction
+
+
 def book_fx_exchange(
     *,
     transaction_id: str,
@@ -585,6 +652,66 @@ class EquityPositionProjection:
     mark_price: Decimal | None
     lots: tuple[EquityLot, ...]
     policy_version: str = "FIFO_GROSS_V1"
+
+
+def _canonical_equity_split_terms(
+    transaction: JournalTransaction,
+    *,
+    instrument: str,
+) -> tuple[Decimal, Decimal, Decimal] | None:
+    """Extract delta and ratio only from canonical split-adjustment shape."""
+
+    symbol = _name(instrument, field="instrument")
+    normalized = _normalized_transaction(transaction)
+    prefix = f"CORPORATE_ACTION_SPLIT_CLEARING:{symbol}:"
+    split_clearing = [
+        item
+        for item in normalized.postings
+        if item.ledger_account.startswith(prefix)
+        and item.asset_or_currency == symbol
+    ]
+    if not split_clearing:
+        return None
+    position_postings = [
+        item
+        for item in normalized.postings
+        if item.ledger_account == f"POSITION:{symbol}"
+        and item.asset_or_currency == symbol
+    ]
+    if len(position_postings) != 1 or len(split_clearing) != 1:
+        raise AccountingConflict(
+            "Split projection requires exactly one position and split-clearing posting"
+        )
+    if len(normalized.postings) != 2:
+        raise AccountingConflict(
+            "Split projection rejects non-canonical extra postings"
+        )
+    delta = position_postings[0].signed_amount
+    if delta == 0 or split_clearing[0].signed_amount != -delta:
+        raise AccountingConflict(
+            "Split projection requires an exactly balanced non-zero quantity delta"
+        )
+    suffix = split_clearing[0].ledger_account[len(prefix):]
+    parts = suffix.split(":")
+    if len(parts) != 2:
+        raise AccountingConflict("Split projection ratio identity is malformed")
+    num_text, den_text = parts
+    if (
+        not num_text.isascii()
+        or not den_text.isascii()
+        or not num_text.isdigit()
+        or not den_text.isdigit()
+        or num_text == "0"
+        or den_text == "0"
+        or (len(num_text) > 1 and num_text.startswith("0"))
+        or (len(den_text) > 1 and den_text.startswith("0"))
+    ):
+        raise AccountingConflict("Split projection ratio identity is not canonical")
+    numerator = Decimal(num_text)
+    denominator = Decimal(den_text)
+    if numerator == denominator:
+        raise AccountingConflict("Split projection ratio must change quantity")
+    return delta, numerator, denominator
 
 
 def _canonical_equity_fill_terms(
@@ -733,17 +860,31 @@ def project_equity_position(
         for transaction in transactions
         if transaction.reverses_transaction_id is not None
     }
-    position_corrections = [
-        transaction
-        for transaction in transactions
-        if transaction.reverses_transaction_id is not None
-        and _canonical_equity_fill_terms(
-            by_id[transaction.reverses_transaction_id],
+    position_corrections: list[JournalTransaction] = []
+    split_correction_ids: set[str] = set()
+    for transaction in transactions:
+        if transaction.reverses_transaction_id is None:
+            continue
+        corrected_id = transaction.reverses_transaction_id
+        corrected = by_id.get(corrected_id)
+        if corrected is None:
+            raise AccountingConflict(
+                "Position correction reversal lacks original transaction"
+            )
+        split_terms = _canonical_equity_split_terms(
+            corrected,
+            instrument=symbol,
+        )
+        fill_terms = _canonical_equity_fill_terms(
+            corrected,
             instrument=symbol,
             settlement_currency=settlement,
         )
-        is not None
-    ]
+        if split_terms is not None or fill_terms is not None:
+            position_corrections.append(transaction)
+        if split_terms is not None:
+            split_correction_ids.add(corrected_id)
+
     has_position_correction = bool(position_corrections)
     if has_position_correction:
         for reversal in position_corrections:
@@ -770,33 +911,54 @@ def project_equity_position(
                 raise AccountingConflict(
                     "Corrected FIFO lineage changed economic identity or observation evidence"
                 )
+            if (
+                corrected_id in split_correction_ids
+                and _canonical_equity_split_terms(
+                    replacement,
+                    instrument=symbol,
+                )
+                is None
+            ):
+                raise AccountingConflict(
+                    "Corrected split history requires one canonical split replacement"
+                )
 
-    active_fills: list[tuple[JournalTransaction, Decimal, Decimal]] = []
+    position_events: list[
+        tuple[str, JournalTransaction, tuple[Decimal, ...]]
+    ] = []
+    has_split = False
     for transaction in transactions:
         if (
             transaction.transaction_id in reversed_ids
             or transaction.transaction_id in reversal_ids
         ):
             continue
-        terms = _canonical_equity_fill_terms(
+        split_terms = _canonical_equity_split_terms(
+            transaction,
+            instrument=symbol,
+        )
+        if split_terms is not None:
+            has_split = True
+            position_events.append(("SPLIT", transaction, split_terms))
+            continue
+        fill_terms = _canonical_equity_fill_terms(
             transaction,
             instrument=symbol,
             settlement_currency=settlement,
         )
-        if terms is None:
-            continue
-        active_fills.append((transaction, terms[0], terms[1]))
+        if fill_terms is not None:
+            position_events.append(("FILL", transaction, fill_terms))
 
-    if has_position_correction:
+    if has_position_correction or has_split:
         ordering: set[tuple[datetime, str]] = set()
-        for transaction, _quantity, _unit_price in active_fills:
+        for kind, transaction, _terms in position_events:
             if (
                 transaction.economic_effective_at is None
                 or transaction.economic_order_key is None
             ):
                 raise AccountingConflict(
-                    "Corrected FIFO history requires economic effective-time "
-                    "and immutable order evidence for every active fill"
+                    "Corrected/split FIFO history requires economic effective-time "
+                    "and immutable order evidence for every position event"
                 )
             key = (
                 _instant_value(
@@ -807,24 +969,71 @@ def project_equity_position(
             )
             if key in ordering:
                 raise AccountingConflict(
-                    "Corrected FIFO history has ambiguous economic ordering"
+                    "Corrected/split FIFO history has ambiguous economic ordering"
                 )
             ordering.add(key)
-        active_fills.sort(
+        position_events.sort(
             key=lambda item: (
                 _instant_value(
-                    item[0].economic_effective_at,
+                    item[1].economic_effective_at,
                     field="economic_effective_at",
                 ),
-                item[0].economic_order_key,
-                item[0].transaction_id,
+                item[1].economic_order_key,
+                item[1].transaction_id,
             )
         )
 
     mutable_lots: list[list[Decimal | str]] = []
     realized = Decimal("0")
 
-    for transaction, quantity, unit_price in active_fills:
+    for kind, transaction, terms in position_events:
+        if kind == "SPLIT":
+            delta, numerator, denominator = terms
+            current_quantity = sum(
+                (
+                    lot[0]
+                    for lot in mutable_lots
+                    if isinstance(lot[0], Decimal)
+                ),
+                Decimal("0"),
+            )
+            if current_quantity == 0:
+                raise AccountingConflict(
+                    "Split adjustment cannot transform an empty projected position"
+                )
+            target = current_quantity * numerator
+            next_quantity = target / denominator
+            if next_quantity * denominator != target:
+                raise AccountingConflict(
+                    "Split projected quantity is not exactly representable"
+                )
+            if next_quantity - current_quantity != delta:
+                raise AccountingConflict(
+                    "Split adjustment delta conflicts with projected pre-split quantity"
+                )
+
+            for lot in mutable_lots:
+                lot_quantity = lot[0]
+                lot_price = lot[1]
+                assert isinstance(lot_quantity, Decimal)
+                assert isinstance(lot_price, Decimal)
+                quantity_target = lot_quantity * numerator
+                adjusted_quantity = quantity_target / denominator
+                if adjusted_quantity * denominator != quantity_target:
+                    raise AccountingConflict(
+                        "Split lot quantity is not exactly representable"
+                    )
+                price_target = lot_price * denominator
+                adjusted_price = price_target / numerator
+                if adjusted_price * numerator != price_target:
+                    raise AccountingConflict(
+                        "Split lot basis is not exactly representable"
+                    )
+                lot[0] = adjusted_quantity
+                lot[1] = adjusted_price
+            continue
+
+        quantity, unit_price = terms
         remaining = quantity
 
         while (
@@ -898,8 +1107,12 @@ def project_equity_position(
         mark_price=mark,
         lots=lots,
         policy_version=(
-            "FIFO_GROSS_EFFECTIVE_V2"
-            if has_position_correction
-            else "FIFO_GROSS_V1"
+            "FIFO_GROSS_CA_SPLIT_V3"
+            if has_split
+            else (
+                "FIFO_GROSS_EFFECTIVE_V2"
+                if has_position_correction
+                else "FIFO_GROSS_V1"
+            )
         ),
     )

@@ -125,6 +125,8 @@ def durable_submission(payload, *, intent_id):
                 "prepared_request_sha256": prepared.body_sha256,
                 "capability_snapshot_ids": list(prepared.capability_snapshot_ids),
                 "instrument_versions": list(prepared.instrument_versions),
+            },
+            order_preparation_binding={
                 "instrument": "BTCUSDT@v1",
                 "side": "BUY",
                 "requested_quantity": "0.01",

@@ -11,6 +11,7 @@ from mvp.autotrade_mvp.dispatch import (
     stable_client_order_id,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
 from mvp.tests.test_reconciliation_journal import reconciliation
 from mvp.autotrade_mvp.recovery import RecoveryController
@@ -45,6 +46,28 @@ class DispatchTests(unittest.TestCase):
 
     def store(self, directory):
         return JournalStore(f"{directory}/journal.sqlite3")
+
+    def prepare_order_callback(self, dispatcher, store):
+        def prepare_order(client_order_id, attempt_id, intent_id, provider, _request, binding, prepared_at):
+            orders = DurableOrderBookProjection(
+                store,
+                provider_id=provider,
+                account_id=dispatcher.account_id,
+                environment=dispatcher.environment,
+                host_id=dispatcher.owner_token,
+                owner_epoch=str(dispatcher.owner_epoch),
+            )
+            orders.create_order(
+                event_key=f"dispatch-order:{attempt_id}",
+                client_order_id=client_order_id,
+                instrument=binding["instrument"],
+                side=binding["side"],
+                requested_quantity=binding["requested_quantity"],
+                quantity_unit=binding["quantity_unit"],
+                origin_intent_id=intent_id,
+                committed_at=prepared_at,
+            )
+        return prepare_order
 
     def test_dispatch_scope_is_required_and_separates_client_ids(self):
         with TemporaryDirectory() as directory:
@@ -179,6 +202,13 @@ class DispatchTests(unittest.TestCase):
                     authority_check=authority,
                     transport_send=transport,
                     sender_check=lambda _owner, _epoch: None,
+                    order_preparation_binding={
+                        "instrument": "TEST@1",
+                        "side": "BUY",
+                        "requested_quantity": "1",
+                        "quantity_unit": "unit:test:share",
+                    },
+                    prepare_order=self.prepare_order_callback(dispatcher, store),
                 )
                 self.assertEqual(outcome.status, "SENT")
 
@@ -1150,6 +1180,13 @@ class DispatchTests(unittest.TestCase):
                     now="2026-09-24T18:00:00Z",
                     authority_check=lambda _hash, _now: (True, "allowed"),
                     transport_send=transport,
+                    order_preparation_binding={
+                        "instrument": "TEST@1",
+                        "side": "BUY",
+                        "requested_quantity": "1",
+                        "quantity_unit": "unit:test:share",
+                    },
+                    prepare_order=self.prepare_order_callback(dispatcher, store),
                 )
                 self.assertEqual(result.status, "BLOCKED")
                 self.assertEqual(result.reason, "sender_fence_required")
@@ -1202,6 +1239,13 @@ class DispatchTests(unittest.TestCase):
                 authority_check=lambda _hash, _now: (True, "allowed"),
                 transport_send=transport,
                 sender_check=recovery.validate_sender,
+                order_preparation_binding={
+                    "instrument": "TEST@1",
+                    "side": "BUY",
+                    "requested_quantity": "1",
+                    "quantity_unit": "unit:test:share",
+                },
+                prepare_order=self.prepare_order_callback(dispatcher, store),
             )
             self.assertEqual(result.status, "BLOCKED")
             self.assertEqual(result.reason, "sender_fence_rejected:PermissionError")
@@ -1241,6 +1285,13 @@ class DispatchTests(unittest.TestCase):
                 authority_check=lambda _hash, _now: (True, "allowed"),
                 transport_send=transport,
                 sender_check=recovery.validate_sender,
+                order_preparation_binding={
+                    "instrument": "TEST@1",
+                    "side": "BUY",
+                    "requested_quantity": "1",
+                    "quantity_unit": "unit:test:share",
+                },
+                prepare_order=self.prepare_order_callback(dispatcher, store),
             )
             self.assertEqual(result.status, "SENT")
             self.assertEqual(outbound, 1)

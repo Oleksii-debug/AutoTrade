@@ -299,19 +299,19 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 submission_intent_id,
                 _provider,
                 request,
-                scope,
+                order_preparation_binding,
                 prepared_at,
             ):
-                self.assertEqual(request["instrument_version"], scope["instrument"])
-                self.assertEqual(request["side"], scope["side"])
-                self.assertEqual(request["quantity"], scope["requested_quantity"])
+                self.assertEqual(request["instrument_version"], order_preparation_binding["instrument"])
+                self.assertEqual(request["side"], order_preparation_binding["side"])
+                self.assertEqual(request["quantity"], order_preparation_binding["requested_quantity"])
                 orders.create_order(
                     event_key=f"dispatch-order:{submission_attempt_id}",
                     client_order_id=client_order_id,
-                    instrument=scope["instrument"],
-                    side=scope["side"],
-                    requested_quantity=scope["requested_quantity"],
-                    quantity_unit=scope["quantity_unit"],
+                    instrument=order_preparation_binding["instrument"],
+                    side=order_preparation_binding["side"],
+                    requested_quantity=order_preparation_binding["requested_quantity"],
+                    quantity_unit=order_preparation_binding["quantity_unit"],
                     origin_intent_id=submission_intent_id,
                     committed_at=prepared_at,
                 )
@@ -338,7 +338,7 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 now=NOW,
                 authority_check=final_authority_check,
                 transport_send=provider.transport_send,
-                submission_scope={
+                order_preparation_binding={
                     "instrument": INSTRUMENT,
                     "side": "BUY",
                     "requested_quantity": "2",
@@ -1001,7 +1001,7 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                     now=NOW,
                     authority_check=lambda _intent_hash, _now: (True, "allowed"),
                     transport_send=crash_after_provider_accepts,
-                    submission_scope={
+                    order_preparation_binding={
                         "instrument": INSTRUMENT,
                         "side": "BUY",
                         "requested_quantity": "1",
@@ -1036,7 +1036,7 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 now=LATER,
                 authority_check=lambda _intent_hash, _now: (True, "allowed"),
                 transport_send=forbidden_retry,
-                submission_scope={
+                order_preparation_binding={
                     "instrument": INSTRUMENT,
                     "side": "BUY",
                     "requested_quantity": "1",

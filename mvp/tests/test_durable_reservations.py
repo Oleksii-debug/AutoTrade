@@ -146,6 +146,8 @@ class DurableReservationBookTests(unittest.TestCase):
             self.store,
             environment="PAPER",
             account_id="paper-account",
+            owner_token="reservation-test-owner",
+            owner_epoch=1,
         )
 
         def ambiguous_transport(client_order_id, request, final_guard):
@@ -156,16 +158,51 @@ class DurableReservationBookTests(unittest.TestCase):
             self.assertTrue(owner_token)
             self.assertEqual(owner_epoch, 1)
 
+        def prepare_order(
+            client_order_id,
+            prepared_attempt_id,
+            prepared_intent_id,
+            prepared_provider,
+            _request,
+            binding,
+            prepared_at,
+        ):
+            orders = DurableOrderBookProjection(
+                self.store,
+                provider_id=prepared_provider,
+                account_id="paper-account",
+                environment="PAPER",
+                host_id="reservation-test-owner",
+                owner_epoch="1",
+            )
+            orders.create_order(
+                event_key=f"dispatch-order:{prepared_attempt_id}",
+                client_order_id=client_order_id,
+                instrument=binding["instrument"],
+                side=binding["side"],
+                requested_quantity=binding["requested_quantity"],
+                quantity_unit=binding["quantity_unit"],
+                origin_intent_id=prepared_intent_id,
+                committed_at=prepared_at,
+            )
+
         outcome = dispatcher.dispatch(
             attempt_id=attempt_id,
             intent_id=intent_id,
             intent_hash="sha256:" + "1" * 64,
             provider=provider,
-            request={"instrument": "TEST", "quantity": "1"},
+            request={"instrument": "TEST", "side": "BUY", "quantity": "1"},
             now="2026-09-25T00:00:00Z",
             authority_check=lambda intent_hash, now: (True, "allowed"),
             transport_send=ambiguous_transport,
             sender_check=sender_check,
+            order_preparation_binding={
+                "instrument": "TEST",
+                "side": "BUY",
+                "requested_quantity": "1",
+                "quantity_unit": "unit:TEST",
+            },
+            prepare_order=prepare_order,
         )
         self.assertEqual(outcome.status, "UNKNOWN")
         return outcome
@@ -324,15 +361,34 @@ class DurableReservationBookTests(unittest.TestCase):
             artifact_id="66666666-6666-4666-8666-666666666666",
             reconciliation_event=reconciliation,
         )
-        first.mark_terminal(
-            command_id="cmd-terminal",
-            idempotency_key="idem-terminal",
-            reservation_id="r1",
-            outcome="PROVEN_ABSENT",
-            provider="SIMULATED",
-            attempt_id="attempt-r1",
-            resolution_evidence=evidence,
-        )
+        authenticated_read = self.artifacts.read_authenticated_snapshot
+        with (
+            patch.object(
+                self.artifacts,
+                "load_manifest",
+                side_effect=AssertionError("split manifest read"),
+            ),
+            patch.object(
+                self.artifacts,
+                "read_bytes",
+                side_effect=AssertionError("split object read"),
+            ),
+            patch.object(
+                self.artifacts,
+                "read_authenticated_snapshot",
+                wraps=authenticated_read,
+            ) as read_snapshot,
+        ):
+            first.mark_terminal(
+                command_id="cmd-terminal",
+                idempotency_key="idem-terminal",
+                reservation_id="r1",
+                outcome="PROVEN_ABSENT",
+                provider="SIMULATED",
+                attempt_id="attempt-r1",
+                resolution_evidence=evidence,
+            )
+        self.assertEqual(read_snapshot.call_count, 3)
 
         restarted = self.book()
         snapshot = restarted.get("r1")
@@ -342,6 +398,40 @@ class DurableReservationBookTests(unittest.TestCase):
             evidence,
         )
         self.assertEqual(restarted.total_reserved("CASH:USD"), Decimal("0"))
+
+    def test_superseded_reconciliation_checkpoint_cannot_release_reservation(self):
+        book = self.book()
+        self.reserve(book)
+        book.mark_unknown(
+            command_id="cmd-unknown-superseded",
+            idempotency_key="idem-unknown-superseded",
+            reservation_id="r1",
+        )
+        self.create_unknown_attempt()
+        first_checkpoint = self.record_reconciliation_resolution()
+        evidence = self.publish_resolution_evidence(
+            artifact_id="99999999-9999-4999-8999-999999999999",
+            reconciliation_event=first_checkpoint,
+        )
+        self.record_reconciliation_resolution(
+            reconciliation_id="newer-provider-truth"
+        )
+
+        with self.assertRaisesRegex(
+            ReservationConflict,
+            "superseded by newer provider truth",
+        ):
+            book.mark_terminal(
+                command_id="cmd-terminal-superseded",
+                idempotency_key="idem-terminal-superseded",
+                reservation_id="r1",
+                outcome="PROVEN_ABSENT",
+                provider="SIMULATED",
+                attempt_id="attempt-r1",
+                resolution_evidence=evidence,
+            )
+        self.assertEqual(book.get("r1").state, "UNKNOWN")
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("70"))
 
     def test_terminal_release_rejects_cross_scope_reconciliation_after_restart(self):
         book = self.book()
@@ -450,7 +540,7 @@ class DurableReservationBookTests(unittest.TestCase):
         before = book.total_reserved("CASH:USD")
         with self.assertRaisesRegex(
             ReservationConflict,
-            "requires canonical durable order projection",
+            "order projection",
         ):
             book.mark_terminal(
                 command_id="cmd-terminal-filled",
@@ -490,16 +580,6 @@ class DurableReservationBookTests(unittest.TestCase):
             host_id="order-host",
             owner_epoch="1",
             evidence_artifact_store=self.artifacts,
-        )
-        orders.create_order(
-            event_key="preexisting-order",
-            client_order_id=dispatched.client_order_id,
-            instrument="TEST",
-            side="BUY",
-            requested_quantity="1",
-            quantity_unit="unit:TEST",
-            origin_intent_id="i1",
-            committed_at="2026-09-25T00:00:00Z",
         )
         orders.sync_submission_attempt(attempt_id="attempt-r1")
         orders.request_cancel(

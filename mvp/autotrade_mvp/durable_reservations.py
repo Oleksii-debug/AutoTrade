@@ -25,6 +25,7 @@ from research.autotrade_research.io.strict_json import strict_json_loads
 from .dispatch import submission_attempt_aggregate_id
 from .durable_order_projection import DurableOrderBookProjection
 from .persistence import JournalStore, canonical_json, payload_digest
+from .reconciliation_journal import require_current_reconciliation_checkpoint
 from .reservations import (
     ReservationBook,
     ReservationConflict,
@@ -766,7 +767,7 @@ class DurableReservationBook:
         attempt_id: object,
         resolution_evidence: object,
         journal_sequence_cut: int | None = None,
-    ) -> str:
+    ) -> tuple[str, str]:
         rid = _text(reservation_id, name="reservation_id")
         intent = _text(intent_id, name="intent_id")
         terminal_outcome = _text(outcome, name="outcome").upper()
@@ -780,7 +781,9 @@ class DurableReservationBook:
                 "terminal release requires the trusted resolution artifact store"
             )
         try:
-            manifest = self.resolution_artifact_store.load_manifest(artifact_id)
+            manifest, raw = self.resolution_artifact_store.read_authenticated_snapshot(
+                artifact_id
+            )
             manifest_hash = manifest.get("manifest_hash")
             if (
                 not isinstance(manifest_hash, str)
@@ -798,7 +801,6 @@ class DurableReservationBook:
                 raise ArtifactIntegrityError(
                     "resolution evidence has an unsupported media type"
                 )
-            raw = self.resolution_artifact_store.read_bytes(artifact_id)
             text = raw.decode("utf-8")
             receipt = strict_json_loads(text)
         except (
@@ -1026,7 +1028,7 @@ class DurableReservationBook:
                 raise ReservationConflict(
                     "FILLED release requires quantitative terminal closure without overfill"
                 )
-        return evidence
+        return evidence, reconciliation_event_id
 
     def mark_terminal(
         self,
@@ -1063,7 +1065,7 @@ class DurableReservationBook:
 
         cut_before = self.store.current_journal_sequence()
         current = self.get(rid)
-        evidence = self._verify_resolution_evidence(
+        evidence, checkpoint_event_id = self._verify_resolution_evidence(
             reservation_id=rid,
             intent_id=current.intent_id,
             outcome=terminal_outcome,
@@ -1072,6 +1074,16 @@ class DurableReservationBook:
             resolution_evidence=f"artifact:{artifact_id}@sha256:{digest}",
             journal_sequence_cut=cut_before,
         )
+        try:
+            require_current_reconciliation_checkpoint(
+                self.store,
+                checkpoint_event_id=checkpoint_event_id,
+                provider_id=provider_name,
+                account_id=self.account_id,
+                environment=self.environment,
+            )
+        except (KeyError, ValueError) as error:
+            raise ReservationConflict(str(error)) from error
         if self.store.current_journal_sequence() != cut_before:
             self._reload()
             raise ReservationConflict(

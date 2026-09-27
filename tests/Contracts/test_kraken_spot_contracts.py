@@ -155,6 +155,8 @@ class KrakenSpotContractTests(unittest.TestCase):
                     "instrument_versions": [
                         prepared_request.instrument_version
                     ],
+                },
+                order_preparation_binding={
                     "instrument": prepared_request.instrument_version,
                     "side": "BUY",
                     "requested_quantity": "0.01",

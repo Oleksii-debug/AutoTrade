@@ -609,6 +609,7 @@ class GuardedDispatcher:
         final_barrier_clock: Callable[[], str] | None = None,
         sender_check: SenderCheck | None = None,
         submission_scope: Mapping[str, Any] | None = None,
+        order_preparation_binding: Mapping[str, Any] | None = None,
         prepare_order: PrepareOrder | None = None,
     ) -> DispatchOutcome:
         for value, name in (
@@ -637,6 +638,19 @@ class GuardedDispatcher:
         submission_scope_hash = (
             "sha256:" + sha256(scope_canonical.encode("utf-8")).hexdigest()
         )
+        if order_preparation_binding is None:
+            order_binding: dict[str, Any] = {}
+        else:
+            if not isinstance(order_preparation_binding, Mapping):
+                raise TypeError("order_preparation_binding must be a mapping")
+            order_binding = json.loads(
+                canonical_json(dict(order_preparation_binding))
+            )
+        order_binding_canonical = canonical_json(order_binding)
+        order_preparation_binding_hash = (
+            "sha256:"
+            + sha256(order_binding_canonical.encode("utf-8")).hexdigest()
+        )
         client_order_id = stable_client_order_id(
             provider,
             intent_id,
@@ -659,6 +673,7 @@ class GuardedDispatcher:
                 "environment": self.environment,
                 "account_id": self.account_id,
                 "submission_scope_hash": submission_scope_hash,
+                "order_preparation_binding_hash": order_preparation_binding_hash,
             }
             if any(prepared.get(key) != value for key, value in expected.items()):
                 raise ValueError("attempt_id conflicts with existing submission content")
@@ -682,6 +697,8 @@ class GuardedDispatcher:
             "prepared_at": _instant(now).isoformat().replace("+00:00", "Z"),
             "submission_scope": scope_dict,
             "submission_scope_hash": submission_scope_hash,
+            "order_preparation_binding": order_binding,
+            "order_preparation_binding_hash": order_preparation_binding_hash,
         }
         prepared = self._append(
             attempt_id=attempt_id,
@@ -736,7 +753,7 @@ class GuardedDispatcher:
                     intent_id,
                     provider,
                     request_frozen,
-                    scope_dict,
+                    _freeze_json(order_binding),
                     now,
                 )
             except Exception as error:

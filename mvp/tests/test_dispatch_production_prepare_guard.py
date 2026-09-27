@@ -6,7 +6,7 @@ from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjectio
 from mvp.autotrade_mvp.persistence import JournalStore
 
 
-ORDER_SCOPE = {
+ORDER_PREPARATION_BINDING = {
     "instrument": "TEST@1",
     "side": "BUY",
     "requested_quantity": "1",
@@ -47,7 +47,7 @@ class ProductionPrepareGuardTests(unittest.TestCase):
                     authority_check=lambda _hash, _now: (True, "allowed"),
                     transport_send=transport,
                     sender_check=lambda _owner, _epoch: None,
-                    submission_scope=ORDER_SCOPE,
+                    order_preparation_binding=ORDER_PREPARATION_BINDING,
                 )
 
                 self.assertEqual(outcome.status, "BLOCKED")
@@ -94,7 +94,7 @@ class ProductionPrepareGuardTests(unittest.TestCase):
                 authority_check=lambda _hash, _now: (True, "allowed"),
                 transport_send=transport,
                 sender_check=lambda _owner, _epoch: None,
-                submission_scope=ORDER_SCOPE,
+                order_preparation_binding=ORDER_PREPARATION_BINDING,
                 prepare_order=lambda *_args: None,
             )
             self.assertEqual(outcome.status, "BLOCKED")
@@ -126,17 +126,17 @@ class ProductionPrepareGuardTests(unittest.TestCase):
                 intent_id,
                 _provider,
                 _request,
-                scope,
+                order_preparation_binding,
                 prepared_at,
             ):
                 sequence.append("prepare")
                 orders.create_order(
                     event_key=f"dispatch-order:{attempt_id}",
                     client_order_id=client_order_id,
-                    instrument=scope["instrument"],
-                    side=scope["side"],
-                    requested_quantity=scope["requested_quantity"],
-                    quantity_unit=scope["quantity_unit"],
+                    instrument=order_preparation_binding["instrument"],
+                    side=order_preparation_binding["side"],
+                    requested_quantity=order_preparation_binding["requested_quantity"],
+                    quantity_unit=order_preparation_binding["quantity_unit"],
                     origin_intent_id=intent_id,
                     committed_at=prepared_at,
                 )
@@ -157,7 +157,7 @@ class ProductionPrepareGuardTests(unittest.TestCase):
                 authority_check=lambda _hash, _now: (True, "allowed"),
                 transport_send=transport,
                 sender_check=lambda _owner, _epoch: None,
-                submission_scope=ORDER_SCOPE,
+                order_preparation_binding=ORDER_PREPARATION_BINDING,
                 prepare_order=prepare_order,
             )
 

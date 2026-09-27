@@ -30,7 +30,7 @@ def make_contract_order_preparer(
         intent_id,
         provider,
         _request,
-        scope,
+        order_preparation_binding,
         prepared_at,
     ):
         if str(provider).upper() != provider_id.upper():
@@ -38,10 +38,10 @@ def make_contract_order_preparer(
         orders.create_order(
             event_key=f"dispatch-order:{attempt_id}",
             client_order_id=client_order_id,
-            instrument=scope["instrument"],
-            side=scope["side"],
-            requested_quantity=scope["requested_quantity"],
-            quantity_unit=scope["quantity_unit"],
+            instrument=order_preparation_binding["instrument"],
+            side=order_preparation_binding["side"],
+            requested_quantity=order_preparation_binding["requested_quantity"],
+            quantity_unit=order_preparation_binding["quantity_unit"],
             origin_intent_id=intent_id,
             committed_at=prepared_at,
         )

@@ -416,10 +416,9 @@ class DurableOrderBookProjection:
                     "provider evidence observation cannot be later than commit time"
                 )
             try:
-                manifest = self.evidence_artifact_store.load_manifest(
+                manifest, _raw = self.evidence_artifact_store.read_authenticated_snapshot(
                     ref["artifact_id"]
                 )
-                self.evidence_artifact_store.read_bytes(ref["artifact_id"])
             except (FileNotFoundError, ArtifactIntegrityError, ValueError) as error:
                 raise OrderProjectionConflict(
                     "provider evidence artifact is not resolvable and intact"
@@ -955,6 +954,29 @@ class DurableOrderBookProjection:
             operation,
             request,
         )
+        if operation == "CORRECT_FILL" and request.get("correction_reference") is not None:
+            order_id = _text(request.get("client_order_id"), name="client_order_id")
+            execution_id = _text(
+                request.get("provider_execution_id"),
+                name="provider_execution_id",
+            )
+            predecessor = _text(
+                request.get("correction_reference"),
+                name="correction_reference",
+            )
+            current_order = candidate.order(order_id)
+            latest = next(
+                (
+                    item
+                    for item in reversed(current_order.fill_history)
+                    if item.provider_execution_id == execution_id
+                ),
+                None,
+            )
+            if latest is None or latest.fill_id != predecessor:
+                raise OrderProjectionConflict(
+                    "correction predecessor changed before its durable append"
+                )
         if operation == "BIND_QUANTITY_UNIT":
             order_id = _text(request.get("client_order_id"), name="client_order_id")
             if order_id in self._quantity_units:
@@ -1643,6 +1665,8 @@ class DurableOrderBookProjection:
                     if _prepare_only
                     else exact_retry
                 )
+            self._reload()
+            order = self.order(client_id)
             target_observation = next(
                 (
                     item
@@ -1708,6 +1732,7 @@ class DurableOrderBookProjection:
                     name="provider_revision",
                 ),
                 provider_execution_id=incoming_execution_id,
+                correction_reference=correction_target,
                 committed_at=committed,
                 evidence_refs=evidence,
                 canonical_execution_fill_hash=canonical_execution_fill_hash,
@@ -1750,6 +1775,7 @@ class DurableOrderBookProjection:
         committed_at: str,
         correction_fill_id: str | None = None,
         provider_execution_id: str | None = None,
+        correction_reference: str | None = None,
         evidence_refs: Sequence[Mapping[str, object]] | None = None,
         canonical_execution_fill_hash: str | None = None,
         canonical_execution_fill: Mapping[str, object] | None = None,
@@ -1778,6 +1804,11 @@ class DurableOrderBookProjection:
                 name="provider_execution_id",
             ),
         }
+        if correction_reference is not None:
+            request["correction_reference"] = _text(
+                correction_reference,
+                name="correction_reference",
+            )
         if canonical_execution_fill_hash is not None:
             request["canonical_execution_fill_hash"] = _text(
                 canonical_execution_fill_hash,

@@ -4,6 +4,7 @@ from uuid import uuid4
 import sqlite3
 import threading
 import unittest
+from unittest.mock import patch
 
 from research.autotrade_research.artifacts.store import ArtifactStore
 
@@ -971,11 +972,119 @@ class DurableOrderProjectionTests(unittest.TestCase):
                     committed_at=T4,
                     execution_fill=delayed,
                 )
-
             self.assertEqual(restarted.order("c1").filled_quantity, Decimal("0.75"))
             self.assertEqual(
                 len(store.load_events("order_projection_book", book.aggregate_id)),
                 count,
+            )
+
+    def test_concurrent_correction_loses_if_newer_predecessor_commits_first(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            stale_writer = durable(store)
+            stale_writer.create_order(
+                event_key="create",
+                client_order_id="c1",
+                instrument="instrument-v1",
+                side="BUY",
+                requested_quantity="2",
+                quantity_unit="unit",
+                origin_intent_id="intent-1",
+                committed_at=T0,
+            )
+            original = {
+                "fill_id": "fill-r1",
+                "provider_execution_id": "exec-1",
+                "order_ref": "c1",
+                "intent_ref": "intent-1",
+                "provider_revision": "r1",
+                "instrument_version": "instrument-v1",
+                "side": "BUY",
+                "last_quantity": {"value": "1", "unit": "unit"},
+                "last_price": "100",
+                "trade_time": T1,
+                "receipt_time": T2,
+                "fees": [],
+                "settlement_date": "2026-09-27",
+                "evidence": [],
+            }
+            stale_writer.ingest_execution_fill(
+                event_key="fill-r1",
+                client_order_id="c1",
+                committed_at=T2,
+                execution_fill=original,
+            )
+            delayed = {
+                **original,
+                "fill_id": "fill-r2",
+                "provider_revision": "r2",
+                "last_quantity": {"value": "1.5", "unit": "unit"},
+                "last_price": "101",
+                "receipt_time": T4,
+                "correction_reference": "fill-r1",
+            }
+            newer = {
+                **original,
+                "fill_id": "fill-r3",
+                "provider_revision": "r3",
+                "last_quantity": {"value": "0.75", "unit": "unit"},
+                "last_price": "99",
+                "receipt_time": T3,
+                "correction_reference": "fill-r1",
+            }
+            applied = threading.Event()
+            resume = threading.Event()
+            original_apply = stale_writer._apply
+
+            def pause_delayed_after_candidate(book, operation, request):
+                result = original_apply(book, operation, request)
+                if operation == "CORRECT_FILL" and request.get("fill_id") == "fill-r1" and request.get("correction_fill_id") == "fill-r2":
+                    applied.set()
+                    if not resume.wait(timeout=5):
+                        raise TimeoutError("correction race did not resume")
+                return result
+
+            stale_writer._apply = pause_delayed_after_candidate
+            failures = []
+
+            def commit_delayed():
+                try:
+                    stale_writer.ingest_execution_fill(
+                        event_key="fill-r2",
+                        client_order_id="c1",
+                        committed_at=T4,
+                        execution_fill=delayed,
+                    )
+                except Exception as error:
+                    failures.append(error)
+
+            thread = threading.Thread(target=commit_delayed, name="delayed-correction")
+            thread.start()
+            self.assertTrue(applied.wait(timeout=5), "delayed correction never reached its candidate cut")
+            current_writer = durable(store)
+            current_writer.ingest_execution_fill(
+                event_key="fill-r3",
+                client_order_id="c1",
+                committed_at=T3,
+                execution_fill=newer,
+            )
+            resume.set()
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive(), "delayed correction did not exit")
+            self.assertEqual(len(failures), 1)
+            self.assertRegex(str(failures[0]), "aggregate_version must be 4")
+            events = store.load_events(
+                "order_projection_book",
+                stale_writer.aggregate_id,
+            )
+            self.assertEqual(len(events), 3)
+
+            restarted = durable(store)
+            snapshot = restarted.order("c1")
+            self.assertEqual(snapshot.filled_quantity, Decimal("0.75"))
+            self.assertEqual(
+                [item.fill_id for item in snapshot.fill_history],
+                ["fill-r1", "fill-r3"],
             )
 
     def test_canonical_execution_fill_correction_uses_existing_fill_lineage(self):
@@ -1939,13 +2048,20 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 request=ack_request,
                 observed_at=T1,
             )
-            ack = book.acknowledge(
-                event_key="ack-evidenced",
-                client_order_id="paper-1",
-                provider_order_id="provider-1",
-                committed_at=T1,
-                evidence_refs=[ack_ref],
-            )
+            authenticated_read = artifacts.read_authenticated_snapshot
+            with (
+                patch.object(artifacts, "load_manifest", side_effect=AssertionError("split manifest read")),
+                patch.object(artifacts, "read_bytes", side_effect=AssertionError("split object read")),
+                patch.object(artifacts, "read_authenticated_snapshot", wraps=authenticated_read) as read_snapshot,
+            ):
+                ack = book.acknowledge(
+                    event_key="ack-evidenced",
+                    client_order_id="paper-1",
+                    provider_order_id="provider-1",
+                    committed_at=T1,
+                    evidence_refs=[ack_ref],
+                )
+            self.assertEqual(read_snapshot.call_count, 2)
             self.assertEqual(ack.snapshot.state, "WORKING")
 
             canonical_fill_body = {

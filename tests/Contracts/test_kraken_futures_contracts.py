@@ -124,6 +124,8 @@ def durable_observation(payload, *, intent_id: str):
                 "prepared_request_sha256": request.body_sha256,
                 "capability_snapshot_ids": [request.capability_snapshot_id],
                 "instrument_versions": [request.instrument_version],
+            },
+            order_preparation_binding={
                 "instrument": request.instrument_version,
                 "side": "BUY",
                 "requested_quantity": "1",

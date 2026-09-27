@@ -124,3 +124,30 @@ WP-19 now carries `submission_attempt_id` and the explicit `SEND_STARTED` state 
 - repeated sync is idempotent because event keys are derived from immutable source event IDs.
 
 The adapter is read-only with respect to WP-18: it never sends, retries, edits or replaces dispatch events. A different outbound attempt trying to bind the same external order after send-start fails closed.
+
+
+## Canonical ExecutionFill ingestion increment
+
+This lineage adds a narrow provider-normalization seam into the same durable WP-19 authority. Provider-specific adapters and reconciliation still own raw parsing; the order projection accepts only the canonical `ExecutionFill` shape and delegates the economic lifecycle mutation to its existing `record_fill` / `correct_fill` paths.
+
+New fail-closed checks bind the normalized fill to the selected canonical order:
+- exact order reference when supplied;
+- exact instrument version and BUY/SELL side;
+- exact parent intent when supplied;
+- receipt time cannot precede trade time, and durable commit cannot precede receipt;
+- unknown canonical fields and missing required fields are rejected rather than ignored;
+- correction facts require provider revision and reuse the existing immutable fill correction lineage.
+
+Focused tests cover normal canonical fill ingestion, restart reconstruction, scope/unknown-field rejection without mutation, and correction replay. This does not claim that every provider adapter already emits the canonical fill shape, nor does it complete Transaction C atomic accounting/reservation/reconciliation composition. Those remain separate integration gates.
+
+
+## Whole-simulator terminal reservation integration
+
+The same lineage now closes one WP-55 semantic integration seam without creating a second reservation or order authority. A reservation may publish terminal outcome `FILLED` only when two independent durable facts agree for the exact provider/account/environment/submission attempt:
+
+- account reconciliation is complete, non-blocking, and resolves the submission as `OBSERVED_EXECUTION`;
+- the canonical durable order projection reconstructs the same client order and submission attempt at exact terminal state `FILLED`.
+
+An execution observation by itself remains insufficient. Partial fills, missing order projection, another submission attempt, and non-`FILLED` order states keep residual reservation capacity held. PAPER/LIVE replay reuses the trusted evidence ArtifactStore rather than bypassing provider-evidence verification.
+
+The whole-simulator regression now exercises authority -> reservation -> guarded dispatch -> order projection -> fill -> accounting -> reconciliation -> terminal reservation and then reconstructs order and reservation state after restart. This proves the semantic terminal-release chain, not cross-aggregate atomicity; stronger Transaction C atomic composition remains a separate gate.

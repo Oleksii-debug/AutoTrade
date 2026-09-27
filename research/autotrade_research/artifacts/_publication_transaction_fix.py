@@ -7,6 +7,7 @@ import stat
 from typing import Any
 
 from . import _namespace_guard as _guard
+from . import _retained_coordination as _coordination
 from . import _retained_namespace as _retained
 from . import _retained_publication as _publication
 from . import _retained_publication_hardening as _posix
@@ -233,7 +234,7 @@ def _publish_bytes_posix_transactional(
     meta = dict(metadata or {})
     digest = sha256(data).hexdigest()
 
-    with _store.ResourceLock(self.lock_path):
+    with _coordination.artifact_store_coordination(self):
         manifest_path = self._manifest_path(normalized_id)
         self._validate_manifest_namespace(manifest_path)
         self._validate_staging_namespace()
@@ -325,7 +326,7 @@ def _publish_bytes_windows_transactional(
     meta = dict(metadata or {})
     digest = sha256(data).hexdigest()
 
-    with _store.ResourceLock(self.lock_path):
+    with _coordination.artifact_store_coordination(self):
         manifest_path = self._manifest_path(normalized_id)
         self._validate_manifest_namespace(manifest_path)
         self._validate_staging_namespace()

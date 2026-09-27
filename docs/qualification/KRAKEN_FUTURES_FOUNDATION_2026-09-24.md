@@ -1,7 +1,7 @@
 # Kraken Futures adapter foundation evidence — 2026-09-24
 
-Status: **implementation foundation only; NOT QUALIFIED for live or demo
-trading authority**.
+Status: **guarded HTTP/signing implementation foundation only; NOT QUALIFIED
+for live or demo trading authority**.
 
 This lineage deliberately owns only the Futures half of WP-23. Concurrent
 Kraken Spot lineages appeared while this work was being prepared; duplicating
@@ -30,13 +30,41 @@ Retained facts:
 6. Duplicate execution identity with conflicting economics fails closed.
 7. Empty history does not prove absence until pagination, consistency horizon
    and exact provider exclusion semantics have separately been qualified.
+8. Current Derivatives REST v3 authentication hashes the exact URL-encoded
+   parameter representation together with the nonce and signing path
+   `/api/v3/sendorder`, then HMAC-SHA512 signs the digest with the
+   base64-decoded API secret.
+9. State-changing `sendorder` uses POST with the exact URL-encoded order
+   parameters carried in the request URL. The bytes used as the `Authent`
+   input must therefore be the same encoded query representation transmitted
+   on the wire.
+
+## Implemented guarded transport foundation
+
+- Canonical prepared requests project exact account, runtime/provider
+  environment, capability, entity, instrument and body digest into the shared
+  guarded transport seam.
+- LIVE and DEMO HTTPS destinations are explicit provider policies; DEMO maps
+  only to PAPER runtime authority.
+- TRADE secrets resolve only after quota/current-capability admission, and the
+  exact capability is rechecked immediately before the final send guard.
+- A journal-backed nonce authority is scoped by provider environment and a
+  non-secret API-key fingerprint and stays monotonic across restart/clock
+  regression.
+- `Authent` is computed from the exact percent-encoded query representation
+  transmitted in the POST URL; write requests cannot carry both a query and
+  semantic body.
+- Exactly one wire send occurs after the final guard. There is no transport
+  retry; post-send ambiguity remains the canonical `UNKNOWN` /
+  reconciliation-first path.
 
 ## Deliberately absent
 
-- no HTTP/WebSocket transport;
-- no API key/signature storage or generation;
-- no rate-limit scheduler or hidden retry;
-- no live/demo calls;
+- no concrete private WebSocket transport;
+- no live/demo calls or credential attachment in this evidence;
+- no qualification claim for provider permissions, quota behavior,
+  timeout-after-send, reconnect/gap recovery, pagination, manual activity or
+  account-mode changes;
 - no claim that Futures demo evidence qualifies Spot;
 - no trading authority.
 

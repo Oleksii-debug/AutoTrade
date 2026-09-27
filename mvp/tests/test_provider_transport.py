@@ -2,11 +2,14 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
+import os
 import subprocess
 import sys
 from threading import Event
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
+from urllib.request import ProxyHandler
 
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
@@ -46,6 +49,7 @@ from mvp.autotrade_mvp.provider_transport import (
     ProviderTransportError,
     ProviderTransportScopeError,
     TradingWireResponse,
+    UrllibJsonWireClient,
     KRAKEN_SPOT_ENDPOINT_POLICIES,
     KrakenSpotAuthenticatedReadSigner,
     KrakenSpotAuthenticatedReadTransport,
@@ -59,6 +63,27 @@ from mvp.autotrade_mvp.provider_transport import (
 )
 from mvp.autotrade_mvp.whitebit import WhiteBitPreparedRequest
 from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
+
+
+class ProviderWirePolicyTests(unittest.TestCase):
+    def test_production_wire_client_disables_ambient_proxy_discovery(self):
+        with patch.dict(
+            os.environ,
+            {
+                "HTTPS_PROXY": "http://127.0.0.1:65534",
+                "https_proxy": "http://127.0.0.1:65534",
+            },
+            clear=False,
+        ):
+            client = UrllibJsonWireClient()
+
+        proxy_handlers = [
+            handler
+            for handler in client._opener.handlers
+            if isinstance(handler, ProxyHandler)
+        ]
+        self.assertEqual(len(proxy_handlers), 1)
+        self.assertEqual(proxy_handlers[0].proxies, {})
 
 
 class FakeSecretResolver:

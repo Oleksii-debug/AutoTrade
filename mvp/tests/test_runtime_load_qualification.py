@@ -105,6 +105,11 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
             self.assertEqual(first.start_journal_sequence, 1)
             self.assertEqual(first.end_journal_sequence, 4)
             self.assertEqual(first.recovered_financial_event_ids, ("fin-1", "fin-2"))
+            observation = first.to_observation(spec)
+            self.assertEqual(observation.expected_financial_event_ids, ("fin-1", "fin-2"))
+            self.assertEqual(observation.recovered_financial_event_ids, ("fin-1", "fin-2"))
+            self.assertEqual(observation.financial_latency_event_ids, ("fin-1", "fin-2"))
+            self.assertEqual(observation.financial_staleness_event_ids, ("fin-1", "fin-2"))
             self.assertEqual(evaluate_runtime_campaign(spec, first).status, "PASS")
 
             reopened = JournalStore(path)
@@ -194,6 +199,7 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
             decision = evaluate_runtime_campaign(spec, evidence)
             self.assertEqual(decision.status, "FAIL")
             self.assertIn("financial_event_loss", decision.reasons)
+            self.assertIn("missing_expected_financial_event_ids", decision.reasons)
             self.assertEqual(decision.metrics["expected_financial_events"], 2)
             self.assertEqual(decision.metrics["recovered_financial_events"], 1)
 
@@ -321,6 +327,37 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
                 expected_financial_event_ids=("fin-1",),
                 financial_aggregate_types="financial",
             )
+
+    def test_campaign_collector_rejects_non_sequence_measurements_before_canonicalization(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(samples=1)
+            current_plan = plan(spec, "fin-1")
+            cut = begin_runtime_campaign(journal=journal, spec=spec, plan=current_plan)
+            journal.append_event(envelope("fin-1"))
+
+            common = dict(
+                journal=journal,
+                spec=spec,
+                plan=current_plan,
+                cut=cut,
+                financial_latency_us=(100,),
+                financial_staleness_us=(80,),
+                research_interference_us=(50,),
+                resource_evidence_hash=RESOURCE,
+                resource_metrics={"cpu_peak_millis": 500},
+            )
+            cases = (
+                ("financial_latency_us", (value for value in (100,))),
+                ("financial_staleness_us", {80}),
+                ("research_interference_us", {"sample": 50}),
+            )
+            for field, bad in cases:
+                with self.subTest(field=field):
+                    values = dict(common)
+                    values[field] = bad
+                    with self.assertRaisesRegex(RuntimeBudgetError, f"{field} must be a sequence"):
+                        collect_runtime_campaign_evidence(**values)
 
     def test_campaign_evidence_cannot_be_directly_self_asserted(self):
         spec = runtime_spec(samples=1)

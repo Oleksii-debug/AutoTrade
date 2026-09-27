@@ -154,9 +154,13 @@ def _open_generation_bound_descriptor(
             )
             try:
                 if not self._same_filesystem_entry(opened, reference):
-                    raise _store.ArtifactIntegrityError(
-                        "artifact object generation changed before descriptor read"
-                    )
+                    # Distinguish a replaced prefix generation from replacement of
+                    # the digest entry inside the still-authoritative prefix. The
+                    # former fails here as generation drift. For the latter, keep
+                    # the original descriptor alive and let canonical revalidation
+                    # preserve its established "path changed during descriptor read"
+                    # classification after the bounded read.
+                    _crash._verify_generation(self, manifest)
             finally:
                 os.close(reference_descriptor)
         except Exception:

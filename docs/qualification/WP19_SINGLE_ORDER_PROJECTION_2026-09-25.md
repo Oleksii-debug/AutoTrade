@@ -158,4 +158,6 @@ The same lineage now closes one WP-55 semantic integration seam without creating
 
 An execution observation by itself remains insufficient. Partial fills, missing order projection, another submission attempt, and non-`FILLED` order states keep residual reservation capacity held. PAPER/LIVE replay reuses the trusted evidence ArtifactStore rather than bypassing provider-evidence verification.
 
+The durable reservation gate evaluates quantitative closure: active filled quantity must equal requested quantity exactly, open quantity must be zero, and the lifecycle state must be `FILLED` or a full-quantity `FILLED_AFTER_CANCEL` / `FILLED_AFTER_EXPIRY` / `FILLED_AFTER_REJECT`. Any overfill, partial terminal outcome, or non-terminal state leaves the reservation held for reconciliation and risk handling.
+
 The whole-simulator regression now exercises authority -> reservation -> guarded dispatch -> order projection -> fill -> accounting -> reconciliation -> terminal reservation and then reconstructs order and reservation state after restart. This proves the semantic terminal-release chain, not cross-aggregate atomicity; stronger Transaction C atomic composition remains a separate gate.

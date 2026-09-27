@@ -1012,9 +1012,19 @@ class DurableReservationBook:
                 raise ReservationConflict(
                     "FILLED release order projection belongs to another submission attempt"
                 )
-            if order.state != "FILLED":
+            terminal_fill_states = {
+                "FILLED",
+                "FILLED_AFTER_CANCEL",
+                "FILLED_AFTER_EXPIRY",
+                "FILLED_AFTER_REJECT",
+            }
+            if (
+                order.state not in terminal_fill_states
+                or order.filled_quantity != order.requested_quantity
+                or order.open_quantity != Decimal("0")
+            ):
                 raise ReservationConflict(
-                    "FILLED release requires canonical order state FILLED"
+                    "FILLED release requires quantitative terminal closure without overfill"
                 )
         return evidence
 

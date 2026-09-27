@@ -5,9 +5,11 @@ import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
+from uuid import uuid4
 
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
+from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
 from mvp.autotrade_mvp.reconciliation import (
     CoverageSurfaceEvidence,
     ProviderFillEvidence,
@@ -98,6 +100,40 @@ class DurableReservationBookTests(unittest.TestCase):
             account_id="paper-account",
             resolution_artifact_store=self.artifacts,
         )
+
+    def provider_order_evidence(self, *, operation, request, observed_at):
+        artifact_id = str(uuid4())
+        source_uri = "https://provider.example.test/evidence"
+        payload = canonical_json(
+            {
+                "operation": operation,
+                "request": request,
+                "observed_at": observed_at,
+            }
+        ).encode("utf-8")
+        manifest = self.artifacts.publish_bytes(
+            artifact_id=artifact_id,
+            data=payload,
+            media_type="application/json",
+            rights={"storage": True, "export": False},
+            source_refs=[source_uri],
+            metadata={
+                "provider_id": "SIMULATED",
+                "account_id": "paper-account",
+                "environment": "PAPER",
+                "order_operation": operation,
+                "request_hash": payload_digest(request),
+                "observed_at": observed_at,
+                "rights_id": "provider-test-evidence",
+            },
+        )
+        return {
+            "artifact_id": artifact_id,
+            "sha256": manifest["sha256"],
+            "source_uri": source_uri,
+            "observed_at": observed_at,
+            "rights_id": "provider-test-evidence",
+        }
 
     def create_unknown_attempt(
         self,
@@ -434,6 +470,108 @@ class DurableReservationBookTests(unittest.TestCase):
         self.assertEqual(restored.state, "UNKNOWN")
         self.assertEqual(restored.consumed["CASH:USD"], Decimal("60"))
         self.assertEqual(restarted.total_reserved("CASH:USD"), before)
+
+    def test_fully_filled_after_cancel_closes_reservation_by_exact_quantity(self):
+        reservations = self.book()
+        self.reserve(reservations)
+        reservations.mark_unknown(
+            command_id="cmd-unknown-cancel-fill",
+            idempotency_key="idem-unknown-cancel-fill",
+            reservation_id="r1",
+        )
+        dispatched = self.create_unknown_attempt()
+        reconciliation = self.record_reconciliation_resolution(outcome="FILLED")
+
+        orders = DurableOrderBookProjection(
+            self.store,
+            provider_id="SIMULATED",
+            account_id="paper-account",
+            environment="PAPER",
+            host_id="order-host",
+            owner_epoch="1",
+            evidence_artifact_store=self.artifacts,
+        )
+        orders.create_order(
+            event_key="preexisting-order",
+            client_order_id=dispatched.client_order_id,
+            instrument="TEST",
+            side="BUY",
+            requested_quantity="1",
+            quantity_unit="unit:TEST",
+            origin_intent_id="i1",
+            committed_at="2026-09-25T00:00:00Z",
+        )
+        orders.sync_submission_attempt(attempt_id="attempt-r1")
+        orders.request_cancel(
+            event_key="cancel-request",
+            client_order_id=dispatched.client_order_id,
+            command_id="cancel-1",
+            committed_at="2026-09-25T00:00:30Z",
+        )
+        cancel_evidence = self.provider_order_evidence(
+            operation="CONFIRM_CANCEL",
+            request={"client_order_id": dispatched.client_order_id},
+            observed_at="2026-09-25T00:00:40Z",
+        )
+        orders.confirm_cancel(
+            event_key="cancel-confirmed",
+            client_order_id=dispatched.client_order_id,
+            committed_at="2026-09-25T00:00:40Z",
+            evidence_refs=[cancel_evidence],
+        )
+
+        fill_body = {
+            "fill_id": "fill-attempt-r1",
+            "provider_execution_id": "exec-attempt-r1",
+            "order_ref": dispatched.client_order_id,
+            "intent_ref": "i1",
+            "instrument_version": "TEST",
+            "side": "BUY",
+            "last_quantity": {"value": "1", "unit": "unit:TEST"},
+            "last_price": "1",
+            "trade_time": "2026-09-25T00:01:00Z",
+            "receipt_time": "2026-09-25T00:01:10Z",
+            "fees": [{"amount": "0", "currency": "USD"}],
+            "settlement_date": "2026-09-25",
+        }
+        fill_request = {
+            "client_order_id": dispatched.client_order_id,
+            "fill_id": "fill-attempt-r1",
+            "provider_execution_id": "exec-attempt-r1",
+            "quantity": "1",
+            "price": "1",
+            "provider_revision": None,
+            "canonical_execution_fill": fill_body,
+        }
+        fill_evidence = self.provider_order_evidence(
+            operation="RECORD_FILL",
+            request=fill_request,
+            observed_at="2026-09-25T00:01:10Z",
+        )
+        order_fill = orders.ingest_execution_fill(
+            event_key="late-full-fill",
+            client_order_id=dispatched.client_order_id,
+            committed_at="2026-09-25T00:01:20Z",
+            execution_fill={**fill_body, "evidence": [fill_evidence]},
+        )
+        self.assertEqual(order_fill.snapshot.state, "FILLED_AFTER_CANCEL")
+
+        filled_evidence = self.publish_resolution_evidence(
+            artifact_id="55555555-5555-4555-8555-555555555556",
+            outcome="FILLED",
+            reconciliation_event=reconciliation,
+        )
+        terminal = reservations.mark_terminal(
+            command_id="cmd-terminal-cancel-filled",
+            idempotency_key="idem-terminal-cancel-filled",
+            reservation_id="r1",
+            outcome="FILLED",
+            provider="SIMULATED",
+            attempt_id="attempt-r1",
+            resolution_evidence=filled_evidence,
+        )
+        self.assertEqual(terminal.state, "FILLED")
+        self.assertEqual(reservations.total_reserved("CASH:USD"), Decimal("0"))
 
     def test_restart_does_not_make_reserved_cash_available_again(self):
         first = self.book()

@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
-from research.autotrade_research.artifacts.store import ArtifactStore
+from research.autotrade_research.artifacts.store import ArtifactIntegrityError, ArtifactStore
 
 import mvp.autotrade_mvp.release_candidate as release_candidate_module
 from mvp.autotrade_mvp.qualification_attestation import (
@@ -284,7 +284,104 @@ def freeze_with_integrity_store(
                 qualification_receipt=receipt,
             )
 
+class _SnapshotOnlyEvidenceStore:
+    def __init__(self, manifest, data, *, fail_snapshot=False):
+        self.manifest = manifest
+        self.data = data
+        self.fail_snapshot = fail_snapshot
+        self.snapshot_calls = []
+        self.legacy_calls = []
+
+    def read_authenticated_snapshot(self, artifact_id):
+        self.snapshot_calls.append(artifact_id)
+        if self.fail_snapshot:
+            raise ArtifactIntegrityError("authenticated snapshot changed")
+        return self.manifest, self.data
+
+    def load_manifest(self, artifact_id):
+        self.legacy_calls.append(("load_manifest", artifact_id))
+        return self.manifest
+
+    def read_bytes(self, artifact_id):
+        self.legacy_calls.append(("read_bytes", artifact_id))
+        return b"legacy-second-lookup-bytes"
+
+
 class ReleaseCandidateFreezeTests(unittest.TestCase):
+    def test_release_evidence_uses_one_authenticated_snapshot_only(self):
+        item = artifact("HOST")
+        data = _ARTIFACT_BYTES[item.artifact_id]
+        manifest = {
+            "manifest_hash": "sha256:" + "a" * 64,
+            "artifact_id": item.artifact_id,
+            "sha256": item.artifact_sha256,
+            "media_type": RELEASE_MEDIA_TYPE,
+            "source_refs": [f"git:{item.source_sha}"],
+            "metadata": {
+                "evidence_kind": RELEASE_EVIDENCE_KIND,
+                "role": item.role,
+                "source_sha": item.source_sha,
+                "signature_status": item.signature_status,
+                "evidence_status": item.evidence_status,
+            },
+        }
+        store = _SnapshotOnlyEvidenceStore(manifest, data)
+        self.assertTrue(
+            release_candidate_module._stored_evidence_is_verified(store, item)
+        )
+        self.assertEqual(store.snapshot_calls, [item.artifact_id])
+        self.assertEqual(store.legacy_calls, [])
+
+    def test_release_evidence_rejects_snapshot_replacement_without_legacy_fallback(self):
+        item = artifact("HOST")
+        data = _ARTIFACT_BYTES[item.artifact_id]
+        manifest = {
+            "manifest_hash": "sha256:" + "b" * 64,
+            "artifact_id": item.artifact_id,
+            "sha256": item.artifact_sha256,
+            "media_type": RELEASE_MEDIA_TYPE,
+            "source_refs": [f"git:{item.source_sha}"],
+            "metadata": {
+                "evidence_kind": RELEASE_EVIDENCE_KIND,
+                "role": item.role,
+                "source_sha": item.source_sha,
+                "signature_status": item.signature_status,
+                "evidence_status": item.evidence_status,
+            },
+        }
+        store = _SnapshotOnlyEvidenceStore(
+            manifest,
+            data,
+            fail_snapshot=True,
+        )
+        self.assertFalse(
+            release_candidate_module._stored_evidence_is_verified(store, item)
+        )
+        self.assertEqual(store.snapshot_calls, [item.artifact_id])
+        self.assertEqual(store.legacy_calls, [])
+
+    def test_release_evidence_rejects_snapshot_bytes_digest_mismatch(self):
+        item = artifact("HOST")
+        manifest = {
+            "manifest_hash": "sha256:" + "c" * 64,
+            "artifact_id": item.artifact_id,
+            "sha256": item.artifact_sha256,
+            "media_type": RELEASE_MEDIA_TYPE,
+            "source_refs": [f"git:{item.source_sha}"],
+            "metadata": {
+                "evidence_kind": RELEASE_EVIDENCE_KIND,
+                "role": item.role,
+                "source_sha": item.source_sha,
+                "signature_status": item.signature_status,
+                "evidence_status": item.evidence_status,
+            },
+        }
+        store = _SnapshotOnlyEvidenceStore(manifest, b"different-bytes")
+        self.assertFalse(
+            release_candidate_module._stored_evidence_is_verified(store, item)
+        )
+        self.assertEqual(store.legacy_calls, [])
+
     def candidate(self, **overrides):
         values = dict(
             release_id="autotrade-rc-20260924-1",

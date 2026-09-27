@@ -26,6 +26,7 @@ from mvp.autotrade_mvp.provider_core import (
 )
 from mvp.tests._durable_dispatch_test_support import durable_order_preparation
 from mvp.autotrade_mvp.kraken_spot import (
+    normalize_authenticated_trade_history,
     KRAKEN_SPOT_DOCS,
     KrakenSpotAbsenceEvidence,
     KrakenSpotAdapterError,
@@ -660,8 +661,9 @@ class KrakenSpotAdapterTests(unittest.TestCase):
                 },
             },
         }
+        observation = trade_history_observation(response)
         fills = parse_trade_history(
-            trade_history_observation(response),
+            observation,
             instrument_versions={"XXBTZUSD": "XBTUSD:v1"},
             client_ids_by_provider_order={"OABC-D123-E456": "at-order-1"},
             fee_currency_by_pair={"XXBTZUSD": "USD"},
@@ -677,6 +679,14 @@ class KrakenSpotAdapterTests(unittest.TestCase):
         self.assertEqual(fill.fee_amount, Decimal("0.20"))
         self.assertEqual(fill.fee_currency, "USD")
         self.assertEqual(fill.trade_time, "2026-09-24T20:00:01.123456Z")
+        normalized_fill, = normalize_authenticated_trade_history(
+            observation,
+            instrument_versions={"XXBTZUSD": "XBTUSD:v1"},
+            client_ids_by_provider_order={"OABC-D123-E456": "at-order-1"},
+            fee_currency_by_pair={"XXBTZUSD": "USD"},
+        )
+        self.assertEqual(normalized_fill.provider_fill, fill)
+        self.assertEqual(normalized_fill.observation.response_bytes, observation.response_bytes)
 
     def test_trade_history_side_is_provider_evidenced_and_fail_closed(self):
         trade = {

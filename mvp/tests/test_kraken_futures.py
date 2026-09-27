@@ -11,6 +11,7 @@ from mvp.autotrade_mvp.capabilities import (
     derive_capability_snapshot,
 )
 from mvp.autotrade_mvp.kraken_futures import (
+    normalize_authenticated_position_executions,
     KrakenFuturesPreparedRequest,
     build_order_payload,
     coverage_evidence,
@@ -450,8 +451,7 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
             )
 
     def test_position_history_maps_only_trade_execution_facts(self):
-        fills = parse_position_executions(
-            futures_position_observation({
+        observation = futures_position_observation({
                 "elements": [
                     {
                         "tradeable": "PI_XBTUSD",
@@ -471,7 +471,9 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                         "realizedFunding": "-0.10",
                     },
                 ]
-            }),
+            })
+        fills = parse_position_executions(
+            observation,
             instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
             execution_client_ids={"exec-1": "hedge-007"},
         )
@@ -485,6 +487,13 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
         self.assertEqual(fill.trade_time, "2026-09-24T20:00:00.123Z")
         self.assertEqual(fill.account_id, "paper-1")
         self.assertEqual(fill.environment, "PAPER")
+        normalized_fill, = normalize_authenticated_position_executions(
+            observation,
+            instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
+            execution_client_ids={"exec-1": "hedge-007"},
+        )
+        self.assertEqual(normalized_fill.provider_fill, fill)
+        self.assertEqual(normalized_fill.observation.response_bytes, observation.response_bytes)
 
     def test_position_history_requires_exact_bound_endpoint(self):
         observation = futures_position_observation(

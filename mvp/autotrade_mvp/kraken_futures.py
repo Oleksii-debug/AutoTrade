@@ -559,6 +559,7 @@ def parse_position_executions(
             fee_amount=row.get("fee", "0"),
             fee_currency=_text(row.get("feeCurrency"), name="feeCurrency"),
             trade_time=_millis_to_utc(fill_time, name="fillTime"),
+            evidence_refs=(observation.evidence_ref,),
         )
         previous = by_execution.get(execution_id)
         if previous is not None and previous != fill:

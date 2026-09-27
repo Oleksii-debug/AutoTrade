@@ -73,6 +73,11 @@ from ._windows_retained_publication_hardening import (
 install_windows_retained_publication_hardening()
 del install_windows_retained_publication_hardening
 
+from ._publication_contract_compat import install_publication_contract_compatibility
+
+install_publication_contract_compatibility()
+del install_publication_contract_compatibility
+
 from ._retained_coordination import install_retained_coordination
 
 install_retained_coordination()

@@ -1875,9 +1875,237 @@ class AuthorityTests(unittest.TestCase):
             self.assertEqual(replayed, admitted)
             self.assertEqual(resolver_calls, [])
 
-    def test_same_symbol_missing_family_stays_rejected_after_restart(self):
+    def test_derivative_authoritative_snapshot_identity_binds_family_and_equivalent_evidence(self):
+        risk_intent = RiskIntent.create(
+            symbol="ABC",
+            side="BUY",
+            quantity="1",
+            price="5",
+            expected_state_version=7,
+            instrument_type="OPTION",
+        )
+        derivative_context = replace(
+            public_risk_context(),
+            positions={"ABC": Decimal("1")},
+            marks={"ABC": Decimal("5")},
+            instrument_types={"ABC": "OPTION"},
+            equivalent_exposure_per_unit={"ABC": Decimal("100")},
+            stress_scenarios=({"ABC": Decimal("-0.10")},),
+        )
+        request = RiskAuthorityRequest(
+            risk_intent=risk_intent,
+            account_id="paper-1",
+            environment="PAPER",
+            provider_id="TEST_PROVIDER",
+            instrument_version=InstrumentVersionIdentity(
+                INSTRUMENT_ID, 1
+            ),
+            capability_snapshot_id=PUBLIC_CAPABILITY_SNAPSHOT_ID,
+            reconciliation_checkpoint_event_id="risk-family-checkpoint",
+            journal_sequence_cut=7,
+            reservation_version=0,
+            reservation_state_digest="sha256:" + "b" * 64,
+            authority_policy_id="p1",
+            authority_policy_version=1,
+            evaluated_at="2026-09-24T18:01:00Z",
+        )
+        canonical = public_authoritative_risk_snapshot(
+            request,
+            risk_context=derivative_context,
+        )
+        family_changed = public_authoritative_risk_snapshot(
+            request,
+            risk_context=replace(
+                derivative_context,
+                instrument_types={"ABC": "FUTURE"},
+            ),
+        )
+        equivalent_changed = public_authoritative_risk_snapshot(
+            request,
+            risk_context=replace(
+                derivative_context,
+                equivalent_exposure_per_unit={"ABC": Decimal("101")},
+            ),
+        )
+
+        self.assertNotEqual(canonical.snapshot_id, family_changed.snapshot_id)
+        self.assertNotEqual(canonical.snapshot_id, equivalent_changed.snapshot_id)
+        self.assertNotEqual(
+            canonical.evidence_payload()["context_fingerprint"],
+            family_changed.evidence_payload()["context_fingerprint"],
+        )
+        self.assertNotEqual(
+            canonical.evidence_payload()["context_fingerprint"],
+            equivalent_changed.evidence_payload()["context_fingerprint"],
+        )
+
+    def test_same_symbol_derivative_snapshot_survives_store_reopen_and_new_missing_evidence_fails_closed(self):
         with TemporaryDirectory() as directory:
-            store = JournalStore(f"{directory}/journal.sqlite3")
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            derivative_context = replace(
+                public_risk_context(),
+                positions={"ABC": Decimal("1")},
+                marks={"ABC": Decimal("5")},
+                instrument_types={"ABC": "OPTION"},
+                equivalent_exposure_per_unit={"ABC": Decimal("100")},
+                stress_scenarios=({"ABC": Decimal("-0.10")},),
+            )
+            derivative_intent = RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="1",
+                price="5",
+                expected_state_version=7,
+                instrument_type="OPTION",
+            )
+            authority = authority_service(
+                store,
+                risk_context=derivative_context,
+            )
+            item = policy(autonomous=True)
+            authority.register_policy(item)
+            kwargs = dict(
+                command_id="cmd-derivative-snapshot",
+                idempotency_key="idem-derivative-snapshot",
+                admission_id="admission-derivative-snapshot",
+                policy_id=item.policy_id,
+                intent_id="intent-derivative-snapshot",
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="5",
+                reservation_id="reservation-derivative-snapshot",
+                **public_financial_kwargs(
+                    store,
+                    risk_context=derivative_context,
+                    risk_intent=derivative_intent,
+                ),
+            )
+            admitted = authority.admit(
+                reservation_book=DurableReservationBook(
+                    store,
+                    environment="PAPER",
+                    account_id="paper-1",
+                ),
+                **kwargs,
+            )
+            self.assertEqual(admitted.outcome, "ADMITTED")
+            risk_event = store.load_events(
+                "risk_decision", admitted.risk_decision_id
+            )[0]
+            durable_snapshot = risk_event["payload"][
+                "authoritative_risk_snapshot"
+            ]
+            self.assertTrue(
+                durable_snapshot["snapshot_id"].startswith(
+                    "risk-snapshot:sha256:"
+                )
+            )
+
+            reopened_store = JournalStore(path)
+            resolver_calls = []
+
+            def replay_resolver(request):
+                resolver_calls.append(request)
+                return public_authoritative_risk_snapshot(
+                    request,
+                    risk_context=replace(
+                        derivative_context,
+                        equivalent_exposure_per_unit={
+                            "ABC": Decimal("999")
+                        },
+                    ),
+                    evidence_suffix="must-not-be-used-for-exact-replay",
+                )
+
+            restarted = authority_service(
+                reopened_store,
+                resolver=replay_resolver,
+            )
+            replayed = restarted.admit(
+                reservation_book=DurableReservationBook(
+                    reopened_store,
+                    environment="PAPER",
+                    account_id="paper-1",
+                ),
+                **kwargs,
+            )
+            self.assertEqual(replayed, admitted)
+            self.assertEqual(resolver_calls, [])
+            replayed_snapshot = reopened_store.load_events(
+                "risk_decision", admitted.risk_decision_id
+            )[0]["payload"]["authoritative_risk_snapshot"]
+            self.assertEqual(replayed_snapshot, durable_snapshot)
+
+            missing_equivalent = replace(
+                derivative_context,
+                equivalent_exposure_per_unit={},
+            )
+            fresh_kwargs = dict(
+                command_id="cmd-derivative-after-restart",
+                idempotency_key="idem-derivative-after-restart",
+                admission_id="admission-derivative-after-restart",
+                policy_id=item.policy_id,
+                intent_id="intent-derivative-after-restart",
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="5",
+                reservation_id="reservation-derivative-after-restart",
+                **public_financial_kwargs(
+                    reopened_store,
+                    intent_hash="sha256:" + "c" * 64,
+                    risk_context=missing_equivalent,
+                    risk_intent=derivative_intent,
+                ),
+            )
+            post_restart = authority_service(
+                reopened_store,
+                risk_context=missing_equivalent,
+            )
+            before_version = DurableReservationBook(
+                reopened_store,
+                environment="PAPER",
+                account_id="paper-1",
+            ).version
+            rejected = post_restart.admit(
+                reservation_book=DurableReservationBook(
+                    reopened_store,
+                    environment="PAPER",
+                    account_id="paper-1",
+                ),
+                **fresh_kwargs,
+            )
+            self.assertEqual(
+                (rejected.outcome, rejected.reason),
+                ("REJECTED", "risk_rejected"),
+            )
+            after_version = DurableReservationBook(
+                reopened_store,
+                environment="PAPER",
+                account_id="paper-1",
+            ).version
+            self.assertEqual(after_version, before_version)
+            rejected_event = reopened_store.load_events(
+                "risk_decision", rejected.risk_decision_id
+            )[0]
+            missing_rule = next(
+                rule
+                for rule in rejected_event["payload"]["rules"]
+                if rule["rule"] == "derivative_equivalent_exposure"
+            )
+            self.assertFalse(missing_rule["passed"])
+            self.assertEqual(missing_rule["observed"], "MISSING:ABC")
+
+    def test_same_symbol_missing_family_stays_rejected_after_store_reopen(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
             exposed = replace(
                 public_risk_context(),
                 positions={"ABC": Decimal("1")},
@@ -1912,22 +2140,46 @@ class AuthorityTests(unittest.TestCase):
                 store, environment="PAPER", account_id="paper-1"
             )
             first = authority.admit(reservation_book=reservations, **kwargs)
-            self.assertEqual((first.outcome, first.reason), ("REJECTED", "risk_rejected"))
+            self.assertEqual(
+                (first.outcome, first.reason),
+                ("REJECTED", "risk_rejected"),
+            )
             self.assertEqual(reservations.version, 0)
             self.assertEqual(store.pending_outbox(), [])
-            self.assertEqual(len(store.load_events("risk_decision", first.risk_decision_id)), 1)
+            self.assertEqual(
+                len(
+                    store.load_events(
+                        "risk_decision", first.risk_decision_id
+                    )
+                ),
+                1,
+            )
 
-            restarted = authority_service(store, risk_context=exposed)
+            reopened_store = JournalStore(path)
+            restarted = authority_service(
+                reopened_store,
+                risk_context=exposed,
+            )
             replayed_reservations = DurableReservationBook(
-                store, environment="PAPER", account_id="paper-1"
+                reopened_store,
+                environment="PAPER",
+                account_id="paper-1",
             )
             replayed = restarted.admit(
-                reservation_book=replayed_reservations, **kwargs
+                reservation_book=replayed_reservations,
+                **kwargs,
             )
             self.assertEqual(replayed, first)
             self.assertEqual(replayed_reservations.version, 0)
-            self.assertEqual(store.pending_outbox(), [])
-            self.assertEqual(len(store.load_events("risk_decision", first.risk_decision_id)), 1)
+            self.assertEqual(reopened_store.pending_outbox(), [])
+            self.assertEqual(
+                len(
+                    reopened_store.load_events(
+                        "risk_decision", first.risk_decision_id
+                    )
+                ),
+                1,
+            )
 
     def test_public_financial_admission_is_atomic_and_restart_idempotent(self):
         with TemporaryDirectory() as directory:

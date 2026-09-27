@@ -342,13 +342,16 @@ class SimulatedProviderContractHarness:
             raise ValueError("coverage_end must not precede coverage_start")
         if not isinstance(pagination_complete, bool):
             raise TypeError("pagination_complete must be boolean")
-        if end > current:
+        horizon = (current if end > current else end).isoformat().replace(
+            "+00:00", "Z"
+        )
+        if cid not in self.provider.orders and end > current:
             core = {
                 "verdict": "INCONCLUSIVE",
                 "searched_surfaces": ["orders-by-client-id", "activity-fills"],
                 "time_window": {"start": coverage_start, "end": coverage_end},
                 "pagination_complete": pagination_complete,
-                "consistency_horizon": coverage_end,
+                "consistency_horizon": horizon,
                 "reason_codes": ["coverage_end_after_query_time"],
             }
             return {
@@ -364,7 +367,7 @@ class SimulatedProviderContractHarness:
                     "searched_surfaces": ["orders-by-client-id", "activity-fills"],
                     "time_window": {"start": coverage_start, "end": coverage_end},
                     "pagination_complete": pagination_complete,
-                    "consistency_horizon": coverage_end,
+                    "consistency_horizon": horizon,
                     "reason_codes": ["submission_outside_coverage"],
                     "submission_started_at": submission_started_at,
                 }
@@ -456,7 +459,11 @@ class SimulatedProviderContractHarness:
         cid = _text(correction_id, name="correction_id")
         execution_id = _text(provider_execution_id, name="provider_execution_id")
         delta = _decimal(fee_delta, name="fee_delta")
-        _instant(now, name="now")
+        canonical_now = (
+            _instant(now, name="now")
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
         matching = [
             fill
             for fill in self.provider.activity_fills()
@@ -469,7 +476,7 @@ class SimulatedProviderContractHarness:
             "provider_execution_id": execution_id,
             "fee_delta": _decimal_text(delta),
             "currency": self.provider.currency,
-            "observed_at": now,
+            "observed_at": canonical_now,
         }
         previous = self._corrections.get(cid)
         if previous is not None:
@@ -484,7 +491,7 @@ class SimulatedProviderContractHarness:
         self.provider.cash -= delta
         record = {
             **core,
-            "evidence": [_evidence("fee-correction", cid, now, core)],
+            "evidence": [_evidence("fee-correction", cid, canonical_now, core)],
         }
         self._corrections[cid] = record
         return record

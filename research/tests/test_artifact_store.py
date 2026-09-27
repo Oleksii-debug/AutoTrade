@@ -1657,9 +1657,15 @@ class ArtifactStoreTests(unittest.TestCase):
             artifact_id = str(uuid4())
             digest = hashlib.sha256(data).hexdigest()
 
-            with patch(
-                "autotrade_research.artifacts._retained_publication_hardening._publish_manifest_posix",
-                side_effect=RuntimeError("simulated process death before manifest commit"),
+            with (
+                patch(
+                    "autotrade_research.artifacts._retained_publication_hardening._publish_manifest_posix",
+                    side_effect=RuntimeError("simulated process death before manifest commit"),
+                ),
+                patch(
+                    "autotrade_research.artifacts._windows_retained_publication_hardening._publish_manifest_windows",
+                    side_effect=RuntimeError("simulated process death before manifest commit"),
+                ),
             ):
                 with self.assertRaisesRegex(RuntimeError, "simulated process death"):
                     store.publish_bytes(

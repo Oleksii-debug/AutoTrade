@@ -56,8 +56,6 @@ _LIFECYCLE_CASES: Mapping[Lifecycle, frozenset[str]] = {
     Lifecycle.CORPORATE: frozenset({"adjusted_contracts", "cross_currency_fees"}),
 }
 
-# This is the integration crosswalk itself, not a second provider registry.
-# Keys must already exist in provider_core.PROVIDERS; validation below enforces it.
 _PROVIDER_FAMILY_LIFECYCLES: Mapping[
     tuple[str, str], tuple[Lifecycle, ...]
 ] = {
@@ -76,11 +74,6 @@ _PROVIDER_FAMILY_LIFECYCLES: Mapping[
     ("ALPACA", "OPTIONS"): (Lifecycle.OPTIONS,),
 }
 
-# Every canonical provider product family must be classified exactly once:
-# either it participates in one or more WP-61 lifecycle rows above, or it is
-# explicitly outside WP-61's futures/perpetual/options/corporate scope.
-# Keeping this closed partition makes provider-registry expansion fail closed
-# until the integration crosswalk is deliberately reviewed.
 _NON_LIFECYCLE_PRODUCT_FAMILIES: Mapping[str, frozenset[str]] = {
     "BYBIT": frozenset({"SPOT", "MARGIN"}),
     "KRAKEN": frozenset({"SPOT", "MARGIN"}),
@@ -191,8 +184,7 @@ def lifecycle_evidence_bytes(item: LifecycleEvidence) -> bytes:
 
 def _stored_evidence_matches(store: ArtifactStore, item: LifecycleEvidence) -> bool:
     try:
-        manifest = store.load_manifest(item.artifact_id)
-        data = store.read_bytes(item.artifact_id)
+        manifest, data = store.read_authenticated_snapshot(item.artifact_id)
         if manifest.get("sha256") != item.artifact_sha256:
             return False
         if "sha256:" + sha256(data).hexdigest() != item.artifact_sha256:
@@ -228,13 +220,6 @@ class CrosswalkVerdict:
 
 
 def advertised_lifecycle_keys() -> tuple[CrosswalkKey, ...]:
-    """Return every lifecycle combination explicitly advertised by the crosswalk.
-
-    The lifecycle map and explicit out-of-scope map must form a closed,
-    non-overlapping partition of every product family in provider_core.PROVIDERS.
-    A provider-registry expansion therefore cannot silently escape WP-61 review.
-    """
-
     canonical_pairs = {
         (provider_id, product_family)
         for provider_id, definition in PROVIDERS.items()
@@ -291,8 +276,6 @@ def qualify_asset_provider_crosswalk(
     evidence_store: ArtifactStore | None = None,
     qualification_receipt: SignedQualificationAttestation | None = None,
 ) -> CrosswalkVerdict:
-    """Fail closed unless every advertised combination has exact complete evidence."""
-
     source_sha = _sha(exact_source_sha, "exact_source_sha")
     if evidence_store is not None and not isinstance(evidence_store, ArtifactStore):
         raise TypeError("evidence_store must be ArtifactStore")

@@ -66,7 +66,7 @@ def _handle_existing(self, existing, immutable, *, windows: bool):
             if windows
             else _transaction._rollback_new_manifest_posix
         )
-        rollback(self, existing["artifact_id"], existing)
+        rollback(self, existing["artifact_id"], (existing,))
         return None
     if any(existing.get(key) != value for key, value in immutable.items()):
         raise _store.ArtifactConflict(
@@ -98,9 +98,18 @@ def _committed_manifest(prepared):
     return committed
 
 
-def _rollback_expected(self, manifest, failure, *, windows: bool):
+def _rollback_expected(
+    self,
+    expected_manifests: tuple[dict[str, Any], ...],
+    failure: BaseException,
+    *,
+    windows: bool,
+) -> None:
     _transaction._rollback_or_raise(
-        self, manifest, failure, windows=windows
+        self,
+        expected_manifests,
+        failure,
+        windows=windows,
     )
 
 
@@ -142,10 +151,6 @@ def _publish_posix(
         source_refs=source_refs,
         metadata=metadata,
     )
-    # Serialization is supplied by retained/root coordination wrappers outside
-    # this canonical mutation. Do not create/open lexical .artifact-store.lock
-    # here: a non-cooperating A->B->A root swap must not redirect compatibility
-    # metadata into a replacement namespace.
     manifest_path = self._manifest_path(normalized_id)
     self._validate_manifest_namespace(manifest_path)
     self._validate_staging_namespace()
@@ -175,7 +180,7 @@ def _publish_posix(
         _retained._assert_all_continuity(self)
         self._verify_manifest_object(prepared)
     except BaseException as failure:
-        _rollback_expected(self, prepared, failure, windows=False)
+        _rollback_expected(self, (prepared,), failure, windows=False)
         raise
 
     committed = _committed_manifest(prepared)
@@ -187,7 +192,14 @@ def _publish_posix(
         self._verify_manifest_object(committed)
         return committed
     except BaseException as failure:
-        _rollback_expected(self, committed, failure, windows=False)
+        # Replacement helpers may fail either before or after their rename
+        # commit point. Both durable bytes are admissible rollback identities.
+        _rollback_expected(
+            self,
+            (prepared, committed),
+            failure,
+            windows=False,
+        )
         raise
 
 
@@ -243,7 +255,7 @@ def _publish_windows(
             _retained._assert_all_continuity(self)
             self._verify_manifest_object(prepared)
         except BaseException as failure:
-            _rollback_expected(self, prepared, failure, windows=True)
+            _rollback_expected(self, (prepared,), failure, windows=True)
             raise
 
         committed = _committed_manifest(prepared)
@@ -255,7 +267,12 @@ def _publish_windows(
             self._verify_manifest_object(committed)
             return committed
         except BaseException as failure:
-            _rollback_expected(self, committed, failure, windows=True)
+            _rollback_expected(
+                self,
+                (prepared, committed),
+                failure,
+                windows=True,
+            )
             raise
     finally:
         _guard._close_windows_handle(prefix_handle)

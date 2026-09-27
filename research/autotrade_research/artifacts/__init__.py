@@ -51,6 +51,11 @@ from ._stable_posix_capabilities import install_stable_posix_capabilities
 install_stable_posix_capabilities()
 del install_stable_posix_capabilities
 
+from ._crash_atomic_manifest import install_crash_atomic_manifest_contract
+
+install_crash_atomic_manifest_contract()
+del install_crash_atomic_manifest_contract
+
 from ._retained_recovery_hardening import install_retained_recovery_hardening
 
 install_retained_recovery_hardening()

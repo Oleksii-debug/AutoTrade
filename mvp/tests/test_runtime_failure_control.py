@@ -160,6 +160,107 @@ class RuntimeRecoveryTests(unittest.TestCase):
         self.assertEqual(controller.state, HostState.READY)
         return controller, owner
 
+    def test_recovery_bound_dispatcher_injects_durable_sender_fence(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            recovery = RecoveryController(
+                owner_store=store,
+                owner_scope="PAPER:test-account",
+            )
+            owner = recovery.start("host-a")
+            self._record_durable_ready(recovery)
+            dispatcher = recovery.build_guarded_dispatcher(
+                store=store,
+                environment="PAPER",
+                account_id="test-account",
+            )
+            self.assertEqual(dispatcher.owner_token, owner.owner_id)
+            self.assertEqual(dispatcher.owner_epoch, owner.epoch)
+
+            sends = []
+
+            def transport(_client_id, _request, final_guard):
+                final_guard()
+                sends.append("wire")
+                return {"ok": True}
+
+            first = dispatcher.dispatch(
+                attempt_id="bound-attempt-1",
+                intent_id="bound-intent-1",
+                intent_hash="bound-hash-1",
+                provider="TEST_PROVIDER",
+                request={"side": "BUY"},
+                now="2026-09-24T19:00:01Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=transport,
+            )
+            self.assertEqual(first.status, "SENT")
+            self.assertEqual(sends, ["wire"])
+
+            with self.assertRaisesRegex(ValueError, "cannot be overridden"):
+                dispatcher.dispatch(
+                    attempt_id="bound-attempt-override",
+                    intent_id="bound-intent-override",
+                    intent_hash="bound-hash-override",
+                    provider="TEST_PROVIDER",
+                    request={"side": "BUY"},
+                    now="2026-09-24T19:00:02Z",
+                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    transport_send=transport,
+                    sender_check=lambda _owner, _epoch: None,
+                )
+
+            successor = RecoveryController(
+                owner_store=store,
+                owner_scope="PAPER:test-account",
+            )
+            successor.start("host-b")
+            second = dispatcher.dispatch(
+                attempt_id="bound-attempt-2",
+                intent_id="bound-intent-2",
+                intent_hash="bound-hash-2",
+                provider="TEST_PROVIDER",
+                request={"side": "SELL"},
+                now="2026-09-24T19:00:03Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=transport,
+            )
+            self.assertEqual(second.status, "BLOCKED")
+            self.assertEqual(second.reason, "sender_fence_rejected:PermissionError")
+            self.assertEqual(sends, ["wire"])
+
+    def test_recovery_bound_dispatcher_rejects_undurable_or_wrong_scope(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            transient = RecoveryController(owner_scope="PAPER:test-account")
+            transient.start("host-a")
+            with self.assertRaisesRegex(PermissionError, "durable owner journal"):
+                transient.build_guarded_dispatcher(
+                    store=store,
+                    environment="PAPER",
+                    account_id="test-account",
+                )
+
+            durable = RecoveryController(
+                owner_store=store,
+                owner_scope="PAPER:test-account",
+            )
+            durable.start("host-a")
+            with self.assertRaisesRegex(PermissionError, "does not match"):
+                durable.build_guarded_dispatcher(
+                    store=store,
+                    environment="LIVE",
+                    account_id="test-account",
+                )
+
+            other_store = JournalStore(Path(directory) / "other.sqlite3")
+            with self.assertRaisesRegex(PermissionError, "durable owner journal"):
+                durable.build_guarded_dispatcher(
+                    store=other_store,
+                    environment="PAPER",
+                    account_id="test-account",
+                )
+
     def test_start_never_reports_ready_before_reconciliation(self):
         controller = RecoveryController()
         controller.start("host-a")

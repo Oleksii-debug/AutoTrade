@@ -716,7 +716,7 @@ def _stored_evidence_is_verified(
     """
 
     try:
-        manifest = store.load_manifest(artifact.artifact_id)
+        manifest, data = store.read_authenticated_snapshot(artifact.artifact_id)
         if not isinstance(manifest.get("manifest_hash"), str):
             return False
         if manifest.get("sha256") != artifact.artifact_sha256:
@@ -733,7 +733,8 @@ def _stored_evidence_is_verified(
             "evidence_status": artifact.evidence_status,
         }:
             return False
-        store.read_bytes(artifact.artifact_id)
+        if "sha256:" + sha256(data).hexdigest() != artifact.artifact_sha256:
+            return False
     except (
         ArtifactIntegrityError,
         FileNotFoundError,

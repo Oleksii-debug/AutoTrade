@@ -33,6 +33,7 @@ from mvp.autotrade_mvp.provider_core import (
     observe_submission_json_response,
     prepare_authenticated_read_query,
 )
+from mvp.tests._durable_dispatch_test_support import durable_order_preparation
 
 
 NOW_DT = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
@@ -272,6 +273,13 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                         prepared.instrument_version
                     ],
                 },
+                **durable_order_preparation(
+                    dispatcher,
+                    instrument=prepared.instrument_version,
+                    side="BUY",
+                    quantity="1",
+                    quantity_unit="unit:" + prepared.instrument_version,
+                ),
             )
             self.assertEqual(outcome.status, "SENT")
             binding = load_submission_response_binding(

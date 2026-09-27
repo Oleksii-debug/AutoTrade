@@ -33,6 +33,7 @@ from mvp.autotrade_mvp.provider_core import (
     observe_submission_json_response,
     prepare_authenticated_read_query,
 )
+from mvp.tests._durable_dispatch_test_support import durable_order_preparation
 
 
 READ_AT = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
@@ -566,6 +567,13 @@ class BybitV5AdapterTests(unittest.TestCase):
                     ),
                     "instrument_versions": list(prepared.instrument_versions),
                 },
+                **durable_order_preparation(
+                    dispatcher,
+                    instrument="BTCUSDT@1",
+                    side="BUY",
+                    quantity="0.01",
+                    quantity_unit="unit:BTCUSDT@1",
+                ),
             )
             self.assertEqual(outcome.status, "SENT")
             binding = load_submission_response_binding(

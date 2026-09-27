@@ -5,6 +5,7 @@ from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from mvp.autotrade_mvp.accounting import (
@@ -1421,6 +1422,24 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                 committed_at="2026-09-25T10:00:02Z",
                 order_book=orders,
                 order_mutation=order_mutation,
+            )
+            with patch.object(
+                store,
+                "commit_command",
+                side_effect=RuntimeError("injected correction commit interruption"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "injected correction"):
+                    commit_provider_fill_correction_with_settlement_replacement(
+                        economics,
+                        settlements,
+                        **correction_kwargs,
+                    )
+            self.assertEqual(len(orders.order(original.client_order_id).fill_history), 1)
+            self.assertEqual(len(economics.transactions), 1)
+            self.assertEqual(len(settlements.obligations), 1)
+            self.assertEqual(
+                reservations.get("reservation-1").consumed["CASH:USD"],
+                Decimal("100"),
             )
             self.assertTrue(
                 commit_provider_fill_correction_with_settlement_replacement(

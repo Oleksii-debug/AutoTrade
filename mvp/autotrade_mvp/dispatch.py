@@ -638,8 +638,11 @@ class GuardedDispatcher:
         submission_scope_hash = (
             "sha256:" + sha256(scope_canonical.encode("utf-8")).hexdigest()
         )
+        has_order_preparation_binding = order_preparation_binding is not None
         if order_preparation_binding is None:
-            order_binding: dict[str, Any] = {}
+            # Keep the historic callback contract for existing dispatch callers.
+            # New callers provide an explicit independent order binding.
+            order_binding: dict[str, Any] = scope_dict
         else:
             if not isinstance(order_preparation_binding, Mapping):
                 raise TypeError("order_preparation_binding must be a mapping")
@@ -673,8 +676,11 @@ class GuardedDispatcher:
                 "environment": self.environment,
                 "account_id": self.account_id,
                 "submission_scope_hash": submission_scope_hash,
-                "order_preparation_binding_hash": order_preparation_binding_hash,
             }
+            if has_order_preparation_binding:
+                expected["order_preparation_binding_hash"] = (
+                    order_preparation_binding_hash
+                )
             if any(prepared.get(key) != value for key, value in expected.items()):
                 raise ValueError("attempt_id conflicts with existing submission content")
             return self._recover_existing(
@@ -697,9 +703,12 @@ class GuardedDispatcher:
             "prepared_at": _instant(now).isoformat().replace("+00:00", "Z"),
             "submission_scope": scope_dict,
             "submission_scope_hash": submission_scope_hash,
-            "order_preparation_binding": order_binding,
-            "order_preparation_binding_hash": order_preparation_binding_hash,
         }
+        if has_order_preparation_binding:
+            prepared_payload["order_preparation_binding"] = order_binding
+            prepared_payload["order_preparation_binding_hash"] = (
+                order_preparation_binding_hash
+            )
         prepared = self._append(
             attempt_id=attempt_id,
             event_type="SubmissionPrepared",

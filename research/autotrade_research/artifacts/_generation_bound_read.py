@@ -3,7 +3,6 @@ from __future__ import annotations
 from hashlib import sha256
 import os
 from pathlib import Path
-import stat
 import sys
 import tempfile
 from typing import Any
@@ -21,20 +20,10 @@ def _generation_matches(expected: dict[str, Any], observed: Any) -> bool:
     return _crash.generation_from_posix_stat(observed) == expected
 
 
-def _open_generation_bound_descriptor(
-    self,
-    manifest: dict[str, Any],
-    object_path: Path,
-    *,
-    expected_bytes: int,
-):
+def _open_prefix_authority(self, manifest: dict[str, Any], object_path: Path):
     generation = _crash._validate_generation(manifest.get("object_generation"))
     prefix, digest = _retained._validate_object_name(self, object_path)
     _retained._assert_directory_continuity(self, ("objects", "sha256"), "objects")
-
-    # Preserve the established adversarial pre-open seam as an observation only.
-    # Authority below comes exclusively from the retained parent + held prefix.
-    self._validate_object_entry(object_path)
 
     if sys.platform == "win32":
         if generation.get("kind") != "windows":
@@ -46,48 +35,24 @@ def _open_generation_bound_descriptor(
             raise _store.ArtifactIntegrityError(
                 "retained object namespace handle is unavailable"
             )
-        prefix_authority = _guard._nt_open_relative_handle(
+        authority = _guard._nt_open_relative_handle(
             parent,
             prefix,
             directory=True,
             subject="artifact object generation",
         )
         try:
-            prefix_info = _guard._windows_handle_information(
-                prefix_authority,
+            opened = _guard._windows_handle_information(
+                authority,
                 subject="artifact object generation",
             )
-            if not _generation_matches(generation, prefix_info):
+            if not _generation_matches(generation, opened):
                 raise _store.ArtifactIntegrityError(
                     "artifact object generation changed after publication"
                 )
-            handle = _guard._nt_open_relative_handle(
-                prefix_authority,
-                digest,
-                directory=False,
-                subject="artifact object",
-            )
-            descriptor = _guard._windows_file_handle_to_descriptor(handle)
-            try:
-                opened = os.fstat(descriptor)
-                self._reject_reparse_point(
-                    opened,
-                    subject="artifact object descriptor",
-                )
-                if (
-                    not stat.S_ISREG(opened.st_mode)
-                    or opened.st_nlink != 1
-                    or opened.st_size != expected_bytes
-                ):
-                    raise _store.ArtifactIntegrityError(
-                        "artifact object size or link identity mismatch"
-                    )
-            except Exception:
-                os.close(descriptor)
-                raise
-            return descriptor, opened, prefix_authority, prefix_info
+            return authority, opened, digest
         except Exception:
-            _guard._close_windows_handle(prefix_authority)
+            _guard._close_windows_handle(authority)
             raise
 
     if generation.get("kind") != "posix":
@@ -99,30 +64,107 @@ def _open_generation_bound_descriptor(
         raise _store.ArtifactIntegrityError(
             "retained object namespace descriptor is unavailable"
         )
-    prefix_authority = _guard._open_posix_directory_component(
+    authority = _guard._open_posix_directory_component(
         self,
         parent_fd,
         prefix,
         subject="artifact object generation",
     )
     try:
-        prefix_info = os.fstat(prefix_authority)
-        if not _generation_matches(generation, prefix_info):
+        opened = os.fstat(authority)
+        if not _generation_matches(generation, opened):
             raise _store.ArtifactIntegrityError(
                 "artifact object generation changed after publication"
             )
-        descriptor, opened = _retained._retained_posix_file(
-            self,
+        return authority, opened, digest
+    except Exception:
+        os.close(authority)
+        raise
+
+
+def _close_prefix_authority(authority) -> None:
+    if sys.platform == "win32":
+        _guard._close_windows_handle(authority)
+    else:
+        os.close(authority)
+
+
+def _open_reference_object(self, prefix_authority, digest: str, *, expected_bytes: int):
+    if sys.platform == "win32":
+        handle = _guard._nt_open_relative_handle(
             prefix_authority,
             digest,
-            subject="artifact object",
+            directory=False,
+            subject="artifact object generation reference",
         )
-        if opened.st_size != expected_bytes:
+        descriptor = _guard._windows_file_handle_to_descriptor(handle)
+        try:
+            opened = os.fstat(descriptor)
+            if opened.st_nlink != 1 or opened.st_size != expected_bytes:
+                raise _store.ArtifactIntegrityError(
+                    "artifact object size or link identity mismatch"
+                )
+            return descriptor, opened
+        except Exception:
             os.close(descriptor)
-            raise _store.ArtifactIntegrityError("artifact object size mismatch")
-        return descriptor, opened, prefix_authority, prefix_info
+            raise
+
+    descriptor, opened = _retained._retained_posix_file(
+        self,
+        prefix_authority,
+        digest,
+        subject="artifact object generation reference",
+    )
+    if opened.st_size != expected_bytes:
+        os.close(descriptor)
+        raise _store.ArtifactIntegrityError("artifact object size mismatch")
+    return descriptor, opened
+
+
+def _open_generation_bound_descriptor(
+    self,
+    manifest: dict[str, Any],
+    object_path: Path,
+    *,
+    expected_bytes: int,
+):
+    """Open through the canonical seam and prove the file descends from manifest P1.
+
+    The retained prefix is opened and generation-checked before the established
+    ArtifactStore object-open seam runs. That keeps existing race/fault injection
+    coverage intact. A second reference open through the retained P1 authority is
+    then compared to the descriptor returned by the canonical seam, so a transient
+    or persistent P1->P2 swap cannot smuggle an equal-bytes object from P2.
+    """
+
+    prefix_authority, prefix_opened, digest = _open_prefix_authority(
+        self, manifest, object_path
+    )
+    try:
+        descriptor, opened = self._open_object_descriptor(
+            object_path,
+            expected_bytes=expected_bytes,
+        )
+        try:
+            reference_descriptor, reference = _open_reference_object(
+                self,
+                prefix_authority,
+                digest,
+                expected_bytes=expected_bytes,
+            )
+            try:
+                if not self._same_filesystem_entry(opened, reference):
+                    raise _store.ArtifactIntegrityError(
+                        "artifact object generation changed before descriptor read"
+                    )
+            finally:
+                os.close(reference_descriptor)
+        except Exception:
+            os.close(descriptor)
+            raise
+        return descriptor, opened, prefix_authority, prefix_opened
     except Exception:
-        os.close(prefix_authority)
+        _close_prefix_authority(prefix_authority)
         raise
 
 
@@ -131,24 +173,21 @@ def _revalidate_generation_bound_descriptor(
     manifest: dict[str, Any],
     object_path: Path,
     descriptor: int,
-    opened: os.stat_result,
+    opened,
     prefix_authority,
     prefix_opened,
     *,
     expected_bytes: int,
 ) -> None:
-    generation = _crash._validate_generation(manifest.get("object_generation"))
-    held = os.fstat(descriptor)
-    if (
-        not stat.S_ISREG(held.st_mode)
-        or held.st_nlink != 1
-        or held.st_size != expected_bytes
-        or not self._same_filesystem_entry(opened, held)
-    ):
-        raise _store.ArtifactIntegrityError(
-            "artifact object changed during descriptor read"
-        )
+    # Preserve canonical object-descriptor/path race checks and diagnostics.
+    self._revalidate_object_descriptor(
+        object_path,
+        descriptor,
+        opened,
+        expected_bytes=expected_bytes,
+    )
 
+    generation = _crash._validate_generation(manifest.get("object_generation"))
     if sys.platform == "win32":
         prefix_current = _guard._windows_handle_information(
             prefix_authority,
@@ -171,8 +210,9 @@ def _revalidate_generation_bound_descriptor(
                 "artifact object generation changed during read"
             )
 
-    # Re-open through the retained top-level object namespace and require the
-    # current lexical prefix to remain the exact generation held for this read.
+    # The configured current prefix must still be the generation held for this
+    # operation. A transient A->B->A remains safe because object bytes came from
+    # the retained A generation; a persistent B cannot become current authority.
     prefix, _digest = _retained._validate_object_name(self, object_path)
     if sys.platform == "win32":
         current = _guard._nt_open_relative_handle(
@@ -207,13 +247,6 @@ def _revalidate_generation_bound_descriptor(
                 )
         finally:
             os.close(current)
-
-
-def _close_prefix_authority(prefix_authority) -> None:
-    if sys.platform == "win32":
-        _guard._close_windows_handle(prefix_authority)
-    else:
-        os.close(prefix_authority)
 
 
 def _verify_manifest_object_bound(self, manifest: dict[str, Any]) -> Path:

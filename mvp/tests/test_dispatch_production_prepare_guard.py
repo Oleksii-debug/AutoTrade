@@ -2,7 +2,16 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
+from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
 from mvp.autotrade_mvp.persistence import JournalStore
+
+
+ORDER_SCOPE = {
+    "instrument": "TEST@1",
+    "side": "BUY",
+    "requested_quantity": "1",
+    "quantity_unit": "unit:test:share",
+}
 
 
 class ProductionPrepareGuardTests(unittest.TestCase):
@@ -33,11 +42,12 @@ class ProductionPrepareGuardTests(unittest.TestCase):
                     intent_id="intent-1",
                     intent_hash="intent-hash",
                     provider="provider",
-                    request={"instrument": "TEST", "side": "BUY", "quantity": "1"},
+                    request={"instrument": "TEST@1", "side": "BUY", "quantity": "1"},
                     now="2026-09-27T18:00:00Z",
                     authority_check=lambda _hash, _now: (True, "allowed"),
                     transport_send=transport,
                     sender_check=lambda _owner, _epoch: None,
+                    submission_scope=ORDER_SCOPE,
                 )
 
                 self.assertEqual(outcome.status, "BLOCKED")
@@ -56,7 +66,7 @@ class ProductionPrepareGuardTests(unittest.TestCase):
                     events[-1]["payload"]["reason"],
                 )
 
-    def test_valid_paper_prepare_runs_before_transport(self):
+    def test_noop_prepare_order_cannot_satisfy_production_proof(self):
         with TemporaryDirectory() as directory:
             store = self._store(directory)
             dispatcher = GuardedDispatcher(
@@ -66,10 +76,70 @@ class ProductionPrepareGuardTests(unittest.TestCase):
                 owner_token="owner",
                 owner_epoch=1,
             )
+            outbound = 0
+
+            def transport(_client_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return {"provider_order_id": "must-not-happen"}
+
+            outcome = dispatcher.dispatch(
+                attempt_id="paper-noop-prepare",
+                intent_id="intent-1",
+                intent_hash="intent-hash",
+                provider="provider",
+                request={"instrument": "TEST@1", "side": "BUY", "quantity": "1"},
+                now="2026-09-27T18:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=transport,
+                sender_check=lambda _owner, _epoch: None,
+                submission_scope=ORDER_SCOPE,
+                prepare_order=lambda *_args: None,
+            )
+            self.assertEqual(outcome.status, "BLOCKED")
+            self.assertEqual(outbound, 0)
+
+    def test_valid_paper_prepare_is_verified_before_transport(self):
+        with TemporaryDirectory() as directory:
+            store = self._store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="acct",
+                owner_token="owner",
+                owner_epoch=1,
+            )
+            orders = DurableOrderBookProjection(
+                store,
+                provider_id="provider",
+                account_id="acct",
+                environment="PAPER",
+                host_id="owner",
+                owner_epoch="1",
+            )
             sequence = []
 
-            def prepare_order(*_args):
+            def prepare_order(
+                client_order_id,
+                attempt_id,
+                intent_id,
+                _provider,
+                _request,
+                scope,
+                prepared_at,
+            ):
                 sequence.append("prepare")
+                orders.create_order(
+                    event_key=f"dispatch-order:{attempt_id}",
+                    client_order_id=client_order_id,
+                    instrument=scope["instrument"],
+                    side=scope["side"],
+                    requested_quantity=scope["requested_quantity"],
+                    quantity_unit=scope["quantity_unit"],
+                    origin_intent_id=intent_id,
+                    committed_at=prepared_at,
+                )
 
             def transport(_client_id, _request, final_guard):
                 sequence.append("transport")
@@ -82,11 +152,12 @@ class ProductionPrepareGuardTests(unittest.TestCase):
                 intent_id="intent-1",
                 intent_hash="intent-hash",
                 provider="provider",
-                request={"instrument": "TEST", "side": "BUY", "quantity": "1"},
+                request={"instrument": "TEST@1", "side": "BUY", "quantity": "1"},
                 now="2026-09-27T18:00:00Z",
                 authority_check=lambda _hash, _now: (True, "allowed"),
                 transport_send=transport,
                 sender_check=lambda _owner, _epoch: None,
+                submission_scope=ORDER_SCOPE,
                 prepare_order=prepare_order,
             )
 

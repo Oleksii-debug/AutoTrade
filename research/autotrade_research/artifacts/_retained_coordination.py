@@ -121,13 +121,20 @@ def _posix_root_lock(store) -> Iterator[None]:
     try:
         yield
     finally:
+        primary_error = sys.exc_info()[1]
         try:
             fcntl.flock(root_fd, fcntl.LOCK_UN)
         except OSError as error:
-            if sys.exc_info()[1] is None:
+            if primary_error is None:
                 raise ResourceLockError(
                     "cannot release retained artifact-store root coordination lock"
                 ) from error
+            try:
+                primary_error.add_note(
+                    f"artifact-store root coordination unlock also failed: {error}"
+                )
+            except BaseException:
+                pass
 
 
 @contextmanager

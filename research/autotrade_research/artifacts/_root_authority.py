@@ -19,6 +19,7 @@ _store = importlib.import_module(f"{__package__}.store")
 _WAIT_OBJECT_0 = 0x00000000
 _WAIT_ABANDONED = 0x00000080
 _WAIT_TIMEOUT = 0x00000102
+_HOST_FSTAT = os.fstat
 
 
 def _configured_root_key(path: Path) -> str:
@@ -68,7 +69,11 @@ def _assert_root_continuity(self) -> None:
             "retained artifact store root descriptor is unavailable"
         )
     try:
-        expected = os.fstat(retained_fd)
+        # Keep the root identity probe independent from lower-level descriptor
+        # read fault injection. Tests and callers may instrument os.fstat around
+        # a manifest/object read; that must not silently change which capability
+        # proves the retained root generation.
+        expected = _HOST_FSTAT(retained_fd)
         current = os.stat(self.root, follow_symlinks=False)
     except OSError as error:
         raise _store.ArtifactIntegrityError(
@@ -261,7 +266,10 @@ def install_root_authority() -> None:
     artifact_store.read_authenticated_snapshot = _root_fenced_read(
         artifact_store.read_authenticated_snapshot
     )
-    artifact_store.read_bytes = _root_fenced_read(artifact_store.read_bytes)
+    # read_bytes is intentionally not fenced a second time: its canonical
+    # implementation delegates to read_authenticated_snapshot, which already
+    # holds the root authority before and after the authenticated read. Keeping
+    # only that fence also preserves the delegation contract for test doubles.
     artifact_store.export = _root_fenced_read(artifact_store.export)
     artifact_store.audit = _root_fenced_read(artifact_store.audit)
     artifact_store.publish_bytes = _root_fenced_mutation(

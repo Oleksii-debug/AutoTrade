@@ -98,6 +98,11 @@ from ._root_authority import install_root_authority
 install_root_authority()
 del install_root_authority
 
+from ._root_authority_failure_fix import install_root_authority_failure_fix
+
+install_root_authority_failure_fix()
+del install_root_authority_failure_fix
+
 CANONICAL_ARTIFACT_STORE_MODULE = "autotrade_research.artifacts.store"
 
 __all__ = [

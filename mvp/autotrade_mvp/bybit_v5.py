@@ -22,11 +22,35 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from .capabilities import CapabilityError, CapabilitySnapshot
 from .provider_core import (
     ProviderCoreError,
+    NormalizedExecutionFill,
     ProviderResponseObservation,
     ProviderSubmissionObservation,
     Surface,
+    _issue_normalized_execution_fill,
 )
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
+
+
+def normalize_authenticated_executions(
+    observation: ProviderResponseObservation,
+    *,
+    instrument_versions: Mapping[str, str],
+    qualified_fee_currencies: Mapping[str, str] | None = None,
+) -> tuple[NormalizedExecutionFill, ...]:
+    """Issue canonical Bybit fill lineage from one authenticated execution read."""
+    fills = parse_executions(
+        observation,
+        instrument_versions=instrument_versions,
+        qualified_fee_currencies=qualified_fee_currencies,
+    )
+    return tuple(
+        _issue_normalized_execution_fill(
+            observation,
+            fill,
+            normalizer_id="bybit.executions.v1",
+        )
+        for fill in fills
+    )
 
 
 BYBIT_DOCUMENTED_ENDPOINTS: Mapping[str, str] = {

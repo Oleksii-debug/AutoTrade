@@ -19,8 +19,38 @@ import json
 import re
 
 from .capabilities import CapabilitySnapshot
-from .provider_core import ProviderResponseObservation, ProviderSubmissionObservation, Surface
+from .provider_core import (
+    NormalizedExecutionFill,
+    ProviderResponseObservation,
+    ProviderSubmissionObservation,
+    Surface,
+    _issue_normalized_execution_fill,
+)
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
+
+
+def normalize_authenticated_trade_history(
+    observation: ProviderResponseObservation,
+    *,
+    instrument_versions: Mapping[str, str],
+    client_ids_by_provider_order: Mapping[str, str],
+    fee_currency_by_pair: Mapping[str, str],
+) -> tuple[NormalizedExecutionFill, ...]:
+    """Issue canonical Kraken Spot fill lineage from exact TradesHistory bytes."""
+    fills = parse_trade_history(
+        observation,
+        instrument_versions=instrument_versions,
+        client_ids_by_provider_order=client_ids_by_provider_order,
+        fee_currency_by_pair=fee_currency_by_pair,
+    )
+    return tuple(
+        _issue_normalized_execution_fill(
+            observation,
+            fill,
+            normalizer_id="kraken-spot.trades-history.v1",
+        )
+        for fill in fills
+    )
 
 
 class KrakenSpotAdapterError(ValueError):

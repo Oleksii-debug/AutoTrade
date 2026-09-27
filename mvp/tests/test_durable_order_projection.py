@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from research.autotrade_research.artifacts.store import ArtifactStore
 
+from mvp.autotrade_mvp.bybit_v5 import normalize_authenticated_executions
 from mvp.autotrade_mvp.durable_order_projection import (
     DurableOrderBookProjection,
 )
@@ -30,13 +31,14 @@ T5 = "2026-09-25T05:40:05Z"
 def durable(
     store,
     *,
+    provider_id="PROVIDER-A",
     account_id="acct-1",
     environment="SIMULATION",
     evidence_artifact_store=None,
 ):
     return DurableOrderBookProjection(
         store,
-        provider_id="PROVIDER-A",
+        provider_id=provider_id,
         account_id=account_id,
         environment=environment,
         host_id="host-1",
@@ -54,6 +56,7 @@ def provider_evidence(
     account_id="acct-1",
     environment="PAPER",
     rights_id="provider-test-evidence",
+    provider_id="PROVIDER-A",
 ):
     artifact_id = str(uuid4())
     source_uri = "https://provider.example.test/evidence"
@@ -71,7 +74,7 @@ def provider_evidence(
         rights={"storage": True, "export": False},
         source_refs=[source_uri],
         metadata={
-            "provider_id": "PROVIDER-A",
+            "provider_id": provider_id,
             "account_id": account_id,
             "environment": environment,
             "order_operation": operation,
@@ -1944,6 +1947,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
             artifacts = ArtifactStore(f"{directory}/artifacts")
             book = durable(
                 store,
+                provider_id="BYBIT",
                 environment="PAPER",
                 evidence_artifact_store=artifacts,
             )
@@ -2024,6 +2028,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
             artifacts = ArtifactStore(f"{directory}/artifacts")
             book = durable(
                 store,
+                provider_id="BYBIT",
                 environment="PAPER",
                 evidence_artifact_store=artifacts,
             )
@@ -2047,6 +2052,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 operation="ACKNOWLEDGE",
                 request=ack_request,
                 observed_at=T1,
+                provider_id="BYBIT",
             )
             authenticated_read = artifacts.read_authenticated_snapshot
             with (
@@ -2064,44 +2070,46 @@ class DurableOrderProjectionTests(unittest.TestCase):
             self.assertEqual(read_snapshot.call_count, 2)
             self.assertEqual(ack.snapshot.state, "WORKING")
 
-            canonical_fill_body = {
-                "fill_id": "fill-1",
-                "provider_execution_id": "execution-1",
-                "order_ref": "paper-1",
-                "instrument_version": "ABC",
-                "side": "BUY",
-                "last_quantity": {"value": "2", "unit": "unit:ABC"},
-                "last_price": "100",
-                "trade_time": T1,
-                "receipt_time": T2,
-                "fees": [],
-                "settlement_date": "2026-09-25",
-            }
-            fill_request = {
-                "client_order_id": "paper-1",
-                "fill_id": "fill-1",
-                "provider_execution_id": "execution-1",
-                "quantity": "2",
-                "price": "100",
-                "provider_revision": None,
-                "canonical_execution_fill": canonical_fill_body,
-            }
-            fill_ref = provider_evidence(
-                artifacts,
-                operation="RECORD_FILL",
-                request=fill_request,
-                observed_at=T2,
+            from mvp.tests.test_bybit_v5 import bound_execution_response
+
+            observation = bound_execution_response(
+                {
+                    "retCode": 0,
+                    "retMsg": "OK",
+                    "result": {
+                        "list": [
+                            {
+                                "execId": "execution-1",
+                                "orderLinkId": "paper-1",
+                                "symbol": "ABC",
+                                "side": "Buy",
+                                "execQty": "2",
+                                "execPrice": "100",
+                                "execFee": "0",
+                                "feeCurrency": "USD",
+                                "execTime": "1790279999123",
+                            }
+                        ]
+                    },
+                    "time": 1790280001000,
+                },
+                account_id="acct-1",
+                instrument_version="ABC",
             )
-            fill = book.ingest_execution_fill(
+            normalized_fill, = normalize_authenticated_executions(
+                observation,
+                instrument_versions={"ABC": "ABC"},
+                qualified_fee_currencies={"USD": "USD"},
+            )
+            fill = book.ingest_normalized_execution_fill(
                 event_key="fill-evidenced",
                 client_order_id="paper-1",
-                execution_fill={
-                    **canonical_fill_body,
-                    "evidence": [fill_ref],
-                },
+                normalized_fill=normalized_fill,
+                settlement_date="2026-09-25",
                 committed_at=T2,
             )
             self.assertEqual(fill.snapshot.state, "FILLED")
+            fill_ref = fill.canonical_execution_fill["evidence"][0]
 
             events = store.load_events(
                 "order_projection_book",
@@ -2112,6 +2120,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
 
             restarted = durable(
                 store,
+                provider_id="BYBIT",
                 environment="PAPER",
                 evidence_artifact_store=artifacts,
             )

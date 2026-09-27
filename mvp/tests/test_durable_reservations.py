@@ -101,7 +101,9 @@ class DurableReservationBookTests(unittest.TestCase):
             resolution_artifact_store=self.artifacts,
         )
 
-    def provider_order_evidence(self, *, operation, request, observed_at):
+    def provider_order_evidence(
+        self, *, operation, request, observed_at, provider_id="SIMULATED"
+    ):
         artifact_id = str(uuid4())
         source_uri = "https://provider.example.test/evidence"
         payload = canonical_json(
@@ -118,7 +120,7 @@ class DurableReservationBookTests(unittest.TestCase):
             rights={"storage": True, "export": False},
             source_refs=[source_uri],
             metadata={
-                "provider_id": "SIMULATED",
+                "provider_id": provider_id,
                 "account_id": "paper-account",
                 "environment": "PAPER",
                 "order_operation": operation,
@@ -569,12 +571,12 @@ class DurableReservationBookTests(unittest.TestCase):
             idempotency_key="idem-unknown-cancel-fill",
             reservation_id="r1",
         )
-        dispatched = self.create_unknown_attempt()
+        dispatched = self.create_unknown_attempt(provider="BYBIT")
         reconciliation = self.record_reconciliation_resolution(outcome="FILLED")
 
         orders = DurableOrderBookProjection(
             self.store,
-            provider_id="SIMULATED",
+            provider_id="BYBIT",
             account_id="paper-account",
             environment="PAPER",
             host_id="order-host",
@@ -592,6 +594,7 @@ class DurableReservationBookTests(unittest.TestCase):
             operation="CONFIRM_CANCEL",
             request={"client_order_id": dispatched.client_order_id},
             observed_at="2026-09-25T00:00:40Z",
+            provider_id="BYBIT",
         )
         orders.confirm_cancel(
             event_key="cancel-confirmed",
@@ -600,44 +603,50 @@ class DurableReservationBookTests(unittest.TestCase):
             evidence_refs=[cancel_evidence],
         )
 
-        fill_body = {
-            "fill_id": "fill-attempt-r1",
-            "provider_execution_id": "exec-attempt-r1",
-            "order_ref": dispatched.client_order_id,
-            "intent_ref": "i1",
-            "instrument_version": "TEST",
-            "side": "BUY",
-            "last_quantity": {"value": "1", "unit": "unit:TEST"},
-            "last_price": "1",
-            "trade_time": "2026-09-25T00:01:00Z",
-            "receipt_time": "2026-09-25T00:01:10Z",
-            "fees": [{"amount": "0", "currency": "USD"}],
-            "settlement_date": "2026-09-25",
-        }
-        fill_request = {
-            "client_order_id": dispatched.client_order_id,
-            "fill_id": "fill-attempt-r1",
-            "provider_execution_id": "exec-attempt-r1",
-            "quantity": "1",
-            "price": "1",
-            "provider_revision": None,
-            "canonical_execution_fill": fill_body,
-        }
-        fill_evidence = self.provider_order_evidence(
-            operation="RECORD_FILL",
-            request=fill_request,
-            observed_at="2026-09-25T00:01:10Z",
+        from mvp.autotrade_mvp.bybit_v5 import normalize_authenticated_executions
+        from mvp.tests.test_bybit_v5 import bound_execution_response
+
+        observation = bound_execution_response(
+            {
+                "retCode": 0,
+                "retMsg": "OK",
+                "result": {
+                    "list": [
+                        {
+                            "execId": "exec-attempt-r1",
+                            "orderLinkId": dispatched.client_order_id,
+                            "symbol": "TEST",
+                            "side": "Buy",
+                            "execQty": "1",
+                            "execPrice": "1",
+                            "execFee": "0",
+                            "feeCurrency": "USD",
+                            "execTime": "1790279999123",
+                        }
+                    ]
+                },
+                "time": 1790280001000,
+            },
+            account_id="paper-account",
+            instrument_version="TEST",
         )
-        order_fill = orders.ingest_execution_fill(
+        normalized_fill, = normalize_authenticated_executions(
+            observation,
+            instrument_versions={"TEST": "TEST"},
+            qualified_fee_currencies={"USD": "USD"},
+        )
+        order_fill = orders.ingest_normalized_execution_fill(
             event_key="late-full-fill",
             client_order_id=dispatched.client_order_id,
+            normalized_fill=normalized_fill,
+            settlement_date="2026-09-25",
             committed_at="2026-09-25T00:01:20Z",
-            execution_fill={**fill_body, "evidence": [fill_evidence]},
         )
         self.assertEqual(order_fill.snapshot.state, "FILLED_AFTER_CANCEL")
 
         filled_evidence = self.publish_resolution_evidence(
             artifact_id="55555555-5555-4555-8555-555555555556",
+            provider="BYBIT",
             outcome="FILLED",
             reconciliation_event=reconciliation,
         )
@@ -646,7 +655,7 @@ class DurableReservationBookTests(unittest.TestCase):
             idempotency_key="idem-terminal-cancel-filled",
             reservation_id="r1",
             outcome="FILLED",
-            provider="SIMULATED",
+            provider="BYBIT",
             attempt_id="attempt-r1",
             resolution_evidence=filled_evidence,
         )

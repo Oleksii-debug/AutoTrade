@@ -26,6 +26,7 @@ from .order_projection import (
     OrderSnapshot,
 )
 from .persistence import JournalStore, canonical_json, payload_digest
+from .provider_core import NormalizedExecutionFill
 
 
 _AGGREGATE_TYPE = "order_projection_book"
@@ -1417,6 +1418,7 @@ class DurableOrderBookProjection:
         execution_fill: Mapping[str, object],
         event_key: str,
         committed_at: str,
+        _canonical_ingest_token: object | None = None,
         _prepare_only: bool = False,
     ) -> DurableOrderMutationResult | PreparedDurableOrderMutation:
         """Apply one canonical ExecutionFill through the existing order authority.
@@ -1425,6 +1427,10 @@ class DurableOrderBookProjection:
         before this boundary. This method deliberately does not interpret raw
         provider responses and does not create a second lifecycle state machine.
         """
+        self._require_canonical_execution_ingest(
+            _canonical_ingest_token,
+            operation="ExecutionFill ingestion",
+        )
         if not isinstance(execution_fill, Mapping):
             raise TypeError("execution_fill must be a mapping")
 
@@ -1759,6 +1765,187 @@ class DurableOrderBookProjection:
             evidence_refs=evidence,
             canonical_execution_fill_hash=canonical_execution_fill_hash,
             canonical_execution_fill=canonical_fill,
+            _canonical_ingest_token=_CANONICAL_EXECUTION_FILL_INGEST,
+            _prepare_only=_prepare_only,
+        )
+
+    def ingest_normalized_execution_fill(
+        self,
+        *,
+        event_key: str,
+        client_order_id: str,
+        normalized_fill: NormalizedExecutionFill,
+        settlement_date: str,
+        committed_at: str,
+        _prepare_only: bool = False,
+    ) -> DurableOrderMutationResult | PreparedDurableOrderMutation:
+        """Persist an adapter-issued fill, retaining exact provider response bytes.
+
+        Provider-specific parsers create ``NormalizedExecutionFill`` only from
+        ProviderResponseObservation. The raw response becomes an immutable
+        ArtifactStore receipt bound to the exact canonical order mutation.
+        """
+        if not isinstance(normalized_fill, NormalizedExecutionFill):
+            raise TypeError("normalized_fill must be NormalizedExecutionFill")
+        if self.environment not in {"PAPER", "LIVE"}:
+            raise OrderProjectionConflict(
+                "authenticated provider normalization is reserved for PAPER/LIVE"
+            )
+        if self.evidence_artifact_store is None:
+            raise OrderProjectionConflict(
+                "authenticated provider normalization requires ArtifactStore"
+            )
+        observation = normalized_fill.observation
+        fill = normalized_fill.provider_fill
+        if (
+            observation.provider_id != self.provider_id
+            or observation.account_id != self.account_id
+            or observation.environment != self.environment
+            or str(fill.provider_id).upper() != self.provider_id
+            or fill.account_id != self.account_id
+            or fill.environment != self.environment
+            or fill.client_order_id != client_order_id
+            or observation.evidence_ref not in tuple(fill.evidence_refs)
+        ):
+            raise OrderProjectionConflict(
+                "normalized provider fill differs from durable order-book scope"
+            )
+        order = self.order(client_order_id)
+        if fill.instrument != order.instrument or fill.side != order.side:
+            raise OrderProjectionConflict(
+                "normalized provider fill differs from durable order instrument or side"
+            )
+        quantity_unit = self._quantity_units.get(client_order_id)
+        if quantity_unit is None:
+            raise OrderProjectionConflict(
+                "target order lacks canonical quantity unit"
+            )
+        try:
+            trade_time = _instant(fill.trade_time, name="provider_fill.trade_time")
+            observed_at = _instant(
+                observation.observed_at,
+                name="provider_observation.observed_at",
+            )
+            parsed_settlement_date = date.fromisoformat(settlement_date)
+        except ValueError as error:
+            raise OrderProjectionConflict(
+                "normalized fill dates are invalid"
+            ) from error
+        if parsed_settlement_date.isoformat() != settlement_date:
+            raise OrderProjectionConflict(
+                "settlement_date must be canonical YYYY-MM-DD"
+            )
+        if datetime.fromisoformat(observed_at.replace("Z", "+00:00")) < datetime.fromisoformat(
+            trade_time.replace("Z", "+00:00")
+        ):
+            raise OrderProjectionConflict(
+                "provider observation cannot precede execution trade time"
+            )
+        canonical_fill: dict[str, object] = {
+            "fill_id": fill.provider_execution_id,
+            "provider_execution_id": fill.provider_execution_id,
+            "order_ref": client_order_id,
+            "intent_ref": order.origin_intent_id,
+            "instrument_version": order.instrument,
+            "side": order.side,
+            "last_quantity": {
+                "value": _decimal_text(fill.quantity, name="provider_fill.quantity"),
+                "unit": quantity_unit,
+            },
+            "last_price": _decimal_text(fill.price, name="provider_fill.price"),
+            "trade_time": trade_time,
+            "receipt_time": observed_at,
+            "fees": [
+                {
+                    "amount": _decimal_text(
+                        fill.fee_amount,
+                        name="provider_fill.fee_amount",
+                    ),
+                    "currency": fill.fee_currency,
+                }
+            ],
+            "settlement_date": settlement_date,
+            "evidence": [],
+        }
+        if order.origin_intent_id is None:
+            canonical_fill.pop("intent_ref")
+        preview_request: dict[str, object] = {
+            "client_order_id": client_order_id,
+            "fill_id": fill.provider_execution_id,
+            "provider_execution_id": fill.provider_execution_id,
+            "quantity": canonical_fill["last_quantity"]["value"],
+            "price": canonical_fill["last_price"],
+            "provider_revision": None,
+            "canonical_execution_fill": canonical_fill,
+        }
+        request_hash = payload_digest(
+            _provider_evidence_request("RECORD_FILL", preview_request)
+        )
+        rights_id = "authenticated-provider-execution-response"
+        source_uri = observation.evidence_ref
+        artifact_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                "https://evidence.autotrade.local/provider-execution/"
+                + canonical_json(
+                    [
+                        self.provider_id,
+                        self.account_id,
+                        self.environment,
+                        observation.response_sha256,
+                        fill.provider_execution_id,
+                    ]
+                ),
+            )
+        )
+        manifest = self.evidence_artifact_store.publish_bytes(
+            artifact_id=artifact_id,
+            data=observation.response_bytes,
+            media_type="application/json",
+            rights={"storage": True, "export": False},
+            source_refs=[source_uri],
+            metadata={
+                "provider_id": self.provider_id,
+                "account_id": self.account_id,
+                "environment": self.environment,
+                "order_operation": "RECORD_FILL",
+                "request_hash": request_hash,
+                "observed_at": observed_at,
+                "rights_id": rights_id,
+                "response_sha256": observation.response_sha256,
+                "provider_query_digest": observation.query_binding.query_digest,
+                "normalizer_id": normalized_fill.normalizer_id,
+            },
+        )
+        canonical_fill["evidence"] = [
+            {
+                "artifact_id": artifact_id,
+                "sha256": manifest["sha256"],
+                "source_uri": source_uri,
+                "observed_at": observed_at,
+                "rights_id": rights_id,
+            }
+        ]
+        execution_fill: dict[str, object] = {
+            "fill_id": canonical_fill["fill_id"],
+            "provider_execution_id": canonical_fill["provider_execution_id"],
+            "order_ref": client_order_id,
+            "intent_ref": order.origin_intent_id,
+            "instrument_version": order.instrument,
+            "side": order.side,
+            "last_quantity": canonical_fill["last_quantity"],
+            "last_price": canonical_fill["last_price"],
+            "trade_time": trade_time,
+            "receipt_time": observed_at,
+            "fees": canonical_fill["fees"],
+            "settlement_date": settlement_date,
+            "evidence": canonical_fill["evidence"],
+        }
+        return self.ingest_execution_fill(
+            event_key=event_key,
+            client_order_id=client_order_id,
+            execution_fill=execution_fill,
+            committed_at=committed_at,
             _canonical_ingest_token=_CANONICAL_EXECUTION_FILL_INGEST,
             _prepare_only=_prepare_only,
         )

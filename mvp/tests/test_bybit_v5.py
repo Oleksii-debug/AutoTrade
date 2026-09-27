@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from mvp.autotrade_mvp.bybit_v5 import (
     build_order_payload,
+    normalize_authenticated_executions,
     prepare_order_submission,
     coverage_evidence,
     parse_executions,
@@ -25,7 +26,10 @@ from mvp.autotrade_mvp.dispatch import (
     load_submission_response_binding,
     stable_client_order_id,
 )
+from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
+from mvp.autotrade_mvp.order_projection import OrderProjectionConflict
 from mvp.autotrade_mvp.persistence import JournalStore
+from research.autotrade_research.artifacts.store import ArtifactStore
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
     Surface,
@@ -882,6 +886,102 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(fill.side, "BUY")
         self.assertIsNone(fill.position_side)
         self.assertEqual(fill.evidence_refs, (observation.evidence_ref,))
+
+    def test_authenticated_normalization_to_order_projection_retains_exact_response(self):
+        response = {
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {
+                "list": [
+                    {
+                        "execId": "exec-normalized-1",
+                        "orderLinkId": "client-1",
+                        "symbol": "BTCUSDT",
+                        "side": "Buy",
+                        "execQty": "0.25",
+                        "execPrice": "65000.10",
+                        "execFee": "1.23",
+                        "feeCurrency": "USDT",
+                        "execTime": "1790279999123",
+                    }
+                ]
+            },
+            "time": 1790280001000,
+        }
+        observation = bound_execution_response(response)
+        normalized, = normalize_authenticated_executions(
+            observation,
+            instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+        )
+        self.assertEqual(normalized.normalizer_id, "bybit.executions.v1")
+        self.assertEqual(normalized.observation.response_bytes, observation.response_bytes)
+        with self.assertRaisesRegex(ProviderCoreError, "provider adapter normalizer"):
+            type(normalized)(
+                observation=observation,
+                provider_fill=normalized.provider_fill,
+                normalizer_id=normalized.normalizer_id,
+            )
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            orders = DurableOrderBookProjection(
+                store,
+                provider_id="BYBIT",
+                account_id="paper-1",
+                environment="PAPER",
+                host_id="host-1",
+                owner_epoch="1",
+                evidence_artifact_store=artifacts,
+            )
+            orders.create_order(
+                event_key="create-bybit-order",
+                client_order_id="client-1",
+                instrument="BTCUSDT@v1",
+                side="BUY",
+                requested_quantity="1",
+                quantity_unit="unit:BTCUSDT@v1",
+                origin_intent_id="intent-1",
+                committed_at="2026-09-24T19:00:00Z",
+            )
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "must use canonical ExecutionFill ingestion",
+            ):
+                orders.ingest_execution_fill(
+                    event_key="caller-supplied-fill",
+                    client_order_id="client-1",
+                    execution_fill={"fill_id": "forged"},
+                    committed_at="2026-09-24T20:01:00Z",
+                )
+            ingested = orders.ingest_normalized_execution_fill(
+                event_key="bybit-authenticated-fill",
+                client_order_id="client-1",
+                normalized_fill=normalized,
+                settlement_date="2026-09-26",
+                committed_at="2026-09-24T20:01:00Z",
+            )
+            self.assertEqual(ingested.snapshot.filled_quantity, Decimal("0.25"))
+            evidence_ref = ingested.canonical_execution_fill["evidence"][0]
+            manifest, raw = artifacts.read_authenticated_snapshot(
+                evidence_ref["artifact_id"]
+            )
+            self.assertEqual(raw, observation.response_bytes)
+            self.assertEqual(manifest["sha256"], evidence_ref["sha256"])
+            self.assertEqual(
+                manifest["metadata"]["response_sha256"],
+                observation.response_sha256,
+            )
+            restarted = DurableOrderBookProjection(
+                JournalStore(f"{directory}/journal.sqlite3"),
+                provider_id="BYBIT",
+                account_id="paper-1",
+                environment="PAPER",
+                host_id="host-1",
+                owner_epoch="1",
+                evidence_artifact_store=artifacts,
+            )
+            self.assertEqual(restarted.order("client-1").filled_quantity, Decimal("0.25"))
 
     def test_execution_direction_is_evidenced_without_inventing_hedge_leg(self):
         base = {

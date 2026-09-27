@@ -20,11 +20,37 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from .capabilities import CapabilitySnapshot
 from .provider_core import (
+    NormalizedExecutionFill,
     ProviderResponseObservation,
     ProviderSubmissionObservation,
     Surface,
+    _issue_normalized_execution_fill,
 )
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
+
+
+def normalize_authenticated_trade_activities(
+    observation: ProviderResponseObservation,
+    *,
+    instrument_versions: Mapping[str, str],
+    client_ids_by_order_id: Mapping[str, str | None],
+    fees_by_activity_id: Mapping[str, tuple[object, str]],
+) -> tuple[NormalizedExecutionFill, ...]:
+    """Issue fill lineage only from the authenticated exact-byte activity parser."""
+    fills = parse_trade_activities(
+        observation,
+        instrument_versions=instrument_versions,
+        client_ids_by_order_id=client_ids_by_order_id,
+        fees_by_activity_id=fees_by_activity_id,
+    )
+    return tuple(
+        _issue_normalized_execution_fill(
+            observation,
+            fill,
+            normalizer_id="alpaca.trade-activities.v1",
+        )
+        for fill in fills
+    )
 
 
 class AlpacaAdapterError(ValueError):

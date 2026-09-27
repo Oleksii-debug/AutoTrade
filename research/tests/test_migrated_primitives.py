@@ -34,6 +34,14 @@ class MigrationTests(unittest.TestCase):
         with self.assertRaises(InvalidJsonDomainError):
             strict_json_loads('{"a":' + ('1' * 641) + '}')
 
+    def test_strict_json_rejects_oversized_document_and_decoded_domain(self):
+        with self.assertRaisesRegex(InvalidJsonDomainError, "document exceeds"):
+            strict_json_loads('{"value":"' + ("x" * 1_000_000) + '"}')
+
+        many_nodes = "[" + ",".join("0" for _ in range(100_001)) + "]"
+        with self.assertRaisesRegex(InvalidJsonDomainError, "decoded domain exceeds"):
+            strict_json_loads(many_nodes)
+
     def test_blank_jsonl_is_json_whitespace_only(self):
         self.assertTrue(jsonl_bytes_are_blank(b" \t\r\n"))
         self.assertFalse(jsonl_bytes_are_blank("\u00a0".encode()))

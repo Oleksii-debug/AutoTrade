@@ -328,7 +328,6 @@ class WholeSimulatorFlowTests(unittest.TestCase):
             )
             orders.sync_submission_attempt(attempt_id=attempt_id)
 
-            fee = fill["fees"][0]
             order_fill = orders.ingest_execution_fill(
                 event_key="whole-flow-fill",
                 client_order_id=dispatched.client_order_id,
@@ -351,6 +350,9 @@ class WholeSimulatorFlowTests(unittest.TestCase):
             )
             self.assertEqual(order_fill.snapshot.state, "FILLED")
             self.assertEqual(order_fill.snapshot.submission_attempt_id, attempt_id)
+            self.assertIsNotNone(order_fill.canonical_execution_fill)
+            canonical_fill = order_fill.canonical_execution_fill
+            fee = canonical_fill["fees"][0]
 
             commit_economic_batch_with_reservation_consumption(
                 economic,
@@ -362,12 +364,12 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 transactions=(
                     book_equity_fill(
                         transaction_id="economic-fill-1",
-                        cause_event_id=fill["provider_execution_id"],
-                        instrument=fill["instrument_version"],
+                        cause_event_id=canonical_fill["provider_execution_id"],
+                        instrument=canonical_fill["instrument_version"],
                         settlement_currency="USD",
-                        side=fill["side"],
-                        quantity=fill["last_quantity"]["value"],
-                        price=fill["last_price"],
+                        side=canonical_fill["side"],
+                        quantity=canonical_fill["last_quantity"]["value"],
+                        price=canonical_fill["last_price"],
                         fee=fee["amount"],
                         fee_currency=fee["currency"],
                     ),
@@ -466,6 +468,44 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 media_type="application/vnd.autotrade.reservation-resolution+json",
                 rights={"storage": True, "export": False},
             )
+            original_verify_resolution = reservations._verify_resolution_evidence
+            injected_journal_write = False
+
+            def verify_then_append_intervening_order(**kwargs):
+                nonlocal injected_journal_write
+                result = original_verify_resolution(**kwargs)
+                if not injected_journal_write:
+                    injected_journal_write = True
+                    orders.create_order(
+                        event_key="intervening-order-after-fill-proof",
+                        client_order_id="intervening-order",
+                        instrument=INSTRUMENT,
+                        side="BUY",
+                        requested_quantity="1",
+                        quantity_unit=fill["last_quantity"]["unit"],
+                        committed_at=LATER,
+                    )
+                return result
+
+            reservations._verify_resolution_evidence = verify_then_append_intervening_order
+            with self.assertRaisesRegex(
+                ReservationConflict,
+                "journal sequence changed while terminal evidence was validated",
+            ):
+                reservations.mark_terminal(
+                    command_id="reservation-terminal-1",
+                    idempotency_key="reservation-terminal-1",
+                    reservation_id="reservation-1",
+                    outcome="FILLED",
+                    provider="SIMULATED",
+                    attempt_id=attempt_id,
+                    resolution_evidence=(
+                        f"artifact:{resolution_artifact_id}@sha256:{resolution_manifest['sha256'].removeprefix('sha256:')}"
+                    ),
+                )
+            reservations._verify_resolution_evidence = original_verify_resolution
+            self.assertNotEqual(reservations.get("reservation-1").state, "FILLED")
+
             terminal = reservations.mark_terminal(
                 command_id="reservation-terminal-1",
                 idempotency_key="reservation-terminal-1",
@@ -481,6 +521,36 @@ class WholeSimulatorFlowTests(unittest.TestCase):
             self.assertIsNotNone(terminal.resolution_evidence)
             self.assertEqual(snapshot["open_orders"], [])
 
+            # A later provider revision must not make the already-committed
+            # terminal reservation event unreplayable. Its proof is bound to
+            # the journal cut at which the order was fully filled.
+            correction = orders.ingest_execution_fill(
+                event_key="whole-flow-fill-correction-r2",
+                client_order_id=dispatched.client_order_id,
+                committed_at="2026-09-24T18:02:00Z",
+                execution_fill={
+                    "fill_id": fill["provider_execution_id"] + "-r2",
+                    "provider_execution_id": fill["provider_execution_id"],
+                    "provider_revision": "r2",
+                    "order_ref": dispatched.client_order_id,
+                    "intent_ref": "intent-1",
+                    "instrument_version": fill["instrument_version"],
+                    "side": fill["side"],
+                    "last_quantity": {
+                        "value": "1.5",
+                        "unit": fill["last_quantity"]["unit"],
+                    },
+                    "last_price": fill["last_price"],
+                    "trade_time": fill["trade_time"],
+                    "receipt_time": "2026-09-24T18:02:00Z",
+                    "fees": fill["fees"],
+                    "settlement_date": "2026-09-24",
+                    "correction_reference": fill["provider_execution_id"],
+                    "evidence": [],
+                },
+            )
+            self.assertEqual(correction.snapshot.filled_quantity, Decimal("1.5"))
+
             restarted_orders = DurableOrderBookProjection(
                 journal,
                 provider_id="SIMULATED",
@@ -491,8 +561,8 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 evidence_artifact_store=artifacts,
             )
             self.assertEqual(
-                restarted_orders.order(dispatched.client_order_id).state,
-                "FILLED",
+                restarted_orders.order(dispatched.client_order_id).filled_quantity,
+                Decimal("1.5"),
             )
             restarted_reservations = DurableReservationBook(
                 journal,

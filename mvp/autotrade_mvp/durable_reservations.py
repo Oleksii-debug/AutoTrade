@@ -267,6 +267,22 @@ class DurableReservationBook:
             try:
                 if operation == "MARK_TERMINAL":
                     current = book.get(request.get("reservation_id"))
+                    proof_sequence = payload.get("proof_journal_sequence")
+                    event_sequence = event.get("journal_sequence")
+                    if proof_sequence is None and type(event_sequence) is int:
+                        # Older terminal records did not serialize the cut.
+                        # Their global journal position bounds the evidence
+                        # available before the reservation release was written.
+                        proof_sequence = event_sequence - 1
+                    if (
+                        type(proof_sequence) is not int
+                        or type(event_sequence) is not int
+                        or proof_sequence < 0
+                        or proof_sequence != event_sequence - 1
+                    ):
+                        raise ReservationConflict(
+                            "terminal release proof is not bound to its journal cut"
+                        )
                     self._verify_resolution_evidence(
                         reservation_id=request.get("reservation_id"),
                         intent_id=current.intent_id,
@@ -274,6 +290,7 @@ class DurableReservationBook:
                         provider=request.get("provider"),
                         attempt_id=request.get("attempt_id"),
                         resolution_evidence=request.get("resolution_evidence"),
+                        journal_sequence_cut=proof_sequence,
                     )
                 snapshot = self._apply(book, operation, request)
             except Exception as error:
@@ -531,6 +548,8 @@ class DurableReservationBook:
         idempotency_key: str,
         operation: str,
         request: dict[str, object],
+        expected_journal_sequence: int | None = None,
+        proof_journal_sequence: int | None = None,
     ) -> ReservationSnapshot:
         cid = _text(command_id, name="command_id")
         idem = _text(idempotency_key, name="idempotency_key")
@@ -594,6 +613,8 @@ class DurableReservationBook:
             "request_hash": payload_digest(request),
             "snapshot": snapshot_value,
         }
+        if proof_journal_sequence is not None:
+            payload["proof_journal_sequence"] = proof_journal_sequence
         envelope = {
             "event_id": event_id,
             "event_type": _EVENT_TYPE,
@@ -622,6 +643,7 @@ class DurableReservationBook:
                 result=snapshot_value,
                 state_version=next_version,
                 events=[(envelope, None)],
+                expected_journal_sequence=expected_journal_sequence,
             )
         except Exception:
             # A competing writer may have committed after this projection was
@@ -743,6 +765,7 @@ class DurableReservationBook:
         provider: object,
         attempt_id: object,
         resolution_evidence: object,
+        journal_sequence_cut: int | None = None,
     ) -> str:
         rid = _text(reservation_id, name="reservation_id")
         intent = _text(intent_id, name="intent_id")
@@ -978,6 +1001,7 @@ class DurableReservationBook:
                     host_id="reservation-resolution-verifier",
                     owner_epoch="read-only",
                     evidence_artifact_store=self.resolution_artifact_store,
+                    journal_sequence_cut=journal_sequence_cut,
                 )
                 order = projection.order(client_order_id)
             except (KeyError, ValueError, TypeError) as error:
@@ -1010,24 +1034,45 @@ class DurableReservationBook:
         terminal_outcome = _text(outcome, name="outcome").upper()
         provider_name = _text(provider, name="provider").upper()
         attempt = _text(attempt_id, name="attempt_id")
-        evidence = self._verify_resolution_evidence(
-            reservation_id=rid,
-            intent_id=current.intent_id,
-            outcome=terminal_outcome,
-            provider=provider_name,
-            attempt_id=attempt,
-            resolution_evidence=resolution_evidence,
+        artifact_id, digest, canonical_evidence = _immutable_evidence_ref(
+            resolution_evidence
         )
         request = {
             "reservation_id": rid,
             "outcome": terminal_outcome,
             "provider": provider_name,
             "attempt_id": attempt,
-            "resolution_evidence": evidence,
+            "resolution_evidence": canonical_evidence,
         }
+        existing = self._existing(
+            idempotency_key=idempotency_key,
+            request=request,
+        )
+        if existing is not None:
+            return self.get(rid)
+
+        cut_before = self.store.current_journal_sequence()
+        current = self.get(rid)
+        evidence = self._verify_resolution_evidence(
+            reservation_id=rid,
+            intent_id=current.intent_id,
+            outcome=terminal_outcome,
+            provider=provider_name,
+            attempt_id=attempt,
+            resolution_evidence=f"artifact:{artifact_id}@sha256:{digest}",
+            journal_sequence_cut=cut_before,
+        )
+        if self.store.current_journal_sequence() != cut_before:
+            self._reload()
+            raise ReservationConflict(
+                "journal sequence changed while terminal evidence was validated"
+            )
+        request["resolution_evidence"] = evidence
         return self._commit(
             command_id=command_id,
             idempotency_key=idempotency_key,
             operation="MARK_TERMINAL",
             request=request,
+            expected_journal_sequence=cut_before,
+            proof_journal_sequence=cut_before,
         )

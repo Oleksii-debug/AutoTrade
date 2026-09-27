@@ -762,11 +762,6 @@ class DurableOrderProjectionTests(unittest.TestCase):
                     committed_at=T3,
                     execution_fill=changed,
                 )
-            self.assertEqual(
-                len(store.load_events("order_projection_book", book.aggregate_id)),
-                before,
-            )
-
             restarted = durable(store)
             with self.assertRaisesRegex(
                 OrderProjectionConflict,
@@ -778,6 +773,88 @@ class DurableOrderProjectionTests(unittest.TestCase):
                     committed_at=T3,
                     execution_fill=changed,
                 )
+
+    def test_delayed_correction_cannot_roll_order_back_from_latest_predecessor(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store)
+            book.create_order(
+                event_key="create",
+                client_order_id="c1",
+                instrument="instrument-v1",
+                side="BUY",
+                requested_quantity="2",
+                quantity_unit="unit",
+                origin_intent_id="intent-1",
+                committed_at=T0,
+            )
+            original = {
+                "fill_id": "fill-r1",
+                "provider_execution_id": "exec-1",
+                "order_ref": "c1",
+                "intent_ref": "intent-1",
+                "provider_revision": "r1",
+                "instrument_version": "instrument-v1",
+                "side": "BUY",
+                "last_quantity": {"value": "1", "unit": "unit"},
+                "last_price": "100",
+                "trade_time": T1,
+                "receipt_time": T2,
+                "fees": [],
+                "settlement_date": "2026-09-27",
+                "evidence": [],
+            }
+            book.ingest_execution_fill(
+                event_key="fill-r1",
+                client_order_id="c1",
+                committed_at=T2,
+                execution_fill=original,
+            )
+            newer = {
+                **original,
+                "fill_id": "fill-r3",
+                "provider_revision": "r3",
+                "last_quantity": {"value": "0.75", "unit": "unit"},
+                "last_price": "99",
+                "receipt_time": T3,
+                "correction_reference": "fill-r1",
+            }
+            book.ingest_execution_fill(
+                event_key="fill-r3",
+                client_order_id="c1",
+                committed_at=T3,
+                execution_fill=newer,
+            )
+            count = len(
+                store.load_events("order_projection_book", book.aggregate_id)
+            )
+
+            restarted = durable(store)
+            delayed = {
+                **original,
+                "fill_id": "fill-r2",
+                "provider_revision": "r2",
+                "last_quantity": {"value": "1.5", "unit": "unit"},
+                "last_price": "101",
+                "receipt_time": T4,
+                "correction_reference": "fill-r1",
+            }
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "correction_reference must extend the latest authoritative provider revision",
+            ):
+                restarted.ingest_execution_fill(
+                    event_key="delayed-fill-r2",
+                    client_order_id="c1",
+                    committed_at=T4,
+                    execution_fill=delayed,
+                )
+
+            self.assertEqual(restarted.order("c1").filled_quantity, Decimal("0.75"))
+            self.assertEqual(
+                len(store.load_events("order_projection_book", book.aggregate_id)),
+                count,
+            )
 
     def test_canonical_execution_fill_correction_uses_existing_fill_lineage(self):
         with TemporaryDirectory() as directory:

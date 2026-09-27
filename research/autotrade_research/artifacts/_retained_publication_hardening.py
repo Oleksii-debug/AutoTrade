@@ -20,20 +20,12 @@ _RENAME_NOREPLACE = 1
 
 
 def _rename_noreplace_posix(parent_fd: int, source: str, target: str) -> None:
-    """Atomically rename inside one retained directory without replacement.
-
-    A hard-link-then-unlink sequence creates a crash state where the canonical
-    manifest has two names and therefore correctly fails the store's hard-link
-    integrity invariant.  Linux renameat2(RENAME_NOREPLACE) gives the required
-    create-if-absent commit without that intermediate alias.  Unsupported POSIX
-    runtimes fail closed rather than silently weakening crash semantics.
-    """
+    """Atomically rename inside one retained directory without replacement."""
 
     if not sys.platform.startswith("linux"):
         raise _store.ArtifactIntegrityError(
             "artifact manifest publication lacks crash-safe no-replace rename support"
         )
-
     libc = ctypes.CDLL(None, use_errno=True)
     renameat2 = getattr(libc, "renameat2", None)
     if renameat2 is None:
@@ -74,8 +66,6 @@ def _assert_prefix_identity(
     prefix: str,
     expected: os.stat_result,
 ) -> None:
-    """Require the lexical prefix to remain the exact directory we opened."""
-
     _retained._assert_directory_continuity(
         self,
         ("objects", "sha256"),
@@ -104,8 +94,6 @@ def _verify_bound_object_bytes(
     *,
     expected_bytes: int,
 ) -> None:
-    """Verify exact immutable bytes through the already-bound prefix."""
-
     no_follow = getattr(os, "O_NOFOLLOW", 0)
     if not no_follow or os.open not in getattr(os, "supports_dir_fd", set()):
         raise _store.ArtifactIntegrityError(
@@ -200,6 +188,7 @@ def _publish_object_posix(
                 "staging",
             )
             _assert_prefix_identity(self, prefix, prefix_identity)
+            linked_new_object = False
             try:
                 os.link(
                     temporary_name,
@@ -216,7 +205,20 @@ def _publish_object_posix(
                     expected_bytes=len(data),
                 )
             else:
+                linked_new_object = True
                 _publication._sync_directory_fd(prefix_fd)
+
+            # Remove the staging alias before enforcing the canonical object's
+            # single-link invariant. A successful link temporarily raises
+            # st_nlink to two; a crash in that window is recoverable because
+            # the second name lives in retained staging.
+            _publication._safe_unlink(
+                self._retained_staging_fd,
+                temporary_name,
+            )
+            temporary_name = None
+            _publication._sync_directory_fd(self._retained_staging_fd)
+            if linked_new_object:
                 _verify_bound_object_bytes(
                     self,
                     prefix_fd,
@@ -224,12 +226,6 @@ def _publish_object_posix(
                     expected_bytes=len(data),
                 )
             _assert_prefix_identity(self, prefix, prefix_identity)
-            _publication._safe_unlink(
-                self._retained_staging_fd,
-                temporary_name,
-            )
-            temporary_name = None
-            _publication._sync_directory_fd(self._retained_staging_fd)
         finally:
             if descriptor is not None:
                 os.close(descriptor)
@@ -288,8 +284,6 @@ def _publish_manifest_posix(
         temporary_name = None
         _publication._sync_directory_fd(self._retained_manifests_fd)
 
-        # A successful manifest must itself satisfy the normal canonical
-        # single-link read invariant immediately after commit.
         committed = os.stat(
             name,
             dir_fd=self._retained_manifests_fd,
@@ -422,7 +416,6 @@ def install_retained_publication_hardening() -> None:
         False,
     ):
         return
-    # The installed bound publisher resolves these module globals at call time.
     _publication._publish_object_posix = _publish_object_posix
     _publication._publish_manifest_posix = _publish_manifest_posix
     _publication._publish_bytes_posix = _publish_bytes_posix

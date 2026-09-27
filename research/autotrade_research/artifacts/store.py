@@ -185,6 +185,7 @@ class ArtifactStore:
             raise ArtifactIntegrityError(
                 "artifact manifest cannot be inspected"
             ) from error
+        self._reject_reparse_point(entry, subject="artifact manifest")
         if stat.S_ISLNK(entry.st_mode):
             raise ArtifactIntegrityError("artifact manifest must not be a symlink")
         if not stat.S_ISREG(entry.st_mode):
@@ -221,6 +222,7 @@ class ArtifactStore:
             raise ArtifactIntegrityError("artifact object is missing")
         except OSError as error:
             raise ArtifactIntegrityError("artifact object cannot be inspected") from error
+        self._reject_reparse_point(entry, subject="artifact object")
         if stat.S_ISLNK(entry.st_mode):
             raise ArtifactIntegrityError("artifact object must not be a symlink")
         if not stat.S_ISREG(entry.st_mode):
@@ -258,6 +260,27 @@ class ArtifactStore:
     ) -> bool:
         return os.path.samestat(first, second)
 
+    @staticmethod
+    def _reject_reparse_point(
+        entry: os.stat_result,
+        *,
+        subject: str,
+    ) -> None:
+        attributes = getattr(entry, "st_file_attributes", None)
+        if os.name == "nt" and attributes is None:
+            raise ArtifactIntegrityError(
+                f"{subject} reparse-point attributes are unavailable"
+            )
+        reparse_flag = getattr(
+            stat,
+            "FILE_ATTRIBUTE_REPARSE_POINT",
+            0x400,
+        )
+        if attributes is not None and attributes & reparse_flag:
+            raise ArtifactIntegrityError(
+                f"{subject} must not be a reparse point"
+            )
+
     def _open_object_descriptor(
         self,
         object_path: Path,
@@ -291,6 +314,10 @@ class ArtifactStore:
 
         try:
             opened = os.fstat(descriptor)
+            self._reject_reparse_point(
+                opened,
+                subject="artifact object descriptor",
+            )
             if not stat.S_ISREG(opened.st_mode):
                 raise ArtifactIntegrityError(
                     "artifact object descriptor must be a regular file"
@@ -328,6 +355,10 @@ class ArtifactStore:
             raise ArtifactIntegrityError(
                 "artifact object descriptor could not be revalidated"
             ) from error
+        self._reject_reparse_point(
+            after_descriptor,
+            subject="artifact object descriptor",
+        )
         if (
             not stat.S_ISREG(after_descriptor.st_mode)
             or after_descriptor.st_nlink != 1
@@ -526,6 +557,10 @@ class ArtifactStore:
 
         try:
             opened = os.fstat(descriptor)
+            self._reject_reparse_point(
+                opened,
+                subject="artifact manifest descriptor",
+            )
             if not stat.S_ISREG(opened.st_mode):
                 raise ArtifactIntegrityError(
                     "artifact manifest descriptor must be a regular file"
@@ -561,6 +596,10 @@ class ArtifactStore:
             raise ArtifactIntegrityError(
                 "artifact manifest descriptor could not be revalidated"
             ) from error
+        self._reject_reparse_point(
+            after_descriptor,
+            subject="artifact manifest descriptor",
+        )
         if (
             not stat.S_ISREG(after_descriptor.st_mode)
             or after_descriptor.st_nlink != 1
@@ -619,6 +658,13 @@ class ArtifactStore:
         finally:
             os.close(descriptor)
 
+        return self._decode_manifest_bytes(path, raw_bytes)
+
+    def _decode_manifest_bytes(
+        self,
+        path: Path,
+        raw_bytes: bytes,
+    ) -> dict[str, Any]:
         try:
             raw = raw_bytes.decode("utf-8")
         except UnicodeError as error:
@@ -628,9 +674,13 @@ class ArtifactStore:
         try:
             value = strict_json_loads(raw)
         except (UnicodeError, ValueError) as error:
-            raise ArtifactIntegrityError(f"invalid artifact manifest: {path.name}") from error
+            raise ArtifactIntegrityError(
+                f"invalid artifact manifest: {path.name}"
+            ) from error
         if type(value) is not dict:
-            raise ArtifactIntegrityError(f"unsupported artifact manifest: {path.name}")
+            raise ArtifactIntegrityError(
+                f"unsupported artifact manifest: {path.name}"
+            )
         authenticated = _verify_manifest_integrity(value, required=False)
         self._validate_manifest_contract(value, authenticated=authenticated)
         return value
@@ -818,10 +868,41 @@ class ArtifactStore:
             raise ArtifactIntegrityError("artifact object changed during read")
         return b"".join(chunks)
 
+    def read_authenticated_snapshot(
+        self,
+        artifact_id: str,
+    ) -> tuple[dict[str, Any], bytes]:
+        normalized_id = self._artifact_id(artifact_id)
+        manifest_path = self._manifest_path(normalized_id)
+        descriptor, opened = self._open_manifest_descriptor(manifest_path)
+        try:
+            raw_bytes = self._read_manifest_descriptor(
+                manifest_path,
+                descriptor,
+                opened,
+            )
+            manifest = self._decode_manifest_bytes(
+                manifest_path,
+                raw_bytes,
+            )
+            if manifest.get("artifact_id") != normalized_id:
+                raise ArtifactIntegrityError(
+                    "manifest artifact identity mismatch"
+                )
+            _verify_manifest_integrity(manifest, required=True)
+            data = self._read_verified_object_bytes(manifest)
+            self._revalidate_manifest_descriptor(
+                manifest_path,
+                descriptor,
+                opened,
+            )
+            return manifest, data
+        finally:
+            os.close(descriptor)
+
     def read_bytes(self, artifact_id: str) -> bytes:
-        manifest = self.load_manifest(artifact_id)
-        _verify_manifest_integrity(manifest, required=True)
-        return self._read_verified_object_bytes(manifest)
+        _manifest, data = self.read_authenticated_snapshot(artifact_id)
+        return data
 
     def export(self, artifact_id: str, destination: str | Path) -> Path:
         manifest = self.load_manifest(artifact_id)

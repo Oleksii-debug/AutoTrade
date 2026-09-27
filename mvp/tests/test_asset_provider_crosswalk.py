@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
-from research.autotrade_research.artifacts.store import ArtifactStore
+from research.autotrade_research.artifacts.store import ArtifactIntegrityError, ArtifactStore
 
 from mvp.autotrade_mvp.asset_provider_crosswalk import (
     CrosswalkError,
@@ -256,6 +256,61 @@ class AssetProviderCrosswalkTests(unittest.TestCase):
             )
         self.assertIn(key, verdict.invalid_keys)
         self.assertEqual(verdict.status, "INCOMPLETE")
+
+    def test_evidence_consumer_uses_one_authenticated_snapshot_and_fails_closed(self):
+        key = advertised_lifecycle_keys()[0]
+        item = complete_evidence(key)
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            store.publish_bytes(
+                artifact_id=item.artifact_id,
+                data=lifecycle_evidence_bytes(item),
+                media_type="application/vnd.autotrade.asset-provider-lifecycle",
+                rights={"storage": True, "export": False},
+                source_refs=[f"git:{item.source_sha}"],
+                metadata=lifecycle_evidence_payload(item),
+            )
+            with (
+                patch.object(
+                    store,
+                    "read_authenticated_snapshot",
+                    wraps=store.read_authenticated_snapshot,
+                ) as snapshot_read,
+                patch.object(
+                    store,
+                    "load_manifest",
+                    side_effect=AssertionError("split manifest read"),
+                ),
+                patch.object(
+                    store,
+                    "read_bytes",
+                    side_effect=AssertionError("split byte read"),
+                ),
+            ):
+                verdict = qualify_asset_provider_crosswalk(
+                    [item],
+                    exact_source_sha=SOURCE,
+                    exact_adapter_shas=adapter_map(),
+                    evidence_store=store,
+                )
+            self.assertEqual(snapshot_read.call_count, 1)
+            self.assertEqual(snapshot_read.call_args.args, (item.artifact_id,))
+            self.assertNotIn(key, verdict.invalid_keys)
+
+            with patch.object(
+                store,
+                "read_authenticated_snapshot",
+                side_effect=ArtifactIntegrityError("snapshot changed"),
+            ):
+                rejected = qualify_asset_provider_crosswalk(
+                    [item],
+                    exact_source_sha=SOURCE,
+                    exact_adapter_shas=adapter_map(),
+                    evidence_store=store,
+                )
+            self.assertIn(key, rejected.invalid_keys)
+            self.assertEqual(rejected.status, "INCOMPLETE")
+            self.assertFalse(rejected.trading_authority_granted)
 
     def test_missing_combination_fails_closed(self):
         keys = advertised_lifecycle_keys()

@@ -6,12 +6,13 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
 from typing import Any, Callable
 from uuid import UUID
 
 from .durable_publish import atomic_write_json, sha256_file, sync_parent_directory
-from .resource_lock import ResourceLock
+from .resource_lock import ResourceLock, _open_read_only_descriptor
 from ..io.strict_json import strict_json_loads
 
 
@@ -142,6 +143,252 @@ class ArtifactStore:
     def _manifest_path(self, artifact_id: str) -> Path:
         return self.manifests / f"{self._artifact_id(artifact_id)}.json"
 
+    def _validate_staging_namespace(self) -> None:
+        try:
+            resolved_root = self.root.resolve(strict=False)
+            expected_staging = resolved_root / "staging"
+            resolved_staging = self.staging.resolve(strict=False)
+        except OSError as error:
+            raise ArtifactIntegrityError(
+                "artifact staging namespace cannot be resolved"
+            ) from error
+        if resolved_staging != expected_staging:
+            raise ArtifactIntegrityError(
+                "artifact staging path escapes store namespace"
+            )
+
+    def _validate_manifest_namespace(self, manifest_path: Path) -> None:
+        try:
+            resolved_root = self.root.resolve(strict=False)
+            expected_manifests = resolved_root / "manifests"
+            resolved_manifests = self.manifests.resolve(strict=False)
+            resolved_parent = manifest_path.parent.resolve(strict=False)
+        except OSError as error:
+            raise ArtifactIntegrityError(
+                "artifact manifest namespace cannot be resolved"
+            ) from error
+        if (
+            resolved_manifests != expected_manifests
+            or resolved_parent != expected_manifests
+        ):
+            raise ArtifactIntegrityError(
+                "artifact manifest path escapes store namespace"
+            )
+
+    def _validate_manifest_entry(self, manifest_path: Path) -> os.stat_result:
+        self._validate_manifest_namespace(manifest_path)
+        try:
+            entry = os.stat(manifest_path, follow_symlinks=False)
+        except FileNotFoundError:
+            raise FileNotFoundError(manifest_path)
+        except OSError as error:
+            raise ArtifactIntegrityError(
+                "artifact manifest cannot be inspected"
+            ) from error
+        self._reject_reparse_point(entry, subject="artifact manifest")
+        if stat.S_ISLNK(entry.st_mode):
+            raise ArtifactIntegrityError("artifact manifest must not be a symlink")
+        if not stat.S_ISREG(entry.st_mode):
+            raise ArtifactIntegrityError(
+                "artifact manifest must be a regular file"
+            )
+        if entry.st_nlink != 1:
+            raise ArtifactIntegrityError(
+                "artifact manifest must not have hard-link aliases"
+            )
+        return entry
+
+    def _validate_object_namespace(self, object_path: Path) -> None:
+        try:
+            resolved_root = self.root.resolve(strict=False)
+            expected_objects = resolved_root / "objects" / "sha256"
+            resolved_objects = self.objects.resolve(strict=False)
+            resolved_parent = object_path.parent.resolve(strict=False)
+        except OSError as error:
+            raise ArtifactIntegrityError(
+                "content-addressed object namespace cannot be resolved"
+            ) from error
+        expected_parent = expected_objects / object_path.name[:2]
+        if resolved_objects != expected_objects or resolved_parent != expected_parent:
+            raise ArtifactIntegrityError(
+                "content-addressed object path escapes store namespace"
+            )
+
+    def _validate_object_entry(self, object_path: Path) -> os.stat_result:
+        self._validate_object_namespace(object_path)
+        try:
+            entry = os.stat(object_path, follow_symlinks=False)
+        except FileNotFoundError:
+            raise ArtifactIntegrityError("artifact object is missing")
+        except OSError as error:
+            raise ArtifactIntegrityError("artifact object cannot be inspected") from error
+        self._reject_reparse_point(entry, subject="artifact object")
+        if stat.S_ISLNK(entry.st_mode):
+            raise ArtifactIntegrityError("artifact object must not be a symlink")
+        if not stat.S_ISREG(entry.st_mode):
+            raise ArtifactIntegrityError("artifact object must be a regular file")
+        if entry.st_nlink != 1:
+            raise ArtifactIntegrityError("artifact object must not have hard-link aliases")
+        return entry
+
+    def _manifest_object_contract(
+        self,
+        manifest: dict[str, Any],
+    ) -> tuple[Path, str, int]:
+        digest_value = manifest.get("sha256")
+        if (
+            not isinstance(digest_value, str)
+            or len(digest_value) != 71
+            or not digest_value.startswith("sha256:")
+            or any(ch not in "0123456789abcdef" for ch in digest_value[7:])
+        ):
+            raise ArtifactIntegrityError("manifest digest is invalid")
+        expected_bytes = manifest.get("bytes")
+        if (
+            isinstance(expected_bytes, bool)
+            or not isinstance(expected_bytes, int)
+            or expected_bytes < 0
+        ):
+            raise ArtifactIntegrityError("manifest byte count is invalid")
+        digest = digest_value.removeprefix("sha256:")
+        return self._object_path(digest), digest, expected_bytes
+
+    @staticmethod
+    def _same_filesystem_entry(
+        first: os.stat_result,
+        second: os.stat_result,
+    ) -> bool:
+        return os.path.samestat(first, second)
+
+    @staticmethod
+    def _reject_reparse_point(
+        entry: os.stat_result,
+        *,
+        subject: str,
+    ) -> None:
+        attributes = getattr(entry, "st_file_attributes", None)
+        if os.name == "nt" and attributes is None:
+            raise ArtifactIntegrityError(
+                f"{subject} reparse-point attributes are unavailable"
+            )
+        reparse_flag = getattr(
+            stat,
+            "FILE_ATTRIBUTE_REPARSE_POINT",
+            0x400,
+        )
+        if attributes is not None and attributes & reparse_flag:
+            raise ArtifactIntegrityError(
+                f"{subject} must not be a reparse point"
+            )
+
+    def _open_object_descriptor(
+        self,
+        object_path: Path,
+        *,
+        expected_bytes: int,
+    ) -> tuple[int, os.stat_result]:
+        before = self._validate_object_entry(object_path)
+        if before.st_size != expected_bytes:
+            raise ArtifactIntegrityError("artifact object size mismatch")
+
+        try:
+            if os.name == "nt":
+                descriptor = _open_read_only_descriptor(object_path)
+            else:
+                no_follow = getattr(os, "O_NOFOLLOW", 0)
+                if not no_follow:
+                    raise OSError(
+                        "platform lacks no-follow artifact object open support"
+                    )
+                flags = (
+                    os.O_RDONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | no_follow
+                    | getattr(os, "O_NONBLOCK", 0)
+                )
+                descriptor = os.open(object_path, flags)
+        except OSError as error:
+            raise ArtifactIntegrityError(
+                "artifact object could not be opened safely"
+            ) from error
+
+        try:
+            opened = os.fstat(descriptor)
+            self._reject_reparse_point(
+                opened,
+                subject="artifact object descriptor",
+            )
+            if not stat.S_ISREG(opened.st_mode):
+                raise ArtifactIntegrityError(
+                    "artifact object descriptor must be a regular file"
+                )
+            if opened.st_nlink != 1:
+                raise ArtifactIntegrityError(
+                    "artifact object descriptor must not have hard-link aliases"
+                )
+            if opened.st_size != expected_bytes:
+                raise ArtifactIntegrityError("artifact object size mismatch")
+            current = self._validate_object_entry(object_path)
+            if (
+                not self._same_filesystem_entry(before, opened)
+                or not self._same_filesystem_entry(opened, current)
+            ):
+                raise ArtifactIntegrityError(
+                    "artifact object changed before descriptor read"
+                )
+        except Exception:
+            os.close(descriptor)
+            raise
+        return descriptor, opened
+
+    def _revalidate_object_descriptor(
+        self,
+        object_path: Path,
+        descriptor: int,
+        opened: os.stat_result,
+        *,
+        expected_bytes: int,
+    ) -> None:
+        try:
+            after_descriptor = os.fstat(descriptor)
+        except OSError as error:
+            raise ArtifactIntegrityError(
+                "artifact object descriptor could not be revalidated"
+            ) from error
+        self._reject_reparse_point(
+            after_descriptor,
+            subject="artifact object descriptor",
+        )
+        if (
+            not stat.S_ISREG(after_descriptor.st_mode)
+            or after_descriptor.st_nlink != 1
+            or after_descriptor.st_size != expected_bytes
+            or not self._same_filesystem_entry(opened, after_descriptor)
+        ):
+            raise ArtifactIntegrityError(
+                "artifact object changed during descriptor read"
+            )
+        current = self._validate_object_entry(object_path)
+        if not self._same_filesystem_entry(after_descriptor, current):
+            raise ArtifactIntegrityError(
+                "artifact object path changed during descriptor read"
+            )
+
+    @staticmethod
+    def _bounded_descriptor_chunks(descriptor: int, expected_bytes: int):
+        remaining = expected_bytes + 1
+        while remaining > 0:
+            try:
+                chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            except OSError as error:
+                raise ArtifactIntegrityError(
+                    "artifact object could not be read safely"
+                ) from error
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
+
     @classmethod
     def _validate_manifest_contract(
         cls,
@@ -270,21 +517,176 @@ class ArtifactStore:
                 "artifact manifest created_at must include timezone"
             )
 
-    def _load_manifest_path(self, path: Path) -> dict[str, Any]:
+    @staticmethod
+    def _manifest_descriptor_snapshot(entry: os.stat_result) -> tuple[int, ...]:
+        """Return descriptor metadata that must remain stable while bytes are read."""
+
+        return (
+            entry.st_mode,
+            entry.st_nlink,
+            entry.st_size,
+            entry.st_mtime_ns,
+            entry.st_ctime_ns,
+        )
+
+    def _open_manifest_descriptor(
+        self,
+        manifest_path: Path,
+    ) -> tuple[int, os.stat_result]:
+        before = self._validate_manifest_entry(manifest_path)
         try:
-            value = strict_json_loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, ValueError) as error:
-            raise ArtifactIntegrityError(f"invalid artifact manifest: {path.name}") from error
+            if os.name == "nt":
+                descriptor = _open_read_only_descriptor(manifest_path)
+            else:
+                no_follow = getattr(os, "O_NOFOLLOW", 0)
+                if not no_follow:
+                    raise OSError(
+                        "platform lacks no-follow artifact manifest open support"
+                    )
+                flags = (
+                    os.O_RDONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | no_follow
+                    | getattr(os, "O_NONBLOCK", 0)
+                )
+                descriptor = os.open(manifest_path, flags)
+        except OSError as error:
+            raise ArtifactIntegrityError(
+                "artifact manifest could not be opened safely"
+            ) from error
+
+        try:
+            opened = os.fstat(descriptor)
+            self._reject_reparse_point(
+                opened,
+                subject="artifact manifest descriptor",
+            )
+            if not stat.S_ISREG(opened.st_mode):
+                raise ArtifactIntegrityError(
+                    "artifact manifest descriptor must be a regular file"
+                )
+            if opened.st_nlink != 1:
+                raise ArtifactIntegrityError(
+                    "artifact manifest descriptor must not have hard-link aliases"
+                )
+            current = self._validate_manifest_entry(manifest_path)
+            if (
+                not self._same_filesystem_entry(before, opened)
+                or not self._same_filesystem_entry(opened, current)
+                or before.st_size != opened.st_size
+                or opened.st_size != current.st_size
+            ):
+                raise ArtifactIntegrityError(
+                    "artifact manifest changed during read"
+                )
+        except Exception:
+            os.close(descriptor)
+            raise
+        return descriptor, opened
+
+    def _revalidate_manifest_descriptor(
+        self,
+        manifest_path: Path,
+        descriptor: int,
+        opened: os.stat_result,
+    ) -> None:
+        try:
+            after_descriptor = os.fstat(descriptor)
+        except OSError as error:
+            raise ArtifactIntegrityError(
+                "artifact manifest descriptor could not be revalidated"
+            ) from error
+        self._reject_reparse_point(
+            after_descriptor,
+            subject="artifact manifest descriptor",
+        )
+        if (
+            not stat.S_ISREG(after_descriptor.st_mode)
+            or after_descriptor.st_nlink != 1
+            or not self._same_filesystem_entry(opened, after_descriptor)
+            or self._manifest_descriptor_snapshot(after_descriptor)
+            != self._manifest_descriptor_snapshot(opened)
+        ):
+            raise ArtifactIntegrityError("artifact manifest changed during read")
+        current = self._validate_manifest_entry(manifest_path)
+        if (
+            not self._same_filesystem_entry(after_descriptor, current)
+            or after_descriptor.st_size != current.st_size
+        ):
+            raise ArtifactIntegrityError("artifact manifest changed during read")
+
+    def _read_manifest_descriptor(
+        self,
+        manifest_path: Path,
+        descriptor: int,
+        opened: os.stat_result,
+    ) -> bytes:
+        expected_bytes = opened.st_size
+        remaining = expected_bytes + 1
+        chunks: list[bytes] = []
+        copied = 0
+        while remaining > 0:
+            try:
+                chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            except OSError as error:
+                raise ArtifactIntegrityError(
+                    "artifact manifest could not be read safely"
+                ) from error
+            if not chunk:
+                break
+            chunks.append(chunk)
+            copied += len(chunk)
+            remaining -= len(chunk)
+
+        self._revalidate_manifest_descriptor(
+            manifest_path,
+            descriptor,
+            opened,
+        )
+        if copied != expected_bytes:
+            raise ArtifactIntegrityError("artifact manifest changed during read")
+        return b"".join(chunks)
+
+    def _load_manifest_path(self, path: Path) -> dict[str, Any]:
+        descriptor, opened = self._open_manifest_descriptor(path)
+        try:
+            raw_bytes = self._read_manifest_descriptor(
+                path,
+                descriptor,
+                opened,
+            )
+        finally:
+            os.close(descriptor)
+
+        return self._decode_manifest_bytes(path, raw_bytes)
+
+    def _decode_manifest_bytes(
+        self,
+        path: Path,
+        raw_bytes: bytes,
+    ) -> dict[str, Any]:
+        try:
+            raw = raw_bytes.decode("utf-8")
+        except UnicodeError as error:
+            raise ArtifactIntegrityError(
+                f"invalid artifact manifest: {path.name}"
+            ) from error
+        try:
+            value = strict_json_loads(raw)
+        except (UnicodeError, ValueError) as error:
+            raise ArtifactIntegrityError(
+                f"invalid artifact manifest: {path.name}"
+            ) from error
         if type(value) is not dict:
-            raise ArtifactIntegrityError(f"unsupported artifact manifest: {path.name}")
+            raise ArtifactIntegrityError(
+                f"unsupported artifact manifest: {path.name}"
+            )
         authenticated = _verify_manifest_integrity(value, required=False)
         self._validate_manifest_contract(value, authenticated=authenticated)
         return value
 
     def load_manifest(self, artifact_id: str) -> dict[str, Any]:
         path = self._manifest_path(artifact_id)
-        if not path.is_file():
-            raise FileNotFoundError(path)
         manifest = self._load_manifest_path(path)
         if manifest.get("artifact_id") != self._artifact_id(artifact_id):
             raise ArtifactIntegrityError("manifest artifact identity mismatch")
@@ -315,7 +717,8 @@ class ArtifactStore:
         manifest_path = self._manifest_path(normalized_id)
 
         with ResourceLock(self.lock_path):
-            if manifest_path.exists():
+            self._validate_manifest_namespace(manifest_path)
+            if manifest_path.exists() or manifest_path.is_symlink():
                 existing = self._load_manifest_path(manifest_path)
                 immutable = {
                     "artifact_id": normalized_id,
@@ -348,14 +751,21 @@ class ArtifactStore:
                 return existing
 
             object_path.parent.mkdir(parents=True, exist_ok=True)
-            if object_path.is_symlink():
-                raise ArtifactIntegrityError(
-                    "content-addressed object path must not be a symlink"
-                )
-            if object_path.exists():
-                if object_path.stat().st_size != len(data) or sha256_file(object_path) != digest:
-                    raise ArtifactIntegrityError("content-addressed object path is corrupt")
+            self._validate_object_namespace(object_path)
+            if object_path.exists() or object_path.is_symlink():
+                try:
+                    self._verify_manifest_object(
+                        {
+                            "sha256": f"sha256:{digest}",
+                            "bytes": len(data),
+                        }
+                    )
+                except ArtifactIntegrityError as error:
+                    raise ArtifactIntegrityError(
+                        "content-addressed object path is corrupt"
+                    ) from error
             else:
+                self._validate_staging_namespace()
                 temporary: Path | None = None
                 try:
                     with tempfile.NamedTemporaryFile(
@@ -397,87 +807,181 @@ class ArtifactStore:
             return manifest
 
     def _verify_manifest_object(self, manifest: dict[str, Any]) -> Path:
-        digest_value = manifest.get("sha256")
-        if not isinstance(digest_value, str) or not digest_value.startswith("sha256:"):
-            raise ArtifactIntegrityError("manifest digest is invalid")
-        digest = digest_value.removeprefix("sha256:")
-        object_path = self._object_path(digest)
-        if object_path.is_symlink():
-            raise ArtifactIntegrityError("artifact object must not be a symlink")
-        if not object_path.is_file():
-            raise ArtifactIntegrityError("artifact object is missing")
-        if object_path.stat().st_size != manifest.get("bytes"):
+        object_path, expected_digest, expected_bytes = (
+            self._manifest_object_contract(manifest)
+        )
+        descriptor, opened = self._open_object_descriptor(
+            object_path,
+            expected_bytes=expected_bytes,
+        )
+        try:
+            copied = 0
+            copied_hash = sha256()
+            for chunk in self._bounded_descriptor_chunks(
+                descriptor,
+                expected_bytes,
+            ):
+                copied += len(chunk)
+                copied_hash.update(chunk)
+            self._revalidate_object_descriptor(
+                object_path,
+                descriptor,
+                opened,
+                expected_bytes=expected_bytes,
+            )
+        finally:
+            os.close(descriptor)
+        if copied != expected_bytes:
             raise ArtifactIntegrityError("artifact object size mismatch")
-        if sha256_file(object_path) != digest:
+        if copied_hash.hexdigest() != expected_digest:
             raise ArtifactIntegrityError("artifact object hash mismatch")
         return object_path
 
+    def _read_verified_object_bytes(self, manifest: dict[str, Any]) -> bytes:
+        object_path, expected_digest, expected_bytes = (
+            self._manifest_object_contract(manifest)
+        )
+        descriptor, opened = self._open_object_descriptor(
+            object_path,
+            expected_bytes=expected_bytes,
+        )
+        try:
+            chunks: list[bytes] = []
+            copied = 0
+            copied_hash = sha256()
+            for chunk in self._bounded_descriptor_chunks(
+                descriptor,
+                expected_bytes,
+            ):
+                chunks.append(chunk)
+                copied += len(chunk)
+                copied_hash.update(chunk)
+            self._revalidate_object_descriptor(
+                object_path,
+                descriptor,
+                opened,
+                expected_bytes=expected_bytes,
+            )
+        finally:
+            os.close(descriptor)
+        if copied != expected_bytes or copied_hash.hexdigest() != expected_digest:
+            raise ArtifactIntegrityError("artifact object changed during read")
+        return b"".join(chunks)
+
+    def read_authenticated_snapshot(
+        self,
+        artifact_id: str,
+    ) -> tuple[dict[str, Any], bytes]:
+        normalized_id = self._artifact_id(artifact_id)
+        manifest_path = self._manifest_path(normalized_id)
+        descriptor, opened = self._open_manifest_descriptor(manifest_path)
+        try:
+            raw_bytes = self._read_manifest_descriptor(
+                manifest_path,
+                descriptor,
+                opened,
+            )
+            manifest = self._decode_manifest_bytes(
+                manifest_path,
+                raw_bytes,
+            )
+            if manifest.get("artifact_id") != normalized_id:
+                raise ArtifactIntegrityError(
+                    "manifest artifact identity mismatch"
+                )
+            _verify_manifest_integrity(manifest, required=True)
+            data = self._read_verified_object_bytes(manifest)
+            self._revalidate_manifest_descriptor(
+                manifest_path,
+                descriptor,
+                opened,
+            )
+            return manifest, data
+        finally:
+            os.close(descriptor)
+
     def read_bytes(self, artifact_id: str) -> bytes:
-        manifest = self.load_manifest(artifact_id)
-        _verify_manifest_integrity(manifest, required=True)
-        return self._verify_manifest_object(manifest).read_bytes()
+        _manifest, data = self.read_authenticated_snapshot(artifact_id)
+        return data
 
     def export(self, artifact_id: str, destination: str | Path) -> Path:
         manifest = self.load_manifest(artifact_id)
         _verify_manifest_integrity(manifest, required=True)
         if manifest.get("rights", {}).get("export") is not True:
             raise PermissionError("artifact rights do not permit export")
-        source = self._verify_manifest_object(manifest)
         if self._export_authorizer is None:
             raise PermissionError("independent export authorization is required")
+
+        source, expected_digest, expected_bytes = (
+            self._manifest_object_contract(manifest)
+        )
+        descriptor, opened = self._open_object_descriptor(
+            source,
+            expected_bytes=expected_bytes,
+        )
         try:
-            authorized = self._export_authorizer(
-                manifest["artifact_id"],
-                manifest["sha256"],
-            )
-        except Exception as error:
-            raise PermissionError(
-                "independent export authorization failed closed"
-            ) from error
-        if authorized is not True:
-            raise PermissionError(
-                "independent export authority does not permit export"
-            )
-        target = Path(destination)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temporary: Path | None = None
-        expected_digest = manifest["sha256"].removeprefix("sha256:")
-        expected_bytes = manifest["bytes"]
-        try:
-            with tempfile.NamedTemporaryFile(
-                "wb",
-                dir=target.parent,
-                prefix=f".{target.name}.",
-                suffix=".tmp",
-                delete=False,
-            ) as handle:
-                temporary = Path(handle.name)
-                copied = 0
-                copied_hash = sha256()
-                with source.open("rb") as source_handle:
-                    while True:
-                        chunk = source_handle.read(1024 * 1024)
-                        if not chunk:
-                            break
+            try:
+                authorized = self._export_authorizer(
+                    manifest["artifact_id"],
+                    manifest["sha256"],
+                )
+            except Exception as error:
+                raise PermissionError(
+                    "independent export authorization failed closed"
+                ) from error
+            if authorized is not True:
+                raise PermissionError(
+                    "independent export authority does not permit export"
+                )
+
+            target = Path(destination)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    "wb",
+                    dir=target.parent,
+                    prefix=f".{target.name}.",
+                    suffix=".tmp",
+                    delete=False,
+                ) as handle:
+                    temporary = Path(handle.name)
+                    copied = 0
+                    copied_hash = sha256()
+                    for chunk in self._bounded_descriptor_chunks(
+                        descriptor,
+                        expected_bytes,
+                    ):
                         handle.write(chunk)
                         copied += len(chunk)
                         copied_hash.update(chunk)
-                handle.flush()
-                os.fsync(handle.fileno())
-            if copied != expected_bytes or copied_hash.hexdigest() != expected_digest:
-                raise ArtifactIntegrityError(
-                    "artifact object changed during export copy"
-                )
-            os.replace(temporary, target)
-            temporary = None
-            sync_parent_directory(target)
+                    self._revalidate_object_descriptor(
+                        source,
+                        descriptor,
+                        opened,
+                        expected_bytes=expected_bytes,
+                    )
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                if (
+                    copied != expected_bytes
+                    or copied_hash.hexdigest() != expected_digest
+                ):
+                    raise ArtifactIntegrityError(
+                        "artifact object changed during export copy"
+                    )
+                os.replace(temporary, target)
+                temporary = None
+                sync_parent_directory(target)
+            finally:
+                if temporary is not None:
+                    try:
+                        temporary.unlink()
+                    except FileNotFoundError:
+                        pass
+            return target
         finally:
-            if temporary is not None:
-                try:
-                    temporary.unlink()
-                except FileNotFoundError:
-                    pass
-        return target
+            os.close(descriptor)
 
     def audit(self) -> ArtifactAudit:
         referenced: set[str] = set()
@@ -488,35 +992,40 @@ class ArtifactStore:
             manifest_count += 1
             try:
                 manifest = self._load_manifest_path(manifest_path)
-                digest = manifest["sha256"].removeprefix("sha256:")
-                referenced.add(digest)
+                # Recovery may delete objects that are not referenced by any
+                # trusted manifest. A legacy/hashless or otherwise unauthenticated
+                # manifest therefore cannot contribute a recovery reference.
+                _verify_manifest_integrity(manifest, required=True)
+            except (
+                ArtifactIntegrityError,
+                FileNotFoundError,
+                KeyError,
+                AttributeError,
+                ValueError,
+            ):
+                corrupt.append(manifest_path.name)
+                continue
+
+            digest = manifest["sha256"].removeprefix("sha256:")
+            referenced.add(digest)
+            object_path = self._object_path(digest)
+            try:
+                self._validate_object_namespace(object_path)
+                os.stat(object_path, follow_symlinks=False)
+            except FileNotFoundError:
+                missing.append(manifest_path.name)
+                continue
+            except (ArtifactIntegrityError, OSError):
+                corrupt.append(manifest_path.name)
+                continue
+
+            try:
                 self._verify_manifest_object(manifest)
-            except (ArtifactIntegrityError, KeyError, AttributeError, ValueError):
-                try:
-                    value = json.loads(manifest_path.read_text(encoding="utf-8"))
-                    digest_value = value.get("sha256") if isinstance(value, dict) else None
-                    digest = digest_value.removeprefix("sha256:") if isinstance(digest_value, str) else ""
-                    if digest:
-                        referenced.add(digest)
-                        path = self._object_path(digest)
-                        if not path.exists():
-                            missing.append(manifest_path.name)
-                        else:
-                            corrupt.append(manifest_path.name)
-                    else:
-                        corrupt.append(manifest_path.name)
-                except Exception:
-                    corrupt.append(manifest_path.name)
+            except ArtifactIntegrityError:
+                corrupt.append(manifest_path.name)
 
         object_digests: set[str] = set()
         for path in self.objects.glob("*/*"):
-            if path.is_symlink():
-                corrupt.append(
-                    "object:" + path.relative_to(self.root).as_posix()
-                )
-                continue
-            if not path.is_file():
-                continue
             digest = path.name
             try:
                 canonical = self._object_path(digest)
@@ -526,6 +1035,13 @@ class ArtifactStore:
                 )
                 continue
             if path != canonical:
+                corrupt.append(
+                    "object:" + path.relative_to(self.root).as_posix()
+                )
+                continue
+            try:
+                self._validate_object_entry(path)
+            except ArtifactIntegrityError:
                 corrupt.append(
                     "object:" + path.relative_to(self.root).as_posix()
                 )
@@ -541,15 +1057,35 @@ class ArtifactStore:
 
     def recover_orphans(self) -> ArtifactAudit:
         with ResourceLock(self.lock_path):
+            self._validate_staging_namespace()
             before = self.audit()
-            for digest in before.unreferenced_objects:
-                path = self._object_path(digest)
-                try:
-                    path.unlink()
-                except FileNotFoundError:
-                    pass
+            corrupt_manifests = tuple(
+                item
+                for item in before.corrupt_objects
+                if not item.startswith("object:")
+            )
+            if not corrupt_manifests:
+                for digest in before.unreferenced_objects:
+                    path = self._object_path(digest)
+                    try:
+                        self._validate_object_entry(path)
+                    except ArtifactIntegrityError:
+                        continue
+                    try:
+                        path.unlink()
+                    except FileNotFoundError:
+                        pass
+            self._validate_staging_namespace()
             for path in self.staging.glob("*"):
-                if path.is_file():
+                try:
+                    entry = os.stat(path, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                except OSError as error:
+                    raise ArtifactIntegrityError(
+                        "artifact staging entry cannot be inspected"
+                    ) from error
+                if stat.S_ISREG(entry.st_mode):
                     try:
                         path.unlink()
                     except FileNotFoundError:

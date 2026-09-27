@@ -618,6 +618,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
         provider_execution_id="provider-execution-1",
         provider_revision=None,
         correction_of=None,
+        position_effect=None,
     ):
         return ProjectedFillEvidence.create(
             fill_id=fill_id,
@@ -629,6 +630,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             price=price,
             provider_revision=provider_revision,
             correction_of=correction_of,
+            position_effect=position_effect,
         )
 
     def provider_fill(
@@ -640,6 +642,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
         fee_amount="0",
         fee_currency="USD",
         position_side=None,
+        position_effect=None,
         provider_execution_id="provider-execution-1",
         evidence_refs=("provider-fill:test",),
         environment=ENVIRONMENT,
@@ -658,6 +661,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             trade_time="2026-09-25T09:00:00Z",
             side=side,
             position_side=position_side,
+            position_effect=position_effect,
             evidence_refs=evidence_refs,
         )
 
@@ -731,6 +735,35 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             self.assertEqual(binding["provider_fill"]["position_side"], None)
             self.assertEqual(binding["provider_fill"]["position_effect"], None)
             self.assertEqual(binding["provider_fill"]["quantity"], "1")
+
+    def test_cash_equity_plan_rejects_provider_evidenced_reduce_effect(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            reserve(reservations)
+            projected = self.projected_fill(position_effect="REDUCE")
+            provider = self.provider_fill(position_effect="REDUCE")
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "does not support position_effect",
+            ):
+                build_provider_fill_financial_plan(
+                    book=economics,
+                    provider_id=PROVIDER,
+                    projected_fill=projected,
+                    provider_fill=provider,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                    reservation_snapshot=reservations.get("reservation-1"),
+                    observed_at="2026-09-25T09:00:01Z",
+                )
+            self.assertEqual(economics.transactions, ())
+            self.assertEqual(
+                reservations.get("reservation-1").consumed,
+                {"CASH:USD": Decimal("0")},
+            )
 
     def test_provider_evidence_retargeting_conflicts_with_existing_fill_binding(self):
         with TemporaryDirectory() as directory:

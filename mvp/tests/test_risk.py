@@ -165,8 +165,7 @@ def context(**overrides):
         stress_scenarios=({"ABC": "-0.10", "XYZ": "-0.20"},),
         equivalent_exposure_per_unit={"ABC": "100", "XYZ": "50"},
         instrument_types={
-            # ABC is the intent instrument in most legacy tests; its exact
-            # type comes from the RiskIntent under test, not a fixture guess.
+            "ABC": "GENERIC",
             "XYZ": "GENERIC",
             "CORE": "GENERIC",
             "HEDGE": "GENERIC",
@@ -935,6 +934,7 @@ class IndependentRiskTests(unittest.TestCase):
                 action="EXERCISE", instrument_type="OPTION",
             ),
             context(
+                instrument_types={"ABC": "OPTION"},
                 option_deliverable_verified=None,
                 option_exercise_cash_required="5000",
                 option_exercise_cash_available="4999.99",
@@ -956,6 +956,7 @@ class IndependentRiskTests(unittest.TestCase):
                 action="EXERCISE", instrument_type="OPTION",
             ),
             context(
+                instrument_types={"ABC": "OPTION"},
                 option_deliverable_verified=True,
                 option_exercise_cash_required="5000",
                 option_exercise_cash_available="5000",
@@ -1006,6 +1007,7 @@ class IndependentRiskTests(unittest.TestCase):
             context(
                 positions={"ABC": "0"},
                 marks={"ABC": "5"},
+                instrument_types={},
                 equivalent_exposure_per_unit={},
                 stress_scenarios=({"ABC": "-0.10"},),
             ),
@@ -1030,6 +1032,7 @@ class IndependentRiskTests(unittest.TestCase):
                 equity="1000",
                 positions={"ABC": "0"},
                 marks={"ABC": "5"},
+                instrument_types={},
                 equivalent_exposure_per_unit={"ABC": "750"},
                 stress_scenarios=({"ABC": "-0.10"},),
             ),
@@ -1050,6 +1053,173 @@ class IndependentRiskTests(unittest.TestCase):
         self.assertEqual(evidenced.net_leverage, Decimal("0.75"))
         self.assertEqual(evidenced.worst_stress_loss, Decimal("75"))
         self.assertTrue(evidenced.admitted)
+
+    def test_same_symbol_existing_position_requires_canonical_family(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="1",
+                price="100",
+                expected_state_version=7,
+                instrument_type="EQUITY",
+            ),
+            context(
+                positions={"ABC": "2"},
+                instrument_types={},
+                equivalent_exposure_per_unit={"ABC": "100"},
+                stress_scenarios=({"ABC": "-0.10"},),
+            ),
+            policy(max_single_notional="10000"),
+        )
+        rule = next(
+            item
+            for item in decision.rules
+            if item.rule == "derivative_equivalent_exposure"
+        )
+        self.assertFalse(rule.passed)
+        self.assertEqual(rule.observed, "MISSING_TYPE:ABC")
+        self.assertFalse(decision.admitted)
+
+    def test_same_symbol_reserved_only_exposure_requires_canonical_family(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="1",
+                price="100",
+                expected_state_version=7,
+                instrument_type="EQUITY",
+            ),
+            context(
+                positions={"ABC": "0"},
+                reserved_position_delta={"ABC": "1"},
+                instrument_types={},
+                equivalent_exposure_per_unit={"ABC": "100"},
+                stress_scenarios=({"ABC": "-0.10"},),
+            ),
+            policy(max_single_notional="10000"),
+        )
+        rule = next(
+            item
+            for item in decision.rules
+            if item.rule == "derivative_equivalent_exposure"
+        )
+        self.assertFalse(rule.passed)
+        self.assertEqual(rule.observed, "MISSING_TYPE:ABC")
+        self.assertFalse(decision.admitted)
+
+    def test_offsetting_current_and_reserved_still_require_canonical_family(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="1",
+                price="100",
+                expected_state_version=7,
+                instrument_type="EQUITY",
+            ),
+            context(
+                positions={"ABC": "1"},
+                reserved_position_delta={"ABC": "-1"},
+                instrument_types={},
+                equivalent_exposure_per_unit={"ABC": "100"},
+                stress_scenarios=({"ABC": "-0.10"},),
+            ),
+            policy(max_single_notional="10000"),
+        )
+        rule = next(
+            item
+            for item in decision.rules
+            if item.rule == "derivative_equivalent_exposure"
+        )
+        self.assertFalse(rule.passed)
+        self.assertEqual(rule.observed, "MISSING_TYPE:ABC")
+        self.assertFalse(decision.admitted)
+
+    def test_same_symbol_existing_family_must_match_new_intent_family(self):
+        with self.assertRaisesRegex(ValueError, "context instrument type"):
+            evaluate_risk(
+                RiskIntent.create(
+                    symbol="ABC",
+                    side="BUY",
+                    quantity="1",
+                    price="100",
+                    expected_state_version=7,
+                    instrument_type="EQUITY",
+                ),
+                context(
+                    positions={"ABC": "1"},
+                    instrument_types={"ABC": "OPTION"},
+                    equivalent_exposure_per_unit={"ABC": "500"},
+                    stress_scenarios=({"ABC": "-0.10"},),
+                ),
+                policy(max_single_notional="10000"),
+            )
+
+    def test_same_symbol_derivative_exposure_requires_equivalent_evidence(self):
+        intent = RiskIntent.create(
+            symbol="ABC", side="BUY", quantity="1", price="5",
+            expected_state_version=7, instrument_type="OPTION",
+        )
+        for positions, reservations in (
+            ({"ABC": "2"}, {}),
+            ({"ABC": "0"}, {"ABC": "2"}),
+            ({"ABC": "2"}, {"ABC": "-2"}),
+        ):
+            with self.subTest(positions=positions, reservations=reservations):
+                decision = evaluate_risk(
+                    intent,
+                    context(
+                        positions=positions,
+                        reserved_position_delta=reservations,
+                        marks={"ABC": "5"},
+                        instrument_types={"ABC": "OPTION"},
+                        equivalent_exposure_per_unit={},
+                        stress_scenarios=({"ABC": "-0.10"},),
+                    ),
+                    policy(max_single_notional="10000"),
+                )
+                rule = next(
+                    item for item in decision.rules
+                    if item.rule == "derivative_equivalent_exposure"
+                )
+                self.assertFalse(rule.passed)
+                self.assertEqual(rule.observed, "MISSING:ABC")
+                self.assertFalse(decision.admitted)
+
+    def test_zero_pre_intent_position_may_use_intent_family(self):
+        decision = evaluate_risk(
+            RiskIntent.create(
+                symbol="ABC",
+                side="BUY",
+                quantity="1",
+                price="5",
+                expected_state_version=7,
+                instrument_type="OPTION",
+            ),
+            context(
+                positions={"ABC": "0"},
+                reserved_position_delta={"ABC": "0"},
+                instrument_types={},
+                marks={"ABC": "5"},
+                equivalent_exposure_per_unit={"ABC": "750"},
+                stress_scenarios=({"ABC": "-0.10"},),
+            ),
+            policy(
+                max_single_notional="1000",
+                max_gross_leverage="1",
+                max_net_leverage="1",
+            ),
+        )
+        self.assertTrue(
+            next(
+                item
+                for item in decision.rules
+                if item.rule == "derivative_equivalent_exposure"
+            ).passed
+        )
+        self.assertTrue(decision.admitted)
 
     def test_existing_derivative_position_without_equivalent_exposure_fails_closed(self):
         decision = evaluate_risk(
@@ -1174,6 +1344,7 @@ class IndependentRiskTests(unittest.TestCase):
             context(
                 positions={"ABC": "0"},
                 marks={"ABC": "4"},
+                instrument_types={},
                 equivalent_exposure_per_unit={"ABC": "-300"},
                 stress_scenarios=({"ABC": "-0.10"},),
             ),
@@ -1210,6 +1381,7 @@ class IndependentRiskTests(unittest.TestCase):
                 equity="1000",
                 positions={"ABC": "0"},
                 marks={"ABC": "100"},
+                instrument_types={},
                 equivalent_exposure_per_unit={"ABC": "1"},
                 stress_scenarios=({"ABC": "-0.10"},),
             ),
@@ -1235,12 +1407,18 @@ class IndependentRiskTests(unittest.TestCase):
         )
         missing = evaluate_risk(
             intent,
-            context(futures_delivery_headroom_seconds={}),
+            context(
+                instrument_types={"ABC": "FUTURE"},
+                futures_delivery_headroom_seconds={},
+            ),
             policy(min_futures_delivery_headroom_seconds="3600"),
         )
         too_close = evaluate_risk(
             intent,
-            context(futures_delivery_headroom_seconds={"ABC": "3599.9"}),
+            context(
+                instrument_types={"ABC": "FUTURE"},
+                futures_delivery_headroom_seconds={"ABC": "3599.9"},
+            ),
             policy(min_futures_delivery_headroom_seconds="3600"),
         )
         self.assertEqual(
@@ -1260,6 +1438,7 @@ class IndependentRiskTests(unittest.TestCase):
             ),
             context(
                 positions={"ABC": "2"},
+                instrument_types={"ABC": "FUTURE"},
                 futures_delivery_headroom_seconds={"ABC": "-10"},
                 stress_scenarios=(),
             ),

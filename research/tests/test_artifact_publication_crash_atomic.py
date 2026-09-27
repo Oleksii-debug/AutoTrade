@@ -213,5 +213,103 @@ raise AssertionError("publication unexpectedly survived hard-crash seam")
             self.assertEqual(audit.manifests, 1)
 
 
+@unittest.skipUnless(sys.platform == "win32", "real Windows crash/reopen semantics required")
+class WindowsPublicationCrashAtomicityTests(unittest.TestCase):
+    def test_prepared_crash_then_same_bytes_prefix_replacement_cannot_be_promoted(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "store"
+            artifact_id = str(uuid4())
+            payload = b"windows-hard-crash-prepared-manifest"
+            research_root = Path(__file__).resolve().parents[1]
+            environment = os.environ.copy()
+            current_pythonpath = environment.get("PYTHONPATH", "")
+            environment["PYTHONPATH"] = os.pathsep.join(
+                part
+                for part in (str(research_root), current_pythonpath)
+                if part
+            )
+
+            child = r'''
+import os
+from pathlib import Path
+import sys
+
+from autotrade_research.artifacts import _windows_retained_publication_hardening as publication
+from autotrade_research.artifacts.store import ArtifactStore
+
+root = Path(sys.argv[1])
+artifact_id = sys.argv[2]
+payload = b"windows-hard-crash-prepared-manifest"
+store = ArtifactStore(root)
+real_publish_manifest = publication._publish_manifest_windows
+
+
+def publish_prepared_then_die(self, *, manifest, replace_existing):
+    result = real_publish_manifest(
+        self,
+        manifest=manifest,
+        replace_existing=replace_existing,
+    )
+    if manifest.get("publication_state") == "PREPARED" and not replace_existing:
+        os._exit(93)
+    return result
+
+
+publication._publish_manifest_windows = publish_prepared_then_die
+store.publish_bytes(
+    artifact_id=artifact_id,
+    data=payload,
+    media_type="application/octet-stream",
+    rights={"storage": True, "export": False},
+)
+raise AssertionError("publication unexpectedly survived hard-crash seam")
+'''
+            completed = subprocess.run(
+                [sys.executable, "-c", child, str(root), artifact_id],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(
+                completed.returncode,
+                93,
+                msg=f"stdout={completed.stdout!r} stderr={completed.stderr!r}",
+            )
+
+            manifest_path = root / "manifests" / f"{artifact_id}.json"
+            raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(raw["schema_version"], 2)
+            self.assertEqual(raw["publication_state"], "PREPARED")
+            prepared_bytes = manifest_path.read_bytes()
+            digest = raw["sha256"].removeprefix("sha256:")
+
+            prefix = root / "objects" / "sha256" / digest[:2]
+            detached = root / "objects" / "sha256" / ("detached-" + digest[:2])
+            replacement = root.parent / ("replacement-" + digest[:2])
+            replacement.mkdir()
+            (replacement / digest).write_bytes(payload)
+            os.replace(prefix, detached)
+            os.replace(replacement, prefix)
+
+            reopened = ArtifactStore(root)
+            with self.assertRaisesRegex(
+                ArtifactIntegrityError,
+                "publication is not committed",
+            ):
+                reopened.read_authenticated_snapshot(artifact_id)
+            with self.assertRaisesRegex(
+                ArtifactIntegrityError,
+                "object generation changed after publication",
+            ):
+                reopened.publish_bytes(
+                    artifact_id=artifact_id,
+                    data=payload,
+                    media_type="application/octet-stream",
+                    rights={"storage": True, "export": False},
+                )
+            self.assertEqual(manifest_path.read_bytes(), prepared_bytes)
+
+
 if __name__ == "__main__":
     unittest.main()

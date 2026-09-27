@@ -384,6 +384,16 @@ def _trusted_recovery_plan(self) -> tuple[set[str], set[str], list[str]]:
     referenced: set[str] = set()
     corrupt: list[str] = []
     for name in tuple(os.listdir(self._retained_manifests_fd)):
+        # atomic_write_json retains a per-manifest ResourceLock sidecar in
+        # this directory. It is coordination state, never a manifest or an
+        # incomplete manifest inventory.
+        if name.startswith(".") and name.endswith(".json.lock"):
+            identifier = name[1:-len(".json.lock")]
+            try:
+                if self._artifact_id(identifier) == identifier:
+                    continue
+            except ValueError:
+                pass
         if not isinstance(name, str) or not name.endswith(".json"):
             corrupt.append(f"manifest:{name}")
             continue
@@ -391,9 +401,11 @@ def _trusted_recovery_plan(self) -> tuple[set[str], set[str], list[str]]:
         try:
             manifest = self._load_manifest_path(path)
             _store._verify_manifest_integrity(manifest, required=True)
-            digest = manifest["sha256"].removeprefix("sha256:")
+            _path, digest, _bytes = self._manifest_object_contract(manifest)
             referenced.add(digest)
-            self._verify_manifest_object(manifest)
+            # A missing/corrupt referenced object remains referenced. Its
+            # state is reported by audit, but it cannot erase an otherwise
+            # authenticated manifest reference from the deletion inventory.
         except (
             _store.ArtifactIntegrityError,
             FileNotFoundError,
@@ -402,8 +414,9 @@ def _trusted_recovery_plan(self) -> tuple[set[str], set[str], list[str]]:
             ValueError,
         ):
             corrupt.append(name)
-    object_digests, object_corrupt = _list_retained_objects(self)
-    corrupt.extend(object_corrupt)
+    object_digests, _object_corrupt = _list_retained_objects(self)
+    # Noncanonical object names cannot be deletion candidates or valid
+    # references; audit reports them, but they need not block a proven orphan.
     return referenced, object_digests, corrupt
 
 

@@ -51,6 +51,11 @@ from ._retained_publication import install_retained_publication_authority
 install_retained_publication_authority()
 del install_retained_publication_authority
 
+from ._retained_publication_hardening import install_retained_publication_hardening
+
+install_retained_publication_hardening()
+del install_retained_publication_hardening
+
 from ._windows_retained_publication import install_windows_retained_publication
 
 install_windows_retained_publication()

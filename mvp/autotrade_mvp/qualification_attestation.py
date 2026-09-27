@@ -36,12 +36,12 @@ _CANONICAL_QUALIFICATION_TRUST_POLICY_GIT_PATH = (
 
 _QUALIFICATION_TRUST_SOURCE_ROOT = Path(__file__).resolve().parents[2]
 
-# Release builds do not ship a Git checkout.  Once the independently reviewed
-# production trust policy is introduced, its canonical SHA-256 is committed here
-# with the runtime source.  A signed/exact-composition release therefore
-# authenticates this pin as part of the executable/source payload, while the
-# mutable packaged JSON remains data only.  None means terminal packaged trust is
-# intentionally unavailable; callers cannot provide or override this value.
+# Release builds do not ship a Git checkout.  A future independently reviewed
+# production trust policy may pin its canonical SHA-256 here so release composition
+# can inventory the exact policy bytes.  This digest is necessary but deliberately
+# insufficient for installed verification: a separate signed/delivered release
+# authority must independently authenticate the installed source SHA.  None means
+# packaged terminal trust is unavailable; callers cannot provide or override it.
 _CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256: str | None = None
 _MAX_QUALIFICATION_TRUST_POLICY_BYTES = 1_048_576
 
@@ -836,20 +836,31 @@ def _canonical_qualification_trust_policy_bytes(
     return bytes(completed.stdout)
 
 
+def _independently_authenticated_packaged_source_sha() -> str:
+    """Return installed source SHA from a separately authenticated release authority.
+
+    No such authority is wired yet.  Keeping this boundary fail-closed prevents a
+    policy digest pin or caller-provided expected_source_sha from becoming a
+    substitute for signed/delivered package identity.
+    """
+
+    raise QualificationTrustUnavailable(
+        "independently authenticated packaged source identity is unavailable"
+    )
+
+
 def _canonical_packaged_qualification_trust_policy_bytes(
     *, expected_source_sha: str
 ) -> bytes:
-    """Read a release policy only when signed runtime source pins its digest.
+    """Read packaged policy only after independent installed-source authentication.
 
     This is deliberately a non-Git release path, not a working-tree fallback.
-    The policy digest pin is source code shipped inside the exact/signed release
-    composition; evidence callers cannot supply a path, digest, policy, or pin.
-    Exact candidate source identity remains bound by the signed qualification
-    attestation and by the release composition's source_sha; it is deliberately
-    not self-pinned inside the same Git commit.
+    The source-controlled policy digest can bind policy bytes into composition,
+    but it cannot authenticate the installed source identity.  That identity must
+    come from a separate signed/delivered release authority and equal the caller's
+    expected_source_sha before packaged policy bytes are trusted.
     A source checkout remains on the Git-object authority path even when Git is
-    temporarily unavailable, preventing an untracked working-tree policy from
-    acquiring trust by matching a release pin.
+    temporarily unavailable.
     """
 
     source_sha = _git_sha(expected_source_sha, name="expected_source_sha")
@@ -857,6 +868,15 @@ def _canonical_packaged_qualification_trust_policy_bytes(
     if _has_git_metadata_ancestor(source_root):
         raise QualificationTrustUnavailable(
             "packaged qualification trust policy is forbidden in a source checkout"
+        )
+
+    authenticated_source_sha = _git_sha(
+        _independently_authenticated_packaged_source_sha(),
+        name="authenticated packaged source_sha",
+    )
+    if authenticated_source_sha != source_sha:
+        raise QualificationTrustError(
+            "packaged source identity does not match expected_source_sha"
         )
 
     expected_digest = _CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256
@@ -895,13 +915,14 @@ def _canonical_packaged_qualification_trust_policy_bytes(
 def load_canonical_qualification_trust_policy(
     *, expected_source_sha: str
 ) -> QualificationTrustPolicy:
-    """Load canonical policy from exact Git source or a signed-release digest pin.
+    """Load canonical policy from exact Git source or authenticated release state.
 
     Checkout/dev verification uses the exact Git object and never mutable
-    working-tree policy bytes.  A delivered non-Git release may instead use the
-    fixed packaged policy only when the runtime source itself pins its exact
-    digest.  This preserves fail-closed terminal verification without requiring
-    Git for Windows on the installed machine.
+    working-tree policy bytes.  A delivered non-Git release may use the fixed
+    packaged policy only after an independent signed/delivered source identity
+    matches expected_source_sha and the policy bytes match the source-controlled
+    digest.  Until that release identity authority is wired, the packaged path is
+    intentionally unavailable.
     """
 
     try:

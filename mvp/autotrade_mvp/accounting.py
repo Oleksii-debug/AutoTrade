@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 from typing import Iterable
 
 from .persistence import payload_digest
@@ -63,6 +63,24 @@ def _canonical_decimal(value: Decimal) -> str:
     if "." in fixed:
         fixed = fixed.rstrip("0").rstrip(".")
     return fixed
+
+
+def _exact_sum(values: Iterable[Decimal]) -> Decimal:
+    """Sum journal quantities without ambient-context rounding or cancellation loss."""
+    amounts = tuple(values)
+    if not amounts:
+        return Decimal("0")
+    integer_digits = max(1, *(value.adjusted() + 1 for value in amounts if value))
+    fractional_digits = max(0, *(-value.as_tuple().exponent for value in amounts))
+    with localcontext() as context:
+        context.prec = max(28, integer_digits + fractional_digits + len(str(len(amounts))) + 1)
+        return sum(amounts, Decimal("0"))
+
+
+def _exact_product(left: Decimal, right: Decimal) -> Decimal:
+    with localcontext() as context:
+        context.prec = max(28, len(left.as_tuple().digits) + len(right.as_tuple().digits))
+        return left * right
 
 
 @dataclass(frozen=True)
@@ -199,13 +217,17 @@ def validate_transaction(transaction: JournalTransaction) -> None:
             )
     if len(transaction.postings) < 2:
         raise ValueError("A journal transaction requires at least two postings")
-    totals: dict[str, Decimal] = {}
+    totals: dict[str, list[Decimal]] = {}
     for item in transaction.postings:
         _name(item.ledger_account, field="ledger_account")
         asset = _name(item.asset_or_currency, field="asset_or_currency")
         amount = _decimal(item.signed_amount, name="signed_amount")
-        totals[asset] = totals.get(asset, Decimal("0")) + amount
-    unbalanced = {asset: amount for asset, amount in totals.items() if amount != 0}
+        totals.setdefault(asset, []).append(amount)
+    unbalanced = {
+        asset: total
+        for asset, amounts in totals.items()
+        if (total := _exact_sum(amounts)) != 0
+    }
     if unbalanced:
         raise ValueError(f"Transaction is not balanced by asset/currency: {unbalanced}")
 
@@ -253,7 +275,7 @@ class EconomicBook:
             if original_id in self._reversed_transaction_ids:
                 raise AccountingConflict("Transaction has already been reversed")
             expected = tuple(
-                Posting(item.ledger_account, item.asset_or_currency, -item.signed_amount)
+                Posting(item.ledger_account, item.asset_or_currency, item.signed_amount.copy_negate())
                 for item in original.postings
             )
             if normalized.postings != expected:
@@ -337,14 +359,13 @@ class EconomicBook:
     def balance(self, ledger_account: str, asset_or_currency: str) -> Decimal:
         account = _name(ledger_account, field="ledger_account")
         asset = _name(asset_or_currency, field="asset_or_currency")
-        return sum(
+        return _exact_sum(
             (
                 item.signed_amount
                 for transaction in self._transactions
                 for item in transaction.postings
                 if item.ledger_account == account and item.asset_or_currency == asset
             ),
-            Decimal("0"),
         )
 
     def cash(self, currency: str) -> Decimal:
@@ -445,7 +466,7 @@ def book_external_cash_flow(
         cause_event_id=_name(cause_event_id, field="cause_event_id"),
         postings=(
             posting(f"CASH:{unit}", unit, value),
-            posting(f"EXTERNAL_EQUITY:{unit}", unit, -value),
+            posting(f"EXTERNAL_EQUITY:{unit}", unit, value.copy_negate()),
         ),
     )
     validate_transaction(transaction)
@@ -478,20 +499,21 @@ def book_equity_fill(
     fee_amount = _decimal(fee, name="fee")
     if qty <= 0 or unit_price <= 0:
         raise ValueError("quantity and price must be positive")
-    signed_quantity = qty if normalized_side == "BUY" else -qty
-    trade_cash = -(qty * unit_price) if normalized_side == "BUY" else qty * unit_price
+    signed_quantity = qty if normalized_side == "BUY" else qty.copy_negate()
+    trade_value = _exact_product(qty, unit_price)
+    trade_cash = trade_value.copy_negate() if normalized_side == "BUY" else trade_value
 
     items = [
         posting(f"POSITION:{symbol}", symbol, signed_quantity),
-        posting(f"CLEARING:{symbol}", symbol, -signed_quantity),
+        posting(f"CLEARING:{symbol}", symbol, signed_quantity.copy_negate()),
         posting(f"CASH:{settlement}", settlement, trade_cash),
-        posting(f"CLEARING:{settlement}", settlement, -trade_cash),
+        posting(f"CLEARING:{settlement}", settlement, trade_cash.copy_negate()),
     ]
     if fee_amount != 0:
         fee_unit = _name(fee_currency or settlement, field="fee_currency")
         items.extend(
             (
-                posting(f"CASH:{fee_unit}", fee_unit, -fee_amount),
+                posting(f"CASH:{fee_unit}", fee_unit, fee_amount.copy_negate()),
                 posting(f"FEE_EXPENSE:{fee_unit}", fee_unit, fee_amount),
             )
         )
@@ -529,10 +551,10 @@ def book_fx_exchange(
         transaction_id=_name(transaction_id, field="transaction_id"),
         cause_event_id=_name(cause_event_id, field="cause_event_id"),
         postings=(
-            posting(f"CASH:{sold}", sold, -sold_value),
+            posting(f"CASH:{sold}", sold, sold_value.copy_negate()),
             posting(f"FX_CLEARING:{sold}", sold, sold_value),
             posting(f"CASH:{bought}", bought, bought_value),
-            posting(f"FX_CLEARING:{bought}", bought, -bought_value),
+            posting(f"FX_CLEARING:{bought}", bought, bought_value.copy_negate()),
         ),
     )
     validate_transaction(transaction)
@@ -551,7 +573,7 @@ def reverse_transaction(
         transaction_id=_name(transaction_id, field="transaction_id"),
         cause_event_id=_name(cause_event_id, field="cause_event_id"),
         postings=tuple(
-            Posting(item.ledger_account, item.asset_or_currency, -item.signed_amount)
+            Posting(item.ledger_account, item.asset_or_currency, item.signed_amount.copy_negate())
             for item in original.postings
         ),
         reverses_transaction_id=original.transaction_id,
@@ -632,14 +654,14 @@ def _canonical_equity_fill_terms(
     ]
     if (
         len(instrument_clearing) != 1
-        or instrument_clearing[0].signed_amount != -quantity
+        or instrument_clearing[0].signed_amount != quantity.copy_negate()
         or len(settlement_clearing) != 1
     ):
         raise AccountingConflict(
             "Position projection requires canonical equity-fill clearing postings"
         )
 
-    trade_cash = -settlement_clearing[0].signed_amount
+    trade_cash = settlement_clearing[0].signed_amount.copy_negate()
     if trade_cash == 0 or (trade_cash > 0) == (quantity > 0):
         raise AccountingConflict(
             "Position projection requires cash direction opposite to quantity"

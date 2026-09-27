@@ -565,7 +565,7 @@ class ProviderFillBindingEnvironmentTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 AccountingConflict,
-                "provider_environment does not match settlement book",
+                "provider fill financial binding scope does not match atomic fill",
             ):
                 commit_economic_batch_with_reservation_consumption(
                     economics,

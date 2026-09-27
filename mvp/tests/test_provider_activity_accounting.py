@@ -82,6 +82,36 @@ def load_paper_book(store, **kwargs):
 
 
 class ProviderActivityAccountingTests(unittest.TestCase):
+    def test_high_precision_provider_cash_amount_survives_journal_and_restart(self):
+        amount = "10.000000000000000000000000000001"
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            evidence = activity(
+                provider_id="ALPACA",
+                account_id="acct",
+                activity_id="exact-cash",
+                signed_amount=amount,
+            )
+            _transaction, inserted = book_paper_activity(
+                store,
+                provider_id="ALPACA",
+                account_id="acct",
+                activity=evidence,
+                observed_at="2026-09-24T18:01:00Z",
+            )
+            self.assertTrue(inserted)
+            economic_events = store.load_events_by_aggregate_type("economic_book")
+            self.assertEqual(len(economic_events), 1)
+            self.assertEqual(
+                economic_events[0]["payload"]["transaction"]["postings"][0]["signed_amount"],
+                amount,
+            )
+            reopened = load_paper_book(
+                JournalStore(path), provider_id="ALPACA", account_id="acct",
+            )
+            self.assertEqual(reopened.cash("USD"), Decimal(amount))
+
     def test_environment_is_part_of_durable_provider_activity_identity(self):
         paper = paper_activity_identity(
             provider_id="ALPACA",

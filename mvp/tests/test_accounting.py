@@ -19,6 +19,41 @@ from mvp.autotrade_mvp.economics import cash_round_trip
 
 
 class AccountingFoundationTests(unittest.TestCase):
+    def test_cash_projection_preserves_small_amount_after_large_cancellation(self):
+        book = EconomicBook()
+        amounts = (
+            "1000000000000000000000000000000",
+            "0.000000000000000000000000000001",
+            "-1000000000000000000000000000000",
+        )
+        for index, amount in enumerate(amounts):
+            book.append(book_external_cash_flow(
+                transaction_id=f"exact-{index}",
+                cause_event_id=f"cash-{index}",
+                currency="USD",
+                amount=amount,
+            ))
+        self.assertEqual(book.cash("USD"), Decimal(amounts[1]))
+
+    def test_equity_fill_preserves_exact_high_precision_product_and_reversal(self):
+        fill = book_equity_fill(
+            transaction_id="exact-fill",
+            cause_event_id="exact-fill-evidence",
+            instrument="ABC",
+            settlement_currency="USD",
+            side="BUY",
+            quantity="1.000000000000000000000000000001",
+            price="2.000000000000000000000000000002",
+        )
+        expected_cash = Decimal("-2.000000000000000000000000000004000000000000000000000000000002")
+        self.assertEqual(fill.postings[2].signed_amount, expected_cash)
+        book = EconomicBook((fill,))
+        self.assertEqual(book.cash("USD"), expected_cash)
+        book.append(reverse_transaction(
+            fill, transaction_id="reverse-exact", cause_event_id="reversal-evidence",
+        ))
+        self.assertEqual(book.cash("USD"), Decimal("0"))
+
     def test_cash_equity_round_trip_matches_independent_oracle(self):
         book = EconomicBook()
         book.append(book_external_cash_flow(

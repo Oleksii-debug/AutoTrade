@@ -76,8 +76,12 @@ def _decimal(value: Decimal | str | int, *, name: str) -> Decimal:
 
 
 def _decimal_text(value: Decimal) -> str:
-    normalized = value.normalize()
-    return format(normalized, "f")
+    if value == 0:
+        return "0"
+    # normalize() rounds through the ambient Decimal context. Durable batch
+    # identities must retain every significant digit of provider evidence.
+    exact = format(value, "f")
+    return exact.rstrip("0").rstrip(".") if "." in exact else exact
 
 
 def _instant(value: str, *, name: str) -> datetime:

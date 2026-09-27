@@ -832,14 +832,16 @@ class AlpacaAdapterTests(unittest.TestCase):
             client_ids_by_order_id={order_id: "at-plan-1"},
             fees_by_activity_id={row["id"]: ("0", "USD")},
         )[0]
-        normalized_fill, = normalize_authenticated_trade_activities(
-            observation,
-            instrument_versions={"AAPL": "AAPL:v1"},
-            client_ids_by_order_id={order_id: "at-plan-1"},
-            fees_by_activity_id={row["id"]: ("0", "USD")},
-        )
-        self.assertEqual(normalized_fill.provider_fill, provider_fill)
-        self.assertEqual(normalized_fill.observation.response_bytes, observation.response_bytes)
+        with self.assertRaisesRegex(
+            AlpacaAdapterError,
+            "independently bound fee evidence",
+        ):
+            normalize_authenticated_trade_activities(
+                observation,
+                instrument_versions={"AAPL": "AAPL:v1"},
+                client_ids_by_order_id={order_id: "at-plan-1"},
+                fees_by_activity_id={row["id"]: ("0", "USD")},
+            )
         self.assertIsNone(provider_fill.position_side)
         projected = ProjectedFillEvidence.create(
             fill_id="alpaca-fill-plan-1",

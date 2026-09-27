@@ -97,3 +97,15 @@ PR gates: formatting/types; schemas and generated-binding drift; unit/property t
 Build Windows installer and portable diagnostics package from a clean pinned source; sign release artifacts; include SBOM, notices, hashes and compatibility manifest. Installer covers runtime/WebView2 prerequisites, per-user startup, upgrade, uninstall and data preservation choices. Web/host artifacts share contract compatibility checks. Dependency versions and model/data rights are reviewed on the exact release, not just on this architecture date.
 
 Update flow: download/verify → quiesce new admissions → track/reconcile in-flight sends → backup → migrate → restart/reconcile → verify host/UI compatibility → restore allowed authority. Failed migration returns to a compatible binary+database backup; do not run an older binary on a newer incompatible schema. Existing provider protection remains visible throughout. A release is done only after installation, keyboard/NVDA workflows, recovery and evidence export work on the delivered artifacts.
+
+## Binding Windows accessibility architecture
+
+This is a product architecture law, not a late cosmetic preference.
+
+For the primary standalone Windows user interface, the binding end-state is **WebView2 + semantic HTML + a correctly exposed Windows UI Automation host**, with keyboard-only and NVDA operation verified on the exact packaged build. Use native semantic HTML controls first; every meaningful control must expose a stable accessible name, role, state and focus through the UI Automation tree. Important text and evidence must be real selectable/copyable text, not a visually rendered or screen-reader-only surrogate. Essential meaning must never exist only in canvas, charts, color, pointer position or other visual-only rendering.
+
+This law does **not** require rewriting the trading, financial, data, risk, learning, persistence or host core. Those remain platform-neutral/canonical services behind the presentation boundary. Existing presentation work may continue while the shell evolves incrementally. Layout, styling and final visual polish are not blockers for current core/product work, provided new domain logic is not coupled irreversibly to an inaccessible UI toolkit.
+
+A native Windows emergency/status surface may remain where this document requires it, but it is a fallback/safety surface, not a second source of product truth.
+
+NVDA_VERIFIED may become true only after physical keyboard-only NVDA acceptance on the exact packaged Windows candidate; automated DOM/UIA checks are necessary evidence but not a substitute.

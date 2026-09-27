@@ -610,6 +610,22 @@ class SimulatedProviderTests(unittest.TestCase):
             1,
         )
 
+    def test_query_order_never_claims_future_coverage_complete(self):
+        provider = SimulatedProvider()
+        result = provider.query_order(
+            client_order_id="missing-future",
+            coverage_start="2026-09-24T17:00:00Z",
+            coverage_end="2026-09-24T19:00:00Z",
+            pagination_complete=True,
+            now="2026-09-24T18:00:00Z",
+        )
+        self.assertEqual(result["verdict"], "INCONCLUSIVE")
+        self.assertEqual(
+            result["reason_codes"],
+            ["coverage_end_after_query_time"],
+        )
+        self.assertEqual(result["consistency_horizon"], "2026-09-24T18:00:00Z")
+
     def test_query_order_never_claims_absence_with_incomplete_pagination(self):
         provider = SimulatedProvider()
         result = provider.query_order(

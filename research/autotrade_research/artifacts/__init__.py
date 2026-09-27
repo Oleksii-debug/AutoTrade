@@ -16,6 +16,11 @@ from ._namespace_guard import install_artifact_store_namespace_guards
 install_artifact_store_namespace_guards()
 del install_artifact_store_namespace_guards
 
+from ._manifest_descriptor_io import install_manifest_descriptor_reader
+
+install_manifest_descriptor_reader()
+del install_manifest_descriptor_reader
+
 from ._windows_descriptor_bridge import install_windows_object_descriptor_bridge
 
 install_windows_object_descriptor_bridge()

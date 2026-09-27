@@ -11,6 +11,10 @@ from .store import (
     ArtifactIntegrityError,
     ArtifactStore,
 )
+from ._namespace_guard import install_artifact_store_namespace_guards
+
+install_artifact_store_namespace_guards()
+del install_artifact_store_namespace_guards
 
 CANONICAL_ARTIFACT_STORE_MODULE = "autotrade_research.artifacts.store"
 

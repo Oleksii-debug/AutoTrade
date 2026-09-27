@@ -46,6 +46,11 @@ from ._retained_namespace_hardening import install_retained_namespace_hardening
 install_retained_namespace_hardening()
 del install_retained_namespace_hardening
 
+from ._stable_posix_capabilities import install_stable_posix_capabilities
+
+install_stable_posix_capabilities()
+del install_stable_posix_capabilities
+
 from ._retained_recovery_hardening import install_retained_recovery_hardening
 
 install_retained_recovery_hardening()

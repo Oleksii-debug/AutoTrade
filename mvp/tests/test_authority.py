@@ -2095,12 +2095,12 @@ class AuthorityTests(unittest.TestCase):
                 "risk_decision", rejected.risk_decision_id
             )[0]
             missing_rule = next(
-                rule
-                for rule in rejected_event["payload"]["rules"]
-                if rule["rule"] == "derivative_equivalent_exposure"
+                check
+                for check in rejected_event["payload"]["checks"]
+                if check["rule_id"] == "derivative_equivalent_exposure"
             )
             self.assertFalse(missing_rule["passed"])
-            self.assertEqual(missing_rule["observed"], "MISSING:ABC")
+            self.assertEqual(missing_rule["measured"], "MISSING:ABC")
 
     def test_same_symbol_missing_family_stays_rejected_after_store_reopen(self):
         with TemporaryDirectory() as directory:

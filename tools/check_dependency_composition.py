@@ -8,8 +8,10 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, asdict
 import json
-from pathlib import Path
+from hashlib import sha256
+from pathlib import Path, PurePosixPath
 import re
+import tomllib
 import xml.etree.ElementTree as ET
 
 
@@ -43,50 +45,143 @@ def is_exact_python_requirement(value: str) -> bool:
     ) is not None
 
 
-def _meaningful_requirements(path: Path) -> list[str]:
-    result: list[str] = []
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
+def _hashed_requirements(path: Path) -> list[tuple[str, tuple[str, ...]]]:
+    """Parse canonical pip requirement entries with SHA-256 artifact hashes."""
+
+    entries: list[tuple[str, tuple[str, ...]]] = []
+    logical = ""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as error:
+        raise ValueError("requirements file is unreadable") from error
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
             continue
-        result.append(line)
-    return result
+        continued = stripped.endswith("\\")
+        fragment = stripped[:-1].rstrip() if continued else stripped
+        logical = f"{logical} {fragment}".strip()
+        if continued:
+            continue
+
+        tokens = logical.split()
+        requirement = tokens[0]
+        hashes: list[str] = []
+        for token in tokens[1:]:
+            match = re.fullmatch(r"--hash=sha256:([0-9a-f]{64})", token)
+            if match is None:
+                raise ValueError(f"invalid requirement option: {token}")
+            hashes.append(match.group(1))
+        entries.append((requirement, tuple(hashes)))
+        logical = ""
+    if logical:
+        raise ValueError("unterminated requirement continuation")
+    return entries
 
 
 def _python_blockers(root: Path) -> tuple[list[str], list[str]]:
     blockers: list[str] = []
+    try:
+        entries = _hashed_requirements(root / "requirements-dev.txt")
+    except ValueError:
+        return ["UNREADABLE_PYTHON_HASH_LOCK"], []
+
     exact: list[str] = []
-    for requirement in _meaningful_requirements(root / "requirements-dev.txt"):
+    dev_requirements: list[str] = []
+    seen_requirements: set[str] = set()
+    for requirement, hashes in entries:
+        dev_requirements.append(requirement)
+        if requirement in seen_requirements:
+            blockers.append(f"DUPLICATE_PYTHON_REQUIREMENT:{requirement}")
+        seen_requirements.add(requirement)
         if is_exact_python_requirement(requirement):
             exact.append(requirement)
         else:
             blockers.append(f"NON_EXACT_PYTHON_REQUIREMENT:{requirement}")
+        if not hashes:
+            blockers.append(f"MISSING_PYTHON_REQUIREMENT_HASH:{requirement}")
+        elif len(hashes) != len(set(hashes)):
+            blockers.append(f"DUPLICATE_PYTHON_REQUIREMENT_HASH:{requirement}")
 
     pyproject = root / "research" / "pyproject.toml"
-    text = pyproject.read_text(encoding="utf-8")
-    in_build_requires = False
-    build_requires_found = False
-    for raw in text.splitlines():
-        stripped = raw.strip()
-        if stripped.startswith("["):
-            in_build_requires = stripped == "[build-system]"
-            continue
-        if in_build_requires and stripped.startswith("requires"):
-            build_requires_found = True
-            value = stripped.split("=", 1)[1].strip()
-            try:
-                items = json.loads(value)
-            except json.JSONDecodeError:
-                blockers.append("UNREADABLE_RESEARCH_BUILD_REQUIREMENTS")
-                break
-            for requirement in items:
-                if not is_exact_python_requirement(requirement):
-                    blockers.append(f"NON_EXACT_RESEARCH_BUILD_REQUIREMENT:{requirement}")
-            break
-    if not build_requires_found:
-        blockers.append("MISSING_RESEARCH_BUILD_REQUIREMENTS")
-    return blockers, exact
+    try:
+        document = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        blockers.append("UNREADABLE_RESEARCH_PYPROJECT")
+        return blockers, exact
 
+    build_system = document.get("build-system")
+    build_requires: list[str] = []
+    if not isinstance(build_system, dict):
+        blockers.append("MALFORMED_RESEARCH_BUILD_SYSTEM")
+        build_requires_raw = None
+    else:
+        build_requires_raw = build_system.get("requires")
+    if not isinstance(build_requires_raw, list) or not build_requires_raw:
+        blockers.append("MISSING_RESEARCH_BUILD_REQUIREMENTS")
+    else:
+        for requirement in build_requires_raw:
+            if not isinstance(requirement, str):
+                blockers.append("MALFORMED_RESEARCH_BUILD_REQUIREMENT")
+                continue
+            build_requires.append(requirement)
+            if not is_exact_python_requirement(requirement):
+                blockers.append(
+                    f"NON_EXACT_RESEARCH_BUILD_REQUIREMENT:{requirement}"
+                )
+        if not set(build_requires).issubset(set(dev_requirements)):
+            blockers.append("RESEARCH_BUILD_REQUIREMENTS_DRIFT")
+
+    project = document.get("project")
+    if not isinstance(project, dict):
+        blockers.append("MALFORMED_RESEARCH_PROJECT")
+        optional_dependencies = None
+    else:
+        optional_dependencies = project.get("optional-dependencies")
+    if not isinstance(optional_dependencies, dict):
+        blockers.append("MALFORMED_RESEARCH_OPTIONAL_DEPENDENCIES")
+        test_requires_raw = None
+    else:
+        test_requires_raw = optional_dependencies.get("test")
+    if not isinstance(test_requires_raw, list) or not test_requires_raw:
+        blockers.append("MISSING_RESEARCH_TEST_REQUIREMENTS")
+    else:
+        test_requires: list[str] = []
+        for requirement in test_requires_raw:
+            if not isinstance(requirement, str):
+                blockers.append("MALFORMED_RESEARCH_TEST_REQUIREMENT")
+                continue
+            test_requires.append(requirement)
+            if not is_exact_python_requirement(requirement):
+                blockers.append(
+                    f"NON_EXACT_RESEARCH_TEST_REQUIREMENT:{requirement}"
+                )
+        expected_tests = set(dev_requirements) - set(build_requires)
+        if set(test_requires) != expected_tests:
+            blockers.append("RESEARCH_TEST_REQUIREMENTS_DRIFT")
+
+    workflow = root / ".github" / "workflows" / "research-primitives.yml"
+    try:
+        workflow_text = workflow.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        blockers.append("UNREADABLE_RESEARCH_INSTALL_WORKFLOW")
+    else:
+        if '- "requirements-dev.txt"' not in workflow_text:
+            blockers.append("RESEARCH_HASH_LOCK_WORKFLOW_PATH_MISSING")
+        expected_hash_install = (
+            'run: "python -m pip install --disable-pip-version-check '
+            "--force-reinstall --no-deps --only-binary=:all: --require-hashes "
+            '-r requirements-dev.txt"'
+        )
+        if expected_hash_install not in workflow_text:
+            blockers.append("RESEARCH_HASHED_INSTALL_COMMAND_MISSING")
+        expected_editable_install = (
+            "run: python -m pip install --no-deps --no-build-isolation -e research"
+        )
+        if expected_editable_install not in workflow_text:
+            blockers.append("RESEARCH_EDITABLE_NO_BUILD_ISOLATION_MISSING")
+
+    return blockers, exact
 
 def _dotnet_dependency_lock_blockers(
     root: Path,
@@ -206,22 +301,228 @@ def _ci_runtime_blockers(root: Path) -> list[str]:
     return blockers
 
 
-def _rights_blockers(root: Path) -> list[str]:
+def _strict_json_document(text: str):
+    """Parse JSON while rejecting duplicate object keys at every nesting level."""
+
+    def reject_duplicate_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON object key: {key}")
+            result[key] = value
+        return result
+
+    return json.loads(text, object_pairs_hook=reject_duplicate_keys)
+
+
+def _repository_evidence_digest(
+    root: Path,
+    *,
+    component_name: str,
+    component: dict,
+    digest_field: str,
+    path_field: str,
+) -> tuple[str | None, list[str]]:
+    """Resolve one APPROVED evidence digest to exact in-repository bytes."""
+
     blockers: list[str] = []
-    document = json.loads((root / "provenance" / "components.json").read_text(encoding="utf-8"))
-    for component in document.get("components", []):
-        name = component.get("name", "<unnamed>")
-        license_value = str(component.get("license", ""))
-        import_disposition = str(component.get("source_import_allowed", ""))
-        if "UNRESOLVED" in license_value:
-            blockers.append(f"UNRESOLVED_COMPONENT_RIGHTS:{name}")
+    raw_path = component.get(path_field)
+    if (
+        not isinstance(raw_path, str)
+        or not raw_path
+        or raw_path != raw_path.strip()
+        or "\\" in raw_path
+    ):
+        return None, [
+            f"APPROVED_COMPONENT_EVIDENCE_PATH_INVALID:{component_name}:{path_field}"
+        ]
+
+    relative = PurePosixPath(raw_path)
+    if (
+        relative.is_absolute()
+        or not relative.parts
+        or relative.parts[0] != "provenance"
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        return None, [
+            f"APPROVED_COMPONENT_EVIDENCE_PATH_INVALID:{component_name}:{path_field}"
+        ]
+
+    candidate = root.joinpath(*relative.parts)
+    # Release evidence must be repository bytes, not a symlink escape whose target
+    # can change independently of the exact source revision.
+    current = root
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            return None, [
+                f"APPROVED_COMPONENT_EVIDENCE_PATH_INVALID:{component_name}:{path_field}"
+            ]
+    try:
+        provenance_root = (root / "provenance").resolve(strict=True)
+        resolved = candidate.resolve(strict=True)
+    except OSError:
+        return None, [
+            f"APPROVED_COMPONENT_EVIDENCE_MISSING:{component_name}:{path_field}"
+        ]
+    if not resolved.is_file() or not resolved.is_relative_to(provenance_root):
+        return None, [
+            f"APPROVED_COMPONENT_EVIDENCE_PATH_INVALID:{component_name}:{path_field}"
+        ]
+
+    try:
+        payload = resolved.read_bytes()
+    except OSError:
+        return None, [
+            f"APPROVED_COMPONENT_EVIDENCE_MISSING:{component_name}:{path_field}"
+        ]
+    if not payload:
+        blockers.append(
+            f"APPROVED_COMPONENT_EVIDENCE_EMPTY:{component_name}:{path_field}"
+        )
+        return None, blockers
+
+    actual = "sha256:" + sha256(payload).hexdigest()
+    expected = component.get(digest_field)
+    if expected != actual:
+        blockers.append(
+            f"APPROVED_COMPONENT_EVIDENCE_DIGEST_MISMATCH:{component_name}:{digest_field}"
+        )
+    return actual, blockers
+
+
+def _rights_blockers(root: Path) -> list[str]:
+    """Fail closed on machine release state, not only descriptive free text.
+
+    Human-readable source_import_allowed values remain useful diagnostics, but
+    release qualification must be impossible to obtain by changing those words
+    while the canonical machine state is still BLOCKED or malformed.
+    """
+
+    blockers: list[str] = []
+    try:
+        document = _strict_json_document(
+            (root / "provenance" / "components.json").read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+        return ["COMPONENT_INVENTORY_INVALID_JSON"]
+    if not isinstance(document, dict):
+        return ["COMPONENT_INVENTORY_INVALID_ROOT"]
+    components = document.get("components")
+    if not isinstance(components, list) or not components:
+        return ["COMPONENT_INVENTORY_MISSING_OR_EMPTY"]
+
+    seen_names: set[str] = set()
+    seen_sources: set[tuple[str, str]] = set()
+    revision_pattern = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
+    digest_pattern = re.compile(r"^sha256:[0-9a-f]{64}$")
+    repository_pattern = re.compile(
+        r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    )
+
+    for index, component in enumerate(components):
+        if not isinstance(component, dict):
+            blockers.append(f"INVALID_COMPONENT_RECORD:{index}")
+            continue
+
+        raw_name = component.get("name")
+        name = raw_name if isinstance(raw_name, str) else f"<unnamed:{index}>"
         if (
-            "PENDING_" in import_disposition
-            or "STILL_REQUIRES_WP03_RECORD" in import_disposition
-            or "AFTER_EXACT_" in import_disposition
-            or "AFTER_STABLE_" in import_disposition
+            not isinstance(raw_name, str)
+            or not raw_name
+            or raw_name != raw_name.strip()
         ):
-            blockers.append(f"UNQUALIFIED_SOURCE_COMPOSITION:{name}")
+            blockers.append(f"INVALID_COMPONENT_NAME:{index}")
+        elif raw_name in seen_names:
+            blockers.append(f"DUPLICATE_COMPONENT_NAME:{raw_name}")
+        else:
+            seen_names.add(raw_name)
+
+        repository = component.get("repository")
+        revision = component.get("revision")
+        if (
+            not isinstance(repository, str)
+            or repository != repository.strip()
+            or repository_pattern.fullmatch(repository) is None
+            or not isinstance(revision, str)
+            or revision_pattern.fullmatch(revision) is None
+        ):
+            blockers.append(f"INVALID_COMPONENT_SOURCE_IDENTITY:{name}")
+        else:
+            source_identity = (repository, revision)
+            if source_identity in seen_sources:
+                blockers.append(f"DUPLICATE_COMPONENT_SOURCE:{name}")
+            else:
+                seen_sources.add(source_identity)
+
+        license_value = component.get("license")
+        if not isinstance(license_value, str) or not license_value.strip():
+            blockers.append(f"MISSING_COMPONENT_RIGHTS:{name}")
+            license_text = ""
+        else:
+            license_text = license_value
+            if "UNRESOLVED" in license_text:
+                blockers.append(f"UNRESOLVED_COMPONENT_RIGHTS:{name}")
+
+        import_disposition = component.get("source_import_allowed")
+        if not isinstance(import_disposition, str) or not import_disposition.strip():
+            blockers.append(f"MISSING_SOURCE_IMPORT_DISPOSITION:{name}")
+            import_text = ""
+        else:
+            import_text = import_disposition
+            if (
+                "PENDING_" in import_text
+                or "STILL_REQUIRES_WP03_RECORD" in import_text
+                or "AFTER_EXACT_" in import_text
+                or "AFTER_STABLE_" in import_text
+            ):
+                blockers.append(f"UNQUALIFIED_SOURCE_COMPOSITION:{name}")
+
+        release_state = component.get("release_distribution_state")
+        if release_state not in {"BLOCKED", "APPROVED"}:
+            blockers.append(f"INVALID_RELEASE_DISTRIBUTION_STATE:{name}")
+            continue
+        if release_state != "APPROVED":
+            blockers.append(
+                f"COMPONENT_RELEASE_DISTRIBUTION_NOT_APPROVED:{name}"
+            )
+            continue
+
+        # APPROVED is a privileged machine state. A digest-shaped string is
+        # not evidence. Each digest must resolve to exact, non-symlink repository
+        # bytes under provenance/ so the exact source revision authenticates the
+        # evidence location and this gate recomputes content identity itself.
+        if "UNRESOLVED" in license_text:
+            blockers.append(f"APPROVED_COMPONENT_RIGHTS_UNRESOLVED:{name}")
+        evidence_fields = (
+            ("dependency_graph_sha256", "dependency_graph_evidence_path"),
+            ("notice_sha256", "notice_evidence_path"),
+            ("advisory_review_sha256", "advisory_review_evidence_path"),
+        )
+        for digest_field, path_field in evidence_fields:
+            value = component.get(digest_field)
+            if not isinstance(value, str) or digest_pattern.fullmatch(value) is None:
+                blockers.append(
+                    f"APPROVED_COMPONENT_EVIDENCE_INVALID:{name}:{digest_field}"
+                )
+                continue
+            _, evidence_blockers = _repository_evidence_digest(
+                root,
+                component_name=name,
+                component=component,
+                digest_field=digest_field,
+                path_field=path_field,
+            )
+            blockers.extend(evidence_blockers)
+
+        # Repository-local bytes prove content identity, not independent release
+        # authorization. Until the canonical qualification trust root is itself
+        # authenticated and a WP-03 receipt is verified against it, APPROVED must
+        # remain fail-closed rather than letting one candidate commit author both
+        # the evidence and the authority to distribute it.
+        blockers.append(
+            f"APPROVED_COMPONENT_INDEPENDENT_AUTHORITY_REQUIRED:{name}"
+        )
     return blockers
 
 

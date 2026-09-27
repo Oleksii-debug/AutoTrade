@@ -7,7 +7,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
-from typing import Any
+from typing import Any, Callable
 from uuid import UUID
 
 from .durable_publish import atomic_write_json, sha256_file, sync_parent_directory
@@ -77,8 +77,17 @@ class ArtifactStore:
 
     SCHEMA_VERSION = 1
 
-    def __init__(self, root: str | Path):
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        export_authorizer: Callable[[str, str], bool] | None = None,
+    ):
         self.root = Path(root)
+        # Manifest hashes detect corruption but do not authenticate mutable policy.
+        # Export authority must come from a caller-controlled source outside this
+        # writable artifact-store namespace and bind the artifact identity+digest.
+        self._export_authorizer = export_authorizer
         self.objects = self.root / "objects" / "sha256"
         self.manifests = self.root / "manifests"
         self.staging = self.root / "staging"
@@ -100,12 +109,29 @@ class ArtifactStore:
             raise TypeError("rights must be a dict")
         if rights.get("storage") is not True:
             raise ValueError("artifact storage is not permitted by rights")
+        allowed_fields = {"storage", "export", "rights_id"}
+        if (
+            not {"storage", "export"}.issubset(rights)
+            or set(rights) - allowed_fields
+        ):
+            raise ValueError(
+                "rights must contain storage/export and only canonical optional fields"
+            )
         export = rights.get("export")
-        if export not in (True, False):
+        if type(export) is not bool:
             raise ValueError("rights.export must be explicitly true or false")
-        normalized = dict(rights)
-        normalized["storage"] = True
-        normalized["export"] = export
+        normalized: dict[str, Any] = {"storage": True, "export": export}
+        if "rights_id" in rights:
+            rights_id = rights["rights_id"]
+            if (
+                not isinstance(rights_id, str)
+                or not rights_id
+                or rights_id != rights_id.strip()
+            ):
+                raise ValueError(
+                    "rights.rights_id must be canonical non-empty text"
+                )
+            normalized["rights_id"] = rights_id
         return normalized
 
     def _object_path(self, digest: str) -> Path:
@@ -116,14 +142,143 @@ class ArtifactStore:
     def _manifest_path(self, artifact_id: str) -> Path:
         return self.manifests / f"{self._artifact_id(artifact_id)}.json"
 
+    @classmethod
+    def _validate_manifest_contract(
+        cls,
+        manifest: dict[str, Any],
+        *,
+        authenticated: bool,
+    ) -> None:
+        """Validate the closed v1 manifest contract without trusting its hash alone.
+
+        A SHA-256 stored beside mutable local bytes is an integrity binding, not a
+        schema validator. Authenticated manifests therefore admit only the exact
+        canonical top-level field set. Legacy hashless manifests may retain extra
+        untrusted fields only so publish_bytes can reconstruct and rebind the
+        canonical manifest from independently verified immutable inputs.
+        """
+
+        required_fields = {
+            "schema_version",
+            "artifact_id",
+            "sha256",
+            "bytes",
+            "media_type",
+            "rights",
+            "source_refs",
+            "metadata",
+            "created_at",
+        }
+        missing = required_fields - set(manifest)
+        if missing:
+            raise ArtifactIntegrityError(
+                "artifact manifest is missing required fields: "
+                + ", ".join(sorted(missing))
+            )
+        if authenticated:
+            allowed = required_fields | {"manifest_hash"}
+            unexpected = set(manifest) - allowed
+            if unexpected:
+                raise ArtifactIntegrityError(
+                    "artifact manifest has unexpected authenticated fields: "
+                    + ", ".join(sorted(unexpected))
+                )
+
+        if type(manifest.get("schema_version")) is not int:
+            raise ArtifactIntegrityError("artifact manifest schema_version is invalid")
+        if manifest["schema_version"] != cls.SCHEMA_VERSION:
+            raise ArtifactIntegrityError("artifact manifest schema_version is unsupported")
+
+        artifact_id = manifest.get("artifact_id")
+        if not isinstance(artifact_id, str):
+            raise ArtifactIntegrityError("artifact manifest artifact_id is invalid")
+        try:
+            canonical_artifact_id = cls._artifact_id(artifact_id)
+        except ValueError as error:
+            raise ArtifactIntegrityError(
+                "artifact manifest artifact_id is invalid"
+            ) from error
+        if canonical_artifact_id != artifact_id:
+            raise ArtifactIntegrityError(
+                "artifact manifest artifact_id is not canonical"
+            )
+
+        digest = manifest.get("sha256")
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 71
+            or not digest.startswith("sha256:")
+            or any(ch not in "0123456789abcdef" for ch in digest[7:])
+        ):
+            raise ArtifactIntegrityError("artifact manifest digest is invalid")
+
+        byte_count = manifest.get("bytes")
+        if type(byte_count) is not int or byte_count < 0:
+            raise ArtifactIntegrityError("artifact manifest byte count is invalid")
+
+        media_type = manifest.get("media_type")
+        if not isinstance(media_type, str) or not media_type.strip():
+            raise ArtifactIntegrityError("artifact manifest media_type is invalid")
+
+        rights = manifest.get("rights")
+        if type(rights) is not dict:
+            raise ArtifactIntegrityError("artifact manifest rights are invalid")
+        allowed_rights_fields = {"storage", "export", "rights_id"}
+        if (
+            not {"storage", "export"}.issubset(rights)
+            or set(rights) - allowed_rights_fields
+            or rights.get("storage") is not True
+            or type(rights.get("export")) is not bool
+        ):
+            raise ArtifactIntegrityError("artifact manifest rights contract is invalid")
+        if "rights_id" in rights:
+            rights_id = rights["rights_id"]
+            if (
+                not isinstance(rights_id, str)
+                or not rights_id
+                or rights_id != rights_id.strip()
+            ):
+                raise ArtifactIntegrityError(
+                    "artifact manifest rights identity is invalid"
+                )
+
+        source_refs = manifest.get("source_refs")
+        if type(source_refs) is not list or not all(
+            isinstance(item, str) and bool(item) for item in source_refs
+        ):
+            raise ArtifactIntegrityError("artifact manifest source_refs are invalid")
+
+        if type(manifest.get("metadata")) is not dict:
+            raise ArtifactIntegrityError("artifact manifest metadata is invalid")
+
+        created_at = manifest.get("created_at")
+        if not isinstance(created_at, str) or not created_at.strip():
+            raise ArtifactIntegrityError("artifact manifest created_at is invalid")
+        try:
+            parsed_created_at = datetime.fromisoformat(
+                created_at.replace("Z", "+00:00")
+            )
+        except ValueError as error:
+            raise ArtifactIntegrityError(
+                "artifact manifest created_at is invalid"
+            ) from error
+        if (
+            parsed_created_at.tzinfo is None
+            or parsed_created_at.utcoffset() is None
+        ):
+            raise ArtifactIntegrityError(
+                "artifact manifest created_at must include timezone"
+            )
+
     def _load_manifest_path(self, path: Path) -> dict[str, Any]:
         try:
             value = strict_json_loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, ValueError) as error:
             raise ArtifactIntegrityError(f"invalid artifact manifest: {path.name}") from error
-        if type(value) is not dict or value.get("schema_version") != self.SCHEMA_VERSION:
+        if type(value) is not dict:
             raise ArtifactIntegrityError(f"unsupported artifact manifest: {path.name}")
-        _verify_manifest_integrity(value, required=False)
+        authenticated = _verify_manifest_integrity(value, required=False)
+        self._validate_manifest_contract(value, authenticated=authenticated)
         return value
 
     def load_manifest(self, artifact_id: str) -> dict[str, Any]:
@@ -268,9 +423,26 @@ class ArtifactStore:
         if manifest.get("rights", {}).get("export") is not True:
             raise PermissionError("artifact rights do not permit export")
         source = self._verify_manifest_object(manifest)
+        if self._export_authorizer is None:
+            raise PermissionError("independent export authorization is required")
+        try:
+            authorized = self._export_authorizer(
+                manifest["artifact_id"],
+                manifest["sha256"],
+            )
+        except Exception as error:
+            raise PermissionError(
+                "independent export authorization failed closed"
+            ) from error
+        if authorized is not True:
+            raise PermissionError(
+                "independent export authority does not permit export"
+            )
         target = Path(destination)
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary: Path | None = None
+        expected_digest = manifest["sha256"].removeprefix("sha256:")
+        expected_bytes = manifest["bytes"]
         try:
             with tempfile.NamedTemporaryFile(
                 "wb",
@@ -280,9 +452,22 @@ class ArtifactStore:
                 delete=False,
             ) as handle:
                 temporary = Path(handle.name)
-                handle.write(source.read_bytes())
+                copied = 0
+                copied_hash = sha256()
+                with source.open("rb") as source_handle:
+                    while True:
+                        chunk = source_handle.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        handle.write(chunk)
+                        copied += len(chunk)
+                        copied_hash.update(chunk)
                 handle.flush()
                 os.fsync(handle.fileno())
+            if copied != expected_bytes or copied_hash.hexdigest() != expected_digest:
+                raise ArtifactIntegrityError(
+                    "artifact object changed during export copy"
+                )
             os.replace(temporary, target)
             temporary = None
             sync_parent_directory(target)

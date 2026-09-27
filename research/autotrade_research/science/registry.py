@@ -705,6 +705,10 @@ class ScientificRegistry:
                         protocol_id=protocol,
                         stopping_rules_hash=stopping_rules_hash,
                     )
+                except ProtocolViolation:
+                    # Keep the verified artifact's precise failure reason.
+                    # ProtocolViolation itself extends ValueError.
+                    raise
                 except ValueError as error:
                     raise ProtocolViolation(
                         "early locked evaluation requires immutable stopping evidence"

@@ -20,6 +20,10 @@ on:
       - "mvp/tests/test_zero_model_qualification.py"
       - ".github/workflows/zero-model-qualification.yml"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

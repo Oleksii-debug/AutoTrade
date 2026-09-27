@@ -27,7 +27,7 @@ from .accounting import (
 )
 from .durable_reservations import reservation_snapshot_digest
 from .persistence import JournalStore, payload_digest
-from .reconciliation import ProviderFillEvidence
+from .reconciliation import ProviderFillEvidence, provider_fill_identity_payload
 from .reconciliation_journal import require_current_reconciliation_checkpoint
 from .reservations import ReservationSnapshot
 
@@ -338,6 +338,60 @@ def _current_unexpected_execution_checkpoint(
         raise AccountingConflict(
             "provider execution is not proven unexpected by current reconciliation checkpoint"
         )
+
+    raw_bindings = payload.get("unexpected_provider_fill_bindings")
+    if not isinstance(raw_bindings, list):
+        raise AccountingConflict(
+            "reconciliation checkpoint does not bind exact unexpected provider fill evidence"
+        )
+    binding: dict[str, object] | None = None
+    seen_binding_ids: set[str] = set()
+    for raw_binding in raw_bindings:
+        if not isinstance(raw_binding, dict):
+            raise AccountingConflict(
+                "reconciliation checkpoint provider fill binding is invalid"
+            )
+        execution_id = raw_binding.get("provider_execution_id")
+        if not isinstance(execution_id, str) or not execution_id.strip():
+            raise AccountingConflict(
+                "reconciliation checkpoint provider fill binding identity is invalid"
+            )
+        execution_id = execution_id.strip()
+        if execution_id in seen_binding_ids:
+            raise AccountingConflict(
+                "reconciliation checkpoint provider fill bindings are not unique"
+            )
+        seen_binding_ids.add(execution_id)
+        identity = raw_binding.get("identity")
+        identity_digest = raw_binding.get("identity_digest")
+        if (
+            not isinstance(identity, dict)
+            or not isinstance(identity_digest, str)
+            or not identity_digest.startswith("sha256:")
+            or len(identity_digest) != 71
+            or payload_digest(identity) != identity_digest
+            or identity.get("provider_execution_id") != execution_id
+        ):
+            raise AccountingConflict(
+                "reconciliation checkpoint provider fill binding integrity is invalid"
+            )
+        if execution_id == provider_fill.provider_execution_id:
+            binding = raw_binding
+
+    if binding is None:
+        raise AccountingConflict(
+            "reconciliation checkpoint does not bind exact unexpected provider fill evidence"
+        )
+    expected_identity = provider_fill_identity_payload(provider_fill)
+    expected_identity_digest = payload_digest(expected_identity)
+    if (
+        binding.get("identity_digest") != expected_identity_digest
+        or binding.get("identity") != expected_identity
+    ):
+        raise AccountingConflict(
+            "provider fill does not match checkpoint-bound reconciliation evidence"
+        )
+
     payload_hash = checkpoint.get("payload_hash")
     journal_sequence = checkpoint.get("journal_sequence")
     if (
@@ -356,6 +410,7 @@ def _current_unexpected_execution_checkpoint(
         "event_id": _text(checkpoint.get("event_id"), name="checkpoint_event_id"),
         "payload_hash": payload_hash,
         "journal_sequence": journal_sequence,
+        "provider_fill_identity_digest": expected_identity_digest,
     }
 
 
@@ -427,6 +482,9 @@ def build_unexpected_provider_fill_transaction(
         "reconciliation_checkpoint_event_id": checkpoint["event_id"],
         "reconciliation_checkpoint_payload_hash": checkpoint["payload_hash"],
         "reconciliation_checkpoint_journal_sequence": checkpoint["journal_sequence"],
+        "reconciliation_provider_fill_identity_digest": checkpoint[
+            "provider_fill_identity_digest"
+        ],
         "provider_id": provider,
         "environment": provider_fill.environment,
         "account_id": provider_fill.account_id,

@@ -1,7 +1,10 @@
 (() => {
   "use strict";
 
-  const API = "/api/v1";
+  const HOST_API = window.AutoTradeHostApi;
+  if (!HOST_API || typeof HOST_API.route !== "function") {
+    throw new Error("Canonical host API routes are unavailable");
+  }
   const MATERIAL_EVENTS = new Set([
     "COMMAND_ACCEPTED",
     "OPERATION_UPDATED",
@@ -99,6 +102,14 @@
       throw new Error(name + " must be a non-empty string");
     }
     return value;
+  }
+
+  function canonicalId(value, name) {
+    const token = requiredText(value, name);
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(token)) {
+      throw new Error(name + " must be a canonical UUID");
+    }
+    return token;
   }
 
   function requiredObject(value, name) {
@@ -255,7 +266,7 @@
     for (const key of Object.keys(result)) {
       if (!allowed.has(key)) throw new Error("CommandResult contains non-canonical field " + key);
     }
-    const commandId = requiredText(result.command_id, "command_id");
+    const commandId = canonicalId(result.command_id, "command_id");
     if (commandId !== expectedCommandId) {
       throw new Error("CommandResult command_id does not match the submitted command");
     }
@@ -267,7 +278,7 @@
     }
     const operationId = result.operation_id === undefined
       ? null
-      : requiredText(result.operation_id, "operation_id");
+      : canonicalId(result.operation_id, "operation_id");
     if (result.status === "ACCEPTED" && operationId === null) {
       throw new Error("ACCEPTED command must provide operation_id for durable tracking");
     }
@@ -292,7 +303,7 @@
         throw new Error("OperationResult contains non-canonical field " + key);
       }
     }
-    const operationId = requiredText(result.operation_id, "operation_id");
+    const operationId = canonicalId(result.operation_id, "operation_id");
     if (operationId !== expectedOperationId) {
       throw new Error("OperationResult operation_id does not match");
     }
@@ -361,7 +372,7 @@
   }
 
   async function submitCanonicalCommand(payload) {
-    const response = await fetch(API + "/commands", {
+    const response = await fetch(HOST_API.route("submitCommand"), {
       method: "POST",
       credentials: "same-origin",
       cache: "no-store",
@@ -620,7 +631,7 @@
 
   async function refreshOperation(operationId) {
     const raw = await jsonFetch(
-      `${API}/operations/${encodeURIComponent(operationId)}`);
+      HOST_API.route("getOperation", {operation_id: operationId}));
     const operation = parseOperationResult(raw, operationId);
     renderOperation(operation);
     return operation;
@@ -735,7 +746,7 @@
   }
 
   async function refreshSnapshot(options = {}) {
-    const snapshot = await jsonFetch(`${API}/state`);
+    const snapshot = await jsonFetch(HOST_API.route("getState"));
     renderSnapshot(snapshot, options);
   }
 
@@ -777,7 +788,8 @@
         await refreshSnapshot();
       }
       const response = await jsonFetch(
-        `${API}/events?after=${encodeURIComponent(state.cursor.toString())}`);
+        HOST_API.route("streamEvents") + "?after=" +
+          encodeURIComponent(state.cursor.toString()));
       const events = Array.isArray(response) ? response : (response.events || []);
       let expectedCursor = state.cursor + 1n;
       for (const event of events) {

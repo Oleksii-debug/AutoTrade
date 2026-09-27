@@ -177,6 +177,7 @@ class RuntimeLoadObservation:
     reconnect_backlog_remaining: int
     declared_duration_us: int | None = None
     observed_duration_us: int | None = None
+    expected_financial_event_ids: tuple[str, ...] = ()
     recovered_financial_event_ids: tuple[str, ...] = ()
     financial_latency_event_ids: tuple[str, ...] = ()
     financial_staleness_event_ids: tuple[str, ...] = ()
@@ -227,6 +228,11 @@ class RuntimeLoadObservation:
             self,
             "research_interference_us",
             _series(self.research_interference_us, name="research_interference_us"),
+        )
+        object.__setattr__(
+            self,
+            "expected_financial_event_ids",
+            _event_ids(self.expected_financial_event_ids, name="expected_financial_event_ids"),
         )
         object.__setattr__(
             self,
@@ -285,10 +291,36 @@ class RuntimeLoadObservation:
         reconnect_backlog_remaining: int,
         declared_duration_us: int | None = None,
         observed_duration_us: int | None = None,
+        expected_financial_event_ids: Sequence[str] = (),
         recovered_financial_event_ids: Sequence[str] = (),
         financial_latency_event_ids: Sequence[str] = (),
         financial_staleness_event_ids: Sequence[str] = (),
     ) -> "RuntimeLoadObservation":
+        # Validate public-factory collection values before canonicalization. This
+        # rejects text, unordered containers, mappings and one-shot iterators
+        # instead of silently reinterpreting them via tuple(...).
+        normalized_latency = _series(financial_latency_us, name="financial_latency_us")
+        normalized_staleness = _series(financial_staleness_us, name="financial_staleness_us")
+        normalized_research = _series(
+            research_interference_us,
+            name="research_interference_us",
+        )
+        normalized_expected_ids = _event_ids(
+            expected_financial_event_ids,
+            name="expected_financial_event_ids",
+        )
+        normalized_recovered_ids = _event_ids(
+            recovered_financial_event_ids,
+            name="recovered_financial_event_ids",
+        )
+        normalized_latency_ids = _event_ids(
+            financial_latency_event_ids,
+            name="financial_latency_event_ids",
+        )
+        normalized_staleness_ids = _event_ids(
+            financial_staleness_event_ids,
+            name="financial_staleness_event_ids",
+        )
         return cls(
             scenario_id=scenario_id,
             spec_digest=spec_digest,
@@ -297,15 +329,16 @@ class RuntimeLoadObservation:
             host_fingerprint=host_fingerprint,
             expected_financial_events=expected_financial_events,
             recovered_financial_events=recovered_financial_events,
-            financial_latency_us=tuple(financial_latency_us),
-            financial_staleness_us=tuple(financial_staleness_us),
-            research_interference_us=tuple(research_interference_us),
+            financial_latency_us=normalized_latency,
+            financial_staleness_us=normalized_staleness,
+            research_interference_us=normalized_research,
             reconnect_backlog_remaining=reconnect_backlog_remaining,
             declared_duration_us=declared_duration_us,
             observed_duration_us=observed_duration_us,
-            recovered_financial_event_ids=tuple(recovered_financial_event_ids),
-            financial_latency_event_ids=tuple(financial_latency_event_ids),
-            financial_staleness_event_ids=tuple(financial_staleness_event_ids),
+            expected_financial_event_ids=normalized_expected_ids,
+            recovered_financial_event_ids=normalized_recovered_ids,
+            financial_latency_event_ids=normalized_latency_ids,
+            financial_staleness_event_ids=normalized_staleness_ids,
         )
 
 
@@ -325,20 +358,36 @@ class RuntimeBudgetDecision:
 def _coverage_reasons(
     observation: RuntimeLoadObservation,
 ) -> tuple[list[str], bool, bool]:
-    """Validate one-to-one durable-event identity for financial measurements."""
+    """Validate exact expected/recovered identity and measurement coverage."""
 
     insufficient: list[str] = []
+    expected_ids = observation.expected_financial_event_ids
     recovered_ids = observation.recovered_financial_event_ids
     latency_ids = observation.financial_latency_event_ids
     staleness_ids = observation.financial_staleness_event_ids
+    expected_set = set(expected_ids)
     recovered_set = set(recovered_ids)
 
-    recovered_identity_valid = True
+    expected_identity_valid = True
+    if len(expected_ids) != observation.expected_financial_events:
+        insufficient.append("incomplete_expected_financial_event_identity")
+        expected_identity_valid = False
+    if len(expected_set) != len(expected_ids):
+        insufficient.append("duplicate_expected_financial_event_ids")
+        expected_identity_valid = False
+
+    recovered_identity_valid = expected_identity_valid
     if len(recovered_ids) != observation.recovered_financial_events:
         insufficient.append("incomplete_recovered_financial_event_identity")
         recovered_identity_valid = False
     if len(recovered_set) != len(recovered_ids):
         insufficient.append("duplicate_recovered_financial_event_ids")
+        recovered_identity_valid = False
+    if expected_set - recovered_set:
+        insufficient.append("missing_expected_financial_event_ids")
+        recovered_identity_valid = False
+    if recovered_set - expected_set:
+        insufficient.append("unknown_recovered_financial_event_ids")
         recovered_identity_valid = False
 
     latency_valid = recovered_identity_valid
@@ -411,6 +460,7 @@ def evaluate_runtime_budget(
         "financial_sample_count": latency_count,
         "financial_latency_sample_count": latency_count,
         "financial_staleness_sample_count": staleness_count,
+        "expected_financial_event_identity_count": len(observation.expected_financial_event_ids),
         "recovered_financial_event_identity_count": len(observation.recovered_financial_event_ids),
         "financial_latency_event_identity_count": len(observation.financial_latency_event_ids),
         "financial_staleness_event_identity_count": len(observation.financial_staleness_event_ids),
@@ -455,9 +505,9 @@ def evaluate_runtime_budget(
     if len(observation.research_interference_us) < spec.min_research_samples:
         insufficient.append("insufficient_research_interference_samples")
 
-    # Aggregate thresholds are meaningful only after one-to-one retained-event
-    # coverage is proven. Anonymous/duplicate/missing identities cannot be used
-    # to manufacture a favorable percentile or staleness maximum.
+    # Aggregate thresholds are meaningful only after exact expected/recovered
+    # identity and one-to-one sample coverage are proven. Anonymous, substituted,
+    # duplicate or missing identities cannot manufacture favorable aggregates.
     if latency_coverage_valid and observation.financial_latency_us:
         p95 = nearest_rank_percentile(observation.financial_latency_us, 95)
         metrics["p95_financial_latency_us"] = p95

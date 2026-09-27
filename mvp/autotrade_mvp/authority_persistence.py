@@ -24,6 +24,7 @@ _NEW_EXPOSURE_BLOCK_FIELDS = {
     "blocked_at",
 }
 _SUPPORTED_ENVIRONMENTS = {"SIMULATION", "PAPER", "LIVE"}
+_SNAPSHOT_COMMAND_ACTOR = "autotrade-authority-snapshot"
 
 
 def _indexed_collection(state: dict, name: str, identity_key: str) -> dict[str, dict]:
@@ -47,8 +48,8 @@ def _indexed_new_exposure_blocks(
     state: dict,
 ) -> dict[tuple[str, str], dict[str, str]]:
     # AuthorityService.restore() deliberately treats the field as optional for
-    # historical schema-v1 snapshots; the monotonic validator must preserve
-    # that deterministic compatibility while validating every present entry.
+    # historical schema-v1 snapshots; the snapshot fence preserves that read
+    # compatibility while requiring every present entry to be canonical.
     values = state.get("new_exposure_blocks", [])
     if not isinstance(values, list):
         raise ValueError("authority state new_exposure_blocks must be a list")
@@ -65,13 +66,18 @@ def _indexed_new_exposure_blocks(
                 raise ValueError(
                     f"authority state new_exposure_blocks entry has invalid {field}"
                 )
-            normalized[field] = value.strip()
-        environment = normalized["environment"].upper()
+            # Exported authority state is already canonical. Reject whitespace or
+            # case rewriting instead of silently normalizing authority identity.
+            if value != value.strip():
+                raise ValueError(
+                    f"authority state new_exposure_blocks entry has non-canonical {field}"
+                )
+            normalized[field] = value
+        environment = normalized["environment"]
         if environment not in _SUPPORTED_ENVIRONMENTS:
             raise ValueError(
                 "authority state new_exposure_blocks entry has unsupported environment"
             )
-        normalized["environment"] = environment
         scope = (normalized["account_id"], environment)
         if scope in indexed:
             raise ValueError(
@@ -81,98 +87,55 @@ def _indexed_new_exposure_blocks(
     return indexed
 
 
-def _has_exact_durable_restore(
+def _canonical_new_exposure_blocks(
     store: JournalStore,
-    *,
-    scope: tuple[str, str],
-    block: dict[str, str],
-) -> bool:
-    """Return whether canonical authority journal durably restored this exact block."""
+) -> dict[tuple[str, str], dict[str, str]]:
+    """Replay the existing canonical block/restore authority and return active blocks."""
 
-    account_id, environment = scope
-    exact_block_seen = False
-    for event in store.load_events("authority_state", "canonical"):
-        payload = event.get("payload")
-        if not isinstance(payload, dict):
-            continue
-        event_type = event.get("event_type")
-        if event_type == "AuthorityNewExposureBlocked":
-            if payload == {
-                "command_id": block["command_id"],
-                "account_id": account_id,
-                "environment": environment,
-                "reason": block["reason"],
-                "blocked_at": block["blocked_at"],
-            }:
-                exact_block_seen = True
-        elif event_type == "AuthorityNewExposureRestored" and exact_block_seen:
-            if (
-                payload.get("account_id") == account_id
-                and payload.get("environment") == environment
-                and payload.get("blocked_command_id") == block["command_id"]
-                and payload.get("blocked_reason") == block["reason"]
-                and payload.get("blocked_at") == block["blocked_at"]
-            ):
-                return True
-    return False
-
-
-def _assert_monotonic_new_exposure_blocks(
-    previous: dict,
-    candidate: dict,
-    *,
-    store: JournalStore,
-) -> None:
-    """Allow an active block to disappear/change only after exact durable restore."""
-
-    old = _indexed_new_exposure_blocks(previous)
-    new = _indexed_new_exposure_blocks(candidate)
-    changed = {
-        scope: block
-        for scope, block in old.items()
-        if new.get(scope) != block
-    }
-    if not changed:
-        return
-
-    for scope, block in changed.items():
-        if not _has_exact_durable_restore(store, scope=scope, block=block):
-            if scope not in new:
-                raise ValueError(
-                    "authority snapshot is stale: new-exposure block was removed "
-                    "without exact durable restore"
-                )
-            raise ValueError(
-                "authority snapshot rewrites durable new-exposure block without "
-                "exact restore and re-block authority"
-            )
-
-    # A restore proof for an old block is necessary but not sufficient. The
-    # candidate must also equal a fresh replay of the canonical authority
-    # journal, so caller-authored removal/replacement cannot borrow an unrelated
-    # historical restore as authority.
     try:
         replayed = AuthorityService(store).export_state()
-        replayed_blocks = _indexed_new_exposure_blocks(replayed)
+        return _indexed_new_exposure_blocks(replayed)
     except Exception as error:
         raise ValueError(
-            "authority snapshot new-exposure transition cannot be proven by "
-            "canonical authority replay"
+            "canonical new-exposure authority cannot be replayed for snapshot proof"
         ) from error
-    if new != replayed_blocks:
-        raise ValueError(
-            "authority snapshot new-exposure blocks do not match canonical "
-            "authority journal replay"
-        )
 
 
-def _assert_monotonic_authority_state(
-    previous: dict,
-    candidate: dict,
+def _assert_new_exposure_blocks_match_canonical(
+    state: dict,
     *,
     store: JournalStore,
 ) -> None:
-    """Reject snapshots that forget or rewrite any durable authority fact."""
+    """Require snapshot block state to equal durable canonical block/restore replay.
+
+    This is stronger than treating the active list as append-only. A legitimate
+    AuthorityNewExposureRestored transition is accepted because canonical replay
+    removes the exact active block; a stale omission, forged addition/rewrite, or
+    resurrection after restore cannot equal replayed authority.
+    """
+
+    candidate = _indexed_new_exposure_blocks(state)
+    canonical = _canonical_new_exposure_blocks(store)
+    if candidate == canonical:
+        return
+
+    missing = sorted(set(canonical) - set(candidate))
+    extra = sorted(set(candidate) - set(canonical))
+    if missing:
+        raise ValueError(
+            "authority snapshot is stale: canonical new-exposure block is missing"
+        )
+    if extra:
+        raise ValueError(
+            "authority snapshot contains new-exposure block without canonical authority"
+        )
+    raise ValueError(
+        "authority snapshot rewrites canonical new-exposure block identity"
+    )
+
+
+def _assert_monotonic_authority_state(previous: dict, candidate: dict) -> None:
+    """Reject snapshots that forget or rewrite any durable snapshot fact."""
     if not isinstance(previous, dict) or not isinstance(candidate, dict):
         raise ValueError("authority state must be an object")
     if previous.get("schema_version") != candidate.get("schema_version"):
@@ -204,7 +167,10 @@ def _assert_monotonic_authority_state(
                     f"authority snapshot rewrites durable {name} fact {identity}"
                 )
 
-    _assert_monotonic_new_exposure_blocks(previous, candidate, store=store)
+    # Validate historical block state even though active block transitions are
+    # authorized by canonical block/restore replay rather than append-only rules.
+    _indexed_new_exposure_blocks(previous)
+    _indexed_new_exposure_blocks(candidate)
 
     old_used = previous.get("used_confirmations")
     new_used = candidate.get("used_confirmations")
@@ -218,6 +184,13 @@ def _assert_monotonic_authority_state(
         raise ValueError("authority snapshot is stale: used confirmation was forgotten")
 
 
+def _snapshot_command_identity(authority_id: str, event_id: str) -> str:
+    digest = payload_digest(
+        {"authority_id": authority_id, "event_id": event_id}
+    ).split(":", 1)[1]
+    return f"authority-snapshot-{digest}"
+
+
 def persist_authority_snapshot(
     store: JournalStore,
     service: AuthorityService,
@@ -226,7 +199,14 @@ def persist_authority_snapshot(
     event_id: str,
     committed_at: str,
 ):
-    """Persist the complete authority state without creating another authority."""
+    """Persist complete authority state without creating another authority.
+
+    New snapshots are committed against the same global journal cut used to
+    prove canonical new-exposure block state. This closes the check-to-append
+    race: a concurrent block/restore or any other journal event invalidates the
+    cut inside JournalStore's write transaction and the snapshot is not stored.
+    Historical immutable event-id retries keep their original envelope semantics.
+    """
     if not isinstance(store, JournalStore):
         raise TypeError("store must be JournalStore")
     if not isinstance(service, AuthorityService):
@@ -243,10 +223,13 @@ def persist_authority_snapshot(
     state = service.export_state()
     existing = store.get_event(event_id)
     checked_previous_version: int | None = None
+    journal_cut: int | None = None
+
     # An immutable event-id replay is a lost-reply retry, not a new authority
     # publication. Let JournalStore compare the reconstructed envelope exactly;
     # only a genuinely new event must extend the latest durable snapshot.
     if existing is None:
+        journal_cut = store.current_journal_sequence()
         existing_events = store.load_events(AUTHORITY_AGGREGATE_TYPE, authority_id)
         if existing_events:
             previous_event = existing_events[-1]
@@ -265,7 +248,12 @@ def persist_authority_snapshot(
             )
             if not isinstance(previous_state, dict):
                 raise ValueError("latest authority journal payload state is invalid")
-            _assert_monotonic_authority_state(previous_state, state, store=store)
+            _assert_monotonic_authority_state(previous_state, state)
+
+        # Every new snapshot, including the first and candidates whose active
+        # list is unchanged from the previous snapshot, must represent the
+        # current canonical block/restore authority exactly.
+        _assert_new_exposure_blocks_match_canonical(state, store=store)
 
     payload = {
         "authority_id": authority_id,
@@ -291,7 +279,31 @@ def persist_authority_snapshot(
             existing["committed_at"] if existing is not None else committed_at.strip()
         ),
     }
-    return store.append_event(envelope)
+
+    if existing is not None:
+        return store.append_event(envelope)
+
+    assert journal_cut is not None
+    command_identity = _snapshot_command_identity(authority_id, event_id)
+    _result, inserted, appended = store.commit_command(
+        command_id=command_identity,
+        actor=_SNAPSHOT_COMMAND_ACTOR,
+        environment="REPLAY",
+        idempotency_key=command_identity,
+        request={"snapshot_event": envelope},
+        result={
+            "event_id": event_id,
+            "aggregate_version": aggregate_version,
+        },
+        state_version=aggregate_version,
+        events=[(envelope, None)],
+        expected_journal_sequence=journal_cut,
+    )
+    if not inserted or len(appended) != 1:
+        raise ValueError(
+            "authority snapshot transaction did not append the exact new event"
+        )
+    return appended[0]
 
 
 def restore_authority_snapshot(
@@ -330,4 +342,12 @@ def restore_authority_snapshot(
 
     if latest is None:
         raise ValueError("authority durable state is missing")
-    return AuthorityService.restore(latest)
+    restored = AuthorityService.restore(latest)
+    # Snapshot restart must not silently resurrect eligibility while canonical
+    # block/restore authority says otherwise. A lagging snapshot therefore fails
+    # closed until a matching snapshot is durably published.
+    _assert_new_exposure_blocks_match_canonical(
+        restored.export_state(),
+        store=store,
+    )
+    return restored

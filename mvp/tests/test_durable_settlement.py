@@ -21,7 +21,7 @@ from mvp.autotrade_mvp.durable_settlement import (
     settlement_rule_evidence_metadata,
     settlement_rule_evidence_receipt,
 )
-from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
+from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
     commit_economic_correction_with_settlement_replacement,
@@ -334,6 +334,7 @@ class DurableSettlementBookTests(unittest.TestCase):
                     "aggregate_version": "1",
                     "committed_at": "2026-09-25T08:59:59Z",
                     "payload": legacy_payload,
+                    "payload_hash": payload_digest(legacy_payload),
                 }
             )
 
@@ -365,6 +366,7 @@ class DurableSettlementBookTests(unittest.TestCase):
                     "aggregate_version": "2",
                     "committed_at": "2026-09-25T09:01:00Z",
                     "payload": settled_payload,
+                    "payload_hash": payload_digest(settled_payload),
                 }
             )
             with self.assertRaisesRegex(

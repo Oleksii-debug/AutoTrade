@@ -49,6 +49,13 @@ class AccountingFoundationTests(unittest.TestCase):
         self.assertEqual(fill.postings[2].signed_amount, expected_cash)
         book = EconomicBook((fill,))
         self.assertEqual(book.cash("USD"), expected_cash)
+        projection = project_equity_position(
+            book, instrument="ABC", settlement_currency="USD",
+            mark_price="2.000000000000000000000000000002",
+        )
+        self.assertEqual(projection.quantity, Decimal("1.000000000000000000000000000001"))
+        self.assertEqual(projection.open_cost_basis, expected_cash.copy_negate())
+        self.assertEqual(projection.unrealized_pnl, Decimal("0"))
         book.append(reverse_transaction(
             fill, transaction_id="reverse-exact", cause_event_id="reversal-evidence",
         ))

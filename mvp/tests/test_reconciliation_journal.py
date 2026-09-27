@@ -194,6 +194,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                         provider_id=provider_id,
                         account_id=account_id,
                         environment="PAPER",
+                        provider_environment="TESTNET",
                     ),
                 ),
                 observed_at="2026-09-24T19:00:01Z",

@@ -70,7 +70,9 @@ def _exact_sum(values: Iterable[Decimal]) -> Decimal:
     amounts = tuple(values)
     if not amounts:
         return Decimal("0")
-    integer_digits = max(1, *(value.adjusted() + 1 for value in amounts if value))
+    integer_digits = max(
+        1, max((value.adjusted() + 1 for value in amounts if value), default=0)
+    )
     fractional_digits = max(0, *(-value.as_tuple().exponent for value in amounts))
     with localcontext() as context:
         context.prec = max(28, integer_digits + fractional_digits + len(str(len(amounts))) + 1)
@@ -666,7 +668,12 @@ def _canonical_equity_fill_terms(
         raise AccountingConflict(
             "Position projection requires cash direction opposite to quantity"
         )
-    unit_price = abs(trade_cash / quantity)
+    with localcontext() as context:
+        context.prec = max(
+            28,
+            len(trade_cash.as_tuple().digits) + len(quantity.as_tuple().digits) + 1,
+        )
+        unit_price = abs(trade_cash / quantity)
     if unit_price <= 0 or not unit_price.is_finite():
         raise AccountingConflict("Position projection requires a finite positive price")
 
@@ -703,7 +710,7 @@ def _canonical_equity_fill_terms(
         instrument=symbol,
         settlement_currency=settlement,
         side="BUY" if quantity > 0 else "SELL",
-        quantity=abs(quantity),
+        quantity=quantity.copy_abs(),
         price=unit_price,
         fee=fee_amount,
         fee_currency=fee_currency,
@@ -858,16 +865,22 @@ def project_equity_position(
             lot_price = mutable_lots[0][1]
             assert isinstance(lot_quantity, Decimal)
             assert isinstance(lot_price, Decimal)
-            close_quantity = min(abs(remaining), abs(lot_quantity))
+            close_quantity = min(remaining.copy_abs(), lot_quantity.copy_abs())
 
             if lot_quantity > 0:
-                realized += close_quantity * (unit_price - lot_price)
-                lot_quantity -= close_quantity
-                remaining += close_quantity
+                realized = _exact_sum((
+                    realized,
+                    _exact_product(close_quantity, _exact_sum((unit_price, lot_price.copy_negate()))),
+                ))
+                lot_quantity = _exact_sum((lot_quantity, close_quantity.copy_negate()))
+                remaining = _exact_sum((remaining, close_quantity))
             else:
-                realized += close_quantity * (lot_price - unit_price)
-                lot_quantity += close_quantity
-                remaining -= close_quantity
+                realized = _exact_sum((
+                    realized,
+                    _exact_product(close_quantity, _exact_sum((lot_price, unit_price.copy_negate()))),
+                ))
+                lot_quantity = _exact_sum((lot_quantity, close_quantity))
+                remaining = _exact_sum((remaining, close_quantity.copy_negate()))
 
             if lot_quantity == 0:
                 mutable_lots.pop(0)
@@ -887,27 +900,27 @@ def project_equity_position(
         )
         for lot in mutable_lots
     )
-    quantity = sum((lot.quantity for lot in lots), Decimal("0"))
-    open_cost_basis = sum(
-        (abs(lot.quantity) * lot.unit_price for lot in lots),
-        Decimal("0"),
+    quantity = _exact_sum(lot.quantity for lot in lots)
+    open_cost_basis = _exact_sum(
+        _exact_product(lot.quantity.copy_abs(), lot.unit_price) for lot in lots
     )
 
     unrealized: Decimal | None
     if mark is None:
         unrealized = None
     else:
-        unrealized = sum(
+        unrealized = _exact_sum(
             (
-                abs(lot.quantity)
-                * (
-                    (mark - lot.unit_price)
-                    if lot.quantity > 0
-                    else (lot.unit_price - mark)
+                _exact_product(
+                    lot.quantity.copy_abs(),
+                    _exact_sum((
+                        mark, lot.unit_price.copy_negate()
+                    )) if lot.quantity > 0 else _exact_sum((
+                        lot.unit_price, mark.copy_negate()
+                    )),
                 )
                 for lot in lots
             ),
-            Decimal("0"),
         )
 
     return EquityPositionProjection(

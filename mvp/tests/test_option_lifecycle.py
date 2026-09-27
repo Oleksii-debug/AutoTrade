@@ -640,6 +640,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             )
             legacy_envelope = dict(source_event)
             legacy_envelope["aggregate_id"] = target_authority.aggregate_id
+            legacy_envelope["aggregate_version"] = str(source_event["aggregate_version"])
             legacy_envelope["payload"] = legacy_payload
             legacy_envelope["payload_hash"] = payload_digest(legacy_payload)
             target_store.append_event(legacy_envelope)

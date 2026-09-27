@@ -753,17 +753,15 @@ class ArtifactStore:
             object_path.parent.mkdir(parents=True, exist_ok=True)
             self._validate_object_namespace(object_path)
             if object_path.exists() or object_path.is_symlink():
-                try:
-                    self._verify_manifest_object(
-                        {
-                            "sha256": f"sha256:{digest}",
-                            "bytes": len(data),
-                        }
-                    )
-                except ArtifactIntegrityError as error:
-                    raise ArtifactIntegrityError(
-                        "content-addressed object path is corrupt"
-                    ) from error
+                # Preserve the precise fail-closed integrity classification
+                # (symlink, hard-link alias, size/hash mismatch, namespace escape).
+                # Callers and qualification regressions rely on these diagnostics.
+                self._verify_manifest_object(
+                    {
+                        "sha256": f"sha256:{digest}",
+                        "bytes": len(data),
+                    }
+                )
             else:
                 self._validate_staging_namespace()
                 temporary: Path | None = None
@@ -1055,6 +1053,208 @@ class ArtifactStore:
             corrupt_objects=tuple(sorted(set(corrupt))),
         )
 
+    @staticmethod
+    def _supports_descriptor_relative_cleanup() -> bool:
+        """Whether stdlib deletion can stay bound to a verified directory."""
+
+        supports_dir_fd = getattr(os, "supports_dir_fd", set())
+        supports_fd = getattr(os, "supports_fd", set())
+        return bool(
+            os.name != "nt"
+            and getattr(os, "O_DIRECTORY", 0)
+            and getattr(os, "O_NOFOLLOW", 0)
+            and os.stat in supports_dir_fd
+            and os.unlink in supports_dir_fd
+            and os.listdir in supports_fd
+        )
+
+    def _open_verified_cleanup_directory(
+        self,
+        directory: Path,
+        *,
+        subject: str,
+    ) -> tuple[int, os.stat_result]:
+        if not self._supports_descriptor_relative_cleanup():
+            raise ArtifactIntegrityError(
+                f"{subject} cleanup lacks descriptor-relative platform support"
+            )
+        try:
+            before = os.stat(directory, follow_symlinks=False)
+        except OSError as error:
+            raise ArtifactIntegrityError(
+                f"{subject} cleanup directory cannot be inspected"
+            ) from error
+        self._reject_reparse_point(before, subject=f"{subject} cleanup directory")
+        if stat.S_ISLNK(before.st_mode) or not stat.S_ISDIR(before.st_mode):
+            raise ArtifactIntegrityError(
+                f"{subject} cleanup directory is not a canonical directory"
+            )
+
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            descriptor = os.open(directory, flags)
+        except OSError as error:
+            raise ArtifactIntegrityError(
+                f"{subject} cleanup directory could not be opened safely"
+            ) from error
+        try:
+            opened = os.fstat(descriptor)
+            current = os.stat(directory, follow_symlinks=False)
+            self._reject_reparse_point(
+                opened,
+                subject=f"{subject} cleanup directory descriptor",
+            )
+            if (
+                not stat.S_ISDIR(opened.st_mode)
+                or not self._same_filesystem_entry(before, opened)
+                or not self._same_filesystem_entry(opened, current)
+            ):
+                raise ArtifactIntegrityError(
+                    f"{subject} cleanup directory changed before destructive use"
+                )
+        except Exception:
+            os.close(descriptor)
+            raise
+        return descriptor, opened
+
+    def _revalidate_cleanup_directory(
+        self,
+        directory: Path,
+        descriptor: int,
+        opened: os.stat_result,
+        *,
+        subject: str,
+    ) -> None:
+        try:
+            held = os.fstat(descriptor)
+            current = os.stat(directory, follow_symlinks=False)
+        except OSError as error:
+            raise ArtifactIntegrityError(
+                f"{subject} cleanup directory could not be revalidated"
+            ) from error
+        self._reject_reparse_point(
+            held,
+            subject=f"{subject} cleanup directory descriptor",
+        )
+        if (
+            not stat.S_ISDIR(held.st_mode)
+            or not self._same_filesystem_entry(opened, held)
+            or not self._same_filesystem_entry(held, current)
+        ):
+            raise ArtifactIntegrityError(
+                f"{subject} cleanup directory changed before destructive use"
+            )
+
+    def _unlink_verified_regular_entry(
+        self,
+        directory: Path,
+        name: str,
+        *,
+        subject: str,
+    ) -> bool:
+        """Delete one regular entry without re-resolving its parent pathname.
+
+        POSIX dir_fd semantics bind inspection and unlink to the same held
+        directory identity. Platforms without that primitive fail closed by
+        declining destructive cleanup.
+        """
+
+        if not self._supports_descriptor_relative_cleanup():
+            return False
+        descriptor, opened = self._open_verified_cleanup_directory(
+            directory,
+            subject=subject,
+        )
+        try:
+            try:
+                entry = os.stat(
+                    name,
+                    dir_fd=descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                return False
+            except OSError as error:
+                raise ArtifactIntegrityError(
+                    f"{subject} cleanup entry cannot be inspected"
+                ) from error
+            self._reject_reparse_point(entry, subject=f"{subject} cleanup entry")
+            if (
+                stat.S_ISLNK(entry.st_mode)
+                or not stat.S_ISREG(entry.st_mode)
+                or entry.st_nlink != 1
+            ):
+                return False
+
+            self._revalidate_cleanup_directory(
+                directory,
+                descriptor,
+                opened,
+                subject=subject,
+            )
+            try:
+                os.unlink(name, dir_fd=descriptor)
+            except FileNotFoundError:
+                return False
+            return True
+        finally:
+            os.close(descriptor)
+
+    def _cleanup_staging_entries(self) -> None:
+        self._validate_staging_namespace()
+        if not self._supports_descriptor_relative_cleanup():
+            return
+        descriptor, opened = self._open_verified_cleanup_directory(
+            self.staging,
+            subject="artifact staging",
+        )
+        try:
+            try:
+                names = tuple(os.listdir(descriptor))
+            except OSError as error:
+                raise ArtifactIntegrityError(
+                    "artifact staging directory cannot be enumerated safely"
+                ) from error
+            for name in names:
+                try:
+                    entry = os.stat(
+                        name,
+                        dir_fd=descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    continue
+                except OSError as error:
+                    raise ArtifactIntegrityError(
+                        "artifact staging entry cannot be inspected"
+                    ) from error
+                self._reject_reparse_point(
+                    entry,
+                    subject="artifact staging cleanup entry",
+                )
+                if (
+                    not stat.S_ISREG(entry.st_mode)
+                    or entry.st_nlink != 1
+                ):
+                    continue
+                self._revalidate_cleanup_directory(
+                    self.staging,
+                    descriptor,
+                    opened,
+                    subject="artifact staging",
+                )
+                try:
+                    os.unlink(name, dir_fd=descriptor)
+                except FileNotFoundError:
+                    continue
+        finally:
+            os.close(descriptor)
+
     def recover_orphans(self) -> ArtifactAudit:
         with ResourceLock(self.lock_path):
             self._validate_staging_namespace()
@@ -1068,26 +1268,13 @@ class ArtifactStore:
                 for digest in before.unreferenced_objects:
                     path = self._object_path(digest)
                     try:
-                        self._validate_object_entry(path)
+                        self._validate_object_namespace(path)
+                        self._unlink_verified_regular_entry(
+                            path.parent,
+                            path.name,
+                            subject="artifact object",
+                        )
                     except ArtifactIntegrityError:
                         continue
-                    try:
-                        path.unlink()
-                    except FileNotFoundError:
-                        pass
-            self._validate_staging_namespace()
-            for path in self.staging.glob("*"):
-                try:
-                    entry = os.stat(path, follow_symlinks=False)
-                except FileNotFoundError:
-                    continue
-                except OSError as error:
-                    raise ArtifactIntegrityError(
-                        "artifact staging entry cannot be inspected"
-                    ) from error
-                if stat.S_ISREG(entry.st_mode):
-                    try:
-                        path.unlink()
-                    except FileNotFoundError:
-                        pass
+            self._cleanup_staging_entries()
             return self.audit()

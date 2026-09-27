@@ -146,6 +146,8 @@ New fail-closed checks bind the normalized fill to the selected canonical order:
 
 Focused tests cover normal canonical fill ingestion, restart reconstruction, scope/unknown-field rejection without mutation, and correction replay. This does not claim that every provider adapter already emits the canonical fill shape, nor does it complete Transaction C atomic accounting/reservation/reconciliation composition. Those remain separate integration gates.
 
+For PAPER/LIVE, the reduced durable `record_fill()` and `correct_fill()` entry points fail closed; provider fill facts must enter through canonical `ExecutionFill` ingestion. Provider evidence metadata binds to the complete normalized observation body, excluding only its attached evidence references and derived digest to avoid self-reference. Direct durable bust commands are blocked in PAPER/LIVE until a canonical provider bust observation exists. Simulation and replay retain the lower-level lifecycle operations for deterministic testing and reconstruction.
+
 
 ## Whole-simulator terminal reservation integration
 

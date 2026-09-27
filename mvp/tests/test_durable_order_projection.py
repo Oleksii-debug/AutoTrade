@@ -1793,6 +1793,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 instrument="ABC",
                 side="BUY",
                 requested_quantity="2",
+                quantity_unit="unit:ABC",
                 committed_at=T0,
             )
             ack_request = {
@@ -1816,6 +1817,19 @@ class DurableOrderProjectionTests(unittest.TestCase):
             )
             self.assertEqual(ack.snapshot.state, "WORKING")
 
+            canonical_fill_body = {
+                "fill_id": "fill-1",
+                "provider_execution_id": "execution-1",
+                "order_ref": "paper-1",
+                "instrument_version": "ABC",
+                "side": "BUY",
+                "last_quantity": {"value": "2", "unit": "unit:ABC"},
+                "last_price": "100",
+                "trade_time": T1,
+                "receipt_time": T2,
+                "fees": [],
+                "settlement_date": "2026-09-25",
+            }
             fill_request = {
                 "client_order_id": "paper-1",
                 "fill_id": "fill-1",
@@ -1823,6 +1837,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 "quantity": "2",
                 "price": "100",
                 "provider_revision": None,
+                "canonical_execution_fill": canonical_fill_body,
             }
             fill_ref = provider_evidence(
                 artifacts,
@@ -1830,15 +1845,14 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 request=fill_request,
                 observed_at=T2,
             )
-            fill = book.record_fill(
+            fill = book.ingest_execution_fill(
                 event_key="fill-evidenced",
                 client_order_id="paper-1",
-                fill_id="fill-1",
-                provider_execution_id="execution-1",
-                quantity="2",
-                price="100",
+                execution_fill={
+                    **canonical_fill_body,
+                    "evidence": [fill_ref],
+                },
                 committed_at=T2,
-                evidence_refs=[fill_ref],
             )
             self.assertEqual(fill.snapshot.state, "FILLED")
 
@@ -1858,6 +1872,62 @@ class DurableOrderProjectionTests(unittest.TestCase):
             self.assertEqual(
                 restarted.order("paper-1").filled_quantity,
                 Decimal("2"),
+            )
+
+    def test_paper_reduced_fill_and_bust_apis_fail_before_journal_append(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store, environment="PAPER")
+            book.create_order(
+                event_key="create-paper-reduced-api",
+                client_order_id="paper-1",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="2",
+                quantity_unit="unit:ABC",
+                committed_at=T0,
+            )
+            before = len(store.load_events("order_projection_book", book.aggregate_id))
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "must use canonical ExecutionFill ingestion",
+            ):
+                book.record_fill(
+                    event_key="reduced-fill",
+                    client_order_id="paper-1",
+                    fill_id="fill-1",
+                    provider_execution_id="exec-1",
+                    quantity="1",
+                    price="100",
+                    committed_at=T1,
+                )
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "must use canonical ExecutionFill ingestion",
+            ):
+                book.correct_fill(
+                    event_key="reduced-correction",
+                    client_order_id="paper-1",
+                    fill_id="fill-1",
+                    quantity="1",
+                    price="100",
+                    provider_revision="r2",
+                    committed_at=T1,
+                )
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "requires a canonical provider bust event",
+            ):
+                book.bust_fill(
+                    event_key="reduced-bust",
+                    client_order_id="paper-1",
+                    fill_id="fill-1",
+                    provider_revision="r2-bust",
+                    committed_at=T1,
+                )
+            self.assertEqual(
+                len(store.load_events("order_projection_book", book.aggregate_id)),
+                before,
             )
 
     def test_evidence_identity_participates_in_idempotency(self):

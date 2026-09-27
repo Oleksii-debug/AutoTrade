@@ -31,6 +31,7 @@ from .persistence import JournalStore, canonical_json, payload_digest
 _AGGREGATE_TYPE = "order_projection_book"
 _EVENT_TYPE = "OrderProjectionMutationCommitted"
 _OUTBOX_TOPIC = "autotrade.order-projection.events"
+_CANONICAL_EXECUTION_FILL_INGEST = object()
 _PROVIDER_EVIDENCE_OPERATIONS = frozenset(
     {
         "RECORD_FILL",
@@ -123,6 +124,25 @@ def _canonical_quantity_value(value: object, *, name: str) -> tuple[str, str]:
         raise OrderProjectionConflict(f"{name}.value must be canonical decimal text")
     unit = _text(value.get("unit"), name=f"{name}.unit")
     return raw_value, unit
+
+
+def _provider_evidence_request(
+    operation: object,
+    request: Mapping[str, object],
+) -> dict[str, object]:
+    """Return the signed observation body without its self-referential refs."""
+    result = dict(request)
+    canonical = result.get("canonical_execution_fill")
+    if operation not in {"RECORD_FILL", "CORRECT_FILL"} or not isinstance(
+        canonical,
+        Mapping,
+    ):
+        return result
+    canonical_body = dict(canonical)
+    canonical_body.pop("evidence", None)
+    result.pop("canonical_execution_fill_hash", None)
+    result["canonical_execution_fill"] = canonical_body
+    return result
 
 
 def _canonical_evidence_refs(
@@ -328,6 +348,17 @@ class DurableOrderBookProjection:
             return status in {"ACKNOWLEDGED", "ACCEPTED", "REJECTED"}
         return operation in _PROVIDER_EVIDENCE_OPERATIONS
 
+    def _require_canonical_execution_ingest(
+        self,
+        token: object | None,
+        *,
+        operation: str,
+    ) -> None:
+        if self.environment in {"PAPER", "LIVE"} and token is not _CANONICAL_EXECUTION_FILL_INGEST:
+            raise OrderProjectionConflict(
+                f"PAPER/LIVE {operation} must use canonical ExecutionFill ingestion"
+            )
+
     def _verify_provider_evidence(
         self,
         *,
@@ -362,7 +393,7 @@ class DurableOrderBookProjection:
         committed_dt = datetime.fromisoformat(
             committed.replace("Z", "+00:00")
         )
-        request_hash = payload_digest(dict(request))
+        request_hash = payload_digest(_provider_evidence_request(operation, request))
         for ref in refs:
             observed_dt = datetime.fromisoformat(
                 ref["observed_at"].replace("Z", "+00:00")
@@ -1200,7 +1231,12 @@ class DurableOrderBookProjection:
         evidence_refs: Sequence[Mapping[str, object]] | None = None,
         canonical_execution_fill_hash: str | None = None,
         canonical_execution_fill: Mapping[str, object] | None = None,
+        _canonical_ingest_token: object | None = None,
     ) -> DurableOrderMutationResult:
+        self._require_canonical_execution_ingest(
+            _canonical_ingest_token,
+            operation="fill recording",
+        )
         request = {
             "client_order_id": _text(client_order_id, name="client_order_id"),
             "fill_id": _text(fill_id, name="fill_id"),
@@ -1551,6 +1587,7 @@ class DurableOrderBookProjection:
                 evidence_refs=evidence,
                 canonical_execution_fill_hash=canonical_execution_fill_hash,
                 canonical_execution_fill=canonical_fill,
+                _canonical_ingest_token=_CANONICAL_EXECUTION_FILL_INGEST,
             )
 
         return self.record_fill(
@@ -1571,6 +1608,7 @@ class DurableOrderBookProjection:
             evidence_refs=evidence,
             canonical_execution_fill_hash=canonical_execution_fill_hash,
             canonical_execution_fill=canonical_fill,
+            _canonical_ingest_token=_CANONICAL_EXECUTION_FILL_INGEST,
         )
 
     def correct_fill(
@@ -1588,7 +1626,12 @@ class DurableOrderBookProjection:
         evidence_refs: Sequence[Mapping[str, object]] | None = None,
         canonical_execution_fill_hash: str | None = None,
         canonical_execution_fill: Mapping[str, object] | None = None,
+        _canonical_ingest_token: object | None = None,
     ) -> DurableOrderMutationResult:
+        self._require_canonical_execution_ingest(
+            _canonical_ingest_token,
+            operation="fill correction",
+        )
         request = {
             "client_order_id": _text(client_order_id, name="client_order_id"),
             "fill_id": _text(fill_id, name="fill_id"),
@@ -1635,6 +1678,10 @@ class DurableOrderBookProjection:
         correction_fill_id: str | None = None,
         evidence_refs: Sequence[Mapping[str, object]] | None = None,
     ) -> DurableOrderMutationResult:
+        if self.environment in {"PAPER", "LIVE"}:
+            raise OrderProjectionConflict(
+                "PAPER/LIVE fill bust requires a canonical provider bust event"
+            )
         request = {
             "client_order_id": _text(client_order_id, name="client_order_id"),
             "fill_id": _text(fill_id, name="fill_id"),

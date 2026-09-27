@@ -211,6 +211,48 @@ class ForwardPaperTerminalQualificationTests(unittest.TestCase):
             result.reason_codes,
         )
 
+    def test_store_match_uses_one_authenticated_snapshot_not_split_reads(self):
+        protocol = self.protocol()
+        evidence = self.evidence(protocol)
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            manifest = self.publish(store, protocol, evidence)
+            with (
+                patch.object(
+                    store,
+                    "load_manifest",
+                    side_effect=AssertionError("legacy split manifest read"),
+                ),
+                patch.object(
+                    store,
+                    "read_bytes",
+                    side_effect=AssertionError("legacy split object read"),
+                ),
+                patch.object(
+                    store,
+                    "read_authenticated_snapshot",
+                    wraps=store.read_authenticated_snapshot,
+                ) as snapshot,
+            ):
+                result = qualify_forward_paper(
+                    protocol,
+                    evidence,
+                    evidence_store=store,
+                    evidence_artifact_id=EVIDENCE_ID,
+                    evidence_artifact_sha256=manifest["sha256"],
+                )
+
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertNotIn(
+            "immutable_forward_paper_evidence_mismatch",
+            result.reason_codes,
+        )
+        self.assertIn(
+            "independent_forward_paper_trust_unavailable",
+            result.reason_codes,
+        )
+        snapshot.assert_called_once_with(EVIDENCE_ID)
+
     def test_exact_artifact_and_independent_pass_can_produce_terminal_pass(self):
         protocol = self.protocol()
         evidence = self.evidence(protocol)

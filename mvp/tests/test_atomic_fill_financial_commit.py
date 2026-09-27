@@ -643,6 +643,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
         fee_currency="USD",
         position_side=None,
         position_effect=None,
+        instrument="ABC",
         provider_execution_id="provider-execution-1",
         evidence_refs=("provider-fill:test",),
         environment=ENVIRONMENT,
@@ -653,7 +654,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             environment=environment,
             provider_execution_id=provider_execution_id,
             client_order_id="client-order-1",
-            instrument="ABC",
+            instrument=instrument,
             quantity=quantity,
             price=price,
             fee_amount=fee_amount,
@@ -763,6 +764,92 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             self.assertEqual(
                 reservations.get("reservation-1").consumed,
                 {"CASH:USD": Decimal("0")},
+            )
+
+    def test_atomic_order_fill_cannot_book_a_different_instrument(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store, environment="SIMULATION")
+            economics = economic_book(store, environment="SIMULATION")
+            orders = DurableOrderBookProjection(
+                store,
+                provider_id=PROVIDER,
+                account_id=ACCOUNT,
+                environment="SIMULATION",
+                host_id="test-host",
+                owner_epoch="1",
+            )
+            reservations.reserve(
+                command_id="cross-instrument-reserve",
+                idempotency_key="cross-instrument-reserve",
+                reservation_id="reservation-1",
+                intent_id="intent-1",
+                requirements={"CASH:USD": "120"},
+                available={"CASH:USD": "1000"},
+            )
+            orders.create_order(
+                event_key="cross-instrument-order",
+                client_order_id="client-order-1",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="1",
+                quantity_unit="unit:ABC",
+                origin_intent_id="intent-1",
+                committed_at="2026-09-25T09:00:00Z",
+            )
+            order_mutation = orders.ingest_execution_fill(
+                event_key="cross-instrument-fill",
+                client_order_id="client-order-1",
+                execution_fill={
+                    "fill_id": "fill-1",
+                    "provider_execution_id": "provider-execution-1",
+                    "order_ref": "client-order-1",
+                    "intent_ref": "intent-1",
+                    "instrument_version": "ABC",
+                    "side": "BUY",
+                    "last_quantity": {"value": "1", "unit": "unit:ABC"},
+                    "last_price": "100",
+                    "trade_time": "2026-09-25T09:00:00Z",
+                    "receipt_time": "2026-09-25T09:00:01Z",
+                    "fees": [{"amount": "0", "currency": "USD"}],
+                    "settlement_date": "2026-09-26",
+                    "evidence": [],
+                },
+                committed_at="2026-09-25T09:00:02Z",
+                _prepare_only=True,
+            )
+            projected = self.projected_fill()
+            provider = self.provider_fill(
+                environment="SIMULATION",
+                instrument="OTHER",
+            )
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "differs from provider/projected financial evidence",
+            ):
+                commit_provider_fill_with_reservation_consumption(
+                    economics,
+                    reservations,
+                    command_id="cross-instrument-financial-command",
+                    idempotency_key="cross-instrument-financial-command",
+                    reservation_id="reservation-1",
+                    projected_fill=projected,
+                    provider_fill=provider,
+                    expected_instrument="OTHER",
+                    settlement_currency="USD",
+                    observed_at="2026-09-25T09:00:01Z",
+                    committed_at="2026-09-25T09:00:02Z",
+                    order_book=orders,
+                    order_mutation=order_mutation,
+                )
+            self.assertEqual(economics.transactions, ())
+            self.assertEqual(
+                reservations.get("reservation-1").consumed,
+                {"CASH:USD": Decimal("0")},
+            )
+            self.assertEqual(
+                orders.order("client-order-1").filled_quantity,
+                Decimal("0"),
             )
 
     def test_provider_evidence_retargeting_conflicts_with_existing_fill_binding(self):

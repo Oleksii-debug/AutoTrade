@@ -2318,6 +2318,7 @@ def commit_provider_fill_with_reservation_consumption(
             canonical.get("fill_id") != projected_fill.fill_id
             or canonical.get("provider_execution_id")
             != projected_fill.provider_execution_id
+            or canonical.get("instrument_version") != expected_instrument
             or canonical.get("intent_ref") != projected_fill.intent_id
             or canonical.get("order_ref") != projected_fill.client_order_id
             or str(canonical.get("side", "")).upper() != projected_fill.side
@@ -2334,6 +2335,12 @@ def commit_provider_fill_with_reservation_consumption(
         ):
             raise AccountingConflict(
                 "prepared canonical order fill differs from provider/projected financial evidence"
+            )
+        if order_book is None or order_book._quantity_units.get(
+            projected_fill.client_order_id
+        ) != quantity.get("unit"):
+            raise AccountingConflict(
+                "prepared canonical order quantity unit differs from the durable order"
             )
     rid = _text(reservation_id, name="reservation_id")
     snapshot = reservation_book.get(rid)

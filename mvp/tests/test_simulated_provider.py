@@ -33,9 +33,10 @@ class SimulatedProviderTests(unittest.TestCase):
             side="BUY",
             quantity="2",
             price="100",
-            now="2026-09-24T18:00:00Z",
+            now="2026-09-24T20:05:00+02:00",
         )
         self.assertEqual(first, second)
+        self.assertEqual(first["provider_received_at"], "2026-09-24T18:00:00Z")
         self.assertEqual(len(provider.activity_fills()), 1)
         snapshot = provider.account_snapshot(now="2026-09-24T18:01:00Z")
         self.assertEqual(snapshot["balances"][0]["total"], "799.8")
@@ -609,6 +610,22 @@ class SimulatedProviderTests(unittest.TestCase):
             len(provider.account_snapshot(now="2026-09-24T18:00:02Z")["open_orders"]),
             1,
         )
+
+    def test_query_order_never_claims_future_coverage_complete(self):
+        provider = SimulatedProvider()
+        result = provider.query_order(
+            client_order_id="missing-future",
+            coverage_start="2026-09-24T17:00:00Z",
+            coverage_end="2026-09-24T19:00:00Z",
+            pagination_complete=True,
+            now="2026-09-24T18:00:00Z",
+        )
+        self.assertEqual(result["verdict"], "INCONCLUSIVE")
+        self.assertEqual(
+            result["reason_codes"],
+            ["coverage_end_after_query_time"],
+        )
+        self.assertEqual(result["consistency_horizon"], "2026-09-24T18:00:00Z")
 
     def test_query_order_never_claims_absence_with_incomplete_pagination(self):
         provider = SimulatedProvider()

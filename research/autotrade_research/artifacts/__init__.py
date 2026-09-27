@@ -56,6 +56,13 @@ from ._windows_retained_publication import install_windows_retained_publication
 install_windows_retained_publication()
 del install_windows_retained_publication
 
+from ._windows_retained_publication_hardening import (
+    install_windows_retained_publication_hardening,
+)
+
+install_windows_retained_publication_hardening()
+del install_windows_retained_publication_hardening
+
 CANONICAL_ARTIFACT_STORE_MODULE = "autotrade_research.artifacts.store"
 
 __all__ = [

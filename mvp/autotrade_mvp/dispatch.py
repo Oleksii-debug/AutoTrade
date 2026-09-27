@@ -475,6 +475,7 @@ class GuardedDispatcher:
         owner_token: str | None = None,
         owner_epoch: int = 1,
         prepared_lease_seconds: int = 60,
+        sender_check: SenderCheck | None = None,
     ):
         self.store = store
         normalized_environment = (
@@ -484,6 +485,8 @@ class GuardedDispatcher:
             raise ValueError("environment must be REPLAY, SIMULATION, PAPER, or LIVE")
         if not isinstance(account_id, str) or not account_id.strip():
             raise ValueError("account_id is required")
+        if sender_check is not None and not callable(sender_check):
+            raise TypeError("sender_check must be callable when provided")
         self.environment = normalized_environment
         self.account_id = account_id.strip()
         self.scope_key = _identity_digest(self.environment, self.account_id)
@@ -494,6 +497,7 @@ class GuardedDispatcher:
         if not isinstance(prepared_lease_seconds, int) or isinstance(prepared_lease_seconds, bool) or prepared_lease_seconds < 1:
             raise ValueError("prepared_lease_seconds must be a positive integer")
         self.prepared_lease_seconds = prepared_lease_seconds
+        self._bound_sender_check = sender_check
 
     def _aggregate_id(self, attempt_id: str) -> str:
         return submission_attempt_aggregate_id(
@@ -616,6 +620,15 @@ class GuardedDispatcher:
                 raise ValueError(f"{name} is required")
         if not isinstance(request, Mapping):
             raise TypeError("request must be a mapping")
+        if self._bound_sender_check is not None and sender_check is not None:
+            raise ValueError(
+                "sender_check is bound at dispatcher construction and cannot be overridden"
+            )
+        effective_sender_check = (
+            self._bound_sender_check
+            if self._bound_sender_check is not None
+            else sender_check
+        )
         _instant(now)
         request_canonical = canonical_json(dict(request))
         request_dict = json.loads(request_canonical)
@@ -766,7 +779,7 @@ class GuardedDispatcher:
                         now=barrier_now,
                     )
                     raise DispatchBlocked("final_barrier_clock_moved_backwards")
-            if self.environment in {"PAPER", "LIVE"} and sender_check is None:
+            if self.environment in {"PAPER", "LIVE"} and effective_sender_check is None:
                 barrier_reason = "sender_fence_required"
                 self._append(
                     attempt_id=attempt_id,
@@ -781,9 +794,9 @@ class GuardedDispatcher:
                     now=barrier_now,
                 )
                 raise DispatchBlocked(barrier_reason)
-            if sender_check is not None:
+            if effective_sender_check is not None:
                 try:
-                    sender_check(self.owner_token, self.owner_epoch)
+                    effective_sender_check(self.owner_token, self.owner_epoch)
                 except Exception as error:
                     barrier_reason = f"sender_fence_rejected:{type(error).__name__}"
                     self._append(

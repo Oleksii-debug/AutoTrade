@@ -6,6 +6,7 @@ import stat
 import sys
 
 from . import _namespace_guard as _guard
+from . import _retained_coordination as _coordination
 from . import _retained_namespace as _retained
 
 _store = importlib.import_module(f"{__package__}.store")
@@ -95,7 +96,7 @@ def _fallback_audit_after_detachment(
 
 
 def _recover_orphans_bound(self):
-    with _store.ResourceLock(self.lock_path):
+    with _coordination.artifact_store_coordination(self):
         self._validate_staging_namespace()
         probe = self.manifests / "00000000-0000-0000-0000-000000000000.json"
         self._validate_manifest_namespace(probe)

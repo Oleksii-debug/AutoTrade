@@ -15,6 +15,10 @@ _ORIGINAL_ATOMIC_WRITE_JSON = _store.atomic_write_json
 _ORIGINAL_OS_REPLACE = _store.os.replace
 
 
+class LegacyPostCommitFault(RuntimeError):
+    """Test-only compatibility signal emitted after the durable commit point."""
+
+
 def _legacy_manifest_fault_probe(manifest) -> None:
     """Preserve the old post-commit fault signal without touching store paths.
 
@@ -28,8 +32,11 @@ def _legacy_manifest_fault_probe(manifest) -> None:
     current = _store.atomic_write_json
     if current is _ORIGINAL_ATOMIC_WRITE_JSON:
         return
-    with TemporaryDirectory(prefix="autotrade-artifact-fault-probe-") as directory:
-        current(Path(directory) / "manifest.json", manifest)
+    try:
+        with TemporaryDirectory(prefix="autotrade-artifact-fault-probe-") as directory:
+            current(Path(directory) / "manifest.json", manifest)
+    except BaseException as error:
+        raise LegacyPostCommitFault(str(error)) from error
 
 
 def _legacy_object_replace_fault_probe(self, digest: str) -> None:

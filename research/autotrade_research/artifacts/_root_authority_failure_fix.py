@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 
+from . import _generation_bound_read as _generation
 from . import _root_authority as _root
 
 _store = _root._store
@@ -42,11 +43,13 @@ def _export_linearized(self, artifact_id: str, destination: str | Path) -> Path:
     Root continuity is authoritative up to the atomic destination replacement.
     Once that replacement succeeds, the export is committed and later lexical
     root replacement cannot retroactively turn the completed external side
-    effect into a reported failure.
+    effect into a reported failure. Schema-v2 source reads additionally retain
+    the manifest-bound object-prefix generation through the complete copy.
     """
 
     with _root._configured_path_coordination(self):
         _root._assert_root_continuity(self)
+        prefix_authority = None
         try:
             manifest = self.load_manifest(artifact_id)
             _store._verify_manifest_integrity(manifest, required=True)
@@ -58,10 +61,21 @@ def _export_linearized(self, artifact_id: str, destination: str | Path) -> Path:
             source, expected_digest, expected_bytes = self._manifest_object_contract(
                 manifest
             )
-            descriptor, opened = self._open_object_descriptor(
-                source,
-                expected_bytes=expected_bytes,
-            )
+            if manifest.get("schema_version") == 2:
+                descriptor, opened, prefix_authority, prefix_opened = (
+                    _generation._open_generation_bound_descriptor(
+                        self,
+                        manifest,
+                        source,
+                        expected_bytes=expected_bytes,
+                    )
+                )
+            else:
+                descriptor, opened = self._open_object_descriptor(
+                    source,
+                    expected_bytes=expected_bytes,
+                )
+                prefix_opened = None
             try:
                 try:
                     authorized = self._export_authorizer(
@@ -99,12 +113,24 @@ def _export_linearized(self, artifact_id: str, destination: str | Path) -> Path:
                             handle.write(chunk)
                             copied += len(chunk)
                             copied_hash.update(chunk)
-                        self._revalidate_object_descriptor(
-                            source,
-                            descriptor,
-                            opened,
-                            expected_bytes=expected_bytes,
-                        )
+                        if manifest.get("schema_version") == 2:
+                            _generation._revalidate_generation_bound_descriptor(
+                                self,
+                                manifest,
+                                source,
+                                descriptor,
+                                opened,
+                                prefix_authority,
+                                prefix_opened,
+                                expected_bytes=expected_bytes,
+                            )
+                        else:
+                            self._revalidate_object_descriptor(
+                                source,
+                                descriptor,
+                                opened,
+                                expected_bytes=expected_bytes,
+                            )
                         handle.flush()
                         os.fsync(handle.fileno())
                     if (
@@ -136,6 +162,9 @@ def _export_linearized(self, artifact_id: str, destination: str | Path) -> Path:
                 return target
             finally:
                 os.close(descriptor)
+                if prefix_authority is not None:
+                    _generation._close_prefix_authority(prefix_authority)
+                    prefix_authority = None
         except BaseException as primary:
             # Before destination commit, root loss outranks a lower-level error.
             # After commit the function has already returned through the success

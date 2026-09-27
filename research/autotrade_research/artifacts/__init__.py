@@ -108,6 +108,11 @@ from ._crash_atomic_publication import install_crash_atomic_publication
 install_crash_atomic_publication()
 del install_crash_atomic_publication
 
+from ._retained_recovery_final import install_retained_recovery_final
+
+install_retained_recovery_final()
+del install_retained_recovery_final
+
 from ._retained_coordination import install_retained_coordination
 
 install_retained_coordination()

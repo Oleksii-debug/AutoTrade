@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mvp.autotrade_mvp.authority import AuthorityService
+from mvp.autotrade_mvp.authority import AuthorityService, _instant
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 
 
@@ -23,8 +23,20 @@ _NEW_EXPOSURE_BLOCK_FIELDS = {
     "reason",
     "blocked_at",
 }
+_NEW_EXPOSURE_RESTORE_FIELDS = {
+    "command_id",
+    "account_id",
+    "environment",
+    "reason",
+    "restored_at",
+    "blocked_command_id",
+    "blocked_reason",
+    "blocked_at",
+}
 _SUPPORTED_ENVIRONMENTS = {"SIMULATION", "PAPER", "LIVE"}
 _SNAPSHOT_COMMAND_ACTOR = "autotrade-authority-snapshot"
+_CANONICAL_AUTHORITY_TYPE = "authority_state"
+_CANONICAL_AUTHORITY_ID = "canonical"
 
 
 def _indexed_collection(state: dict, name: str, identity_key: str) -> dict[str, dict]:
@@ -78,6 +90,7 @@ def _indexed_new_exposure_blocks(
             raise ValueError(
                 "authority state new_exposure_blocks entry has unsupported environment"
             )
+        _instant(normalized["blocked_at"], name="blocked_at")
         scope = (normalized["account_id"], environment)
         if scope in indexed:
             raise ValueError(
@@ -87,18 +100,113 @@ def _indexed_new_exposure_blocks(
     return indexed
 
 
+def _canonical_event_text(payload: dict, field: str) -> str:
+    value = payload.get(field)
+    if not isinstance(value, str) or not value.strip() or value != value.strip():
+        raise ValueError(
+            f"canonical new-exposure authority has invalid {field}"
+        )
+    return value
+
+
 def _canonical_new_exposure_blocks(
     store: JournalStore,
 ) -> dict[tuple[str, str], dict[str, str]]:
-    """Replay the existing canonical block/restore authority and return active blocks."""
+    """Replay only canonical block/restore transitions from authority_state.
 
+    Full AuthorityService journal replay also verifies durable financial
+    admissions and may need external artifact evidence. Snapshot publication
+    must not acquire that unrelated availability dependency merely to prove the
+    emergency no-new-risk state. The source remains the same canonical
+    authority_state/canonical journal; this focused replay reproduces its exact
+    block/restore transition rules and validates aggregate order.
+    """
+
+    active: dict[tuple[str, str], dict[str, str]] = {}
+    expected_version = 1
     try:
-        replayed = AuthorityService(store).export_state()
-        return _indexed_new_exposure_blocks(replayed)
+        events = store.load_events(_CANONICAL_AUTHORITY_TYPE, _CANONICAL_AUTHORITY_ID)
+        for event in events:
+            if event.get("aggregate_version") != expected_version:
+                raise ValueError(
+                    "canonical authority journal version sequence is invalid"
+                )
+            expected_version += 1
+            event_type = event.get("event_type")
+            if event_type not in {
+                "AuthorityNewExposureBlocked",
+                "AuthorityNewExposureRestored",
+            }:
+                continue
+            payload = event.get("payload")
+            if not isinstance(payload, dict):
+                raise ValueError(
+                    "canonical new-exposure authority payload is malformed"
+                )
+
+            if event_type == "AuthorityNewExposureBlocked":
+                if set(payload) != _NEW_EXPOSURE_BLOCK_FIELDS:
+                    raise ValueError(
+                        "canonical new-exposure block payload has invalid structure"
+                    )
+                account_id = _canonical_event_text(payload, "account_id")
+                environment = _canonical_event_text(payload, "environment")
+                if environment not in _SUPPORTED_ENVIRONMENTS:
+                    raise ValueError(
+                        "canonical new-exposure block environment is unsupported"
+                    )
+                block = {
+                    "account_id": account_id,
+                    "environment": environment,
+                    "command_id": _canonical_event_text(payload, "command_id"),
+                    "reason": _canonical_event_text(payload, "reason"),
+                    "blocked_at": _canonical_event_text(payload, "blocked_at"),
+                }
+                _instant(block["blocked_at"], name="blocked_at")
+                scope = (account_id, environment)
+                existing = active.get(scope)
+                if existing is not None and existing != block:
+                    raise ValueError(
+                        "canonical new-exposure block history conflicts"
+                    )
+                active[scope] = block
+                continue
+
+            if set(payload) != _NEW_EXPOSURE_RESTORE_FIELDS:
+                raise ValueError(
+                    "canonical new-exposure restore payload has invalid structure"
+                )
+            account_id = _canonical_event_text(payload, "account_id")
+            environment = _canonical_event_text(payload, "environment")
+            if environment not in _SUPPORTED_ENVIRONMENTS:
+                raise ValueError(
+                    "canonical new-exposure restore environment is unsupported"
+                )
+            _canonical_event_text(payload, "command_id")
+            _canonical_event_text(payload, "reason")
+            restored_at = _canonical_event_text(payload, "restored_at")
+            _instant(restored_at, name="restored_at")
+            expected_block = {
+                "account_id": account_id,
+                "environment": environment,
+                "command_id": _canonical_event_text(payload, "blocked_command_id"),
+                "reason": _canonical_event_text(payload, "blocked_reason"),
+                "blocked_at": _canonical_event_text(payload, "blocked_at"),
+            }
+            _instant(expected_block["blocked_at"], name="blocked_at")
+            scope = (account_id, environment)
+            if active.get(scope) != expected_block:
+                raise ValueError(
+                    "canonical new-exposure restore does not match active block"
+                )
+            del active[scope]
     except Exception as error:
+        if isinstance(error, ValueError) and str(error).startswith("canonical "):
+            raise
         raise ValueError(
             "canonical new-exposure authority cannot be replayed for snapshot proof"
         ) from error
+    return active
 
 
 def _assert_new_exposure_blocks_match_canonical(
@@ -285,20 +393,27 @@ def persist_authority_snapshot(
 
     assert journal_cut is not None
     command_identity = _snapshot_command_identity(authority_id, event_id)
-    _result, inserted, appended = store.commit_command(
-        command_id=command_identity,
-        actor=_SNAPSHOT_COMMAND_ACTOR,
-        environment="REPLAY",
-        idempotency_key=command_identity,
-        request={"snapshot_event": envelope},
-        result={
-            "event_id": event_id,
-            "aggregate_version": aggregate_version,
-        },
-        state_version=aggregate_version,
-        events=[(envelope, None)],
-        expected_journal_sequence=journal_cut,
-    )
+    try:
+        _result, inserted, appended = store.commit_command(
+            command_id=command_identity,
+            actor=_SNAPSHOT_COMMAND_ACTOR,
+            environment="REPLAY",
+            idempotency_key=command_identity,
+            request={"snapshot_event": envelope},
+            result={
+                "event_id": event_id,
+                "aggregate_version": aggregate_version,
+            },
+            state_version=aggregate_version,
+            events=[(envelope, None)],
+            expected_journal_sequence=journal_cut,
+        )
+    except ValueError as error:
+        if "journal sequence changed after financial evidence validation" in str(error):
+            raise ValueError(
+                "authority snapshot aggregate_version/journal sequence changed before commit"
+            ) from error
+        raise
     if not inserted or len(appended) != 1:
         raise ValueError(
             "authority snapshot transaction did not append the exact new event"

@@ -46,6 +46,11 @@ from ._retained_namespace_hardening import install_retained_namespace_hardening
 install_retained_namespace_hardening()
 del install_retained_namespace_hardening
 
+from ._retained_recovery_hardening import install_retained_recovery_hardening
+
+install_retained_recovery_hardening()
+del install_retained_recovery_hardening
+
 from ._retained_publication import install_retained_publication_authority
 
 install_retained_publication_authority()

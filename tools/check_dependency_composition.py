@@ -110,13 +110,21 @@ def _python_blockers(root: Path) -> tuple[list[str], list[str]]:
         blockers.append("UNREADABLE_RESEARCH_PYPROJECT")
         return blockers, exact
 
-    build_requires_raw = document.get("build-system", {}).get("requires")
+    build_system = document.get("build-system")
     build_requires: list[str] = []
+    if not isinstance(build_system, dict):
+        blockers.append("MALFORMED_RESEARCH_BUILD_SYSTEM")
+        build_requires_raw = None
+    else:
+        build_requires_raw = build_system.get("requires")
     if not isinstance(build_requires_raw, list) or not build_requires_raw:
         blockers.append("MISSING_RESEARCH_BUILD_REQUIREMENTS")
     else:
-        build_requires = list(build_requires_raw)
-        for requirement in build_requires:
+        for requirement in build_requires_raw:
+            if not isinstance(requirement, str):
+                blockers.append("MALFORMED_RESEARCH_BUILD_REQUIREMENT")
+                continue
+            build_requires.append(requirement)
             if not is_exact_python_requirement(requirement):
                 blockers.append(
                     f"NON_EXACT_RESEARCH_BUILD_REQUIREMENT:{requirement}"
@@ -124,16 +132,26 @@ def _python_blockers(root: Path) -> tuple[list[str], list[str]]:
         if not set(build_requires).issubset(set(dev_requirements)):
             blockers.append("RESEARCH_BUILD_REQUIREMENTS_DRIFT")
 
-    test_requires_raw = (
-        document.get("project", {})
-        .get("optional-dependencies", {})
-        .get("test")
-    )
+    project = document.get("project")
+    if not isinstance(project, dict):
+        blockers.append("MALFORMED_RESEARCH_PROJECT")
+        optional_dependencies = None
+    else:
+        optional_dependencies = project.get("optional-dependencies")
+    if not isinstance(optional_dependencies, dict):
+        blockers.append("MALFORMED_RESEARCH_OPTIONAL_DEPENDENCIES")
+        test_requires_raw = None
+    else:
+        test_requires_raw = optional_dependencies.get("test")
     if not isinstance(test_requires_raw, list) or not test_requires_raw:
         blockers.append("MISSING_RESEARCH_TEST_REQUIREMENTS")
     else:
-        test_requires = list(test_requires_raw)
-        for requirement in test_requires:
+        test_requires: list[str] = []
+        for requirement in test_requires_raw:
+            if not isinstance(requirement, str):
+                blockers.append("MALFORMED_RESEARCH_TEST_REQUIREMENT")
+                continue
+            test_requires.append(requirement)
             if not is_exact_python_requirement(requirement):
                 blockers.append(
                     f"NON_EXACT_RESEARCH_TEST_REQUIREMENT:{requirement}"

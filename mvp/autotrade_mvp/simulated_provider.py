@@ -725,7 +725,9 @@ class SimulatedProvider:
             "searched_surfaces": searched,
             "time_window": window,
             "pagination_complete": pagination_complete,
-            "consistency_horizon": canonical_end,
+            "consistency_horizon": (
+                canonical_now if end > current else canonical_end
+            ),
         }
         if order_payload is not None:
             core["order"] = order_payload

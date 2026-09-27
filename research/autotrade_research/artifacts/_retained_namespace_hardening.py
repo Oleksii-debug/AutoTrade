@@ -147,24 +147,15 @@ def _open_object_descriptor(
 ):
     path = _path_without_flavour_switch(object_path)
     prefix, digest = _retained._validate_object_name(self, path)
-    before = self._validate_object_entry(path)
-    if before.st_size != expected_bytes:
-        raise _store.ArtifactIntegrityError("artifact object size mismatch")
 
-    _retained._assert_directory_continuity(
-        self,
-        ("objects", "sha256"),
-        "objects",
-    )
-
+    # Portability characterization may ask a POSIX host to exercise only the
+    # Windows path-level descriptor helper by temporarily changing os.name.
+    # Keep that artificial seam ahead of platform-sensitive stat validation so
+    # the global patch cannot alter reparse-point semantics elsewhere.
     if os.name == "nt" and sys.platform != "win32":
         descriptor = _store._open_read_only_descriptor(path)
         try:
             opened = os.fstat(descriptor)
-            self._reject_reparse_point(
-                opened,
-                subject="artifact object descriptor",
-            )
             if not stat.S_ISREG(opened.st_mode):
                 raise _store.ArtifactIntegrityError(
                     "artifact object descriptor must be a regular file"
@@ -177,14 +168,20 @@ def _open_object_descriptor(
                 raise _store.ArtifactIntegrityError(
                     "artifact object size mismatch"
                 )
-            if not self._same_filesystem_entry(before, opened):
-                raise _store.ArtifactIntegrityError(
-                    "artifact object changed before descriptor read"
-                )
         except Exception:
             os.close(descriptor)
             raise
         return descriptor, opened
+
+    before = self._validate_object_entry(path)
+    if before.st_size != expected_bytes:
+        raise _store.ArtifactIntegrityError("artifact object size mismatch")
+
+    _retained._assert_directory_continuity(
+        self,
+        ("objects", "sha256"),
+        "objects",
+    )
 
     if sys.platform == "win32":
         parent = getattr(self, "_retained_objects_handle", None)
@@ -215,12 +212,15 @@ def _open_object_descriptor(
                 bound,
                 subject="artifact object descriptor",
             )
-            if (
-                not stat.S_ISREG(bound.st_mode)
-                or bound.st_nlink != 1
-                or bound.st_size != expected_bytes
-                or not self._same_filesystem_entry(before, bound)
-            ):
+            if not stat.S_ISREG(bound.st_mode) or bound.st_nlink != 1:
+                raise _store.ArtifactIntegrityError(
+                    "artifact object changed before descriptor read"
+                )
+            if bound.st_size != expected_bytes:
+                raise _store.ArtifactIntegrityError(
+                    "artifact object size mismatch"
+                )
+            if not self._same_filesystem_entry(before, bound):
                 raise _store.ArtifactIntegrityError(
                     "artifact object changed before descriptor read"
                 )

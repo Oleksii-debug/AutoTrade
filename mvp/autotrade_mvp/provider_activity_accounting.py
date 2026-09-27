@@ -76,8 +76,12 @@ def _decimal(value: Decimal | str | int, *, name: str) -> Decimal:
 
 
 def _decimal_text(value: Decimal) -> str:
-    normalized = value.normalize()
-    return format(normalized, "f")
+    if value == 0:
+        return "0"
+    # normalize() rounds through the ambient Decimal context. Durable batch
+    # identities must retain every significant digit of provider evidence.
+    exact = format(value, "f")
+    return exact.rstrip("0").rstrip(".") if "." in exact else exact
 
 
 def _instant(value: str, *, name: str) -> datetime:
@@ -1546,10 +1550,25 @@ def commit_economic_batch_with_reservation_consumption(
             settlement_book.scope.provider_id != economic_book.provider_id
             or settlement_book.scope.account_id != economic_book.account_id
             or settlement_book.scope.environment != economic_book.environment
+            or settlement_book.scope.provider_environment
+            != economic_book.provider_environment
         ):
             raise ValueError(
                 "settlement book must share provider/account/environment scope"
             )
+        if provider_fill_binding is not None:
+            binding_provider_environment = provider_fill_binding.request.get(
+                "provider_environment",
+                provider_fill_binding.request.get("environment"),
+            )
+            if (
+                binding_provider_environment
+                != settlement_book.scope.provider_environment
+            ):
+                raise AccountingConflict(
+                    "provider fill financial binding provider_environment "
+                    "does not match settlement book"
+                )
         if not settlement_items:
             raise ValueError(
                 "settlement_book requires explicit settlement obligations"

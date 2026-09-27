@@ -1076,6 +1076,17 @@ class ReconciliationTests(unittest.TestCase):
 
     def test_provider_environment_scope_is_enforced_for_financial_truth(self):
         scoped = fill(provider_environment="TESTNET")
+        def scoped_snapshot(provider_environment):
+            return SnapshotConsistencyEvidence(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                provider_environment=provider_environment,
+                mode="ATOMIC",
+                query_started_at="2026-09-24T17:00:00Z",
+                query_completed_at="2026-09-24T19:00:00Z",
+            )
+
         self.assertEqual(scoped.provider_environment, "TESTNET")
         self.assertEqual(fill().provider_environment, "PAPER")
         with self.assertRaisesRegex(
@@ -1085,10 +1096,12 @@ class ReconciliationTests(unittest.TestCase):
             self.base(
                 provider_environment="DEMO",
                 provider_fills=[scoped],
+                snapshot_consistency=scoped_snapshot("DEMO"),
             )
         result = self.base(
             provider_environment="TESTNET",
             provider_fills=[scoped],
+            snapshot_consistency=scoped_snapshot("TESTNET"),
         )
         self.assertTrue(result.complete)
 

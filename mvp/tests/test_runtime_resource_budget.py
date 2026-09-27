@@ -159,6 +159,30 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
         self.assertEqual(decision.status, "INCONCLUSIVE")
         self.assertIn("insufficient_financial_latency_samples", decision.reasons)
 
+    def test_every_recovered_financial_event_requires_latency_coverage(self):
+        decision = evaluate_runtime_budget(
+            self.spec(min_financial_samples=5),
+            self.observation(
+                financial_latency_us=[100_000] * 19,
+                financial_staleness_us=[100_000] * 20,
+            ),
+        )
+        self.assertEqual(decision.status, "INCONCLUSIVE")
+        self.assertIn("incomplete_financial_latency_coverage", decision.reasons)
+        self.assertEqual(decision.metrics["financial_latency_sample_count"], 19)
+
+    def test_every_recovered_financial_event_requires_staleness_coverage(self):
+        decision = evaluate_runtime_budget(
+            self.spec(min_financial_samples=5),
+            self.observation(
+                financial_latency_us=[100_000] * 20,
+                financial_staleness_us=[100_000] * 19,
+            ),
+        )
+        self.assertEqual(decision.status, "INCONCLUSIVE")
+        self.assertIn("incomplete_financial_staleness_coverage", decision.reasons)
+        self.assertEqual(decision.metrics["financial_staleness_sample_count"], 19)
+
     def test_failure_has_priority_over_insufficient_evidence(self):
         decision = evaluate_runtime_budget(
             self.spec(),

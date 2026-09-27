@@ -36,6 +36,11 @@ from ._retained_namespace import install_retained_namespace_authority
 install_retained_namespace_authority()
 del install_retained_namespace_authority
 
+from ._retained_namespace_hardening import install_retained_namespace_hardening
+
+install_retained_namespace_hardening()
+del install_retained_namespace_hardening
+
 CANONICAL_ARTIFACT_STORE_MODULE = "autotrade_research.artifacts.store"
 
 __all__ = [

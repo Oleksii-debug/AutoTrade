@@ -208,10 +208,6 @@ def _publish_object_posix(
                 linked_new_object = True
                 _publication._sync_directory_fd(prefix_fd)
 
-            # Remove the staging alias before enforcing the canonical object's
-            # single-link invariant. A successful link temporarily raises
-            # st_nlink to two; a crash in that window is recoverable because
-            # the second name lives in retained staging.
             _publication._safe_unlink(
                 self._retained_staging_fd,
                 temporary_name,
@@ -225,6 +221,10 @@ def _publish_object_posix(
                     digest,
                     expected_bytes=len(data),
                 )
+                # Compatibility/qualification seam. The retained descriptor fsync
+                # above is authoritative; this redundant call preserves existing
+                # durability instrumentation without replacing bound semantics.
+                _store.sync_parent_directory(self._object_path(digest))
             _assert_prefix_identity(self, prefix, prefix_identity)
         finally:
             if descriptor is not None:
@@ -283,6 +283,9 @@ def _publish_manifest_posix(
             )
         temporary_name = None
         _publication._sync_directory_fd(self._retained_manifests_fd)
+        _store.sync_parent_directory(
+            self._manifest_path(manifest["artifact_id"])
+        )
 
         committed = os.stat(
             name,

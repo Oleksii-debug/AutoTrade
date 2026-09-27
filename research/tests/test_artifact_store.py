@@ -17,6 +17,18 @@ from autotrade_research.artifacts.store import (
 
 
 class ArtifactStoreTests(unittest.TestCase):
+    @staticmethod
+    def _make_hashless_v1(path, manifest, **extra):
+        legacy = {
+            key: value
+            for key, value in manifest.items()
+            if key not in {"manifest_hash", "publication_state", "object_generation"}
+        }
+        legacy["schema_version"] = 1
+        legacy.update(extra)
+        path.write_text(json.dumps(legacy), encoding="utf-8")
+        return legacy
+
     def test_publish_read_and_idempotent_republish(self):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)
@@ -1058,9 +1070,7 @@ class ArtifactStoreTests(unittest.TestCase):
                 metadata={"kind": "legacy-upgrade"},
             )
             path = store._manifest_path(artifact_id)
-            legacy = dict(manifest)
-            legacy.pop("manifest_hash")
-            path.write_text(json.dumps(legacy), encoding="utf-8")
+            self._make_hashless_v1(path, manifest)
 
             with self.assertRaisesRegex(ArtifactIntegrityError, "lacks integrity binding"):
                 store.export(artifact_id, Path(directory) / "before.txt")
@@ -1073,6 +1083,9 @@ class ArtifactStoreTests(unittest.TestCase):
                 source_refs=["source:fixture"],
                 metadata={"kind": "legacy-upgrade"},
             )
+            self.assertEqual(upgraded["schema_version"], 2)
+            self.assertEqual(upgraded["publication_state"], "COMMITTED")
+            self.assertIn("object_generation", upgraded)
             self.assertIn("manifest_hash", upgraded)
             target = store.export(artifact_id, Path(directory) / "after.txt")
             self.assertEqual(target.read_bytes(), b"public")
@@ -1090,9 +1103,7 @@ class ArtifactStoreTests(unittest.TestCase):
                 metadata={"kind": "legacy-read-upgrade"},
             )
             path = store._manifest_path(artifact_id)
-            legacy = dict(manifest)
-            legacy.pop("manifest_hash")
-            path.write_text(json.dumps(legacy), encoding="utf-8")
+            self._make_hashless_v1(path, manifest)
 
             with self.assertRaisesRegex(
                 ArtifactIntegrityError,
@@ -1108,6 +1119,9 @@ class ArtifactStoreTests(unittest.TestCase):
                 source_refs=["source:fixture"],
                 metadata={"kind": "legacy-read-upgrade"},
             )
+            self.assertEqual(upgraded["schema_version"], 2)
+            self.assertEqual(upgraded["publication_state"], "COMMITTED")
+            self.assertIn("object_generation", upgraded)
             self.assertIn("manifest_hash", upgraded)
             self.assertEqual(store.read_bytes(artifact_id), b"evidence")
 
@@ -1124,11 +1138,12 @@ class ArtifactStoreTests(unittest.TestCase):
                 metadata={"kind": "legacy-rebind"},
             )
             path = store._manifest_path(artifact_id)
-            legacy = dict(manifest)
-            legacy.pop("manifest_hash")
-            legacy["created_at"] = "2000-01-01T00:00:00Z"
-            legacy["untrusted_extra"] = {"claimed": "historical-proof"}
-            path.write_text(json.dumps(legacy), encoding="utf-8")
+            self._make_hashless_v1(
+                path,
+                manifest,
+                created_at="2000-01-01T00:00:00Z",
+                untrusted_extra={"claimed": "historical-proof"},
+            )
 
             rebound = store.publish_bytes(
                 artifact_id=artifact_id,
@@ -1139,6 +1154,9 @@ class ArtifactStoreTests(unittest.TestCase):
                 metadata={"kind": "legacy-rebind"},
             )
 
+            self.assertEqual(rebound["schema_version"], 2)
+            self.assertEqual(rebound["publication_state"], "COMMITTED")
+            self.assertIn("object_generation", rebound)
             self.assertIn("manifest_hash", rebound)
             self.assertNotEqual(rebound["created_at"], "2000-01-01T00:00:00Z")
             self.assertNotIn("untrusted_extra", rebound)
@@ -1154,10 +1172,43 @@ class ArtifactStoreTests(unittest.TestCase):
                     "source_refs",
                     "metadata",
                     "created_at",
+                    "publication_state",
+                    "object_generation",
                     "manifest_hash",
                 },
             )
             self.assertEqual(store.read_bytes(artifact_id), b"legacy-evidence")
+
+    def test_hashless_unknown_manifest_schema_cannot_be_upgraded(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            artifact_id = str(uuid4())
+            store.publish_bytes(
+                artifact_id=artifact_id,
+                data=b"evidence",
+                media_type="application/octet-stream",
+                rights={"storage": True, "export": False},
+            )
+            path = store._manifest_path(artifact_id)
+            current = json.loads(path.read_text(encoding="utf-8"))
+            unknown = self._make_hashless_v1(path, current)
+            unknown["schema_version"] = 99
+            unknown["untrusted_extra"] = "must not be sealed"
+            path.write_text(json.dumps(unknown), encoding="utf-8")
+            original = path.read_bytes()
+
+            with self.assertRaisesRegex(
+                ArtifactIntegrityError,
+                "schema_version is unsupported",
+            ):
+                store.publish_bytes(
+                    artifact_id=artifact_id,
+                    data=b"evidence",
+                    media_type="application/octet-stream",
+                    rights={"storage": True, "export": False},
+                )
+
+            self.assertEqual(path.read_bytes(), original)
 
     def test_audit_never_reopens_failed_manifest_by_path_after_safe_load_error(self):
         with TemporaryDirectory() as directory:
@@ -1607,7 +1658,7 @@ class ArtifactStoreTests(unittest.TestCase):
             digest = hashlib.sha256(data).hexdigest()
 
             with patch(
-                "autotrade_research.artifacts.store.atomic_write_json",
+                "autotrade_research.artifacts._retained_publication_hardening._publish_manifest_posix",
                 side_effect=RuntimeError("simulated process death before manifest commit"),
             ):
                 with self.assertRaisesRegex(RuntimeError, "simulated process death"):

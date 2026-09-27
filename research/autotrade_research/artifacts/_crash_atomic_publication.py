@@ -221,6 +221,13 @@ def _handle_existing(self, existing, immutable, *, windows: bool):
         # Every v2 record is authenticated transaction state before it can
         # influence retry or recovery behavior.
         _contract._ORIGINAL_VERIFY_MANIFEST_INTEGRITY(existing, required=True)
+    elif schema != 1:
+        # Only the canonical historical v1 shape is eligible for the bounded
+        # hashless migration. Unknown/future schemas must never be upgraded by
+        # treating their untrusted fields as legacy evidence.
+        raise _store.ArtifactIntegrityError(
+            "artifact manifest schema_version is unsupported"
+        )
 
     if any(existing.get(key) != value for key, value in immutable.items()):
         raise _store.ArtifactConflict(

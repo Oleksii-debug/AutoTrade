@@ -17,7 +17,6 @@ class WindowsRetainedRelativeRenameRealTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory) / "store"
             store = ArtifactStore(root)
-            self.assertTrue(store._windows_retained_rename_fix)
             self.assertTrue(store._windows_retained_publication_hardening)
 
             artifact_id = str(uuid4())

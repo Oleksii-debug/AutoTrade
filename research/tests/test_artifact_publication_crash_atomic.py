@@ -315,6 +315,107 @@ raise AssertionError("publication unexpectedly survived hard-crash seam")
                 )
             self.assertEqual(manifest_path.read_bytes(), prepared_bytes)
 
+    def test_committed_crash_then_same_bytes_prefix_replacement_is_rejected(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "store"
+            artifact_id = str(uuid4())
+            payload = b"windows-hard-crash-committed-manifest"
+            research_root = Path(__file__).resolve().parents[1]
+            environment = os.environ.copy()
+            current_pythonpath = environment.get("PYTHONPATH", "")
+            environment["PYTHONPATH"] = os.pathsep.join(
+                part
+                for part in (str(research_root), current_pythonpath)
+                if part
+            )
+
+            child = r'''
+import os
+from pathlib import Path
+import sys
+
+from autotrade_research.artifacts import _windows_retained_publication_hardening as publication
+from autotrade_research.artifacts.store import ArtifactStore
+
+root = Path(sys.argv[1])
+artifact_id = sys.argv[2]
+payload = b"windows-hard-crash-committed-manifest"
+store = ArtifactStore(root)
+real_publish_manifest = publication._publish_manifest_windows
+
+
+def publish_committed_then_die(self, *, manifest, replace_existing):
+    result = real_publish_manifest(
+        self,
+        manifest=manifest,
+        replace_existing=replace_existing,
+    )
+    if manifest.get("publication_state") == "COMMITTED" and replace_existing:
+        os._exit(94)
+    return result
+
+
+publication._publish_manifest_windows = publish_committed_then_die
+store.publish_bytes(
+    artifact_id=artifact_id,
+    data=payload,
+    media_type="application/octet-stream",
+    rights={"storage": True, "export": False},
+)
+raise AssertionError("publication unexpectedly survived hard-crash seam")
+'''
+            completed = subprocess.run(
+                [sys.executable, "-c", child, str(root), artifact_id],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(
+                completed.returncode,
+                94,
+                msg=f"stdout={completed.stdout!r} stderr={completed.stderr!r}",
+            )
+
+            manifest_path = root / "manifests" / f"{artifact_id}.json"
+            committed_bytes = manifest_path.read_bytes()
+            raw = json.loads(committed_bytes)
+            self.assertEqual(raw["schema_version"], 2)
+            self.assertEqual(raw["publication_state"], "COMMITTED")
+            digest = raw["sha256"].removeprefix("sha256:")
+
+            prefix = root / "objects" / "sha256" / digest[:2]
+            detached = root / "objects" / "sha256" / ("detached-" + digest[:2])
+            replacement = root.parent / ("replacement-" + digest[:2])
+            replacement.mkdir()
+            (replacement / digest).write_bytes(payload)
+            os.replace(prefix, detached)
+            os.replace(replacement, prefix)
+
+            reopened = ArtifactStore(root)
+            for operation in (
+                lambda: reopened.load_manifest(artifact_id),
+                lambda: reopened.read_bytes(artifact_id),
+                lambda: reopened.read_authenticated_snapshot(artifact_id),
+            ):
+                with self.assertRaisesRegex(
+                    ArtifactIntegrityError,
+                    "object generation changed after publication",
+                ):
+                    operation()
+
+            with self.assertRaisesRegex(
+                ArtifactIntegrityError,
+                "object generation changed after publication",
+            ):
+                reopened.publish_bytes(
+                    artifact_id=artifact_id,
+                    data=payload,
+                    media_type="application/octet-stream",
+                    rights={"storage": True, "export": False},
+                )
+            self.assertEqual(manifest_path.read_bytes(), committed_bytes)
+
 
 if __name__ == "__main__":
     unittest.main()

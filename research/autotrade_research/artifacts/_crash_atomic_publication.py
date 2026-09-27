@@ -61,6 +61,11 @@ def _legacy_rebind(self, immutable, *, windows: bool):
 def _handle_existing(self, existing, immutable, *, windows: bool):
     if existing is None:
         return None
+    if existing.get("schema_version") == 2:
+        # Every v2 record is part of the authenticated publication protocol.
+        # Verify its integrity without applying COMMITTED-only admissibility yet,
+        # because an interrupted PREPARED record is a valid forensic barrier.
+        _contract._ORIGINAL_VERIFY_MANIFEST_INTEGRITY(existing, required=True)
     if existing.get("schema_version") == 2 and existing.get("publication_state") == "PREPARED":
         # A PREPARED manifest is a durable forensic barrier after an interrupted
         # publication. Never erase it before proving that the exact object-prefix

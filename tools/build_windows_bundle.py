@@ -476,12 +476,12 @@ def _load_composition(
                 f"composition {kind} digest does not match declared component"
             )
 
-    # The qualification verifier has two authorities: exact Git objects for
-    # checkout/CI, and a source-controlled digest pin for a delivered non-Git
-    # runtime.  When that production pin exists, release composition must carry
-    # the exact same policy bytes.  The installer-input boundary subsequently
-    # preserves the full component inventory, so a signed installer binds the
-    # policy without allowing a packager/caller-selected trust root or digest.
+    # Exact Git objects remain the qualification trust authority for checkout/CI.
+    # A source-controlled packaged-policy digest is only a composition inventory
+    # constraint: it can require the exact policy bytes to be shipped, but cannot
+    # authenticate the installed source SHA.  Terminal non-Git verification stays
+    # unavailable until a separate signed/delivered source-identity authority is
+    # wired into qualification_attestation.
     try:
         qualification_policy_digest = (
             canonical_packaged_qualification_trust_policy_digest()

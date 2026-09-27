@@ -216,7 +216,7 @@ class SimulatedProvider:
                 raise SimulatedProviderConflict(
                     "attempt_id already has different simulated order content"
                 )
-            return self._submission_result(prior_attempt, canonical_now)
+            return self._submission_result(prior_attempt, prior_attempt.submitted_at)
 
         prior_client = self.orders.get(cid)
         if prior_client is not None:
@@ -661,17 +661,33 @@ class SimulatedProvider:
         end = _instant(coverage_end, name="coverage_end")
         canonical_start = start.isoformat().replace("+00:00", "Z")
         canonical_end = end.isoformat().replace("+00:00", "Z")
-        canonical_now = _utc_text(now, name="now")
+        current = _instant(now, name="now")
+        canonical_now = current.isoformat().replace("+00:00", "Z")
         if end < start:
             raise ValueError("coverage_end must not precede coverage_start")
         if not isinstance(pagination_complete, bool):
             raise TypeError("pagination_complete must be boolean")
-        order = self.orders.get(cid)
         searched = ["orders-by-client-id", "activity-fills"]
         window = {
             "start": canonical_start,
             "end": canonical_end,
         }
+        if end > current:
+            core = {
+                "verdict": "INCONCLUSIVE",
+                "searched_surfaces": searched,
+                "time_window": window,
+                "pagination_complete": pagination_complete,
+                "consistency_horizon": canonical_now,
+                "reason_codes": ["coverage_end_after_query_time"],
+            }
+            return {
+                **core,
+                "evidence": [
+                    _evidence("query-order", cid, canonical_now, core)
+                ],
+            }
+        order = self.orders.get(cid)
         if order is not None:
             verdict = "FOUND"
             filled = self._filled_quantity(order)

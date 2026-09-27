@@ -5,8 +5,10 @@ from hashlib import sha256
 import os
 import stat
 from typing import Any
+from uuid import uuid4
 
 from . import _namespace_guard as _guard
+from . import _publication_admission as _admission
 from . import _retained_namespace as _retained
 from . import _retained_publication as _publication
 from . import _retained_publication_hardening as _posix
@@ -146,6 +148,74 @@ def _rollback_new_manifest_windows(
         _guard._close_windows_handle(manifests)
 
 
+def _delete_admission_marker_posix(self, name: str) -> None:
+    try:
+        os.unlink(name, dir_fd=self._retained_manifests_fd)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise _store.ArtifactIntegrityError(
+            "artifact publication admission rollback failed"
+        ) from error
+
+
+def _delete_admission_marker_windows(self, name: str) -> None:
+    manifests = _windows._open_mutation_directory(
+        self,
+        ("manifests",),
+        retained_name="manifests",
+    )
+    handle = None
+    descriptor = None
+    try:
+        try:
+            handle = _windows._nt_create_relative(
+                manifests,
+                name,
+                directory=False,
+                disposition=_windows._FILE_OPEN,
+                desired_access=(
+                    _guard._NT_FILE_READ_ATTRIBUTES
+                    | _windows._DELETE
+                    | _guard._NT_SYNCHRONIZE
+                ),
+                subject="artifact publication admission rollback marker",
+            )
+        except FileNotFoundError:
+            return
+        descriptor = _guard._windows_file_handle_to_descriptor(handle)
+        handle = None
+        _win._delete_fd_on_close(descriptor)
+        os.close(descriptor)
+        descriptor = None
+    except OSError as error:
+        raise _store.ArtifactIntegrityError(
+            "artifact publication admission rollback failed"
+        ) from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        elif handle is not None:
+            _guard._close_windows_handle(handle)
+        _guard._close_windows_handle(manifests)
+
+
+def _rollback_admission_markers(self, artifact_id: str) -> None:
+    names = (
+        _admission._marker_name(artifact_id, _admission._PREPARED),
+        _admission._marker_name(artifact_id, _admission._COMMITTED),
+    )
+    for name in names:
+        if os.name == "nt":
+            _delete_admission_marker_windows(self, name)
+        else:
+            _delete_admission_marker_posix(self, name)
+    if os.name != "nt":
+        _publication._sync_directory_fd(self._retained_manifests_fd)
+    else:
+        _store.sync_parent_directory(self._manifest_path(artifact_id))
+
+
 def _rollback_or_raise(self, manifest, failure, *, windows: bool) -> None:
     try:
         if windows:
@@ -160,9 +230,10 @@ def _rollback_or_raise(self, manifest, failure, *, windows: bool) -> None:
                 manifest["artifact_id"],
                 manifest,
             )
+        _rollback_admission_markers(self, manifest["artifact_id"])
     except BaseException as rollback_error:
         error = _store.ArtifactIntegrityError(
-            "rejected artifact publication could not roll back committed manifest"
+            "rejected artifact publication could not roll back committed state"
         )
         try:
             error.add_note(
@@ -247,6 +318,13 @@ def _publish_bytes_posix_transactional(
             "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
         manifest["manifest_hash"] = _store._manifest_integrity_hash(manifest)
+        transaction_id = uuid4().hex
+        _admission.prepare_publication(
+            self,
+            manifest=manifest,
+            transaction_id=transaction_id,
+            prefix_identity=prefix_identity,
+        )
         try:
             _posix._publish_manifest_posix(
                 self,
@@ -256,6 +334,12 @@ def _publish_bytes_posix_transactional(
             _posix._assert_prefix_identity(self, prefix, prefix_identity)
             _retained._assert_all_continuity(self)
             self._verify_manifest_object(manifest)
+            _admission.commit_publication(
+                self,
+                manifest=manifest,
+                transaction_id=transaction_id,
+                prefix_identity=prefix_identity,
+            )
             return manifest
         except BaseException as failure:
             _rollback_or_raise(self, manifest, failure, windows=False)
@@ -339,6 +423,13 @@ def _publish_bytes_windows_transactional(
                 "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             }
             manifest["manifest_hash"] = _store._manifest_integrity_hash(manifest)
+            transaction_id = uuid4().hex
+            _admission.prepare_publication(
+                self,
+                manifest=manifest,
+                transaction_id=transaction_id,
+                prefix_identity=prefix_identity,
+            )
             try:
                 _win._publish_manifest_windows(
                     self,
@@ -353,6 +444,12 @@ def _publish_bytes_windows_transactional(
                 )
                 _win._assert_windows_prefix_identity(self, prefix_name, prefix_identity)
                 _retained._assert_all_continuity(self)
+                _admission.commit_publication(
+                    self,
+                    manifest=manifest,
+                    transaction_id=transaction_id,
+                    prefix_identity=prefix_identity,
+                )
                 return manifest
             except BaseException as failure:
                 _rollback_or_raise(self, manifest, failure, windows=True)

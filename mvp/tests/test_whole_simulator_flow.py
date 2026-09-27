@@ -14,6 +14,7 @@ from mvp.autotrade_mvp.authority import (
     AuthorityService,
 )
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
+from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
 from mvp.autotrade_mvp.provider_activity_accounting import (
@@ -304,9 +305,51 @@ class WholeSimulatorFlowTests(unittest.TestCase):
             self.assertEqual(dispatched.status, "SENT")
             self.assertEqual(dispatched.response["outcome"], "ACKNOWLEDGED")
             self.assertEqual(provider.outbound_request_count, 1)
-
             fill = provider.activity_fills()[0]
+
+            orders = DurableOrderBookProjection(
+                journal,
+                provider_id="SIMULATED",
+                account_id="sim-account",
+                environment="SIMULATION",
+                host_id="sim-host",
+                owner_epoch="1",
+            )
+            orders.create_order(
+                event_key="whole-flow-order",
+                client_order_id=dispatched.client_order_id,
+                instrument=INSTRUMENT,
+                side="BUY",
+                requested_quantity="2",
+                quantity_unit=fill["last_quantity"]["unit"],
+                parent_intent_id="intent-1",
+                committed_at=NOW,
+            )
+            orders.sync_submission_attempt(attempt_id=attempt_id)
+
             fee = fill["fees"][0]
+            order_fill = orders.ingest_execution_fill(
+                event_key="whole-flow-fill",
+                client_order_id=dispatched.client_order_id,
+                committed_at=LATER,
+                execution_fill={
+                    "fill_id": fill["provider_execution_id"],
+                    "provider_execution_id": fill["provider_execution_id"],
+                    "order_ref": dispatched.client_order_id,
+                    "instrument_version": fill["instrument_version"],
+                    "side": fill["side"],
+                    "last_quantity": fill["last_quantity"],
+                    "last_price": fill["last_price"],
+                    "trade_time": fill["trade_time"],
+                    "receipt_time": LATER,
+                    "fees": fill["fees"],
+                    "settlement_date": "2026-09-24",
+                    "evidence": [],
+                },
+            )
+            self.assertEqual(order_fill.snapshot.state, "FILLED")
+            self.assertEqual(order_fill.snapshot.submission_attempt_id, attempt_id)
+
             commit_economic_batch_with_reservation_consumption(
                 economic,
                 reservations,
@@ -421,28 +464,44 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 media_type="application/vnd.autotrade.reservation-resolution+json",
                 rights={"storage": True, "export": False},
             )
-            with self.assertRaisesRegex(
-                ReservationConflict,
-                "lacks canonical reconciliation semantics",
-            ):
-                reservations.mark_terminal(
-                    command_id="reservation-terminal-1",
-                    idempotency_key="reservation-terminal-1",
-                    reservation_id="reservation-1",
-                    outcome="FILLED",
-                    provider="SIMULATED",
-                    attempt_id=attempt_id,
-                    resolution_evidence=(
-                        f"artifact:{resolution_artifact_id}@{resolution_manifest['sha256']}"
-                    ),
-                )
-            # One observed execution proves economic activity, not terminal fill.
-            # Until durable order projection proves FILLED, reservation authority
-            # must not publish a terminal state.
-            reservation = reservations.get("reservation-1")
-            self.assertEqual(reservation.state, "WORKING")
-            self.assertIsNone(reservation.resolution_evidence)
+            terminal = reservations.mark_terminal(
+                command_id="reservation-terminal-1",
+                idempotency_key="reservation-terminal-1",
+                reservation_id="reservation-1",
+                outcome="FILLED",
+                provider="SIMULATED",
+                attempt_id=attempt_id,
+                resolution_evidence=(
+                    f"artifact:{resolution_artifact_id}@{resolution_manifest['sha256']}"
+                ),
+            )
+            self.assertEqual(terminal.state, "FILLED")
+            self.assertIsNotNone(terminal.resolution_evidence)
             self.assertEqual(snapshot["open_orders"], [])
+
+            restarted_orders = DurableOrderBookProjection(
+                journal,
+                provider_id="SIMULATED",
+                account_id="sim-account",
+                environment="SIMULATION",
+                host_id="sim-host-restart",
+                owner_epoch="2",
+            )
+            self.assertEqual(
+                restarted_orders.order(dispatched.client_order_id).state,
+                "FILLED",
+            )
+            restarted_reservations = DurableReservationBook(
+                journal,
+                environment="SIMULATION",
+                account_id="sim-account",
+                resolution_artifact_store=artifacts,
+            )
+            self.assertEqual(
+                restarted_reservations.get("reservation-1").state,
+                "FILLED",
+            )
+            self.assertEqual(restarted_reservations.total_reserved("CASH:USD"), Decimal("0"))
 
     def test_acknowledgement_without_fill_keeps_reservation_and_working_order_truth(self):
         with TemporaryDirectory() as directory:

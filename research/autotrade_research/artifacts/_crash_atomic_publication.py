@@ -61,6 +61,14 @@ def _handle_existing(self, existing, immutable, *, windows: bool):
     if existing is None:
         return None
     if existing.get("schema_version") == 2 and existing.get("publication_state") == "PREPARED":
+        # A PREPARED manifest is a durable forensic barrier after an interrupted
+        # publication. Never erase it before proving that the exact object-prefix
+        # generation recorded before the crash is still authoritative. Otherwise
+        # a same-bytes replacement prefix could be accepted on retry and promoted
+        # under a fresh COMMITTED manifest, defeating crash-atomic generation
+        # binding. A mismatch deliberately remains fail-closed and leaves the
+        # PREPARED manifest in place for audit/recovery rather than guessing.
+        _contract._verify_generation(self, existing)
         rollback = (
             _transaction._rollback_new_manifest_windows
             if windows

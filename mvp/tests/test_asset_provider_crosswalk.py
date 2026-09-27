@@ -36,6 +36,7 @@ from mvp.autotrade_mvp.perpetuals import (
     PerpetualContract,
     funding_cashflow,
 )
+from mvp.autotrade_mvp.provider_core import PROVIDERS
 from mvp.autotrade_mvp.qualification_attestation import (
     EvidenceArtifactRef,
     QualificationScope,
@@ -167,6 +168,16 @@ class AssetProviderCrosswalkTests(unittest.TestCase):
             ("BINANCE", "USD_M", Lifecycle.PERPETUAL),
             {(k.provider_id, k.product_family, k.lifecycle) for k in keys},
         )
+
+    def test_provider_registry_expansion_requires_explicit_crosswalk_classification(self):
+        definition = PROVIDERS["ALPACA"]
+        expanded = replace(
+            definition,
+            product_families=definition.product_families + ("TOKENIZED_EQUITIES",),
+        )
+        with patch.dict(PROVIDERS, {"ALPACA": expanded}):
+            with self.assertRaisesRegex(CrosswalkError, "unclassified product family"):
+                advertised_lifecycle_keys()
 
     def test_complete_exact_build_matrix_passes_without_granting_trade_authority(self):
         evidence = [complete_evidence(key) for key in advertised_lifecycle_keys()]

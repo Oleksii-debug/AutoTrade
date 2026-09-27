@@ -1290,7 +1290,12 @@ class ArtifactStoreTests(unittest.TestCase):
             self.assertIn(orphan_digest, before.unreferenced_objects)
 
             after = store.recover_orphans()
-            self.assertFalse(orphan.exists())
+            if store._supports_descriptor_relative_cleanup():
+                self.assertFalse(orphan.exists())
+                self.assertNotIn(orphan_digest, after.unreferenced_objects)
+            else:
+                self.assertTrue(orphan.exists())
+                self.assertIn(orphan_digest, after.unreferenced_objects)
             self.assertIn(manifest_path.name, after.missing_objects)
             self.assertNotIn(manifest_path.name, after.corrupt_objects)
 
@@ -1350,11 +1355,19 @@ class ArtifactStoreTests(unittest.TestCase):
             before = store.audit()
             self.assertIn(orphan_digest, before.unreferenced_objects)
             after = store.recover_orphans()
-            self.assertFalse(orphan_path.exists())
-            self.assertEqual(after.unreferenced_objects, ())
+            if store._supports_descriptor_relative_cleanup():
+                self.assertFalse(orphan_path.exists())
+                self.assertEqual(after.unreferenced_objects, ())
+                self.assertEqual(list(store.staging.iterdir()), [])
+            else:
+                self.assertTrue(orphan_path.exists())
+                self.assertIn(orphan_digest, after.unreferenced_objects)
+                self.assertEqual(
+                    [path.name for path in store.staging.iterdir()],
+                    ["left.tmp"],
+                )
             kept_digest = manifest["sha256"].removeprefix("sha256:")
             self.assertTrue(store._object_path(kept_digest).exists())
-            self.assertEqual(list(store.staging.iterdir()), [])
 
     @unittest.skipIf(os.name == "nt", "symlink creation is not reliably available on Windows CI")
     def test_recovery_refuses_aliased_staging_directory_and_preserves_external_files(self):
@@ -1375,10 +1388,14 @@ class ArtifactStoreTests(unittest.TestCase):
 
             self.assertEqual(external.read_bytes(), b"external")
 
-    @unittest.skipIf(os.name == "nt", "symlink creation is not reliably available on Windows CI")
-    def test_recovery_revalidates_orphan_namespace_immediately_before_unlink(self):
+    @unittest.skipUnless(
+        os.name != "nt",
+        "descriptor-relative destructive recovery requires POSIX",
+    )
+    def test_recovery_parent_swap_at_unlink_cannot_delete_outside_object(self):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(Path(directory) / "store")
+            self.assertTrue(store._supports_descriptor_relative_cleanup())
             data = b"recoverable-orphan"
             digest = hashlib.sha256(data).hexdigest()
             orphan = store._object_path(digest)
@@ -1389,24 +1406,64 @@ class ArtifactStoreTests(unittest.TestCase):
             outside.mkdir()
             external = outside / digest
             external.write_bytes(b"external-must-survive")
+            detached_parent = Path(directory) / "detached-canonical-parent"
+            real_unlink = os.unlink
+            swapped = False
 
-            original_audit = store.audit
-            audit_calls = 0
-
-            def audit_then_swap_namespace():
-                nonlocal audit_calls
-                result = original_audit()
-                audit_calls += 1
-                if audit_calls == 1:
-                    orphan.unlink()
-                    orphan.parent.rmdir()
+            def swap_parent_then_unlink(name, *, dir_fd=None):
+                nonlocal swapped
+                if not swapped and name == digest and dir_fd is not None:
+                    swapped = True
+                    os.replace(orphan.parent, detached_parent)
                     orphan.parent.symlink_to(outside, target_is_directory=True)
-                return result
+                return real_unlink(name, dir_fd=dir_fd)
 
-            with patch.object(store, "audit", side_effect=audit_then_swap_namespace):
+            with patch(
+                "autotrade_research.artifacts.store.os.unlink",
+                side_effect=swap_parent_then_unlink,
+            ):
                 store.recover_orphans()
 
+            self.assertTrue(swapped)
             self.assertEqual(external.read_bytes(), b"external-must-survive")
+            self.assertFalse((detached_parent / digest).exists())
+
+    @unittest.skipUnless(
+        os.name != "nt",
+        "descriptor-relative destructive recovery requires POSIX",
+    )
+    def test_recovery_staging_parent_swap_at_unlink_cannot_delete_outside_file(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            self.assertTrue(store._supports_descriptor_relative_cleanup())
+            staged = store.staging / "left.tmp"
+            staged.write_bytes(b"canonical-staged")
+
+            outside = Path(directory) / "outside-staging-parent"
+            outside.mkdir()
+            external = outside / staged.name
+            external.write_bytes(b"external-must-survive")
+            detached_staging = Path(directory) / "detached-staging"
+            real_unlink = os.unlink
+            swapped = False
+
+            def swap_parent_then_unlink(name, *, dir_fd=None):
+                nonlocal swapped
+                if not swapped and name == staged.name and dir_fd is not None:
+                    swapped = True
+                    os.replace(store.staging, detached_staging)
+                    store.staging.symlink_to(outside, target_is_directory=True)
+                return real_unlink(name, dir_fd=dir_fd)
+
+            with patch(
+                "autotrade_research.artifacts.store.os.unlink",
+                side_effect=swap_parent_then_unlink,
+            ):
+                store.recover_orphans()
+
+            self.assertTrue(swapped)
+            self.assertEqual(external.read_bytes(), b"external-must-survive")
+            self.assertFalse((detached_staging / staged.name).exists())
 
     def test_storage_without_rights_is_rejected_before_writing(self):
         with TemporaryDirectory() as directory:
@@ -1488,7 +1545,10 @@ class ArtifactStoreTests(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "symlink creation is not reliably available on Windows CI")
     def test_committed_manifest_fails_closed_if_object_is_replaced_by_symlink(self):
         with TemporaryDirectory() as directory:
-            store = ArtifactStore(Path(directory) / "store")
+            store = ArtifactStore(
+                Path(directory) / "store",
+                export_authorizer=lambda _artifact_id, _digest: True,
+            )
             artifact_id = str(uuid4())
             data = b"durable-content"
             manifest = store.publish_bytes(
@@ -1557,9 +1617,14 @@ class ArtifactStoreTests(unittest.TestCase):
             self.assertFalse(store._manifest_path(artifact_id).exists())
             self.assertIn(digest, store.audit().unreferenced_objects)
 
-            recovered = ArtifactStore(directory).recover_orphans()
-            self.assertFalse(object_path.exists())
-            self.assertEqual(recovered.unreferenced_objects, ())
+            reopened = ArtifactStore(directory)
+            recovered = reopened.recover_orphans()
+            if reopened._supports_descriptor_relative_cleanup():
+                self.assertFalse(object_path.exists())
+                self.assertEqual(recovered.unreferenced_objects, ())
+            else:
+                self.assertTrue(object_path.exists())
+                self.assertIn(digest, recovered.unreferenced_objects)
 
     def test_failed_object_replace_cleans_staging_without_manifest(self):
         with TemporaryDirectory() as directory:
@@ -1612,9 +1677,14 @@ class ArtifactStoreTests(unittest.TestCase):
             self.assertFalse(store._manifest_path(artifact_id).exists())
             self.assertIn(digest, store.audit().unreferenced_objects)
 
-            recovered = ArtifactStore(directory).recover_orphans()
-            self.assertFalse(object_path.exists())
-            self.assertEqual(recovered.unreferenced_objects, ())
+            reopened = ArtifactStore(directory)
+            recovered = reopened.recover_orphans()
+            if reopened._supports_descriptor_relative_cleanup():
+                self.assertFalse(object_path.exists())
+                self.assertEqual(recovered.unreferenced_objects, ())
+            else:
+                self.assertTrue(object_path.exists())
+                self.assertIn(digest, recovered.unreferenced_objects)
 
     def test_crash_after_manifest_commit_recovers_committed_artifact(self):
         with TemporaryDirectory() as directory:
@@ -1710,10 +1780,14 @@ class ArtifactStoreTests(unittest.TestCase):
             )
 
             after = store.recover_orphans()
-            self.assertFalse(orphan.exists())
+            if store._supports_descriptor_relative_cleanup():
+                self.assertFalse(orphan.exists())
+                self.assertEqual(after.unreferenced_objects, ())
+            else:
+                self.assertTrue(orphan.exists())
+                self.assertIn(orphan_digest, after.unreferenced_objects)
             self.assertTrue(malformed.exists())
             self.assertTrue(misplaced.exists())
-            self.assertEqual(after.unreferenced_objects, ())
             self.assertIn(
                 "object:" + malformed.relative_to(store.root).as_posix(),
                 after.corrupt_objects,

@@ -16,25 +16,61 @@ from . import _windows_retained_publication_hardening as _win
 _store = _posix._store
 
 
-def _rollback_new_manifest_posix(self, artifact_id: str) -> None:
+def _read_exact_descriptor(descriptor: int, expected: bytes) -> bytes:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    remaining = len(expected) + 1
+    while remaining > 0:
+        chunk = os.read(descriptor, min(1024 * 1024, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _rollback_new_manifest_posix(
+    self,
+    artifact_id: str,
+    expected_manifest: dict[str, Any],
+) -> bool:
     name = f"{artifact_id}.json"
+    expected = _publication._json_bytes(expected_manifest)
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    descriptor = None
     try:
-        opened = os.stat(
-            name,
-            dir_fd=self._retained_manifests_fd,
-            follow_symlinks=False,
-        )
-    except FileNotFoundError:
-        return
+        try:
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | no_follow,
+                dir_fd=self._retained_manifests_fd,
+            )
+        except FileNotFoundError:
+            return False
+        opened = os.fstat(descriptor)
+        self._reject_reparse_point(opened, subject="rejected artifact manifest")
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            raise _store.ArtifactIntegrityError(
+                "rejected artifact publication manifest rollback target is not canonical"
+            )
+        if opened.st_size != len(expected):
+            raise _store.ArtifactIntegrityError(
+                "rejected artifact publication manifest rollback target changed identity"
+            )
+        if _read_exact_descriptor(descriptor, expected) != expected:
+            raise _store.ArtifactIntegrityError(
+                "rejected artifact publication manifest rollback target changed identity"
+            )
+    except _store.ArtifactIntegrityError:
+        raise
     except OSError as error:
         raise _store.ArtifactIntegrityError(
             "rejected artifact publication manifest rollback inspection failed"
         ) from error
-    self._reject_reparse_point(opened, subject="rejected artifact manifest")
-    if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
-        raise _store.ArtifactIntegrityError(
-            "rejected artifact publication manifest rollback target is not canonical"
-        )
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
     try:
         os.unlink(name, dir_fd=self._retained_manifests_fd)
         _publication._sync_directory_fd(self._retained_manifests_fd)
@@ -42,9 +78,15 @@ def _rollback_new_manifest_posix(self, artifact_id: str) -> None:
         raise _store.ArtifactIntegrityError(
             "rejected artifact publication manifest rollback failed"
         ) from error
+    return True
 
 
-def _rollback_new_manifest_windows(self, artifact_id: str) -> None:
+def _rollback_new_manifest_windows(
+    self,
+    artifact_id: str,
+    expected_manifest: dict[str, Any],
+) -> bool:
+    expected = _publication._json_bytes(expected_manifest)
     manifests = _windows._open_mutation_directory(
         self,
         ("manifests",),
@@ -60,14 +102,15 @@ def _rollback_new_manifest_windows(self, artifact_id: str) -> None:
                 directory=False,
                 disposition=_windows._FILE_OPEN,
                 desired_access=(
-                    _guard._NT_FILE_READ_ATTRIBUTES
+                    _guard._NT_FILE_READ_DATA
+                    | _guard._NT_FILE_READ_ATTRIBUTES
                     | _windows._DELETE
                     | _guard._NT_SYNCHRONIZE
                 ),
                 subject="rejected artifact manifest",
             )
         except FileNotFoundError:
-            return
+            return False
         descriptor = _guard._windows_file_handle_to_descriptor(handle)
         handle = None
         opened = os.fstat(descriptor)
@@ -76,10 +119,19 @@ def _rollback_new_manifest_windows(self, artifact_id: str) -> None:
             raise _store.ArtifactIntegrityError(
                 "rejected artifact publication manifest rollback target is not canonical"
             )
+        if opened.st_size != len(expected):
+            raise _store.ArtifactIntegrityError(
+                "rejected artifact publication manifest rollback target changed identity"
+            )
+        if _read_exact_descriptor(descriptor, expected) != expected:
+            raise _store.ArtifactIntegrityError(
+                "rejected artifact publication manifest rollback target changed identity"
+            )
         _win._delete_fd_on_close(descriptor)
         os.close(descriptor)
         descriptor = None
         _store.sync_parent_directory(self._manifest_path(artifact_id))
+        return True
     except _store.ArtifactIntegrityError:
         raise
     except OSError as error:
@@ -92,6 +144,33 @@ def _rollback_new_manifest_windows(self, artifact_id: str) -> None:
         elif handle is not None:
             _guard._close_windows_handle(handle)
         _guard._close_windows_handle(manifests)
+
+
+def _rollback_or_raise(self, manifest, failure, *, windows: bool) -> None:
+    try:
+        if windows:
+            _rollback_new_manifest_windows(
+                self,
+                manifest["artifact_id"],
+                manifest,
+            )
+        else:
+            _rollback_new_manifest_posix(
+                self,
+                manifest["artifact_id"],
+                manifest,
+            )
+    except BaseException as rollback_error:
+        error = _store.ArtifactIntegrityError(
+            "rejected artifact publication could not roll back committed manifest"
+        )
+        try:
+            error.add_note(
+                f"publication also failed: {type(failure).__name__}: {failure}"
+            )
+        except BaseException:
+            pass
+        raise error from rollback_error
 
 
 def _publish_bytes_posix_transactional(
@@ -168,27 +247,19 @@ def _publish_bytes_posix_transactional(
             "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
         manifest["manifest_hash"] = _store._manifest_integrity_hash(manifest)
-        committed = False
         try:
             _posix._publish_manifest_posix(
                 self,
                 manifest=manifest,
                 replace_existing=False,
             )
-            committed = True
             _posix._assert_prefix_identity(self, prefix, prefix_identity)
             _retained._assert_all_continuity(self)
             self._verify_manifest_object(manifest)
             return manifest
         except BaseException as failure:
-            if committed:
-                try:
-                    _rollback_new_manifest_posix(self, normalized_id)
-                except BaseException as rollback_error:
-                    raise _store.ArtifactIntegrityError(
-                        "rejected artifact publication could not roll back committed manifest"
-                    ) from rollback_error
-            raise failure
+            _rollback_or_raise(self, manifest, failure, windows=False)
+            raise
 
 
 def _publish_bytes_windows_transactional(
@@ -268,14 +339,12 @@ def _publish_bytes_windows_transactional(
                 "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             }
             manifest["manifest_hash"] = _store._manifest_integrity_hash(manifest)
-            committed = False
             try:
                 _win._publish_manifest_windows(
                     self,
                     manifest=manifest,
                     replace_existing=False,
                 )
-                committed = True
                 _win._verify_bound_windows_object(
                     self,
                     prefix_handle,
@@ -286,14 +355,8 @@ def _publish_bytes_windows_transactional(
                 _retained._assert_all_continuity(self)
                 return manifest
             except BaseException as failure:
-                if committed:
-                    try:
-                        _rollback_new_manifest_windows(self, normalized_id)
-                    except BaseException as rollback_error:
-                        raise _store.ArtifactIntegrityError(
-                            "rejected artifact publication could not roll back committed manifest"
-                        ) from rollback_error
-                raise failure
+                _rollback_or_raise(self, manifest, failure, windows=True)
+                raise
         finally:
             _guard._close_windows_handle(prefix_handle)
 

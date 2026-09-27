@@ -61,8 +61,6 @@ def _assert_windows_prefix_identity(
     prefix_name: str,
     expected_identity: Any,
 ) -> None:
-    """Require the current digest-prefix name to remain the retained generation."""
-
     _retained._assert_directory_continuity(
         self,
         ("objects", "sha256"),
@@ -102,8 +100,6 @@ def _verify_bound_windows_object(
     *,
     expected_bytes: int,
 ) -> None:
-    """Verify immutable object bytes through the original retained prefix HANDLE."""
-
     handle = _guard._nt_open_relative_handle(
         prefix_handle,
         digest,
@@ -115,10 +111,7 @@ def _verify_bound_windows_object(
         descriptor = _guard._windows_file_handle_to_descriptor(handle)
         handle = None
         opened = os.fstat(descriptor)
-        self._reject_reparse_point(
-            opened,
-            subject="artifact object descriptor",
-        )
+        self._reject_reparse_point(opened, subject="artifact object descriptor")
         if not stat.S_ISREG(opened.st_mode):
             raise _store.ArtifactIntegrityError(
                 "artifact object descriptor must be a regular file"
@@ -154,8 +147,6 @@ def _publish_object_windows_bound(
     digest: str,
     data: bytes,
 ) -> tuple[str, Any, int]:
-    """Publish and return the exact prefix HANDLE retained through manifest commit."""
-
     objects = _windows._open_mutation_directory(
         self,
         ("objects", "sha256"),
@@ -194,35 +185,20 @@ def _publish_object_windows_bound(
                 digest,
                 expected_bytes=len(data),
             )
-            _assert_windows_prefix_identity(
-                self,
-                prefix_name,
-                prefix_identity,
-            )
+            _assert_windows_prefix_identity(self, prefix_name, prefix_identity)
             result = (prefix_name, prefix_identity, prefix_handle)
             prefix_handle = None
             return result
 
-        _name, descriptor = _windows._create_temp_fd(
-            staging,
-            prefix="artifact",
-        )
+        _name, descriptor = _windows._create_temp_fd(staging, prefix="artifact")
         _publication._write_all(descriptor, data)
         _publication._verify_staged_descriptor(
             descriptor,
             expected_digest=digest,
             expected_bytes=len(data),
         )
-        _retained._assert_directory_continuity(
-            self,
-            ("staging",),
-            "staging",
-        )
-        _assert_windows_prefix_identity(
-            self,
-            prefix_name,
-            prefix_identity,
-        )
+        _retained._assert_directory_continuity(self, ("staging",), "staging")
+        _assert_windows_prefix_identity(self, prefix_name, prefix_identity)
         try:
             _windows._publish_temp_fd(
                 descriptor,
@@ -231,7 +207,6 @@ def _publish_object_windows_bound(
                 replace=False,
             )
         except OSError as error:
-            # _publish_temp_fd owns and closes the descriptor on failure too.
             descriptor = None
             if not _is_destination_collision(error):
                 raise
@@ -244,11 +219,8 @@ def _publish_object_windows_bound(
             digest,
             expected_bytes=len(data),
         )
-        _assert_windows_prefix_identity(
-            self,
-            prefix_name,
-            prefix_identity,
-        )
+        _store.sync_parent_directory(self._object_path(digest))
+        _assert_windows_prefix_identity(self, prefix_name, prefix_identity)
         result = (prefix_name, prefix_identity, prefix_handle)
         prefix_handle = None
         return result
@@ -271,8 +243,6 @@ def _publish_manifest_windows(
     manifest: dict[str, Any],
     replace_existing: bool,
 ) -> None:
-    """Publish one manifest without double-closing failed temp descriptors."""
-
     manifests = _windows._open_mutation_directory(
         self,
         ("manifests",),
@@ -312,6 +282,9 @@ def _publish_manifest_windows(
             raise
         else:
             descriptor = None
+        _store.sync_parent_directory(
+            self._manifest_path(manifest["artifact_id"])
+        )
     finally:
         if descriptor is not None:
             try:
@@ -394,11 +367,7 @@ def _publish_bytes_windows_hardened(
             data=data,
         )
         try:
-            _assert_windows_prefix_identity(
-                self,
-                prefix_name,
-                prefix_identity,
-            )
+            _assert_windows_prefix_identity(self, prefix_name, prefix_identity)
             _retained._assert_all_continuity(self)
 
             manifest = {
@@ -415,20 +384,13 @@ def _publish_bytes_windows_hardened(
                 replace_existing=False,
             )
 
-            # The object verified after manifest commit is the object under the
-            # original retained prefix HANDLE, not whatever a same-name prefix
-            # replacement might expose lexically.
             _verify_bound_windows_object(
                 self,
                 prefix_handle,
                 digest,
                 expected_bytes=len(data),
             )
-            _assert_windows_prefix_identity(
-                self,
-                prefix_name,
-                prefix_identity,
-            )
+            _assert_windows_prefix_identity(self, prefix_name, prefix_identity)
             _retained._assert_all_continuity(self)
             return manifest
         finally:

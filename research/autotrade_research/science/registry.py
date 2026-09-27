@@ -304,8 +304,9 @@ class ScientificRegistry:
         artifact_id, digest = artifact_text.split("@sha256:", 1)
         expected_digest = "sha256:" + digest
         try:
-            manifest = self.artifact_store.load_manifest(artifact_id)
-            self.artifact_store.read_bytes(artifact_id)
+            manifest, _bytes = self.artifact_store.read_authenticated_snapshot(
+                artifact_id
+            )
         except (
             FileNotFoundError,
             ArtifactIntegrityError,

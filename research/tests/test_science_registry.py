@@ -2,8 +2,12 @@ import copy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
-from research.autotrade_research.artifacts.store import ArtifactStore
+from research.autotrade_research.artifacts.store import (
+    ArtifactIntegrityError,
+    ArtifactStore,
+)
 from research.autotrade_research.science.registry import (
     ProtocolConflict,
     ProtocolViolation,
@@ -283,6 +287,64 @@ class ScientificRegistryTests(unittest.TestCase):
             self.assertEqual(
                 locked.result["stopping_evidence_ref"],
                 canonical_ref,
+            )
+
+    def test_early_stop_uses_one_authenticated_snapshot_before_holdout_access(self):
+        with TemporaryDirectory() as directory:
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            store = ScientificRegistry(
+                Path(directory) / "science.sqlite3",
+                artifact_store=artifacts,
+            )
+            registered = store.register_protocol(protocol())
+            rules_hash = store.completeness(registered.protocol_id)["stopping_rules_hash"]
+            reference = publish_stopping_evidence(
+                artifacts,
+                protocol_id=registered.protocol_id,
+                stopping_rules_hash=rules_hash,
+            )
+            artifact_id = reference[len("artifact:"):].split("@sha256:", 1)[0]
+            result = {
+                "stopping_rule_triggered": True,
+                "stopping_rules_hash": rules_hash,
+                "stopping_evidence_ref": reference,
+            }
+            with (
+                patch.object(
+                    artifacts,
+                    "read_authenticated_snapshot",
+                    wraps=artifacts.read_authenticated_snapshot,
+                ) as snapshot_read,
+                patch.object(artifacts, "load_manifest", side_effect=AssertionError("split read")),
+                patch.object(artifacts, "read_bytes", side_effect=AssertionError("split read")),
+            ):
+                store.register_evaluation(
+                    registered.protocol_id,
+                    holdout_id="cohesive-evidence",
+                    holdout_identity=holdout_identity(),
+                    result=result,
+                )
+                self.assertEqual(snapshot_read.call_count, 1)
+                self.assertEqual(snapshot_read.call_args.args, (artifact_id,))
+            self.assertEqual(
+                store.holdout_access_count(registered.protocol_id, "cohesive-evidence"),
+                1,
+            )
+            with patch.object(
+                artifacts,
+                "read_authenticated_snapshot",
+                side_effect=ArtifactIntegrityError("namespace replaced"),
+            ):
+                with self.assertRaisesRegex(ProtocolViolation, "cannot be verified"):
+                    store.register_evaluation(
+                        registered.protocol_id,
+                        holdout_id="untrusted-evidence",
+                        holdout_identity=holdout_identity(dataset_digit="b"),
+                        result=result,
+                    )
+            self.assertEqual(
+                store.holdout_access_count(registered.protocol_id, "untrusted-evidence"),
+                0,
             )
 
     def test_early_stop_requires_resolvable_stopping_evidence(self):

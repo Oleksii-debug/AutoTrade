@@ -11,6 +11,25 @@ from .store import (
     ArtifactIntegrityError,
     ArtifactStore,
 )
+from ._namespace_guard import install_artifact_store_namespace_guards
+
+install_artifact_store_namespace_guards()
+del install_artifact_store_namespace_guards
+
+from ._manifest_descriptor_io import install_manifest_descriptor_reader
+
+install_manifest_descriptor_reader()
+del install_manifest_descriptor_reader
+
+from ._windows_descriptor_bridge import install_windows_object_descriptor_bridge
+
+install_windows_object_descriptor_bridge()
+del install_windows_object_descriptor_bridge
+
+from ._race_regressions import install_artifact_store_race_regressions
+
+install_artifact_store_race_regressions()
+del install_artifact_store_race_regressions
 
 CANONICAL_ARTIFACT_STORE_MODULE = "autotrade_research.artifacts.store"
 

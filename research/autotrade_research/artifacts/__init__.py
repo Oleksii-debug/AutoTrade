@@ -26,6 +26,11 @@ from ._windows_descriptor_bridge import install_windows_object_descriptor_bridge
 install_windows_object_descriptor_bridge()
 del install_windows_object_descriptor_bridge
 
+from ._race_regressions import install_artifact_store_race_regressions
+
+install_artifact_store_race_regressions()
+del install_artifact_store_race_regressions
+
 CANONICAL_ARTIFACT_STORE_MODULE = "autotrade_research.artifacts.store"
 
 __all__ = [

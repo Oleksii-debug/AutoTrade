@@ -6,6 +6,7 @@ import os
 import stat
 from typing import Any
 
+from . import _crash_atomic_manifest as _crash_contract
 from . import _namespace_guard as _guard
 from . import _retained_coordination as _coordination
 from . import _retained_namespace as _retained
@@ -186,13 +187,22 @@ def _rollback_or_raise(
 def _publication_manifests(
     self,
     immutable: dict[str, Any],
+    *,
+    prefix_identity: Any,
+    windows: bool,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     created_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    generation = (
+        _crash_contract.generation_from_windows_info(prefix_identity)
+        if windows
+        else _crash_contract.generation_from_posix_stat(prefix_identity)
+    )
     prepared = {
         "schema_version": self.SCHEMA_VERSION,
         **immutable,
         "created_at": created_at,
         "publication_state": "PREPARED",
+        "object_generation": generation,
     }
     prepared["manifest_hash"] = _store._manifest_integrity_hash(prepared)
     committed = dict(prepared)
@@ -201,12 +211,14 @@ def _publication_manifests(
     return prepared, committed
 
 
-def _legacy_rebind_manifest(self, immutable: dict[str, Any]) -> dict[str, Any]:
+def _legacy_rebind_manifest(immutable: dict[str, Any]) -> dict[str, Any]:
+    # Preserve the closed v1 authenticated contract for legacy rebinds. New
+    # publications use v2 generation-bound PREPARED/COMMITTED admission, but a
+    # verified legacy object has no historical prefix-generation fact to invent.
     rebound = {
-        "schema_version": self.SCHEMA_VERSION,
+        "schema_version": 1,
         **immutable,
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "publication_state": "COMMITTED",
     }
     rebound["manifest_hash"] = _store._manifest_integrity_hash(rebound)
     return rebound
@@ -257,7 +269,7 @@ def _publish_bytes_posix_transactional(
                 )
             self._verify_manifest_object(existing)
             if not _store._verify_manifest_integrity(existing, required=False):
-                rebound = _legacy_rebind_manifest(self, immutable)
+                rebound = _legacy_rebind_manifest(immutable)
                 _posix._publish_manifest_posix(
                     self,
                     manifest=rebound,
@@ -275,7 +287,12 @@ def _publish_bytes_posix_transactional(
         _posix._assert_prefix_identity(self, prefix, prefix_identity)
         _retained._assert_all_continuity(self)
 
-        prepared, committed = _publication_manifests(self, immutable)
+        prepared, committed = _publication_manifests(
+            self,
+            immutable,
+            prefix_identity=prefix_identity,
+            windows=False,
+        )
         exposed = False
         try:
             _posix._publish_manifest_posix(
@@ -352,7 +369,7 @@ def _publish_bytes_windows_transactional(
                 )
             self._verify_manifest_object(existing)
             if not _store._verify_manifest_integrity(existing, required=False):
-                rebound = _legacy_rebind_manifest(self, immutable)
+                rebound = _legacy_rebind_manifest(immutable)
                 _win._publish_manifest_windows(
                     self,
                     manifest=rebound,
@@ -370,7 +387,12 @@ def _publish_bytes_windows_transactional(
         try:
             _win._assert_windows_prefix_identity(self, prefix_name, prefix_identity)
             _retained._assert_all_continuity(self)
-            prepared, committed = _publication_manifests(self, immutable)
+            prepared, committed = _publication_manifests(
+                self,
+                immutable,
+                prefix_identity=prefix_identity,
+                windows=True,
+            )
             exposed = False
             try:
                 _win._publish_manifest_windows(

@@ -1,3 +1,4 @@
+from hashlib import sha256
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -10,6 +11,9 @@ from autotrade_research.artifacts.store import (
     ArtifactStore,
 )
 from autotrade_research.artifacts import _retained_publication as publication
+from autotrade_research.artifacts import (
+    _retained_publication_hardening as publication_hardening,
+)
 
 
 @unittest.skipIf(
@@ -86,36 +90,23 @@ class RetainedPublicationNamespaceTests(unittest.TestCase):
             detached = root / "canonical-manifests"
             replacement = root / "replacement-manifests"
             replacement.mkdir()
-            real_link = os.link
+            real_rename = publication_hardening._rename_noreplace_posix
             swapped = False
 
-            def swap_then_link(
-                src,
-                dst,
-                *,
-                src_dir_fd=None,
-                dst_dir_fd=None,
-                follow_symlinks=True,
-            ):
+            def swap_then_rename(parent_fd, source, target):
                 nonlocal swapped
-                if (
-                    not swapped
-                    and dst_dir_fd == store._retained_manifests_fd
-                    and str(dst).endswith(".json")
-                ):
+                if not swapped:
                     swapped = True
                     os.replace(store.manifests, detached)
                     os.replace(replacement, store.manifests)
-                return real_link(
-                    src,
-                    dst,
-                    src_dir_fd=src_dir_fd,
-                    dst_dir_fd=dst_dir_fd,
-                    follow_symlinks=follow_symlinks,
-                )
+                return real_rename(parent_fd, source, target)
 
             try:
-                with patch.object(publication.os, "link", side_effect=swap_then_link):
+                with patch.object(
+                    publication_hardening,
+                    "_rename_noreplace_posix",
+                    side_effect=swap_then_rename,
+                ):
                     with self.assertRaisesRegex(
                         ArtifactIntegrityError,
                         "manifests namespace changed",
@@ -129,6 +120,17 @@ class RetainedPublicationNamespaceTests(unittest.TestCase):
                     entry.unlink()
                 store.manifests.rmdir()
                 os.replace(detached, store.manifests)
+
+    def test_new_manifest_commit_is_single_link_and_leaves_no_internal_alias(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            manifest = self._publish(store, payload=b"single-link-manifest")
+            path = store._manifest_path(manifest["artifact_id"])
+            self.assertEqual(os.stat(path, follow_symlinks=False).st_nlink, 1)
+            self.assertEqual(
+                [entry.name for entry in store.manifests.iterdir() if entry.name.startswith(".manifest-")],
+                [],
+            )
 
     def test_object_swap_after_last_check_cannot_redirect_object_commit(self):
         with TemporaryDirectory() as directory:
@@ -178,6 +180,127 @@ class RetainedPublicationNamespaceTests(unittest.TestCase):
             finally:
                 store.objects.rmdir()
                 os.replace(detached, store.objects)
+
+    def test_exact_digest_prefix_swap_cannot_yield_successful_manifest(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "store"
+            store = ArtifactStore(root)
+            payload = b"prefix-race"
+            digest = sha256(payload).hexdigest()
+            prefix = store.objects / digest[:2]
+            prefix.mkdir()
+            detached = store.objects / f"detached-{digest[:2]}"
+            replacement = Path(directory) / "replacement-prefix"
+            replacement.mkdir()
+            real_link = os.link
+            swapped = False
+
+            def swap_prefix_then_link(
+                src,
+                dst,
+                *,
+                src_dir_fd=None,
+                dst_dir_fd=None,
+                follow_symlinks=True,
+            ):
+                nonlocal swapped
+                if (
+                    not swapped
+                    and src_dir_fd == store._retained_staging_fd
+                    and dst == digest
+                ):
+                    swapped = True
+                    os.replace(prefix, detached)
+                    os.replace(replacement, prefix)
+                return real_link(
+                    src,
+                    dst,
+                    src_dir_fd=src_dir_fd,
+                    dst_dir_fd=dst_dir_fd,
+                    follow_symlinks=follow_symlinks,
+                )
+
+            try:
+                with patch.object(
+                    publication.os,
+                    "link",
+                    side_effect=swap_prefix_then_link,
+                ):
+                    with self.assertRaisesRegex(
+                        ArtifactIntegrityError,
+                        "object prefix changed during publication",
+                    ):
+                        self._publish(store, payload=payload)
+                self.assertTrue(swapped)
+                self.assertEqual(list(prefix.iterdir()), [])
+                self.assertTrue((detached / digest).exists())
+                self.assertEqual(list(store.manifests.glob("*.json")), [])
+            finally:
+                for entry in prefix.iterdir():
+                    entry.unlink()
+                prefix.rmdir()
+                os.replace(detached, prefix)
+
+    def test_exact_prefix_replacement_with_same_bytes_is_not_new_authority(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "store"
+            store = ArtifactStore(root)
+            payload = b"prefix-same-bytes"
+            digest = sha256(payload).hexdigest()
+            prefix = store.objects / digest[:2]
+            prefix.mkdir()
+            detached = store.objects / f"detached-{digest[:2]}"
+            replacement = Path(directory) / "replacement-prefix"
+            replacement.mkdir()
+            (replacement / digest).write_bytes(payload)
+            real_link = os.link
+            swapped = False
+
+            def swap_prefix_then_link(
+                src,
+                dst,
+                *,
+                src_dir_fd=None,
+                dst_dir_fd=None,
+                follow_symlinks=True,
+            ):
+                nonlocal swapped
+                if (
+                    not swapped
+                    and src_dir_fd == store._retained_staging_fd
+                    and dst == digest
+                ):
+                    swapped = True
+                    os.replace(prefix, detached)
+                    os.replace(replacement, prefix)
+                return real_link(
+                    src,
+                    dst,
+                    src_dir_fd=src_dir_fd,
+                    dst_dir_fd=dst_dir_fd,
+                    follow_symlinks=follow_symlinks,
+                )
+
+            try:
+                with patch.object(
+                    publication.os,
+                    "link",
+                    side_effect=swap_prefix_then_link,
+                ):
+                    with self.assertRaisesRegex(
+                        ArtifactIntegrityError,
+                        "object prefix changed during publication",
+                    ):
+                        self._publish(store, payload=payload)
+                self.assertTrue(swapped)
+                self.assertEqual((prefix / digest).read_bytes(), payload)
+                self.assertTrue((detached / digest).exists())
+                self.assertEqual(list(store.manifests.glob("*.json")), [])
+            finally:
+                for entry in prefix.iterdir():
+                    entry.unlink()
+                prefix.rmdir()
+                os.replace(detached, prefix)
 
     def test_staging_swap_during_temp_creation_cannot_redirect_staged_bytes(self):
         with TemporaryDirectory() as directory:

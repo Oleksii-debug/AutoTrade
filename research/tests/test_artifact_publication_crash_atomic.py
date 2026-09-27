@@ -201,6 +201,11 @@ raise AssertionError("publication unexpectedly survived hard-crash seam")
                 ArtifactIntegrityError,
                 "object generation changed after publication",
             ):
+                reopened.load_manifest(artifact_id)
+            with self.assertRaisesRegex(
+                ArtifactIntegrityError,
+                "object generation changed after publication",
+            ):
                 reopened.read_bytes(artifact_id)
             with self.assertRaisesRegex(
                 ArtifactIntegrityError,

@@ -53,6 +53,43 @@ def _parse_bounded_json_integer(value: str) -> int:
     return -parsed if negative else parsed
 
 
+def _validate_json_nesting_before_decode(text: str) -> None:
+    """Bound container depth before the recursive stdlib decoder sees the input.
+
+    This scan intentionally does not try to validate JSON syntax. It tracks only
+    structural delimiters that are outside strings, while respecting backslash
+    escaping inside strings. ``json.loads`` remains the syntax authority and the
+    post-decode validator remains defense in depth.
+    """
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for character in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+
+        if character == '"':
+            in_string = True
+        elif character in "[{":
+            depth += 1
+            if depth > _JSON_MAX_NESTING_DEPTH:
+                raise InvalidJsonDomainError(
+                    f"JSON nesting exceeds {_JSON_MAX_NESTING_DEPTH} containers"
+                )
+        elif character in "]}" and depth > 0:
+            # Syntax matching is deliberately left to json.loads. Refusing to let
+            # malformed leading closers drive depth below zero ensures they cannot
+            # mask a later deeply nested segment from this resource fence.
+            depth -= 1
+
+
 def _validate_strict_json_value(root: object) -> None:
     stack = [(root, 0)]
     visited = 0
@@ -110,6 +147,7 @@ def strict_json_loads(text: str) -> Any:
         raise InvalidJsonDomainError(
             f"JSON document exceeds {_JSON_MAX_DOCUMENT_CHARS} characters"
         )
+    _validate_json_nesting_before_decode(text)
     raw = json.loads(
         text,
         object_pairs_hook=_unique_json_object,

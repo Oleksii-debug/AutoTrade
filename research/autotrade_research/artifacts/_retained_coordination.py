@@ -139,13 +139,12 @@ def _posix_root_lock(store) -> Iterator[None]:
 
 @contextmanager
 def artifact_store_coordination(store) -> Iterator[None]:
-    """Serialize mutations on a filesystem identity that cannot be path-swapped.
+    """Serialize mutations against the retained root filesystem identity.
 
-    The legacy `.artifact-store.lock` remains as compatibility metadata inside
-    existing mutation code, but it is no longer the sole coordination authority.
-    POSIX locks the already-retained canonical root directory inode; Windows uses
-    a kernel mutex name derived from that root's volume/file identity. Replacing
-    the lexical lock file therefore cannot create a second cooperating writer.
+    Coordination is reentrant within one thread. Public mutation wrappers and
+    lower retained-authority implementations can therefore share this one lock
+    without reopening the legacy lexical ``.artifact-store.lock`` path or
+    prematurely releasing the OS-level root lock on a nested exit.
     """
 
     thread_lock = getattr(store, "_artifact_store_thread_lock", None)
@@ -153,17 +152,35 @@ def artifact_store_coordination(store) -> Iterator[None]:
         raise ResourceLockError(
             "artifact-store coordination was not initialized"
         )
+
+    current_thread = threading.get_ident()
+    owner = getattr(store, "_artifact_store_coordination_owner", None)
+    depth = getattr(store, "_artifact_store_coordination_depth", 0)
+    if owner == current_thread and depth > 0:
+        store._artifact_store_coordination_depth = depth + 1
+        try:
+            yield
+        finally:
+            store._artifact_store_coordination_depth -= 1
+        return
+
     if not thread_lock.acquire(blocking=False):
         raise ResourceLockBusyError(
             "retained artifact-store coordination lock is busy"
         )
     try:
-        if sys.platform == "win32":
-            with _windows_root_mutex(store):
-                yield
-        else:
-            with _posix_root_lock(store):
-                yield
+        store._artifact_store_coordination_owner = current_thread
+        store._artifact_store_coordination_depth = 1
+        try:
+            if sys.platform == "win32":
+                with _windows_root_mutex(store):
+                    yield
+            else:
+                with _posix_root_lock(store):
+                    yield
+        finally:
+            store._artifact_store_coordination_depth = 0
+            store._artifact_store_coordination_owner = None
     finally:
         thread_lock.release()
 
@@ -180,6 +197,8 @@ def install_retained_coordination() -> None:
     def coordinated_init(self, *args, **kwargs):
         previous_init(self, *args, **kwargs)
         self._artifact_store_thread_lock = threading.RLock()
+        self._artifact_store_coordination_owner = None
+        self._artifact_store_coordination_depth = 0
 
     def coordinated_publish(self, *args, **kwargs):
         with artifact_store_coordination(self):

@@ -1014,6 +1014,21 @@ class DurableReservationBook:
                 raise ReservationConflict(
                     "FILLED release order projection belongs to another submission attempt"
                 )
+            reconciled_execution_ids = matching[0].get(
+                "provider_execution_ids"
+            )
+            if not isinstance(reconciled_execution_ids, list):
+                raise ReservationConflict(
+                    "FILLED release reconciliation lacks provider execution identities"
+                )
+            projected_execution_ids = set(order.provider_execution_index)
+            if (
+                not projected_execution_ids
+                or set(reconciled_execution_ids) != projected_execution_ids
+            ):
+                raise ReservationConflict(
+                    "FILLED release reconciliation execution identities differ from order projection"
+                )
             terminal_fill_states = {
                 "FILLED",
                 "FILLED_AFTER_CANCEL",

@@ -214,6 +214,7 @@ class DurableReservationBookTests(unittest.TestCase):
         *,
         outcome="PROVEN_ABSENT",
         attempt_id="attempt-r1",
+        provider_execution_id=None,
         reconciliation_id=None,
     ):
         unknowns = unknown_submissions_from_dispatch(
@@ -254,7 +255,9 @@ class DurableReservationBookTests(unittest.TestCase):
                 provider_id=unknown.provider_id,
                 account_id=unknown.account_id,
                 environment=unknown.environment,
-                provider_execution_id="exec-" + attempt_id,
+                provider_execution_id=(
+                    provider_execution_id or "exec-" + attempt_id
+                ),
                 client_order_id=unknown.client_order_id,
                 instrument="TEST",
                 quantity="1",
@@ -644,11 +647,40 @@ class DurableReservationBookTests(unittest.TestCase):
         )
         self.assertEqual(order_fill.snapshot.state, "FILLED_AFTER_CANCEL")
 
-        filled_evidence = self.publish_resolution_evidence(
+        mismatched_checkpoint = self.record_reconciliation_resolution(
+            outcome="FILLED",
+            provider_execution_id="exec-unrelated",
+            reconciliation_id="reconciliation-mismatched-execution-set",
+        )
+        mismatched_evidence = self.publish_resolution_evidence(
             artifact_id="55555555-5555-4555-8555-555555555556",
             provider="BYBIT",
             outcome="FILLED",
-            reconciliation_event=reconciliation,
+            reconciliation_event=mismatched_checkpoint,
+        )
+        with self.assertRaisesRegex(
+            ReservationConflict,
+            "execution identities differ",
+        ):
+            reservations.mark_terminal(
+                command_id="cmd-terminal-cancel-filled-mismatch",
+                idempotency_key="idem-terminal-cancel-filled-mismatch",
+                reservation_id="r1",
+                outcome="FILLED",
+                provider="BYBIT",
+                attempt_id="attempt-r1",
+                resolution_evidence=mismatched_evidence,
+            )
+
+        matching_checkpoint = self.record_reconciliation_resolution(
+            outcome="FILLED",
+            reconciliation_id="reconciliation-matching-execution-set",
+        )
+        filled_evidence = self.publish_resolution_evidence(
+            artifact_id="55555555-5555-4555-8555-555555555557",
+            provider="BYBIT",
+            outcome="FILLED",
+            reconciliation_event=matching_checkpoint,
         )
         terminal = reservations.mark_terminal(
             command_id="cmd-terminal-cancel-filled",

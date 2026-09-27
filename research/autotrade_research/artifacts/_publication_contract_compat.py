@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import importlib
 import os
+from pathlib import Path
 import stat
+from tempfile import TemporaryDirectory
 
 from . import _namespace_guard as _guard
 from . import _retained_publication_hardening as _posix
@@ -13,13 +15,21 @@ _ORIGINAL_ATOMIC_WRITE_JSON = _store.atomic_write_json
 _ORIGINAL_OS_REPLACE = _store.os.replace
 
 
-def _legacy_manifest_fault_probe(self, manifest) -> None:
-    """Preserve the historical manifest crash-injection seam only when replaced."""
+def _legacy_manifest_fault_probe(manifest) -> None:
+    """Preserve the old post-commit fault signal without touching store paths.
+
+    Historical characterization patches ``store.atomic_write_json`` and expects
+    an exception after the canonical manifest is already durable. The retained
+    publisher no longer uses that pathname primitive. If a test replaces it,
+    invoke the replacement only against an isolated temporary file outside the
+    ArtifactStore namespace, after the real retained publication has completed.
+    """
 
     current = _store.atomic_write_json
     if current is _ORIGINAL_ATOMIC_WRITE_JSON:
         return
-    current(self._manifest_path(manifest["artifact_id"]), manifest)
+    with TemporaryDirectory(prefix="autotrade-artifact-fault-probe-") as directory:
+        current(Path(directory) / "manifest.json", manifest)
 
 
 def _legacy_object_replace_fault_probe(self, digest: str) -> None:
@@ -113,12 +123,14 @@ def _posix_manifest_publish_with_fault_probe(
     manifest,
     replace_existing: bool,
 ):
-    _legacy_manifest_fault_probe(self, manifest)
-    return _ORIGINAL_POSIX_MANIFEST_PUBLISH(
+    result = _ORIGINAL_POSIX_MANIFEST_PUBLISH(
         self,
         manifest=manifest,
         replace_existing=replace_existing,
     )
+    if manifest.get("publication_state") != "PREPARED":
+        _legacy_manifest_fault_probe(manifest)
+    return result
 
 
 def _windows_manifest_publish_with_fault_probe(
@@ -127,12 +139,14 @@ def _windows_manifest_publish_with_fault_probe(
     manifest,
     replace_existing: bool,
 ):
-    _legacy_manifest_fault_probe(self, manifest)
-    return _ORIGINAL_WINDOWS_MANIFEST_PUBLISH(
+    result = _ORIGINAL_WINDOWS_MANIFEST_PUBLISH(
         self,
         manifest=manifest,
         replace_existing=replace_existing,
     )
+    if manifest.get("publication_state") != "PREPARED":
+        _legacy_manifest_fault_probe(manifest)
+    return result
 
 
 def install_publication_contract_compatibility() -> None:

@@ -31,6 +31,11 @@ from ._race_regressions import install_artifact_store_race_regressions
 install_artifact_store_race_regressions()
 del install_artifact_store_race_regressions
 
+from ._retained_namespace import install_retained_namespace_authority
+
+install_retained_namespace_authority()
+del install_retained_namespace_authority
+
 CANONICAL_ARTIFACT_STORE_MODULE = "autotrade_research.artifacts.store"
 
 __all__ = [

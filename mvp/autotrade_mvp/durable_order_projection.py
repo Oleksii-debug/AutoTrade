@@ -177,7 +177,7 @@ def _canonical_evidence_refs(
 
 
 def _snapshot_payload(snapshot: OrderSnapshot) -> dict[str, object]:
-    return {
+    payload = {
         "provider_id": snapshot.provider_id,
         "account_id": snapshot.account_id,
         "environment": snapshot.environment,
@@ -220,6 +220,11 @@ def _snapshot_payload(snapshot: OrderSnapshot) -> dict[str, object]:
         "replace_command_id": snapshot.replace_command_id,
         "expired": snapshot.expired,
     }
+    # Keep old journal snapshots byte-compatible while recording originating
+    # intent identity separately from amendment parent-order identity.
+    if snapshot.origin_intent_id is not None:
+        payload["origin_intent_id"] = snapshot.origin_intent_id
+    return payload
 
 
 def _scope_id(provider_id: str, account_id: str, environment: str) -> str:
@@ -277,6 +282,11 @@ class DurableOrderBookProjection:
             tuple[str, OrderSnapshot, str],
         ] = {}
         self._quantity_units: dict[str, str] = {}
+        self._provider_execution_owners: dict[
+            str,
+            tuple[str, str, str | None],
+        ] = {}
+        self._canonical_fill_hashes: dict[tuple[str, str, str], str] = {}
         self._reload()
 
     def _new_book(self) -> OrderBookProjection:
@@ -319,15 +329,15 @@ class DurableOrderBookProjection:
             raise OrderProjectionConflict(
                 "local lifecycle mutation must not claim provider-result evidence"
             )
-        if self.evidence_artifact_store is None:
-            if self.environment in {"PAPER", "LIVE"}:
-                raise OrderProjectionConflict(
-                    "provider evidence requires the trusted ArtifactStore boundary"
-                )
-            # REPLAY/SIMULATION are deterministic synthetic environments. They
-            # may carry canonical evidence identity without claiming that a
-            # real provider artifact has been qualified by the trusted store.
+        if self.environment in {"REPLAY", "SIMULATION"}:
+            # Synthetic provider evidence is a deterministic fixture identity,
+            # not a production ArtifactStore claim. A store may also be
+            # configured for unrelated resolution receipts in this environment.
             return refs
+        if self.evidence_artifact_store is None:
+            raise OrderProjectionConflict(
+                "provider evidence requires the trusted ArtifactStore boundary"
+            )
 
         committed = _instant(committed_at, name="committed_at")
         committed_dt = datetime.fromisoformat(
@@ -412,6 +422,7 @@ class DurableOrderBookProjection:
                 requested_quantity=request.get("requested_quantity"),
                 oco_group_id=request.get("oco_group_id"),
                 parent_intent_id=request.get("parent_intent_id"),
+                origin_intent_id=request.get("origin_intent_id"),
             )
             return order.snapshot()
 
@@ -472,10 +483,17 @@ class DurableOrderBookProjection:
         OrderBookProjection,
         dict[str, tuple[str, OrderSnapshot, str]],
         dict[str, str],
+        dict[str, tuple[str, str, str | None]],
+        dict[tuple[str, str, str], str],
     ]:
         book = self._new_book()
         idempotency: dict[str, tuple[str, OrderSnapshot, str]] = {}
         quantity_units: dict[str, str] = {}
+        provider_execution_owners: dict[
+            str,
+            tuple[str, str, str | None],
+        ] = {}
+        canonical_fill_hashes: dict[tuple[str, str, str], str] = {}
         expected_version = 1
 
         for event in events:
@@ -533,6 +551,16 @@ class DurableOrderBookProjection:
                 raise OrderProjectionConflict(
                     "order projection journal snapshot must be an object"
                 )
+            self._check_provider_execution_owner(
+                provider_execution_owners,
+                operation,
+                request,
+            )
+            self._check_canonical_fill_hash(
+                canonical_fill_hashes,
+                operation,
+                request,
+            )
             if event_key in idempotency:
                 raise OrderProjectionConflict(
                     "duplicate durable order event_key in journal"
@@ -548,6 +576,33 @@ class DurableOrderBookProjection:
                 raise OrderProjectionConflict(
                     "order projection journal snapshot differs from replay"
                 )
+            if operation == "RECORD_FILL":
+                provider_execution_id = request.get("provider_execution_id")
+                if provider_execution_id is not None:
+                    provider_execution_owners[
+                        _text(provider_execution_id, name="provider_execution_id")
+                    ] = (
+                        _text(request.get("client_order_id"), name="client_order_id"),
+                        _text(request.get("fill_id"), name="fill_id"),
+                        _optional_text(
+                            request.get("canonical_execution_fill_hash"),
+                            name="canonical_execution_fill_hash",
+                        ),
+                    )
+            if operation == "CORRECT_FILL":
+                provider_execution_id = request.get("provider_execution_id")
+                canonical_hash = request.get("canonical_execution_fill_hash")
+                if provider_execution_id is not None and canonical_hash is not None:
+                    canonical_fill_hashes[
+                        (
+                            "CORRECT_FILL",
+                            _text(provider_execution_id, name="provider_execution_id"),
+                            _text(request.get("provider_revision"), name="provider_revision"),
+                        )
+                    ] = _text(
+                        canonical_hash,
+                        name="canonical_execution_fill_hash",
+                    )
             if operation == "CREATE" and request.get("quantity_unit") is not None:
                 order_id = _text(
                     request.get("client_order_id"),
@@ -569,13 +624,88 @@ class DurableOrderBookProjection:
                 str(event["event_id"]),
             )
 
-        return book, idempotency, quantity_units
+        return (
+            book,
+            idempotency,
+            quantity_units,
+            provider_execution_owners,
+            canonical_fill_hashes,
+        )
+
+    @staticmethod
+    def _check_canonical_fill_hash(
+        hashes: Mapping[tuple[str, str, str], str],
+        operation: object,
+        request: Mapping[str, object],
+    ) -> None:
+        canonical_hash = request.get("canonical_execution_fill_hash")
+        if canonical_hash is None:
+            return
+        if operation == "RECORD_FILL":
+            identity = (
+                "RECORD_FILL",
+                _text(request.get("provider_execution_id"), name="provider_execution_id"),
+                _text(request.get("fill_id"), name="fill_id"),
+            )
+        elif operation == "CORRECT_FILL":
+            identity = (
+                "CORRECT_FILL",
+                _text(request.get("provider_execution_id"), name="provider_execution_id"),
+                _text(request.get("provider_revision"), name="provider_revision"),
+            )
+        else:
+            return
+        canonical_hash = _text(
+            canonical_hash,
+            name="canonical_execution_fill_hash",
+        )
+        previous = hashes.get(identity)
+        if previous is not None and previous != canonical_hash:
+            raise OrderProjectionConflict(
+                "provider execution observation is bound to different canonical economics"
+            )
+
+    @staticmethod
+    def _check_provider_execution_owner(
+        owners: Mapping[str, tuple[str, str, str | None]],
+        operation: object,
+        request: Mapping[str, object],
+    ) -> None:
+        if operation != "RECORD_FILL":
+            return
+        provider_execution_id = request.get("provider_execution_id")
+        if provider_execution_id is None:
+            return
+        execution_id = _text(
+            provider_execution_id,
+            name="provider_execution_id",
+        )
+        owner = (
+            _text(request.get("client_order_id"), name="client_order_id"),
+            _text(request.get("fill_id"), name="fill_id"),
+            _optional_text(
+                request.get("canonical_execution_fill_hash"),
+                name="canonical_execution_fill_hash",
+            ),
+        )
+        prior = owners.get(execution_id)
+        if prior is not None:
+            if prior[:2] != owner[:2]:
+                raise OrderProjectionConflict(
+                    "provider execution id is already owned by another order fill"
+                )
+            if prior[2] != owner[2]:
+                raise OrderProjectionConflict(
+                    "provider execution observation is bound to different canonical economics"
+                )
 
     def _reload(self) -> None:
         (
             self._book,
             self._idempotency,
             self._quantity_units,
+            self._provider_execution_owners,
+            self._canonical_fill_hashes,
         ) = self._replay(self._events())
 
     def _commit(
@@ -617,7 +747,17 @@ class DurableOrderBookProjection:
             )
 
         events = self._events()
-        candidate, _ = self._replay(events)
+        candidate, _, _, execution_owners, canonical_fill_hashes = self._replay(events)
+        self._check_provider_execution_owner(
+            execution_owners,
+            operation,
+            request,
+        )
+        self._check_canonical_fill_hash(
+            canonical_fill_hashes,
+            operation,
+            request,
+        )
         snapshot = self._apply(candidate, operation, request)
         payload = {
             "schema_version": "1.0.0",
@@ -628,9 +768,13 @@ class DurableOrderBookProjection:
             "request_hash": request_hash,
             "snapshot": _snapshot_payload(snapshot),
         }
-        version = self.store.next_aggregate_version(
-            _AGGREGATE_TYPE,
-            self.aggregate_id,
+        # The event snapshot above was computed from this exact journal cut.
+        # Never select a later version after another writer has committed: the
+        # store's transactional version check must reject this stale snapshot.
+        version = (
+            int(events[-1]["aggregate_version"]) + 1
+            if events
+            else 1
         )
         event_id = str(
             uuid5(
@@ -706,6 +850,7 @@ class DurableOrderBookProjection:
         quantity_unit: str | None = None,
         oco_group_id: str | None = None,
         parent_intent_id: str | None = None,
+        origin_intent_id: str | None = None,
     ) -> DurableOrderMutationResult:
         request = {
             "client_order_id": _text(client_order_id, name="client_order_id"),
@@ -719,6 +864,10 @@ class DurableOrderBookProjection:
             "parent_intent_id": _optional_text(
                 parent_intent_id,
                 name="parent_intent_id",
+            ),
+            "origin_intent_id": _optional_text(
+                origin_intent_id,
+                name="origin_intent_id",
             ),
         }
         if quantity_unit is not None:
@@ -1072,8 +1221,8 @@ class DurableOrderBookProjection:
         if intent_ref is not None:
             normalized_intent_ref = _text(intent_ref, name="intent_ref")
             if (
-                order.parent_intent_id is None
-                or normalized_intent_ref != order.parent_intent_id
+                order.origin_intent_id is None
+                or normalized_intent_ref != order.origin_intent_id
             ):
                 raise OrderProjectionConflict(
                     "canonical ExecutionFill intent_ref differs from target order"
@@ -1256,6 +1405,7 @@ class DurableOrderBookProjection:
                     provider_revision,
                     name="provider_revision",
                 ),
+                provider_execution_id=incoming_execution_id,
                 committed_at=committed,
                 evidence_refs=evidence,
                 canonical_execution_fill_hash=canonical_execution_fill_hash,
@@ -1291,6 +1441,7 @@ class DurableOrderBookProjection:
         provider_revision: str,
         committed_at: str,
         correction_fill_id: str | None = None,
+        provider_execution_id: str | None = None,
         evidence_refs: Sequence[Mapping[str, object]] | None = None,
         canonical_execution_fill_hash: str | None = None,
     ) -> DurableOrderMutationResult:
@@ -1306,6 +1457,10 @@ class DurableOrderBookProjection:
             "correction_fill_id": _optional_text(
                 correction_fill_id,
                 name="correction_fill_id",
+            ),
+            "provider_execution_id": _optional_text(
+                provider_execution_id,
+                name="provider_execution_id",
             ),
         }
         if canonical_execution_fill_hash is not None:

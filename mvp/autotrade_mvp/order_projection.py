@@ -78,6 +78,7 @@ class OrderSnapshot:
     replace_requested: bool
     replace_command_id: str | None
     expired: bool
+    origin_intent_id: str | None = None
 
 
 class OrderProjectionConflict(ValueError):
@@ -97,6 +98,7 @@ class OrderProjection:
         requested_quantity,
         oco_group_id: str | None = None,
         parent_intent_id: str | None = None,
+        origin_intent_id: str | None = None,
     ):
         self.provider_id = _text(provider_id, name="provider_id").upper()
         self.account_id = _text(account_id, name="account_id")
@@ -119,6 +121,11 @@ class OrderProjection:
         self.parent_intent_id = (
             _text(parent_intent_id, name="parent_intent_id")
             if parent_intent_id is not None
+            else None
+        )
+        self.origin_intent_id = (
+            _text(origin_intent_id, name="origin_intent_id")
+            if origin_intent_id is not None
             else None
         )
         if self.parent_intent_id == self.client_order_id:
@@ -589,6 +596,7 @@ class OrderProjection:
             replace_requested=self.replace_requested,
             replace_command_id=self.replace_command_id,
             expired=self.expired,
+            origin_intent_id=self.origin_intent_id,
         )
 
 
@@ -659,6 +667,7 @@ class OrderBookProjection:
         requested_quantity,
         oco_group_id: str | None = None,
         parent_intent_id: str | None = None,
+        origin_intent_id: str | None = None,
     ) -> OrderProjection:
         order = OrderProjection(
             provider_id=self.provider_id,
@@ -670,6 +679,7 @@ class OrderBookProjection:
             requested_quantity=requested_quantity,
             oco_group_id=oco_group_id,
             parent_intent_id=parent_intent_id,
+            origin_intent_id=origin_intent_id,
         )
         self.register(order)
         return order

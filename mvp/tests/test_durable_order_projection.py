@@ -2,6 +2,7 @@ from decimal import Decimal
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 import sqlite3
+import threading
 import unittest
 
 from research.autotrade_research.artifacts.store import ArtifactStore
@@ -22,6 +23,7 @@ T1 = "2026-09-25T05:40:01Z"
 T2 = "2026-09-25T05:40:02Z"
 T3 = "2026-09-25T05:40:03Z"
 T4 = "2026-09-25T05:40:04Z"
+T5 = "2026-09-25T05:40:05Z"
 
 
 def durable(
@@ -87,6 +89,145 @@ def provider_evidence(
 
 
 class DurableOrderProjectionTests(unittest.TestCase):
+    def test_provider_execution_id_has_durable_single_order_ownership_through_bust(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store)
+            for order_id in ("c1", "c2"):
+                book.create_order(
+                    event_key=f"create-{order_id}",
+                    client_order_id=order_id,
+                    instrument="ABC",
+                    side="BUY",
+                    requested_quantity="2",
+                    committed_at=T0,
+                )
+            book.record_fill(
+                event_key="fill-c1",
+                client_order_id="c1",
+                fill_id="f1",
+                provider_execution_id="exec-owned-by-c1",
+                quantity="1",
+                price="100",
+                provider_revision="r1",
+                committed_at=T1,
+            )
+
+            def reject_cross_order_reuse(instance, event_key):
+                before = len(
+                    store.load_events("order_projection_book", instance.aggregate_id)
+                )
+                with self.assertRaisesRegex(
+                    OrderProjectionConflict,
+                    "already owned by another order fill",
+                ):
+                    instance.record_fill(
+                        event_key=event_key,
+                        client_order_id="c2",
+                        fill_id=f"{event_key}-fill",
+                        provider_execution_id="exec-owned-by-c1",
+                        quantity="1",
+                        price="100",
+                        provider_revision="r1",
+                        committed_at=T1,
+                    )
+                self.assertEqual(
+                    len(store.load_events("order_projection_book", instance.aggregate_id)),
+                    before,
+                )
+                self.assertEqual(instance.order("c2").filled_quantity, Decimal("0"))
+
+            reject_cross_order_reuse(book, "duplicate-before-bust")
+            book.bust_fill(
+                event_key="bust-c1",
+                client_order_id="c1",
+                fill_id="f1",
+                correction_fill_id="f1-bust",
+                provider_revision="r2",
+                committed_at=T2,
+            )
+            restarted = durable(store)
+            reject_cross_order_reuse(restarted, "duplicate-after-restart-and-bust")
+            self.assertEqual(restarted.order("c1").filled_quantity, Decimal("0"))
+
+    def test_concurrent_stale_order_snapshot_is_rejected_without_poisoning_replay(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            seed = durable(store)
+            seed.create_order(
+                event_key="create-seed",
+                client_order_id="seed",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="2",
+                committed_at=T0,
+            )
+
+            stale_writer = durable(store)
+            concurrent_writer = durable(store)
+            applied = threading.Event()
+            resume = threading.Event()
+            original_apply = stale_writer._apply
+
+            def pause_after_stale_apply(book, operation, request):
+                result = original_apply(book, operation, request)
+                if (
+                    operation == "CREATE"
+                    and request.get("client_order_id") == "stale"
+                    and threading.current_thread().name == "stale-order-writer"
+                ):
+                    applied.set()
+                    if not resume.wait(timeout=5):
+                        raise TimeoutError("concurrency regression did not resume")
+                return result
+
+            stale_writer._apply = pause_after_stale_apply
+            failures = []
+
+            def write_stale_snapshot():
+                try:
+                    stale_writer.create_order(
+                        event_key="create-stale",
+                        client_order_id="stale",
+                        instrument="ABC",
+                        side="BUY",
+                        requested_quantity="2",
+                        committed_at=T1,
+                    )
+                except Exception as error:  # captured for assertion in test thread
+                    failures.append(error)
+
+            thread = threading.Thread(
+                target=write_stale_snapshot,
+                name="stale-order-writer",
+            )
+            thread.start()
+            self.assertTrue(applied.wait(timeout=5), "stale writer never reached its cut")
+            concurrent_writer.create_order(
+                event_key="create-concurrent",
+                client_order_id="concurrent",
+                instrument="ABC",
+                side="BUY",
+                requested_quantity="2",
+                committed_at=T1,
+            )
+            resume.set()
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive(), "stale writer failed to exit")
+            self.assertEqual(len(failures), 1)
+            self.assertRegex(str(failures[0]), "aggregate_version must be 3")
+
+            events = store.load_events(
+                "order_projection_book",
+                stale_writer.aggregate_id,
+            )
+            self.assertEqual(len(events), 2)
+            restarted = durable(store)
+            self.assertEqual(
+                {snapshot.client_order_id for snapshot in restarted.snapshots},
+                {"seed", "concurrent"},
+            )
+
     def test_create_ack_fill_restart_rebuilds_exact_projection(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
@@ -134,7 +275,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 side="BUY",
                 requested_quantity="2",
                 quantity_unit="unit",
-                parent_intent_id="intent-1",
+                origin_intent_id="intent-1",
                 committed_at=T0,
             )
             result = book.ingest_execution_fill(
@@ -168,6 +309,73 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 restarted.order("c1").fill_history[0].provider_execution_id,
                 "exec-1",
             )
+            self.assertEqual(restarted.order("c1").origin_intent_id, "intent-1")
+
+    def test_amendment_parent_order_and_originating_intent_are_distinct(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store)
+            book.create_order(
+                event_key="create-parent",
+                client_order_id="order-1",
+                instrument="instrument-v1",
+                side="BUY",
+                requested_quantity="2",
+                quantity_unit="unit",
+                origin_intent_id="intent-origin-1",
+                committed_at=T0,
+            )
+            book.create_order(
+                event_key="create-child",
+                client_order_id="order-2",
+                instrument="instrument-v1",
+                side="BUY",
+                requested_quantity="2",
+                quantity_unit="unit",
+                parent_intent_id="order-1",
+                origin_intent_id="intent-origin-2",
+                committed_at=T1,
+            )
+
+            child = durable(store).order("order-2")
+            self.assertEqual(child.parent_intent_id, "order-1")
+            self.assertEqual(child.origin_intent_id, "intent-origin-2")
+            self.assertEqual(durable(store)._book.amendment_child("order-1"), "order-2")
+
+            wrong_intent = {
+                "fill_id": "fill-child",
+                "provider_execution_id": "exec-child",
+                "order_ref": "order-2",
+                "intent_ref": "order-1",
+                "instrument_version": "instrument-v1",
+                "side": "BUY",
+                "last_quantity": {"value": "1", "unit": "unit"},
+                "last_price": "100",
+                "trade_time": T1,
+                "receipt_time": T2,
+                "fees": [],
+                "settlement_date": "2026-09-27",
+                "evidence": [],
+            }
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "intent_ref differs from target order",
+            ):
+                book.ingest_execution_fill(
+                    event_key="wrong-intent-ref",
+                    client_order_id="order-2",
+                    committed_at=T2,
+                    execution_fill=wrong_intent,
+                )
+            wrong_intent["intent_ref"] = "intent-origin-2"
+            accepted = book.ingest_execution_fill(
+                event_key="correct-intent-ref",
+                client_order_id="order-2",
+                committed_at=T2,
+                execution_fill=wrong_intent,
+            )
+            self.assertEqual(accepted.snapshot.filled_quantity, Decimal("1"))
+            self.assertEqual(durable(store).order("order-2").origin_intent_id, "intent-origin-2")
 
     def test_canonical_execution_fill_scope_mismatch_fails_before_mutation(self):
         with TemporaryDirectory() as directory:
@@ -418,6 +626,159 @@ class DurableOrderProjectionTests(unittest.TestCase):
                 Decimal("1"),
             )
 
+    def test_canonical_fill_economics_are_immutable_across_event_keys_and_restart(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store)
+            book.create_order(
+                event_key="create",
+                client_order_id="c1",
+                instrument="instrument-v1",
+                side="BUY",
+                requested_quantity="2",
+                quantity_unit="unit",
+                origin_intent_id="intent-1",
+                committed_at=T0,
+            )
+            fill = {
+                "fill_id": "fill-1",
+                "provider_execution_id": "exec-1",
+                "order_ref": "c1",
+                "intent_ref": "intent-1",
+                "instrument_version": "instrument-v1",
+                "side": "BUY",
+                "last_quantity": {"value": "1", "unit": "unit"},
+                "last_price": "100",
+                "trade_time": T1,
+                "receipt_time": T2,
+                "fees": [],
+                "settlement_date": "2026-09-27",
+                "evidence": [],
+            }
+            book.ingest_execution_fill(
+                event_key="canonical-fill-A",
+                client_order_id="c1",
+                committed_at=T2,
+                execution_fill=fill,
+            )
+            before = len(
+                store.load_events("order_projection_book", book.aggregate_id)
+            )
+            changed = dict(fill)
+            changed["fees"] = [{"amount": "1", "currency": "USD"}]
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "different canonical economics",
+            ):
+                book.ingest_execution_fill(
+                    event_key="canonical-fill-B",
+                    client_order_id="c1",
+                    committed_at=T2,
+                    execution_fill=changed,
+                )
+            self.assertEqual(
+                len(store.load_events("order_projection_book", book.aggregate_id)),
+                before,
+            )
+
+            restarted = durable(store)
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "different canonical economics",
+            ):
+                restarted.ingest_execution_fill(
+                    event_key="canonical-fill-C",
+                    client_order_id="c1",
+                    committed_at=T2,
+                    execution_fill=changed,
+                )
+            self.assertEqual(
+                len(store.load_events("order_projection_book", book.aggregate_id)),
+                before,
+            )
+
+    def test_canonical_correction_economics_are_immutable_by_provider_revision(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = durable(store)
+            book.create_order(
+                event_key="create",
+                client_order_id="c1",
+                instrument="instrument-v1",
+                side="BUY",
+                requested_quantity="2",
+                quantity_unit="unit",
+                origin_intent_id="intent-1",
+                committed_at=T0,
+            )
+            original = {
+                "fill_id": "fill-1",
+                "provider_execution_id": "exec-1",
+                "order_ref": "c1",
+                "intent_ref": "intent-1",
+                "provider_revision": "r1",
+                "instrument_version": "instrument-v1",
+                "side": "BUY",
+                "last_quantity": {"value": "1", "unit": "unit"},
+                "last_price": "100",
+                "trade_time": T1,
+                "receipt_time": T2,
+                "fees": [],
+                "settlement_date": "2026-09-27",
+                "evidence": [],
+            }
+            book.ingest_execution_fill(
+                event_key="fill-r1",
+                client_order_id="c1",
+                committed_at=T2,
+                execution_fill=original,
+            )
+            correction = {
+                **original,
+                "fill_id": "fill-r2",
+                "provider_revision": "r2",
+                "receipt_time": T3,
+                "last_quantity": {"value": "1.5", "unit": "unit"},
+                "last_price": "101",
+                "correction_reference": "fill-1",
+            }
+            book.ingest_execution_fill(
+                event_key="correction-r2-A",
+                client_order_id="c1",
+                committed_at=T3,
+                execution_fill=correction,
+            )
+            before = len(
+                store.load_events("order_projection_book", book.aggregate_id)
+            )
+            changed = {**correction, "fees": [{"amount": "1", "currency": "USD"}]}
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "different canonical economics",
+            ):
+                book.ingest_execution_fill(
+                    event_key="correction-r2-B",
+                    client_order_id="c1",
+                    committed_at=T3,
+                    execution_fill=changed,
+                )
+            self.assertEqual(
+                len(store.load_events("order_projection_book", book.aggregate_id)),
+                before,
+            )
+
+            restarted = durable(store)
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "different canonical economics",
+            ):
+                restarted.ingest_execution_fill(
+                    event_key="correction-r2-C",
+                    client_order_id="c1",
+                    committed_at=T3,
+                    execution_fill=changed,
+                )
+
     def test_canonical_execution_fill_correction_uses_existing_fill_lineage(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
@@ -536,7 +897,7 @@ class DurableOrderProjectionTests(unittest.TestCase):
             corrected = book.ingest_execution_fill(
                 event_key="fill-r3",
                 client_order_id="c1",
-                committed_at="2026-09-25T00:00:05Z",
+                committed_at=T5,
                 execution_fill={
                     "fill_id": "fill-1-r3",
                     "provider_execution_id": "exec-1",

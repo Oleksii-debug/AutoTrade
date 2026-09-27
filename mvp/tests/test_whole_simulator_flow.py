@@ -216,6 +216,7 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 observed_at=NOW,
                 host_id="sim-host",
                 owner_epoch="1",
+                evidence_artifact_store=artifacts,
             )
             for pending in journal.pending_outbox():
                 if pending["event_id"] == availability_checkpoint["event_id"]:
@@ -322,7 +323,7 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 side="BUY",
                 requested_quantity="2",
                 quantity_unit=fill["last_quantity"]["unit"],
-                parent_intent_id="intent-1",
+                origin_intent_id="intent-1",
                 committed_at=NOW,
             )
             orders.sync_submission_attempt(attempt_id=attempt_id)
@@ -336,6 +337,7 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                     "fill_id": fill["provider_execution_id"],
                     "provider_execution_id": fill["provider_execution_id"],
                     "order_ref": dispatched.client_order_id,
+                    "intent_ref": "intent-1",
                     "instrument_version": fill["instrument_version"],
                     "side": fill["side"],
                     "last_quantity": fill["last_quantity"],
@@ -486,6 +488,7 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 environment="SIMULATION",
                 host_id="sim-host-restart",
                 owner_epoch="2",
+                evidence_artifact_store=artifacts,
             )
             self.assertEqual(
                 restarted_orders.order(dispatched.client_order_id).state,

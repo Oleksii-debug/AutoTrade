@@ -9,7 +9,6 @@ from threading import Event
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
-from urllib.request import ProxyHandler
 
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
@@ -83,16 +82,10 @@ class ProviderWirePolicyTests(unittest.TestCase):
                 "https_proxy": "http://127.0.0.1:65534",
             },
             clear=False,
-        ):
-            client = UrllibJsonWireClient()
+        ), patch("urllib.request.getproxies") as ambient_proxy_discovery:
+            UrllibJsonWireClient()
 
-        proxy_handlers = [
-            handler
-            for handler in client._opener.handlers
-            if isinstance(handler, ProxyHandler)
-        ]
-        self.assertEqual(len(proxy_handlers), 1)
-        self.assertEqual(proxy_handlers[0].proxies, {})
+        ambient_proxy_discovery.assert_not_called()
 
 
 class SignedWriteEnvelopeTests(unittest.TestCase):

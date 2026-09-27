@@ -103,6 +103,11 @@ from ._publication_contract_compat import install_publication_contract_compatibi
 install_publication_contract_compatibility()
 del install_publication_contract_compatibility
 
+from ._crash_atomic_publication import install_crash_atomic_publication
+
+install_crash_atomic_publication()
+del install_crash_atomic_publication
+
 from ._retained_coordination import install_retained_coordination
 
 install_retained_coordination()

@@ -216,7 +216,7 @@ class SimulatedProvider:
                 raise SimulatedProviderConflict(
                     "attempt_id already has different simulated order content"
                 )
-            return self._submission_result(prior_attempt, canonical_now)
+            return self._submission_result(prior_attempt, prior_attempt.submitted_at)
 
         prior_client = self.orders.get(cid)
         if prior_client is not None:

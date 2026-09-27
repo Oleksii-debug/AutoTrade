@@ -848,9 +848,15 @@ class SignedHttpRequest:
             or parsed.fragment
         ):
             raise ProviderTransportScopeError("signed request URL is invalid")
-        if type(self.body) is not bytes or not self.body:
+        if type(self.body) is not bytes:
             raise ProviderTransportScopeError(
-                "signed request body must be non-empty exact bytes"
+                "signed request body must be exact bytes"
+            )
+        has_query = bool(parsed.query)
+        has_body = bool(self.body)
+        if has_query == has_body:
+            raise ProviderTransportScopeError(
+                "signed POST requires exactly one payload channel: URL query or body"
             )
         if not isinstance(self.headers, Mapping):
             raise ProviderTransportScopeError("headers must be a mapping")
@@ -1011,7 +1017,7 @@ class UrllibJsonWireClient:
                 "request must be SignedHttpRequest or AuthenticatedReadHttpRequest"
             )
         if isinstance(request, SignedHttpRequest):
-            data = request.body
+            data = request.body or None
             method = request.method
         else:
             data = request.body or None
@@ -2118,9 +2124,10 @@ class KrakenFuturesSigner:
                 "Kraken Futures nonce must be an unsigned 64-bit positive integer"
             )
         credential = KrakenFuturesCredential.parse(credential_plaintext)
-        exact_body = urlencode(sorted(parameters.items())).encode("ascii")
+        exact_query = urlencode(sorted(parameters.items()))
+        exact_query_bytes = exact_query.encode("ascii")
         digest = sha256(
-            exact_body
+            exact_query_bytes
             + str(nonce).encode("ascii")
             + KrakenFuturesSigner.SIGNING_PATH.encode("ascii")
         ).digest()
@@ -2130,16 +2137,15 @@ class KrakenFuturesSigner:
         ).decode("ascii")
         return SignedHttpRequest(
             method="POST",
-            url=policy.absolute_url(path),
+            url=policy.absolute_url(path) + "?" + exact_query,
             headers=MappingProxyType(
                 {
-                    "Content-Type": "application/x-www-form-urlencoded",
                     "APIKey": credential.api_key,
                     "Nonce": str(nonce),
                     "Authent": signature,
                 }
             ),
-            body=exact_body,
+            body=b"",
             timeout_seconds=policy.timeout_seconds,
         )
 

@@ -46,7 +46,10 @@ def _indexed_collection(state: dict, name: str, identity_key: str) -> dict[str, 
 def _indexed_new_exposure_blocks(
     state: dict,
 ) -> dict[tuple[str, str], dict[str, str]]:
-    values = state.get("new_exposure_blocks")
+    # AuthorityService.restore() deliberately treats the field as optional for
+    # historical schema-v1 snapshots; the monotonic validator must preserve
+    # that deterministic compatibility while validating every present entry.
+    values = state.get("new_exposure_blocks", [])
     if not isinstance(values, list):
         raise ValueError("authority state new_exposure_blocks must be a list")
     indexed: dict[tuple[str, str], dict[str, str]] = {}

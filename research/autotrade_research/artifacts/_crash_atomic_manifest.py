@@ -119,6 +119,10 @@ def _load_manifest_committed(self, artifact_id: str):
         raise _store.ArtifactIntegrityError(
             "artifact manifest publication is not committed"
         )
+    # A durable COMMITTED marker is not sufficient authority by itself. Rebind
+    # the manifest to the exact retained object-prefix generation before any
+    # caller can observe it as committed metadata after a process/power crash.
+    _verify_generation(self, manifest)
     return manifest
 
 

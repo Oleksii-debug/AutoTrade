@@ -10,6 +10,7 @@ from autotrade_research.artifacts.store import (
     ArtifactIntegrityError,
     ArtifactStore,
 )
+from autotrade_research.artifacts import _retained_recovery_hardening as recovery
 
 
 @unittest.skipIf(
@@ -159,36 +160,27 @@ class ArtifactNamespaceGuardTests(unittest.TestCase):
             external.parent.mkdir(parents=True)
             external.write_bytes(b"outside-must-survive")
             detached = root / "objects" / "detached-sha256"
-            original_unlink = store._unlink_verified_regular_entry
+            real_unlink_bound = recovery._unlink_bound_object
             swapped = False
 
-            def swap_intermediate_then_unlink(
-                cleanup_directory,
-                name,
-                *,
-                subject,
-            ):
+            def swap_intermediate_then_unlink(bound_store, candidate_digest):
                 nonlocal swapped
-                if not swapped and name == digest:
+                if not swapped and candidate_digest == digest:
                     swapped = True
                     os.replace(store.objects, detached)
                     store.objects.symlink_to(
                         outside_sha256,
                         target_is_directory=True,
                     )
-                return original_unlink(
-                    cleanup_directory,
-                    name,
-                    subject=subject,
-                )
+                return real_unlink_bound(bound_store, candidate_digest)
 
             try:
                 with patch.object(
-                    store,
-                    "_unlink_verified_regular_entry",
+                    recovery,
+                    "_unlink_bound_object",
                     side_effect=swap_intermediate_then_unlink,
                 ):
-                    store.recover_orphans()
+                    report = store.recover_orphans()
             finally:
                 if store.objects.is_symlink():
                     store.objects.unlink()
@@ -197,8 +189,8 @@ class ArtifactNamespaceGuardTests(unittest.TestCase):
 
             self.assertTrue(swapped)
             self.assertEqual(external.read_bytes(), b"outside-must-survive")
-            self.assertTrue(orphan.exists())
-            self.assertIn(digest, store.audit().unreferenced_objects)
+            self.assertFalse(orphan.exists())
+            self.assertNotIn(digest, report.unreferenced_objects)
 
     def test_ordinary_manifest_child_replacement_is_not_new_authority(self):
         with TemporaryDirectory() as directory:

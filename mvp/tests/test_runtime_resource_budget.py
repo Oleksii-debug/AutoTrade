@@ -160,9 +160,11 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
         self.assertIn("insufficient_financial_latency_samples", decision.reasons)
 
     def test_every_recovered_financial_event_requires_latency_coverage(self):
+        spec = self.spec(min_financial_samples=5)
         decision = evaluate_runtime_budget(
-            self.spec(min_financial_samples=5),
+            spec,
             self.observation(
+                spec_digest=spec.digest,
                 financial_latency_us=[100_000] * 19,
                 financial_staleness_us=[100_000] * 20,
             ),
@@ -172,9 +174,11 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
         self.assertEqual(decision.metrics["financial_latency_sample_count"], 19)
 
     def test_every_recovered_financial_event_requires_staleness_coverage(self):
+        spec = self.spec(min_financial_samples=5)
         decision = evaluate_runtime_budget(
-            self.spec(min_financial_samples=5),
+            spec,
             self.observation(
+                spec_digest=spec.digest,
                 financial_latency_us=[100_000] * 20,
                 financial_staleness_us=[100_000] * 19,
             ),

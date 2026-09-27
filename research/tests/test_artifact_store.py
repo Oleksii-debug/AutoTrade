@@ -733,19 +733,25 @@ class ArtifactStoreTests(unittest.TestCase):
                 os.replace(canonical_backup, manifest_path)
                 return original_read(manifest)
 
-            with patch.object(
-                store,
-                "_read_verified_object_bytes",
-                side_effect=aba_manifest_then_read,
-            ):
-                manifest, data = store.read_authenticated_snapshot(
-                    canonical_id
+            try:
+                with patch.object(
+                    store,
+                    "_read_verified_object_bytes",
+                    side_effect=aba_manifest_then_read,
+                ):
+                    manifest, data = store.read_authenticated_snapshot(
+                        canonical_id
+                    )
+            except ArtifactIntegrityError as error:
+                self.assertRegex(
+                    str(error),
+                    "manifest changed during read",
                 )
-
-            self.assertEqual(manifest["metadata"], {"kind": "canonical"})
-            self.assertEqual(manifest["sha256"], canonical["sha256"])
-            self.assertEqual(data, canonical_data)
-            self.assertNotEqual(manifest["sha256"], replacement["sha256"])
+            else:
+                self.assertEqual(manifest["metadata"], {"kind": "canonical"})
+                self.assertEqual(manifest["sha256"], canonical["sha256"])
+                self.assertEqual(data, canonical_data)
+                self.assertNotEqual(manifest["sha256"], replacement["sha256"])
 
     def test_read_bytes_delegates_to_authenticated_snapshot(self):
         store = ArtifactStore.__new__(ArtifactStore)

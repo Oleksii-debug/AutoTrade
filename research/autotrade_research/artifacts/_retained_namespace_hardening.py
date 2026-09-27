@@ -13,10 +13,21 @@ _store = importlib.import_module(f"{__package__}.store")
 
 
 def _path_without_flavour_switch(path: Path) -> Path:
-    # Some portability regressions deliberately patch os.name. Reconstructing
-    # pathlib.Path while that patch is active asks pathlib for a WindowsPath on
-    # POSIX. Existing concrete paths already carry the correct host flavour.
+    # Some portability regressions deliberately characterize path-level Windows
+    # descriptor behavior from a non-Windows host. Existing concrete paths must
+    # keep their host pathlib flavour while that isolated seam is exercised.
     return path if isinstance(path, Path) else Path(path)
+
+
+def _use_path_level_windows_descriptor_bridge() -> bool:
+    """Return whether the isolated portability bridge should be exercised.
+
+    Real Windows always uses retained HANDLE authority below. This predicate is
+    deliberately separate so non-Windows characterization can patch one local
+    capability seam instead of mutating process-global ``os.name``.
+    """
+
+    return os.name == "nt" and sys.platform != "win32"
 
 
 def _open_posix_relative_file(
@@ -148,11 +159,7 @@ def _open_object_descriptor(
     path = _path_without_flavour_switch(object_path)
     prefix, digest = _retained._validate_object_name(self, path)
 
-    # Portability characterization may ask a POSIX host to exercise only the
-    # Windows path-level descriptor helper by temporarily changing os.name.
-    # Keep that artificial seam ahead of platform-sensitive stat validation so
-    # the global patch cannot alter reparse-point semantics elsewhere.
-    if os.name == "nt" and sys.platform != "win32":
+    if _use_path_level_windows_descriptor_bridge():
         descriptor = _store._open_read_only_descriptor(path)
         try:
             opened = os.fstat(descriptor)

@@ -24,7 +24,7 @@ from mvp.autotrade_mvp.persistence import (
     canonical_json,
     payload_digest,
 )
-from research.autotrade_research.artifacts.store import ArtifactStore
+from research.autotrade_research.artifacts.store import ArtifactIntegrityError, ArtifactStore
 from mvp.autotrade_mvp.reservations import (
     InsufficientAvailable,
     ReservationConflict,
@@ -306,6 +306,85 @@ class DurableReservationBookTests(unittest.TestCase):
             evidence,
         )
         self.assertEqual(restarted.total_reserved("CASH:USD"), Decimal("0"))
+
+    def test_terminal_release_and_restart_use_one_authenticated_snapshot_per_verification(self):
+        book = self.book()
+        self.reserve(book)
+        book.mark_unknown(
+            command_id="cmd-unknown-snapshot",
+            idempotency_key="idem-unknown-snapshot",
+            reservation_id="r1",
+        )
+        self.create_unknown_attempt()
+        reconciliation = self.record_reconciliation_resolution()
+        evidence = self.publish_resolution_evidence(
+            artifact_id="99999999-9999-4999-8999-999999999999",
+            reconciliation_event=reconciliation,
+        )
+        with (
+            patch.object(
+                self.artifacts,
+                "read_authenticated_snapshot",
+                wraps=self.artifacts.read_authenticated_snapshot,
+            ) as snapshot_read,
+            patch.object(self.artifacts, "load_manifest", side_effect=AssertionError("split read")),
+            patch.object(self.artifacts, "read_bytes", side_effect=AssertionError("split read")),
+        ):
+            book.mark_terminal(
+                command_id="cmd-terminal-snapshot",
+                idempotency_key="idem-terminal-snapshot",
+                reservation_id="r1",
+                outcome="PROVEN_ABSENT",
+                provider="SIMULATED",
+                attempt_id="attempt-r1",
+                resolution_evidence=evidence,
+            )
+            # Admission, commit refresh and journal replay each consume one
+            # cohesive snapshot; none split manifest from receipt bytes.
+            self.assertEqual(snapshot_read.call_count, 3)
+            self.assertEqual(self.book().get("r1").state, "PROVEN_ABSENT")
+            self.assertEqual(snapshot_read.call_count, 5)
+            self.assertTrue(
+                all(
+                    call.args == ("99999999-9999-4999-8999-999999999999",)
+                    for call in snapshot_read.call_args_list
+                )
+            )
+
+    def test_snapshot_integrity_failure_keeps_unknown_reservation_durable(self):
+        book = self.book()
+        self.reserve(book)
+        book.mark_unknown(
+            command_id="cmd-unknown-failed-snapshot",
+            idempotency_key="idem-unknown-failed-snapshot",
+            reservation_id="r1",
+        )
+        self.create_unknown_attempt()
+        reconciliation = self.record_reconciliation_resolution()
+        evidence = self.publish_resolution_evidence(
+            artifact_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            reconciliation_event=reconciliation,
+        )
+        before_version = book.version
+        with patch.object(
+            self.artifacts,
+            "read_authenticated_snapshot",
+            side_effect=ArtifactIntegrityError("manifest identity changed"),
+        ):
+            with self.assertRaisesRegex(ReservationConflict, "verification failed"):
+                book.mark_terminal(
+                    command_id="cmd-terminal-failed-snapshot",
+                    idempotency_key="idem-terminal-failed-snapshot",
+                    reservation_id="r1",
+                    outcome="PROVEN_ABSENT",
+                    provider="SIMULATED",
+                    attempt_id="attempt-r1",
+                    resolution_evidence=evidence,
+                )
+        self.assertEqual(book.version, before_version)
+        self.assertEqual(book.get("r1").state, "UNKNOWN")
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("70"))
+        self.assertEqual(self.book().total_reserved("CASH:USD"), Decimal("70"))
 
     def test_terminal_release_rejects_cross_scope_reconciliation_after_restart(self):
         book = self.book()

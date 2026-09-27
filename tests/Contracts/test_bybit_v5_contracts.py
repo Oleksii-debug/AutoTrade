@@ -25,6 +25,7 @@ from mvp.autotrade_mvp.dispatch import (
 )
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import observe_submission_json_response
+from contract_order_fixture import make_contract_order_preparer
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -124,7 +125,17 @@ def durable_submission(payload, *, intent_id):
                 "prepared_request_sha256": prepared.body_sha256,
                 "capability_snapshot_ids": list(prepared.capability_snapshot_ids),
                 "instrument_versions": list(prepared.instrument_versions),
+                "instrument": "BTCUSDT@v1",
+                "side": "BUY",
+                "requested_quantity": "0.01",
+                "quantity_unit": "unit:crypto:BTC",
             },
+            prepare_order=make_contract_order_preparer(
+                store,
+                provider_id="BYBIT",
+                account_id="contract-account",
+                environment="LIVE",
+            ),
         )
         if outcome.status != "SENT":
             raise AssertionError(f"guarded dispatch did not persist SENT: {outcome}")

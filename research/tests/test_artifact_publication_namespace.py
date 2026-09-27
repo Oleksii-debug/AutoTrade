@@ -14,6 +14,9 @@ from autotrade_research.artifacts import _retained_publication as publication
 from autotrade_research.artifacts import (
     _retained_publication_hardening as publication_hardening,
 )
+from autotrade_research.artifacts import (
+    _posix_retained_object_move_fix as object_move,
+)
 
 
 @unittest.skipIf(
@@ -139,36 +142,23 @@ class RetainedPublicationNamespaceTests(unittest.TestCase):
             detached = root / "objects" / "canonical-sha256"
             replacement = root / "objects" / "replacement-sha256"
             replacement.mkdir()
-            real_link = os.link
+            real_move = object_move._rename_noreplace_between_dirs_posix
             swapped = False
 
-            def swap_then_link(
-                src,
-                dst,
-                *,
-                src_dir_fd=None,
-                dst_dir_fd=None,
-                follow_symlinks=True,
-            ):
+            def swap_then_move(source_parent_fd, source, target_parent_fd, target):
                 nonlocal swapped
-                if (
-                    not swapped
-                    and src_dir_fd == store._retained_staging_fd
-                    and dst_dir_fd not in {None, store._retained_manifests_fd}
-                ):
+                if not swapped and source_parent_fd == store._retained_staging_fd:
                     swapped = True
                     os.replace(store.objects, detached)
                     os.replace(replacement, store.objects)
-                return real_link(
-                    src,
-                    dst,
-                    src_dir_fd=src_dir_fd,
-                    dst_dir_fd=dst_dir_fd,
-                    follow_symlinks=follow_symlinks,
-                )
+                return real_move(source_parent_fd, source, target_parent_fd, target)
 
             try:
-                with patch.object(publication.os, "link", side_effect=swap_then_link):
+                with patch.object(
+                    object_move,
+                    "_rename_noreplace_between_dirs_posix",
+                    side_effect=swap_then_move,
+                ):
                     with self.assertRaisesRegex(
                         ArtifactIntegrityError,
                         "objects namespace changed",
@@ -192,39 +182,22 @@ class RetainedPublicationNamespaceTests(unittest.TestCase):
             detached = store.objects / f"detached-{digest[:2]}"
             replacement = Path(directory) / "replacement-prefix"
             replacement.mkdir()
-            real_link = os.link
+            real_move = object_move._rename_noreplace_between_dirs_posix
             swapped = False
 
-            def swap_prefix_then_link(
-                src,
-                dst,
-                *,
-                src_dir_fd=None,
-                dst_dir_fd=None,
-                follow_symlinks=True,
-            ):
+            def swap_prefix_then_move(source_parent_fd, source, target_parent_fd, target):
                 nonlocal swapped
-                if (
-                    not swapped
-                    and src_dir_fd == store._retained_staging_fd
-                    and dst == digest
-                ):
+                if not swapped and source_parent_fd == store._retained_staging_fd and target == digest:
                     swapped = True
                     os.replace(prefix, detached)
                     os.replace(replacement, prefix)
-                return real_link(
-                    src,
-                    dst,
-                    src_dir_fd=src_dir_fd,
-                    dst_dir_fd=dst_dir_fd,
-                    follow_symlinks=follow_symlinks,
-                )
+                return real_move(source_parent_fd, source, target_parent_fd, target)
 
             try:
                 with patch.object(
-                    publication.os,
-                    "link",
-                    side_effect=swap_prefix_then_link,
+                    object_move,
+                    "_rename_noreplace_between_dirs_posix",
+                    side_effect=swap_prefix_then_move,
                 ):
                     with self.assertRaisesRegex(
                         ArtifactIntegrityError,
@@ -253,39 +226,22 @@ class RetainedPublicationNamespaceTests(unittest.TestCase):
             replacement = Path(directory) / "replacement-prefix"
             replacement.mkdir()
             (replacement / digest).write_bytes(payload)
-            real_link = os.link
+            real_move = object_move._rename_noreplace_between_dirs_posix
             swapped = False
 
-            def swap_prefix_then_link(
-                src,
-                dst,
-                *,
-                src_dir_fd=None,
-                dst_dir_fd=None,
-                follow_symlinks=True,
-            ):
+            def swap_prefix_then_move(source_parent_fd, source, target_parent_fd, target):
                 nonlocal swapped
-                if (
-                    not swapped
-                    and src_dir_fd == store._retained_staging_fd
-                    and dst == digest
-                ):
+                if not swapped and source_parent_fd == store._retained_staging_fd and target == digest:
                     swapped = True
                     os.replace(prefix, detached)
                     os.replace(replacement, prefix)
-                return real_link(
-                    src,
-                    dst,
-                    src_dir_fd=src_dir_fd,
-                    dst_dir_fd=dst_dir_fd,
-                    follow_symlinks=follow_symlinks,
-                )
+                return real_move(source_parent_fd, source, target_parent_fd, target)
 
             try:
                 with patch.object(
-                    publication.os,
-                    "link",
-                    side_effect=swap_prefix_then_link,
+                    object_move,
+                    "_rename_noreplace_between_dirs_posix",
+                    side_effect=swap_prefix_then_move,
                 ):
                     with self.assertRaisesRegex(
                         ArtifactIntegrityError,

@@ -1875,6 +1875,60 @@ class AuthorityTests(unittest.TestCase):
             self.assertEqual(replayed, admitted)
             self.assertEqual(resolver_calls, [])
 
+    def test_same_symbol_missing_family_stays_rejected_after_restart(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            exposed = replace(
+                public_risk_context(),
+                positions={"ABC": Decimal("1")},
+                instrument_types={},
+            )
+            authority = authority_service(store, risk_context=exposed)
+            item = policy(autonomous=True)
+            authority.register_policy(item)
+            kwargs = dict(
+                command_id="cmd-family-reject",
+                idempotency_key="idem-family-reject",
+                admission_id="admission-family-reject",
+                policy_id=item.policy_id,
+                intent_id="intent-family-reject",
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_id="reservation-family-reject",
+                **public_financial_kwargs(
+                    store,
+                    risk_context=exposed,
+                    risk_intent=RiskIntent.create(
+                        symbol="ABC", side="BUY", quantity="1", price="100",
+                        expected_state_version=7, instrument_type="EQUITY",
+                    ),
+                ),
+            )
+            reservations = DurableReservationBook(
+                store, environment="PAPER", account_id="paper-1"
+            )
+            first = authority.admit(reservation_book=reservations, **kwargs)
+            self.assertEqual((first.outcome, first.reason), ("REJECTED", "risk_rejected"))
+            self.assertEqual(reservations.version, 0)
+            self.assertEqual(store.pending_outbox(), [])
+            self.assertEqual(len(store.load_events("risk_decision", first.risk_decision_id)), 1)
+
+            restarted = authority_service(store, risk_context=exposed)
+            replayed_reservations = DurableReservationBook(
+                store, environment="PAPER", account_id="paper-1"
+            )
+            replayed = restarted.admit(
+                reservation_book=replayed_reservations, **kwargs
+            )
+            self.assertEqual(replayed, first)
+            self.assertEqual(replayed_reservations.version, 0)
+            self.assertEqual(store.pending_outbox(), [])
+            self.assertEqual(len(store.load_events("risk_decision", first.risk_decision_id)), 1)
+
     def test_public_financial_admission_is_atomic_and_restart_idempotent(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

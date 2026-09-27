@@ -32,6 +32,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import (
     HTTPRedirectHandler,
+    ProxyHandler,
     Request,
     build_opener,
 )
@@ -980,7 +981,9 @@ class UrllibJsonWireClient:
     """One-shot TLS client with redirects and automatic retries disabled."""
 
     def __init__(self) -> None:
-        self._opener = build_opener(_NoRedirectHandler())
+        # Provider destination authority is explicit in ProviderEndpointPolicy.
+        # Never inherit process/OS proxy discovery as an undeclared network hop.
+        self._opener = build_opener(ProxyHandler({}), _NoRedirectHandler())
 
     def send(
         self,

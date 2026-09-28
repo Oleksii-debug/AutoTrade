@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
@@ -17,6 +18,7 @@ from mvp.autotrade_mvp.perpetual_funding import (
     PerpetualFundingConflict,
     PerpetualFundingError,
     PerpetualFundingObservation,
+    _source_event_identity,
 )
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
@@ -349,6 +351,28 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
             },
         )
         return authority, book
+
+    def test_provider_event_identity_is_instrument_scoped_by_default(self):
+        base = normalize(sealed_funding(external_event_id="provider-row-7"))
+        same_instrument_retry = replace(base, provider_revision="2")
+        other_instrument = replace(
+            base,
+            instrument_version="dddddddd-dddd-4ddd-8ddd-dddddddddddd@1",
+        )
+        other_provider_row = replace(base, external_event_id="provider-row-8")
+
+        self.assertEqual(
+            _source_event_identity(base),
+            _source_event_identity(same_instrument_retry),
+        )
+        self.assertNotEqual(
+            _source_event_identity(base),
+            _source_event_identity(other_instrument),
+        )
+        self.assertNotEqual(
+            _source_event_identity(base),
+            _source_event_identity(other_provider_row),
+        )
 
     def test_arbitrary_funding_normalizer_cannot_be_injected(self):
         evidence = sealed_funding()

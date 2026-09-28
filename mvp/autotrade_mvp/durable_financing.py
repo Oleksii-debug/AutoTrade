@@ -455,8 +455,13 @@ def _bybit_funding_event_from_exact_response(
             "Bybit funding row_id must resolve to exactly one transaction-log row"
         )
     row = matches[0]
+    query_account_type = observation.query_binding.query.get("accountType")
     query_category = observation.query_binding.query.get("category")
     row_category = _text(row.get("category"), name="category")
+    if query_account_type != "UNIFIED":
+        raise FinancingError(
+            "Bybit funding requires the exact authenticated UNIFIED account query"
+        )
     if query_category != "linear" or row_category != query_category:
         raise FinancingError(
             "Bybit funding row category must match the exact authenticated linear query"

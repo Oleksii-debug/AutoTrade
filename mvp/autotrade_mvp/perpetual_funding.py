@@ -100,6 +100,35 @@ def _source_event_identity(
     )
 
 
+def _funding_convention(version: InstrumentVersion) -> FundingConvention:
+    """Resolve immutable funding sign/price semantics from the instrument version."""
+
+    if not isinstance(version, InstrumentVersion):
+        raise TypeError("version must be InstrumentVersion")
+    schedule = version.funding_schedule
+    if not isinstance(schedule, Mapping):
+        raise PerpetualFundingError(
+            "durable funding requires an explicit versioned funding convention"
+        )
+    price_basis = _text(
+        schedule.get("price_basis"),
+        "funding_schedule.price_basis",
+    ).upper()
+    positive_rate_effect = _text(
+        schedule.get("positive_rate_effect"),
+        "funding_schedule.positive_rate_effect",
+    ).upper()
+    if price_basis not in {"MARK", "INDEX"}:
+        raise PerpetualFundingError(
+            "funding_schedule.price_basis must be MARK or INDEX"
+        )
+    if positive_rate_effect not in {"LONG_PAYS", "LONG_RECEIVES"}:
+        raise PerpetualFundingError(
+            "funding_schedule.positive_rate_effect must be LONG_PAYS or LONG_RECEIVES"
+        )
+    return FundingConvention(positive_rate_effect, price_basis)
+
+
 def _inverse_settlement_policy(
     version: InstrumentVersion,
 ) -> tuple[Decimal, str]:
@@ -873,6 +902,16 @@ class DurablePerpetualFundingAuthority:
         if version.payoff not in {"LINEAR", "INVERSE"}:
             raise PerpetualFundingError("perpetual payoff is not canonically qualified")
 
+        canonical_convention = _funding_convention(version)
+        if (
+            observation.price_basis != canonical_convention.price_basis
+            or observation.positive_rate_effect
+            != canonical_convention.positive_rate_effect
+        ):
+            raise PerpetualFundingConflict(
+                "provider funding convention does not match immutable instrument version"
+            )
+
         canonical_collateral = version.settlement_currency
         if observation.collateral_currency != canonical_collateral:
             raise PerpetualFundingConflict(
@@ -1054,9 +1093,7 @@ class DurablePerpetualFundingAuthority:
             max_age=timedelta(microseconds=1),
             max_mark_index_deviation=Decimal("1"),
         )
-        convention = FundingConvention(
-            observation.positive_rate_effect, observation.price_basis
-        )
+        convention = _funding_convention(version)
         if contract.payoff == "LINEAR":
             currency, amount = funding_cashflow(
                 contract=contract,

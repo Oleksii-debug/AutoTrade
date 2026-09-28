@@ -508,6 +508,82 @@ class ChampionRegistryTests(unittest.TestCase):
                 0,
             )
 
+    def test_legacy_early_stop_evaluation_cannot_promote_after_policy_hardening(self):
+        with TemporaryDirectory() as directory:
+            science = ScientificRegistry(Path(directory) / "science.sqlite3")
+            value = protocol()
+            value["trial_budget"] = 1
+            value["stopping_rules"] = "legacy caller asserted stop"
+            registered = science.register_protocol(value)
+            candidate = "candidate-legacy-early-stop"
+            artifact = digest(candidate)
+            science.record_trial(
+                registered.protocol_id,
+                status="COMPLETED",
+                payload={
+                    "candidate_id": candidate,
+                    "artifact_hash": artifact,
+                },
+            )
+            closed = science.completeness(registered.protocol_id)
+            valid_until = BASE + timedelta(days=1)
+            result = {
+                "candidate_id": candidate,
+                "artifact_hash": artifact,
+                "evaluation_status": "PASS",
+                "retention_passed": True,
+                "risk_passed": True,
+                "authority_scope_id": "paper-scope",
+                "evidence_valid_until": valid_until.isoformat(),
+                "reproducible": True,
+                "causal_audit_passed": True,
+                "financial_invariants_passed": True,
+                "trial_log_complete": True,
+                "recorded_trial_count": closed["recorded_trials"],
+                "trial_budget": closed["trial_budget"],
+                "trial_log_hash": closed["trial_log_hash"],
+                "stopping_rule_triggered": True,
+                "stopping_rules_hash": closed["stopping_rules_hash"],
+                "stopping_evidence_ref": (
+                    "artifact:00000000-0000-0000-0000-000000000001@sha256:"
+                    + "a" * 64
+                ),
+            }
+            locked = science.register_evaluation(
+                registered.protocol_id,
+                holdout_id="holdout-legacy-early-stop",
+                holdout_identity=holdout_identity("holdout-legacy-early-stop"),
+                result=result,
+            )
+
+            # Model a legacy/recovered scientific state whose locked evaluation
+            # exists while the current authority reports an unclosed budget.
+            # Old code accepted the caller stopping fields above at promotion.
+            original_completeness = science.completeness
+            def legacy_open_budget(protocol_id):
+                state = dict(original_completeness(protocol_id))
+                state["remaining_trial_budget"] = 1
+                return state
+            science.completeness = legacy_open_budget
+
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "full registered trial closure",
+            ):
+                science.verify_candidate_promotion_evidence(
+                    evaluation_id=locked["evaluation_id"],
+                    protocol_id=registered.protocol_id,
+                    protocol_hash=registered.protocol_hash,
+                    result_hash=locked["result_hash"],
+                    candidate_id=candidate,
+                    artifact_hash=artifact,
+                    evaluation_status="PASS",
+                    retention_passed=True,
+                    risk_passed=True,
+                    authority_scope_id="paper-scope",
+                    evidence_valid_until=valid_until.isoformat(),
+                )
+
     def test_locked_evaluation_trial_log_hash_detects_trial_log_tampering(self):
         with TemporaryDirectory() as directory:
             science = ScientificRegistry(Path(directory) / "science.sqlite3")

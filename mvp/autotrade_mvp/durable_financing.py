@@ -215,6 +215,20 @@ def _normalize_artifact_digest(manifest: Mapping[str, Any]) -> str:
     return digest
 
 
+def _verify_authenticated_snapshot_bytes(
+    data: bytes,
+    *,
+    artifact_digest: str,
+) -> None:
+    if not isinstance(data, bytes):
+        raise FinancingError("authenticated financing evidence bytes are required")
+    actual = "sha256:" + sha256(data).hexdigest()
+    if actual != artifact_digest:
+        raise FinancingError(
+            "authenticated financing artifact digest does not match returned bytes"
+        )
+
+
 def _event_payload(
     *,
     provider_id: str,
@@ -330,6 +344,10 @@ def authenticated_financing_event(
             "financing evidence artifact lacks canonical storage rights"
         )
     artifact_digest = _normalize_artifact_digest(manifest)
+    _verify_authenticated_snapshot_bytes(
+        data,
+        artifact_digest=artifact_digest,
+    )
 
     evidence = _strict_json_object(data)
     expected_keys = {
@@ -712,6 +730,10 @@ class DurableFinancingBook:
         if not isinstance(rights, Mapping) or rights.get("storage") is not True:
             raise FinancingError("Bybit financing artifact lacks storage rights")
         artifact_digest = _normalize_artifact_digest(manifest)
+        _verify_authenticated_snapshot_bytes(
+            raw,
+            artifact_digest=artifact_digest,
+        )
         if artifact_digest != observation.response_sha256:
             raise FinancingError(
                 "Bybit financing artifact bytes do not match provider observation"

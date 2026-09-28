@@ -9,6 +9,7 @@ import unittest
 from tools.build_provenance_manifest import (
     OUTPUT,
     ROOT,
+    dependency_advisory_evidence_document,
     git_blob_sha,
     rendered_manifest,
 )
@@ -71,6 +72,151 @@ class ReleaseManifestPortabilityTests(unittest.TestCase):
             document["source_inventory"]["research_pyproject_blob_sha"],
             git_blob_sha(ROOT / "research" / "pyproject.toml"),
         )
+
+    def _advisory_fixture(self):
+        graph = {
+            "python_development_dependencies": [
+                {"name": "attrs", "version": "26.1.0", "hashes": ["sha256:" + "1" * 64]}
+            ],
+            "dotnet_package_dependencies": [
+                {"name": "Example.Package", "version": "1.2.3"}
+            ],
+            "inspected_components": [
+                {"repository": "owner/repo", "revision": "a" * 40}
+            ],
+        }
+        policy = {
+            "artifact_id": "policy-1",
+            "sha256": "sha256:" + "2" * 64,
+            "observed_at": "2026-09-28T20:00:00Z",
+        }
+        source = {
+            "artifact_id": "advisory-db-1",
+            "sha256": "sha256:" + "3" * 64,
+            "observed_at": "2026-09-28T20:01:00Z",
+        }
+        document = {
+            "qualified": True,
+            "schema_version": "1.0.0",
+            "source_sha": "b" * 40,
+            "evidence_refs": [policy, source],
+            "dependency_graph": graph,
+            "review_policy_evidence": policy,
+            "advisory_source_evidence": [source],
+            "reviewed_components": [
+                "nuget:Example.Package@1.2.3",
+                "python:attrs==26.1.0",
+                "source:owner/repo@" + "a" * 40,
+            ],
+            "blocking_findings": [],
+            "residual_risks": [],
+        }
+        return graph, document
+
+    def _write_advisory(self, root, document):
+        path = Path(root) / "dependency-advisory-qualification.json"
+        path.write_text(
+            json.dumps(document, sort_keys=True),
+            encoding="utf-8",
+        )
+        return path
+
+    def test_advisory_qualification_requires_complete_policy_and_source_authority(self):
+        graph, document = self._advisory_fixture()
+        with TemporaryDirectory() as directory:
+            path = self._write_advisory(directory, document)
+            self.assertEqual(
+                dependency_advisory_evidence_document(
+                    path,
+                    expected_dependency_graph=graph,
+                    expected_source_sha="b" * 40,
+                ),
+                (True, None),
+            )
+
+            legacy = dict(document)
+            legacy.pop("review_policy_evidence")
+            path = self._write_advisory(directory, legacy)
+            self.assertEqual(
+                dependency_advisory_evidence_document(
+                    path,
+                    expected_dependency_graph=graph,
+                    expected_source_sha="b" * 40,
+                ),
+                (False, "missing_review_policy_evidence"),
+            )
+
+            unbound_policy = dict(document)
+            unbound_policy["review_policy_evidence"] = {
+                "artifact_id": "policy-2",
+                "sha256": "sha256:" + "4" * 64,
+                "observed_at": "2026-09-28T20:02:00Z",
+            }
+            path = self._write_advisory(directory, unbound_policy)
+            self.assertEqual(
+                dependency_advisory_evidence_document(
+                    path,
+                    expected_dependency_graph=graph,
+                    expected_source_sha="b" * 40,
+                ),
+                (False, "unbound_review_policy_evidence"),
+            )
+
+    def test_advisory_qualification_requires_exact_component_coverage(self):
+        graph, document = self._advisory_fixture()
+        with TemporaryDirectory() as directory:
+            incomplete = dict(document)
+            incomplete["reviewed_components"] = document["reviewed_components"][:-1]
+            path = self._write_advisory(directory, incomplete)
+            self.assertEqual(
+                dependency_advisory_evidence_document(
+                    path,
+                    expected_dependency_graph=graph,
+                    expected_source_sha="b" * 40,
+                ),
+                (False, "reviewed_component_coverage_mismatch"),
+            )
+
+            reordered = dict(document)
+            reordered["reviewed_components"] = list(
+                reversed(document["reviewed_components"])
+            )
+            path = self._write_advisory(directory, reordered)
+            self.assertEqual(
+                dependency_advisory_evidence_document(
+                    path,
+                    expected_dependency_graph=graph,
+                    expected_source_sha="b" * 40,
+                ),
+                (False, "reviewed_component_coverage_mismatch"),
+            )
+
+    def test_advisory_qualification_cannot_hide_blocking_findings(self):
+        graph, document = self._advisory_fixture()
+        with TemporaryDirectory() as directory:
+            blocked = dict(document)
+            blocked["blocking_findings"] = ["GHSA-example remains unresolved"]
+            path = self._write_advisory(directory, blocked)
+            self.assertEqual(
+                dependency_advisory_evidence_document(
+                    path,
+                    expected_dependency_graph=graph,
+                    expected_source_sha="b" * 40,
+                ),
+                (False, "blocking_findings_present"),
+            )
+
+            malformed_residual = dict(document)
+            malformed_residual["residual_risks"] = [" duplicate ", " duplicate "]
+            path = self._write_advisory(directory, malformed_residual)
+            self.assertEqual(
+                dependency_advisory_evidence_document(
+                    path,
+                    expected_dependency_graph=graph,
+                    expected_source_sha="b" * 40,
+                ),
+                (False, "invalid_residual_risks"),
+            )
 
     def test_manifest_check_is_read_only_and_byte_stable(self):
         before = OUTPUT.read_bytes()

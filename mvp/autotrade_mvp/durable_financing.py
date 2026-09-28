@@ -482,11 +482,16 @@ class DurableFinancingBook:
             )
 
         next_version = len(durable_events) + 1
-        when = (
-            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        commit_instant = (
+            datetime.now(timezone.utc)
             if committed_at is None
-            else _instant_text(_instant(committed_at, name="committed_at"))
+            else _instant(committed_at, name="committed_at")
         )
+        if commit_instant < event.available_at:
+            raise FinancingError(
+                "financing evidence cannot be committed before available_at"
+            )
+        when = _instant_text(commit_instant)
         payload = _event_payload(
             provider_id=self.provider_id,
             account_id=self.account_id,

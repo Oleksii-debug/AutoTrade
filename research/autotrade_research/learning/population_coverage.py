@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
-from typing import Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from ..memory.episodes import CoveragePopulationSnapshot
 
@@ -92,6 +92,292 @@ def _canonical(value) -> str:
 
 def _digest(value) -> str:
     return "sha256:" + sha256(_canonical(value).encode("utf-8")).hexdigest()
+
+
+ReconciliationEvidenceResolver = Callable[[str], Mapping[str, Any]]
+OutcomeEvidenceResolver = Callable[[str], Mapping[str, Any]]
+
+
+def resolve_outcome_evidence(
+    episode_id: str,
+    *,
+    causal_cutoff,
+    resolver: OutcomeEvidenceResolver | None,
+) -> dict[str, Any]:
+    """Resolve label/outcome maturity from an independent evidence authority.
+
+    Episode payload fields remain immutable references, not authority. The
+    resolver must bind the exact episode to content-addressed outcome evidence
+    and canonical availability times. Missing, superseded or future evidence
+    fails closed.
+    """
+
+    identity = _text(episode_id, name="episode_id")
+    cutoff = _time(causal_cutoff, name="causal_cutoff")
+    if resolver is None:
+        return {
+            "status": "UNVERIFIED",
+            "episode_id": identity,
+            "reason": "OUTCOME_EVIDENCE_RESOLVER_UNAVAILABLE",
+        }
+    if not callable(resolver):
+        raise TypeError("outcome_evidence_resolver must be callable or None")
+    try:
+        raw = resolver(identity)
+    except LookupError:
+        return {
+            "status": "UNVERIFIED",
+            "episode_id": identity,
+            "reason": "OUTCOME_EVIDENCE_NOT_FOUND",
+        }
+    if raw is None:
+        return {
+            "status": "UNVERIFIED",
+            "episode_id": identity,
+            "reason": "OUTCOME_EVIDENCE_NOT_FOUND",
+        }
+    if not isinstance(raw, Mapping):
+        raise TypeError("outcome evidence resolver must return a mapping")
+
+    bound_episode = _text(
+        raw.get("episode_id"),
+        name="outcome evidence episode_id",
+    )
+    if bound_episode != identity:
+        raise ValueError("outcome evidence episode binding mismatch")
+    evidence_ref = _text(raw.get("evidence_ref"), name="outcome evidence_ref")
+    evidence_digest = _sha_identity(
+        raw.get("evidence_digest"),
+        name="outcome evidence_digest",
+    )
+    observed_at = _time(
+        raw.get("observed_at"),
+        name="outcome evidence observed_at",
+    )
+    label_available_at = _time(
+        raw.get("label_available_at"),
+        name="outcome evidence label_available_at",
+    )
+    outcome_horizon_at = _time(
+        raw.get("outcome_horizon_at"),
+        name="outcome evidence outcome_horizon_at",
+    )
+    outcome_class = _text(
+        raw.get("outcome_class"),
+        name="outcome evidence outcome_class",
+    ).upper()
+    if outcome_class not in _OUTCOME_CLASSES:
+        raise ValueError("outcome evidence class is not canonical")
+    if (
+        datetime.fromisoformat(label_available_at)
+        < datetime.fromisoformat(outcome_horizon_at)
+    ):
+        raise ValueError(
+            "outcome evidence label availability precedes its horizon"
+        )
+    if (
+        datetime.fromisoformat(observed_at)
+        < datetime.fromisoformat(label_available_at)
+    ):
+        raise ValueError(
+            "outcome evidence observation precedes label availability"
+        )
+
+    label_version = raw.get("label_version")
+    if label_version is not None:
+        label_version = _text(
+            label_version,
+            name="outcome evidence label_version",
+        )
+    target = raw.get("target")
+    if target is not None:
+        target = _text(target, name="outcome evidence target")
+
+    common = {
+        "episode_id": identity,
+        "evidence_ref": evidence_ref,
+        "evidence_digest": evidence_digest,
+        "observed_at": observed_at,
+        "label_available_at": label_available_at,
+        "outcome_horizon_at": outcome_horizon_at,
+        "outcome_class": outcome_class,
+        "label_version": label_version,
+        "target": target,
+    }
+    if raw.get("current_scope") is not True:
+        return {
+            "status": "UNVERIFIED",
+            **common,
+            "reason": "OUTCOME_EVIDENCE_SUPERSEDED",
+        }
+    if any(
+        datetime.fromisoformat(value) > datetime.fromisoformat(cutoff)
+        for value in (outcome_horizon_at, label_available_at, observed_at)
+    ):
+        return {
+            "status": "UNVERIFIED",
+            **common,
+            "reason": "OUTCOME_EVIDENCE_AFTER_CAUSAL_CUTOFF",
+        }
+    return {
+        "status": "VERIFIED",
+        **common,
+        "current_scope": True,
+    }
+
+
+def resolve_reconciliation_evidence(
+    episode_id: str,
+    *,
+    causal_cutoff,
+    resolver: ReconciliationEvidenceResolver | None,
+) -> dict[str, Any]:
+    """Resolve one episode against the external reconciliation authority.
+
+    The resolver is an injected read-only authority boundary. Production
+    callers should back it with the existing reconciliation-journal readers,
+    including current-scope validation. Missing authority fails closed instead
+    of trusting caller-authored reconciliation state or timestamps.
+    """
+
+    identity = _text(episode_id, name="episode_id")
+    cutoff = _time(causal_cutoff, name="causal_cutoff")
+    if resolver is None:
+        return {
+            "status": "UNVERIFIED",
+            "episode_id": identity,
+            "reason": "RECONCILIATION_RESOLVER_UNAVAILABLE",
+        }
+    if not callable(resolver):
+        raise TypeError("reconciliation_evidence_resolver must be callable or None")
+    try:
+        raw = resolver(identity)
+    except LookupError:
+        return {
+            "status": "UNVERIFIED",
+            "episode_id": identity,
+            "reason": "RECONCILIATION_EVIDENCE_NOT_FOUND",
+        }
+    if raw is None:
+        return {
+            "status": "UNVERIFIED",
+            "episode_id": identity,
+            "reason": "RECONCILIATION_EVIDENCE_NOT_FOUND",
+        }
+    if not isinstance(raw, Mapping):
+        raise TypeError("reconciliation evidence resolver must return a mapping")
+
+    bound_episode = _text(
+        raw.get("episode_id"),
+        name="reconciliation evidence episode_id",
+    )
+    if bound_episode != identity:
+        raise ValueError("reconciliation evidence episode binding mismatch")
+
+    checkpoint_event_id = _text(raw.get("checkpoint_event_id"), name="checkpoint_event_id")
+    checkpoint_payload_hash = _sha_identity(
+        raw.get("checkpoint_payload_hash"),
+        name="checkpoint_payload_hash",
+    )
+    checkpoint_aggregate_id = _text(
+        raw.get("checkpoint_aggregate_id"),
+        name="checkpoint_aggregate_id",
+    )
+    aggregate_version = raw.get("checkpoint_aggregate_version")
+    if (
+        not isinstance(aggregate_version, int)
+        or isinstance(aggregate_version, bool)
+        or aggregate_version <= 0
+    ):
+        raise ValueError("checkpoint_aggregate_version must be a positive integer")
+    observed_at = _time(raw.get("observed_at"), name="observed_at")
+    provider_id = _text(raw.get("provider_id"), name="provider_id").upper()
+    account_id = _text(raw.get("account_id"), name="account_id")
+    environment = _text(raw.get("environment"), name="environment").upper()
+    attempt_id = _text(raw.get("attempt_id"), name="attempt_id")
+    intent_id = _text(raw.get("intent_id"), name="intent_id")
+    client_order_id = _text(raw.get("client_order_id"), name="client_order_id")
+    outcome = _text(raw.get("outcome"), name="outcome").upper()
+    evidence_reason = _text(raw.get("evidence_reason"), name="evidence_reason")
+    if raw.get("current_scope") is not True:
+        return {
+            "status": "UNVERIFIED",
+            "episode_id": identity,
+            "reason": "RECONCILIATION_EVIDENCE_SUPERSEDED",
+            "checkpoint_event_id": checkpoint_event_id,
+            "checkpoint_payload_hash": checkpoint_payload_hash,
+            "checkpoint_aggregate_id": checkpoint_aggregate_id,
+            "checkpoint_aggregate_version": aggregate_version,
+            "observed_at": observed_at,
+        }
+
+    def identities(name: str) -> tuple[str, ...]:
+        values = raw.get(name, ())
+        if not isinstance(values, (list, tuple)):
+            raise TypeError(f"{name} must be a list or tuple")
+        normalized = tuple(sorted(_text(value, name=name) for value in values))
+        if len(normalized) != len(set(normalized)):
+            raise ValueError(f"{name} must contain unique identities")
+        return normalized
+
+    provider_order_ids = identities("provider_order_ids")
+    provider_execution_ids = identities("provider_execution_ids")
+    if outcome == "OBSERVED_EXECUTION":
+        if not provider_execution_ids:
+            raise ValueError(
+                "OBSERVED_EXECUTION reconciliation evidence requires execution identity"
+            )
+    elif outcome == "PROVEN_ABSENT":
+        if provider_order_ids or provider_execution_ids:
+            raise ValueError(
+                "PROVEN_ABSENT reconciliation evidence cannot carry provider identities"
+            )
+    else:
+        return {
+            "status": "UNVERIFIED",
+            "episode_id": identity,
+            "reason": "RECONCILIATION_OUTCOME_NOT_TERMINAL",
+            "checkpoint_event_id": checkpoint_event_id,
+            "checkpoint_payload_hash": checkpoint_payload_hash,
+            "checkpoint_aggregate_id": checkpoint_aggregate_id,
+            "checkpoint_aggregate_version": aggregate_version,
+            "observed_at": observed_at,
+            "outcome": outcome,
+        }
+
+    if datetime.fromisoformat(observed_at) > datetime.fromisoformat(cutoff):
+        return {
+            "status": "UNVERIFIED",
+            "episode_id": identity,
+            "reason": "RECONCILIATION_EVIDENCE_AFTER_CAUSAL_CUTOFF",
+            "checkpoint_event_id": checkpoint_event_id,
+            "checkpoint_payload_hash": checkpoint_payload_hash,
+            "checkpoint_aggregate_id": checkpoint_aggregate_id,
+            "checkpoint_aggregate_version": aggregate_version,
+            "observed_at": observed_at,
+            "outcome": outcome,
+        }
+
+    return {
+        "status": "VERIFIED",
+        "episode_id": identity,
+        "checkpoint_event_id": checkpoint_event_id,
+        "checkpoint_payload_hash": checkpoint_payload_hash,
+        "checkpoint_aggregate_id": checkpoint_aggregate_id,
+        "checkpoint_aggregate_version": aggregate_version,
+        "observed_at": observed_at,
+        "provider_id": provider_id,
+        "account_id": account_id,
+        "environment": environment,
+        "attempt_id": attempt_id,
+        "intent_id": intent_id,
+        "client_order_id": client_order_id,
+        "outcome": outcome,
+        "evidence_reason": evidence_reason,
+        "provider_order_ids": provider_order_ids,
+        "provider_execution_ids": provider_execution_ids,
+        "current_scope": True,
+    }
 
 
 def _summary(
@@ -366,6 +652,8 @@ def build_population_coverage(
     permission_classes: Sequence[str],
     included_episode_ids: Sequence[str],
     exclusions: Mapping[str, str],
+    reconciliation_evidence_resolver: ReconciliationEvidenceResolver | None = None,
+    outcome_evidence_resolver: OutcomeEvidenceResolver | None = None,
     task: str | None = None,
     instrument_family: str | None = None,
 ) -> PopulationCoverageManifest:
@@ -480,12 +768,19 @@ def build_population_coverage(
         outcome_class = _text(outcome.get("class"), name="outcome.class").upper()
         if outcome_class not in _OUTCOME_CLASSES:
             raise ValueError("outcome.class is not a canonical population class")
-        label_mature = outcome.get("label_mature")
-        if not isinstance(label_mature, bool):
-            raise TypeError("outcome.label_mature must be boolean")
-        reconciliation_state = _text(
-            outcome.get("reconciliation_state"),
-            name="outcome.reconciliation_state",
+        outcome_evidence = resolve_outcome_evidence(
+            episode_id,
+            causal_cutoff=cutoff,
+            resolver=outcome_evidence_resolver,
+        )
+        evidenced_class = outcome_evidence.get("outcome_class")
+        if evidenced_class is not None and evidenced_class != outcome_class:
+            raise ValueError(
+                "canonical outcome evidence class does not match episode outcome"
+            )
+        label_mature = (
+            outcome_evidence.get("status") == "VERIFIED"
+            and outcome_class not in {"PENDING", "UNKNOWN"}
         )
         intended = payload.get("intended_action")
         if not isinstance(intended, Mapping):
@@ -494,6 +789,35 @@ def build_population_coverage(
         no_trade = action_side == "NO_TRADE"
         if no_trade and outcome_class != "NULL":
             raise ValueError("NO_TRADE semantic subtype must use NULL outcome class")
+
+        if no_trade:
+            reconciliation_evidence = {
+                "status": "NOT_REQUIRED",
+                "episode_id": episode_id,
+                "reason": "NO_TRADE_HAS_NO_EXTERNAL_EXECUTION",
+            }
+        else:
+            try:
+                reconciliation_evidence = resolve_reconciliation_evidence(
+                    episode_id,
+                    causal_cutoff=cutoff,
+                    resolver=reconciliation_evidence_resolver,
+                )
+            except (TypeError, ValueError):
+                # Population construction is a qualification boundary. A malformed
+                # or cross-episode authority record must make the row ineligible,
+                # not abort manifest construction and bypass durable NO_UPDATE
+                # evidence generation.
+                reconciliation_evidence = {
+                    "status": "UNVERIFIED",
+                    "episode_id": episode_id,
+                    "reason": "RECONCILIATION_EVIDENCE_INVALID",
+                }
+        reconciliation_state = (
+            "RECONCILED"
+            if no_trade or reconciliation_evidence.get("status") == "VERIFIED"
+            else "UNVERIFIED"
+        )
 
         corrections = raw.get("correction_lineage")
         tombstones = raw.get("tombstone_lineage")
@@ -512,7 +836,9 @@ def build_population_coverage(
             "tombstone_lineage": tombstones,
             "outcome_class": outcome_class,
             "label_mature": label_mature,
+            "outcome_evidence": outcome_evidence,
             "reconciliation_state": reconciliation_state,
+            "reconciliation_evidence": reconciliation_evidence,
             "no_trade": no_trade,
         }
         fact_digest = _digest(lineage)
@@ -521,6 +847,9 @@ def build_population_coverage(
             "outcome_class": outcome_class,
             "no_trade": no_trade,
             "label_mature": label_mature,
+            "outcome_evidence": outcome_evidence,
+            "reconciliation_state": reconciliation_state,
+            "reconciliation_evidence": reconciliation_evidence,
             "tombstoned": bool(tombstones),
             "digest": fact_digest,
         }
@@ -552,7 +881,12 @@ def build_population_coverage(
         regime = record["regime"]
         regime_counts[regime] = regime_counts.get(regime, 0) + 1
         regime_labels_complete[regime] = (
-            regime_labels_complete.get(regime, True) and record["label_mature"]
+            regime_labels_complete.get(regime, True)
+            and record["label_mature"]
+            and (
+                record["no_trade"]
+                or record["reconciliation_state"] == "RECONCILED"
+            )
         )
 
     eligible_no_trade = sum(1 for _klass, _digest_value, flag in record_rows if flag)

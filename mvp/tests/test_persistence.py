@@ -1,5 +1,6 @@
 from tempfile import TemporaryDirectory
 import json
+from hashlib import sha256
 import sqlite3
 import unittest
 
@@ -424,6 +425,47 @@ class JournalStoreTests(unittest.TestCase):
             conflicting = event(payload={"kind": "fill", "quantity": "2"})
             with self.assertRaisesRegex(ValueError, "conflicts"):
                 store.append_event(conflicting)
+
+    def test_command_replay_rejects_rehashed_noncanonical_result_json(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.record_command(
+                actor="alice",
+                environment="PAPER",
+                command_id="cmd-canonical-result",
+                idempotency_key="key-canonical-result",
+                request={"action": "A"},
+                result={"status": "ACCEPTED", "value": 1},
+                state_version=1,
+            )
+
+            noncanonical = '{"status": "ACCEPTED", "value": 1}'
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE command_dedupe SET result_json = ?, result_hash = ? "
+                    "WHERE command_id = ?",
+                    (
+                        noncanonical,
+                        "sha256:" + sha256(noncanonical.encode("utf-8")).hexdigest(),
+                        "cmd-canonical-result",
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "command result is not canonical JSON"):
+                store.record_command(
+                    actor="alice",
+                    environment="PAPER",
+                    command_id="cmd-retry",
+                    idempotency_key="key-canonical-result",
+                    request={"action": "A"},
+                    result={"status": "ignored"},
+                    state_version=2,
+                )
 
     def test_command_dedupe_returns_prior_result_and_rejects_changed_request(self):
         with TemporaryDirectory() as directory:

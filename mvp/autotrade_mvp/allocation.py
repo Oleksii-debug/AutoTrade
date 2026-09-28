@@ -664,15 +664,16 @@ def _evaluate(
                 else Decimal("0")
             )
         else:
-            proportional_cost = (
-                turnover * candidate.turnover_cost_rate
-                + abs(notional) * candidate.holding_cost_rate
-            )
-            cost = (
-                max(proportional_cost, candidate.fee_floor)
+            holding_cost = abs(notional) * candidate.holding_cost_rate
+            execution_cost = (
+                max(
+                    turnover * candidate.turnover_cost_rate,
+                    candidate.fee_floor,
+                )
                 if turnover != 0
-                else proportional_cost
+                else Decimal("0")
             )
+            cost = holding_cost + execution_cost
         notionals[candidate.symbol] = notional
         total_cost += cost
         total_turnover += turnover
@@ -1085,15 +1086,26 @@ def _expected_net_utility(
     objective_by_symbol: Mapping[str, ObjectiveCandidate],
     policy: AllocationPolicy,
 ) -> Decimal:
-    gross_objective = sum(
-        (
-            abs(target.notional)
-            * objective_by_symbol[target.symbol].objective_rate
-            for target in result.targets
-            if target.symbol in objective_by_symbol
-        ),
-        Decimal("0"),
-    )
+    # Objective rates describe the requested direction. Evaluate the complete
+    # resulting portfolio rather than subset labels: unchanged holdings are
+    # still economic exposure, and a partial reversal that remains opposite to
+    # the requested direction must not receive positive desired-direction
+    # utility.
+    gross_objective = Decimal("0")
+    for target in result.targets:
+        objective = objective_by_symbol.get(target.symbol)
+        if objective is None or target.notional == 0:
+            continue
+        desired = objective.candidate.desired_notional
+        if desired == 0:
+            continue
+        aligned = (target.notional > 0) == (desired > 0)
+        directional_rate = (
+            objective.objective_rate
+            if aligned
+            else -objective.objective_rate
+        )
+        gross_objective += abs(target.notional) * directional_rate
     if result.worst_stress_loss is None:
         raise ValueError(
             "objective utility requires qualified worst_stress_loss evidence"
@@ -1143,7 +1155,7 @@ def allocate_objective_targets(
             allocation=fallback,
             selected_symbols=(),
             expected_net_utility=Decimal("0"),
-            objective_version="deterministic-net-utility-v3",
+            objective_version="deterministic-net-utility-v4",
             reason="no objective candidates",
         )
 
@@ -1170,7 +1182,7 @@ def allocate_objective_targets(
                 allocation=fallback,
                 selected_symbols=(),
                 expected_net_utility=Decimal("0"),
-                objective_version="deterministic-net-utility-v3",
+                objective_version="deterministic-net-utility-v4",
                 reason=evidence_problem,
             )
         normalized_evidence = tuple(stress_evidence)
@@ -1195,7 +1207,7 @@ def allocate_objective_targets(
             allocation=fallback,
             selected_symbols=(),
             expected_net_utility=Decimal("0"),
-            objective_version="deterministic-net-utility-v3",
+            objective_version="deterministic-net-utility-v4",
             reason="no candidate has positive expected return after risk penalty",
         )
 
@@ -1214,7 +1226,7 @@ def allocate_objective_targets(
             allocation=fallback,
             selected_symbols=(),
             expected_net_utility=Decimal("0"),
-            objective_version="deterministic-net-utility-v3",
+            objective_version="deterministic-net-utility-v4",
             reason=(
                 "objective search budget exceeded before complete subset "
                 "evaluation"
@@ -1270,16 +1282,16 @@ def allocate_objective_targets(
                 allocation=fallback,
                 selected_symbols=(),
                 expected_net_utility=Decimal("0"),
-                objective_version="deterministic-net-utility-v3",
+                objective_version="deterministic-net-utility-v4",
                 reason=result.reason,
             )
         if result.status != "ALLOCATED":
             continue
-        subset_objective = {
+        complete_objective = {
             item.candidate.symbol: item
-            for item in subset
+            for item in candidates
         }
-        utility = _expected_net_utility(result, subset_objective, policy)
+        utility = _expected_net_utility(result, complete_objective, policy)
         if utility <= 0:
             continue
         target_by_symbol = {
@@ -1290,7 +1302,18 @@ def allocate_objective_targets(
             sorted(
                 symbol
                 for symbol in subset_symbols
-                if target_by_symbol[symbol].notional != 0
+                if (
+                    target_by_symbol[symbol].notional != 0
+                    and (
+                        target_by_symbol[symbol].notional > 0
+                    ) == (
+                        next(
+                            item.candidate.desired_notional
+                            for item in subset
+                            if item.candidate.symbol == symbol
+                        ) > 0
+                    )
+                )
             )
         )
         if not active_symbols:
@@ -1331,7 +1354,7 @@ def allocate_objective_targets(
             allocation=fallback,
             selected_symbols=(),
             expected_net_utility=Decimal("0"),
-            objective_version="deterministic-net-utility-v3",
+            objective_version="deterministic-net-utility-v4",
             reason=(
                 "no positive-utility feasible allocation survived hard "
                 "constraints and estimated costs"
@@ -1342,7 +1365,7 @@ def allocate_objective_targets(
         allocation=best_result,
         selected_symbols=best_symbols,
         expected_net_utility=best_utility,
-        objective_version="deterministic-net-utility-v3",
+        objective_version="deterministic-net-utility-v4",
         reason=(
             "selected the highest positive expected-net-utility deterministic "
             "candidate subset that passed all hard allocation constraints"
@@ -2099,16 +2122,34 @@ def allocate_evidence_bound_objective_targets(
         versions_raw = resolved.payload.get("instrument_versions")
         if not isinstance(shocks_raw, Mapping) or not isinstance(versions_raw, Mapping):
             raise ValueError("stress evidence requires shocks and instrument_versions mappings")
-        if set(shocks_raw) != set(symbols) or set(versions_raw) != set(symbols):
-            raise ValueError("stress evidence must exactly cover candidate symbols")
+        stress_relevant_symbols = {
+            item.candidate.symbol
+            for item in normalized_candidates
+            if (
+                item.candidate.current_quantity != 0
+                or item.candidate.desired_notional != 0
+            )
+        }
+        shock_symbols = set(shocks_raw)
+        version_symbols = set(versions_raw)
+        if shock_symbols != version_symbols:
+            raise ValueError(
+                "stress evidence shocks and instrument_versions must cover the same symbols"
+            )
+        if not stress_relevant_symbols.issubset(shock_symbols):
+            raise ValueError(
+                "stress evidence must cover every current/requested exposure symbol"
+            )
+        if not shock_symbols.issubset(set(symbols)):
+            raise ValueError("stress evidence contains an unknown candidate symbol")
         shocks = {
             symbol: _decimal(
                 shocks_raw[symbol],
                 name=f"stress evidence {name} shock {symbol}",
             )
-            for symbol in symbols
+            for symbol in shock_symbols
         }
-        for symbol in symbols:
+        for symbol in shock_symbols:
             if _text(
                 versions_raw[symbol],
                 name=f"stress evidence {name} instrument version {symbol}",

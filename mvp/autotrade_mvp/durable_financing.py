@@ -455,6 +455,12 @@ def _bybit_funding_event_from_exact_response(
             "Bybit funding row_id must resolve to exactly one transaction-log row"
         )
     row = matches[0]
+    query_category = observation.query_binding.query.get("category")
+    row_category = _text(row.get("category"), name="category")
+    if query_category != "linear" or row_category != query_category:
+        raise FinancingError(
+            "Bybit funding row category must match the exact authenticated linear query"
+        )
     if _text(row.get("type"), name="type").upper() != "SETTLEMENT":
         raise FinancingError("Bybit financing row must be a SETTLEMENT record")
     raw_funding = row.get("funding")
@@ -508,6 +514,10 @@ def _bybit_funding_event_from_exact_response(
     if version.settlement_currency.strip().upper() != currency:
         raise FinancingError(
             "Bybit funding currency does not match canonical instrument settlement unit"
+        )
+    if observation.query_binding.instrument_version != instrument_version:
+        raise FinancingError(
+            "Bybit funding authenticated query is not bound to the canonical instrument version"
         )
     available_at = _instant(observation.observed_at, name="observed_at")
     evidence_ref = (

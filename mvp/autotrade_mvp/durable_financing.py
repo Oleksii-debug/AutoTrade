@@ -256,6 +256,10 @@ def authenticated_financing_event(
     provider = _text(provider_id, name="provider_id").upper()
     account = _text(account_id, name="account_id")
     scope = _environment(environment)
+    if scope in {"PAPER", "LIVE"}:
+        raise FinancingError(
+            "PAPER/LIVE financing requires a qualified provider-specific normalizer"
+        )
     try:
         manifest, data = artifact_store.read_authenticated_snapshot(aid)
     except Exception as error:

@@ -105,7 +105,7 @@ def resolve_action(source, *, corrects=None):
     )
 
 
-def pure_book(*, quantity="10"):
+def pure_book(*, quantity="10", borrowed_quantity="0", recalled_quantity="0"):
     current = canonical_instrument()
     return CorporateActionBook(
         EquityState.create(
@@ -115,6 +115,8 @@ def pure_book(*, quantity="10"):
             settled_cash="1000",
             unsettled_cash="0",
             currency="USDT",
+            borrowed_quantity=borrowed_quantity,
+            recalled_quantity=recalled_quantity,
         ),
         instrument_version=current,
         registry=InstrumentRegistry(versions=(current,)),
@@ -547,6 +549,70 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
                 ),
                 1,
             )
+
+    def test_short_split_fails_closed_before_durable_economics_or_evidence(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            durable_evidence = evidence_store(store)
+            economics = DurableProviderEconomicBook(
+                store,
+                provider_id="BINANCE",
+                account_id="acct-1",
+                environment="PAPER",
+            )
+            economics.append(
+                book_equity_fill(
+                    transaction_id="canonical-short-position-seed",
+                    cause_event_id="provider-fill:canonical-short-position-seed",
+                    instrument="BTCUSDT",
+                    settlement_currency="USDT",
+                    side="SELL",
+                    quantity="10",
+                    price="100",
+                    economic_effective_at=(
+                        READ_NOW - timedelta(minutes=2)
+                    ).isoformat().replace("+00:00", "Z"),
+                    economic_order_key="provider:BINANCE:execution:short-position-seed",
+                    observed_at=(
+                        READ_NOW - timedelta(minutes=1)
+                    ).isoformat().replace("+00:00", "Z"),
+                )
+            )
+            accepted = resolve_action(sealed_action(kind="SPLIT"))
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "requires atomic borrow authority",
+            ):
+                commit_authoritative_corporate_action(
+                    store=store,
+                    evidence_store=durable_evidence,
+                    economic_book=economics,
+                    corporate_book=pure_book(
+                        quantity="-10",
+                        borrowed_quantity="10",
+                    ),
+                    accepted=accepted,
+                )
+
+            self.assertEqual(economics.position("BTCUSDT"), Decimal("-10"))
+            self.assertEqual(len(economics.transactions), 1)
+            self.assertEqual(
+                store.load_events(
+                    "corporate_action_evidence",
+                    durable_evidence.aggregate_id,
+                ),
+                [],
+            )
+            reopened = DurableProviderEconomicBook(
+                JournalStore(path),
+                provider_id="BINANCE",
+                account_id="acct-1",
+                environment="PAPER",
+            )
+            self.assertEqual(reopened.position("BTCUSDT"), Decimal("-10"))
+            self.assertEqual(len(reopened.transactions), 1)
 
     def test_equal_time_fill_cannot_authorize_split_before_causal_phase_is_proven(self):
         with TemporaryDirectory() as directory:

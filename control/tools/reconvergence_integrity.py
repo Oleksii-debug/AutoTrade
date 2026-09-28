@@ -56,6 +56,8 @@ PROTECTED_SENTINELS = frozenset(
         "control/INDEX.json",
         "control/qualification.json",
         "control/work-packages/bank.json",
+        "control/__init__.py",
+        "control/tools/__init__.py",
         "control/tools/reconvergence_integrity.py",
         "control/tools/registry_state.py",
         "docs/product/PRODUCT_SPEC_CANONICAL.txt",
@@ -90,6 +92,20 @@ INTEGRATION_HARNESS_ROOTS = frozenset(
         "tools/check_nvda_qualification.py",
         "tools/verify.py",
         "tools/write_ci_evidence.py",
+        "tests/Contracts.DotNet/Contracts.DotNet.csproj",
+        "tests/Contracts.DotNet/Program.cs",
+        "tests/Desktop.Client/Desktop.Client.csproj",
+        "tests/Desktop.Client/Program.cs",
+        "contracts/fixtures/common-scalars.corpus.json",
+    }
+)
+
+BOOTSTRAP_TRUST_ROOTS = frozenset(
+    {
+        "control/__init__.py",
+        "control/tools/__init__.py",
+        "control/tools/reconvergence_integrity.py",
+        "control/tools/registry_state.py",
     }
 )
 
@@ -296,6 +312,7 @@ def assess_reconvergence(
             kind == "M"
             and (
                 change.path in SELF_PROTECTING_TRUST_ROOTS
+                or change.path in BOOTSTRAP_TRUST_ROOTS
                 or change.path in WORKFLOW_AUTHORITY_ROOTS
                 or change.path in INTEGRATION_HARNESS_ROOTS
             )
@@ -312,6 +329,15 @@ def assess_reconvergence(
         ):
             protected_damage.add(
                 f"{change.path} (unauthorized workflow-authority creation)"
+            )
+        if (
+            kind in {"A", "R", "C"}
+            and change.path in BOOTSTRAP_TRUST_ROOTS
+            and change.path not in base_path_set
+            and not exactly_authorized(change.path)
+        ):
+            protected_damage.add(
+                f"{change.path} (unauthorized bootstrap trust-root creation)"
             )
     protected_violations = tuple(sorted(protected_damage))
 

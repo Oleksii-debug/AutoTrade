@@ -387,6 +387,8 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 environment="SIMULATION",
                 as_of="2026-09-25T18:40:00Z",
                 current_policy_version="risk-policy:12",
+                current_policy=self.policy(),
+                current_max_candidate_sets=64,
                 current_provider_id="SIMULATED",
                 current_instrument_versions={"AAA": "instrument:aaa:v3"},
                 current_capability_snapshot_ids={"AAA": "capability:1"},
@@ -499,6 +501,8 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 environment="SIMULATION",
                 as_of="2026-09-25T18:40:00Z",
                 current_policy_version="risk-policy:12",
+                current_policy=self.policy(),
+                current_max_candidate_sets=64,
                 current_provider_id="SIMULATED",
                 current_instrument_versions={"AAA": "instrument:aaa:v3"},
                 current_capability_snapshot_ids={"AAA": "capability:1"},
@@ -516,6 +520,8 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 environment="SIMULATION",
                 as_of="2026-09-25T18:40:00Z",
                 current_policy_version="risk-policy:12",
+                current_policy=self.policy(),
+                current_max_candidate_sets=64,
                 current_provider_id="SIMULATED",
                 current_instrument_versions={"AAA": "instrument:aaa:v3"},
                 current_capability_snapshot_ids={"AAA": "capability:1"},
@@ -535,6 +541,8 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
             "resolved_evidence": bundle[-1],
             "environment": "SIMULATION",
             "as_of": "2026-09-25T18:40:00Z",
+            "current_policy": self.policy(),
+            "current_max_candidate_sets": 64,
             "current_provider_id": "SIMULATED",
             "current_instrument_versions": {"AAA": "instrument:aaa:v3"},
             "current_capability_snapshot_ids": {"AAA": "capability:1"},
@@ -547,6 +555,8 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
             revalidate_evidence_bound_allocation(
                 **common,
                 current_policy_version="risk-policy:13",
+                current_policy=self.policy(),
+                current_max_candidate_sets=64,
                 current_reconciliation_run_id="reconciliation:acct:1:v5",
                 current_reservation_state_digest="3" * 64,
             )
@@ -554,6 +564,8 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
             revalidate_evidence_bound_allocation(
                 **common,
                 current_policy_version="risk-policy:12",
+                current_policy=self.policy(),
+                current_max_candidate_sets=64,
                 current_reconciliation_run_id="reconciliation:acct:1:v6",
                 current_reservation_state_digest="3" * 64,
             )
@@ -561,8 +573,68 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
             revalidate_evidence_bound_allocation(
                 **common,
                 current_policy_version="risk-policy:12",
+                current_policy=self.policy(),
+                current_max_candidate_sets=64,
                 current_reconciliation_run_id="reconciliation:acct:1:v5",
                 current_reservation_state_digest="4" * 64,
+            )
+
+    def test_same_policy_version_cannot_hide_policy_configuration_change(self):
+        bundle = self.bundle()
+        result = self.allocate(bundle=bundle)
+        changed_policy = AllocationPolicy.create(
+            cash_available="1000",
+            max_gross_notional="1000",
+            max_net_notional="1000",
+            max_symbol_notional="1000",
+            max_total_cost="50",
+            max_stress_loss="500",
+            max_turnover_notional="1000",
+            require_adverse_stress_evidence=True,
+            require_fresh_stress_evidence=True,
+            max_execution_states=9999,
+        )
+        with self.assertRaisesRegex(ValueError, "policy configuration changed"):
+            revalidate_evidence_bound_allocation(
+                result,
+                resolved_evidence=bundle[-1],
+                environment="SIMULATION",
+                as_of="2026-09-25T18:40:00Z",
+                current_policy_version="risk-policy:12",
+                current_policy=changed_policy,
+                current_max_candidate_sets=64,
+                current_provider_id="SIMULATED",
+                current_instrument_versions={"AAA": "instrument:aaa:v3"},
+                current_capability_snapshot_ids={"AAA": "capability:1"},
+                current_account_id="acct:paper:1",
+                current_account_snapshot_id="snapshot:acct:1:v5",
+                current_reconciliation_run_id="reconciliation:acct:1:v5",
+                current_account_state_version=5,
+                current_reservation_state_version=9,
+                current_reservation_state_digest="3" * 64,
+            )
+
+    def test_same_policy_version_cannot_hide_objective_search_budget_change(self):
+        bundle = self.bundle()
+        result = self.allocate(bundle=bundle)
+        with self.assertRaisesRegex(ValueError, "objective search configuration changed"):
+            revalidate_evidence_bound_allocation(
+                result,
+                resolved_evidence=bundle[-1],
+                environment="SIMULATION",
+                as_of="2026-09-25T18:40:00Z",
+                current_policy_version="risk-policy:12",
+                current_policy=self.policy(),
+                current_max_candidate_sets=65,
+                current_provider_id="SIMULATED",
+                current_instrument_versions={"AAA": "instrument:aaa:v3"},
+                current_capability_snapshot_ids={"AAA": "capability:1"},
+                current_account_id="acct:paper:1",
+                current_account_snapshot_id="snapshot:acct:1:v5",
+                current_reconciliation_run_id="reconciliation:acct:1:v5",
+                current_account_state_version=5,
+                current_reservation_state_version=9,
+                current_reservation_state_digest="3" * 64,
             )
 
     def test_provider_capability_and_instrument_scope_are_current_at_admission(self):
@@ -577,6 +649,8 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
             "environment": "SIMULATION",
             "as_of": "2026-09-25T18:40:00Z",
             "current_policy_version": "risk-policy:12",
+            "current_policy": self.policy(),
+            "current_max_candidate_sets": 64,
             "current_provider_id": "SIMULATED",
             "current_instrument_versions": {"AAA": "instrument:aaa:v3"},
             "current_capability_snapshot_ids": {"AAA": "capability:1"},
@@ -616,6 +690,8 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 environment="SIMULATION",
                 as_of="2026-09-25T18:29:59Z",
                 current_policy_version="risk-policy:12",
+                current_policy=self.policy(),
+                current_max_candidate_sets=64,
                 current_provider_id="SIMULATED",
                 current_instrument_versions={"AAA": "instrument:aaa:v3"},
                 current_capability_snapshot_ids={"AAA": "capability:1"},
@@ -637,6 +713,8 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 environment="SIMULATION",
                 as_of="2026-09-25T19:01:00Z",
                 current_policy_version="risk-policy:12",
+                current_policy=self.policy(),
+                current_max_candidate_sets=64,
                 current_provider_id="SIMULATED",
                 current_instrument_versions={"AAA": "instrument:aaa:v3"},
                 current_capability_snapshot_ids={"AAA": "capability:1"},
@@ -716,6 +794,8 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 environment="SIMULATION",
                 as_of="2026-09-25T18:40:00Z",
                 current_policy_version="risk-policy:12",
+                current_policy=self.policy(),
+                current_max_candidate_sets=64,
                 current_provider_id="SIMULATED",
                 current_instrument_versions={"AAA": "instrument:aaa:v3"},
                 current_capability_snapshot_ids={"AAA": "capability:1"},

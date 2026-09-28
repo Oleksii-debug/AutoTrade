@@ -798,6 +798,23 @@ class DurableFinancingTests(unittest.TestCase):
             result.economic_transaction.observed_at,
             observed_at.isoformat().replace("+00:00", "Z"),
         )
+        restarted_economic = DurableProviderEconomicBook(
+            self.store,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="PAPER",
+        )
+        restarted_financing = DurableFinancingBook(
+            self.store,
+            restarted_economic,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="PAPER",
+        )
+        restarted = restarted_financing.latest(result.event.charge_id)
+        self.assertIsNotNone(restarted)
+        self.assertEqual(restarted.evidence_ref, result.event.evidence_ref)
+        self.assertIn(observation.evidence_ref, restarted.evidence_ref)
 
     def test_bybit_funding_requires_canonical_instrument_version_authority(self):
         transaction_time = int(BASE.timestamp() * 1000)
@@ -912,6 +929,8 @@ class DurableFinancingTests(unittest.TestCase):
             *,
             row_category: str = "linear",
             query_category: str = "linear",
+            account_type: str = "UNIFIED",
+            extra_query: Mapping[str, str] | None = None,
             capability_instrument_version: str | None = None,
             expected: str,
         ):
@@ -934,6 +953,8 @@ class DurableFinancingTests(unittest.TestCase):
                 raw,
                 observed_at=observed_at,
                 query_category=query_category,
+                account_type=account_type,
+                extra_query=extra_query,
                 capability_instrument_version=capability_instrument_version,
             )
             artifact = str(uuid4())
@@ -979,7 +1000,12 @@ class DurableFinancingTests(unittest.TestCase):
             )
 
         attempt(row_category="inverse", expected="row category")
-        attempt(query_category="inverse", expected="row category")
+        attempt(query_category="inverse", expected="exact qualified")
+        attempt(account_type="CONTRACT", expected="exact qualified")
+        attempt(
+            extra_query={"type": "SETTLEMENT"},
+            expected="exact qualified",
+        )
         attempt(
             capability_instrument_version=(
                 "99999999-9999-4999-8999-999999999999@1"

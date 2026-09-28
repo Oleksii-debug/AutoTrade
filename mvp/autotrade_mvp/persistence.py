@@ -2353,8 +2353,6 @@ class JournalStore:
                 }
             )
 
-        effect_json, effect_hash = self._event_batch_effect(prepared)
-
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -2377,7 +2375,18 @@ class JournalStore:
                         stored_effect_hash, str
                     ):
                         raise ValueError("command event-batch effect authority is missing")
-                    if stored_effect_json != effect_json or stored_effect_hash != effect_hash:
+                    stored_sequences = self._stored_effect_journal_sequences(
+                        stored_effect_json,
+                        stored_effect_hash,
+                    )
+                    retry_effect_json, retry_effect_hash = self._event_batch_effect(
+                        prepared,
+                        stored_sequences,
+                    )
+                    if (
+                        stored_effect_json != retry_effect_json
+                        or stored_effect_hash != retry_effect_hash
+                    ):
                         raise ValueError(
                             "idempotency_key retry event batch differs from original effect"
                         )
@@ -2411,14 +2420,24 @@ class JournalStore:
                 ).fetchone() is not None:
                     raise ValueError("command_id already exists with another idempotency key")
 
+                journal_sequence_cut = self._journal_sequence_value(connection)
                 if (
                     expected_journal_sequence is not None
-                    and self._journal_sequence_value(connection)
-                    != expected_journal_sequence
+                    and journal_sequence_cut != expected_journal_sequence
                 ):
                     raise ValueError(
                         "journal sequence changed after financial evidence validation"
                     )
+                batch_journal_sequences = list(
+                    range(
+                        journal_sequence_cut + 1,
+                        journal_sequence_cut + len(prepared) + 1,
+                    )
+                )
+                effect_json, effect_hash = self._event_batch_effect(
+                    prepared,
+                    batch_journal_sequences,
+                )
 
                 next_versions: dict[tuple[str, str], int] = {}
                 for item in prepared:
@@ -2469,7 +2488,7 @@ class JournalStore:
 
                 appended: list[AppendResult] = []
                 next_journal_sequence = (
-                    self._journal_sequence_value(connection) + 1
+                    journal_sequence_cut + 1
                     if self.SCHEMA_VERSION >= 6
                     else None
                 )

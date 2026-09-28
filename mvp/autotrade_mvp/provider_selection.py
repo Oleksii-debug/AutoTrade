@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Iterable
+from typing import Iterable, Protocol, runtime_checkable
 
-from .capabilities import CapabilitySnapshot
+from .capabilities import CapabilityError, CapabilityRegistry, CapabilitySnapshot
 from .provider_core import QualificationEvidence, provider_definition
 
 
@@ -57,6 +57,37 @@ ASSET_FAMILY_COMPATIBILITY = {
         ("IBKR", "FX"),
     },
 }
+
+
+@runtime_checkable
+class CapabilityLookup(Protocol):
+    """Structural read contract for current capability truth.
+
+    CapabilityRegistry and restart-aware durable wrappers both satisfy this
+    contract without making provider selection own another capability store.
+    """
+
+    def latest(
+        self,
+        *,
+        provider_id: str,
+        account_id: str,
+        entity_id: str,
+        environment: str,
+        instrument_version: str,
+        at: datetime,
+    ) -> CapabilitySnapshot: ...
+
+    def require_verified(
+        self,
+        *,
+        provider_id: str,
+        account_id: str,
+        entity_id: str,
+        environment: str,
+        instrument_version: str,
+        at: datetime,
+    ) -> CapabilitySnapshot: ...
 
 
 class ProviderSelectionError(ValueError):
@@ -179,6 +210,7 @@ def select_provider(
     candidates: Iterable[ProviderCandidate],
     *,
     at: datetime,
+    capability_registry: CapabilityLookup,
 ) -> ProviderSelection:
     """Resolve one exact route or fail closed.
 
@@ -189,6 +221,8 @@ def select_provider(
 
     if not isinstance(request, ProviderRouteRequest):
         raise TypeError("request must be ProviderRouteRequest")
+    if not isinstance(capability_registry, CapabilityLookup):
+        raise TypeError("capability_registry must provide the canonical latest() lookup contract")
     point = _instant(at, "at")
     materialized = tuple(candidates)
     if any(not isinstance(candidate, ProviderCandidate) for candidate in materialized):
@@ -224,13 +258,47 @@ def select_provider(
             reasons.append("CAPABILITY_ENVIRONMENT_MISMATCH")
         if capability.instrument_version != request.instrument_version:
             reasons.append("CAPABILITY_INSTRUMENT_MISMATCH")
-        if not capability.admits(
+
+        lookup = dict(
+            provider_id=capability.provider_id,
+            account_id=capability.account_id,
+            entity_id=capability.entity_id,
+            environment=capability.environment,
+            instrument_version=capability.instrument_version,
             at=point,
-            order_type=request.order_type,
-            time_in_force=request.time_in_force,
-            permission_scope=request.permission_scope,
-        ):
-            reasons.append("CAPABILITY_DOES_NOT_ADMIT_ACTION")
+        )
+        latest_capability: CapabilitySnapshot | None = None
+        try:
+            latest_capability = capability_registry.latest(**lookup)
+        except CapabilityError:
+            reasons.append("CAPABILITY_REGISTRY_UNRESOLVED")
+        else:
+            if latest_capability.snapshot_id != capability.snapshot_id:
+                reasons.append("CAPABILITY_SUPERSEDED")
+            elif latest_capability != capability:
+                reasons.append("CAPABILITY_CONTENT_MISMATCH")
+            try:
+                admitted_capability = capability_registry.require_verified(**lookup)
+            except CapabilityError:
+                reasons.append("CAPABILITY_NOT_CURRENTLY_VERIFIED")
+            else:
+                if admitted_capability != latest_capability:
+                    reasons.append("CAPABILITY_REGISTRY_CHANGED_DURING_SELECTION")
+                if admitted_capability.snapshot_id != capability.snapshot_id:
+                    if "CAPABILITY_SUPERSEDED" not in reasons:
+                        reasons.append("CAPABILITY_SUPERSEDED")
+                elif (
+                    admitted_capability != capability
+                    and "CAPABILITY_CONTENT_MISMATCH" not in reasons
+                ):
+                    reasons.append("CAPABILITY_CONTENT_MISMATCH")
+                if not admitted_capability.admits(
+                    at=point,
+                    order_type=request.order_type,
+                    time_in_force=request.time_in_force,
+                    permission_scope=request.permission_scope,
+                ):
+                    reasons.append("CAPABILITY_DOES_NOT_ADMIT_ACTION")
 
         unsupported = set(candidate.qualification.unsupported_features)
         requested_features = {

@@ -1029,6 +1029,98 @@ class DurableReservationBook:
                 raise ReservationConflict(
                     "FILLED release reconciliation execution identities differ from order projection"
                 )
+
+            provider_fill_bindings = matching[0].get("provider_fill_bindings")
+            if not isinstance(provider_fill_bindings, list):
+                raise ReservationConflict(
+                    "FILLED release reconciliation lacks exact provider fill bindings"
+                )
+            provider_identities: dict[str, dict[str, object]] = {}
+            for binding in provider_fill_bindings:
+                if not isinstance(binding, dict):
+                    raise ReservationConflict(
+                        "FILLED release provider fill binding is malformed"
+                    )
+                identity = binding.get("identity")
+                execution_id = binding.get("provider_execution_id")
+                identity_digest = binding.get("identity_digest")
+                if (
+                    not isinstance(identity, dict)
+                    or not isinstance(execution_id, str)
+                    or identity.get("provider_execution_id") != execution_id
+                    or identity_digest != payload_digest(identity)
+                    or execution_id in provider_identities
+                ):
+                    raise ReservationConflict(
+                        "FILLED release provider fill binding integrity failed"
+                    )
+                provider_identities[execution_id] = identity
+            if set(provider_identities) != projected_execution_ids:
+                raise ReservationConflict(
+                    "FILLED release provider fill bindings differ from order projection"
+                )
+
+            canonical_fills = projection.active_canonical_execution_fills(
+                client_order_id
+            )
+            if set(canonical_fills) != projected_execution_ids:
+                raise ReservationConflict(
+                    "FILLED release lacks canonical execution economics"
+                )
+            for execution_id in sorted(projected_execution_ids):
+                provider_identity = provider_identities[execution_id]
+                canonical_fill = canonical_fills[execution_id]
+                quantity = canonical_fill.get("last_quantity")
+                if not isinstance(quantity, dict):
+                    raise ReservationConflict(
+                        "FILLED release canonical execution quantity is malformed"
+                    )
+                required_pairs = {
+                    "provider_id": provider_name,
+                    "account_id": self.account_id,
+                    "environment": self.environment,
+                    "provider_execution_id": canonical_fill.get(
+                        "provider_execution_id"
+                    ),
+                    "client_order_id": canonical_fill.get("order_ref"),
+                    "instrument": canonical_fill.get("instrument_version"),
+                    "side": canonical_fill.get("side"),
+                    "quantity": quantity.get("value"),
+                    "price": canonical_fill.get("last_price"),
+                    "trade_time": canonical_fill.get("trade_time"),
+                }
+                if any(
+                    provider_identity.get(key) != value
+                    for key, value in required_pairs.items()
+                ):
+                    raise ReservationConflict(
+                        "FILLED release provider economics differ from canonical execution"
+                    )
+
+                fees = canonical_fill.get("fees")
+                if not isinstance(fees, list):
+                    raise ReservationConflict(
+                        "FILLED release canonical execution fees are malformed"
+                    )
+                provider_fee = provider_identity.get("fee_amount")
+                if fees:
+                    if len(fees) != 1 or not isinstance(fees[0], dict):
+                        raise ReservationConflict(
+                            "FILLED release cannot collapse multi-fee canonical execution identity"
+                        )
+                    fee = fees[0]
+                    if (
+                        provider_fee != fee.get("amount")
+                        or provider_identity.get("fee_currency")
+                        != fee.get("currency")
+                    ):
+                        raise ReservationConflict(
+                            "FILLED release provider fee differs from canonical execution"
+                        )
+                elif provider_fee != "0":
+                    raise ReservationConflict(
+                        "FILLED release provider fee differs from canonical execution"
+                    )
             terminal_fill_states = {
                 "FILLED",
                 "FILLED_AFTER_CANCEL",

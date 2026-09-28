@@ -2562,9 +2562,7 @@ class JournalStoreTests(unittest.TestCase):
                         "legacy-v8-key",
                         payload_digest(request),
                         result_json,
-                        "sha256:" + __import__("hashlib").sha256(
-                            result_json.encode("utf-8")
-                        ).hexdigest(),
+                        payload_digest(result),
                         1,
                         "2026-09-24T16:00:00Z",
                     ),

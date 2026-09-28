@@ -49,6 +49,7 @@ def economics_binding(
     dimension_evidence=(),
     status="QUALIFIED",
     input_manifest_refs=("sha256:" + "c" * 64,),
+    registered_run_receipt=None,
 ):
     return StrategyEconomicsBinding(
         strategy_fingerprint=proposal.strategy_fingerprint,
@@ -71,6 +72,11 @@ def economics_binding(
         capacity_assessment_sha256="sha256:" + "2" * 64,
         max_feasible_quantity=max_feasible_quantity,
         lot_size=lot_size,
+        registered_run_receipt_sha256=(
+            None
+            if registered_run_receipt is None
+            else registered_run_receipt.fingerprint
+        ),
         required_evidence_dimensions=required_evidence_dimensions,
         dimension_evidence=dimension_evidence,
         status=status,

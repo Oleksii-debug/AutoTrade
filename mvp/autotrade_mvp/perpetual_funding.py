@@ -638,6 +638,7 @@ class DurablePerpetualFundingAuthority:
         evidence_resolver: FundingEvidenceResolver,
         funding_endpoints: frozenset[str],
         permission_scope: str,
+        funding_evidence_endpoints: Mapping[str, frozenset[str]] | None = None,
     ) -> None:
         if not isinstance(store, JournalStore):
             raise TypeError("store must be JournalStore")
@@ -659,6 +660,35 @@ class DurablePerpetualFundingAuthority:
         self.instrument_registry = instrument_registry
         self.evidence_resolver = evidence_resolver
         self.funding_endpoints = endpoints
+        if funding_evidence_endpoints is None:
+            self.funding_evidence_endpoints = None
+        else:
+            if not isinstance(funding_evidence_endpoints, Mapping):
+                raise TypeError("funding_evidence_endpoints must be a mapping")
+            required_roles = {"income", "rate", "prices", "cut"}
+            if set(funding_evidence_endpoints) != required_roles:
+                raise PerpetualFundingError(
+                    "funding_evidence_endpoints must define income/rate/prices/cut roles"
+                )
+            normalized_policy: dict[str, frozenset[str]] = {}
+            for role in sorted(required_roles):
+                values = funding_evidence_endpoints[role]
+                if not isinstance(values, frozenset) or not values:
+                    raise PerpetualFundingError(
+                        "each funding evidence role requires a non-empty endpoint set"
+                    )
+                normalized = frozenset(
+                    _text(value, f"{role} endpoint") for value in values
+                )
+                if any(
+                    not value.startswith("/") or "://" in value
+                    for value in normalized
+                ):
+                    raise PerpetualFundingError(
+                        "funding evidence endpoints must be provider-relative paths"
+                    )
+                normalized_policy[role] = normalized
+            self.funding_evidence_endpoints = normalized_policy
         self.permission_scope = _text(permission_scope, "permission_scope")
         self.aggregate_id = _identity(
             "perpetual-funding-book",
@@ -692,16 +722,41 @@ class DurablePerpetualFundingAuthority:
         if isinstance(source, FundingEvidenceBundle):
             if source.evidence_ref != reference:
                 raise PerpetualFundingError("resolved funding composite identity mismatch")
-            for item in (source.income, source.rate, source.prices, source.cut):
+            role_items = (
+                ("income", source.income),
+                ("rate", source.rate),
+                ("prices", source.prices),
+                ("cut", source.cut),
+            )
+            if (
+                source.income.environment in {"PAPER", "LIVE"}
+                and self.funding_evidence_endpoints is None
+            ):
+                raise PerpetualFundingError(
+                    "financial funding composite requires role-specific endpoint policy"
+                )
+            for role, item in role_items:
                 endpoint = item.query_binding.endpoint
-                if endpoint not in self.funding_endpoints:
+                allowed = (
+                    self.funding_endpoints
+                    if self.funding_evidence_endpoints is None
+                    else self.funding_evidence_endpoints[role]
+                )
+                if endpoint not in allowed:
                     raise PerpetualFundingError(
-                        "funding evidence endpoint is not allowed"
+                        f"{role} funding evidence endpoint is not allowed"
+                    )
+                if item.query_binding.surface not in {
+                    Surface.ACTIVITIES,
+                    Surface.AUTHENTICATED_READ,
+                }:
+                    raise PerpetualFundingError(
+                        f"{role} funding evidence surface is not allowed"
                     )
                 try:
                     item.require_scope(
                         provider_id=self.economic_book.provider_id,
-                        surface=Surface.ACTIVITIES,
+                        surface=item.query_binding.surface,
                         endpoint=endpoint,
                         account_id=self.economic_book.account_id,
                         environment=self.economic_book.environment,

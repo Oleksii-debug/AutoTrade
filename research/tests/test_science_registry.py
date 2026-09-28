@@ -180,6 +180,19 @@ class ScientificRegistryTests(unittest.TestCase):
                 0,
             )
 
+            # The rejected attempt must roll back the holdout identity/alias too.
+            # Otherwise a pre-budget probe could poison the future legitimate
+            # locked evaluation even though no holdout access was recorded.
+            exhaust_trials(store, registered.protocol_id)
+            admitted = store.register_evaluation(
+                registered.protocol_id,
+                holdout_id="holdout-premature",
+                holdout_identity=holdout_identity(dataset_digit="b"),
+                result={"score": "0.1"},
+            )
+            self.assertEqual(admitted["prior_access_count"], 0)
+            self.assertEqual(admitted["untouched"], 1)
+
     def test_all_caller_asserted_early_stop_forms_fail_before_holdout_access(self):
         with TemporaryDirectory() as directory:
             store = ScientificRegistry(Path(directory) / "science.sqlite3")

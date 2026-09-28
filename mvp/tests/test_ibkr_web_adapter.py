@@ -94,11 +94,16 @@ def ready_session(**overrides):
     initialization_id = values.pop("initialization_id")
     return IbkrBrokerageSessionStatus.from_init_payload(
         {
-            "connected": values["connected"],
-            "authenticated": values["authenticated"],
-            "established": values["established"],
-            "competing": values["competing"],
-            "message": "",
+            "success": {
+                "value": {
+                    "connected": values["connected"],
+                    "authenticated": values["authenticated"],
+                    "established": values["established"],
+                    "competing": values["competing"],
+                    "message": "",
+                    "serverInfo": {"serverName": "fixture"},
+                }
+            }
         },
         environment=environment,
         initialization_id=initialization_id,
@@ -423,6 +428,89 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 at=NOW,
                 maximum_session_age_seconds=30,
             )
+
+    def test_current_wrapped_init_hashes_complete_provider_response(self):
+        base = {
+            "success": {
+                "value": {
+                    "connected": True,
+                    "authenticated": True,
+                    "established": True,
+                    "competing": False,
+                    "message": "",
+                    "serverInfo": {"serverName": "server-a"},
+                }
+            }
+        }
+        first = IbkrBrokerageSessionStatus.from_init_payload(
+            base,
+            environment="PAPER",
+            initialization_id="init-wrapped",
+            observed_at=NOW,
+        )
+        changed_outer_evidence = {
+            "success": {
+                "value": {
+                    **base["success"]["value"],
+                    "serverInfo": {"serverName": "server-b"},
+                }
+            }
+        }
+        second = IbkrBrokerageSessionStatus.from_init_payload(
+            changed_outer_evidence,
+            environment="PAPER",
+            initialization_id="init-wrapped",
+            observed_at=NOW,
+        )
+        self.assertTrue(first.trade_ready)
+        self.assertNotEqual(first.source_sha256, second.source_sha256)
+        self.assertNotEqual(first.generation_id, second.generation_id)
+
+    def test_wrapped_init_schema_fails_closed_before_session_authority(self):
+        valid_value = {
+            "connected": True,
+            "authenticated": True,
+            "established": True,
+            "competing": False,
+        }
+        cases = (
+            ({"success": valid_value}, "success.value"),
+            ({"success": {"value": "ready"}}, "success.value"),
+            (
+                {"success": {"value": valid_value}, "warning": "unexpected"},
+                "unexpected top-level",
+            ),
+            (
+                {"success": {"value": valid_value, "other": {}}},
+                "success.value",
+            ),
+        )
+        for payload, expected in cases:
+            with self.subTest(payload=payload), self.assertRaisesRegex(
+                IbkrWebAdapterError,
+                expected,
+            ):
+                IbkrBrokerageSessionStatus.from_init_payload(
+                    payload,
+                    environment="PAPER",
+                    initialization_id="init-invalid-wrapper",
+                    observed_at=NOW,
+                )
+
+    def test_legacy_unwrapped_init_shape_remains_explicitly_supported(self):
+        session = IbkrBrokerageSessionStatus.from_init_payload(
+            {
+                "connected": True,
+                "authenticated": True,
+                "established": True,
+                "competing": False,
+                "message": "",
+            },
+            environment="PAPER",
+            initialization_id="init-legacy",
+            observed_at=NOW,
+        )
+        self.assertTrue(session.trade_ready)
 
     def test_brokerage_session_readiness_does_not_manufacture_account_identity(self):
         session = ready_session()

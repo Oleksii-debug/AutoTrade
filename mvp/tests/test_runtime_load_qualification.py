@@ -91,7 +91,9 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
                 "plan": current_plan,
                 "cut": cut,
                 "financial_latency_us": (100, 120),
+                "financial_latency_event_ids": ("fin-1", "fin-2"),
                 "financial_staleness_us": (80, 90),
+                "financial_staleness_event_ids": ("fin-1", "fin-2"),
                 "research_interference_us": (50,),
                 "resource_evidence_hash": RESOURCE,
                 "resource_metrics": {
@@ -227,6 +229,68 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
                     resource_evidence_hash=RESOURCE,
                     resource_metrics={"cpu_peak_millis": 500},
                 )
+
+    def test_anonymous_measurement_arrays_cannot_be_promoted_to_bound_coverage(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(samples=1)
+            current_plan = plan(spec, "fin-1")
+            cut = begin_runtime_campaign(journal=journal, spec=spec, plan=current_plan)
+            journal.append_event(envelope("fin-1"))
+
+            evidence = collect_runtime_campaign_evidence(
+                journal=journal,
+                spec=spec,
+                plan=current_plan,
+                cut=cut,
+                financial_latency_us=(1,),
+                financial_staleness_us=(1,),
+                research_interference_us=(0,),
+                resource_evidence_hash=RESOURCE,
+                resource_metrics={"cpu_peak_millis": 1},
+            )
+            observation = evidence.to_observation(spec)
+            self.assertEqual(observation.recovered_financial_event_ids, ("fin-1",))
+            self.assertEqual(observation.financial_latency_event_ids, ())
+            self.assertEqual(observation.financial_staleness_event_ids, ())
+            self.assertEqual(evaluate_runtime_campaign(spec, evidence).status, "INCONCLUSIVE")
+
+    def test_measurement_source_event_ids_must_match_recovered_journal_order(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec()
+            current_plan = plan(spec, "fin-1", "fin-2")
+            cut = begin_runtime_campaign(journal=journal, spec=spec, plan=current_plan)
+            journal.append_event(envelope("fin-1"))
+            journal.append_event(envelope("fin-2"))
+
+            for field, ids in (
+                ("financial_latency_event_ids", ("fin-1", "fin-1")),
+                ("financial_latency_event_ids", ("fin-2", "fin-1")),
+                ("financial_staleness_event_ids", ("fin-1", "other")),
+            ):
+                with self.subTest(field=field, ids=ids):
+                    kwargs = {
+                        "financial_latency_event_ids": ("fin-1", "fin-2"),
+                        "financial_staleness_event_ids": ("fin-1", "fin-2"),
+                    }
+                    kwargs[field] = ids
+                    with self.assertRaisesRegex(
+                        RuntimeBudgetError,
+                        "must exactly match recovered financial events in journal order",
+                    ):
+                        collect_runtime_campaign_evidence(
+                            journal=journal,
+                            spec=spec,
+                            plan=current_plan,
+                            cut=cut,
+                            financial_latency_us=(100, 120),
+                            financial_staleness_us=(80, 90),
+                            research_interference_us=(50,),
+                            resource_evidence_hash=RESOURCE,
+                            resource_metrics={"cpu_peak_millis": 500},
+                            **kwargs,
+                        )
 
     def test_undeclared_financial_event_cannot_be_hidden_from_campaign_cut(self):
         with TemporaryDirectory() as directory:
@@ -378,7 +442,9 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
                 expected_financial_event_ids=("fin-1",),
                 recovered_financial_event_bindings=(),
                 financial_latency_us=(100,),
+                financial_latency_event_ids=(),
                 financial_staleness_us=(80,),
+                financial_staleness_event_ids=(),
                 research_interference_us=(50,),
                 reconnect_backlog_remaining=0,
                 resource_evidence_hash=RESOURCE,

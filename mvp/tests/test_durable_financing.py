@@ -11,6 +11,7 @@ import unittest
 from autotrade_mvp.durable_financing import (
     DurableFinancingBook,
     _event_payload,
+    _revision_book_digest,
     authenticated_financing_event,
 )
 from autotrade_mvp.financing import FinancingConflict, FinancingError
@@ -73,6 +74,7 @@ class FakeArtifactStore:
                 "artifact_id": artifact_id,
                 "sha256": "sha256:" + sha256(data).hexdigest(),
                 "media_type": "application/json",
+                "rights": {"storage": True, "export": False},
             },
             data,
         )
@@ -321,6 +323,10 @@ class DurableFinancingTests(unittest.TestCase):
             artifact_digest=artifact_digest,
             charge_scope_type=charge_scope_type,
             charge_scope_id=charge_scope_id,
+            previous_revision_digest=_revision_book_digest([]),
+            resulting_revision_digest=_revision_book_digest([event]),
+            resulting_final_charge=event.amount,
+            economic_delta=event.amount,
         )
         self.store.append_event(
             {

@@ -492,7 +492,14 @@ class DurableOrderBookProjection:
         order = book.order(client_order_id)
         if operation == "BIND_QUANTITY_UNIT":
             return order.snapshot()
-        if operation == "MARK_SEND_STARTED":
+        if operation == "MARK_PRE_SEND_ABORTED":
+            order.mark_pre_send_aborted(attempt_id=request.get("attempt_id"))
+        elif operation == "REARM_SUBMISSION":
+            order.rearm_submission(
+                previous_attempt_id=request.get("previous_attempt_id"),
+                attempt_id=request.get("attempt_id"),
+            )
+        elif operation == "MARK_SEND_STARTED":
             order.mark_send_started(attempt_id=request.get("attempt_id"))
         elif operation == "ACKNOWLEDGE":
             order.acknowledge(
@@ -1154,6 +1161,153 @@ class DurableOrderBookProjection:
             committed_at=committed_at,
         )
 
+    def mark_pre_send_aborted(
+        self,
+        *,
+        event_key: str,
+        client_order_id: str,
+        attempt_id: str,
+        source_blocked_event_id: str,
+        source_blocked_payload_hash: str,
+        preparation_binding_hash: str,
+        origin_intent_id: str,
+        committed_at: str,
+    ) -> DurableOrderMutationResult:
+        return self._commit(
+            event_key=event_key,
+            operation="MARK_PRE_SEND_ABORTED",
+            request={
+                "client_order_id": _text(client_order_id, name="client_order_id"),
+                "attempt_id": _text(attempt_id, name="attempt_id"),
+                "source_blocked_event_id": _text(
+                    source_blocked_event_id,
+                    name="source_blocked_event_id",
+                ),
+                "source_blocked_payload_hash": _text(
+                    source_blocked_payload_hash,
+                    name="source_blocked_payload_hash",
+                ),
+                "preparation_binding_hash": _text(
+                    preparation_binding_hash,
+                    name="preparation_binding_hash",
+                ),
+                "origin_intent_id": _text(
+                    origin_intent_id,
+                    name="origin_intent_id",
+                ),
+            },
+            committed_at=committed_at,
+        )
+
+    def rearm_submission(
+        self,
+        *,
+        event_key: str,
+        client_order_id: str,
+        attempt_id: str,
+        committed_at: str,
+    ) -> DurableOrderMutationResult:
+        """Rearm only from exact durable provider-free blocked/new prepared facts."""
+        new_attempt = _text(attempt_id, name="attempt_id")
+        order_id = _text(client_order_id, name="client_order_id")
+        self._reload()
+        order = self.order(order_id)
+        if order.state != "PRE_SEND_ABORTED" or order.submission_attempt_id is None:
+            raise OrderProjectionConflict(
+                "submission rearm requires a durable pre-send aborted order"
+            )
+        previous_attempt = order.submission_attempt_id
+        old_events = self.store.load_events(
+            "submission_attempt",
+            submission_attempt_aggregate_id(
+                environment=self.environment,
+                account_id=self.account_id,
+                attempt_id=previous_attempt,
+            ),
+        )
+        new_events = self.store.load_events(
+            "submission_attempt",
+            submission_attempt_aggregate_id(
+                environment=self.environment,
+                account_id=self.account_id,
+                attempt_id=new_attempt,
+            ),
+        )
+        if (
+            len(old_events) != 2
+            or old_events[0].get("event_type") != "SubmissionPrepared"
+            or old_events[1].get("event_type") != "SubmissionBlocked"
+        ):
+            raise OrderProjectionConflict(
+                "pre-send rearm source must be exactly prepared then blocked"
+            )
+        if (
+            not new_events
+            or new_events[0].get("event_type") != "SubmissionPrepared"
+            or any(event.get("event_type") == "SubmissionSending" for event in new_events)
+        ):
+            raise OrderProjectionConflict(
+                "pre-send rearm target must have durable preparation and no send-start"
+            )
+        old_prepared = old_events[0].get("payload")
+        new_prepared = new_events[0].get("payload")
+        old_blocked = old_events[1].get("payload")
+        if not all(
+            isinstance(payload, Mapping)
+            for payload in (old_prepared, new_prepared, old_blocked)
+        ):
+            raise OrderProjectionConflict(
+                "pre-send rearm submission evidence is malformed"
+            )
+        origin_intent = order.origin_intent_id
+        if origin_intent is None:
+            raise OrderProjectionConflict(
+                "pre-send rearm requires canonical order origin intent"
+            )
+        for prepared, expected_attempt in (
+            (old_prepared, previous_attempt),
+            (new_prepared, new_attempt),
+        ):
+            if (
+                prepared.get("attempt_id") != expected_attempt
+                or prepared.get("client_order_id") != order_id
+                or str(prepared.get("provider", "")).upper() != self.provider_id
+                or prepared.get("account_id") != self.account_id
+                or str(prepared.get("environment", "")).upper() != self.environment
+                or prepared.get("intent_id") != origin_intent
+            ):
+                raise OrderProjectionConflict(
+                    "pre-send rearm submission identity differs from canonical order"
+                )
+        old_binding = old_prepared.get("order_preparation_binding_hash")
+        new_binding = new_prepared.get("order_preparation_binding_hash")
+        if (
+            not isinstance(old_binding, str)
+            or not old_binding
+            or old_binding != new_binding
+        ):
+            raise OrderProjectionConflict(
+                "pre-send rearm requires unchanged canonical preparation binding"
+            )
+        blocked_event_id = _text(
+            old_events[1].get("event_id"),
+            name="source blocked event_id",
+        )
+        return self._commit(
+            event_key=event_key,
+            operation="REARM_SUBMISSION",
+            request={
+                "client_order_id": order_id,
+                "previous_attempt_id": previous_attempt,
+                "attempt_id": new_attempt,
+                "source_blocked_event_id": blocked_event_id,
+                "source_blocked_payload_hash": payload_digest(dict(old_blocked)),
+                "preparation_binding_hash": old_binding,
+                "origin_intent_id": origin_intent,
+            },
+            committed_at=committed_at,
+        )
+
     def mark_send_started(
         self,
         *,
@@ -1353,8 +1507,34 @@ class DurableOrderBookProjection:
                     raise OrderProjectionConflict(
                         "blocked submission cannot follow send-start"
                     )
-                # No provider-side order lifecycle fact exists when the send
-                # barrier blocked the attempt. Keep the pre-send order pending.
+                terminal_seen = True
+                binding_hash = prepared_payload.get("order_preparation_binding_hash")
+                origin_intent = prepared_payload.get("intent_id")
+                if not isinstance(binding_hash, str) or not binding_hash:
+                    raise OrderProjectionConflict(
+                        "blocked production submission lacks preparation binding"
+                    )
+                if not isinstance(origin_intent, str) or not origin_intent:
+                    raise OrderProjectionConflict(
+                        "blocked submission lacks origin intent"
+                    )
+                payload = event.get("payload")
+                if not isinstance(payload, Mapping):
+                    raise OrderProjectionConflict(
+                        "blocked submission payload must be an object"
+                    )
+                results.append(
+                    self.mark_pre_send_aborted(
+                        event_key=event_key,
+                        client_order_id=client_order_id,
+                        attempt_id=attempt,
+                        source_blocked_event_id=source_event_id,
+                        source_blocked_payload_hash=payload_digest(dict(payload)),
+                        preparation_binding_hash=binding_hash,
+                        origin_intent_id=origin_intent,
+                        committed_at=committed_at,
+                    )
+                )
                 continue
 
         return tuple(results)

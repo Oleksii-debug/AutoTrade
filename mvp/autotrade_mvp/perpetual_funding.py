@@ -1091,8 +1091,8 @@ class DurablePerpetualFundingAuthority:
             for event in events
             if self._payload(event).get("instrument_version")
             == observation.instrument_version
-            and self._payload(event).get("funding_period_id")
-            == observation.funding_period_id
+            and self._payload(event).get("effective_at")
+            == _utc_text(observation.effective_at)
         ]
         if observation.corrects_external_event_id is None and same_period:
             raise PerpetualFundingConflict(

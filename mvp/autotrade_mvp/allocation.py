@@ -605,6 +605,7 @@ def _normalize_stress_evidence(
     normalized = _normalize_stress_scenarios(
         candidates,
         {item.name: dict(item.shocks) for item in materialized},
+        require_complete=False,
     )
     return normalized, None
 
@@ -741,6 +742,7 @@ def _evaluate(
 def _cash_fallback(
     candidates: Sequence[AllocationCandidate],
     *,
+    policy: AllocationPolicy,
     reason: str,
     stress_scenarios: Mapping[str, Mapping[str, Decimal]] | None = None,
 ) -> AllocationResult:
@@ -796,6 +798,15 @@ def _cash_fallback(
             and all(exposed_symbols <= set(scenario) for scenario in scenarios)
         )
     )
+    if stress_is_qualified and policy.require_adverse_stress_evidence:
+        stress_is_qualified = all(
+            any(
+                scenario[candidate.symbol] * notional < 0
+                for scenario in scenarios
+            )
+            for candidate, notional in zip(candidates, current_notionals)
+            if notional != 0
+        )
     worst_stress_loss: Decimal | None
     if not stress_is_qualified:
         # Missing/incomplete stress evidence is unknown, not a measured zero.
@@ -905,7 +916,7 @@ def allocate_targets(
     """
 
     if not candidates:
-        return _cash_fallback(candidates, reason="no allocation candidates")
+        return _cash_fallback(candidates, policy=policy, reason="no allocation candidates")
 
     normalized_stress = _normalize_stress_scenarios(
         candidates,
@@ -921,6 +932,7 @@ def allocate_targets(
         if evidence_problem is not None:
             return _cash_fallback(
                 candidates,
+                policy=policy,
                 reason=evidence_problem,
                 stress_scenarios=normalized_stress,
             )
@@ -945,6 +957,7 @@ def allocate_targets(
         )
         return _cash_fallback(
             candidates,
+            policy=policy,
             stress_scenarios=normalized_stress,
             reason=(
                 "stress evidence is missing explicit shocks for the current/requested "
@@ -955,19 +968,25 @@ def allocate_targets(
     if policy.minimum_cash_reserve > policy.cash_available:
         return _cash_fallback(
             candidates,
+            policy=policy,
             stress_scenarios=normalized_stress,
             reason="minimum cash reserve exceeds available cash",
         )
 
     if policy.require_adverse_stress_evidence:
-        requested_symbols = {
-            candidate.symbol: candidate.desired_notional
+        relevant_directions = {
+            (candidate.symbol, notional > 0)
             for candidate in candidates
-            if candidate.desired_notional != 0
+            for notional in (
+                candidate.desired_notional,
+                candidate.current_quantity * candidate.price,
+            )
+            if notional != 0
         }
-        if requested_symbols and not normalized_stress:
+        if relevant_directions and not normalized_stress:
             return _cash_fallback(
                 candidates,
+                policy=policy,
                 stress_scenarios=normalized_stress,
                 reason=(
                     "adverse stress evidence is required before increasing exposure; "
@@ -975,23 +994,19 @@ def allocate_targets(
                 ),
             )
         uncovered = []
-        for symbol, desired_notional in requested_symbols.items():
-            has_adverse_shock = any(
-                (
-                    scenario[symbol] < 0
-                    if desired_notional > 0
-                    else scenario[symbol] > 0
-                )
+        for symbol, is_long in sorted(relevant_directions):
+            if not any(
+                scenario[symbol] < 0 if is_long else scenario[symbol] > 0
                 for scenario in normalized_stress.values()
-            )
-            if not has_adverse_shock:
+            ):
                 uncovered.append(symbol)
         if uncovered:
             return _cash_fallback(
                 candidates,
+                policy=policy,
                 stress_scenarios=normalized_stress,
                 reason=(
-                    "adverse stress evidence is missing for requested exposure: "
+                    "adverse stress evidence is missing for current/requested exposure: "
                     + ", ".join(sorted(uncovered))
                 ),
             )
@@ -1006,6 +1021,7 @@ def allocate_targets(
         if requested_change and requested.turnover_notional == 0:
             return _cash_fallback(
                 candidates,
+                policy=policy,
                 stress_scenarios=normalized_stress,
                 reason=(
                     "requested change is below executable lot/minimum-notional "
@@ -1016,6 +1032,7 @@ def allocate_targets(
             return requested
         return _cash_fallback(
             candidates,
+            policy=policy,
             stress_scenarios=normalized_stress,
             reason=(
                 "requested allocation contains no executable positive lot after "
@@ -1028,6 +1045,7 @@ def allocate_targets(
     except _ExecutionSearchBudgetExceeded:
         return _cash_fallback(
             candidates,
+            policy=policy,
             stress_scenarios=normalized_stress,
             reason="execution-state search budget exceeded; feasibility not established",
         )
@@ -1053,6 +1071,7 @@ def allocate_targets(
 
     return _cash_fallback(
         candidates,
+        policy=policy,
         stress_scenarios=normalized_stress,
         reason=(
             "complete bounded execution-state search found no positive-turnover "
@@ -1119,7 +1138,7 @@ def allocate_objective_targets(
         allocation_candidates.append(item.candidate)
 
     if not candidates:
-        fallback = _cash_fallback((), reason="no objective candidates")
+        fallback = _cash_fallback((), policy=policy, reason="no objective candidates")
         return ObjectiveAllocationResult(
             allocation=fallback,
             selected_symbols=(),
@@ -1131,6 +1150,7 @@ def allocate_objective_targets(
     normalized_stress = _normalize_stress_scenarios(
         allocation_candidates,
         stress_scenarios,
+        require_complete=False,
     )
     normalized_evidence: tuple[StressScenarioEvidence, ...] = ()
     if policy.require_adverse_stress_evidence and policy.require_fresh_stress_evidence:
@@ -1142,6 +1162,7 @@ def allocate_objective_targets(
         if evidence_problem is not None:
             fallback = _cash_fallback(
                 allocation_candidates,
+                policy=policy,
                 stress_scenarios=normalized_stress,
                 reason=evidence_problem,
             )
@@ -1166,6 +1187,7 @@ def allocate_objective_targets(
     if not ranked:
         fallback = _cash_fallback(
             allocation_candidates,
+            policy=policy,
             stress_scenarios=normalized_stress,
             reason="no candidate has positive expected return after risk penalty",
         )
@@ -1181,6 +1203,7 @@ def allocate_objective_targets(
     if candidate_set_count > max_candidate_sets:
         fallback = _cash_fallback(
             allocation_candidates,
+            policy=policy,
             stress_scenarios=normalized_stress,
             reason=(
                 "objective search budget exceeded before complete subset "
@@ -1239,6 +1262,7 @@ def allocate_objective_targets(
         if "execution-state search budget exceeded" in result.reason:
             fallback = _cash_fallback(
                 allocation_candidates,
+                policy=policy,
                 stress_scenarios=normalized_stress,
                 reason=result.reason,
             )
@@ -1296,6 +1320,7 @@ def allocate_objective_targets(
     if best_result is None:
         fallback = _cash_fallback(
             allocation_candidates,
+            policy=policy,
             stress_scenarios=normalized_stress,
             reason=(
                 "no positive-utility feasible allocation survived hard "

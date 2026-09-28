@@ -1397,6 +1397,46 @@ class DiscreteAllocationSearchTests(unittest.TestCase):
         self.assertEqual(result.status, "ALLOCATED")
         self.assertEqual(result.worst_stress_loss, Decimal("1"))
 
+    def test_reversal_fallback_requires_adverse_current_direction(self):
+        for current, desired, favorable in [(100, -100, ".2"), (-100, 100, "-.2")]:
+            candidate = self.position("A", current, desired)
+            policy = self.loose_policy(max_turnover_notional="0", require_adverse_stress_evidence=True,
+                                       require_fresh_stress_evidence=False)
+            result = allocate_targets([candidate], policy,
+                                      stress_scenarios={"desired_adverse": {"A": favorable}})
+            self.assertEqual(result.status, "NO_INCREASE_FALLBACK")
+            self.assertEqual(result.targets[0].quantity, Decimal(current))
+            self.assertIsNone(result.worst_stress_loss)
+            qualified = allocate_targets([candidate], policy,
+                stress_scenarios={"up": {"A": ".2"}, "down": {"A": "-.2"}})
+            self.assertEqual(qualified.worst_stress_loss, Decimal("20"))
+
+    def test_partially_executed_reversal_does_not_qualify_retained_direction(self):
+        candidate = self.position("A", 100, -100, max_executable_notional="10")
+        result = allocate_targets([candidate], self.loose_policy(require_adverse_stress_evidence=True,
+                                  require_fresh_stress_evidence=False),
+                                  stress_scenarios={"up": {"A": ".2"}})
+        self.assertEqual(result.status, "NO_INCREASE_FALLBACK")
+        self.assertIsNone(result.worst_stress_loss)
+
+    def test_default_fresh_stress_omits_only_zero_unchanged_symbols(self):
+        evidence = (StressScenarioEvidence.create(name="down", shocks={"A": "-.2"},
+            observed_at="2026-09-27T00:00:00Z", valid_until="2026-09-28T00:00:00Z",
+            source_ref="scenario:adverse"),)
+        policy = self.loose_policy(require_adverse_stress_evidence=True)
+        for current, desired, expected in [(0, 0, "ALLOCATED"), (1, 0, "NO_INCREASE_FALLBACK"),
+                                          (0, 1, "NO_INCREASE_FALLBACK")]:
+            result = allocate_targets([self.position("A", 0, 10), self.position("B", current, desired)],
+                policy, stress_evidence=evidence, decision_time="2026-09-27T12:00:00Z")
+            self.assertEqual(result.status, expected)
+            if current:
+                self.assertIsNone(result.worst_stress_loss)
+        result = allocate_objective_targets([
+            ObjectiveCandidate(self.position("A", 0, 10), Decimal(".1")),
+            ObjectiveCandidate(self.position("B", 0, 0), Decimal("0"))], policy,
+            stress_evidence=evidence, decision_time="2026-09-27T12:00:00Z")
+        self.assertEqual(result.allocation.status, "ALLOCATED")
+
     def test_bounded_integer_portfolios_match_independent_exhaustive_oracle(self):
         from fractions import Fraction
         from math import lcm

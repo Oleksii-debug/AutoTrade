@@ -994,6 +994,38 @@ class AblationTests(unittest.TestCase):
             )
 
 
+    def test_terminal_qualification_rejects_caller_defined_authority_subclass(self):
+        cases = [
+            pair("forged-authority-a", "2", population_unit="unit-a"),
+            pair("forged-authority-b", "2", population_unit="unit-b"),
+        ]
+        population = registered_population(cases)
+        evidence = tuple(
+            item
+            for matched in cases
+            for item in canonical_evidence(matched)
+        )
+
+        class ForgedAuthority(AblationQualificationAuthority):
+            def __init__(self):
+                pass
+
+            def resolve(self, pairs, *, outcome_refs):
+                return population, evidence
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "canonical AblationQualificationAuthority",
+        ):
+            evaluate_qualified_incremental_value(
+                "agent",
+                cases,
+                authority=ForgedAuthority(),
+                outcome_refs=(),
+                minimum_pairs=2,
+                required_lower_bound=Decimal("0"),
+            )
+
     def test_trusted_qualification_rejects_case_reassignment_inside_complete_population(self):
         cases = [
             pair("case-a", "2", population_unit="unit-a"),

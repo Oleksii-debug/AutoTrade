@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 from functools import wraps
+from hashlib import sha256
 from typing import Any, Mapping
 
 from .dispatch import GuardedDispatcher
+from .persistence import canonical_json
 
 
 class _MissingDurableOrderPreparation(PermissionError):
@@ -70,7 +72,8 @@ def install_production_prepare_guard() -> None:
             return original(self, *args, **kwargs)
 
         supplied = kwargs.get("prepare_order")
-        if kwargs.get("order_preparation_binding") is None:
+        order_preparation_binding = kwargs.get("order_preparation_binding")
+        if order_preparation_binding is None:
             def missing_order_binding(*_args: Any, **_kwargs: Any) -> None:
                 raise _MissingDurableOrderPreparation(
                     "explicit order_preparation_binding is required for PAPER/LIVE submission"
@@ -90,6 +93,22 @@ def install_production_prepare_guard() -> None:
 
             kwargs["prepare_order"] = missing_prepare_order
             return original(self, *args, **kwargs)
+
+        if not isinstance(order_preparation_binding, Mapping):
+            def invalid_order_binding(*_args: Any, **_kwargs: Any) -> None:
+                raise _MissingDurableOrderPreparation(
+                    "order_preparation_binding must be a mapping"
+                )
+
+            kwargs["prepare_order"] = invalid_order_binding
+            return original(self, *args, **kwargs)
+
+        order_preparation_binding_hash = (
+            "sha256:"
+            + sha256(
+                canonical_json(dict(order_preparation_binding)).encode("utf-8")
+            ).hexdigest()
+        )
 
         if not callable(supplied):
             def invalid_prepare_order(*_args: Any, **_kwargs: Any) -> None:

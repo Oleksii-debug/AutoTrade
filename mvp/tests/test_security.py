@@ -81,6 +81,47 @@ class SecurityBoundaryTests(unittest.TestCase):
                     **values,
                 )
 
+    def test_provider_environment_scope_reaches_vault_resolution(self):
+        handle = self.boundary.register_secret(
+            self.owner.token,
+            origin=self.owner.origin,
+            owner_identity="windows-user-1",
+            account_id="paper-1",
+            provider="BYBIT",
+            environment="PAPER",
+            purpose="TRADE",
+            secret_value="bybit-secret",
+            provider_environment="TESTNET",
+        )
+        self.assertEqual(handle.environment, "PAPER")
+        self.assertEqual(handle.provider_environment, "TESTNET")
+        self.assertEqual(
+            self.boundary.resolve_for_execution(
+                self.owner.token,
+                origin=self.owner.origin,
+                handle=handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="BYBIT",
+                environment="PAPER",
+                purpose="TRADE",
+                provider_environment="TESTNET",
+            ),
+            "bybit-secret",
+        )
+        with self.assertRaises(PermissionError):
+            self.boundary.resolve_for_execution(
+                self.owner.token,
+                origin=self.owner.origin,
+                handle=handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="BYBIT",
+                environment="PAPER",
+                purpose="TRADE",
+                provider_environment="DEMO",
+            )
+
     def test_researcher_cannot_resolve_trade_secret(self):
         handle = self._credential()
         researcher = self.boundary.create_session(

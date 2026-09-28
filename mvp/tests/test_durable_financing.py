@@ -358,6 +358,42 @@ class DurableFinancingTests(unittest.TestCase):
             )
         self.assertIsNone(self.financing.latest("borrow-btc-2026-09-28"))
 
+    def test_commit_cannot_predate_authenticated_evidence_availability(self):
+        artifact = "00000000-0000-0000-0000-000000000070"
+        available_at = BASE + timedelta(minutes=5)
+        self.artifacts.put(
+            artifact,
+            revision=1,
+            available_at=available_at,
+        )
+
+        with self.assertRaisesRegex(
+            FinancingError,
+            "cannot be committed before available_at",
+        ):
+            self.financing.record_authenticated_artifact(
+                self.artifacts,
+                artifact_id=artifact,
+                committed_at=BASE.isoformat(),
+            )
+
+        self.assertIsNone(self.financing.latest("borrow-btc-2026-09-28"))
+        self.assertEqual(
+            self.economic.balance("FINANCING_EXPENSE:BTC", "BTC"),
+            0,
+        )
+
+        committed = self.financing.record_authenticated_artifact(
+            self.artifacts,
+            artifact_id=artifact,
+            committed_at=available_at.isoformat(),
+        )
+        self.assertTrue(committed.inserted)
+        self.assertEqual(
+            str(self.economic.balance("FINANCING_EXPENSE:BTC", "BTC")),
+            "1.20",
+        )
+
     def test_authenticated_scope_mismatch_fails_before_journal_mutation(self):
         artifact = "00000000-0000-0000-0000-000000000071"
         self.artifacts.put(artifact, revision=1, account_id="other-account")

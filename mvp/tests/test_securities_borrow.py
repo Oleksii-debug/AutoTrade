@@ -250,6 +250,47 @@ class DurableBorrowRecallProjectionTests(unittest.TestCase):
         )
         self.assertEqual(restarted.active_blocking_resources, ())
 
+    def test_future_recall_does_not_leak_into_earlier_decision_cut(self):
+        projection = self.projection()
+        projection.record_recall(
+            recall(
+                effective_at="2026-09-25T05:08:00Z",
+                observed_at="2026-09-25T05:10:00Z",
+                deadline="2026-09-25T06:00:00Z",
+            )
+        )
+
+        self.assertEqual(
+            projection.active_quantity_at("2026-09-25T05:07:59Z"),
+            Decimal("0"),
+        )
+        self.assertEqual(
+            projection.active_quantity_at("2026-09-25T05:09:59Z"),
+            Decimal("0"),
+        )
+        self.assertEqual(
+            projection.active_blocking_resources_at("2026-09-25T05:09:59Z"),
+            (),
+        )
+        self.assertEqual(
+            projection.active_quantity_at("2026-09-25T05:10:00Z"),
+            Decimal("3"),
+        )
+        self.assertEqual(
+            projection.active_blocking_resources_at("2026-09-25T05:10:00Z"),
+            (availability().resource_key,),
+        )
+
+        restarted = self.projection(JournalStore(self.path))
+        self.assertEqual(
+            restarted.active_quantity_at("2026-09-25T05:09:59Z"),
+            Decimal("0"),
+        )
+        self.assertEqual(
+            restarted.active_quantity_at("2026-09-25T05:10:00Z"),
+            Decimal("3"),
+        )
+
     def test_future_resolution_does_not_release_recall_before_observation_cut(self):
         projection = self.projection()
         projection.record_recall(recall())

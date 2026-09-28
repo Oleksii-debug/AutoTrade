@@ -31,6 +31,10 @@ from .financing import (
     FinancingUpdate,
     book_financing_delta,
 )
+from .instruments import (
+    InstrumentRegistry,
+    InstrumentRegistryError,
+)
 from .persistence import JournalStore, canonical_json, payload_digest
 from .provider_activity_accounting import DurableProviderEconomicBook
 from .provider_core import ProviderResponseObservation, Surface
@@ -428,6 +432,7 @@ def _bybit_funding_event_from_exact_response(
     artifact_id: str,
     artifact_digest: str,
     row_id: str,
+    instrument_registry: InstrumentRegistry,
     instrument_versions: Mapping[str, str],
 ) -> tuple[FinancingEvent, str, str]:
     response = _strict_json_object(raw)
@@ -465,10 +470,14 @@ def _bybit_funding_event_from_exact_response(
         )
     currency = _text(row.get("currency"), name="currency").upper()
     symbol = _text(row.get("symbol"), name="symbol")
+    if not isinstance(instrument_registry, InstrumentRegistry):
+        raise FinancingError(
+            "Bybit financing requires canonical InstrumentRegistry authority"
+        )
     if not isinstance(instrument_versions, Mapping):
         raise FinancingError("instrument_versions must be a mapping")
     try:
-        instrument_version = _text(
+        requested_instrument_version = _text(
             instrument_versions[symbol],
             name="instrument_version",
         )
@@ -480,6 +489,26 @@ def _bybit_funding_event_from_exact_response(
         row.get("transactionTime"),
         name="transactionTime",
     )
+    try:
+        version = instrument_registry.exact(requested_instrument_version)
+    except InstrumentRegistryError as error:
+        raise FinancingError(
+            "Bybit funding instrument_version is not canonical registry authority"
+        ) from error
+    instrument_version = f"{version.instrument_id}@{version.version}"
+    if (
+        version.provider_id.strip().upper() != "BYBIT"
+        or version.provider_symbol != symbol
+        or version.asset_class != "PERPETUAL"
+        or not version.contains(effective_at)
+    ):
+        raise FinancingError(
+            "Bybit funding instrument_version does not match provider product at event time"
+        )
+    if version.settlement_currency.strip().upper() != currency:
+        raise FinancingError(
+            "Bybit funding currency does not match canonical instrument settlement unit"
+        )
     available_at = _instant(observation.observed_at, name="observed_at")
     evidence_ref = (
         f"artifact:{artifact_id}:{artifact_digest}|{observation.evidence_ref}"
@@ -701,6 +730,7 @@ class DurableFinancingBook:
         *,
         artifact_id: str,
         row_id: str,
+        instrument_registry: InstrumentRegistry,
         instrument_versions: Mapping[str, str],
         committed_at: str | None = None,
     ) -> DurableFinancingResult:
@@ -745,6 +775,7 @@ class DurableFinancingBook:
                 artifact_id=aid,
                 artifact_digest=artifact_digest,
                 row_id=row_id,
+                instrument_registry=instrument_registry,
                 instrument_versions=instrument_versions,
             )
         )

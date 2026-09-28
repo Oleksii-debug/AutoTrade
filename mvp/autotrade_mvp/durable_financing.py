@@ -92,13 +92,50 @@ def _charge_scope(
     return normalized_type, normalized_id
 
 
-def _validate_source_account_unit(source_account: str, unit: str) -> None:
-    source = _text(source_account, name="source_account")
+def _canonical_financing_source_account(
+    *,
+    provider_id: object,
+    charge_scope_type: object,
+    unit: object,
+) -> str:
+    """Return the AutoTrade-owned ledger account for a financing charge.
+
+    Provider evidence may describe the economic charge, but it cannot choose an
+    internal chart-of-accounts bucket.  The mapping is deliberately small and
+    fail-closed until a qualified provider-specific normalizer owns additional
+    financing classifications.
+    """
+
+    provider = _text(provider_id, name="provider_id").upper()
+    scope_type = _text(charge_scope_type, name="charge_scope_type").upper()
     charge_unit = _text(unit, name="unit").upper()
-    if ":" not in source or source.rsplit(":", 1)[1].upper() != charge_unit:
+    if provider == "BYBIT" and scope_type == "INSTRUMENT":
+        return f"CASH:{charge_unit}"
+    if scope_type == "ACCOUNT":
+        return f"BORROW_LIABILITY:{charge_unit}"
+    raise FinancingError(
+        "financing source account requires a qualified provider/scope mapping"
+    )
+
+
+def _validate_source_account_binding(
+    source_account: object,
+    *,
+    provider_id: object,
+    charge_scope_type: object,
+    unit: object,
+) -> str:
+    source = _text(source_account, name="source_account")
+    expected = _canonical_financing_source_account(
+        provider_id=provider_id,
+        charge_scope_type=charge_scope_type,
+        unit=unit,
+    )
+    if source != expected:
         raise FinancingError(
-            "financing source account must be explicitly denominated in event unit"
+            "provider financing evidence cannot select an internal ledger account"
         )
+    return expected
 
 
 def _instant(value: object, *, name: str) -> datetime:
@@ -313,9 +350,11 @@ def authenticated_financing_event(
         evidence.get("charge_scope_id"),
         account_id=account,
     )
-    _validate_source_account_unit(
-        _text(evidence.get("source_account"), name="source_account"),
-        _text(evidence.get("unit"), name="unit"),
+    source_account = _validate_source_account_binding(
+        evidence.get("source_account"),
+        provider_id=provider,
+        charge_scope_type=charge_scope_type,
+        unit=evidence.get("unit"),
     )
 
     evidence_ref = f"artifact:{aid}:{artifact_digest}"
@@ -327,7 +366,7 @@ def authenticated_financing_event(
         available_at=_instant(evidence.get("available_at"), name="available_at"),
         unit=evidence.get("unit"),
         amount=evidence.get("amount"),
-        source_account=evidence.get("source_account"),
+        source_account=source_account,
         evidence_ref=evidence_ref,
     )
     return event, artifact_digest, charge_scope_type, charge_scope_id
@@ -523,9 +562,11 @@ class DurableFinancingBook:
                 payload.get("charge_scope_id"),
                 account_id=self.account_id,
             )
-            _validate_source_account_unit(
-                _text(payload.get("source_account"), name="source_account"),
-                _text(payload.get("unit"), name="unit"),
+            _validate_source_account_binding(
+                payload.get("source_account"),
+                provider_id=payload.get("provider_id"),
+                charge_scope_type=payload.get("charge_scope_type"),
+                unit=payload.get("unit"),
             )
             candidate_event = _event_from_payload(payload)
             previous_digest = _revision_book_digest(history)

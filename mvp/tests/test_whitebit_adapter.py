@@ -12,6 +12,7 @@ from mvp.autotrade_mvp.capabilities import (
     EvidenceVerification,
     derive_capability_snapshot,
 )
+from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
     ProviderResponseObservation,
@@ -72,6 +73,8 @@ from mvp.autotrade_mvp.whitebit import (
 
 
 NOW = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
+WHITEBIT_BTC_ID = "11111111-1111-4111-8111-111111111111"
+WHITEBIT_ETH_ID = "22222222-2222-4222-8222-222222222222"
 
 
 def capability(
@@ -118,38 +121,74 @@ def capability(
     )
 
 
+def whitebit_spot_instrument(
+    *,
+    instrument_id=WHITEBIT_BTC_ID,
+    symbol="BTC_USDT",
+    base_currency="BTC",
+) -> InstrumentVersion:
+    return InstrumentVersion(
+        instrument_id=instrument_id,
+        version=1,
+        provider_id="WHITEBIT",
+        venue_id="WHITEBIT",
+        provider_symbol=symbol,
+        asset_class="CRYPTO_SPOT",
+        base_currency=base_currency,
+        quote_currency="USDT",
+        settlement_currency="USDT",
+        quantity_unit=base_currency,
+        contract_multiplier="1",
+        price_tick="0.01",
+        quantity_step="0.000001",
+        minimum_quantity="0.000001",
+        calendar_id="CONTINUOUS_24_7",
+        timezone_id="UTC",
+        effective_from=NOW - timedelta(days=365),
+    )
+
+
+def whitebit_registry(instrument: InstrumentVersion | None = None) -> InstrumentRegistry:
+    registry = InstrumentRegistry()
+    registry.add(instrument or whitebit_spot_instrument())
+    return registry
+
+
 def execution_observation(
     rows,
     *,
-    market="BTC_USDT",
+    instrument: InstrumentVersion | None = None,
     limit=50,
     endpoint="/api/v4/trade-account/executed-history",
     include_market=True,
-    instrument_version="BTC_USDT:v1",
+    query_market: str | None = None,
 ):
+    instrument = instrument or whitebit_spot_instrument()
+    registry = whitebit_registry(instrument)
+    instrument_version = f"{instrument.instrument_id}@{instrument.version}"
     read_capability = capability(
         instrument_version=instrument_version,
         permission_scopes=("ORDER.READ",),
     )
-    query = {
-        "startDate": "1700000000",
-        "endDate": "1700000100",
-        "offset": "0",
-        "limit": str(limit),
-    }
-    if include_market:
-        query["market"] = market
-    if endpoint == "/api/v4/trade-account/executed-history" and include_market:
+    if endpoint == "/api/v4/trade-account/executed-history" and include_market and query_market is None:
         binding = prepare_execution_history_read(
             capability=read_capability,
+            instrument_registry=registry,
             start_unix=1_700_000_000,
             end_unix=1_700_000_100,
             offset=0,
             limit=limit,
-            market=market,
             at=NOW,
         )
     else:
+        query = {
+            "startDate": "1700000000",
+            "endDate": "1700000100",
+            "offset": "0",
+            "limit": str(limit),
+        }
+        if include_market:
+            query["market"] = query_market or instrument.provider_symbol
         binding = prepare_authenticated_read_query(
             capability=read_capability,
             surface=Surface.AUTHENTICATED_READ,
@@ -159,12 +198,13 @@ def execution_observation(
             permission_scope="ORDER.READ",
         )
     response_bytes = json.dumps(rows, separators=(",", ":")).encode("utf-8")
-    return observe_authenticated_json_response(
+    observation = observe_authenticated_json_response(
         query_binding=binding,
         http_status=200,
         response_bytes=response_bytes,
         observed_at=NOW,
     )
+    return observation, registry
 
 
 def market_rules(
@@ -967,14 +1007,17 @@ class WhiteBitAdapterTests(unittest.TestCase):
         ):
             parse_execution_history_response({"caller": "mapping"})
 
-        observation = execution_observation([row])
-        fills = parse_execution_history_response(observation)
+        observation, registry = execution_observation([row])
+        fills = parse_execution_history_response(
+            observation,
+            instrument_registry=registry,
+        )
         self.assertEqual(len(fills), 1)
         fill = fills[0]
         self.assertEqual(fill.provider_execution_id, "123")
         self.assertEqual(fill.account_id, "account-1")
         self.assertEqual(fill.environment, "PAPER")
-        self.assertEqual(fill.instrument, "BTC_USDT:v1")
+        self.assertEqual(fill.instrument, f"{WHITEBIT_BTC_ID}@1")
         self.assertEqual(fill.quantity, Decimal("0.001"))
         self.assertEqual(fill.price, Decimal("40000"))
         self.assertEqual(fill.fee_amount, Decimal("0.04"))
@@ -982,14 +1025,19 @@ class WhiteBitAdapterTests(unittest.TestCase):
         self.assertTrue(fill.evidence_refs[0].startswith("provider-read:sha256:"))
 
     def test_provider_response_observation_cannot_be_directly_forged(self):
-        read_capability = capability(permission_scopes=("ORDER.READ",))
+        instrument = whitebit_spot_instrument()
+        registry = whitebit_registry(instrument)
+        read_capability = capability(
+            instrument_version=f"{instrument.instrument_id}@{instrument.version}",
+            permission_scopes=("ORDER.READ",),
+        )
         binding = prepare_execution_history_read(
             capability=read_capability,
+            instrument_registry=registry,
             start_unix=1_700_000_000,
             end_unix=1_700_000_100,
             offset=0,
             limit=50,
-            market="BTC_USDT",
             at=NOW,
         )
         with self.assertRaisesRegex(
@@ -1021,8 +1069,10 @@ class WhiteBitAdapterTests(unittest.TestCase):
         }
         parser_only = parse_execution_deal(row, market="BTC_USDT")
         self.assertIsNone(parser_only.client_order_id)
+        observation, registry = execution_observation([row])
         fill = parse_execution_history_response(
-            execution_observation([row])
+            observation,
+            instrument_registry=registry,
         )[0]
         self.assertIsNone(fill.client_order_id)
         self.assertEqual(fill.side, "SELL")
@@ -1065,27 +1115,35 @@ class WhiteBitAdapterTests(unittest.TestCase):
             WhiteBitAdapterError,
             "exact market-scoped query",
         ):
+            observation, registry = execution_observation(
+                [row], include_market=False
+            )
             parse_execution_history_response(
-                execution_observation([row], include_market=False)
+                observation,
+                instrument_registry=registry,
             )
 
         with self.assertRaisesRegex(
             ProviderCoreError,
             "endpoint mismatch",
         ):
+            observation, registry = execution_observation(
+                [row],
+                endpoint="/api/v4/trade-account/order/history",
+            )
             parse_execution_history_response(
-                execution_observation(
-                    [row],
-                    endpoint="/api/v4/trade-account/order/history",
-                )
+                observation,
+                instrument_registry=registry,
             )
 
         with self.assertRaisesRegex(
             WhiteBitAdapterError,
             "must be a JSON array",
         ):
+            observation, registry = execution_observation({"records": [row]})
             parse_execution_history_response(
-                execution_observation({"records": [row]})
+                observation,
+                instrument_registry=registry,
             )
 
         second = dict(row)
@@ -1094,12 +1152,21 @@ class WhiteBitAdapterTests(unittest.TestCase):
             WhiteBitAdapterError,
             "exceeds requested page limit",
         ):
+            observation, registry = execution_observation(
+                [row, second], limit=1
+            )
             parse_execution_history_response(
-                execution_observation([row, second], limit=1)
+                observation,
+                instrument_registry=registry,
             )
 
     def test_execution_history_query_numbers_must_be_canonical(self):
-        read_capability = capability(permission_scopes=("ORDER.READ",))
+        instrument = whitebit_spot_instrument()
+        registry = whitebit_registry(instrument)
+        read_capability = capability(
+            instrument_version=f"{instrument.instrument_id}@{instrument.version}",
+            permission_scopes=("ORDER.READ",),
+        )
         binding = prepare_authenticated_read_query(
             capability=read_capability,
             surface=Surface.AUTHENTICATED_READ,
@@ -1124,7 +1191,106 @@ class WhiteBitAdapterTests(unittest.TestCase):
             WhiteBitAdapterError,
             "canonical non-negative integer text",
         ):
-            parse_execution_history_response(observation)
+            parse_execution_history_response(
+                observation,
+                instrument_registry=registry,
+            )
+
+    def test_execution_market_instrument_mapping_is_registry_authoritative(self):
+        btc_row = {
+            "id": 700,
+            "clientOrderId": "at-order-700",
+            "time": "1593233939",
+            "side": "buy",
+            "role": 1,
+            "amount": "0.001",
+            "price": "40000",
+            "deal": "40",
+            "fee": "0",
+            "orderId": 701,
+            "feeAsset": "USDT",
+        }
+        eth_instrument = whitebit_spot_instrument(
+            instrument_id=WHITEBIT_ETH_ID,
+            symbol="ETH_USDT",
+            base_currency="ETH",
+        )
+        observation, registry = execution_observation(
+            [btc_row],
+            instrument=eth_instrument,
+            query_market="BTC_USDT",
+        )
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "market does not match canonical instrument mapping",
+        ):
+            parse_execution_history_response(
+                observation,
+                instrument_registry=registry,
+            )
+
+    def test_execution_market_alias_comes_only_from_explicit_registry_mapping(self):
+        alias_instrument = whitebit_spot_instrument(symbol="XBT_USDT")
+        row = {
+            "id": 702,
+            "clientOrderId": "at-order-702",
+            "time": "1593233939",
+            "side": "buy",
+            "role": 1,
+            "amount": "0.001",
+            "price": "40000",
+            "deal": "40",
+            "fee": "0",
+            "orderId": 703,
+            "feeAsset": "USDT",
+        }
+        observation, registry = execution_observation(
+            [row],
+            instrument=alias_instrument,
+        )
+        self.assertEqual(
+            observation.query_binding.query["market"],
+            "XBT_USDT",
+        )
+        fill = parse_execution_history_response(
+            observation,
+            instrument_registry=registry,
+        )[0]
+        self.assertEqual(fill.instrument, f"{WHITEBIT_BTC_ID}@1")
+
+    def test_execution_mapping_identity_survives_registry_reconstruction(self):
+        instrument = whitebit_spot_instrument()
+        observation, first_registry = execution_observation(
+            [
+                {
+                    "id": 704,
+                    "clientOrderId": "at-order-704",
+                    "time": "1593233939",
+                    "side": "sell",
+                    "role": 2,
+                    "amount": "0.002",
+                    "price": "41000",
+                    "deal": "82",
+                    "fee": "0.01",
+                    "orderId": 705,
+                    "feeAsset": "USDT",
+                }
+            ],
+            instrument=instrument,
+        )
+        first = parse_execution_history_response(
+            observation,
+            instrument_registry=first_registry,
+        )
+        reconstructed_registry = whitebit_registry(
+            whitebit_spot_instrument()
+        )
+        replayed = parse_execution_history_response(
+            observation,
+            instrument_registry=reconstructed_registry,
+        )
+        self.assertEqual(first, replayed)
+        self.assertEqual(first[0].evidence_refs, replayed[0].evidence_refs)
 
     def test_execution_history_deduplicates_exact_rows_and_rejects_conflicts(self):
         row = {

@@ -373,7 +373,9 @@ def restore_authority_snapshot(
 
     ``evidence_artifact_store`` is required when canonical financial history
     contains BORROW evidence because replay reuses the full canonical financial
-    validator. CASH-only histories need no artifact store.
+    validator. CASH-only histories need no artifact store. The returned detached
+    snapshot service retains the same trusted artifact dependency so a later
+    snapshot proof cannot accidentally lose BORROW verification authority.
     """
     if not isinstance(store, JournalStore):
         raise TypeError("store must be JournalStore")
@@ -411,4 +413,8 @@ def restore_authority_snapshot(
         store=store,
         evidence_artifact_store=evidence_artifact_store,
     )
+    # AuthorityService.restore() intentionally rebuilds a detached snapshot.
+    # Carry only the trusted immutable-artifact dependency forward; do not
+    # pretend the detached service has replayed the canonical journal version.
+    restored.evidence_artifact_store = evidence_artifact_store
     return restored

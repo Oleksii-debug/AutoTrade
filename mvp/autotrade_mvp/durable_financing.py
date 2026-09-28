@@ -72,6 +72,34 @@ def _environment(value: object) -> str:
     return normalized
 
 
+def _charge_scope(
+    scope_type: object,
+    scope_id: object,
+    *,
+    account_id: str,
+) -> tuple[str, str]:
+    normalized_type = _text(scope_type, name="charge_scope_type").upper()
+    if normalized_type not in {"ACCOUNT", "INSTRUMENT", "POSITION"}:
+        raise FinancingError(
+            "charge_scope_type must be ACCOUNT, INSTRUMENT, or POSITION"
+        )
+    normalized_id = _text(scope_id, name="charge_scope_id")
+    if normalized_type == "ACCOUNT" and normalized_id != account_id:
+        raise FinancingError(
+            "account-level financing scope must match the authority account"
+        )
+    return normalized_type, normalized_id
+
+
+def _validate_source_account_unit(source_account: str, unit: str) -> None:
+    source = _text(source_account, name="source_account")
+    charge_unit = _text(unit, name="unit").upper()
+    if ":" not in source or source.rsplit(":", 1)[1].upper() != charge_unit:
+        raise FinancingError(
+            "financing source account must be explicitly denominated in event unit"
+        )
+
+
 def _instant(value: object, *, name: str) -> datetime:
     text = _text(value, name=name)
     try:
@@ -143,6 +171,8 @@ def _event_payload(
     event: FinancingEvent,
     artifact_id: str,
     artifact_digest: str,
+    charge_scope_type: str,
+    charge_scope_id: str,
 ) -> dict[str, Any]:
     return {
         "schema_version": "1.0.0",
@@ -157,6 +187,8 @@ def _event_payload(
         "unit": event.unit,
         "amount": _decimal_text(event.amount),
         "source_account": event.source_account,
+        "charge_scope_type": charge_scope_type,
+        "charge_scope_id": charge_scope_id,
         "artifact_id": artifact_id,
         "artifact_digest": artifact_digest,
         "evidence_ref": event.evidence_ref,
@@ -177,6 +209,8 @@ def _event_from_payload(payload: Mapping[str, Any]) -> FinancingEvent:
         "unit",
         "amount",
         "source_account",
+        "charge_scope_type",
+        "charge_scope_id",
         "artifact_id",
         "artifact_digest",
         "evidence_ref",
@@ -203,7 +237,7 @@ def authenticated_financing_event(
     provider_id: str,
     account_id: str,
     environment: str,
-) -> tuple[FinancingEvent, str]:
+) -> tuple[FinancingEvent, str, str, str]:
     """Reconstruct one financing event from one authenticated artifact snapshot."""
 
     aid = _text(artifact_id, name="artifact_id")
@@ -234,6 +268,8 @@ def authenticated_financing_event(
         "unit",
         "amount",
         "source_account",
+        "charge_scope_type",
+        "charge_scope_id",
     }
     if set(evidence) != expected_keys:
         raise FinancingError("financing evidence must use the canonical shape")
@@ -245,6 +281,16 @@ def authenticated_financing_event(
         raise FinancingError("financing evidence account does not match authority")
     if _environment(evidence.get("environment")) != scope:
         raise FinancingError("financing evidence environment does not match authority")
+
+    charge_scope_type, charge_scope_id = _charge_scope(
+        evidence.get("charge_scope_type"),
+        evidence.get("charge_scope_id"),
+        account_id=account,
+    )
+    _validate_source_account_unit(
+        _text(evidence.get("source_account"), name="source_account"),
+        _text(evidence.get("unit"), name="unit"),
+    )
 
     evidence_ref = f"artifact:{aid}:{artifact_digest}"
     event = FinancingEvent.create(
@@ -258,7 +304,7 @@ def authenticated_financing_event(
         source_account=evidence.get("source_account"),
         evidence_ref=evidence_ref,
     )
-    return event, artifact_digest
+    return event, artifact_digest, charge_scope_type, charge_scope_id
 
 
 class DurableFinancingBook:
@@ -332,6 +378,15 @@ class DurableFinancingBook:
                 or payload.get("charge_id") != charge_id
             ):
                 raise FinancingConflict("durable financing scope is invalid")
+            _charge_scope(
+                payload.get("charge_scope_type"),
+                payload.get("charge_scope_id"),
+                account_id=self.account_id,
+            )
+            _validate_source_account_unit(
+                _text(payload.get("source_account"), name="source_account"),
+                _text(payload.get("unit"), name="unit"),
+            )
             history.append(_event_from_payload(payload))
         return FinancingRevisionBook(history)
 
@@ -373,7 +428,12 @@ class DurableFinancingBook:
         artifact_id: str,
         committed_at: str | None = None,
     ) -> DurableFinancingResult:
-        event, artifact_digest = authenticated_financing_event(
+        (
+            event,
+            artifact_digest,
+            charge_scope_type,
+            charge_scope_id,
+        ) = authenticated_financing_event(
             artifact_store,
             artifact_id=artifact_id,
             provider_id=self.provider_id,
@@ -434,6 +494,8 @@ class DurableFinancingBook:
             event=event,
             artifact_id=_text(artifact_id, name="artifact_id"),
             artifact_digest=artifact_digest,
+            charge_scope_type=charge_scope_type,
+            charge_scope_id=charge_scope_id,
         )
         event_id = str(
             uuid5(

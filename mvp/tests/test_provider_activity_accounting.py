@@ -19,6 +19,7 @@ def activity(
     provider_id="ALPACA",
     account_id="paper-1",
     environment="PAPER",
+    provider_environment=None,
     activity_id="cash-1",
     activity_type="DEPOSIT",
     origin="EXTERNAL",
@@ -34,6 +35,7 @@ def activity(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
         activity_id=activity_id,
         activity_type=activity_type,
         origin=origin,
@@ -101,6 +103,71 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                 environment="LIVE",
             ),
         )
+
+    def test_bybit_external_cash_replay_is_provider_environment_scoped(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            evidence = activity(
+                provider_id="BYBIT",
+                account_id="acct",
+                provider_environment="TESTNET",
+                activity_id="cash-testnet",
+                signed_amount="25",
+            )
+            transaction, inserted = book_paper_activity(
+                store,
+                provider_id="BYBIT",
+                account_id="acct",
+                activity=evidence,
+                observed_at="2026-09-24T18:01:00Z",
+            )
+            self.assertTrue(inserted)
+
+            testnet_book_id = paper_book_id(
+                provider_id="BYBIT",
+                account_id="acct",
+                provider_environment="TESTNET",
+            )
+            demo_book_id = paper_book_id(
+                provider_id="BYBIT",
+                account_id="acct",
+                provider_environment="DEMO",
+            )
+            self.assertNotEqual(testnet_book_id, demo_book_id)
+            events = store.load_events("economic_book", testnet_book_id)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(
+                events[0]["payload"]["provider_environment"],
+                "TESTNET",
+            )
+
+            reloaded = load_paper_book(
+                store,
+                provider_id="BYBIT",
+                account_id="acct",
+                provider_environment="TESTNET",
+            )
+            self.assertEqual(
+                [item.transaction_id for item in reloaded.transactions],
+                [transaction.transaction_id],
+            )
+            demo = load_paper_book(
+                store,
+                provider_id="BYBIT",
+                account_id="acct",
+                provider_environment="DEMO",
+            )
+            self.assertEqual(demo.transactions, ())
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "requires explicit provider_environment",
+            ):
+                activity(
+                    provider_id="BYBIT",
+                    account_id="acct",
+                    activity_id="missing-provider-environment",
+                )
 
     def test_bridge_requires_canonical_environment_scope(self):
         with TemporaryDirectory() as directory:
@@ -492,8 +559,8 @@ class ProviderActivityAccountingTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
             for candidate in (
-                activity(provider_id="BYBIT", account_id="acct", activity_id="unknown", origin="UNKNOWN"),
-                activity(provider_id="BYBIT", account_id="acct", activity_id="auto", origin="AUTOTRADE"),
+                activity(provider_id="BYBIT", account_id="acct", provider_environment="TESTNET", activity_id="unknown", origin="UNKNOWN"),
+                activity(provider_id="BYBIT", account_id="acct", provider_environment="TESTNET", activity_id="auto", origin="AUTOTRADE"),
             ):
                 with self.assertRaisesRegex(ValueError, "MANUAL or EXTERNAL"):
                     book_paper_activity(
@@ -513,6 +580,7 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                     activity=activity(
                         provider_id="BYBIT",
                         account_id="acct",
+                        provider_environment="TESTNET",
                         activity_id="adjustment",
                         activity_type="CASH_ADJUSTMENT",
                     ),

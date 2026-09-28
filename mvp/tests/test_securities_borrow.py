@@ -261,6 +261,37 @@ class DurableBorrowRecallProjectionTests(unittest.TestCase):
         self.assertEqual(restarted.active_quantity, Decimal("3"))
         self.assertEqual(restarted.version, 1)
 
+    def test_future_recall_is_invisible_before_provider_fact_is_observed(self):
+        projection = self.projection()
+        projection.record_recall(recall())
+
+        self.assertEqual(
+            projection.active_quantity_at("2026-09-25T05:00:30Z"),
+            Decimal("0"),
+        )
+        self.assertEqual(
+            projection.active_quantity_at("2026-09-25T05:00:50Z"),
+            Decimal("0"),
+        )
+        self.assertEqual(
+            projection.active_quantity_at("2026-09-25T05:01:00Z"),
+            Decimal("3"),
+        )
+        self.assertEqual(
+            projection.active_blocking_resources_at("2026-09-25T05:01:00Z"),
+            (availability().resource_key,),
+        )
+
+        restarted = self.projection(JournalStore(self.path))
+        self.assertEqual(
+            restarted.active_quantity_at("2026-09-25T05:00:50Z"),
+            Decimal("0"),
+        )
+        self.assertEqual(
+            restarted.active_quantity_at("2026-09-25T05:01:00Z"),
+            Decimal("3"),
+        )
+
     def test_future_resolution_cannot_release_before_observation_cut_and_survives_restart(self):
         projection = self.projection()
         projection.record_recall(recall())

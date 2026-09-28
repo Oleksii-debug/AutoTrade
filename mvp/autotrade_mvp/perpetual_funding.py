@@ -493,6 +493,20 @@ def _composite_observation(
     if any(_text(item["symbol"], "symbol") != symbol for item in (rate, prices, cut)):
         raise PerpetualFundingError("funding evidence symbol mismatch")
     effective = _canonical_instant_text(rate["fundingTime"], "fundingTime")
+    income_time = income["time"]
+    if (
+        isinstance(income_time, bool)
+        or not isinstance(income_time, int)
+        or income_time < 0
+    ):
+        raise PerpetualFundingError("funding income time must be non-negative epoch milliseconds")
+    income_effective = datetime.fromtimestamp(
+        income_time / 1000, tz=timezone.utc
+    )
+    if income_effective != effective:
+        raise PerpetualFundingError(
+            "funding income event is not bound to the registered funding cut"
+        )
     if _canonical_instant_text(prices["time"], "price time") != effective:
         raise PerpetualFundingError("mark/index evidence is not bound to the registered funding cut")
     if _canonical_instant_text(cut["fundingTime"], "cut fundingTime") != effective:

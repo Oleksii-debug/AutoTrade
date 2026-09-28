@@ -164,7 +164,9 @@ def _event_id(scope: SettlementAccountScope, kind: str, identity: object) -> str
 
 def _scope_payload(scope: SettlementAccountScope) -> dict[str, str]:
     payload = {
-        **_scope_payload(scope),
+        "provider_id": scope.provider_id,
+        "account_id": scope.account_id,
+        "environment": scope.environment,
     }
     if scope.provider_environment != scope.environment:
         payload["provider_environment"] = scope.provider_environment

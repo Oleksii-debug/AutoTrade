@@ -579,6 +579,120 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
                 current_reservation_state_digest="4" * 64,
             )
 
+    def test_evidence_bound_stress_coverage_ignores_only_zero_unchanged_symbols(self):
+        objective_a, market_a, capital, stress, resolved = self.bundle()
+        valuation_a = resolved["valuation:aaa:v1"]
+
+        objective_b_payload = dict(objective_a.payload)
+        objective_b_payload.update({
+            "symbol": "BBB",
+            "candidate_id": "candidate:bbb:v1",
+            "proposal_id": "proposal:bbb:v1",
+            "desired_notional": "0",
+            "expected_return_rate": "0",
+            "risk_penalty_rate": "0",
+        })
+        objective_b = self.evidence(
+            evidence_id="objective:bbb:v1",
+            kind="OBJECTIVE",
+            payload=objective_b_payload,
+        )
+
+        market_b_payload = dict(market_a.payload)
+        market_b_payload.update({
+            "symbol": "BBB",
+            "instrument_version": "instrument:bbb:v1",
+            "capability_snapshot_id": "capability:2",
+        })
+        market_b = self.evidence(
+            evidence_id="market:bbb:v1",
+            kind="MARKET_CONSTRAINT",
+            payload=market_b_payload,
+        )
+
+        valuation_b_payload = dict(valuation_a.payload)
+        valuation_b_payload.update({
+            "symbol": "BBB",
+            "instrument_version": "instrument:bbb:v1",
+            "capability_snapshot_id": "capability:2",
+            "desired_notional_base": "0",
+        })
+        valuation_b = self.evidence(
+            evidence_id="valuation:bbb:v1",
+            kind="VALUATION",
+            payload=valuation_b_payload,
+        )
+
+        def capital_with_bbb(quantity):
+            payload = dict(capital.payload)
+            payload["position_quantities"] = {"AAA": "0", "BBB": quantity}
+            return self.evidence(
+                evidence_id=capital.evidence_id,
+                kind="CAPITAL_STATE",
+                payload=payload,
+            )
+
+        candidate_b = ObjectiveCandidate.create(
+            symbol="BBB",
+            desired_notional="0",
+            price="10",
+            lot_size="1",
+            expected_return_rate="0",
+            risk_penalty_rate="0",
+            cost_rate="0.001",
+            capital_requirement_rate="1",
+            min_notional="10",
+            fee_floor="0",
+            max_executable_notional="500",
+        )
+
+        zero_capital = capital_with_bbb("0")
+        zero_resolved = {
+            **resolved,
+            objective_b.evidence_id: objective_b,
+            market_b.evidence_id: market_b,
+            valuation_b.evidence_id: valuation_b,
+            zero_capital.evidence_id: zero_capital,
+        }
+        result = allocate_evidence_bound_objective_targets(
+            (self.candidate(), candidate_b),
+            self.policy(),
+            objective_evidence={"AAA": objective_a, "BBB": objective_b},
+            market_evidence={"AAA": market_a, "BBB": market_b},
+            valuation_evidence={"AAA": valuation_a, "BBB": valuation_b},
+            capital_evidence=zero_capital,
+            stress_source_evidence=(stress,),
+            resolved_evidence=zero_resolved,
+            environment="SIMULATION",
+            decision_time=self.DECISION_TIME,
+            policy_version="risk-policy:12",
+        )
+        self.assertEqual(result.objective.allocation.status, "ALLOCATED")
+        self.assertEqual(result.objective.selected_symbols, ("AAA",))
+
+        exposed_capital = capital_with_bbb("1")
+        exposed_resolved = {
+            **zero_resolved,
+            exposed_capital.evidence_id: exposed_capital,
+        }
+        with self.assertRaisesRegex(
+            ValueError,
+            "stress evidence must cover every current/requested exposure symbol",
+        ):
+            allocate_evidence_bound_objective_targets(
+                (self.candidate(), candidate_b),
+                self.policy(),
+                objective_evidence={"AAA": objective_a, "BBB": objective_b},
+                market_evidence={"AAA": market_a, "BBB": market_b},
+                valuation_evidence={"AAA": valuation_a, "BBB": valuation_b},
+                capital_evidence=exposed_capital,
+                stress_source_evidence=(stress,),
+                resolved_evidence=exposed_resolved,
+                environment="SIMULATION",
+                decision_time=self.DECISION_TIME,
+                policy_version="risk-policy:12",
+            )
+
     def test_same_policy_version_cannot_hide_policy_configuration_change(self):
         bundle = self.bundle()
         result = self.allocate(bundle=bundle)

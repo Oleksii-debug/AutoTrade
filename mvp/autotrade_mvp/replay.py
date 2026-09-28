@@ -317,7 +317,7 @@ class CompositeReplayCheckpoint:
     runtime_authority_seal: str
     build_sha: str
     protocol_ref: str
-    schema_version: str = "2.0.0"
+    schema_version: str = "3.0.0"
 
     def __post_init__(self) -> None:
         if not isinstance(self.replay, ReplayCheckpoint):
@@ -343,7 +343,7 @@ class CompositeReplayCheckpoint:
         protocol = self.protocol_ref.strip()
         if protocol != self.protocol_ref:
             raise ReplayError("protocol_ref must be canonical text")
-        if self.schema_version != "2.0.0":
+        if self.schema_version != "3.0.0":
             raise ReplayError("unsupported composite replay checkpoint schema")
         object.__setattr__(self, "runtime_components", components)
         object.__setattr__(self, "runtime_cut_id", cut_id)
@@ -687,6 +687,8 @@ def resume_from_composite_checkpoint(
 
     if not isinstance(checkpoint, CompositeReplayCheckpoint):
         raise TypeError("checkpoint must be CompositeReplayCheckpoint")
+    if not isinstance(runtime_state_authority, RuntimeStateAuthority):
+        raise TypeError("runtime_state_authority must be RuntimeStateAuthority")
     if runtime_state_authority.authority_id != checkpoint.runtime_authority_id:
         raise ReplayError("runtime state authority identity differs from checkpoint")
     checkpoint_snapshot = RuntimeStateSnapshot(

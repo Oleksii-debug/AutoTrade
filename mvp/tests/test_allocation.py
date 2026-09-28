@@ -1398,6 +1398,38 @@ class AllocationTests(unittest.TestCase):
         targets = {item.symbol: item.notional for item in result.allocation.targets}
         self.assertEqual(targets, {"AAA": Decimal("10"), "BBB": Decimal("10")})
 
+
+    def test_allocation_policy_digest_binds_execution_search_budget(self):
+        from mvp.autotrade_mvp.allocation import _allocation_policy_digest
+
+        first = self.policy(max_execution_states=100)
+        same = self.policy(max_execution_states=100)
+        changed = self.policy(max_execution_states=101)
+
+        self.assertEqual(
+            _allocation_policy_digest(first),
+            _allocation_policy_digest(same),
+        )
+        self.assertNotEqual(
+            _allocation_policy_digest(first),
+            _allocation_policy_digest(changed),
+        )
+
+    def test_objective_search_digest_binds_candidate_set_budget(self):
+        from mvp.autotrade_mvp.allocation import _objective_search_config_digest
+
+        self.assertEqual(
+            _objective_search_config_digest(64),
+            _objective_search_config_digest(64),
+        )
+        self.assertNotEqual(
+            _objective_search_config_digest(64),
+            _objective_search_config_digest(65),
+        )
+        for invalid in (0, -1, True, 2.5):
+            with self.assertRaisesRegex(ValueError, "max_candidate_sets"):
+                _objective_search_config_digest(invalid)
+
 class DiscreteAllocationSearchTests(unittest.TestCase):
     policy = AllocationTests.policy
     candidate = AllocationTests.candidate

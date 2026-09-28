@@ -351,6 +351,7 @@ class ProviderResponseObservation:
     """Exact response bytes bound to one immutable authenticated query."""
 
     query_binding: AuthenticatedReadQueryBinding
+    provider_environment: str
     observed_at: str
     http_status: int
     response_sha256: str
@@ -367,6 +368,11 @@ class ProviderResponseObservation:
             raise TypeError(
                 "query_binding must be AuthenticatedReadQueryBinding"
             )
+        object.__setattr__(
+            self,
+            "provider_environment",
+            _text(self.provider_environment, "provider_environment").upper(),
+        )
         if (
             isinstance(self.http_status, bool)
             or not isinstance(self.http_status, int)
@@ -430,6 +436,7 @@ class ProviderResponseObservation:
         endpoint: str,
         account_id: str | None = None,
         environment: str | None = None,
+        provider_environment: str | None = None,
     ) -> None:
         self.query_binding.require_scope(
             provider_id=provider_id,
@@ -438,6 +445,17 @@ class ProviderResponseObservation:
             account_id=account_id,
             environment=environment,
         )
+        if (
+            provider_environment is not None
+            and _text(
+                provider_environment,
+                "provider_environment",
+            ).upper()
+            != self.provider_environment
+        ):
+            raise ProviderCoreError(
+                "provider-read provenance provider-environment mismatch"
+            )
 
 
 def observe_authenticated_json_response(
@@ -446,6 +464,7 @@ def observe_authenticated_json_response(
     http_status: int,
     response_bytes: bytes,
     observed_at: datetime,
+    provider_environment: str | None = None,
 ) -> ProviderResponseObservation:
     if not isinstance(query_binding, AuthenticatedReadQueryBinding):
         raise TypeError("query_binding must be AuthenticatedReadQueryBinding")
@@ -460,9 +479,27 @@ def observe_authenticated_json_response(
         )
     payload = _decode_exact_json(response_bytes)
     observed = _utc_text(observed_at, "observed_at")
+    if provider_environment is None and query_binding.provider_id == "BYBIT":
+        raise ProviderCoreError(
+            "BYBIT authenticated provider read requires explicit provider_environment"
+        )
+    provider_env = (
+        query_binding.environment
+        if provider_environment is None
+        else _text(provider_environment, "provider_environment").upper()
+    )
+    if (
+        query_binding.provider_id == "BYBIT"
+        and provider_env not in {"MAINNET", "TESTNET", "DEMO"}
+    ):
+        raise ProviderCoreError(
+            "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
+        )
     response_digest = "sha256:" + sha256(response_bytes).hexdigest()
     identity_material = (
         query_binding.query_digest
+        + "\n"
+        + provider_env
         + "\n"
         + str(http_status)
         + "\n"
@@ -473,6 +510,7 @@ def observe_authenticated_json_response(
     evidence_ref = "provider-read:sha256:" + sha256(identity_material).hexdigest()
     return ProviderResponseObservation(
         query_binding=query_binding,
+        provider_environment=provider_env,
         observed_at=observed,
         http_status=http_status,
         response_sha256=response_digest,
@@ -579,6 +617,7 @@ class ProviderSubmissionObservation:
         instrument_versions: tuple[str, ...],
         account_id: str | None = None,
         environment: str | None = None,
+        provider_environment: str | None = None,
         client_order_id: str | None = None,
     ) -> None:
         if _text(provider_id, "provider_id").upper() != self.provider_id:
@@ -598,6 +637,22 @@ class ProviderSubmissionObservation:
             and _text(environment, "environment").upper() != self.environment
         ):
             raise ProviderCoreError("provider-write provenance environment mismatch")
+        if provider_environment is not None:
+            expected_provider_environment = _text(
+                provider_environment,
+                "provider_environment",
+            ).upper()
+            actual_provider_environment = _thaw_json(
+                self.response_binding.submission_scope
+            ).get("provider_environment")
+            if (
+                not isinstance(actual_provider_environment, str)
+                or actual_provider_environment.upper()
+                != expected_provider_environment
+            ):
+                raise ProviderCoreError(
+                    "provider-write provenance provider-environment mismatch"
+                )
         if (
             client_order_id is not None
             and _text(client_order_id, "client_order_id") != self.client_order_id
@@ -613,6 +668,7 @@ def observe_submission_json_response(
     prepared_request_sha256: str,
     capability_snapshot_ids: tuple[str, ...],
     instrument_versions: tuple[str, ...],
+    provider_environment: str | None = None,
 ) -> ProviderSubmissionObservation:
     """Project one exact durable write response into provider-neutral evidence."""
 
@@ -655,6 +711,15 @@ def observe_submission_json_response(
         "capability_snapshot_ids": list(capabilities),
         "instrument_versions": list(instruments),
     }
+    if provider == "BYBIT" and provider_environment is None:
+        raise ProviderCoreError(
+            "BYBIT durable submission requires explicit provider_environment"
+        )
+    if provider_environment is not None:
+        expected_scope["provider_environment"] = _text(
+            provider_environment,
+            "provider_environment",
+        ).upper()
     actual_scope = _thaw_json(response_binding.submission_scope)
     if actual_scope != expected_scope:
         raise ProviderCoreError(

@@ -74,7 +74,13 @@ def bybit_instrument_registry(
     return registry, f"{version.instrument_id}@{version.version}"
 
 
-def bybit_activity_observation(raw: bytes, *, observed_at: datetime):
+def bybit_activity_observation(
+    raw: bytes,
+    *,
+    observed_at: datetime,
+    query_category: str = "linear",
+    capability_instrument_version: str | None = None,
+):
     capability_observed = BASE - timedelta(minutes=5)
     claims = tuple(
         CapabilityClaim(
@@ -83,7 +89,10 @@ def bybit_activity_observation(raw: bytes, *, observed_at: datetime):
             account_id="acct-1",
             entity_id="bybit-financing-test",
             environment="PAPER",
-            instrument_version=f"{BYBIT_XRP_INSTRUMENT_ID}@1",
+            instrument_version=(
+                capability_instrument_version
+                or f"{BYBIT_XRP_INSTRUMENT_ID}@1"
+            ),
             observed_at=capability_observed,
             expires_at=BASE + timedelta(hours=1),
             supported_order_types=frozenset({"MARKET"}),
@@ -117,7 +126,7 @@ def bybit_activity_observation(raw: bytes, *, observed_at: datetime):
         capability=capability,
         surface=Surface.ACTIVITIES,
         endpoint="/v5/account/transaction-log",
-        query={"accountType": "UNIFIED", "category": "linear"},
+        query={"accountType": "UNIFIED", "category": query_category},
         at=BASE,
         permission_scope="ORDER.READ",
     )

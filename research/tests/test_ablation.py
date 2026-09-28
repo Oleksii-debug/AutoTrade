@@ -1396,6 +1396,32 @@ class AblationTests(unittest.TestCase):
                 "qualified_registered_canonical_ablation_net_of_cost",
             )
 
+            swapped_cases = [
+                AblationPair(
+                    target_component=cases[0].target_component,
+                    full=replace(cases[0].full, case_id=cases[1].full.case_id),
+                    ablated=replace(cases[0].ablated, case_id=cases[1].ablated.case_id),
+                ),
+                AblationPair(
+                    target_component=cases[1].target_component,
+                    full=replace(cases[1].full, case_id=cases[0].full.case_id),
+                    ablated=replace(cases[1].ablated, case_id=cases[0].ablated.case_id),
+                ),
+            ]
+            reassigned = evaluate_qualified_incremental_value(
+                "agent",
+                swapped_cases,
+                authority=authority,
+                outcome_refs=refs,
+                minimum_pairs=2,
+                required_lower_bound=Decimal("0"),
+            )
+            self.assertEqual(reassigned.status, "INCONCLUSIVE")
+            self.assertEqual(
+                reassigned.reason,
+                "registered_population_case_binding_mismatch",
+            )
+
             authority.resolve = lambda *_args, **_kwargs: (_ for _ in ()).throw(
                 AssertionError("caller-controlled virtual resolve must not execute")
             )

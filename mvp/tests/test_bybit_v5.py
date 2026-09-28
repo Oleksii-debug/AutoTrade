@@ -913,6 +913,12 @@ class BybitV5AdapterTests(unittest.TestCase):
             observation,
             instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
         )
+        for wrong_instrument in ("ETHUSDT@v1", "BTCUSDT@v2"):
+            with self.subTest(wrong_instrument=wrong_instrument):
+                with self.assertRaisesRegex(ProviderCoreError, "exact provider observation"):
+                    normalize_authenticated_executions(
+                        observation, instrument_versions={"BTCUSDT": wrong_instrument}
+                    )
         self.assertEqual(normalized.normalizer_id, "bybit.executions.v1")
         self.assertEqual(normalized.observation.response_bytes, observation.response_bytes)
         with self.assertRaisesRegex(ProviderCoreError, "provider adapter normalizer"):

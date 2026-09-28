@@ -520,6 +520,7 @@ class NormalizedExecutionFill:
                 "account_id",
                 "environment",
                 "provider_execution_id",
+                "instrument",
                 "evidence_refs",
             )
         ):
@@ -527,6 +528,7 @@ class NormalizedExecutionFill:
         if (
             str(fill.provider_id).upper() != self.observation.provider_id
             or fill.account_id != self.observation.account_id
+            or fill.instrument != self.observation.query_binding.instrument_version
             or fill.environment != self.observation.environment
             or self.observation.evidence_ref not in tuple(fill.evidence_refs)
         ):

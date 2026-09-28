@@ -175,3 +175,16 @@ PAPER/LIVE known-order fill commits now require the existing `DurableSettlementB
 The initial financial binding persists the principal rule digest (request schema 1.2.0). Corrections retain that identity (request schema 1.1.0) and reject a different rule, including an otherwise authenticated replacement. Existing PAPER/LIVE bindings lacking this evidence cannot gain new correction authority automatically; an explicit migration/reconciliation remains required. No general currency-rule migration is implemented here.
 
 Financial identity serialization no longer uses context-sensitive `Decimal.normalize()`. It retains every digit while canonicalizing insignificant trailing zeros. Regressions exercise low precision with rounding traps, distinct financial identities, production-scope recorded Bybit fills with settlement, one-shot obligation iterables, restart/idempotent retry, invalid rule/currency/instrument/date/evidence, and injected failure during a SQLite economic-event insert. These are deterministic fixture tests, not real provider qualification. Provider-normalization provenance, typed instrument quantities, risk-to-request binding, bust semantics and full release qualification remain open.
+
+### Instrument binding and independent fee currency (2026-09-28)
+
+Normalized execution fills now require their instrument version to equal the
+instrument version admitted by the authenticated read query. Bybit regression
+coverage rejects both a different instrument and a different version of the same
+instrument. This structural boundary does not authenticate arbitrary caller
+normalization mappings or fee joins; full normalization provenance remains open.
+
+Recorded PAPER/LIVE fixtures separately book USD principal and EUR fees, including
+independent authenticated settlement rules, reservation consumption and journal
+restart. These fixtures exercise production admission code without provider calls
+or real trading. Full MVP discovery: 2,517 tests, OK, one platform-specific skip.

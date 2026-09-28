@@ -42,6 +42,7 @@ from mvp.autotrade_mvp.settlement import (
     SettlementAccountScope,
     SettlementRuleBinding,
     equity_cash_obligation_from_transaction,
+    cash_settlement_obligation_from_transaction,
 )
 
 
@@ -89,6 +90,8 @@ def settlement_obligation(
     environment=ENVIRONMENT,
     provider_id=PROVIDER,
     rule_version="1",
+    currency="USD",
+    component_id=None,
 ):
     trade_date = datetime.fromisoformat(transaction.economic_effective_at.replace("Z", "+00:00")).date()
     rule = SettlementRuleBinding(
@@ -100,7 +103,7 @@ def settlement_obligation(
             environment=environment,
         ),
         instrument_version="ABC",
-        settlement_currency="USD",
+        settlement_currency=currency,
         effective_from=date(2026, 9, 1),
         effective_to=None,
         evidence_refs=("instrument:ABC", "rule:test-equity-cash:1"),
@@ -136,6 +139,12 @@ def settlement_obligation(
             f"artifact:{artifact_id}@{manifest['sha256']}",
         ),
     )
+    if component_id is not None:
+        return cash_settlement_obligation_from_transaction(
+            transaction, obligation_id=obligation_id, currency=currency,
+            trade_date=trade_date, settlement_date=date(2026, 9, 26),
+            component_id=component_id, instrument_version="ABC", rule_binding=rule,
+        )
     return equity_cash_obligation_from_transaction(
         transaction,
         obligation_id=obligation_id,
@@ -632,14 +641,22 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
 
 
 class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
-    def production_fill_components(self, directory, environment):
+    def production_fill_components(self, directory, environment, *, fee_currency="USD", fee_amount="0"):
         from mvp.autotrade_mvp.bybit_v5 import normalize_authenticated_executions
         from mvp.tests.test_bybit_v5 import bound_execution_response
 
         store = JournalStore(Path(directory) / "journal.sqlite3")
         artifacts = artifact_store_for(store)
         reservations = reservation_book(store, environment=environment)
-        reserve(reservations)
+        requirements = {"CASH:USD": "120"}
+        if fee_currency != "USD":
+            requirements[f"CASH:{fee_currency}"] = "2"
+        reservations.reserve(
+            command_id="reserve-command", idempotency_key="reserve-idempotency",
+            reservation_id="reservation-1", intent_id="intent-1",
+            requirements=requirements,
+            available={key: "1000" for key in requirements},
+        )
         economics = DurableProviderEconomicBook(
             store, provider_id="BYBIT", account_id=ACCOUNT, environment=environment
         )
@@ -661,7 +678,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             {"retCode": 0, "result": {"list": [{
                 "execId": "provider-execution-1", "orderLinkId": "client-order-1",
                 "symbol": "ABC", "side": "Buy", "execQty": "1",
-                "execPrice": "100", "execFee": "0", "feeCurrency": "USD",
+                "execPrice": "100", "execFee": fee_amount, "feeCurrency": fee_currency,
                 "execTime": "1790279999123",
             }]}}, account_id=ACCOUNT, environment=environment, instrument_version="ABC",
         )
@@ -684,15 +701,45 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
         obligation = settlement_obligation(
             store, plan.transaction, environment=environment, provider_id="BYBIT"
         )
+        obligations = [obligation]
+        if fee_currency != "USD" and Decimal(fee_amount) != 0:
+            obligations.append(settlement_obligation(
+                store, plan.transaction, environment=environment, provider_id="BYBIT",
+                obligation_id="settlement-fee", currency=fee_currency, component_id="FEE",
+            ))
         args = dict(
             command_id="fill-command", idempotency_key="fill-command",
             reservation_id="reservation-1", projected_fill=projected, provider_fill=provider,
             expected_instrument="ABC", settlement_currency="USD",
             observed_at="2026-09-25T09:00:01Z", committed_at="2026-09-25T09:00:02Z",
-            settlement_book=settlements, settlement_obligations=(obligation,),
+            settlement_book=settlements, settlement_obligations=tuple(obligations),
             order_book=orders, order_mutation=mutation,
         )
         return store, economics, reservations, args, normalized
+
+    def test_production_fill_separates_principal_and_third_currency_fee(self):
+        for environment in ("PAPER", "LIVE"):
+            with self.subTest(environment=environment), TemporaryDirectory() as directory:
+                store, economics, reservations, args, _ = self.production_fill_components(
+                    directory, environment, fee_currency="EUR", fee_amount="0.75"
+                )
+                principal, fee = args["settlement_obligations"]
+                self.assertEqual((principal.currency, principal.amount), ("USD", Decimal("-100")))
+                self.assertEqual((fee.currency, fee.amount), ("EUR", Decimal("-0.75")))
+                self.assertTrue(commit_provider_fill_with_reservation_consumption(
+                    economics, reservations, **args
+                ))
+                reopened = JournalStore(store.path)
+                replayed = DurableProviderEconomicBook(
+                    reopened, provider_id="BYBIT", account_id=ACCOUNT, environment=environment
+                )
+                self.assertEqual(replayed.cash("USD"), Decimal("-100"))
+                self.assertEqual(replayed.cash("EUR"), Decimal("-0.75"))
+                consumed = reservation_book(reopened, environment=environment).get("reservation-1").consumed
+                self.assertEqual(consumed["CASH:USD"], Decimal("100"))
+                self.assertEqual(consumed["CASH:EUR"], Decimal("0.75"))
+                binding, = reopened.load_events_by_aggregate_type("provider_fill_financial_binding")
+                self.assertEqual(binding["payload"]["request"]["settlement_rule_digest"], principal.rule_binding.digest)
 
     def test_production_fill_currency_rule_survives_atomic_commit_and_restart(self):
         for environment in ("PAPER", "LIVE"):

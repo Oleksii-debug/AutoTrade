@@ -696,6 +696,8 @@ class DurableBorrowRecallProjection:
         if recall is None:
             raise KeyError(rid)
         point = _dt(_instant(now, name="now"))
+        if _dt(recall.effective_at) > point or _dt(recall.observed_at) > point:
+            return Decimal("0")
         resolved = sum(
             (
                 evidence.resolved_quantity

@@ -997,7 +997,7 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(legacy.current_schema_version(), 1)
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 8)
+            self.assertEqual(upgraded.current_schema_version(), 9)
             self.assertEqual(
                 upgraded.load_events("account", "paper-1")[0]["event_id"],
                 "evt-1",
@@ -1034,7 +1034,7 @@ class JournalStoreTests(unittest.TestCase):
                 connection.close()
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 8)
+            self.assertEqual(upgraded.current_schema_version(), 9)
             with self.assertRaisesRegex(ValueError, "legacy unscoped"):
                 upgraded.record_command(
                     actor="alice",
@@ -1098,7 +1098,7 @@ class JournalStoreTests(unittest.TestCase):
                 connection.close()
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 8)
+            self.assertEqual(upgraded.current_schema_version(), 9)
             replayed, inserted = upgraded.record_command(
                 actor="alice",
                 environment="PAPER",
@@ -1797,7 +1797,7 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(legacy.current_schema_version(), 6)
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 8)
+            self.assertEqual(upgraded.current_schema_version(), 9)
             self.assertEqual(
                 [item["event_id"] for item in upgraded.load_events_after_journal_sequence(0)],
                 ["evt-1"],
@@ -2110,7 +2110,7 @@ class JournalStoreTests(unittest.TestCase):
             )
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 8)
+            self.assertEqual(upgraded.current_schema_version(), 9)
             self.assertIsNone(
                 upgraded.load_projection_checkpoint(
                     projection_name="position",

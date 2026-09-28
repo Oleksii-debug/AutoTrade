@@ -133,6 +133,7 @@ class OrderProjection:
         self.provider_order_id: str | None = None
         self.submission_attempt_id: str | None = None
         self.submission_state = "PENDING"
+        self._rearmed_attempt_id: str | None = None
         self.cancel_requested = False
         self.cancelled = False
         self.cancel_command_id: str | None = None
@@ -157,9 +158,62 @@ class OrderProjection:
             )
         self.submission_attempt_id = attempt
 
+    def mark_pre_send_aborted(self, *, attempt_id: str) -> None:
+        """Project a provider-free local abort without inventing provider state."""
+        attempt = _text(attempt_id, name="attempt_id")
+        if self.submission_state == "PRE_SEND_ABORTED":
+            if self.submission_attempt_id == attempt:
+                return
+            raise OrderProjectionConflict(
+                "pre-send aborted order belongs to a different submission attempt"
+            )
+        if self.submission_attempt_id is not None or self.submission_state != "PENDING":
+            raise OrderProjectionConflict(
+                "pre-send abort is unavailable after send-start or provider outcome"
+            )
+        self.submission_attempt_id = attempt
+        self.submission_state = "PRE_SEND_ABORTED"
+        self._rearmed_attempt_id = None
+
+    def rearm_submission(
+        self,
+        *,
+        previous_attempt_id: str,
+        attempt_id: str,
+    ) -> None:
+        """Authorize exactly one new attempt after a provider-free local abort."""
+        previous = _text(previous_attempt_id, name="previous_attempt_id")
+        next_attempt = _text(attempt_id, name="attempt_id")
+        if previous == next_attempt:
+            raise OrderProjectionConflict("rearm requires a new submission attempt")
+        if (
+            self.submission_state != "PRE_SEND_ABORTED"
+            or self.submission_attempt_id != previous
+        ):
+            raise OrderProjectionConflict(
+                "submission rearm requires the exact pre-send aborted attempt"
+            )
+        if self.provider_order_id is not None or self._history:
+            raise OrderProjectionConflict(
+                "submission rearm is unavailable after provider lifecycle evidence"
+            )
+        self.submission_attempt_id = None
+        self.submission_state = "PENDING"
+        self._rearmed_attempt_id = next_attempt
+
     def mark_send_started(self, *, attempt_id: str) -> None:
         """Record the durable outbound-attempt identity without inventing ACK."""
-        self._bind_submission_attempt(attempt_id)
+        attempt = _text(attempt_id, name="attempt_id")
+        if self.submission_state == "PRE_SEND_ABORTED":
+            raise OrderProjectionConflict(
+                "pre-send aborted order must be explicitly rearmed"
+            )
+        if self._rearmed_attempt_id is not None and attempt != self._rearmed_attempt_id:
+            raise OrderProjectionConflict(
+                "send-start attempt differs from the exact rearm target"
+            )
+        self._bind_submission_attempt(attempt)
+        self._rearmed_attempt_id = None
 
     def acknowledge(
         self,
@@ -572,6 +626,8 @@ class OrderProjection:
             )
         if filled > 0:
             return "PARTIALLY_FILLED"
+        if self.submission_state == "PRE_SEND_ABORTED":
+            return "PRE_SEND_ABORTED"
         if self.submission_state == "ACCEPTED":
             return "WORKING"
         if self.submission_state == "UNKNOWN":

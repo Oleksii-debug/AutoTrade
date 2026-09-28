@@ -3,6 +3,7 @@ from hashlib import sha256
 import json
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
@@ -214,9 +215,6 @@ def frozen_release(
         candidate,
         evidence_store=store,
         qualification_receipt=receipt,
-        qualification_policy=trust_policy,
-        expected_policy_id=trust_policy.policy_id,
-        expected_policy_version=trust_policy.policy_version,
     )
     if decision.status != "FROZEN":
         raise AssertionError(decision.reasons)
@@ -280,11 +278,15 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             policy_version="2026.09",
             roots=(self.trust_root,),
         )
+        self._test_policy = patch(
+            "mvp.autotrade_mvp.qualification_attestation."
+            "load_canonical_qualification_trust_policy",
+            return_value=self.trust_policy,
+        )
+        self._test_policy.start()
+        self.addCleanup(self._test_policy.stop)
         self.trust = WindowsUpdateTrustContext(
             evidence_store=self.store,
-            qualification_policy=self.trust_policy,
-            expected_policy_id=self.trust_policy.policy_id,
-            expected_policy_version=self.trust_policy.policy_version,
         )
         self.current = frozen_release(
             self.store,

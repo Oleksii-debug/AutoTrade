@@ -222,6 +222,119 @@ class CompositeReplayCheckpoint:
             ).encode("utf-8")
         ).hexdigest()
 
+    def to_record(self) -> Mapping[str, Any]:
+        """Return the canonical persisted checkpoint record.
+
+        This record is a portable integrity envelope over references to the
+        actual component authorities; it does not become an authority for their
+        underlying state.
+        """
+
+        return MappingProxyType(
+            {
+                "schema_version": self.schema_version,
+                "replay": MappingProxyType(
+                    {
+                        "dataset_digest": self.replay.dataset_digest,
+                        "cursor": self.replay.cursor,
+                        "clock": self.replay.clock,
+                    }
+                ),
+                "runtime_components": MappingProxyType(
+                    dict(self.runtime_components)
+                ),
+                "build_sha": self.build_sha,
+                "protocol_ref": self.protocol_ref,
+                "fingerprint": self.fingerprint,
+            }
+        )
+
+    def to_canonical_json(self) -> str:
+        return json.dumps(
+            _plain_json(self.to_record()),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+
+    @classmethod
+    def from_canonical_json(cls, document: str) -> "CompositeReplayCheckpoint":
+        if not isinstance(document, str):
+            raise TypeError("composite replay checkpoint document must be text")
+        try:
+            decoded = json.loads(document)
+        except json.JSONDecodeError as error:
+            raise ReplayError(
+                "composite replay checkpoint document is not valid JSON"
+            ) from error
+        if not isinstance(decoded, dict):
+            raise ReplayError(
+                "composite replay checkpoint document must be a JSON object"
+            )
+        try:
+            canonical = json.dumps(
+                decoded,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as error:
+            raise ReplayError(
+                "composite replay checkpoint document contains noncanonical JSON values"
+            ) from error
+        if canonical != document:
+            raise ReplayError(
+                "composite replay checkpoint document must use canonical JSON bytes"
+            )
+        expected_keys = {
+            "schema_version",
+            "replay",
+            "runtime_components",
+            "build_sha",
+            "protocol_ref",
+            "fingerprint",
+        }
+        if set(decoded) != expected_keys:
+            raise ReplayError(
+                "composite replay checkpoint document has unknown or missing fields"
+            )
+        replay_value = decoded["replay"]
+        if not isinstance(replay_value, dict) or set(replay_value) != {
+            "dataset_digest",
+            "cursor",
+            "clock",
+        }:
+            raise ReplayError(
+                "composite replay checkpoint replay record has invalid fields"
+            )
+        components = decoded["runtime_components"]
+        if not isinstance(components, dict):
+            raise ReplayError(
+                "composite replay checkpoint runtime_components must be an object"
+            )
+        persisted_fingerprint = _sha256_hex(
+            decoded["fingerprint"],
+            field="checkpoint fingerprint",
+        )
+        checkpoint = cls(
+            replay=ReplayCheckpoint(
+                dataset_digest=replay_value["dataset_digest"],
+                cursor=replay_value["cursor"],
+                clock=replay_value["clock"],
+            ),
+            runtime_components=components,
+            build_sha=decoded["build_sha"],
+            protocol_ref=decoded["protocol_ref"],
+            schema_version=decoded["schema_version"],
+        )
+        if checkpoint.fingerprint != persisted_fingerprint:
+            raise ReplayError(
+                "composite replay checkpoint fingerprint does not match persisted content"
+            )
+        return checkpoint
+
 
 @dataclass(frozen=True)
 class ReplayCheckpoint:

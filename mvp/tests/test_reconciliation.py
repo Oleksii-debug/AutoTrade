@@ -1123,6 +1123,14 @@ class ReconciliationTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(
             ValueError,
+            "does not match runtime environment",
+        ):
+            ProviderFillEvidence.create(
+                **common,
+                provider_environment="MAINNET",
+            )
+        with self.assertRaisesRegex(
+            ValueError,
             "requires explicit provider_environment",
         ):
             reconcile_account(

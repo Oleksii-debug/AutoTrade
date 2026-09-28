@@ -202,14 +202,6 @@ class IbkrBrokerageSessionStatus:
             name="brokerage initialization_id",
         )
         observed = _instant(observed_at, name="observed_at")
-        values: dict[str, bool] = {}
-        for field in ("connected", "authenticated", "established", "competing"):
-            value = payload.get(field)
-            if type(value) is not bool:
-                raise IbkrWebAdapterError(
-                    f"{field} must be a provider boolean"
-                )
-            values[field] = value
         try:
             canonical = json.dumps(
                 dict(payload),
@@ -222,6 +214,39 @@ class IbkrBrokerageSessionStatus:
             raise IbkrWebAdapterError(
                 "brokerage init payload is not canonical JSON"
             ) from error
+        # Current Client Portal responses wrap the brokerage-session
+        # status in success.value. Retain the complete response as provenance;
+        # never hash only the transformed inner object. The explicit unwrapped
+        # form remains accepted for the documented legacy endpoint shape.
+        status_payload: Mapping[str, object]
+        if "success" in payload:
+            if set(payload) != {"success"}:
+                raise IbkrWebAdapterError(
+                    "wrapped brokerage init payload contains unexpected top-level fields"
+                )
+            success = payload.get("success")
+            if not isinstance(success, Mapping) or set(success) != {"value"}:
+                raise IbkrWebAdapterError(
+                    "wrapped brokerage init payload must contain only success.value"
+                )
+            value = success.get("value")
+            if not isinstance(value, Mapping):
+                raise IbkrWebAdapterError(
+                    "wrapped brokerage init success.value must be an object"
+                )
+            status_payload = value
+        else:
+            status_payload = payload
+
+        values: dict[str, bool] = {}
+        for field in ("connected", "authenticated", "established", "competing"):
+            value = status_payload.get(field)
+            if type(value) is not bool:
+                raise IbkrWebAdapterError(
+                    f"{field} must be a provider boolean"
+                )
+            values[field] = value
+
         source_sha256 = "sha256:" + hashlib.sha256(canonical).hexdigest()
         generation_material = json.dumps(
             {

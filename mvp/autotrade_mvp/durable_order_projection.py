@@ -812,6 +812,39 @@ class DurableOrderBookProjection:
         """Rebuild after a surrounding multi-aggregate JournalStore commit."""
         self._reload()
 
+    def active_canonical_execution_fills(
+        self,
+        client_order_id: str,
+    ) -> dict[str, dict[str, object]]:
+        """Return the latest durable canonical observation per provider execution.
+
+        The method is journal-cut bounded by this projection instance and does
+        not query provider state. Corrections replace the prior observation for
+        the same provider execution id while immutable event history remains.
+        """
+        order_id = _text(client_order_id, name="client_order_id")
+        result: dict[str, dict[str, object]] = {}
+        for event in self._events():
+            payload = event.get("payload")
+            request = payload.get("request") if isinstance(payload, dict) else None
+            operation = payload.get("operation") if isinstance(payload, dict) else None
+            if operation not in {"RECORD_FILL", "CORRECT_FILL"} or not isinstance(
+                request, dict
+            ):
+                continue
+            if request.get("client_order_id") != order_id:
+                continue
+            canonical = request.get("canonical_execution_fill")
+            if not isinstance(canonical, dict):
+                continue
+            execution_id = _text(
+                canonical.get("provider_execution_id"),
+                name="provider_execution_id",
+            )
+            result[execution_id] = dict(canonical)
+        return result
+
+
     def _prepared_existing(
         self,
         result: DurableOrderMutationResult,

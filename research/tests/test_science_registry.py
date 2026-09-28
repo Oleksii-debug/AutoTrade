@@ -211,256 +211,83 @@ class ScientificRegistryTests(unittest.TestCase):
                 0,
             )
 
-    def test_early_stop_must_bind_exact_registered_stopping_rules(self):
+    def test_all_caller_asserted_early_stop_forms_fail_before_holdout_access(self):
         with TemporaryDirectory() as directory:
-            store = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registered = store.register_protocol(protocol())
-            canonical_ref = (
-                "artifact:22222222-2222-4222-8222-222222222222@sha256:"
-                + "b" * 64
-            )
-            with self.assertRaisesRegex(
-                ProtocolViolation,
-                "registered stopping rules",
-            ):
-                store.register_evaluation(
-                    registered.protocol_id,
-                    holdout_id="holdout-wrong-stop",
-                    holdout_identity=holdout_identity(),
-                    result={
-                        "stopping_rule_triggered": True,
-                        "stopping_rules_hash": "sha256:" + "f" * 64,
-                        "stopping_evidence_ref": canonical_ref,
-                    },
-                )
-            self.assertEqual(
-                store.holdout_access_count(
-                    registered.protocol_id,
-                    "holdout-wrong-stop",
-                ),
-                0,
-            )
-
-    def test_triggered_stopping_rule_requires_immutable_artifact_evidence(self):
-        with TemporaryDirectory() as directory:
-            store = ScientificRegistry(Path(directory) / "science.sqlite3")
-            registered = store.register_protocol(protocol())
-            with self.assertRaisesRegex(
-                ProtocolViolation,
-                "immutable artifact evidence",
-            ):
-                store.register_evaluation(
-                    registered.protocol_id,
-                    holdout_id="holdout-invalid-stop",
-                    holdout_identity=holdout_identity(),
-                    result={
-                        "stopping_rule_triggered": True,
-                        "stopping_evidence_ref": "ticket-123",
-                    },
-                )
-
             artifact_store = ArtifactStore(Path(directory) / "artifacts")
             store = ScientificRegistry(
                 Path(directory) / "science.sqlite3",
                 artifact_store=artifact_store,
             )
             registered = store.register_protocol(protocol())
-            stopping_rules_hash = store.completeness(
+            rules_hash = store.completeness(
                 registered.protocol_id
             )["stopping_rules_hash"]
             canonical_ref = publish_stopping_evidence(
                 artifact_store,
-                protocol_id=registered.protocol_id,
-                stopping_rules_hash=stopping_rules_hash,
-            )
-            row = store.register_evaluation(
-                registered.protocol_id,
-                holdout_id="holdout-valid-stop",
-                holdout_identity=holdout_identity(),
-                result={
-                    "stopping_rule_triggered": True,
-                    "stopping_rules_hash": stopping_rules_hash,
-                    "stopping_evidence_ref": canonical_ref,
-                },
-            )
-            locked = store.locked_evaluation(row["evaluation_id"])
-            self.assertEqual(
-                locked.result["stopping_evidence_ref"],
-                canonical_ref,
-            )
-
-    def test_early_stop_uses_one_authenticated_snapshot_before_holdout_access(self):
-        with TemporaryDirectory() as directory:
-            artifacts = ArtifactStore(Path(directory) / "artifacts")
-            store = ScientificRegistry(
-                Path(directory) / "science.sqlite3",
-                artifact_store=artifacts,
-            )
-            registered = store.register_protocol(protocol())
-            rules_hash = store.completeness(registered.protocol_id)["stopping_rules_hash"]
-            reference = publish_stopping_evidence(
-                artifacts,
                 protocol_id=registered.protocol_id,
                 stopping_rules_hash=rules_hash,
             )
-            artifact_id = reference[len("artifact:"):].split("@sha256:", 1)[0]
-            result = {
-                "stopping_rule_triggered": True,
-                "stopping_rules_hash": rules_hash,
-                "stopping_evidence_ref": reference,
-            }
-            with (
-                patch.object(
-                    artifacts,
-                    "read_authenticated_snapshot",
-                    wraps=artifacts.read_authenticated_snapshot,
-                ) as snapshot_read,
-                patch.object(artifacts, "load_manifest", side_effect=AssertionError("split read")),
-                patch.object(artifacts, "read_bytes", side_effect=AssertionError("split read")),
-            ):
-                store.register_evaluation(
-                    registered.protocol_id,
-                    holdout_id="cohesive-evidence",
-                    holdout_identity=holdout_identity(),
-                    result=result,
-                )
-                self.assertEqual(snapshot_read.call_count, 1)
-                self.assertEqual(snapshot_read.call_args.args, (artifact_id,))
-            self.assertEqual(
-                store.holdout_access_count(registered.protocol_id, "cohesive-evidence"),
-                1,
+
+            variants = (
+                {"score": "0.1"},
+                {"stopping_rule_triggered": True},
+                {
+                    "stopping_rule_triggered": True,
+                    "stopping_rules_hash": rules_hash,
+                    "stopping_evidence_ref": canonical_ref,
+                },
+                {
+                    "stopping_rule_triggered": True,
+                    "stopping_rules_hash": "sha256:" + "f" * 64,
+                    "stopping_evidence_ref": canonical_ref,
+                },
             )
-            with patch.object(
-                artifacts,
-                "read_authenticated_snapshot",
-                side_effect=ArtifactIntegrityError("namespace replaced"),
-            ):
-                with self.assertRaisesRegex(ProtocolViolation, "cannot be verified"):
-                    store.register_evaluation(
-                        registered.protocol_id,
-                        holdout_id="untrusted-evidence",
-                        holdout_identity=holdout_identity(dataset_digit="b"),
-                        result=result,
+            for index, result in enumerate(variants):
+                holdout_id = f"early-stop-disabled-{index}"
+                with self.subTest(result=result):
+                    with self.assertRaisesRegex(
+                        ProtocolViolation,
+                        "early stopping is not an admitted holdout-access authority",
+                    ):
+                        store.register_evaluation(
+                            registered.protocol_id,
+                            holdout_id=holdout_id,
+                            holdout_identity=holdout_identity(),
+                            result=result,
+                        )
+                    self.assertEqual(
+                        store.holdout_access_count(
+                            registered.protocol_id,
+                            holdout_id,
+                        ),
+                        0,
                     )
-            self.assertEqual(
-                store.holdout_access_count(registered.protocol_id, "untrusted-evidence"),
-                0,
-            )
+                    self.assertEqual(
+                        store.completeness(
+                            registered.protocol_id
+                        )["recorded_trials"],
+                        0,
+                    )
 
-    def test_early_stop_requires_resolvable_stopping_evidence(self):
+    def test_full_trial_closure_allows_locked_evaluation_without_early_stop_authority(self):
         with TemporaryDirectory() as directory:
-            artifact_store = ArtifactStore(Path(directory) / "artifacts")
-            store = ScientificRegistry(
-                Path(directory) / "science.sqlite3",
-                artifact_store=artifact_store,
-            )
+            store = ScientificRegistry(Path(directory) / "science.sqlite3")
             registered = store.register_protocol(protocol())
-            stopping_rules_hash = store.completeness(
-                registered.protocol_id
-            )["stopping_rules_hash"]
-            missing_ref = (
-                "artifact:33333333-3333-4333-8333-333333333333@sha256:"
-                + "c" * 64
+            exhaust_trials(store, registered.protocol_id)
+            row = store.register_evaluation(
+                registered.protocol_id,
+                holdout_id="closed-budget-holdout",
+                holdout_identity=holdout_identity(),
+                result={"score": "0.1"},
             )
-            with self.assertRaisesRegex(
-                ProtocolViolation,
-                "cannot be verified",
-            ):
-                store.register_evaluation(
-                    registered.protocol_id,
-                    holdout_id="holdout-missing-stop",
-                    holdout_identity=holdout_identity(),
-                    result={
-                        "stopping_rule_triggered": True,
-                        "stopping_rules_hash": stopping_rules_hash,
-                        "stopping_evidence_ref": missing_ref,
-                    },
-                )
+            self.assertEqual(row["prior_access_count"], 0)
+            self.assertEqual(row["untouched"], 1)
             self.assertEqual(
                 store.holdout_access_count(
                     registered.protocol_id,
-                    "holdout-missing-stop",
+                    "closed-budget-holdout",
                 ),
-                0,
-            )
-
-    def test_early_stop_rejects_stopping_evidence_digest_mismatch(self):
-        with TemporaryDirectory() as directory:
-            artifact_store = ArtifactStore(Path(directory) / "artifacts")
-            store = ScientificRegistry(
-                Path(directory) / "science.sqlite3",
-                artifact_store=artifact_store,
-            )
-            registered = store.register_protocol(protocol())
-            stopping_rules_hash = store.completeness(
-                registered.protocol_id
-            )["stopping_rules_hash"]
-            canonical_ref = publish_stopping_evidence(
-                artifact_store,
-                protocol_id=registered.protocol_id,
-                stopping_rules_hash=stopping_rules_hash,
-                artifact_id="44444444-4444-4444-8444-444444444444",
-            )
-            wrong_ref = canonical_ref.rsplit(":", 1)[0] + ":" + "d" * 64
-            with self.assertRaisesRegex(
-                ProtocolViolation,
-                "digest mismatch",
-            ):
-                store.register_evaluation(
-                    registered.protocol_id,
-                    holdout_id="holdout-wrong-digest",
-                    holdout_identity=holdout_identity(),
-                    result={
-                        "stopping_rule_triggered": True,
-                        "stopping_rules_hash": stopping_rules_hash,
-                        "stopping_evidence_ref": wrong_ref,
-                    },
-                )
-            self.assertEqual(
-                store.holdout_access_count(
-                    registered.protocol_id,
-                    "holdout-wrong-digest",
-                ),
-                0,
-            )
-
-    def test_early_stop_evidence_must_bind_protocol_and_stopping_rules(self):
-        with TemporaryDirectory() as directory:
-            artifact_store = ArtifactStore(Path(directory) / "artifacts")
-            store = ScientificRegistry(
-                Path(directory) / "science.sqlite3",
-                artifact_store=artifact_store,
-            )
-            registered = store.register_protocol(protocol())
-            stopping_rules_hash = store.completeness(
-                registered.protocol_id
-            )["stopping_rules_hash"]
-            ref = publish_stopping_evidence(
-                artifact_store,
-                protocol_id="00000000-0000-4000-8000-000000000099",
-                stopping_rules_hash=stopping_rules_hash,
-                artifact_id="55555555-5555-4555-8555-555555555555",
-            )
-            with self.assertRaisesRegex(
-                ProtocolViolation,
-                "not bound to the registered protocol",
-            ):
-                store.register_evaluation(
-                    registered.protocol_id,
-                    holdout_id="holdout-wrong-binding",
-                    holdout_identity=holdout_identity(),
-                    result={
-                        "stopping_rule_triggered": True,
-                        "stopping_rules_hash": stopping_rules_hash,
-                        "stopping_evidence_ref": ref,
-                    },
-                )
-            self.assertEqual(
-                store.holdout_access_count(
-                    registered.protocol_id,
-                    "holdout-wrong-binding",
-                ),
-                0,
+                1,
             )
 
     def test_failed_and_discarded_trials_are_preserved(self):

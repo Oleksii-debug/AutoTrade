@@ -69,6 +69,50 @@ class DispatchTests(unittest.TestCase):
             )
         return prepare_order
 
+    def test_restart_retry_cannot_drop_canonical_order_binding(self):
+        for environment in ("PAPER", "LIVE"):
+            with self.subTest(environment=environment), TemporaryDirectory() as directory:
+                store = self.store(directory)
+                dispatcher = GuardedDispatcher(
+                    store, environment=environment, account_id="acct",
+                    owner_token="owner", owner_epoch=1,
+                )
+                outbound = []
+
+                def transport(client_id, _request, final_guard):
+                    final_guard()
+                    outbound.append(client_id)
+                    raise TimeoutError("recorded ambiguous response")
+
+                args = dict(
+                    attempt_id="order-binding-retry", intent_id="intent-1", intent_hash="h1",
+                    provider="provider", request={"quantity": "1"},
+                    now="2026-09-24T20:00:00Z",
+                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    transport_send=transport, sender_check=lambda _owner, _epoch: None,
+                    order_preparation_binding={
+                        "instrument": "TEST@1", "side": "BUY", "requested_quantity": "1",
+                        "quantity_unit": "unit:test:share",
+                    },
+                    prepare_order=self.prepare_order_callback(dispatcher, store),
+                )
+                self.assertEqual(dispatcher.dispatch(**args).status, "UNKNOWN")
+                reopened = self.store(directory)
+                recovered = GuardedDispatcher(
+                    reopened, environment=environment, account_id="acct",
+                    owner_token="owner", owner_epoch=1,
+                )
+                before = reopened.current_journal_sequence()
+                without_binding = {key: value for key, value in args.items()
+                                   if key != "order_preparation_binding"}
+                with self.assertRaisesRegex(ValueError, "conflicts with existing submission"):
+                    recovered.dispatch(**without_binding)
+                self.assertEqual(reopened.current_journal_sequence(), before)
+                self.assertEqual(len(outbound), 1)
+                self.assertEqual(recovered.dispatch(**args).status, "UNKNOWN")
+                self.assertEqual(len(outbound), 1)
+                self.assertEqual(reopened.current_journal_sequence(), before)
+
     def test_dispatch_scope_is_required_and_separates_client_ids(self):
         with TemporaryDirectory() as directory:
             store = self.store(directory)

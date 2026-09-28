@@ -677,7 +677,10 @@ class GuardedDispatcher:
                 "account_id": self.account_id,
                 "submission_scope_hash": submission_scope_hash,
             }
-            if has_order_preparation_binding:
+            # Persisted binding remains part of attempt identity even when a
+            # retry omits the optional argument. Compare its effective fallback
+            # scope; omission must not erase a previously explicit order binding.
+            if has_order_preparation_binding or "order_preparation_binding_hash" in prepared:
                 expected["order_preparation_binding_hash"] = (
                     order_preparation_binding_hash
                 )

@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 from decimal import Decimal
 import json
 from tempfile import TemporaryDirectory
@@ -177,6 +178,7 @@ def bound_execution_response(
     account_id="paper-1",
     environment="PAPER",
     instrument_version="BTCUSDT@v1",
+    symbol=None,
 ):
     query = prepare_authenticated_read_query(
         capability=read_capability(
@@ -186,7 +188,7 @@ def bound_execution_response(
         ),
         surface=Surface.AUTHENTICATED_READ,
         endpoint="/v5/execution/list",
-        query={"category": "spot", "limit": "100"},
+        query={"category": "spot", "limit": "100", **({"symbol": symbol} if symbol else {})},
         at=READ_AT,
         permission_scope="ORDER.READ",
     )
@@ -919,6 +921,38 @@ class BybitV5AdapterTests(unittest.TestCase):
                     normalize_authenticated_executions(
                         observation, instrument_versions={"BTCUSDT": wrong_instrument}
                     )
+        from mvp.autotrade_mvp.provider_core import _issue_normalized_execution_fill
+
+        for changes in (
+            {"quantity": Decimal("0.3")}, {"price": Decimal("1")},
+            {"fee_amount": Decimal("0")}, {"fee_currency": "EUR"},
+            {"side": "SELL"}, {"client_order_id": "other-order"},
+            {"provider_execution_id": "missing-execution"},
+            {"trade_time": "2026-09-24T19:59:00Z"},
+        ):
+            with self.subTest(changes=changes):
+                with self.assertRaisesRegex(ProviderCoreError, "exact response economics"):
+                    _issue_normalized_execution_fill(
+                        observation, replace(normalized.provider_fill, **changes),
+                        normalizer_id=normalized.normalizer_id,
+                    )
+        with self.assertRaisesRegex(ProviderCoreError, "unsupported Bybit"):
+            _issue_normalized_execution_fill(
+                observation, normalized.provider_fill, normalizer_id="unverified.normalizer"
+            )
+        with self.assertRaisesRegex(ProviderCoreError, "symbol differs from authenticated query"):
+            normalize_authenticated_executions(
+                bound_execution_response(response, symbol="ETHUSDT"),
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+        missing_fee = json.loads(json.dumps(response))
+        del missing_fee["result"]["list"][0]["feeCurrency"]
+        with self.assertRaisesRegex(ProviderCoreError, "fee currency is unresolved"):
+            normalize_authenticated_executions(
+                bound_execution_response(missing_fee),
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                qualified_fee_currencies={"BTCUSDT@v1": "USDT"},
+            )
         self.assertEqual(normalized.normalizer_id, "bybit.executions.v1")
         self.assertEqual(normalized.observation.response_bytes, observation.response_bytes)
         with self.assertRaisesRegex(ProviderCoreError, "provider adapter normalizer"):

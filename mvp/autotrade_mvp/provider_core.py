@@ -497,7 +497,8 @@ class NormalizedExecutionFill:
 
     Adapters issue this only after parsing their provider-specific response
     through the canonical ProviderResponseObservation path. Ordinary callers
-    cannot instantiate the wrapper or substitute evidence from another read.
+    cannot instantiate the wrapper through its public constructor. Scope is
+    checked here; Bybit economics are additionally re-derived from the response.
     """
 
     observation: ProviderResponseObservation
@@ -538,6 +539,13 @@ class NormalizedExecutionFill:
         normalizer = _text(self.normalizer_id, "normalizer_id")
         if normalizer != normalizer.strip().lower():
             raise ProviderCoreError("normalizer_id must be canonical lowercase text")
+        if self.observation.provider_id == "BYBIT":
+            if normalizer != "bybit.executions.v1":
+                raise ProviderCoreError("unsupported Bybit execution normalizer")
+            # Import lazily to reuse the adapter parser without a module cycle.
+            from .bybit_v5 import verify_normalized_execution
+
+            verify_normalized_execution(self.observation, fill)
         object.__setattr__(self, "normalizer_id", normalizer)
 
 

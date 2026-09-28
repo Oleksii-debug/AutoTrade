@@ -188,3 +188,28 @@ Recorded PAPER/LIVE fixtures separately book USD principal and EUR fees, includi
 independent authenticated settlement rules, reservation consumption and journal
 restart. These fixtures exercise production admission code without provider calls
 or real trading. Full MVP discovery: 2,517 tests, OK, one platform-specific skip.
+
+### Bybit source economics and restart identity (2026-09-28)
+
+Bybit normalized-fill construction now reuses the canonical execution parser to
+re-derive financial fields from the immutable provider observation. Quantity,
+price, fee amount/currency, side, client order, execution identity and trade time
+must match a parsed execution. Unsupported normalizer identifiers are rejected.
+When the authenticated query names a symbol, response symbols must match it.
+A caller fee-currency fallback is insufficient for this production wrapper;
+parser-only support remains available without granting normalized-fill authority.
+Symbol-to-instrument metadata qualification and the other providers' independently
+authenticated joins remain unfinished; this is not whole-provider qualification.
+
+A restart retry now compares a previously stored explicit order-preparation hash
+even when the caller omits the optional binding argument. The effective fallback
+scope cannot erase initial order identity. A regression failed in PAPER and LIVE
+before repair, then passed: omitted binding is rejected without a journal write;
+exact retry remains UNKNOWN and sends nothing a second time.
+
+Validation: 117 focused normalization/order/accounting tests passed, then the full
+MVP suite passed 2,517 tests (one platform skip) and 90 contract tests passed.
+After the dispatch retry repair, 173 dispatch/recovery/transport/Bybit tests passed.
+The initial broad run in the resumed environment failed because jsonschema was
+missing; the pinned hash-checked development dependencies were installed before
+the successful rerun. Local .NET and real Windows/NVDA checks were not performed.

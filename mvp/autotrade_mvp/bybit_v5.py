@@ -53,6 +53,39 @@ def normalize_authenticated_executions(
     )
 
 
+def verify_normalized_execution(
+    observation: ProviderResponseObservation,
+    fill: ProviderFillEvidence,
+) -> None:
+    """Re-derive Bybit economics; an observation reference alone is insufficient.
+
+    Instrument version authority stays with the prepared read scope. Symbol to
+    instrument metadata qualification remains a separate admission requirement.
+    Caller-supplied fee currency fallbacks cannot prove source economics here.
+    """
+    if not isinstance(fill, ProviderFillEvidence):
+        raise TypeError("fill must be ProviderFillEvidence")
+    result = _mapping(observation.payload.get("result"), name="result")
+    rows = result.get("list")
+    if not isinstance(rows, (list, tuple)):
+        raise ProviderCoreError("result.list must be an array")
+    symbols = {
+        _text(_mapping(row, name="execution").get("symbol"), name="symbol")
+        for row in rows
+    }
+    query_symbol = observation.query_binding.query.get("symbol")
+    if query_symbol is not None and symbols - {query_symbol}:
+        raise ProviderCoreError("Bybit execution symbol differs from authenticated query")
+    candidates = parse_executions(
+        observation,
+        instrument_versions={
+            symbol: observation.query_binding.instrument_version for symbol in symbols
+        },
+    )
+    if fill not in candidates:
+        raise ProviderCoreError("normalized Bybit fill differs from exact response economics")
+
+
 BYBIT_DOCUMENTED_ENDPOINTS: Mapping[str, str] = {
     "SERVER_TIME": "/v5/market/time",
     "INSTRUMENTS": "/v5/market/instruments-info",

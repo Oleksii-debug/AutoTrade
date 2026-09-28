@@ -1,4 +1,6 @@
 import copy
+from hashlib import sha256
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -159,7 +161,7 @@ class ScientificRegistryTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 ProtocolViolation,
-                "trial budget is exhausted",
+                "exact registered trial budget",
             ):
                 store.register_evaluation(
                     registered.protocol_id,
@@ -224,7 +226,7 @@ class ScientificRegistryTests(unittest.TestCase):
                 with self.subTest(result=result):
                     with self.assertRaisesRegex(
                         ProtocolViolation,
-                        "early stopping is not an admitted holdout-access authority",
+                        "early stopping and oversized trial populations are not",
                     ):
                         store.register_evaluation(
                             registered.protocol_id,
@@ -245,6 +247,62 @@ class ScientificRegistryTests(unittest.TestCase):
                         )["recorded_trials"],
                         0,
                     )
+
+    def test_oversized_trial_population_cannot_unlock_holdout(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "science.sqlite3"
+            store = ScientificRegistry(path)
+            value = protocol()
+            value["trial_budget"] = 1
+            registered = store.register_protocol(value)
+            store.record_trial(
+                registered.protocol_id,
+                status="COMPLETED",
+                payload={"trial_index": 0, "result": "registered"},
+                trial_id="11111111-1111-4111-8111-111111111111",
+            )
+
+            extra_payload = {"trial_index": 1, "result": "legacy-extra"}
+            extra_json = json.dumps(
+                extra_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            extra_hash = "sha256:" + sha256(extra_json.encode("utf-8")).hexdigest()
+            import sqlite3
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "INSERT INTO trials("
+                    "trial_id,protocol_id,status,payload_hash,payload_json,created_at"
+                    ") VALUES(?,?,?,?,?,?)",
+                    (
+                        "22222222-2222-4222-8222-222222222222",
+                        registered.protocol_id,
+                        "COMPLETED",
+                        extra_hash,
+                        extra_json,
+                        "2026-09-28T12:00:00Z",
+                    ),
+                )
+                connection.commit()
+
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "exact registered trial budget",
+            ):
+                store.register_evaluation(
+                    registered.protocol_id,
+                    holdout_id="holdout-oversized-trials",
+                    holdout_identity=holdout_identity(),
+                    result={"score": "0.1"},
+                )
+            self.assertEqual(
+                store.holdout_access_count(
+                    registered.protocol_id,
+                    "holdout-oversized-trials",
+                ),
+                0,
+            )
 
     def test_corrupt_trial_population_cannot_unlock_holdout(self):
         with TemporaryDirectory() as directory:

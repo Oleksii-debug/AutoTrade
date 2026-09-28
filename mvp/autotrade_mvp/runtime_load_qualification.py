@@ -64,6 +64,12 @@ def _series(values: Sequence[int], *, name: str) -> tuple[int, ...]:
     )
 
 
+def _event_id_series(values: Sequence[str], *, name: str) -> tuple[str, ...]:
+    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+        raise RuntimeBudgetError(f"{name} must be a sequence")
+    return tuple(_text(value, name=name) for value in values)
+
+
 def _sorted_unique_text(values: Sequence[str], *, name: str) -> tuple[str, ...]:
     if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
         raise RuntimeBudgetError(f"{name} must be a sequence")
@@ -265,6 +271,8 @@ class RuntimeCampaignEvidence:
     end_journal_sequence: int
     expected_financial_event_ids: tuple[str, ...]
     recovered_financial_event_bindings: tuple[tuple[str, str, int], ...]
+    financial_latency_event_ids: tuple[str, ...]
+    financial_staleness_event_ids: tuple[str, ...]
     financial_latency_us: tuple[int, ...]
     financial_staleness_us: tuple[int, ...]
     research_interference_us: tuple[int, ...]
@@ -357,17 +365,32 @@ class RuntimeCampaignEvidence:
         object.__setattr__(
             self, "recovered_financial_event_bindings", tuple(bindings)
         )
+        latency_ids = _event_id_series(
+            self.financial_latency_event_ids,
+            name="financial_latency_event_ids",
+        )
+        staleness_ids = _event_id_series(
+            self.financial_staleness_event_ids,
+            name="financial_staleness_event_ids",
+        )
         latency = _series(self.financial_latency_us, name="financial_latency_us")
         staleness = _series(
             self.financial_staleness_us,
             name="financial_staleness_us",
         )
         recovered_count = len(bindings)
-        if len(latency) != recovered_count or len(staleness) != recovered_count:
+        if (
+            len(latency) != recovered_count
+            or len(staleness) != recovered_count
+            or len(latency_ids) != len(latency)
+            or len(staleness_ids) != len(staleness)
+        ):
             raise RuntimeBudgetError(
-                "financial latency/staleness samples must bind one-to-one "
-                "to recovered financial events in journal order"
+                "financial latency/staleness samples and source event ids must bind "
+                "one-to-one to recovered financial events"
             )
+        object.__setattr__(self, "financial_latency_event_ids", latency_ids)
+        object.__setattr__(self, "financial_staleness_event_ids", staleness_ids)
         object.__setattr__(self, "financial_latency_us", latency)
         object.__setattr__(self, "financial_staleness_us", staleness)
         object.__setattr__(
@@ -428,6 +451,8 @@ class RuntimeCampaignEvidence:
                     for event_id, payload_hash, sequence
                     in self.recovered_financial_event_bindings
                 ],
+                "financial_latency_event_ids": list(self.financial_latency_event_ids),
+                "financial_staleness_event_ids": list(self.financial_staleness_event_ids),
                 "financial_latency_us": list(self.financial_latency_us),
                 "financial_staleness_us": list(self.financial_staleness_us),
                 "research_interference_us": list(self.research_interference_us),
@@ -464,8 +489,8 @@ class RuntimeCampaignEvidence:
             observed_duration_us=self.observed_duration_us,
             expected_financial_event_ids=self.expected_financial_event_ids,
             recovered_financial_event_ids=recovered_ids,
-            financial_latency_event_ids=recovered_ids,
-            financial_staleness_event_ids=recovered_ids,
+            financial_latency_event_ids=self.financial_latency_event_ids,
+            financial_staleness_event_ids=self.financial_staleness_event_ids,
         )
 
 
@@ -511,7 +536,9 @@ def collect_runtime_campaign_evidence(
     plan: RuntimeCampaignPlan,
     cut: RuntimeCampaignCut,
     financial_latency_us: Sequence[int],
+    financial_latency_event_ids: Sequence[str],
     financial_staleness_us: Sequence[int],
+    financial_staleness_event_ids: Sequence[str],
     research_interference_us: Sequence[int],
     resource_evidence_hash: str,
     resource_metrics: Mapping[str, int],
@@ -532,7 +559,15 @@ def collect_runtime_campaign_evidence(
     # Preserve the public Sequence contract instead of tuple-canonicalizing
     # arbitrary iterables before validation.
     normalized_latency = _series(financial_latency_us, name="financial_latency_us")
+    normalized_latency_ids = _event_id_series(
+        financial_latency_event_ids,
+        name="financial_latency_event_ids",
+    )
     normalized_staleness = _series(financial_staleness_us, name="financial_staleness_us")
+    normalized_staleness_ids = _event_id_series(
+        financial_staleness_event_ids,
+        name="financial_staleness_event_ids",
+    )
     normalized_research = _series(
         research_interference_us,
         name="research_interference_us",
@@ -597,6 +632,8 @@ def collect_runtime_campaign_evidence(
         end_journal_sequence=end_sequence,
         expected_financial_event_ids=plan.expected_financial_event_ids,
         recovered_financial_event_bindings=tuple(recovered),
+        financial_latency_event_ids=normalized_latency_ids,
+        financial_staleness_event_ids=normalized_staleness_ids,
         financial_latency_us=normalized_latency,
         financial_staleness_us=normalized_staleness,
         research_interference_us=normalized_research,

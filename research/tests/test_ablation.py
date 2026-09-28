@@ -994,6 +994,49 @@ class AblationTests(unittest.TestCase):
             )
 
 
+    def test_trusted_qualification_rejects_case_reassignment_inside_complete_population(self):
+        cases = [
+            pair("case-a", "2", population_unit="unit-a"),
+            pair("case-b", "2", population_unit="unit-b"),
+        ]
+        evidence = tuple(
+            item
+            for matched in cases
+            for item in canonical_evidence(matched)
+        )
+        population = RegisteredAblationPopulation(
+            protocol_digest=FINGERPRINT_A,
+            population_digest=FINGERPRINT_D,
+            stopping_rule_digest=FINGERPRINT_C,
+            source_revision="9" * 40,
+            registered_at_utc=CUT - timedelta(days=1),
+            evaluation_cutoff_utc=CUT + timedelta(hours=2),
+            population_unit_ids=("unit-a", "unit-b"),
+            case_bindings=(("unit-a", "case-b"), ("unit-b", "case-a")),
+            complete=True,
+        )
+
+        class TrustedStub(AblationQualificationAuthority):
+            def __init__(self):
+                pass
+
+            def resolve(self, pairs, *, outcome_refs):
+                return population, evidence
+
+        result = evaluate_qualified_incremental_value(
+            "agent",
+            cases,
+            authority=TrustedStub(),
+            outcome_refs=(),
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertEqual(
+            result.reason,
+            "registered_population_case_binding_mismatch",
+        )
+
     def test_qualified_pass_requires_canonical_outcome_evidence(self):
         cases = [
             pair("qualified-a", "2", population_unit="unit-a"),

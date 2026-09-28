@@ -65,14 +65,20 @@ def _provider_environment(
             name="provider_environment",
         ).upper()
     )
-    if provider == "BYBIT" and normalized not in {
-        "MAINNET",
-        "TESTNET",
-        "DEMO",
-    }:
-        raise ValueError(
-            "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
-        )
+    if provider == "BYBIT":
+        if normalized not in {"MAINNET", "TESTNET", "DEMO"}:
+            raise ValueError(
+                "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
+            )
+        if (
+            runtime_environment == "LIVE" and normalized != "MAINNET"
+        ) or (
+            runtime_environment == "PAPER"
+            and normalized not in {"TESTNET", "DEMO"}
+        ):
+            raise ValueError(
+                "BYBIT provider_environment does not match runtime environment"
+            )
     return normalized
 
 

@@ -9,6 +9,7 @@ public partial class MainWindow : Window
     private readonly IEmergencyHostClient _hostClient;
     private readonly CancellationTokenSource _lifetime = new();
     private EmergencyHostStatus? _lastKnownConnectedStatus;
+    private EmergencyHostStatus? _lastKnownCurrentStatus;
 
     public MainWindow()
         : this(DesktopHostClientFactory.Create())
@@ -95,11 +96,23 @@ public partial class MainWindow : Window
                     : status.ValidateStaleSuccessorOf(previous);
             }
 
+            // STALE snapshots can carry older evidence without lowering the
+            // last accepted CURRENT floor. Validate both before updating either
+            // memory; rejected refreshes and disconnects retain both fences.
+            if (status.IsCurrent && _lastKnownCurrentStatus is { } lastCurrent)
+            {
+                status = status.ValidateSuccessorOf(lastCurrent);
+            }
+
             // Preserve the newest validated connected authority snapshot even
             // when its freshness is non-current.  Freshness may make evidence
             // older, but it must never erase durable host/account/environment
             // identity or state-version monotonicity from the successor chain.
             _lastKnownConnectedStatus = status;
+            if (status.IsCurrent)
+            {
+                _lastKnownCurrentStatus = status;
+            }
 
             if (status.IsCurrent)
             {

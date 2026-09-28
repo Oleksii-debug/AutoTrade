@@ -950,8 +950,69 @@ internal static class Program
             "non-canonical sequence must fail closed");
     }
 
+    static void WindowRetainsCurrentEvidenceFloorTest()
+    {
+        Exception? failure = null;
+        Thread thread = new(() =>
+        {
+            MainWindow? window = null;
+            try
+            {
+                const System.Reflection.BindingFlags flags =
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                window = (MainWindow)Activator.CreateInstance(typeof(MainWindow), flags, null,
+                    new object[] { new DisconnectedEmergencyHostClient() }, null)!;
+                var apply = typeof(MainWindow).GetMethod("ApplyHostStatus", flags)!;
+                var latest = typeof(MainWindow).GetField("_lastKnownConnectedStatus", flags)!;
+                var current = typeof(MainWindow).GetField("_lastKnownCurrentStatus", flags)!;
+                DateTimeOffset origin = new(2026, 9, 25, 9, 30, 0, TimeSpan.Zero);
+                EmergencyHostStatus first = new(true, "host-local-1", "paper-account-1", "PAPER",
+                    "7", origin, "Current host evidence") { IsCurrent = true };
+                void Accept(EmergencyHostStatus status) => apply.Invoke(window, new object[] { status, false });
+                void Reject(EmergencyHostStatus status)
+                {
+                    object? priorConnected = latest.GetValue(window);
+                    object? priorCurrent = current.GetValue(window);
+                    bool rejected = false;
+                    try { Accept(status); }
+                    catch (System.Reflection.TargetInvocationException error)
+                        when (error.InnerException is InvalidOperationException) { rejected = true; }
+                    Check.True(rejected, "window accepted regressed or retargeted host evidence");
+                    Check.True(ReferenceEquals(priorConnected, latest.GetValue(window))
+                        && ReferenceEquals(priorCurrent, current.GetValue(window)),
+                        "rejected evidence changed the retained authority/freshness chain");
+                }
+                Accept(first);
+                Accept(first with { StateVersion = "8", ObservedAtUtc = origin.AddMinutes(-10), IsCurrent = false });
+                Reject(first with { StateVersion = "9", ObservedAtUtc = origin.AddMinutes(-5) });
+                Accept(first with { StateVersion = "9", ObservedAtUtc = origin.AddMinutes(-20), IsCurrent = false });
+                Reject(first with { StateVersion = "10", ObservedAtUtc = origin.AddMinutes(-1) });
+                Accept(EmergencyHostStatus.Disconnected("Host disconnected"));
+                Reject(first with { StateVersion = "10", ObservedAtUtc = origin.AddMinutes(-1) });
+                Reject(first with { StateVersion = "8", ObservedAtUtc = origin.AddMinutes(1) });
+                Reject(first with { StateVersion = "10", HostId = "different-host" });
+                Accept(first with { StateVersion = "10" }); // Equality is valid.
+                Accept(first with { StateVersion = "11", ObservedAtUtc = origin.AddMinutes(1) });
+                Check.True(((EmergencyHostStatus)current.GetValue(window)!).ObservedAtUtc == origin.AddMinutes(1),
+                    "new CURRENT evidence did not advance the retained floor");
+                Accept(EmergencyHostStatus.Disconnected("Host disconnected again"));
+                var displayed = (System.Windows.Controls.TextBox)window.FindName("LastEvidenceValue");
+                Check.True(displayed.Text.Contains("stale", StringComparison.Ordinal),
+                    "disconnected display did not label retained evidence stale");
+            }
+            catch (Exception error) { failure = error; }
+            finally { window?.Close(); }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        if (failure is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+    }
+
     public static async Task Main()
     {
+        WindowRetainsCurrentEvidenceFloorTest();
         CredentialTargetIsOriginBoundTest();
         await PairedOriginMismatchFailsBeforeTransportTest();
         await CanonicalStatusAndOperationTest();

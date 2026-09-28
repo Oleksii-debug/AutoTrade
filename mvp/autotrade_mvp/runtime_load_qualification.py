@@ -64,6 +64,16 @@ def _series(values: Sequence[int], *, name: str) -> tuple[int, ...]:
     )
 
 
+def _ordered_text_sequence(
+    values: Sequence[str],
+    *,
+    name: str,
+) -> tuple[str, ...]:
+    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+        raise RuntimeBudgetError(f"{name} must be a sequence")
+    return tuple(_text(value, name=name) for value in values)
+
+
 def _sorted_unique_text(values: Sequence[str], *, name: str) -> tuple[str, ...]:
     if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
         raise RuntimeBudgetError(f"{name} must be a sequence")

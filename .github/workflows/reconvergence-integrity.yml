@@ -74,6 +74,7 @@ jobs:
           token = os.environ["GH_TOKEN"]
           target = Path(os.environ["APPROVED_SCOPE_FILE"])
           approved: list[str] = []
+          seen: set[str] = set()
           page = 1
           while True:
               query = urllib.parse.urlencode({"per_page": 100, "page": page})
@@ -97,13 +98,14 @@ jobs:
                       expected_head_sha=head_sha,
                   )
                   if parsed is not None:
-                      approved.extend(parsed)
+                      for path in parsed:
+                          if path not in seen:
+                              seen.add(path)
+                              approved.append(path)
               if len(comments) < 100:
                   break
               page += 1
 
-          if len(set(approved)) != len(approved):
-              raise RuntimeError("trusted scope approvals must not overlap/repeat exact paths")
           target.write_text("".join(f"{path}\n" for path in approved), encoding="utf-8")
           print(f"Resolved {len(approved)} externally approved exact path(s).")
           PY

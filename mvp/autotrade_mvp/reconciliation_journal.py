@@ -207,6 +207,17 @@ def reconciliation_payload(
                 "evidence_reason": item.evidence_reason,
                 "provider_order_ids": list(item.provider_order_ids),
                 "provider_execution_ids": list(item.provider_execution_ids),
+                "provider_fill_bindings": [
+                    {
+                        "provider_execution_id": identity["provider_execution_id"],
+                        "identity_digest": payload_digest(identity),
+                        "identity": identity,
+                    }
+                    for identity in (
+                        provider_fill_identity_payload(fill)
+                        for fill in item.provider_fills
+                    )
+                ],
             }
             for item in result.submission_resolutions
         ],

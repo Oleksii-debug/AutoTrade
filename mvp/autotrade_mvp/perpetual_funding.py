@@ -1124,6 +1124,14 @@ class DurablePerpetualFundingAuthority:
                 )
             prior_event = matches[0]
             prior_payload = self._payload(prior_event)
+            prior_observed_at = _canonical_instant_text(
+                prior_payload.get("observed_at"),
+                "prior funding observed_at",
+            )
+            if observation.observed_at < prior_observed_at:
+                raise PerpetualFundingConflict(
+                    "funding correction observation cannot predate its predecessor"
+                )
             for key, expected in (
                 ("instrument_version", observation.instrument_version),
                 ("funding_period_id", observation.funding_period_id),

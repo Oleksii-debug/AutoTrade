@@ -2959,6 +2959,29 @@ class AuthorityService:
                 )
                 for resource, amount in authoritative_available.items()
             }
+            if required_borrow_resource is not None:
+                resource_details = availability_evidence.get("resource_details")
+                if not isinstance(resource_details, Mapping):
+                    raise AuthorityConflict(
+                        "authoritative borrow availability lacks typed resource details"
+                    )
+                raw_borrow_detail = resource_details.get(required_borrow_resource)
+                if not isinstance(raw_borrow_detail, Mapping):
+                    raise AuthorityConflict(
+                        "authoritative borrow availability lacks required resource detail"
+                    )
+                borrow_evidence = BorrowAvailabilityEvidence.from_resource_detail(
+                    raw_borrow_detail
+                )
+                if (
+                    borrow_evidence.resource_key != required_borrow_resource
+                    or borrow_evidence.instrument_id != snapshot_instrument.instrument_id
+                    or borrow_evidence.instrument_version != snapshot_instrument.version
+                    or borrow_evidence.quantity_unit != snapshot_instrument.quantity_unit
+                ):
+                    raise AuthorityConflict(
+                        "authoritative borrow quantity unit or instrument scope mismatch"
+                    )
             caller_expected_available = dict(canonical_available)
             durable_borrow_adjustment: tuple[Decimal, Decimal] | None = None
             if existing is not None and required_borrow_resource is not None:
@@ -2974,6 +2997,7 @@ class AuthorityService:
                     )
                 raw_adjustment = raw_adjustments.get(required_borrow_resource)
                 required_adjustment_fields = {
+                    "quantity_unit",
                     "total_capacity",
                     "current_borrowed_quantity",
                     "reservable_capacity",
@@ -3011,6 +3035,8 @@ class AuthorityService:
                     or durable_current_borrowed < 0
                     or reservable_capacity < 0
                     or durable_required_increment < 0
+                    or raw_adjustment.get("quantity_unit")
+                    != snapshot_instrument.quantity_unit
                     or durable_current_borrowed != current_borrowed_quantity
                     or durable_required_increment != required_borrow_quantity
                     or durable_current_borrowed > total_capacity
@@ -3070,6 +3096,7 @@ class AuthorityService:
                         },
                         "borrow_capacity_adjustments": {
                             required_borrow_resource: {
+                                "quantity_unit": snapshot_instrument.quantity_unit,
                                 "total_capacity": _canonical_decimal_text(
                                     total_capacity
                                 ),
@@ -3769,6 +3796,8 @@ class AuthorityService:
                             != record.instrument_version.instrument_id
                             or borrow.instrument_version
                             != record.instrument_version.version
+                            or borrow.quantity_unit
+                            != record.instrument_version.quantity_unit
                         ):
                             raise AuthorityConflict(
                                 "durable borrow dispatch scope mismatch"
@@ -3784,6 +3813,7 @@ class AuthorityService:
                             environment=borrow.environment,
                             instrument_id=borrow.instrument_id,
                             instrument_version=borrow.instrument_version,
+                            quantity_unit=borrow.quantity_unit,
                             evidence_artifact_store=self.evidence_artifact_store,
                         )
                         if projection.active_quantity_at(now) > 0:

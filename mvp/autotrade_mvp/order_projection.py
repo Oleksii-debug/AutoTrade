@@ -282,6 +282,29 @@ class OrderProjection:
             if correction_fill_id is not None
             else fid
         )
+        key = (fid, revision)
+        prior = self._revision_records.get(key)
+        if prior is not None:
+            predecessor_id = (
+                _text(correction_reference, name="correction_reference")
+                if correction_reference is not None
+                else prior.correction_of
+            )
+            candidate = FillRecord(
+                fill_id=observation_id,
+                provider_execution_id=current.provider_execution_id,
+                quantity=quantity,
+                price=price,
+                active=active,
+                provider_revision=revision,
+                correction_of=predecessor_id,
+            )
+            if prior == candidate:
+                return False
+            raise OrderProjectionConflict(
+                "provider revision already has different content"
+            )
+
         predecessor_id = (
             _text(correction_reference, name="correction_reference")
             if correction_reference is not None
@@ -300,14 +323,6 @@ class OrderProjection:
             provider_revision=revision,
             correction_of=predecessor_id,
         )
-        key = (fid, revision)
-        prior = self._revision_records.get(key)
-        if prior is not None:
-            if prior == candidate:
-                return False
-            raise OrderProjectionConflict(
-                "provider revision already has different content"
-            )
         if observation_id != fid:
             for item in self._history:
                 if item.fill_id == observation_id and item != candidate:

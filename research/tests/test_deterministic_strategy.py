@@ -1403,5 +1403,38 @@ class DeterministicStrategyTests(unittest.TestCase):
             )
 
 
+    def test_configuration_tamper_cannot_reuse_old_registered_output(self):
+        descriptor = self.descriptor()
+        proposal, receipt = run_registered_baseline(
+            ReturnThresholdBaseline(
+                lookback=2,
+                threshold="0.01",
+                proposal_quantity="2",
+                descriptor=descriptor,
+            ),
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+            instrument_version="instrument:aaa@7",
+        )
+        payload = json.loads(receipt.strategy_snapshot)
+        payload["threshold"] = "0.02"
+        tampered_snapshot = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        with self.assertRaisesRegex(ValueError, "configuration fingerprint"):
+            RegisteredStrategyRunReceipt(
+                strategy_snapshot=tampered_snapshot,
+                instrument_version=receipt.instrument_version,
+                symbol=receipt.symbol,
+                decision_time=receipt.decision_time,
+                observations=receipt.observations,
+                proposal=proposal,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

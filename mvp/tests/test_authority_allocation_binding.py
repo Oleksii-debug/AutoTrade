@@ -145,6 +145,19 @@ def _evidence(*, evidence_id, kind, payload, environment=ENVIRONMENT):
     )
 
 
+def _allocation_policy(*, max_execution_states=10000):
+    return AllocationPolicy.create(
+        cash_available="1000",
+        max_gross_notional="1000",
+        max_net_notional="1000",
+        max_symbol_notional="1000",
+        max_total_cost="50",
+        max_stress_loss="500",
+        max_turnover_notional="1000",
+        max_execution_states=max_execution_states,
+    )
+
+
 def _allocation_bundle(reservations, *, environment=ENVIRONMENT):
     objective = _evidence(
         evidence_id="objective:abc:v1",
@@ -277,15 +290,7 @@ def _allocation_bundle(reservations, *, environment=ENVIRONMENT):
                 max_executable_notional="100",
             ),
         ),
-        AllocationPolicy.create(
-            cash_available="1000",
-            max_gross_notional="1000",
-            max_net_notional="1000",
-            max_symbol_notional="1000",
-            max_total_cost="50",
-            max_stress_loss="500",
-            max_turnover_notional="1000",
-        ),
+        _allocation_policy(),
         objective_evidence={"ABC": objective},
         market_evidence={"ABC": market},
         valuation_evidence={"ABC": valuation},
@@ -305,6 +310,8 @@ def _snapshot(
     *,
     account_state_version=7,
     policy_version=None,
+    allocation_policy=None,
+    max_candidate_sets=64,
     financial_instruments=None,
 ):
     return AllocationAuthoritySnapshot(
@@ -312,6 +319,12 @@ def _snapshot(
         provider_id=PROVIDER_ID,
         account_id=ACCOUNT_ID,
         policy_version=result.policy_version if policy_version is None else policy_version,
+        allocation_policy=(
+            _allocation_policy()
+            if allocation_policy is None
+            else allocation_policy
+        ),
+        max_candidate_sets=max_candidate_sets,
         instrument_versions=dict(result.instrument_versions),
         financial_instruments=(
             {"ABC": (INSTRUMENT_ID, 1)}
@@ -405,6 +418,62 @@ def _admit(authority, reservations, checkpoint, allocation_result, **overrides):
 
 
 class AuthorityAllocationBindingTests(unittest.TestCase):
+    def test_admission_rejects_same_version_allocation_policy_substitution(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            result, resolved = _allocation_bundle(reservations)
+            authority = AuthorityService(
+                store,
+                allocation_authority_resolver=lambda _result: _snapshot(
+                    result,
+                    resolved,
+                    allocation_policy=_allocation_policy(
+                        max_execution_states=9999
+                    ),
+                ),
+            )
+            authority.register_policy(_authority_policy())
+            checkpoint = _checkpoint(store)
+
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "allocation evidence is stale, mismatched, or non-authoritative",
+            ):
+                _admit(authority, reservations, checkpoint, result)
+            self.assertEqual(reservations.version, 0)
+
+    def test_admission_rejects_same_version_objective_search_budget_substitution(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            result, resolved = _allocation_bundle(reservations)
+            authority = AuthorityService(
+                store,
+                allocation_authority_resolver=lambda _result: _snapshot(
+                    result,
+                    resolved,
+                    max_candidate_sets=65,
+                ),
+            )
+            authority.register_policy(_authority_policy())
+            checkpoint = _checkpoint(store)
+
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "allocation evidence is stale, mismatched, or non-authoritative",
+            ):
+                _admit(authority, reservations, checkpoint, result)
+            self.assertEqual(reservations.version, 0)
+
     def test_allocation_binding_is_committed_atomically_and_restart_retry_is_exact(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
@@ -539,6 +608,8 @@ class AuthorityAllocationBindingTests(unittest.TestCase):
                     provider_id=PROVIDER_ID,
                     account_id=ACCOUNT_ID,
                     policy_version=result.policy_version,
+                    allocation_policy=_allocation_policy(),
+                    max_candidate_sets=64,
                     instrument_versions=dict(result.instrument_versions),
                     financial_instruments={"ABC": (INSTRUMENT_ID, 1)},
                     capability_snapshot_ids=dict(result.capability_snapshot_ids),

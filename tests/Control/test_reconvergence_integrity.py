@@ -430,7 +430,13 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertIn("github.event.pull_request.base.ref", workflow)
         self.assertIn("github.event.pull_request.base.sha", workflow)
         self.assertNotIn("--pull-request-event", workflow)
-        self.assertNotIn("--allowed-scope", workflow)
+        self.assertIn("author_association", workflow)
+        self.assertIn('"OWNER"', workflow)
+        self.assertIn("expected_head_sha=head_sha", workflow)
+        self.assertIn("APPROVED_SCOPE_FILE", workflow)
+        self.assertIn('args+=(--allowed-scope "${scope}")', workflow)
+        self.assertNotIn("github.event.pull_request.body", workflow)
+        self.assertNotIn("github.event.pull_request.title", workflow)
         self.assertNotIn("edited", workflow)
 
     def test_module_help_bootstraps_from_repository_root(self):

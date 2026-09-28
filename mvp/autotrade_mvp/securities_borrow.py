@@ -31,7 +31,7 @@ BORROW_PROVIDER_EVIDENCE_MEDIA_TYPE = (
     "application/vnd.autotrade.securities-borrow-evidence+json"
 )
 BORROW_PROVIDER_EVIDENCE_TYPE = "AUTOTRADE_SECURITIES_BORROW_EVIDENCE"
-BORROW_PROVIDER_EVIDENCE_SCHEMA_VERSION = 1
+BORROW_PROVIDER_EVIDENCE_SCHEMA_VERSION = 2
 
 
 class BorrowEvidenceError(ValueError):
@@ -204,6 +204,7 @@ def provider_borrow_evidence_metadata(evidence: object) -> dict[str, object]:
         "environment": evidence.environment,
         "instrument_id": evidence.instrument_id,
         "instrument_version": evidence.instrument_version,
+        "quantity_unit": evidence.quantity_unit,
         "provider_revision": evidence.provider_revision,
     }
     if isinstance(evidence, BorrowAvailabilityEvidence):

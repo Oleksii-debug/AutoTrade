@@ -507,11 +507,20 @@ def _bybit_funding_event_from_exact_response(
             "Bybit funding instrument_version is not canonical registry authority"
         ) from error
     instrument_version = f"{version.instrument_id}@{version.version}"
+    try:
+        effective_version = instrument_registry.at(
+            version.instrument_id,
+            effective_at,
+        )
+    except InstrumentRegistryError as error:
+        raise FinancingError(
+            "Bybit funding instrument_version is not effective at event time"
+        ) from error
     if (
-        version.provider_id.strip().upper() != "BYBIT"
+        effective_version != version
+        or version.provider_id.strip().upper() != "BYBIT"
         or version.provider_symbol != symbol
         or version.asset_class != "PERPETUAL"
-        or not version.contains(effective_at)
     ):
         raise FinancingError(
             "Bybit funding instrument_version does not match provider product at event time"

@@ -533,6 +533,68 @@ class DurableFinancingTests(unittest.TestCase):
             )
         self.assertIsNone(self.financing.latest("borrow-btc-2026-09-28"))
 
+    def test_provider_evidence_cannot_redirect_internal_financing_account(self):
+        first = "00000000-0000-0000-0000-000000000072"
+        malicious = "00000000-0000-0000-0000-000000000073"
+        self.artifacts.put(first, revision=1, amount="1.20")
+        self.financing.record_authenticated_artifact(
+            self.artifacts,
+            artifact_id=first,
+            committed_at=BASE.isoformat(),
+        )
+
+        self.artifacts.put(
+            malicious,
+            revision=2,
+            amount="1.50",
+            available_at=BASE + timedelta(minutes=1),
+            source_account="ARBITRARY_INTERNAL_BUCKET:BTC",
+        )
+        with self.assertRaisesRegex(
+            FinancingError,
+            "cannot select an internal ledger account",
+        ):
+            self.financing.record_authenticated_artifact(
+                self.artifacts,
+                artifact_id=malicious,
+                committed_at=(BASE + timedelta(minutes=1)).isoformat(),
+            )
+
+        self.assertEqual(
+            str(self.economic.balance("FINANCING_EXPENSE:BTC", "BTC")),
+            "1.20",
+        )
+        self.assertEqual(
+            str(self.economic.balance("BORROW_LIABILITY:BTC", "BTC")),
+            "-1.20",
+        )
+
+        restarted_economic = DurableProviderEconomicBook(
+            self.store,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="SIMULATION",
+        )
+        restarted = DurableFinancingBook(
+            self.store,
+            restarted_economic,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="SIMULATION",
+        )
+        latest = restarted.latest("borrow-btc-2026-09-28")
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest.revision, 1)
+        self.assertEqual(latest.source_account, "BORROW_LIABILITY:BTC")
+        self.assertEqual(
+            str(restarted_economic.balance("FINANCING_EXPENSE:BTC", "BTC")),
+            "1.20",
+        )
+        self.assertEqual(
+            restarted_economic.balance("ARBITRARY_INTERNAL_BUCKET:BTC", "BTC"),
+            0,
+        )
+
     def test_commit_cannot_predate_authenticated_evidence_availability(self):
         artifact = "00000000-0000-0000-0000-000000000070"
         available_at = BASE + timedelta(minutes=5)

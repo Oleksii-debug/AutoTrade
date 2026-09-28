@@ -1,6 +1,8 @@
 using AutoTrade.Engine.Lean;
 using QuantConnect;
 using QuantConnect.Orders;
+using QuantConnect.Orders.Fees;
+using QuantConnect.Securities;
 using System.Xml.Linq;
 
 static void Require(bool condition, string message)
@@ -61,8 +63,12 @@ if (args.Length > 0)
             Symbol = restartSymbol,
             UtcTime = instant.AddMilliseconds(1),
             Status = OrderStatus.PartiallyFilled,
+            Direction = OrderDirection.Buy,
             FillQuantity = 0.25m,
-            FillPrice = 451.125m
+            FillPrice = 451.125m,
+            FillPriceCurrency = "USD",
+            OrderFee = new OrderFee(new CashAmount(0.01m, "USD")),
+            Quantity = 1m
         });
         File.WriteAllText(
             restartStatePath,
@@ -83,8 +89,12 @@ if (args.Length > 0)
             Symbol = restartSymbol,
             UtcTime = instant.AddMilliseconds(1),
             Status = OrderStatus.PartiallyFilled,
+            Direction = OrderDirection.Buy,
             FillQuantity = 0.25m,
-            FillPrice = 451.125m
+            FillPrice = 451.125m,
+            FillPriceCurrency = "USD",
+            OrderFee = new OrderFee(new CashAmount(0.01m, "USD")),
+            Quantity = 1m
         });
         Require(
             repeated.DuplicateIdentity && !repeated.IdentityConflict,
@@ -120,6 +130,20 @@ if (args.Length > 0)
         Require(
             regressedAfterRestart.HasEconomicFill,
             "Restart characterization lost the economic fill.");
+
+        var stillBelowRestartHighWater = resumedCallbacks.Observe(new OrderEvent
+        {
+            OrderId = 84,
+            Id = 4,
+            Symbol = restartSymbol,
+            UtcTime = instant.AddTicks(5000),
+            Status = OrderStatus.Submitted,
+            FillQuantity = decimal.Zero,
+            FillPrice = decimal.Zero
+        });
+        Require(
+            stillBelowRestartHighWater.TimeRegressed,
+            "Restart forgot the callback arrival high-water after one regressed event.");
 
         Console.WriteLine("WP02_LEAN_RESTART_RESUME_PASS");
         return;
@@ -189,6 +213,65 @@ Require(!submitted.DuplicateIdentity, "First callback identity was marked duplic
 Require(!submitted.IdentityConflict, "First callback identity cannot conflict.");
 Require(!submitted.TimeRegressed, "First callback cannot regress time.");
 
+var noFeeDefaultCallbacks = new LeanCallbackCharacterizer();
+var noFeeDefault = noFeeDefaultCallbacks.Observe(new OrderEvent
+{
+    OrderId = 41,
+    Id = 1,
+    Symbol = symbol,
+    UtcTime = instant,
+    Status = OrderStatus.Submitted,
+    Direction = OrderDirection.Buy,
+    FillQuantity = decimal.Zero,
+    FillPrice = decimal.Zero,
+    Quantity = 1m
+});
+var noFeeDefaultState = noFeeDefaultCallbacks.ExportRestartState();
+
+var noFeeZeroCallbacks = new LeanCallbackCharacterizer();
+var noFeeZero = noFeeZeroCallbacks.Observe(new OrderEvent
+{
+    OrderId = 41,
+    Id = 1,
+    Symbol = symbol,
+    UtcTime = instant,
+    Status = OrderStatus.Submitted,
+    Direction = OrderDirection.Buy,
+    FillQuantity = decimal.Zero,
+    FillPrice = decimal.Zero,
+    OrderFee = OrderFee.Zero,
+    Quantity = 1m
+});
+var noFeeZeroState = noFeeZeroCallbacks.ExportRestartState();
+
+Require(!noFeeDefault.HasOrderFee, "Default semantic no-fee was marked as a fee.");
+Require(!noFeeZero.HasOrderFee, "OrderFee.Zero semantic no-fee was marked as a fee.");
+Require(noFeeDefault.FeeAmount == "0" && noFeeZero.FeeAmount == "0",
+    "Semantic no-fee amount was not canonical zero.");
+Require(noFeeDefault.FeeCurrency == "" && noFeeZero.FeeCurrency == "",
+    "Semantic no-fee currency was not canonical empty.");
+Require(
+    noFeeDefaultState == noFeeZeroState,
+    "Equivalent default and OrderFee.Zero callbacks produced different restart identity.");
+
+var restoredZeroFee = LeanCallbackCharacterizer.RestoreRestartState(noFeeDefaultState);
+var replayedZeroFee = restoredZeroFee.Observe(new OrderEvent
+{
+    OrderId = 41,
+    Id = 1,
+    Symbol = symbol,
+    UtcTime = instant,
+    Status = OrderStatus.Submitted,
+    Direction = OrderDirection.Buy,
+    FillQuantity = decimal.Zero,
+    FillPrice = decimal.Zero,
+    OrderFee = OrderFee.Zero,
+    Quantity = 1m
+});
+Require(
+    replayedZeroFee.DuplicateIdentity && !replayedZeroFee.IdentityConflict,
+    "Semantic no-fee normalization did not survive restart/replay.");
+
 var partial = callbacks.Observe(new OrderEvent
 {
     OrderId = 42,
@@ -196,13 +279,23 @@ var partial = callbacks.Observe(new OrderEvent
     Symbol = symbol,
     UtcTime = instant.AddMilliseconds(1),
     Status = OrderStatus.PartiallyFilled,
+    Direction = OrderDirection.Buy,
     FillQuantity = 0.25m,
-    FillPrice = 451.125m
+    FillPrice = 451.125m,
+    FillPriceCurrency = "USD",
+    OrderFee = new OrderFee(new CashAmount(0.01m, "USD")),
+    Quantity = 1m
 });
 Require(partial.Status == "PartiallyFilled", "Partial-fill status was not preserved.");
 Require(partial.HasEconomicFill, "Non-zero fill quantity was lost.");
 Require(partial.FillQuantity == "0.25", "Callback fill quantity changed.");
 Require(partial.FillPrice == "451.125", "Callback fill price changed.");
+Require(partial.FillPriceCurrency == "USD", "Callback fill currency was lost.");
+Require(partial.Direction == "Buy", "Callback direction was lost.");
+Require(partial.HasOrderFee, "Callback fee presence was lost.");
+Require(partial.FeeAmount == "0.01", "Callback fee amount changed.");
+Require(partial.FeeCurrency == "USD", "Callback fee currency changed.");
+Require(partial.Quantity == "1", "Callback order quantity changed.");
 Require(!partial.DuplicateIdentity, "New callback identity was marked duplicate.");
 
 var duplicate = callbacks.Observe(new OrderEvent
@@ -212,8 +305,12 @@ var duplicate = callbacks.Observe(new OrderEvent
     Symbol = symbol,
     UtcTime = instant.AddMilliseconds(1),
     Status = OrderStatus.PartiallyFilled,
+    Direction = OrderDirection.Buy,
     FillQuantity = 0.25m,
-    FillPrice = 451.125m
+    FillPrice = 451.125m,
+    FillPriceCurrency = "USD",
+    OrderFee = new OrderFee(new CashAmount(0.01m, "USD")),
+    Quantity = 1m
 });
 Require(duplicate.DuplicateIdentity, "Duplicate callback identity was not surfaced.");
 Require(!duplicate.IdentityConflict, "Identical duplicate callback was marked conflicting.");
@@ -235,6 +332,60 @@ Require(
     conflictingDuplicate.IdentityConflict,
     "Same callback identity with different economics was not surfaced as conflict.");
 
+var conflictingFee = callbacks.Observe(new OrderEvent
+{
+    OrderId = 42,
+    Id = 2,
+    Symbol = symbol,
+    UtcTime = instant.AddMilliseconds(1),
+    Status = OrderStatus.PartiallyFilled,
+    Direction = OrderDirection.Buy,
+    FillQuantity = 0.25m,
+    FillPrice = 451.125m,
+    FillPriceCurrency = "USD",
+    OrderFee = new OrderFee(new CashAmount(0.02m, "USD")),
+    Quantity = 1m
+});
+Require(
+    conflictingFee.DuplicateIdentity && conflictingFee.IdentityConflict,
+    "Same callback identity with different fee economics was not surfaced as conflict.");
+
+var conflictingCurrency = callbacks.Observe(new OrderEvent
+{
+    OrderId = 42,
+    Id = 2,
+    Symbol = symbol,
+    UtcTime = instant.AddMilliseconds(1),
+    Status = OrderStatus.PartiallyFilled,
+    Direction = OrderDirection.Buy,
+    FillQuantity = 0.25m,
+    FillPrice = 451.125m,
+    FillPriceCurrency = "EUR",
+    OrderFee = new OrderFee(new CashAmount(0.01m, "EUR")),
+    Quantity = 1m
+});
+Require(
+    conflictingCurrency.DuplicateIdentity && conflictingCurrency.IdentityConflict,
+    "Same callback identity with different currency economics was not surfaced as conflict.");
+
+var conflictingDirection = callbacks.Observe(new OrderEvent
+{
+    OrderId = 42,
+    Id = 2,
+    Symbol = symbol,
+    UtcTime = instant.AddMilliseconds(1),
+    Status = OrderStatus.PartiallyFilled,
+    Direction = OrderDirection.Sell,
+    FillQuantity = 0.25m,
+    FillPrice = 451.125m,
+    FillPriceCurrency = "USD",
+    OrderFee = new OrderFee(new CashAmount(0.01m, "USD")),
+    Quantity = 1m
+});
+Require(
+    conflictingDirection.DuplicateIdentity && conflictingDirection.IdentityConflict,
+    "Same callback identity with different direction was not surfaced as conflict.");
+
 var regressed = callbacks.Observe(new OrderEvent
 {
     OrderId = 42,
@@ -248,6 +399,20 @@ var regressed = callbacks.Observe(new OrderEvent
 Require(regressed.TimeRegressed, "Arrival-time regression was silently hidden.");
 Require(regressed.HasEconomicFill, "Final non-zero fill was not characterized.");
 
+var stillBelowHighWater = callbacks.Observe(new OrderEvent
+{
+    OrderId = 42,
+    Id = 4,
+    Symbol = symbol,
+    UtcTime = instant.AddTicks(5000),
+    Status = OrderStatus.Submitted,
+    FillQuantity = decimal.Zero,
+    FillPrice = decimal.Zero
+});
+Require(
+    stillBelowHighWater.TimeRegressed,
+    "A second callback below the prior arrival high-water was silently accepted.");
+
 var restartIntegrity = new LeanCallbackCharacterizer();
 restartIntegrity.Observe(new OrderEvent
 {
@@ -256,8 +421,12 @@ restartIntegrity.Observe(new OrderEvent
     Symbol = symbol,
     UtcTime = instant,
     Status = OrderStatus.PartiallyFilled,
+    Direction = OrderDirection.Buy,
     FillQuantity = 0.5m,
-    FillPrice = 451.125m
+    FillPrice = 451.125m,
+    FillPriceCurrency = "USD",
+    OrderFee = new OrderFee(new CashAmount(0.03m, "USD")),
+    Quantity = 1m
 });
 var restartCheckpoint = restartIntegrity.ExportRestartState();
 var verifiedRestart = LeanCallbackCharacterizer.RestoreRestartState(restartCheckpoint);
@@ -268,8 +437,12 @@ var verifiedDuplicate = verifiedRestart.Observe(new OrderEvent
     Symbol = symbol,
     UtcTime = instant,
     Status = OrderStatus.PartiallyFilled,
+    Direction = OrderDirection.Buy,
     FillQuantity = 0.5m,
-    FillPrice = 451.125m
+    FillPrice = 451.125m,
+    FillPriceCurrency = "USD",
+    OrderFee = new OrderFee(new CashAmount(0.03m, "USD")),
+    Quantity = 1m
 });
 Require(
     verifiedDuplicate.DuplicateIdentity && !verifiedDuplicate.IdentityConflict,
@@ -285,6 +458,17 @@ Require(
 ExpectFailure<InvalidDataException>(
     () => LeanCallbackCharacterizer.RestoreRestartState(tamperedRestartCheckpoint),
     "tampered LEAN callback restart economics must fail integrity verification");
+
+var oldSchemaCheckpoint = restartCheckpoint.Replace(
+    "\"SchemaVersion\":\"2.1.0\"",
+    "\"SchemaVersion\":\"2.0.0\"",
+    StringComparison.Ordinal);
+Require(
+    oldSchemaCheckpoint != restartCheckpoint,
+    "Restart schema regression did not mutate the schema version.");
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(oldSchemaCheckpoint),
+    "v2.0 restart state lacking monotonic arrival-high-water semantics must fail closed");
 
 Require(
     restartCheckpoint.StartsWith("{", StringComparison.Ordinal),
@@ -308,8 +492,8 @@ ExpectFailure<InvalidDataException>(
     "unknown callback restart state fields must fail closed");
 
 var checkpointWithDuplicateTopLevel = restartCheckpoint.Replace(
-    "\"SchemaVersion\":\"1.0.0\"",
-    "\"SchemaVersion\":\"1.0.0\",\"SchemaVersion\":\"1.0.0\"",
+    "\"SchemaVersion\":\"2.1.0\"",
+    "\"SchemaVersion\":\"2.1.0\",\"SchemaVersion\":\"2.1.0\"",
     StringComparison.Ordinal);
 Require(
     checkpointWithDuplicateTopLevel != restartCheckpoint,

@@ -43,15 +43,40 @@ def _provider_environment(
     value: object | None,
     *,
     fallback_environment: str,
+    provider: str,
 ) -> str:
-    if value is None:
-        return fallback_environment
-    normalized = _text(value, name="provider_environment").upper()
+    runtime_environment = _text(
+        fallback_environment, name="environment"
+    ).upper()
+    provider_id = _text(provider, name="provider").upper()
+    normalized = (
+        runtime_environment
+        if value is None
+        else _text(value, name="provider_environment").upper()
+    )
     if len(normalized) > 64 or any(
         character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
         for character in normalized
     ):
         raise SecretVaultError("provider_environment is not canonical")
+    if provider_id == "BYBIT":
+        if value is None:
+            raise SecretVaultError(
+                "BYBIT credential scope requires explicit provider_environment"
+            )
+        if normalized not in {"MAINNET", "TESTNET", "DEMO"}:
+            raise SecretVaultError(
+                "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
+            )
+        if (
+            runtime_environment == "LIVE" and normalized != "MAINNET"
+        ) or (
+            runtime_environment == "PAPER"
+            and normalized not in {"TESTNET", "DEMO"}
+        ):
+            raise SecretVaultError(
+                "BYBIT provider_environment does not match runtime environment"
+            )
     return normalized
 
 
@@ -237,6 +262,7 @@ class PersistentCredentialHandle:
             _provider_environment(
                 self.provider_environment,
                 fallback_environment=environment,
+                provider=self.provider,
             ),
         )
         purpose = _text(self.purpose, name="purpose").upper()
@@ -390,6 +416,7 @@ class ProtectedCredentialVault:
         normalized_provider_environment = _provider_environment(
             provider_environment,
             fallback_environment=normalized_environment,
+            provider=normalized_provider,
         )
         normalized_purpose = _text(purpose, name="purpose").upper()
         if normalized_purpose not in ProtectedCredentialVault.ALLOWED_PURPOSES:

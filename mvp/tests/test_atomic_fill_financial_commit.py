@@ -1,5 +1,5 @@
-from datetime import date
-from decimal import Decimal
+from datetime import date, datetime
+from decimal import Decimal, Inexact, Rounded, localcontext
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
@@ -28,6 +28,8 @@ from mvp.autotrade_mvp.fill_accounting import (
 )
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
+    _projected_fill_binding_payload,
+    _provider_fill_binding_payload,
     commit_economic_batch_with_reservation_consumption,
     commit_provider_fill_correction_with_settlement_replacement,
     commit_provider_fill_with_reservation_consumption,
@@ -85,12 +87,15 @@ def settlement_obligation(
     *,
     obligation_id: str = "settlement-economic-fill-1",
     environment=ENVIRONMENT,
+    provider_id=PROVIDER,
+    rule_version="1",
 ):
+    trade_date = datetime.fromisoformat(transaction.economic_effective_at.replace("Z", "+00:00")).date()
     rule = SettlementRuleBinding(
         rule_id="test-equity-cash",
-        rule_version="1",
+        rule_version=rule_version,
         scope=SettlementAccountScope(
-            provider_id=PROVIDER,
+            provider_id=provider_id,
             account_id=ACCOUNT,
             environment=environment,
         ),
@@ -102,7 +107,7 @@ def settlement_obligation(
     )
     receipt = settlement_rule_evidence_receipt(
         rule,
-        trade_date=date(2026, 9, 25),
+        trade_date=trade_date,
         expected_settlement_date=date(2026, 9, 26),
     )
     artifact_id = str(
@@ -120,7 +125,7 @@ def settlement_obligation(
         source_refs=["provider-doc:test-settlement-rule"],
         metadata=settlement_rule_evidence_metadata(
             rule,
-            trade_date=date(2026, 9, 25),
+            trade_date=trade_date,
             expected_settlement_date=date(2026, 9, 26),
         ),
     )
@@ -627,6 +632,236 @@ class AtomicFillFinancialCommitTests(unittest.TestCase):
 
 
 class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
+    def production_fill_components(self, directory, environment):
+        from mvp.autotrade_mvp.bybit_v5 import normalize_authenticated_executions
+        from mvp.tests.test_bybit_v5 import bound_execution_response
+
+        store = JournalStore(Path(directory) / "journal.sqlite3")
+        artifacts = artifact_store_for(store)
+        reservations = reservation_book(store, environment=environment)
+        reserve(reservations)
+        economics = DurableProviderEconomicBook(
+            store, provider_id="BYBIT", account_id=ACCOUNT, environment=environment
+        )
+        settlements = DurableSettlementBook(
+            store, provider_id="BYBIT", account_id=ACCOUNT, environment=environment,
+            evidence_artifact_store=artifacts,
+        )
+        orders = DurableOrderBookProjection(
+            store, provider_id="BYBIT", account_id=ACCOUNT, environment=environment,
+            host_id="test-host", owner_epoch="1",
+            evidence_artifact_store=artifacts,
+        )
+        orders.create_order(
+            event_key="create", client_order_id="client-order-1", instrument="ABC",
+            side="BUY", requested_quantity="1", quantity_unit="unit:share",
+            origin_intent_id="intent-1", committed_at="2026-09-24T19:00:00Z",
+        )
+        observation = bound_execution_response(
+            {"retCode": 0, "result": {"list": [{
+                "execId": "provider-execution-1", "orderLinkId": "client-order-1",
+                "symbol": "ABC", "side": "Buy", "execQty": "1",
+                "execPrice": "100", "execFee": "0", "feeCurrency": "USD",
+                "execTime": "1790279999123",
+            }]}}, account_id=ACCOUNT, environment=environment, instrument_version="ABC",
+        )
+        normalized, = normalize_authenticated_executions(
+            observation, instrument_versions={"ABC": "ABC"}
+        )
+        mutation = orders.ingest_normalized_execution_fill(
+            event_key="fill", client_order_id="client-order-1",
+            normalized_fill=normalized, settlement_date="2026-09-26",
+            committed_at="2026-09-25T09:00:02Z", _prepare_only=True,
+        )
+        projected = self.projected_fill(fill_id="provider-execution-1")
+        provider = normalized.provider_fill
+        plan = build_provider_fill_financial_plan(
+            book=economics, provider_id="BYBIT", projected_fill=projected,
+            provider_fill=provider, expected_instrument="ABC", settlement_currency="USD",
+            reservation_snapshot=reservations.get("reservation-1"),
+            observed_at="2026-09-25T09:00:01Z",
+        )
+        obligation = settlement_obligation(
+            store, plan.transaction, environment=environment, provider_id="BYBIT"
+        )
+        args = dict(
+            command_id="fill-command", idempotency_key="fill-command",
+            reservation_id="reservation-1", projected_fill=projected, provider_fill=provider,
+            expected_instrument="ABC", settlement_currency="USD",
+            observed_at="2026-09-25T09:00:01Z", committed_at="2026-09-25T09:00:02Z",
+            settlement_book=settlements, settlement_obligations=(obligation,),
+            order_book=orders, order_mutation=mutation,
+        )
+        return store, economics, reservations, args, normalized
+
+    def test_production_fill_currency_rule_survives_atomic_commit_and_restart(self):
+        for environment in ("PAPER", "LIVE"):
+            with self.subTest(environment=environment), TemporaryDirectory() as directory:
+                store, economics, reservations, args, normalized = self.production_fill_components(directory, environment)
+                obligation, = args["settlement_obligations"]
+                # Exercise a one-shot iterable through planning and commit.
+                args["settlement_obligations"] = iter((obligation,))
+                self.assertTrue(commit_provider_fill_with_reservation_consumption(
+                    economics, reservations, **args
+                ))
+                reopened = JournalStore(store.path)
+                bindings = reopened.load_events_by_aggregate_type("provider_fill_financial_binding")
+                self.assertEqual(len(bindings), 1)
+                self.assertEqual(
+                    bindings[0]["payload"]["request"]["settlement_rule_digest"],
+                    obligation.rule_binding.digest,
+                )
+                replayed = DurableProviderEconomicBook(
+                    reopened, provider_id="BYBIT", account_id=ACCOUNT, environment=environment
+                )
+                self.assertEqual(replayed.cash("USD"), Decimal("-100"))
+                self.assertEqual(args["order_book"].order("client-order-1").state, "FILLED")
+                replayed_orders = DurableOrderBookProjection(
+                    reopened, provider_id="BYBIT", account_id=ACCOUNT, environment=environment,
+                    host_id="test-host", owner_epoch="1", evidence_artifact_store=artifact_store_for(reopened),
+                )
+                args["order_book"] = replayed_orders
+                args["order_mutation"] = replayed_orders.ingest_normalized_execution_fill(
+                    event_key="fill", client_order_id="client-order-1", normalized_fill=normalized,
+                    settlement_date="2026-09-26", committed_at="2026-09-25T09:00:02Z", _prepare_only=True,
+                )
+                args["settlement_book"] = DurableSettlementBook(
+                    reopened, provider_id="BYBIT", account_id=ACCOUNT, environment=environment,
+                    evidence_artifact_store=artifact_store_for(reopened),
+                )
+                args["settlement_obligations"] = (obligation,)
+                before = reopened.current_journal_sequence()
+                self.assertFalse(commit_provider_fill_with_reservation_consumption(
+                    replayed, reservation_book(reopened, environment=environment), **args
+                ))
+                self.assertEqual(reopened.current_journal_sequence(), before)
+
+    def test_production_fill_rejects_unbound_settlement_before_any_journal_write(self):
+        for environment in ("PAPER", "LIVE"):
+            for fault in ("currency", "missing", "instrument", "date", "evidence", "duplicate"):
+                with self.subTest(environment=environment, fault=fault), TemporaryDirectory() as directory:
+                    store, economics, reservations, args, _ = self.production_fill_components(directory, environment)
+                    obligation, = args["settlement_obligations"]
+                    if fault == "currency":
+                        args["settlement_currency"] = "EUR"
+                    elif fault == "missing":
+                        args["settlement_obligations"] = ()
+                    elif fault == "instrument":
+                        args["settlement_obligations"] = (replace(obligation,
+                            rule_binding=replace(obligation.rule_binding, instrument_version="OTHER")),)
+                    elif fault == "date":
+                        args["settlement_obligations"] = (replace(obligation, trade_date=date(2026, 9, 25)),)
+                    elif fault == "evidence":
+                        args["settlement_obligations"] = (replace(obligation,
+                            rule_binding=replace(obligation.rule_binding, evidence_refs=("unverified",))),)
+                    else:
+                        args["settlement_obligations"] = (obligation, obligation)
+                    before = store.current_journal_sequence()
+                    with self.assertRaises((AccountingConflict, ValueError)):
+                        commit_provider_fill_with_reservation_consumption(economics, reservations, **args)
+                    self.assertEqual(store.current_journal_sequence(), before)
+                    self.assertEqual(economics.transactions, ())
+                    self.assertEqual(reservations.get("reservation-1").consumed["CASH:USD"], Decimal("0"))
+
+    def test_production_settlement_commit_rolls_back_on_mid_transaction_failure(self):
+        import sqlite3
+
+        with TemporaryDirectory() as directory:
+            store, economics, reservations, args, _ = self.production_fill_components(directory, "PAPER")
+            before = store.current_journal_sequence()
+            with store._connect() as connection:
+                connection.execute("""
+                    CREATE TRIGGER fail_economic_insert BEFORE INSERT ON events
+                    WHEN NEW.aggregate_type = 'economic_book'
+                    BEGIN SELECT RAISE(ABORT, 'injected economic write failure'); END
+                """)
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "injected economic write failure"):
+                commit_provider_fill_with_reservation_consumption(economics, reservations, **args)
+            reopened = JournalStore(store.path)
+            self.assertEqual(reopened.current_journal_sequence(), before)
+            self.assertEqual(reopened.load_events_by_aggregate_type("provider_fill_financial_binding"), [])
+            self.assertEqual(reservation_book(reopened, environment="PAPER").get("reservation-1").consumed["CASH:USD"], Decimal("0"))
+            self.assertEqual(args["settlement_book"].obligations, ())
+            self.assertEqual(args["order_book"].order("client-order-1").state, "PENDING")
+            with reopened._connect() as connection:
+                connection.execute("DROP TRIGGER fail_economic_insert")
+            self.assertTrue(commit_provider_fill_with_reservation_consumption(economics, reservations, **args))
+
+    def test_production_correction_cannot_switch_evidenced_settlement_rule(self):
+        for environment in ("PAPER", "LIVE"):
+            with self.subTest(environment=environment), TemporaryDirectory() as directory:
+                store, economics, reservations, args, _ = self.production_fill_components(directory, environment)
+                self.assertTrue(commit_provider_fill_with_reservation_consumption(economics, reservations, **args))
+                original_projected = args["projected_fill"]
+                original_provider = args["provider_fill"]
+                corrected_projected = replace(
+                    original_projected, fill_id="correction-1", quantity=Decimal("0.9"),
+                    correction_of=original_projected.fill_id, provider_revision="2",
+                )
+                corrected_provider = replace(original_provider, quantity=Decimal("0.9"))
+                _, replacement = build_provider_fill_correction_transactions(
+                    book=economics, provider_id="BYBIT",
+                    original_projected_fill=original_projected, original_provider_fill=original_provider,
+                    corrected_projected_fill=corrected_projected, corrected_provider_fill=corrected_provider,
+                    expected_instrument="ABC", settlement_currency="USD",
+                    correction_observed_at="2026-09-25T10:00:00Z",
+                )
+                changed_rule_obligation = settlement_obligation(
+                    store, replacement, obligation_id="replacement-obligation", environment=environment,
+                    provider_id="BYBIT", rule_version="2",
+                )
+                before = store.current_journal_sequence()
+                with self.assertRaisesRegex(AccountingConflict, "settlement rule differs from initial fill"):
+                    commit_provider_fill_correction_with_settlement_replacement(
+                        economics, args["settlement_book"], reservation_book=reservations,
+                        reservation_id="reservation-1", command_id="correction", idempotency_key="correction",
+                        original_projected_fill=original_projected, original_provider_fill=original_provider,
+                        corrected_projected_fill=corrected_projected, corrected_provider_fill=corrected_provider,
+                        expected_instrument="ABC", settlement_currency="USD",
+                        correction_observed_at="2026-09-25T10:00:00Z",
+                        settlement_obligations=(changed_rule_obligation,),
+                    )
+                self.assertEqual(store.current_journal_sequence(), before)
+                self.assertEqual(len(economics.transactions), 1)
+
+    def test_financial_binding_preserves_all_digits_independent_of_decimal_context(self):
+        values = {
+            "quantity": "12345678901234567890.1234567890123456789",
+            "price": "98765432109876543210.9876543210987654321",
+            "fee_amount": "0.0000000000000000001234567890123456789",
+        }
+        provider = self.provider_fill(**values)
+        projected = self.projected_fill(
+            quantity=values["quantity"], price=values["price"]
+        )
+        for precision in (6, 28, 60):
+            with self.subTest(precision=precision), localcontext() as context:
+                context.prec = precision
+                context.traps[Inexact] = True
+                context.traps[Rounded] = True
+                provider_payload = _provider_fill_binding_payload(provider)
+                projected_payload = _projected_fill_binding_payload(projected)
+                for field, value in values.items():
+                    self.assertEqual(provider_payload[field], value)
+                for field in ("quantity", "price"):
+                    self.assertEqual(projected_payload[field], values[field])
+
+    def test_distinct_provider_amounts_do_not_collapse_under_low_precision(self):
+        from mvp.autotrade_mvp.persistence import payload_digest
+
+        first = self.provider_fill(fee_amount="0.12345671")
+        different = self.provider_fill(fee_amount="0.12345679")
+        equivalent = self.provider_fill(fee_amount="0.1234567100")
+        with localcontext() as context:
+            context.prec = 6
+            first_digest = payload_digest(_provider_fill_binding_payload(first))
+            self.assertNotEqual(
+                first_digest, payload_digest(_provider_fill_binding_payload(different))
+            )
+            self.assertEqual(
+                first_digest, payload_digest(_provider_fill_binding_payload(equivalent))
+            )
+
     def projected_fill(
         self,
         *,

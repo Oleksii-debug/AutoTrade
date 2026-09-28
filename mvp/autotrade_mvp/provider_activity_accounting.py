@@ -36,7 +36,7 @@ from .durable_order_projection import (
     DurableOrderBookProjection,
     PreparedDurableOrderMutation,
 )
-from .durable_settlement import DurableSettlementBook
+from .durable_settlement import DurableSettlementBook, verify_settlement_rule_evidence
 from .fill_accounting import (
     ProjectedFillEvidence,
     ProviderFillFinancialPlan,
@@ -45,7 +45,7 @@ from .fill_accounting import (
 )
 from .persistence import JournalStore, canonical_json, payload_digest
 from .reconciliation import ProviderActivityEvidence, ProviderFillEvidence
-from .settlement import SettlementObligation
+from .settlement import SettlementObligation, equity_cash_obligation_from_transaction
 
 
 _ALLOWED_EXTERNAL_CASH_TYPES = frozenset({"DEPOSIT", "WITHDRAWAL"})
@@ -80,8 +80,12 @@ def _decimal(value: Decimal | str | int, *, name: str) -> Decimal:
 
 
 def _decimal_text(value: Decimal) -> str:
-    normalized = value.normalize()
-    return format(normalized, "f")
+    # normalize() applies the ambient Decimal precision before stripping zeros.
+    # Financial identity must preserve every supplied digit in every context.
+    if value == 0:
+        return "0"
+    rendered = format(value, "f")
+    return rendered.rstrip("0").rstrip(".") if "." in rendered else rendered
 
 
 def _instant(value: str, *, name: str) -> datetime:
@@ -352,6 +356,84 @@ def _provider_fill_binding_payload(
     }
 
 
+def _verified_fill_settlement_rule(
+    economic_book: "DurableProviderEconomicBook",
+    settlement_book: DurableSettlementBook | None,
+    obligations: tuple[SettlementObligation, ...],
+    *,
+    instrument: str,
+    trade_time: str,
+    currency: str | None,
+) -> tuple[str, str]:
+    """Resolve trade currency from the existing evidenced settlement authority."""
+    if not isinstance(settlement_book, DurableSettlementBook) or not obligations:
+        raise AccountingConflict("provider fill requires evidenced settlement obligations")
+    if settlement_book.store is not economic_book.store or (
+        settlement_book.scope.provider_id,
+        settlement_book.scope.account_id,
+        settlement_book.scope.environment,
+    ) != (
+        economic_book.provider_id,
+        economic_book.account_id,
+        economic_book.environment,
+    ):
+        raise AccountingConflict("provider fill settlement book scope differs")
+    trade_date = _instant(trade_time, name="provider trade_time").date()
+    principal = []
+    for obligation in obligations:
+        if not isinstance(obligation, SettlementObligation):
+            raise TypeError("settlement_obligations must contain SettlementObligation")
+        rule = obligation.rule_binding
+        if (
+            rule is None
+            or rule.scope != settlement_book.scope
+            or rule.instrument_version != instrument
+            or obligation.trade_date != trade_date
+            or not rule.applies_on(trade_date)
+            or rule.settlement_currency != obligation.currency
+        ):
+            raise AccountingConflict("provider fill settlement rule scope/instrument/date differs")
+        verify_settlement_rule_evidence(
+            rule,
+            settlement_book.evidence_artifact_store,
+            trade_date=trade_date,
+            expected_settlement_date=obligation.settlement_date,
+        )
+        if obligation.component_id == "PRINCIPAL_AND_SAME_CURRENCY_FEE":
+            principal.append(rule)
+    if len(principal) != 1:
+        raise AccountingConflict("provider fill requires exactly one principal settlement rule")
+    rule = principal[0]
+    if currency is not None and rule.settlement_currency != _text(currency, name="settlement_currency").upper():
+        raise AccountingConflict("settlement currency differs from evidenced principal rule")
+    return rule.settlement_currency, rule.digest
+
+
+def _verify_principal_cash_transaction(
+    transactions: Iterable[JournalTransaction],
+    obligations: tuple[SettlementObligation, ...],
+    *,
+    instrument: str,
+) -> None:
+    principal, = (
+        item for item in obligations
+        if item.component_id == "PRINCIPAL_AND_SAME_CURRENCY_FEE"
+    )
+    matching = [
+        item for item in transactions
+        if item.transaction_id == principal.source_transaction_id
+    ]
+    if len(matching) != 1:
+        raise AccountingConflict("principal settlement source transaction differs")
+    expected = equity_cash_obligation_from_transaction(
+        matching[0], obligation_id=principal.obligation_id, instrument=instrument,
+        settlement_currency=principal.currency, settlement_date=principal.settlement_date,
+        rule_binding=principal.rule_binding,
+    )
+    if expected != principal:
+        raise AccountingConflict("principal settlement differs from canonical trade cash")
+
+
 def _prepare_provider_fill_binding(
     economic_book: "DurableProviderEconomicBook",
     *,
@@ -359,6 +441,7 @@ def _prepare_provider_fill_binding(
     projected_fill: ProjectedFillEvidence,
     provider_fill: ProviderFillEvidence,
     committed_at: str,
+    settlement_rule_digest: str | None = None,
 ) -> PreparedProviderFillBinding:
     if not isinstance(plan, ProviderFillFinancialPlan):
         raise TypeError("plan must be ProviderFillFinancialPlan")
@@ -411,6 +494,9 @@ def _prepare_provider_fill_binding(
         ),
         "derived_usage": usage,
     }
+    if settlement_rule_digest is not None:
+        request["schema_version"] = "1.2.0"
+        request["settlement_rule_digest"] = settlement_rule_digest
     events = economic_book.store.load_events(
         _PROVIDER_FILL_BINDING_AGGREGATE_TYPE,
         aggregate_id,
@@ -625,6 +711,7 @@ def _prepare_provider_fill_correction_binding(
     replacement: JournalTransaction,
     asset_family: str,
     committed_at: str,
+    settlement_rule_digest: str | None = None,
 ) -> PreparedProviderFillCorrectionBinding:
     """Prepare correction high-water evidence without mutating financial state."""
 
@@ -694,6 +781,11 @@ def _prepare_provider_fill_correction_binding(
     if not isinstance(initial_request, Mapping):
         raise AccountingConflict("initial provider fill binding request is invalid")
     initial_request = dict(initial_request)
+    if economic_book.environment in {"PAPER", "LIVE"} and (
+        settlement_rule_digest is None
+        or initial_request.get("settlement_rule_digest") != settlement_rule_digest
+    ):
+        raise AccountingConflict("correction settlement rule differs from initial fill binding")
     if initial_payload.get("request_digest") != payload_digest(initial_request):
         raise AccountingConflict("initial provider fill binding request digest is invalid")
     if (
@@ -780,6 +872,10 @@ def _prepare_provider_fill_correction_binding(
             raise AccountingConflict(
                 "provider fill correction request digest is invalid"
             )
+        if economic_book.environment in {"PAPER", "LIVE"} and (
+            request.get("settlement_rule_digest") != settlement_rule_digest
+        ):
+            raise AccountingConflict("persisted correction settlement rule differs from initial fill")
         if (
             request.get("reservation_id") != rid
             or request.get("intent_id") != corrected_projected_fill.intent_id
@@ -851,6 +947,8 @@ def _prepare_provider_fill_correction_binding(
         "corrected_provider_fill_digest": payload_digest(corrected_provider_payload),
         "replacement_transaction_digest": replacement_digest,
     }
+    if settlement_rule_digest is not None:
+        stable_request["settlement_rule_digest"] = settlement_rule_digest
 
     if (
         last_request is not None
@@ -923,7 +1021,7 @@ def _prepare_provider_fill_correction_binding(
     }
     reservation_cut = reservation_snapshot_digest(snapshot)
     request = {
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0" if settlement_rule_digest is not None else "1.0.0",
         "provider_id": economic_book.provider_id,
         "account_id": economic_book.account_id,
         "environment": economic_book.environment,
@@ -1398,6 +1496,18 @@ def commit_economic_batch_with_reservation_consumption(
             )
 
     settlement_items = tuple(settlement_obligations)
+    if economic_book.environment in {"PAPER", "LIVE"}:
+        fill_payload = provider_fill_binding.request.get("provider_fill")
+        if not isinstance(fill_payload, Mapping):
+            raise AccountingConflict("provider fill settlement requires bound fill evidence")
+        _, rule_digest = _verified_fill_settlement_rule(
+            economic_book, settlement_book, settlement_items,
+            instrument=fill_payload.get("instrument"),
+            trade_time=fill_payload.get("trade_time"),
+            currency=None,
+        )
+        if provider_fill_binding.request.get("settlement_rule_digest") != rule_digest:
+            raise AccountingConflict("provider fill binding settlement rule differs")
     if settlement_book is None and settlement_items:
         raise ValueError(
             "settlement obligations require the canonical durable settlement book"
@@ -1455,6 +1565,11 @@ def commit_economic_batch_with_reservation_consumption(
         transactions,
         committed_at=when,
     )
+    if economic_book.environment in {"PAPER", "LIVE"}:
+        _verify_principal_cash_transaction(
+            economic_plan.transactions, settlement_items,
+            instrument=provider_fill_binding.request["provider_fill"]["instrument"],
+        )
 
     settlement_plan = None
     if settlement_book is not None:
@@ -1856,6 +1971,18 @@ def commit_economic_correction_with_settlement_replacement(
         raise ValueError(
             "correction replacement requires explicit settlement obligations"
         )
+    if economic_book.environment in {"PAPER", "LIVE"}:
+        fill_payload = provider_fill_correction_binding.request.get("corrected_provider_fill")
+        if not isinstance(fill_payload, Mapping):
+            raise AccountingConflict("correction settlement requires bound fill evidence")
+        _, rule_digest = _verified_fill_settlement_rule(
+            economic_book, settlement_book, items,
+            instrument=fill_payload.get("instrument"),
+            trade_time=fill_payload.get("trade_time"),
+            currency=None,
+        )
+        if provider_fill_correction_binding.request.get("settlement_rule_digest") != rule_digest:
+            raise AccountingConflict("correction binding settlement rule differs")
 
     cid = _text(command_id, name="command_id")
     idem = _text(idempotency_key, name="idempotency_key")
@@ -1869,6 +1996,11 @@ def commit_economic_correction_with_settlement_replacement(
         committed_at=when,
     )
     canonical_reversal, canonical_replacement = economic_plan.transactions
+    if economic_book.environment in {"PAPER", "LIVE"}:
+        _verify_principal_cash_transaction(
+            (canonical_replacement,), items,
+            instrument=provider_fill_correction_binding.request["corrected_provider_fill"]["instrument"],
+        )
     if (
         canonical_reversal.reverses_transaction_id is None
         or canonical_replacement.corrects_transaction_id
@@ -2179,6 +2311,18 @@ def commit_provider_fill_correction_with_settlement_replacement(
     double-consuming the same delta.
     """
 
+    settlement_obligations = tuple(settlement_obligations)
+    settlement_rule_digest = None
+    if economic_book.environment in {"PAPER", "LIVE"}:
+        if corrected_provider_fill.instrument != expected_instrument:
+            raise AccountingConflict("corrected provider instrument differs from expected instrument")
+        settlement_currency, settlement_rule_digest = _verified_fill_settlement_rule(
+            economic_book, settlement_book, settlement_obligations,
+            instrument=expected_instrument,
+            trade_time=corrected_provider_fill.trade_time,
+            currency=settlement_currency,
+        )
+
     when = (
         datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         if committed_at is None
@@ -2206,6 +2350,7 @@ def commit_provider_fill_correction_with_settlement_replacement(
         replacement=replacement,
         asset_family=asset_family,
         committed_at=when,
+        settlement_rule_digest=settlement_rule_digest,
     )
     if (order_book is None) != (order_mutation is None):
         raise ValueError("order_book and order_mutation must be supplied together")
@@ -2364,6 +2509,17 @@ def commit_provider_fill_with_reservation_consumption(
             raise AccountingConflict(
                 "prepared canonical order quantity unit differs from the durable order"
             )
+    settlement_obligations = tuple(settlement_obligations)
+    settlement_rule_digest = None
+    if economic_book.environment in {"PAPER", "LIVE"}:
+        if provider_fill.instrument != expected_instrument:
+            raise AccountingConflict("provider instrument differs from expected instrument")
+        settlement_currency, settlement_rule_digest = _verified_fill_settlement_rule(
+            economic_book, settlement_book, settlement_obligations,
+            instrument=expected_instrument,
+            trade_time=provider_fill.trade_time,
+            currency=settlement_currency,
+        )
     rid = _text(reservation_id, name="reservation_id")
     snapshot = reservation_book.get(rid)
     plan = build_provider_fill_financial_plan(
@@ -2394,6 +2550,7 @@ def commit_provider_fill_with_reservation_consumption(
         projected_fill=projected_fill,
         provider_fill=provider_fill,
         committed_at=when,
+        settlement_rule_digest=settlement_rule_digest,
     )
     return commit_economic_batch_with_reservation_consumption(
         economic_book,

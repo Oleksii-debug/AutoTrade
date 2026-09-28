@@ -213,6 +213,83 @@ class SpecialistDagTests(unittest.TestCase):
         self.assertEqual(result.accepted_roles, ("admitted",))
         self.assertIn(("rejected", "not_scheduled"), result.rejected_roles)
 
+    def test_child_result_is_rejected_when_dependency_result_is_missing(self):
+        specs = [
+            spec("base", "g1"),
+            spec("child", "g2", dependencies=("base",)),
+        ]
+        plan = full_plan(specs)
+        self.assertEqual(plan.scheduled_roles, ("base", "child"))
+        result = aggregate(
+            specs,
+            [run("child", "0.8")],
+            plan=plan,
+            decision_deadline=NOW,
+        )
+        self.assertEqual(result.accepted_roles, ())
+        self.assertEqual(result.direction, "FLAT")
+        self.assertIn(("base", "missing_result"), result.rejected_roles)
+        self.assertIn(
+            ("child", "dependency_result_unavailable"),
+            result.rejected_roles,
+        )
+
+    def test_child_result_is_rejected_when_dependency_is_late(self):
+        specs = [
+            spec("base", "g1"),
+            spec("child", "g2", dependencies=("base",)),
+        ]
+        result = aggregate(
+            specs,
+            [run("base", "0.5", late=True), run("child", "0.9")],
+            plan=full_plan(specs),
+            decision_deadline=NOW,
+        )
+        self.assertEqual(result.accepted_roles, ())
+        self.assertIn(("base", "late"), result.rejected_roles)
+        self.assertIn(
+            ("child", "dependency_result_unavailable"),
+            result.rejected_roles,
+        )
+
+    def test_dependency_rejection_cascades_across_multiple_levels(self):
+        specs = [
+            spec("base", "g1"),
+            spec("middle", "g2", dependencies=("base",)),
+            spec("leaf", "g3", dependencies=("middle",)),
+        ]
+        result = aggregate(
+            specs,
+            [run("middle", "0.6"), run("leaf", "0.9")],
+            plan=full_plan(specs),
+            decision_deadline=NOW,
+        )
+        self.assertEqual(result.accepted_roles, ())
+        self.assertIn(("base", "missing_result"), result.rejected_roles)
+        self.assertIn(
+            ("middle", "dependency_result_unavailable"),
+            result.rejected_roles,
+        )
+        self.assertIn(
+            ("leaf", "dependency_result_unavailable"),
+            result.rejected_roles,
+        )
+
+    def test_accepted_dependency_allows_child_to_contribute(self):
+        specs = [
+            spec("base", "same"),
+            spec("child", "other", dependencies=("base",)),
+        ]
+        result = aggregate(
+            specs,
+            [run("child", "0.8"), run("base", "0.2")],
+            plan=full_plan(specs),
+            decision_deadline=NOW,
+        )
+        self.assertEqual(result.accepted_roles, ("base", "child"))
+        self.assertEqual(result.score, Decimal("0.5"))
+        self.assertEqual(result.direction, "LONG")
+
     def test_missing_planned_result_is_explicit_evidence(self):
         specs = [spec("a", "g1"), spec("b", "g2")]
         result = aggregate(

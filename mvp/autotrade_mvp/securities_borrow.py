@@ -686,6 +686,11 @@ class DurableBorrowRecallProjection:
         if recall is None:
             raise KeyError(rid)
         decision_time = _dt(_instant(now, name="now"))
+        if (
+            _dt(recall.effective_at) > decision_time
+            or _dt(recall.observed_at) > decision_time
+        ):
+            return Decimal("0")
         resolved = Decimal("0")
         for evidence in self._resolutions.values():
             if evidence.recall_id != rid:

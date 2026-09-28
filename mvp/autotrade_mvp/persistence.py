@@ -2119,7 +2119,7 @@ class JournalStore:
         for descriptor in rows:
             if not isinstance(descriptor, dict) or set(descriptor) != {
                 "event_id", "aggregate_type", "aggregate_id", "aggregate_version",
-                "envelope_hash", "outbox_topic", "outbox_hash",
+                "journal_sequence", "envelope_hash", "outbox_topic", "outbox_hash",
             }:
                 raise ValueError("command event-batch descriptor is invalid")
             event_row = connection.execute(
@@ -2143,6 +2143,7 @@ class JournalStore:
                 event_row["aggregate_type"] != descriptor["aggregate_type"]
                 or event_row["aggregate_id"] != descriptor["aggregate_id"]
                 or event_row["aggregate_version"] != descriptor["aggregate_version"]
+                or event_row["journal_sequence"] != descriptor["journal_sequence"]
                 or event_row["envelope_hash"] != descriptor["envelope_hash"]
             ):
                 raise ValueError("command event-batch event identity changed")

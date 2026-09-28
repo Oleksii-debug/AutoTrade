@@ -27,6 +27,7 @@ from mvp.autotrade_mvp.whitebit import (
     collateral_balance_request,
     decode_whitebit_json,
     execution_history_coverage,
+    execution_history_query_fingerprint,
     funding_history_request,
     market_fee_request,
     open_order_coverage,
@@ -913,15 +914,24 @@ class WhiteBitAdapterTests(unittest.TestCase):
         raw = json.dumps([row], separators=(",", ":"))
         digest = "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
         artifact_id = str(uuid4())
+        request = paged_execution_history_request(
+            start_unix=1_700_000_000,
+            end_unix=1_700_000_100,
+            offset=0,
+            limit=50,
+            market="btc_usdt",
+        )
+        query_fingerprint = execution_history_query_fingerprint(request)
         deals = parse_execution_history_response(
             raw,
-            market="BTC_USDT",
+            request=request,
             observed_at=NOW,
             response_evidence={
                 "artifact_id": artifact_id,
                 "sha256": digest,
                 "observed_at": NOW.isoformat().replace("+00:00", "Z"),
                 "source_uri": "https://docs.whitebit.com/api-reference/trade-account/executed-history",
+                "query_fingerprint": query_fingerprint,
             },
         )
         self.assertEqual(len(deals), 1)
@@ -935,7 +945,9 @@ class WhiteBitAdapterTests(unittest.TestCase):
         self.assertEqual(fill.fee_amount, Decimal("0.04"))
         self.assertEqual(
             fill.evidence_refs,
-            (f"whitebit-response:{artifact_id}:{digest}",),
+            (
+                f"whitebit-response:{artifact_id}:{digest}:query-{query_fingerprint}",
+            ),
         )
 
     def test_execution_deal_without_client_id_remains_reconcilable_with_evidence(self):
@@ -956,14 +968,22 @@ class WhiteBitAdapterTests(unittest.TestCase):
         self.assertIsNone(parser_only.client_order_id)
         raw = json.dumps([row], separators=(",", ":"))
         digest = "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        request = paged_execution_history_request(
+            start_unix=1_700_000_000,
+            end_unix=1_700_000_100,
+            offset=0,
+            limit=50,
+            market="btc_usdt",
+        )
         deal = parse_execution_history_response(
             raw,
-            market="BTC_USDT",
+            request=request,
             observed_at=NOW,
             response_evidence={
                 "artifact_id": str(uuid4()),
                 "sha256": digest,
                 "observed_at": NOW.isoformat().replace("+00:00", "Z"),
+                "query_fingerprint": execution_history_query_fingerprint(request),
             },
         )[0]
         self.assertIsNone(
@@ -991,7 +1011,7 @@ class WhiteBitAdapterTests(unittest.TestCase):
                 market="BTC_USDT",
             )
 
-    def test_execution_history_response_rejects_digest_time_and_shape_mismatch(self):
+    def test_execution_history_response_rejects_digest_time_query_and_shape_mismatch(self):
         row = {
             "id": 123,
             "clientOrderId": "at-order-123",
@@ -1007,16 +1027,25 @@ class WhiteBitAdapterTests(unittest.TestCase):
         }
         raw = json.dumps([row], separators=(",", ":"))
         digest = "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        request = paged_execution_history_request(
+            start_unix=1_700_000_000,
+            end_unix=1_700_000_100,
+            offset=0,
+            limit=50,
+            market="btc_usdt",
+        )
+        query_fingerprint = execution_history_query_fingerprint(request)
         evidence = {
             "artifact_id": str(uuid4()),
             "sha256": digest,
             "observed_at": NOW.isoformat().replace("+00:00", "Z"),
+            "query_fingerprint": query_fingerprint,
         }
 
         with self.assertRaisesRegex(WhiteBitAdapterError, "digest does not match"):
             parse_execution_history_response(
                 raw,
-                market="BTC_USDT",
+                request=request,
                 observed_at=NOW,
                 response_evidence={**evidence, "sha256": "sha256:" + "0" * 64},
             )
@@ -1024,7 +1053,7 @@ class WhiteBitAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(WhiteBitAdapterError, "observed_at does not match"):
             parse_execution_history_response(
                 raw,
-                market="BTC_USDT",
+                request=request,
                 observed_at=NOW,
                 response_evidence={
                     **evidence,
@@ -1034,6 +1063,54 @@ class WhiteBitAdapterTests(unittest.TestCase):
                 },
             )
 
+        other_market_request = paged_execution_history_request(
+            start_unix=1_700_000_000,
+            end_unix=1_700_000_100,
+            offset=0,
+            limit=50,
+            market="eth_usdt",
+        )
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "query_fingerprint does not match exact request",
+        ):
+            parse_execution_history_response(
+                raw,
+                request=other_market_request,
+                observed_at=NOW,
+                response_evidence=evidence,
+            )
+
+        unscoped_request = paged_execution_history_request(
+            start_unix=1_700_000_000,
+            end_unix=1_700_000_100,
+            offset=0,
+            limit=50,
+        )
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "exact market-scoped query",
+        ):
+            execution_history_query_fingerprint(unscoped_request)
+
+        wrong_surface = paged_order_history_request(
+            start_unix=1_700_000_000,
+            end_unix=1_700_000_100,
+            offset=0,
+            limit=50,
+            market="btc_usdt",
+        )
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "canonical EXECUTIONS request",
+        ):
+            parse_execution_history_response(
+                raw,
+                request=wrong_surface,
+                observed_at=NOW,
+                response_evidence=evidence,
+            )
+
         object_raw = json.dumps({"records": [row]}, separators=(",", ":"))
         object_digest = "sha256:" + hashlib.sha256(
             object_raw.encode("utf-8")
@@ -1041,12 +1118,42 @@ class WhiteBitAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(WhiteBitAdapterError, "must be a JSON array"):
             parse_execution_history_response(
                 object_raw,
-                market="BTC_USDT",
+                request=request,
                 observed_at=NOW,
                 response_evidence={
                     "artifact_id": str(uuid4()),
                     "sha256": object_digest,
                     "observed_at": NOW.isoformat().replace("+00:00", "Z"),
+                    "query_fingerprint": query_fingerprint,
+                },
+            )
+
+        second = dict(row)
+        second["id"] = 124
+        too_many_raw = json.dumps([row, second], separators=(",", ":"))
+        one_row_request = paged_execution_history_request(
+            start_unix=1_700_000_000,
+            end_unix=1_700_000_100,
+            offset=0,
+            limit=1,
+            market="btc_usdt",
+        )
+        one_row_query = execution_history_query_fingerprint(one_row_request)
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "exceeds requested page limit",
+        ):
+            parse_execution_history_response(
+                too_many_raw,
+                request=one_row_request,
+                observed_at=NOW,
+                response_evidence={
+                    "artifact_id": str(uuid4()),
+                    "sha256": "sha256:" + hashlib.sha256(
+                        too_many_raw.encode("utf-8")
+                    ).hexdigest(),
+                    "observed_at": NOW.isoformat().replace("+00:00", "Z"),
+                    "query_fingerprint": one_row_query,
                 },
             )
 

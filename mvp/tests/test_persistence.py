@@ -2481,6 +2481,83 @@ class JournalStoreTests(unittest.TestCase):
             ):
                 store.commit_command(**args)
 
+    def test_commit_command_replay_detects_stored_event_core_tamper(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            original = event()
+            args = {
+                "actor": "alice",
+                "environment": "PAPER",
+                "command_id": "cmd-core-tamper",
+                "idempotency_key": "key-core-tamper",
+                "request": {"action": "ORDER.SUBMIT", "intent_id": "intent-core"},
+                "result": {"status": "ACCEPTED"},
+                "state_version": 1,
+                "events": [(original, "events")],
+                "expected_journal_sequence": 0,
+            }
+            store.commit_command(**args)
+
+            connection = sqlite3.connect(path)
+            try:
+                # Preserve the original envelope/effect digest while corrupting a
+                # core event column. Replay must verify the complete event authority,
+                # not only aggregate identity + envelope hash.
+                connection.execute(
+                    "UPDATE events SET event_type = 'ForgedEventType' "
+                    "WHERE event_id = 'evt-1'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "envelope conflicts with core journal event",
+            ):
+                store.commit_command(**args)
+
+    def test_result_only_command_rejects_invented_effect_metadata(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            request = {"action": "TEST"}
+            result = {"status": "ACCEPTED"}
+            store.record_command(
+                command_id="cmd-result-tamper",
+                actor="alice",
+                environment="PAPER",
+                idempotency_key="key-result-tamper",
+                request=request,
+                result=result,
+                state_version=0,
+            )
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE command_dedupe SET effect_json = '{}', "
+                    "effect_hash = 'sha256:forged' "
+                    "WHERE command_id = 'cmd-result-tamper'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "result-only command carries unexpected effect authority",
+            ):
+                store.record_command(
+                    command_id="cmd-result-tamper-retry",
+                    actor="alice",
+                    environment="PAPER",
+                    idempotency_key="key-result-tamper",
+                    request=request,
+                    result={"status": "MUST_NOT_REPLACE"},
+                    state_version=1,
+                )
+
     def test_record_and_commit_command_effect_kinds_cannot_alias(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

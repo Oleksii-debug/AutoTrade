@@ -3,6 +3,8 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 
+from research.autotrade_research.artifacts.store import ArtifactStore
+
 from mvp.autotrade_mvp.authority import (
     AuthorityPolicy,
     AuthorityService,
@@ -320,7 +322,10 @@ class AuthorityPersistenceCanonicalProjectionTests(unittest.TestCase):
             )
 
     def test_persist_rejects_service_bound_to_a_different_journal(self):
-        with tempfile.TemporaryDirectory() as left_directory, tempfile.TemporaryDirectory() as right_directory:
+        with (
+            tempfile.TemporaryDirectory() as left_directory,
+            tempfile.TemporaryDirectory() as right_directory,
+        ):
             left = self._store(left_directory)
             right = self._store(right_directory)
             service = AuthorityService(left)
@@ -335,6 +340,40 @@ class AuthorityPersistenceCanonicalProjectionTests(unittest.TestCase):
             self.assertEqual(
                 0,
                 len(right.load_events("financial-authority", AUTHORITY_ID)),
+            )
+
+    def test_restore_preserves_trusted_artifact_dependency_for_later_proof(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store(directory)
+            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            canonical = AuthorityService(
+                store,
+                evidence_artifact_store=artifacts,
+            )
+            canonical.register_policy(self._policy(autonomous=True))
+            self._snapshot(
+                store,
+                canonical,
+                "snapshot-with-artifact-authority",
+                "2026-09-25T01:00:00Z",
+            )
+
+            restored = restore_authority_snapshot(
+                store,
+                authority_id=AUTHORITY_ID,
+                evidence_artifact_store=artifacts,
+            )
+
+            self.assertIs(restored.evidence_artifact_store, artifacts)
+            self._snapshot(
+                store,
+                restored,
+                "snapshot-republished-with-artifact-authority",
+                "2026-09-25T01:00:01Z",
+            )
+            self.assertEqual(
+                2,
+                len(store.load_events("financial-authority", AUTHORITY_ID)),
             )
 
 

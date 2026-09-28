@@ -2058,7 +2058,12 @@ class JournalStore:
             )
 
     @staticmethod
-    def _event_batch_effect(prepared: list[dict[str, Any]]) -> tuple[str, str]:
+    def _event_batch_effect(
+        prepared: list[dict[str, Any]],
+        journal_sequences: list[int],
+    ) -> tuple[str, str]:
+        if len(journal_sequences) != len(prepared):
+            raise ValueError("command event-batch journal sequence cardinality mismatch")
         effect = {
             "events": [
                 {
@@ -2066,6 +2071,7 @@ class JournalStore:
                     "aggregate_type": item["aggregate_type"],
                     "aggregate_id": item["aggregate_id"],
                     "aggregate_version": item["aggregate_version"],
+                    "journal_sequence": journal_sequence,
                     "envelope_hash": item["envelope_hash"],
                     "outbox_topic": item["outbox_topic"],
                     "outbox_hash": (
@@ -2077,7 +2083,11 @@ class JournalStore:
                         else None
                     ),
                 }
-                for item in prepared
+                for item, journal_sequence in zip(
+                    prepared,
+                    journal_sequences,
+                    strict=True,
+                )
             ]
         }
         effect_json = canonical_json(effect)

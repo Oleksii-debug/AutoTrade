@@ -365,6 +365,35 @@ class DurableFinancingTests(unittest.TestCase):
             )
         self.assertIsNone(self.financing.latest("borrow-btc-2026-09-28"))
 
+    def test_authenticated_manifest_digest_must_match_returned_bytes(self):
+        artifact = "00000000-0000-0000-0000-000000000052"
+        self.artifacts.put(artifact, revision=1)
+        valid = self.artifacts.items[artifact]
+
+        class LyingSnapshotStore:
+            def read_authenticated_snapshot(self, artifact_id: str):
+                return (
+                    {
+                        "artifact_id": artifact_id,
+                        "sha256": "sha256:" + sha256(b"different-bytes").hexdigest(),
+                        "media_type": "application/json",
+                        "rights": {"storage": True, "export": False},
+                    },
+                    valid,
+                )
+
+        with self.assertRaisesRegex(FinancingError, "digest does not match returned bytes"):
+            self.financing.record_authenticated_artifact(
+                LyingSnapshotStore(),
+                artifact_id=artifact,
+                committed_at=BASE.isoformat(),
+            )
+        self.assertIsNone(self.financing.latest("borrow-btc-2026-09-28"))
+        self.assertEqual(
+            self.economic.balance("FINANCING_EXPENSE:BTC", "BTC"),
+            0,
+        )
+
     def test_forged_or_unreadable_artifact_cannot_grant_economics(self):
         with self.assertRaises(FinancingError):
             self.financing.record_authenticated_artifact(
@@ -711,6 +740,73 @@ class DurableFinancingTests(unittest.TestCase):
         self.assertEqual(
             result.economic_transaction.observed_at,
             observed_at.isoformat().replace("+00:00", "Z"),
+        )
+
+    def test_bybit_funding_rejects_snapshot_bytes_that_do_not_match_manifest(self):
+        transaction_time = int(BASE.timestamp() * 1000)
+        response = {
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {
+                "nextPageCursor": "",
+                "list": [
+                    {
+                        "id": "funding-row-digest",
+                        "symbol": "XRPUSDT",
+                        "category": "linear",
+                        "side": "Buy",
+                        "transactionTime": str(transaction_time),
+                        "type": "SETTLEMENT",
+                        "funding": "-0.001",
+                        "currency": "USDT",
+                    }
+                ],
+            },
+            "time": transaction_time + 1000,
+        }
+        raw = json.dumps(response, sort_keys=True, separators=(",", ":")).encode()
+        observed_at = BASE + timedelta(seconds=2)
+        observation = bybit_activity_observation(raw, observed_at=observed_at)
+        artifact = "00000000-0000-0000-0000-000000000082"
+
+        class LyingBybitSnapshotStore:
+            def read_authenticated_snapshot(self, artifact_id: str):
+                altered = raw.replace(b"-0.001", b"-9.999")
+                return (
+                    {
+                        "artifact_id": artifact_id,
+                        "sha256": observation.response_sha256,
+                        "media_type": "application/json",
+                        "rights": {"storage": True, "export": False},
+                    },
+                    altered,
+                )
+
+        paper_economic = DurableProviderEconomicBook(
+            self.store,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="PAPER",
+        )
+        paper_financing = DurableFinancingBook(
+            self.store,
+            paper_economic,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="PAPER",
+        )
+        with self.assertRaisesRegex(FinancingError, "digest does not match returned bytes"):
+            paper_financing.record_bybit_funding_observation(
+                observation,
+                LyingBybitSnapshotStore(),
+                artifact_id=artifact,
+                row_id="funding-row-digest",
+                instrument_versions={"XRPUSDT": "XRPUSDT@v1"},
+                committed_at=observed_at.isoformat(),
+            )
+        self.assertEqual(
+            paper_economic.balance("FINANCING_EXPENSE:USDT", "USDT"),
+            0,
         )
 
     def test_bybit_funding_rejects_income_or_mismatched_artifact(self):

@@ -919,7 +919,7 @@ class ScientificRegistry:
                 raise ProtocolViolation(
                     f"locked evaluation does not prove {required_true}"
                 )
-        if trial_state["remaining_trial_budget"] > 0:
+        if trial_state["remaining_trial_budget"] != 0:
             # Historical databases may already contain a locked evaluation
             # created by an older build that treated caller-declared stopping
             # evidence as authority.  The current scientific contract has no
@@ -977,6 +977,10 @@ class ScientificRegistry:
             )
             counts[row["status"]] = counts.get(row["status"], 0) + 1
         total = len(trial_rows)
+        if total > budget:
+            raise ProtocolViolation(
+                "registered trial population exceeds preregistered trial budget"
+            )
         return {
             "trial_budget": budget,
             "recorded_trials": total,

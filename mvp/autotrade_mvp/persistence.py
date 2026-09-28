@@ -329,6 +329,14 @@ class JournalStore:
             }
         if cls.SCHEMA_VERSION >= 5:
             command_columns["result_hash"] = ("TEXT", False)
+        if cls.SCHEMA_VERSION >= 9:
+            command_columns.update(
+                {
+                    "effect_kind": ("TEXT", False),
+                    "effect_json": ("TEXT", False),
+                    "effect_hash": ("TEXT", False),
+                }
+            )
 
         events = {
             "event_id": ("TEXT", False),
@@ -2027,11 +2035,23 @@ class JournalStore:
     @staticmethod
     def _require_command_effect_kind(row: sqlite3.Row, expected: str) -> None:
         kind = row["effect_kind"]
+        effect_json = row["effect_json"]
+        effect_hash = row["effect_hash"]
         if kind == "LEGACY_UNKNOWN":
+            if effect_json is not None or effect_hash is not None:
+                raise ValueError("legacy command effect carries invented effect authority")
             raise ValueError(
                 "legacy command history has ambiguous transactional effect; "
                 "use a new idempotency key"
             )
+        if kind == "RESULT_ONLY":
+            if effect_json is not None or effect_hash is not None:
+                raise ValueError("result-only command carries unexpected effect authority")
+        elif kind == "EVENT_BATCH":
+            if not isinstance(effect_json, str) or not isinstance(effect_hash, str):
+                raise ValueError("command event-batch effect authority is missing")
+        else:
+            raise ValueError("command effect kind is invalid")
         if kind != expected:
             raise ValueError(
                 "idempotency_key belongs to a different command effect kind"
@@ -2094,8 +2114,9 @@ class JournalStore:
                 raise ValueError("command event-batch descriptor is invalid")
             event_row = connection.execute(
                 """
-                SELECT event_id, aggregate_type, aggregate_id, aggregate_version,
-                       envelope_json, envelope_hash
+                SELECT event_id, event_type, aggregate_type, aggregate_id,
+                       aggregate_version, payload_json, payload_hash, committed_at,
+                       envelope_json, envelope_hash, journal_sequence
                 FROM events
                 WHERE event_id = ?
                 """,
@@ -2103,6 +2124,11 @@ class JournalStore:
             ).fetchone()
             if event_row is None:
                 raise ValueError("command event-batch event is missing")
+            # Verify the complete canonical event/core binding before trusting
+            # the narrower command-effect descriptor. This catches corruption
+            # of event type, payload/hash, committed time, envelope canonicality,
+            # or global sequence even when aggregate identity still looks valid.
+            self._decode_event_row(event_row)
             if (
                 event_row["aggregate_type"] != descriptor["aggregate_type"]
                 or event_row["aggregate_id"] != descriptor["aggregate_id"]

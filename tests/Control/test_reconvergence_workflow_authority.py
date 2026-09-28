@@ -115,7 +115,10 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
         self.assertFalse(created.allowed)
         self.assertEqual(
             created.protected_violations,
-            ("control/__init__.py (unauthorized bootstrap trust-root creation)",),
+            (
+                "control/__init__.py (unauthorized bootstrap trust-root creation)",
+                "control/__init__.py (unauthorized trust-root creation)",
+            ),
         )
 
     def test_exact_scope_can_authorize_bootstrap_trust_root_evolution(self):

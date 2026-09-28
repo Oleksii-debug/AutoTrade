@@ -578,6 +578,12 @@ def collect_runtime_campaign_evidence(
         financial_staleness_event_ids,
         name="financial_staleness_event_ids",
     )
+    if normalized_latency_ids or normalized_staleness_ids:
+        raise RuntimeBudgetError(
+            "caller-authored financial measurement event bindings are not "
+            "qualification authority; independently derived measurement "
+            "provenance is required"
+        )
     normalized_research = _series(
         research_interference_us,
         name="research_interference_us",

@@ -12,6 +12,7 @@ from autotrade_mvp.durable_financing import (\n    DurableFinancingBook,\n    _e
 from autotrade_mvp.financing import FinancingConflict, FinancingError
 from autotrade_mvp.persistence import JournalStore
 from autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
+from autotrade_research.artifacts import ArtifactStore
 
 
 BASE = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
@@ -208,6 +209,29 @@ class DurableFinancingTests(unittest.TestCase):
         self.assertEqual(
             self.economic.balance("FINANCING_EXPENSE:BTC", "BTC"),
             0,
+        )
+
+    def test_real_artifact_store_authenticated_snapshot_is_accepted(self):
+        artifact = "00000000-0000-0000-0000-000000000049"
+        self.artifacts.put(artifact, revision=1, amount="0.75")
+        real_store = ArtifactStore(Path(self.temp.name) / "artifacts")
+        real_store.publish_bytes(
+            artifact_id=artifact,
+            data=self.artifacts.items[artifact],
+            media_type="application/json",
+            rights={"storage": True, "export": False},
+            source_refs=["provider-fixture:bybit-financing-r1"],
+            metadata={"evidence_class": "provider_financing"},
+        )
+        result = self.financing.record_authenticated_artifact(
+            real_store,
+            artifact_id=artifact,
+            committed_at=BASE.isoformat(),
+        )
+        self.assertTrue(result.inserted)
+        self.assertEqual(
+            str(self.economic.balance("FINANCING_EXPENSE:BTC", "BTC")),
+            "0.75",
         )
 
     def test_forged_or_unreadable_artifact_cannot_grant_economics(self):

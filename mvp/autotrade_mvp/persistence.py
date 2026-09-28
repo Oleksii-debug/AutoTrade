@@ -2028,9 +2028,12 @@ class JournalStore:
         if row["result_hash"] != expected_hash:
             raise ValueError("command result hash does not match stored result")
         try:
-            return json.loads(result_json)
+            decoded = json.loads(result_json)
         except (json.JSONDecodeError, TypeError) as error:
             raise ValueError("command result is not valid JSON") from error
+        if canonical_json(decoded) != result_json:
+            raise ValueError("command result is not canonical JSON")
+        return decoded
 
     @staticmethod
     def _require_command_effect_kind(row: sqlite3.Row, expected: str) -> None:

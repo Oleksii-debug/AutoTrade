@@ -216,6 +216,10 @@ class DurableReservationBookTests(unittest.TestCase):
         attempt_id="attempt-r1",
         provider_execution_id=None,
         reconciliation_id=None,
+        provider_quantity="1",
+        provider_price="1",
+        provider_fee_amount="0",
+        provider_trade_time="2026-09-25T00:01:00Z",
     ):
         unknowns = unknown_submissions_from_dispatch(
             self.store,
@@ -260,11 +264,11 @@ class DurableReservationBookTests(unittest.TestCase):
                 ),
                 client_order_id=unknown.client_order_id,
                 instrument="TEST",
-                quantity="1",
-                price="1",
-                fee_amount="0",
+                quantity=provider_quantity,
+                price=provider_price,
+                fee_amount=provider_fee_amount,
                 fee_currency="USD",
-                trade_time="2026-09-25T00:01:00Z",
+                trade_time=provider_trade_time,
             )
             provider_fills = (fill,)
             local_execution_ids = (fill.provider_execution_id,)
@@ -624,7 +628,7 @@ class DurableReservationBookTests(unittest.TestCase):
                             "execPrice": "1",
                             "execFee": "0",
                             "feeCurrency": "USD",
-                            "execTime": "1790279999123",
+                            "execTime": "1790294460000",
                         }
                     ]
                 },
@@ -671,6 +675,33 @@ class DurableReservationBookTests(unittest.TestCase):
                 attempt_id="attempt-r1",
                 resolution_evidence=mismatched_evidence,
             )
+
+        economic_mismatch_checkpoint = self.record_reconciliation_resolution(
+            outcome="FILLED",
+            reconciliation_id="reconciliation-mismatched-fill-economics",
+            provider_quantity="0.9",
+        )
+        economic_mismatch_evidence = self.publish_resolution_evidence(
+            artifact_id="55555555-5555-4555-8555-555555555558",
+            provider="BYBIT",
+            outcome="FILLED",
+            reconciliation_event=economic_mismatch_checkpoint,
+        )
+        with self.assertRaisesRegex(
+            ReservationConflict,
+            "provider economics differ",
+        ):
+            reservations.mark_terminal(
+                command_id="cmd-terminal-cancel-filled-economic-mismatch",
+                idempotency_key="idem-terminal-cancel-filled-economic-mismatch",
+                reservation_id="r1",
+                outcome="FILLED",
+                provider="BYBIT",
+                attempt_id="attempt-r1",
+                resolution_evidence=economic_mismatch_evidence,
+            )
+        self.assertEqual(reservations.get("r1").state, "UNKNOWN")
+        self.assertEqual(reservations.total_reserved("CASH:USD"), Decimal("70"))
 
         matching_checkpoint = self.record_reconciliation_resolution(
             outcome="FILLED",

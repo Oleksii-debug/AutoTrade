@@ -523,6 +523,7 @@ class DeterministicStrategyTests(unittest.TestCase):
             economics_binding=economics_binding(
                 proposal,
                 instrument_version=instrument,
+                registered_run_receipt=receipt,
             ),
             exit_policy_ref="exit-policy:registered-v1",
             compute_cost_currency="USD",
@@ -982,6 +983,7 @@ class DeterministicStrategyTests(unittest.TestCase):
             proposal,
             instrument_version="instrument:aaa@1",
             max_feasible_quantity="1",
+            registered_run_receipt=receipt,
         )
         with self.assertRaisesRegex(ValueError, "cannot increase"):
             EconomicsBoundProposal(
@@ -1008,6 +1010,7 @@ class DeterministicStrategyTests(unittest.TestCase):
             instrument_version="instrument:aaa@1",
             max_feasible_quantity="2",
             lot_size="1",
+            registered_run_receipt=receipt,
         )
         with self.assertRaisesRegex(ValueError, "lot multiple"):
             EconomicsBoundProposal(
@@ -1126,6 +1129,7 @@ class DeterministicStrategyTests(unittest.TestCase):
             instrument_version="instrument:aaa@1",
             max_feasible_quantity="1.4",
             lot_size="0.5",
+            registered_run_receipt=receipt,
         )
         bound = bind_strategy_economics(
             proposal,
@@ -1229,6 +1233,7 @@ class DeterministicStrategyTests(unittest.TestCase):
             proposal,
             instrument_version="instrument:aaa@1",
             max_feasible_quantity="1",
+            registered_run_receipt=receipt,
         )
         body = to_decision_proposal(
             proposal,
@@ -1408,6 +1413,72 @@ class DeterministicStrategyTests(unittest.TestCase):
                 registered_run_receipt=receipt,
             )
 
+
+    def test_qualified_economics_cannot_cross_bind_distinct_registered_run_inputs(self):
+        descriptor = self.descriptor()
+        instrument = "instrument:aaa@7"
+        decision_time = BASE + timedelta(minutes=1)
+
+        proposal_a, receipt_a = run_registered_baseline(
+            ReturnThresholdBaseline(
+                lookback=2,
+                threshold="0.01",
+                proposal_quantity="2",
+                descriptor=descriptor,
+            ),
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=decision_time,
+            symbol="AAA",
+            instrument_version=instrument,
+        )
+        proposal_b, receipt_b = run_registered_baseline(
+            ReturnThresholdBaseline(
+                lookback=2,
+                threshold="0.01",
+                proposal_quantity="2",
+                descriptor=descriptor,
+            ),
+            [obs(0, "100"), obs(1, "103")],
+            decision_time=decision_time,
+            symbol="AAA",
+            instrument_version=instrument,
+        )
+        self.assertEqual(proposal_a.action, "BUY")
+        self.assertEqual(proposal_b.action, "BUY")
+        self.assertEqual(
+            proposal_a.strategy_configuration_fingerprint,
+            proposal_b.strategy_configuration_fingerprint,
+        )
+        self.assertEqual(proposal_a.decision_time, proposal_b.decision_time)
+        self.assertNotEqual(receipt_a.fingerprint, receipt_b.fingerprint)
+
+        economics_a = economics_binding(
+            proposal_a,
+            instrument_version=instrument,
+            registered_run_receipt=receipt_a,
+        )
+        accepted = bind_strategy_economics(
+            proposal_a,
+            economics_a,
+            instrument_version=instrument,
+            registered_run_receipt=receipt_a,
+        )
+        self.assertEqual(accepted.action, "BUY")
+        self.assertEqual(
+            economics_a.registered_run_receipt_sha256,
+            receipt_a.fingerprint,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "exact registered strategy run",
+        ):
+            bind_strategy_economics(
+                proposal_b,
+                economics_a,
+                instrument_version=instrument,
+                registered_run_receipt=receipt_b,
+            )
 
     def test_configuration_tamper_cannot_reuse_old_registered_output(self):
         descriptor = self.descriptor()

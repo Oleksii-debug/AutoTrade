@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using QuantConnect.Orders;
+using QuantConnect.Securities;
 
 namespace AutoTrade.Engine.Lean;
 
@@ -37,10 +38,24 @@ public sealed class LeanCallbackCharacterizer
         }
 
         var identity = (orderEvent.OrderId, orderEvent.Id);
-        var hasOrderFee = orderEvent.OrderFee is not null;
-        var feeAmount = hasOrderFee ? orderEvent.OrderFee.Value.Amount : decimal.Zero;
+        // Normalize LEAN's economic fee representation exactly once. Pinned LEAN
+        // represents semantic "no fee" both as a missing/default fee and as
+        // OrderFee.Zero / CashAmount.NullCurrency. Those forms must not create
+        // different callback identities.
+        var orderFee = orderEvent.OrderFee;
+        var feeValue = orderFee?.Value;
+        var semanticNoFee =
+            !feeValue.HasValue ||
+            (feeValue.Value.Amount == decimal.Zero &&
+             (string.IsNullOrEmpty(feeValue.Value.Currency) ||
+              string.Equals(
+                  feeValue.Value.Currency,
+                  CashAmount.NullCurrency,
+                  StringComparison.Ordinal)));
+        var hasOrderFee = !semanticNoFee;
+        var feeAmount = hasOrderFee ? feeValue!.Value.Amount : decimal.Zero;
         var feeCurrency = hasOrderFee
-            ? orderEvent.OrderFee.Value.Currency ?? string.Empty
+            ? feeValue!.Value.Currency ?? string.Empty
             : string.Empty;
         var fingerprint = new CallbackFingerprint(
             orderEvent.Status,

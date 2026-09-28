@@ -778,7 +778,11 @@ class DurableFinancingTests(unittest.TestCase):
             allow_nan=False,
         ).encode("utf-8")
         observed_at = BASE + timedelta(seconds=2)
-        observation = bybit_activity_observation(raw, observed_at=observed_at)
+        observation = bybit_activity_observation(
+            raw,
+            observed_at=observed_at,
+            extra_query={"cursor": "page-2", "limit": "50"},
+        )
         artifact = "00000000-0000-0000-0000-000000000080"
         raw_store = ArtifactStore(Path(self.temp.name) / "bybit-raw-artifacts")
         raw_store.publish_bytes(
@@ -1043,11 +1047,23 @@ class DurableFinancingTests(unittest.TestCase):
             )
 
         attempt(row_category="inverse", expected="row category")
-        attempt(query_category="inverse", expected="exact qualified")
-        attempt(account_type="CONTRACT", expected="exact qualified")
+        attempt(query_category="inverse", expected="qualified linear")
+        attempt(account_type="CONTRACT", expected="qualified linear")
         attempt(
-            extra_query={"type": "SETTLEMENT"},
-            expected="exact qualified",
+            extra_query={"unexpected": "value"},
+            expected="qualified linear",
+        )
+        attempt(
+            extra_query={"type": "TRADE"},
+            expected="qualified linear",
+        )
+        attempt(
+            extra_query={"currency": "BTC"},
+            expected="row currency",
+        )
+        attempt(
+            extra_query={"baseCoin": "BTC"},
+            expected="base currency",
         )
         attempt(
             capability_instrument_version=(

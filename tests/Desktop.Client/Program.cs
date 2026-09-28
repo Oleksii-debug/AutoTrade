@@ -34,13 +34,14 @@ internal static class Program
         string token,
         string version = "0",
         string hostFreshness = "CURRENT",
-        string? freshnessAsOf = null)
+        string? freshnessAsOf = null,
+        string? eventCursor = null)
     {
         string serverTime = NowUtc();
         return new
         {
             state_version = version,
-            event_cursor = version,
+            event_cursor = eventCursor ?? version,
             server_time = serverTime,
             host_id = "host-local-1",
             account_id = "paper-account-1",
@@ -353,6 +354,57 @@ internal static class Program
         Check.True(
             status.Message.Contains("STALE", StringComparison.Ordinal),
             "non-current host freshness was not surfaced in status text");
+    }
+
+    static async Task SnapshotAuthorityRelationAndFreshnessEnumFailClosedTest()
+    {
+        const string token = "session-token-snapshot-authority";
+        MutableSessionProvider sessions = new(PairedSession(token));
+
+        async Task AssertRejected(object snapshot, string message)
+        {
+            DelegateHandler handler = new((request, _, _) =>
+            {
+                AssertAuth(request, token);
+                return Task.FromResult(Json(HttpStatusCode.OK, snapshot));
+            });
+            AuthenticatedEmergencyHostClient client = new(
+                new HttpClient(handler),
+                HostOrigin,
+                sessions);
+            await Check.ThrowsAsync<InvalidOperationException>(
+                () => client.GetStatusAsync(CancellationToken.None),
+                message);
+        }
+
+        await AssertRejected(
+            Snapshot(token, "9", eventCursor: "8"),
+            "snapshot with event_cursor behind state_version was accepted");
+        await AssertRejected(
+            Snapshot(token, "9", eventCursor: "10"),
+            "snapshot with event_cursor ahead of state_version was accepted");
+        await AssertRejected(
+            Snapshot(token, "9", hostFreshness: "BROKEN"),
+            "unsupported host freshness advanced native authority state");
+        await AssertRejected(
+            Snapshot(token, "9", hostFreshness: "current"),
+            "non-canonical host freshness casing was accepted");
+
+        DelegateHandler validHandler = new((request, _, _) =>
+        {
+            AssertAuth(request, token);
+            return Task.FromResult(
+                Json(HttpStatusCode.OK, Snapshot(token, "10", eventCursor: "10")));
+        });
+        AuthenticatedEmergencyHostClient validClient = new(
+            new HttpClient(validHandler),
+            HostOrigin,
+            sessions);
+        EmergencyHostStatus status =
+            await validClient.GetStatusAsync(CancellationToken.None);
+        Check.True(
+            status.StateVersion == "10" && status.IsCurrent,
+            "canonical equal state_version/event_cursor snapshot did not survive restart-style advance");
     }
 
     static async Task StaleFreshnessDoesNotDisableEmergencyBlockTest()
@@ -1019,6 +1071,7 @@ internal static class Program
         StaleSuccessorMayCarryOlderEvidenceTimeTest();
         StaleSuccessorRejectsDurableRegressionAndIdentityChangeTest();
         await NonCurrentFreshnessRemainsExplicitTest();
+        await SnapshotAuthorityRelationAndFreshnessEnumFailClosedTest();
         await StaleFreshnessDoesNotDisableEmergencyBlockTest();
         await AmbiguousPostExactRetryTest();
         await UncertainCommandCannotRetargetSessionTest();

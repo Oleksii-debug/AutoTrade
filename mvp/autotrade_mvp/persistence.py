@@ -329,6 +329,18 @@ class JournalStore:
             }
         if cls.SCHEMA_VERSION >= 5:
             command_columns["result_hash"] = ("TEXT", False)
+        if cls.SCHEMA_VERSION >= 9:
+            # v9 is migrated with ALTER TABLE, so the effect columns are
+            # intentionally nullable at the SQLite declaration level. Runtime
+            # semantics enforce the exact RESULT_ONLY / EVENT_BATCH / LEGACY_UNKNOWN
+            # shape before any saved result is returned.
+            command_columns.update(
+                {
+                    "effect_kind": ("TEXT", False),
+                    "effect_json": ("TEXT", False),
+                    "effect_hash": ("TEXT", False),
+                }
+            )
 
         events = {
             "event_id": ("TEXT", False),

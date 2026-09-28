@@ -22,6 +22,20 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Verify event base is still live target tip
+        if: github.event_name == 'pull_request_target'
+        shell: bash
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          live_base="$(
+            git ls-remote --refs origin \
+              "refs/heads/${BASE_REF}" |
+              awk 'NR == 1 { print $1 }'
+          )"
+          test -n "${live_base}"
+          test "${live_base}" = "${BASE_SHA}"
       - name: Fetch exact candidate revision without checking it out
         if: github.event_name == 'pull_request_target'
         shell: bash
@@ -38,4 +52,9 @@ jobs:
           --base "${{ github.event.pull_request.base.sha }}"
           --head "${{ github.event.pull_request.head.sha }}"
       - name: Run trusted guard regression tests
-        run: python -m unittest tests.Control.test_reconvergence_integrity -v
+        run: >-
+          python -m unittest
+          tests.Control.test_reconvergence_integrity
+          tests.Control.test_reconvergence_integrity_entrypoint
+          tests.Control.test_reconvergence_integrity_security_regressions
+          -v

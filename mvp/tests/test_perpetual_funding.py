@@ -133,6 +133,7 @@ def sealed_funding(
     observed_offset=1,
     corrects=None,
     instrument_id="BTCUSDT",
+    funding_period_id="2026-09-25T10:00:00Z",
     price_reference_at="2026-09-25T10:00:00Z",
     collateral_currency="USDT",
 ):
@@ -147,7 +148,7 @@ def sealed_funding(
     payload = {
         "external_event_id": external_event_id,
         "provider_revision": revision,
-        "funding_period_id": "2026-09-25T10:00:00Z",
+        "funding_period_id": funding_period_id,
         "effective_at": "2026-09-25T10:00:00Z",
         "price_reference_at": price_reference_at,
         "instrument_id": instrument_id,
@@ -1034,6 +1035,33 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
                         authority.apply(target.evidence_ref)
                     self.assertEqual(store.current_journal_sequence(), before_sequence)
                     self.assertEqual(book.audit_digest(), before_digest)
+
+    def test_same_effective_cut_cannot_double_book_with_different_period_id(self):
+        first = sealed_funding(
+            external_event_id="funding-cut-a",
+            funding_period_id="provider-period-a",
+            observed_offset=1,
+        )
+        duplicate_cut = sealed_funding(
+            external_event_id="funding-cut-b",
+            funding_period_id="provider-period-b",
+            observed_offset=2,
+        )
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority, book = self.authority(store, [first, duplicate_cut])
+            authority.apply(first.evidence_ref)
+            before_sequence = store.current_journal_sequence()
+            before_digest = book.audit_digest()
+
+            with self.assertRaisesRegex(
+                PerpetualFundingConflict,
+                "funding period already has a canonical provider event",
+            ):
+                authority.apply(duplicate_cut.evidence_ref)
+
+            self.assertEqual(store.current_journal_sequence(), before_sequence)
+            self.assertEqual(book.audit_digest(), before_digest)
 
     def test_correction_observation_cannot_predate_predecessor_after_restart(self):
         original = sealed_funding(observed_offset=1)

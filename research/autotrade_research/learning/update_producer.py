@@ -20,17 +20,24 @@ from hashlib import sha256
 import json
 import re
 from types import MappingProxyType
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 from uuid import UUID
 
 from ..artifacts.store import ArtifactStore
 from ..jobs import ResearchJobStore
 from ..memory.episodes import CoveragePopulationSnapshot, ExperienceMemory
+from ..science.registry import ProtocolRegistration, ScientificRegistry
 from .online import (
     OnlineUpdateDecision,
     OnlineUpdateEnvelope,
     OnlineUpdateInput,
     evaluate_online_update,
+)
+from .population_coverage import (
+    PopulationCoverageManifest,
+    build_population_coverage,
+    resolve_outcome_evidence,
+    resolve_reconciliation_evidence,
 )
 
 
@@ -179,6 +186,7 @@ class UpdateProducerConfig:
     calibration_task: str
     test_evidence_refs: tuple[str, ...]
     instrument_family: str | None = None
+    protocol_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source_sha", _git_sha(self.source_sha))
@@ -261,6 +269,12 @@ class UpdateProducerConfig:
                     name="instrument_family",
                 ),
             )
+        if self.protocol_id is not None:
+            object.__setattr__(
+                self,
+                "protocol_id",
+                _text(self.protocol_id, name="protocol_id"),
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,6 +348,8 @@ class _LearningRow:
     label_available_at: datetime
     outcome_horizon_at: datetime
     execution_reconciled_at: datetime
+    outcome_evidence: Mapping[str, Any]
+    reconciliation_evidence: Mapping[str, Any] | None
     correction_hashes: tuple[str, ...]
 
 
@@ -343,7 +359,7 @@ def _load_checkpoint(
     *,
     config: UpdateProducerConfig,
     envelope: OnlineUpdateEnvelope,
-) -> tuple[str, _Checkpoint]:
+) -> tuple[str, _Checkpoint, datetime]:
     ref, manifest, payload = _artifact_ref(
         artifact_store,
         reference,
@@ -404,10 +420,14 @@ def _load_checkpoint(
         name: _decimal(raw_means[name], name=f"reference_feature_mean[{name}]")
         for name in names
     }
+    checkpoint_created_at = _time(
+        manifest.get("created_at"),
+        name="checkpoint created_at",
+    )
     return ref, _Checkpoint(
         parameters=MappingProxyType(parameters),
         reference_feature_means=MappingProxyType(means),
-    )
+    ), checkpoint_created_at
 
 
 def _verify_registered_evidence(
@@ -459,20 +479,21 @@ def _physical_observation_identity(
     artifact_store: ArtifactStore,
     raw: Mapping[str, Any],
     payload: Mapping[str, Any],
-) -> str:
-    """Derive physical identity only from registered immutable evidence.
+) -> tuple[str, datetime]:
+    """Derive physical identity and authoritative local availability.
 
-    Caller-owned decision/information timestamps are deliberately excluded.
-    Until the causal locus itself is independently authority-issued, allowing
-    those labels into identity would let one physical fact cross scientific
-    populations by timestamp relabelling.
+    Caller-owned decision/information/learning timestamps are deliberately
+    excluded from physical identity. Evidence availability is taken only from
+    an integrity-bound ArtifactStore manifest. A caller therefore cannot
+    backdate immutable evidence by writing an earlier label_available_at.
     """
 
     raw_refs = payload.get("evidence_refs")
     if not isinstance(raw_refs, (list, tuple)) or not raw_refs:
         raise ValueError("physical observation requires evidence references")
 
-    resolved_digests: list[str] = []
+    resolved_evidence: list[tuple[str, str]] = []
+    availability_points: list[datetime] = []
     seen_refs: set[str] = set()
     for raw_ref in raw_refs:
         reference, manifest, evidence_bytes = _artifact_ref(
@@ -485,6 +506,10 @@ def _physical_observation_identity(
                 "physical observation evidence references must be unique"
             )
         seen_refs.add(reference)
+        _sha256_identity(
+            manifest.get("manifest_hash"),
+            name="physical evidence manifest_hash",
+        )
         digest = _sha256_identity(
             manifest.get("sha256"),
             name="physical evidence digest",
@@ -493,17 +518,25 @@ def _physical_observation_identity(
             raise ValueError(
                 "physical observation evidence bytes changed after resolution"
             )
-        resolved_digests.append(digest)
+        available_at = _time(
+            manifest.get("created_at"),
+            name="physical evidence created_at",
+        )
+        availability_points.append(available_at)
+        resolved_evidence.append((digest, _iso(available_at)))
 
     material = {
-        "schema_version": "2.0.0",
+        "schema_version": "3.0.0",
         "instrument_family": _text(
             raw.get("instrument_family"),
             name="instrument_family",
         ),
-        "evidence_digests": tuple(sorted(resolved_digests)),
+        "evidence": tuple(sorted(resolved_evidence)),
     }
-    return _digest_bytes(_canonical_bytes(material))
+    return (
+        _digest_bytes(_canonical_bytes(material)),
+        max(availability_points),
+    )
 
 
 def _extract_learning_rows(
@@ -513,6 +546,8 @@ def _extract_learning_rows(
     cutoff: datetime,
     config: UpdateProducerConfig,
     feature_names: tuple[str, ...],
+    reconciliation_evidence_resolver: Callable[[str], Mapping[str, Any]] | None,
+    outcome_evidence_resolver: Callable[[str], Mapping[str, Any]] | None,
 ) -> tuple[
     tuple[_LearningRow, ...],
     tuple[tuple[str, str], ...],
@@ -546,7 +581,10 @@ def _extract_learning_rows(
                 learning.get("observation_id"),
                 name="observation_id",
             )
-            physical_observation_id = _physical_observation_identity(
+            (
+                base_physical_observation_id,
+                physical_evidence_available_at,
+            ) = _physical_observation_identity(
                 artifact_store,
                 raw,
                 payload,
@@ -562,10 +600,6 @@ def _extract_learning_rows(
             horizon = _time(
                 learning.get("outcome_horizon_at"),
                 name="outcome_horizon_at",
-            )
-            reconciled = _time(
-                learning.get("execution_reconciled_at"),
-                name="execution_reconciled_at",
             )
             features_raw = learning.get("features")
             if not isinstance(features_raw, Mapping):
@@ -584,18 +618,139 @@ def _extract_learning_rows(
             exclusions.append((episode_id, "LEARNING_SCHEMA_INVALID"))
             continue
 
+        try:
+            resolved_outcome = resolve_outcome_evidence(
+                episode_id,
+                causal_cutoff=cutoff,
+                resolver=outcome_evidence_resolver,
+            )
+        except (TypeError, ValueError):
+            exclusions.append((episode_id, "OUTCOME_EVIDENCE_INVALID"))
+            continue
+        if resolved_outcome.get("status") != "VERIFIED":
+            reason = resolved_outcome.get("reason")
+            if reason == "OUTCOME_EVIDENCE_AFTER_CAUSAL_CUTOFF":
+                exclusions.append((episode_id, "LABEL_NOT_CAUSALLY_MATURE"))
+            else:
+                exclusions.append((episode_id, "OUTCOME_EVIDENCE_UNVERIFIED"))
+            continue
+        try:
+            authority_label_version = _text(
+                resolved_outcome.get("label_version"),
+                name="authority label_version",
+            )
+            authority_label_available = _time(
+                resolved_outcome.get("label_available_at"),
+                name="authority label_available_at",
+            )
+            authority_horizon = _time(
+                resolved_outcome.get("outcome_horizon_at"),
+                name="authority outcome_horizon_at",
+            )
+            authority_target = _decimal(
+                resolved_outcome.get("target"),
+                name="authority target",
+            )
+            outcome_payload = payload.get("outcome")
+            if not isinstance(outcome_payload, Mapping):
+                raise ValueError("outcome must be a mapping")
+            payload_outcome_class = _text(
+                outcome_payload.get("class"),
+                name="outcome.class",
+            ).upper()
+            authority_outcome_class = _text(
+                resolved_outcome.get("outcome_class"),
+                name="authority outcome_class",
+            ).upper()
+        except (TypeError, ValueError):
+            exclusions.append((episode_id, "OUTCOME_EVIDENCE_INVALID"))
+            continue
+        if authority_outcome_class in {"PENDING", "UNKNOWN"}:
+            exclusions.append((episode_id, "OUTCOME_EVIDENCE_NOT_TERMINAL"))
+            continue
+        if (
+            authority_outcome_class != payload_outcome_class
+            or authority_label_version != label_version
+            or authority_label_available != label_available
+            or authority_horizon != horizon
+            or authority_target != target
+        ):
+            exclusions.append((episode_id, "OUTCOME_EVIDENCE_MISMATCH"))
+            continue
+        label_version = authority_label_version
+        label_available = authority_label_available
+        horizon = authority_horizon
+        target = authority_target
+
         if label_version != config.label_version:
             exclusions.append((episode_id, "LABEL_VERSION_INELIGIBLE"))
             continue
         if (
             label_available > cutoff
             or horizon > cutoff
-            or reconciled > cutoff
             or label_available < horizon
-            or label_available < reconciled
         ):
             exclusions.append((episode_id, "LABEL_NOT_CAUSALLY_MATURE"))
             continue
+        if physical_evidence_available_at > label_available:
+            exclusions.append(
+                (episode_id, "PHYSICAL_EVIDENCE_NOT_CAUSALLY_AVAILABLE")
+            )
+            continue
+
+        intended = payload.get("intended_action")
+        if not isinstance(intended, Mapping):
+            exclusions.append((episode_id, "LEARNING_SCHEMA_INVALID"))
+            continue
+        try:
+            action_side = _text(
+                intended.get("side"),
+                name="intended_action.side",
+            ).upper()
+        except (TypeError, ValueError):
+            exclusions.append((episode_id, "LEARNING_SCHEMA_INVALID"))
+            continue
+
+        reconciliation_evidence: Mapping[str, Any] | None = None
+        physical_observation_id = base_physical_observation_id
+        if action_side == "NO_TRADE":
+            reconciled = horizon
+        else:
+            try:
+                resolved = resolve_reconciliation_evidence(
+                    episode_id,
+                    causal_cutoff=cutoff,
+                    resolver=reconciliation_evidence_resolver,
+                )
+            except (TypeError, ValueError):
+                exclusions.append(
+                    (episode_id, "RECONCILIATION_EVIDENCE_INVALID")
+                )
+                continue
+            if resolved.get("status") != "VERIFIED":
+                exclusions.append(
+                    (episode_id, "RECONCILIATION_EVIDENCE_UNVERIFIED")
+                )
+                continue
+            reconciliation_evidence = MappingProxyType(dict(resolved))
+            reconciled = _time(
+                resolved.get("observed_at"),
+                name="authority execution_reconciled_at",
+            )
+            if reconciled > cutoff or label_available < reconciled:
+                exclusions.append(
+                    (episode_id, "LABEL_NOT_CAUSALLY_MATURE")
+                )
+                continue
+            physical_observation_id = _digest_bytes(
+                _canonical_bytes(
+                    {
+                        "physical_observation_id": base_physical_observation_id,
+                        "reconciliation_evidence": dict(resolved),
+                    }
+                )
+            )
+
         corrections = raw.get("correction_lineage")
         correction_hashes: list[str] = []
         if isinstance(corrections, tuple):
@@ -622,6 +777,8 @@ def _extract_learning_rows(
                 label_available_at=label_available,
                 outcome_horizon_at=horizon,
                 execution_reconciled_at=reconciled,
+                outcome_evidence=MappingProxyType(dict(resolved_outcome)),
+                reconciliation_evidence=reconciliation_evidence,
                 correction_hashes=tuple(sorted(correction_hashes)),
             )
         )
@@ -758,6 +915,12 @@ def _row_evidence(row: _LearningRow) -> dict[str, Any]:
         "label_available_at": _iso(row.label_available_at),
         "outcome_horizon_at": _iso(row.outcome_horizon_at),
         "execution_reconciled_at": _iso(row.execution_reconciled_at),
+        "outcome_evidence": dict(row.outcome_evidence),
+        "reconciliation_evidence": (
+            None
+            if row.reconciliation_evidence is None
+            else dict(row.reconciliation_evidence)
+        ),
         "correction_hashes": list(row.correction_hashes),
     }
 
@@ -778,6 +941,7 @@ def _producer_config_evidence(config: UpdateProducerConfig) -> dict[str, Any]:
         "calibration_task": config.calibration_task,
         "test_evidence_refs": sorted(config.test_evidence_refs),
         "instrument_family": config.instrument_family,
+        "protocol_id": config.protocol_id,
     }
     return value
 
@@ -812,6 +976,175 @@ def _online_envelope_evidence(
     }
 
 
+
+def _coverage_selection(
+    rows: tuple[_LearningRow, ...],
+    exclusions: tuple[tuple[str, str], ...],
+    aliases: tuple[tuple[str, tuple[str, ...]], ...],
+) -> tuple[tuple[str, ...], dict[str, str]]:
+    """Map deduplicated learner rows back to the complete episode population.
+
+    Multiple immutable episodes may be aliases of one physical observation.
+    They remain first-class population members even though the gradient consumes
+    the physical fact once. Only episodes that are genuinely unusable are
+    exclusions in the canonical population manifest.
+    """
+
+    accepted_physical = {row.physical_observation_id for row in rows}
+    included: set[str] = set()
+    for physical_id, episode_ids in aliases:
+        if physical_id in accepted_physical:
+            included.update(episode_ids)
+
+    exclusion_map: dict[str, str] = {}
+    for episode_id, reason in exclusions:
+        if episode_id in included and reason == "PHYSICAL_DUPLICATE":
+            continue
+        if episode_id in included:
+            # An accepted physical fact cannot simultaneously be excluded from
+            # population coverage for another reason.
+            raise ValueError(
+                "accepted learning episode has incompatible population exclusion"
+            )
+        prior = exclusion_map.get(episode_id)
+        if prior is not None and prior != reason:
+            raise ValueError(
+                "learning episode has multiple incompatible exclusion reasons"
+            )
+        exclusion_map[episode_id] = reason
+    return tuple(sorted(included)), exclusion_map
+
+
+def _population_authority_reason(
+    manifest: PopulationCoverageManifest | None,
+    *,
+    population: CoveragePopulationSnapshot,
+    rows: tuple[_LearningRow, ...],
+    exclusions: tuple[tuple[str, str], ...],
+    aliases: tuple[tuple[str, tuple[str, ...]], ...],
+    candidate_hash: str,
+    cutoff: datetime,
+    permission_classes: tuple[str, ...],
+    task: str,
+    instrument_family: str | None,
+    population_name: str,
+    reconciliation_evidence_resolver: Callable[[str], Mapping[str, Any]] | None,
+    outcome_evidence_resolver: Callable[[str], Mapping[str, Any]] | None,
+) -> tuple[str | None, PopulationCoverageManifest | None]:
+    """Verify one caller-supplied manifest against the canonical memory cut."""
+
+    if manifest is None:
+        return f"LEARNING.{population_name}_POPULATION_COVERAGE_REQUIRED", None
+    if not isinstance(manifest, PopulationCoverageManifest):
+        raise TypeError(
+            f"{population_name.lower()}_population_manifest must be PopulationCoverageManifest"
+        )
+    if manifest.candidate_hash != candidate_hash:
+        return f"LEARNING.{population_name}_POPULATION_CANDIDATE_MISMATCH", manifest
+
+    included_episode_ids, coverage_exclusions = _coverage_selection(
+        rows,
+        exclusions,
+        aliases,
+    )
+    try:
+        expected = build_population_coverage(
+            population,
+            candidate_hash=candidate_hash,
+            frozen_protocol_hash=manifest.frozen_protocol_hash,
+            input_snapshot_hash=population.root_hash,
+            causal_cutoff=cutoff,
+            permission_classes=permission_classes,
+            included_episode_ids=included_episode_ids,
+            exclusions=coverage_exclusions,
+            reconciliation_evidence_resolver=reconciliation_evidence_resolver,
+            outcome_evidence_resolver=outcome_evidence_resolver,
+            task=task,
+            instrument_family=instrument_family,
+        )
+    except (TypeError, ValueError):
+        return f"LEARNING.{population_name}_POPULATION_CANONICAL_INVALID", manifest
+
+    if manifest != expected:
+        return f"LEARNING.{population_name}_POPULATION_COVERAGE_MISMATCH", manifest
+    if not manifest.complete:
+        return f"LEARNING.{population_name}_POPULATION_COVERAGE_INCOMPLETE", manifest
+
+    outcome_counts = {
+        outcome_class: count
+        for outcome_class, count, _digest in manifest.included_outcomes
+    }
+    labels_complete = all(
+        complete
+        for _regime, complete in manifest.included_labels_complete_by_regime
+    )
+    if (
+        not labels_complete
+        or outcome_counts.get("PENDING", 0) != 0
+        or outcome_counts.get("UNKNOWN", 0) != 0
+    ):
+        return f"LEARNING.{population_name}_OUTCOME_EVIDENCE_INCOMPLETE", manifest
+    return None, manifest
+
+
+
+def _scientific_preregistration_reason(
+    scientific_registry: ScientificRegistry | None,
+    *,
+    config: UpdateProducerConfig,
+    calibration_population: CoveragePopulationSnapshot,
+    calibration_cutoff: datetime,
+    permission_classes: tuple[str, ...],
+    checkpoint_created_at: datetime,
+    update_manifest: PopulationCoverageManifest | None,
+    calibration_manifest: PopulationCoverageManifest | None,
+) -> tuple[str | None, ProtocolRegistration | None]:
+    """Verify independent, time-ordered preregistration for this update cut."""
+
+    if config.protocol_id is None or scientific_registry is None:
+        return "LEARNING.SCIENTIFIC_PREREGISTRATION_REQUIRED", None
+    if not isinstance(scientific_registry, ScientificRegistry):
+        raise TypeError("scientific_registry must be ScientificRegistry or None")
+    if update_manifest is None or calibration_manifest is None:
+        return None, None
+    if (
+        update_manifest.frozen_protocol_hash
+        != calibration_manifest.frozen_protocol_hash
+    ):
+        return None, None
+    try:
+        registration, protocol = scientific_registry.protocol_document(
+            config.protocol_id
+        )
+    except KeyError:
+        return "LEARNING.SCIENTIFIC_PREREGISTRATION_REQUIRED", None
+
+    scope = protocol.get("online_update_registration")
+    expected_scope = {
+        "schema_version": "1.0.0",
+        "calibration_population_root_hash": calibration_population.root_hash,
+        "calibration_cutoff": _iso(calibration_cutoff),
+        "update_task": config.update_task,
+        "calibration_task": config.calibration_task,
+        "instrument_family": config.instrument_family,
+        "permission_classes": list(permission_classes),
+        "feature_schema_hash": config.feature_schema_hash,
+        "label_version": config.label_version,
+        "source_sha": config.source_sha,
+    }
+    if not isinstance(scope, dict) or scope != expected_scope:
+        return "LEARNING.SCIENTIFIC_PREREGISTRATION_SCOPE_MISMATCH", None
+    if registration.protocol_hash != update_manifest.frozen_protocol_hash:
+        return "LEARNING.SCIENTIFIC_PREREGISTRATION_HASH_MISMATCH", None
+    registered_at = _time(
+        registration.created_at,
+        name="protocol registration created_at",
+    )
+    if registered_at >= checkpoint_created_at:
+        return "LEARNING.SCIENTIFIC_PREREGISTRATION_LATE", None
+    return None, registration
+
+
 def produce_bounded_online_update(
     *,
     memory: ExperienceMemory,
@@ -824,6 +1157,11 @@ def produce_bounded_online_update(
     update_cutoff: datetime,
     calibration_cutoff: datetime,
     granted_permissions: set[str],
+    update_population_manifest: PopulationCoverageManifest | None = None,
+    calibration_population_manifest: PopulationCoverageManifest | None = None,
+    scientific_registry: ScientificRegistry | None = None,
+    reconciliation_evidence_resolver: Callable[[str], Mapping[str, Any]] | None = None,
+    outcome_evidence_resolver: Callable[[str], Mapping[str, Any]] | None = None,
 ) -> ProducedOnlineUpdate:
     if not isinstance(memory, ExperienceMemory):
         raise TypeError("memory must be ExperienceMemory")
@@ -835,6 +1173,17 @@ def produce_bounded_online_update(
         raise TypeError("config must be UpdateProducerConfig")
     if not isinstance(runtime_state, OnlineUpdateRuntimeState):
         raise TypeError("runtime_state must be OnlineUpdateRuntimeState")
+    if (
+        reconciliation_evidence_resolver is not None
+        and not callable(reconciliation_evidence_resolver)
+    ):
+        raise TypeError(
+            "reconciliation_evidence_resolver must be callable or None"
+        )
+    if outcome_evidence_resolver is not None and not callable(
+        outcome_evidence_resolver
+    ):
+        raise TypeError("outcome_evidence_resolver must be callable or None")
     update_time = _time(update_cutoff, name="update_cutoff")
     calibration_time = _time(
         calibration_cutoff,
@@ -853,7 +1202,7 @@ def produce_bounded_online_update(
         )
     )
 
-    checkpoint_reference, checkpoint = _load_checkpoint(
+    checkpoint_reference, checkpoint, checkpoint_created_at = _load_checkpoint(
         artifact_store,
         checkpoint_ref,
         config=config,
@@ -890,6 +1239,8 @@ def produce_bounded_online_update(
         cutoff=update_time,
         config=config,
         feature_names=feature_names,
+        reconciliation_evidence_resolver=reconciliation_evidence_resolver,
+        outcome_evidence_resolver=outcome_evidence_resolver,
     )
     (
         calibration_rows,
@@ -902,6 +1253,8 @@ def produce_bounded_online_update(
         cutoff=calibration_time,
         config=config,
         feature_names=feature_names,
+        reconciliation_evidence_resolver=reconciliation_evidence_resolver,
+        outcome_evidence_resolver=outcome_evidence_resolver,
     )
 
     cross_population_overlap = tuple(
@@ -911,7 +1264,72 @@ def produce_bounded_online_update(
         )
     )
 
+    checkpoint_candidate_hash = _sha256_identity(
+        "sha256:" + checkpoint_reference.rsplit("@sha256:", 1)[1],
+        name="checkpoint candidate hash",
+    )
+    update_population_reason, verified_update_manifest = (
+        _population_authority_reason(
+            update_population_manifest,
+            population=update_population,
+            rows=update_rows,
+            exclusions=update_exclusions,
+            aliases=update_aliases,
+            candidate_hash=checkpoint_candidate_hash,
+            cutoff=update_time,
+            permission_classes=canonical_permissions,
+            task=config.update_task,
+            instrument_family=config.instrument_family,
+            population_name="UPDATE",
+            reconciliation_evidence_resolver=reconciliation_evidence_resolver,
+            outcome_evidence_resolver=outcome_evidence_resolver,
+        )
+    )
+    calibration_population_reason, verified_calibration_manifest = (
+        _population_authority_reason(
+            calibration_population_manifest,
+            population=calibration_population,
+            rows=calibration_rows,
+            exclusions=calibration_exclusions,
+            aliases=calibration_aliases,
+            candidate_hash=checkpoint_candidate_hash,
+            cutoff=calibration_time,
+            permission_classes=canonical_permissions,
+            task=config.calibration_task,
+            instrument_family=config.instrument_family,
+            population_name="CALIBRATION",
+            reconciliation_evidence_resolver=reconciliation_evidence_resolver,
+            outcome_evidence_resolver=outcome_evidence_resolver,
+        )
+    )
+
+    preregistration_reason, protocol_registration = (
+        _scientific_preregistration_reason(
+            scientific_registry,
+            config=config,
+            calibration_population=calibration_population,
+            calibration_cutoff=calibration_time,
+            permission_classes=canonical_permissions,
+            checkpoint_created_at=checkpoint_created_at,
+            update_manifest=verified_update_manifest,
+            calibration_manifest=verified_calibration_manifest,
+        )
+    )
+
     reasons: list[str] = []
+    if preregistration_reason is not None:
+        reasons.append(preregistration_reason)
+    if update_population_reason is not None:
+        reasons.append(update_population_reason)
+    if calibration_population_reason is not None:
+        reasons.append(calibration_population_reason)
+    if (
+        verified_update_manifest is not None
+        and verified_calibration_manifest is not None
+        and verified_update_manifest.frozen_protocol_hash
+        != verified_calibration_manifest.frozen_protocol_hash
+    ):
+        reasons.append("LEARNING.POPULATION_PROTOCOL_MISMATCH")
     if cross_population_overlap:
         reasons.append("LEARNING.CROSS_POPULATION_CONTAMINATION")
     if update_conflicts:
@@ -1026,6 +1444,16 @@ def produce_bounded_online_update(
             "updates_in_window": runtime_state.updates_in_window,
         },
         "granted_permissions": list(canonical_permissions),
+        "scientific_registration": (
+            None
+            if protocol_registration is None
+            else {
+                "protocol_id": protocol_registration.protocol_id,
+                "protocol_hash": protocol_registration.protocol_hash,
+                "registered_at": protocol_registration.created_at,
+                "checkpoint_created_at": _iso(checkpoint_created_at),
+            }
+        ),
         "checkpoint": {
             "artifact_ref": checkpoint_reference,
             "parameters": {
@@ -1049,6 +1477,27 @@ def produce_bounded_online_update(
             "calibration_evidence_ref": calibration_reference,
             "test_evidence_refs": list(test_references),
             "label_version": config.label_version,
+            "population_authority": {
+                "candidate_hash": checkpoint_candidate_hash,
+                "update_manifest_digest": (
+                    None
+                    if verified_update_manifest is None
+                    else verified_update_manifest.digest
+                ),
+                "calibration_manifest_digest": (
+                    None
+                    if verified_calibration_manifest is None
+                    else verified_calibration_manifest.digest
+                ),
+                "frozen_protocol_hash": (
+                    None
+                    if verified_update_manifest is None
+                    or verified_calibration_manifest is None
+                    or verified_update_manifest.frozen_protocol_hash
+                    != verified_calibration_manifest.frozen_protocol_hash
+                    else verified_update_manifest.frozen_protocol_hash
+                ),
+            },
         },
         "population": {
             "update_included": [

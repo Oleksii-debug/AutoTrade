@@ -2411,5 +2411,165 @@ class JournalStoreTests(unittest.TestCase):
             ):
                 store.commit_command(**command_args)
 
+
+    def test_commit_command_replay_binds_original_event_batch(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            original = event()
+            args = {
+                "actor": "alice",
+                "environment": "PAPER",
+                "command_id": "cmd-effect-bind",
+                "idempotency_key": "key-effect-bind",
+                "request": {"action": "ORDER.SUBMIT", "intent_id": "intent-1"},
+                "result": {"status": "ACCEPTED"},
+                "state_version": 1,
+                "events": [(original, None)],
+                "expected_journal_sequence": 0,
+            }
+            saved, inserted, appended = store.commit_command(**args)
+            self.assertTrue(inserted)
+            self.assertEqual(saved, {"status": "ACCEPTED"})
+            self.assertEqual(len(appended), 1)
+
+            replacement = event(
+                "evt-probe",
+                1,
+                {"kind": "probe"},
+            )
+            replacement["aggregate_type"] = "probe"
+            replacement["aggregate_id"] = "healthy"
+            replacement["payload_hash"] = payload_digest(replacement["payload"])
+            with self.assertRaisesRegex(
+                ValueError,
+                "retry event batch differs from original effect",
+            ):
+                store.commit_command(**{**args, "events": [(replacement, None)]})
+
+    def test_commit_command_replay_detects_stored_event_identity_tamper(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            original = event()
+            args = {
+                "actor": "alice",
+                "environment": "PAPER",
+                "command_id": "cmd-effect-tamper",
+                "idempotency_key": "key-effect-tamper",
+                "request": {"action": "ORDER.SUBMIT", "intent_id": "intent-1"},
+                "result": {"status": "ACCEPTED"},
+                "state_version": 1,
+                "events": [(original, None)],
+                "expected_journal_sequence": 0,
+            }
+            store.commit_command(**args)
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE events SET aggregate_type = 'probe', aggregate_id = 'moved' "
+                    "WHERE event_id = 'evt-1'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "event identity changed",
+            ):
+                store.commit_command(**args)
+
+    def test_record_and_commit_command_effect_kinds_cannot_alias(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            request = {"action": "TEST"}
+            result = {"status": "ACCEPTED"}
+            store.record_command(
+                command_id="cmd-result",
+                actor="alice",
+                environment="PAPER",
+                idempotency_key="shared-key",
+                request=request,
+                result=result,
+                state_version=0,
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "different command effect kind",
+            ):
+                store.commit_command(
+                    command_id="cmd-event",
+                    actor="alice",
+                    environment="PAPER",
+                    idempotency_key="shared-key",
+                    request=request,
+                    result=result,
+                    state_version=1,
+                    events=[(event(), None)],
+                )
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.commit_command(
+                command_id="cmd-event",
+                actor="alice",
+                environment="PAPER",
+                idempotency_key="shared-key",
+                request=request,
+                result=result,
+                state_version=1,
+                events=[(event(), None)],
+                expected_journal_sequence=0,
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "different command effect kind",
+            ):
+                store.record_command(
+                    command_id="cmd-result",
+                    actor="alice",
+                    environment="PAPER",
+                    idempotency_key="shared-key",
+                    request=request,
+                    result=result,
+                    state_version=1,
+                )
+
+    def test_v8_command_rows_upgrade_to_ambiguous_and_fail_closed(self):
+        class V8JournalStore(JournalStore):
+            SCHEMA_VERSION = 8
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            legacy = V8JournalStore(path)
+            legacy.record_command(
+                command_id="cmd-legacy",
+                actor="alice",
+                environment="PAPER",
+                idempotency_key="legacy-key",
+                request={"action": "TEST"},
+                result={"status": "ACCEPTED"},
+                state_version=0,
+            )
+            upgraded = JournalStore(path)
+            self.assertEqual(upgraded.current_schema_version(), 9)
+            with self.assertRaisesRegex(
+                ValueError,
+                "ambiguous transactional effect",
+            ):
+                upgraded.record_command(
+                    command_id="cmd-legacy",
+                    actor="alice",
+                    environment="PAPER",
+                    idempotency_key="legacy-key",
+                    request={"action": "TEST"},
+                    result={"status": "ACCEPTED"},
+                    state_version=0,
+                )
+
 if __name__ == "__main__":
     unittest.main()

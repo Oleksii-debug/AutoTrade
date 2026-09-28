@@ -1096,7 +1096,7 @@ class AllocationTests(unittest.TestCase):
         self.assertEqual(result.selected_symbols, ("LOW_STRESS",))
         self.assertEqual(result.allocation.worst_stress_loss, Decimal("10"))
         self.assertEqual(result.expected_net_utility, Decimal("90"))
-        self.assertEqual(result.objective_version, "deterministic-net-utility-v3")
+        self.assertEqual(result.objective_version, "deterministic-net-utility-v4")
 
     def test_stress_loss_penalty_rejects_binary_float(self):
         with self.assertRaises(TypeError):
@@ -1290,7 +1290,113 @@ class AllocationTests(unittest.TestCase):
         self.assertEqual(result.allocation.status, "ALLOCATED")
         self.assertEqual(result.selected_symbols, ("CHEAP",))
         self.assertEqual(result.expected_net_utility, Decimal("50"))
-        self.assertEqual(result.objective_version, "deterministic-net-utility-v3")
+        self.assertEqual(result.objective_version, "deterministic-net-utility-v4")
+
+
+    def test_split_holding_cost_cannot_satisfy_execution_fee_floor(self):
+        candidate = self.candidate(
+            desired="1010",
+            price="10",
+            lot="1",
+            capital_requirement="0",
+            fee_floor="5",
+            current_quantity="100",
+            turnover_cost_rate="0.001",
+            holding_cost_rate="0.02",
+        )
+        accepted = allocate_targets(
+            [candidate],
+            self.policy(
+                cash_available="1000",
+                max_gross_notional="2000",
+                max_net_notional="2000",
+                max_symbol_notional="2000",
+                max_total_cost="26",
+            ),
+        )
+        self.assertEqual(accepted.status, "ALLOCATED")
+        self.assertEqual(accepted.targets[0].turnover_notional, Decimal("10"))
+        self.assertEqual(accepted.targets[0].estimated_cost, Decimal("25.20"))
+
+        blocked = allocate_targets(
+            [candidate],
+            self.policy(
+                cash_available="1000",
+                max_gross_notional="2000",
+                max_net_notional="2000",
+                max_symbol_notional="2000",
+                max_total_cost="24",
+            ),
+        )
+        self.assertEqual(blocked.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(blocked.targets[0].estimated_cost, Decimal("20.00"))
+
+    def test_objective_partial_reversal_never_credits_opposite_retained_exposure(self):
+        for current, desired in (("100", "-100"), ("-100", "100")):
+            result = allocate_objective_targets(
+                [
+                    ObjectiveCandidate.create(
+                        symbol="REV",
+                        desired_notional=desired,
+                        price="1",
+                        lot_size="1",
+                        expected_return_rate="0.10",
+                        current_quantity=current,
+                        max_executable_notional="20",
+                        turnover_cost_rate="0",
+                        holding_cost_rate="0",
+                    )
+                ],
+                self.policy(
+                    cash_available="1000",
+                    max_gross_notional="1000",
+                    max_net_notional="1000",
+                    max_symbol_notional="1000",
+                    max_total_cost="100",
+                ),
+            )
+            self.assertEqual(result.allocation.status, "NO_INCREASE_FALLBACK")
+            self.assertEqual(result.selected_symbols, ())
+            self.assertEqual(result.expected_net_utility, Decimal("0"))
+            self.assertEqual(
+                result.allocation.targets[0].notional,
+                Decimal(current),
+            )
+
+    def test_objective_utility_depends_on_portfolio_economics_not_subset_labels(self):
+        result = allocate_objective_targets(
+            [
+                ObjectiveCandidate.create(
+                    symbol="AAA",
+                    desired_notional="10",
+                    price="1",
+                    lot_size="1",
+                    expected_return_rate="0.10",
+                ),
+                ObjectiveCandidate.create(
+                    symbol="BBB",
+                    desired_notional="10",
+                    price="1",
+                    lot_size="1",
+                    expected_return_rate="0.05",
+                    current_quantity="10",
+                    turnover_cost_rate="0",
+                    holding_cost_rate="0",
+                ),
+            ],
+            self.policy(
+                cash_available="1000",
+                max_gross_notional="1000",
+                max_net_notional="1000",
+                max_symbol_notional="1000",
+                max_total_cost="100",
+            ),
+        )
+        self.assertEqual(result.allocation.status, "ALLOCATED")
+        self.assertEqual(result.selected_symbols, ("AAA",))
+        self.assertEqual(result.expected_net_utility, Decimal("1.50"))
+        targets = {item.symbol: item.notional for item in result.allocation.targets}
+        self.assertEqual(targets, {"AAA": Decimal("10"), "BBB": Decimal("10")})
 
 class DiscreteAllocationSearchTests(unittest.TestCase):
     policy = AllocationTests.policy

@@ -46,6 +46,7 @@ def bybit_instrument_registry(
     settlement_currency: str = "USDT",
     provider_id: str = "BYBIT",
     effective_from: datetime | None = None,
+    successor_from: datetime | None = None,
 ):
     version = InstrumentVersion(
         instrument_id=BYBIT_XRP_INSTRUMENT_ID,
@@ -71,7 +72,35 @@ def bybit_instrument_registry(
         funding_schedule={"interval_hours": 8},
         margin_model_id="BYBIT-USDT-PERP",
     )
-    registry = InstrumentRegistry(versions=(version,))
+    versions = [version]
+    if successor_from is not None:
+        versions.append(
+            InstrumentVersion(
+                instrument_id=BYBIT_XRP_INSTRUMENT_ID,
+                version=2,
+                provider_id=provider_id,
+                venue_id="BYBIT-LINEAR",
+                provider_symbol=symbol,
+                asset_class="PERPETUAL",
+                base_currency="XRP",
+                quote_currency="USDT",
+                settlement_currency=settlement_currency,
+                quantity_unit="XRP",
+                contract_multiplier=Decimal("1"),
+                price_tick=Decimal("0.0001"),
+                quantity_step=Decimal("0.1"),
+                minimum_quantity=Decimal("0.1"),
+                calendar_id="CONTINUOUS_24_7",
+                timezone_id="UTC",
+                effective_from=successor_from,
+                payoff="LINEAR",
+                underlying_id=f"{BYBIT_XRP_UNDERLYING_ID}@1",
+                settlement_method="CASH",
+                funding_schedule={"interval_hours": 8},
+                margin_model_id="BYBIT-USDT-PERP-V2",
+            )
+        )
+    registry = InstrumentRegistry(versions=tuple(versions))
     return registry, f"{version.instrument_id}@{version.version}"
 
 

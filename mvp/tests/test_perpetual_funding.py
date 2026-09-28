@@ -181,6 +181,7 @@ def sealed_composite_funding(
     post_cut=(),
     corrects=None,
     environment="PAPER",
+    income_time=1790330400000,
 ):
     capability = funding_capability(environment=environment)
 
@@ -211,7 +212,7 @@ def sealed_composite_funding(
             "income": income,
             "asset": "USDT",
             "info": "",
-            "time": 1790330400000,
+            "time": income_time,
             "tranId": tran_id,
             "tradeId": "",
         },
@@ -706,6 +707,30 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
             self.assertFalse(replay.inserted)
             self.assertEqual(replay.active_transaction_id, first.active_transaction_id)
             self.assertEqual(restarted_book.cash("USDT"), book.cash("USDT"))
+
+    def test_composite_income_time_must_match_registered_funding_cut(self):
+        evidence = sealed_composite_funding(income_time=1790330400001)
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority, book = self.authority(store, [evidence], environment="PAPER")
+            before = book.audit_digest()
+            with self.assertRaisesRegex(
+                PerpetualFundingError, "income event is not bound"
+            ):
+                authority.apply(evidence.evidence_ref)
+            self.assertEqual(book.audit_digest(), before)
+
+    def test_cut_evidence_rejects_unknown_same_cut_transaction_identity(self):
+        evidence = sealed_composite_funding(pre_cut=("ghost-same-cut",))
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority, book = self.authority(store, [evidence], environment="PAPER")
+            before = book.audit_digest()
+            with self.assertRaisesRegex(
+                PerpetualFundingConflict, "exactly match canonical same-cut"
+            ):
+                authority.apply(evidence.evidence_ref)
+            self.assertEqual(book.audit_digest(), before)
 
     def test_composite_provider_income_conflict_rejects_before_mutation(self):
         evidence = sealed_composite_funding(income="-0.19")

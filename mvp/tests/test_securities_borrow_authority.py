@@ -64,6 +64,7 @@ def _borrow_evidence(capacity="100"):
         locate_id="locate-authority-1",
         provider_revision="borrow-snapshot-r1",
         capacity_quantity=capacity,
+        quantity_unit="share",
         hard_to_borrow=True,
         observed_at="2026-09-25T05:00:30Z",
         effective_at="2026-09-25T05:00:00Z",
@@ -499,6 +500,7 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                 environment=ENVIRONMENT,
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
+                quantity_unit="share",
             )
             projection.record_recall(
                 BorrowRecallEvidence(
@@ -510,6 +512,7 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                     instrument_version=1,
                     provider_revision="dispatch-recall-r1",
                     quantity="2",
+                    quantity_unit="share",
                     observed_at="2026-09-25T05:01:20Z",
                     effective_at="2026-09-25T05:01:10Z",
                     evidence_ref="provider:dispatch-recall-r1",
@@ -533,6 +536,7 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                     instrument_version=1,
                     provider_revision="dispatch-recall-r2",
                     resolved_quantity="2",
+                    quantity_unit="share",
                     observed_at="2026-09-25T05:01:45Z",
                     effective_at="2026-09-25T05:01:40Z",
                     evidence_ref="provider:dispatch-recall-r2",
@@ -545,6 +549,7 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                 environment=ENVIRONMENT,
                 instrument_id=INSTRUMENT_ID,
                 instrument_version=1,
+                quantity_unit="share",
                 evidence_artifact_store=authority.evidence_artifact_store,
             )
             self.assertEqual(reloaded_projection.active_quantity, Decimal("0"))

@@ -64,7 +64,15 @@ PROTECTED_SENTINELS = frozenset(
         "control/tools/registry_state.py",
         "docs/product/PRODUCT_SPEC_CANONICAL.txt",
         "docs/engineering/00_AUTOTRADE_MASTER_ENGINEERING_SPEC.md",
+        "Directory.Build.props",
+        "Directory.Build.targets",
+        "global.json",
         "requirements-dev.txt",
+        "contracts/fixtures/common-scalars.corpus.json",
+        "tests/Contracts.DotNet/Contracts.DotNet.csproj",
+        "tests/Contracts.DotNet/Program.cs",
+        "tests/Desktop.Client/Desktop.Client.csproj",
+        "tests/Desktop.Client/Program.cs",
         "tools/baseline.py",
         "tools/build_provenance_manifest.py",
         "tools/check_nvda_qualification.py",
@@ -102,6 +110,9 @@ WORKFLOW_AUTHORITY_ROOTS = frozenset(
 
 INTEGRATION_HARNESS_ROOTS = frozenset(
     {
+        "Directory.Build.props",
+        "Directory.Build.targets",
+        "global.json",
         "requirements-dev.txt",
         "tools/baseline.py",
         "tools/build_provenance_manifest.py",

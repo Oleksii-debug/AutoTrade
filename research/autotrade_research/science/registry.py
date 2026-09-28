@@ -639,19 +639,17 @@ class ScientificRegistry:
                     raise ProtocolViolation(
                         "registered trial population integrity mismatch"
                     )
-            if recorded_trials < trial_budget:
-                # The protocol's stopping_rules remain immutable preregistered
-                # scientific material, but AutoTrade does not yet have a
-                # canonical adjudicator that can derive an early-stop decision
-                # from the exact registered trial population.  Caller booleans,
-                # artifact metadata and storage integrity are not scientific
-                # truth authority.  Until such an adjudicator exists, the one
-                # locked forward holdout is unavailable before full trial
-                # closure.
+            if recorded_trials != trial_budget:
+                # The locked holdout is authorized only by the exact
+                # preregistered trial population.  A short population is
+                # incomplete; an oversized population is corrupt/legacy state,
+                # not "more complete" evidence.  AutoTrade also has no
+                # canonical adjudicator for early stopping yet, so neither
+                # condition may grant holdout access.
                 raise ProtocolViolation(
-                    "locked holdout cannot be accessed before registered trial "
-                    "budget is exhausted; early stopping is not an admitted "
-                    "holdout-access authority"
+                    "locked holdout requires the exact registered trial budget; "
+                    "early stopping and oversized trial populations are not "
+                    "admitted holdout-access authorities"
                 )
             forward_start, forward_end = _period(
                 protocol_payload["forward_period"],

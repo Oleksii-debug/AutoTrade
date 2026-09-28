@@ -501,6 +501,93 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
             self.assertFalse(exact_retry.inserted)
             self.assertEqual(len(restarted_economics.transactions), 2)
 
+    def test_deferred_zero_effect_activation_is_a_durable_fact(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            durable_evidence = evidence_store(store)
+            economics = economic_book(store)
+            announced = resolve_action(
+                sealed_action(
+                    per_share="0",
+                    observed_offset=1,
+                    effective_offset=5,
+                )
+            )
+
+            pending = commit_authoritative_corporate_action(
+                store=store,
+                evidence_store=durable_evidence,
+                economic_book=economics,
+                corporate_book=pure_book(),
+                accepted=announced,
+            )
+            self.assertFalse(pending.economically_active)
+            self.assertEqual(
+                store.load_events("corporate_action_activation", "missing"),
+                [],
+            )
+
+            reopened = JournalStore(path)
+            restarted_economics = economic_book(reopened)
+            before_activation_cut = reopened.current_journal_sequence()
+            activated = commit_authoritative_corporate_action(
+                store=reopened,
+                evidence_store=evidence_store(reopened),
+                economic_book=restarted_economics,
+                corporate_book=pure_book(),
+                accepted=announced,
+                activation_at=announced.event.effective_at,
+            )
+            self.assertTrue(activated.economically_active)
+            self.assertEqual(activated.transaction_ids, ())
+            self.assertEqual(len(restarted_economics.transactions), 1)
+
+            activation_events = reopened.load_events_by_aggregate_type(
+                "corporate_action_activation"
+            )
+            self.assertEqual(len(activation_events), 1)
+            activation = activation_events[0]
+            self.assertEqual(
+                activation["event_type"],
+                "CorporateActionFinancialActivated",
+            )
+            self.assertGreater(
+                activation["journal_sequence"],
+                before_activation_cut,
+            )
+            payload = activation["payload"]
+            self.assertEqual(payload["transaction_ids"], [])
+            self.assertEqual(
+                payload["pre_activation_journal_sequence"],
+                before_activation_cut,
+            )
+            self.assertEqual(
+                payload["activation_at"],
+                announced.event.effective_at.isoformat().replace("+00:00", "Z"),
+            )
+
+            again = commit_authoritative_corporate_action(
+                store=reopened,
+                evidence_store=evidence_store(reopened),
+                economic_book=restarted_economics,
+                corporate_book=pure_book(),
+                accepted=announced,
+                activation_at=announced.event.effective_at,
+            )
+            self.assertFalse(again.inserted)
+            self.assertTrue(again.economically_active)
+            self.assertEqual(again.transaction_ids, ())
+            self.assertEqual(
+                len(
+                    reopened.load_events_by_aggregate_type(
+                        "corporate_action_activation"
+                    )
+                ),
+                1,
+            )
+            self.assertEqual(len(restarted_economics.transactions), 1)
+
     def test_sealed_split_commits_atomically_and_preserves_fifo_basis(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

@@ -874,6 +874,10 @@ def commit_authoritative_corporate_action(
         raise AccountingConflict(
             "corporate-action activation exists without retained provider evidence"
         )
+    if activation_already_committed and not economic_committed:
+        raise AccountingConflict(
+            "corporate-action activation exists without complete durable economics"
+        )
     if (
         economic_plan is not None
         and economic_plan.already_committed
@@ -991,6 +995,6 @@ def commit_authoritative_corporate_action(
         accepted_event=accepted.event,
         transition=transition,
         next_state=candidate.state,
-        transaction_ids=tuple(item.transaction_id for item in transactions),
+        transaction_ids=transaction_ids,
         economically_active=True,
     )

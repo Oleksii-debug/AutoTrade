@@ -321,6 +321,7 @@ class BorrowAvailabilityEvidence:
     locate_id: str
     provider_revision: str
     capacity_quantity: Decimal
+    quantity_unit: str
     hard_to_borrow: bool
     observed_at: str
     effective_at: str
@@ -337,6 +338,7 @@ class BorrowAvailabilityEvidence:
         object.__setattr__(self, "locate_id", _text(self.locate_id, name="locate_id"))
         object.__setattr__(self, "provider_revision", _text(self.provider_revision, name="provider_revision"))
         object.__setattr__(self, "capacity_quantity", _decimal(self.capacity_quantity, name="capacity_quantity"))
+        object.__setattr__(self, "quantity_unit", _text(self.quantity_unit, name="quantity_unit"))
         if not isinstance(self.hard_to_borrow, bool):
             raise TypeError("hard_to_borrow must be boolean")
         observed = _instant(self.observed_at, name="observed_at")
@@ -379,6 +381,7 @@ class BorrowAvailabilityEvidence:
             "locate_id": self.locate_id,
             "provider_revision": self.provider_revision,
             "capacity_quantity": _decimal_text(self.capacity_quantity),
+            "quantity_unit": self.quantity_unit,
             "hard_to_borrow": "true" if self.hard_to_borrow else "false",
             "observed_at": self.observed_at,
             "effective_at": self.effective_at,
@@ -414,6 +417,7 @@ class BorrowAvailabilityEvidence:
             locate_id=detail.get("locate_id"),
             provider_revision=detail.get("provider_revision"),
             capacity_quantity=detail.get("capacity_quantity"),
+            quantity_unit=detail.get("quantity_unit"),
             hard_to_borrow=(hard == "true"),
             observed_at=detail.get("observed_at"),
             effective_at=detail.get("effective_at"),
@@ -433,6 +437,7 @@ class BorrowRecallEvidence:
     instrument_version: int
     provider_revision: str
     quantity: Decimal
+    quantity_unit: str
     observed_at: str
     effective_at: str
     evidence_ref: str
@@ -447,6 +452,7 @@ class BorrowRecallEvidence:
         object.__setattr__(self, "instrument_version", _version(self.instrument_version))
         object.__setattr__(self, "provider_revision", _text(self.provider_revision, name="provider_revision"))
         object.__setattr__(self, "quantity", _decimal(self.quantity, name="quantity", positive=True))
+        object.__setattr__(self, "quantity_unit", _text(self.quantity_unit, name="quantity_unit"))
         observed = _instant(self.observed_at, name="observed_at")
         effective = _instant(self.effective_at, name="effective_at")
         if _dt(effective) > _dt(observed):
@@ -479,6 +485,7 @@ class BorrowRecallEvidence:
             "instrument_version": self.instrument_version,
             "provider_revision": self.provider_revision,
             "quantity": _decimal_text(self.quantity),
+            "quantity_unit": self.quantity_unit,
             "observed_at": self.observed_at,
             "effective_at": self.effective_at,
             "evidence_ref": self.evidence_ref,
@@ -501,6 +508,7 @@ class BorrowRecallResolutionEvidence:
     instrument_version: int
     provider_revision: str
     resolved_quantity: Decimal
+    quantity_unit: str
     observed_at: str
     effective_at: str
     evidence_ref: str
@@ -515,6 +523,7 @@ class BorrowRecallResolutionEvidence:
         object.__setattr__(self, "instrument_version", _version(self.instrument_version))
         object.__setattr__(self, "provider_revision", _text(self.provider_revision, name="provider_revision"))
         object.__setattr__(self, "resolved_quantity", _decimal(self.resolved_quantity, name="resolved_quantity", positive=True))
+        object.__setattr__(self, "quantity_unit", _text(self.quantity_unit, name="quantity_unit"))
         observed = _instant(self.observed_at, name="observed_at")
         effective = _instant(self.effective_at, name="effective_at")
         if _dt(effective) > _dt(observed):
@@ -544,6 +553,7 @@ class BorrowRecallResolutionEvidence:
             "instrument_version": self.instrument_version,
             "provider_revision": self.provider_revision,
             "resolved_quantity": _decimal_text(self.resolved_quantity),
+            "quantity_unit": self.quantity_unit,
             "observed_at": self.observed_at,
             "effective_at": self.effective_at,
             "evidence_ref": self.evidence_ref,
@@ -566,6 +576,7 @@ class DurableBorrowRecallProjection:
         environment: str,
         instrument_id: str,
         instrument_version: int,
+        quantity_unit: str,
         evidence_artifact_store: ArtifactStore,
     ):
         if not isinstance(store, JournalStore):
@@ -579,6 +590,7 @@ class DurableBorrowRecallProjection:
         self.environment = _environment(environment)
         self.instrument_id = _instrument_id(instrument_id)
         self.instrument_version = _version(instrument_version)
+        self.quantity_unit = _text(quantity_unit, name="quantity_unit")
         self.resource_key = borrow_resource_key(
             provider_id=self.provider_id,
             account_id=self.account_id,
@@ -601,6 +613,7 @@ class DurableBorrowRecallProjection:
             and evidence.environment == self.environment
             and evidence.instrument_id == self.instrument_id
             and evidence.instrument_version == self.instrument_version
+            and evidence.quantity_unit == self.quantity_unit
             and evidence.resource_key == self.resource_key
         )
 

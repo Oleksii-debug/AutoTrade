@@ -1173,28 +1173,80 @@ class DurableOrderBookProjection:
         origin_intent_id: str,
         committed_at: str,
     ) -> DurableOrderMutationResult:
+        order_id = _text(client_order_id, name="client_order_id")
+        attempt = _text(attempt_id, name="attempt_id")
+        source_event_id = _text(
+            source_blocked_event_id,
+            name="source_blocked_event_id",
+        )
+        source_hash = _text(
+            source_blocked_payload_hash,
+            name="source_blocked_payload_hash",
+        )
+        binding_hash = _text(
+            preparation_binding_hash,
+            name="preparation_binding_hash",
+        )
+        origin_intent = _text(origin_intent_id, name="origin_intent_id")
+        events = self.store.load_events(
+            "submission_attempt",
+            submission_attempt_aggregate_id(
+                environment=self.environment,
+                account_id=self.account_id,
+                attempt_id=attempt,
+            ),
+        )
+        if (
+            len(events) != 2
+            or events[0].get("event_type") != "SubmissionPrepared"
+            or events[1].get("event_type") != "SubmissionBlocked"
+        ):
+            raise OrderProjectionConflict(
+                "pre-send abort requires exactly prepared then blocked submission facts"
+            )
+        prepared_payload = events[0].get("payload")
+        blocked_payload = events[1].get("payload")
+        if not isinstance(prepared_payload, Mapping) or not isinstance(
+            blocked_payload,
+            Mapping,
+        ):
+            raise OrderProjectionConflict(
+                "pre-send abort submission evidence is malformed"
+            )
+        actual_binding = prepared_payload.get(
+            "order_preparation_binding_hash",
+            prepared_payload.get("submission_scope_hash"),
+        )
+        if (
+            events[1].get("event_id") != source_event_id
+            or payload_digest(dict(blocked_payload)) != source_hash
+            or actual_binding != binding_hash
+            or prepared_payload.get("attempt_id") != attempt
+            or prepared_payload.get("client_order_id") != order_id
+            or prepared_payload.get("intent_id") != origin_intent
+            or str(prepared_payload.get("provider", "")).upper() != self.provider_id
+            or prepared_payload.get("account_id") != self.account_id
+            or str(prepared_payload.get("environment", "")).upper() != self.environment
+        ):
+            raise OrderProjectionConflict(
+                "pre-send abort proof differs from durable submission facts"
+            )
+        self._reload()
+        order = self.order(order_id)
+        if order.origin_intent_id != origin_intent:
+            raise OrderProjectionConflict(
+                "pre-send abort origin intent differs from canonical order"
+            )
         return self._commit(
             event_key=event_key,
             operation="MARK_PRE_SEND_ABORTED",
             request={
-                "client_order_id": _text(client_order_id, name="client_order_id"),
-                "attempt_id": _text(attempt_id, name="attempt_id"),
-                "source_blocked_event_id": _text(
-                    source_blocked_event_id,
-                    name="source_blocked_event_id",
-                ),
-                "source_blocked_payload_hash": _text(
-                    source_blocked_payload_hash,
-                    name="source_blocked_payload_hash",
-                ),
-                "preparation_binding_hash": _text(
-                    preparation_binding_hash,
-                    name="preparation_binding_hash",
-                ),
-                "origin_intent_id": _text(
-                    origin_intent_id,
-                    name="origin_intent_id",
-                ),
+                "client_order_id": order_id,
+                "attempt_id": attempt,
+                "source_blocked_event_id": source_event_id,
+                "source_blocked_payload_hash": source_hash,
+                "preparation_binding_hash": binding_hash,
+                "origin_intent_id": origin_intent,
             },
             committed_at=committed_at,
         )
@@ -1509,9 +1561,9 @@ class DurableOrderBookProjection:
                 continue
 
             if event_type == "SubmissionBlocked":
-                if sending_seen:
+                if sending_seen or terminal_seen:
                     raise OrderProjectionConflict(
-                        "blocked submission cannot follow send-start"
+                        "blocked submission cannot follow send-start or terminal outcome"
                     )
                 terminal_seen = True
                 binding_hash = prepared_payload.get(

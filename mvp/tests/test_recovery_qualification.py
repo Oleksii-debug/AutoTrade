@@ -13,6 +13,7 @@ from mvp.autotrade_mvp.qualification_attestation import (
     SignedQualificationAttestation,
 )
 from mvp.autotrade_mvp.recovery_qualification import (
+    _store_artifact_matches,
     RecoveryEvidenceStatus,
     RecoveryQualificationDecision,
     RecoveryQualificationPolicy,
@@ -238,6 +239,137 @@ def qualify(
             return_value=canonical_trust_policy,
         ):
             return evaluate()
+
+
+class RecoveryArtifactSnapshotTests(unittest.TestCase):
+    def test_release_artifact_uses_one_authenticated_snapshot_and_hashes_returned_bytes(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            manifest = store.publish_bytes(
+                artifact_id=RELEASE_ARTIFACT_ID,
+                data=RELEASE_ARTIFACT_BYTES,
+                media_type="application/vnd.autotrade.release-artifact",
+                rights={"storage": True, "export": False},
+                source_refs=[f"git:{SOURCE_SHA}"],
+                metadata={
+                    "evidence_kind": "RECOVERY_RELEASE_ARTIFACT",
+                    "source_sha": SOURCE_SHA,
+                },
+            )
+            metadata = {
+                "evidence_kind": "RECOVERY_RELEASE_ARTIFACT",
+                "source_sha": SOURCE_SHA,
+            }
+            original_snapshot = store.read_authenticated_snapshot
+            with (
+                patch.object(
+                    store,
+                    "read_authenticated_snapshot",
+                    wraps=original_snapshot,
+                ) as snapshot,
+                patch.object(
+                    store,
+                    "load_manifest",
+                    side_effect=AssertionError("split manifest read is forbidden"),
+                ),
+                patch.object(
+                    store,
+                    "read_bytes",
+                    side_effect=AssertionError("split object read is forbidden"),
+                ),
+            ):
+                self.assertTrue(
+                    _store_artifact_matches(
+                        store,
+                        artifact_id=RELEASE_ARTIFACT_ID,
+                        artifact_sha256=ARTIFACT_SHA,
+                        media_type="application/vnd.autotrade.release-artifact",
+                        source_sha=SOURCE_SHA,
+                        metadata=metadata,
+                    )
+                )
+            snapshot.assert_called_once_with(RELEASE_ARTIFACT_ID)
+
+            with patch.object(
+                store,
+                "read_authenticated_snapshot",
+                return_value=(manifest, b"tampered-release-bytes"),
+            ):
+                self.assertFalse(
+                    _store_artifact_matches(
+                        store,
+                        artifact_id=RELEASE_ARTIFACT_ID,
+                        artifact_sha256=ARTIFACT_SHA,
+                        media_type="application/vnd.autotrade.release-artifact",
+                        source_sha=SOURCE_SHA,
+                        metadata=metadata,
+                    )
+                )
+
+    def test_recovery_receipt_requires_same_snapshot_manifest_and_exact_bytes(self):
+        item = evidence(RecoveryScenario.POWER_LOSS)
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            manifest = store.publish_bytes(
+                artifact_id=item.evidence_artifact_id,
+                data=recovery_evidence_receipt_bytes(item),
+                media_type="application/vnd.autotrade.recovery-evidence",
+                rights={"storage": True, "export": False},
+                source_refs=[f"git:{item.source_sha}"],
+                metadata=recovery_evidence_receipt_metadata(item),
+            )
+            original_snapshot = store.read_authenticated_snapshot
+            with (
+                patch.object(
+                    store,
+                    "read_authenticated_snapshot",
+                    wraps=original_snapshot,
+                ) as snapshot,
+                patch.object(
+                    store,
+                    "load_manifest",
+                    side_effect=AssertionError("split manifest read is forbidden"),
+                ),
+                patch.object(
+                    store,
+                    "read_bytes",
+                    side_effect=AssertionError("split object read is forbidden"),
+                ),
+            ):
+                self.assertTrue(
+                    _store_artifact_matches(
+                        store,
+                        artifact_id=item.evidence_artifact_id,
+                        artifact_sha256=item.evidence_artifact_sha256,
+                        media_type="application/vnd.autotrade.recovery-evidence",
+                        source_sha=item.source_sha,
+                        metadata=recovery_evidence_receipt_metadata(item),
+                        expected_bytes=recovery_evidence_receipt_bytes(item),
+                    )
+                )
+            snapshot.assert_called_once_with(item.evidence_artifact_id)
+
+            replaced_manifest = dict(manifest)
+            replaced_manifest["source_refs"] = ["git:" + ("f" * 40)]
+            with patch.object(
+                store,
+                "read_authenticated_snapshot",
+                return_value=(
+                    replaced_manifest,
+                    recovery_evidence_receipt_bytes(item),
+                ),
+            ):
+                self.assertFalse(
+                    _store_artifact_matches(
+                        store,
+                        artifact_id=item.evidence_artifact_id,
+                        artifact_sha256=item.evidence_artifact_sha256,
+                        media_type="application/vnd.autotrade.recovery-evidence",
+                        source_sha=item.source_sha,
+                        metadata=recovery_evidence_receipt_metadata(item),
+                        expected_bytes=recovery_evidence_receipt_bytes(item),
+                    )
+                )
 
 
 class RecoveryReleaseQualificationTests(unittest.TestCase):

@@ -80,6 +80,24 @@ internal static class Program
             "request actor header is missing or changed");
     }
     
+    static void CanonicalOperationIdentityVectorTest()
+    {
+        Check.True(
+            HostOperationIdentity.Derive(
+                "paper-account-1",
+                "PAPER",
+                "11111111-1111-1111-1111-111111111111")
+                == "2bb8887a-3631-590a-ba0a-4497cb3f5d2a",
+            "C# host operation identity drifted from the canonical Python host contract");
+        Check.True(
+            HostOperationIdentity.Derive(
+                "рахунок-1",
+                "PAPER",
+                "11111111-1111-1111-1111-111111111111")
+                == "af5d4862-0d05-52a7-a58f-2752376b712d",
+            "canonical host operation identity changed for UTF-8 account scope");
+    }
+
     static void CredentialTargetIsOriginBoundTest()
     {
         string target =
@@ -1155,6 +1173,7 @@ internal static class Program
     public static async Task Main()
     {
         WindowRetainsCurrentEvidenceFloorTest();
+        CanonicalOperationIdentityVectorTest();
         CredentialTargetIsOriginBoundTest();
         await PairedOriginMismatchFailsBeforeTransportTest();
         await CanonicalStatusAndOperationTest();

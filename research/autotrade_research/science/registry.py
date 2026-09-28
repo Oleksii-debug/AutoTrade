@@ -14,8 +14,6 @@ import sqlite3
 from typing import Any
 from uuid import UUID, uuid4
 
-from ..artifacts.store import ArtifactIntegrityError, ArtifactStore
-
 
 REQUIRED_PROTOCOL_FIELDS = {
     "hypothesis",
@@ -271,70 +269,10 @@ class LockedEvaluationEvidence:
 
 
 class ScientificRegistry:
-    def __init__(
-        self,
-        path: str | Path,
-        *,
-        artifact_store: ArtifactStore | None = None,
-    ):
-        if artifact_store is not None and not isinstance(artifact_store, ArtifactStore):
-            raise TypeError("artifact_store must be the canonical ArtifactStore")
+    def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.artifact_store = artifact_store
         self._init()
-
-    def _verify_stopping_evidence(
-        self,
-        reference: Any,
-        *,
-        protocol_id: str,
-        stopping_rules_hash: str,
-    ) -> str:
-        immutable_ref = _immutable_artifact_ref(
-            reference,
-            "stopping_evidence_ref",
-        )
-        if self.artifact_store is None:
-            raise ProtocolViolation(
-                "early locked evaluation requires a resolvable immutable "
-                "stopping-evidence artifact"
-            )
-        artifact_text = immutable_ref.removeprefix("artifact:")
-        artifact_id, digest = artifact_text.split("@sha256:", 1)
-        expected_digest = "sha256:" + digest
-        try:
-            manifest, _bytes = self.artifact_store.read_authenticated_snapshot(
-                artifact_id
-            )
-        except (
-            FileNotFoundError,
-            ArtifactIntegrityError,
-            OSError,
-            ValueError,
-        ) as error:
-            raise ProtocolViolation(
-                "early locked evaluation stopping evidence cannot be verified"
-            ) from error
-        if manifest.get("sha256") != expected_digest:
-            raise ProtocolViolation(
-                "early locked evaluation stopping evidence digest mismatch"
-            )
-        metadata = manifest.get("metadata")
-        required_metadata = {
-            "kind": "stopping-rule-evidence",
-            "protocol_id": protocol_id,
-            "stopping_rules_hash": stopping_rules_hash,
-        }
-        if (
-            not isinstance(metadata, dict)
-            or any(metadata.get(key) != value for key, value in required_metadata.items())
-        ):
-            raise ProtocolViolation(
-                "early locked evaluation stopping evidence is not bound to "
-                "the registered protocol and stopping rules"
-            )
-        return immutable_ref
 
     @contextmanager
     def _connect(self):

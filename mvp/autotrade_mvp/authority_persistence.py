@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from research.autotrade_research.artifacts.store import ArtifactStore
+
 from mvp.autotrade_mvp.authority import AuthorityService
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 
@@ -26,31 +28,6 @@ _NEW_EXPOSURE_BLOCK_FIELDS = {
 _SNAPSHOT_COMMAND_ACTOR = "autotrade-authority-snapshot"
 _CANONICAL_AUTHORITY_TYPE = "authority_state"
 _CANONICAL_AUTHORITY_ID = "canonical"
-
-
-class _SnapshotProjectionAuthorityService(AuthorityService):
-    """Replay canonical authority transitions without external evidence I/O.
-
-    AuthorityService._restore_journal() is the canonical transition parser and
-    state machine.  Snapshot publication needs that exact state at one durable
-    journal cut, but must not acquire an unrelated availability dependency on
-    risk/reservation/artifact evidence merely to prove persistence equality.
-
-    This subclass changes exactly one replay seam: durable financial-evidence
-    existence/authenticity is not re-resolved.  All journal ordering, policy,
-    scope, confirmation, admission, block/restore and identity checks performed
-    by _restore_journal() remain the canonical implementation and are reused
-    directly rather than copied into a second projector.
-    """
-
-    def _validate_durable_financial_evidence(
-        self,
-        record,
-        policy,
-        *,
-        require_transaction_cut: bool = False,
-    ) -> None:
-        del record, policy, require_transaction_cut
 
 
 def _indexed_collection(state: dict, name: str, identity_key: str) -> dict[str, dict]:
@@ -102,23 +79,33 @@ def _indexed_new_exposure_blocks(
     return indexed
 
 
-def _canonical_authority_state(store: JournalStore) -> dict | None:
-    """Project the full canonical authority aggregate using its own replay code.
+def _canonical_authority_state(
+    store: JournalStore,
+    *,
+    evidence_artifact_store: ArtifactStore | None = None,
+) -> dict | None:
+    """Project the full canonical authority aggregate using canonical replay.
 
     ``None`` is an explicit legacy boundary: historical snapshot-only installs
-    may have no ``authority_state/canonical`` aggregate at all.  Once at least
-    one canonical transition exists, the aggregate is authoritative for the
-    entire persisted authority surface and snapshots must equal it exactly.
+    may have no ``authority_state/canonical`` aggregate at all. Once at least one
+    canonical transition exists, snapshots must equal the exact state rebuilt by
+    ``AuthorityService`` itself.
+
+    Financial admissions are not given a weaker replay mode here. CASH evidence
+    is revalidated entirely from the JournalStore. BORROW evidence additionally
+    requires the same trusted ``ArtifactStore`` used by canonical financial
+    authority; absence of that cryptographic evidence dependency fails closed.
     """
 
     events = store.load_events(_CANONICAL_AUTHORITY_TYPE, _CANONICAL_AUTHORITY_ID)
     if not events:
         return None
 
-    projection = _SnapshotProjectionAuthorityService()
-    projection.store = store
     try:
-        projection._restore_journal()
+        projection = AuthorityService(
+            store,
+            evidence_artifact_store=evidence_artifact_store,
+        )
     except Exception as error:
         raise ValueError(
             "canonical authority journal cannot be projected for snapshot proof"
@@ -204,13 +191,14 @@ def _assert_authority_state_matches_canonical(
     state: dict,
     *,
     store: JournalStore,
+    evidence_artifact_store: ArtifactStore | None = None,
 ) -> None:
     """Bind a snapshot to the canonical authority aggregate at the read cut.
 
     Snapshot-only historical installs remain readable while the canonical
-    aggregate is genuinely absent.  In that legacy mode active new-exposure
+    aggregate is genuinely absent. In that legacy mode active new-exposure
     blocks are still forbidden because block/restore has always been canonical
-    journal authority.  As soon as any canonical authority event exists, the
+    journal authority. As soon as any canonical authority event exists, the
     complete snapshot must equal the full canonical projection; comparing only
     with the prior snapshot is insufficient when a canonical mutation occurred
     without an intermediate snapshot.
@@ -221,7 +209,10 @@ def _assert_authority_state_matches_canonical(
     except Exception as error:
         raise ValueError("authority snapshot state is invalid") from error
 
-    canonical = _canonical_authority_state(store)
+    canonical = _canonical_authority_state(
+        store,
+        evidence_artifact_store=evidence_artifact_store,
+    )
     if canonical is None:
         if _indexed_new_exposure_blocks(candidate):
             raise ValueError(
@@ -260,7 +251,7 @@ def persist_authority_snapshot(
 
     New snapshots capture one global journal cut, prove their complete state
     against the canonical authority aggregate observed at that cut, and commit
-    with the same cut as a compare-and-append fence.  A canonical or unrelated
+    with the same cut as a compare-and-append fence. A canonical or unrelated
     journal event between proof and append invalidates the transaction.
 
     Historical immutable event-id retries keep their original envelope
@@ -270,6 +261,8 @@ def persist_authority_snapshot(
         raise TypeError("store must be JournalStore")
     if not isinstance(service, AuthorityService):
         raise TypeError("service must be AuthorityService")
+    if service.store is not None and service.store is not store:
+        raise ValueError("authority service and snapshot store must share one JournalStore")
     if not isinstance(authority_id, str) or not authority_id.strip():
         raise ValueError("authority_id is required")
     if not isinstance(event_id, str) or not event_id.strip():
@@ -309,7 +302,11 @@ def persist_authority_snapshot(
                 raise ValueError("latest authority journal payload state is invalid")
             _assert_monotonic_authority_state(previous_state, state)
 
-        _assert_authority_state_matches_canonical(state, store=store)
+        _assert_authority_state_matches_canonical(
+            state,
+            store=store,
+            evidence_artifact_store=service.evidence_artifact_store,
+        )
 
     payload = {
         "authority_id": authority_id,
@@ -370,8 +367,14 @@ def restore_authority_snapshot(
     store: JournalStore,
     *,
     authority_id: str,
+    evidence_artifact_store: ArtifactStore | None = None,
 ) -> AuthorityService:
-    """Restore latest durable authority state; missing/corrupt state fails closed."""
+    """Restore latest durable authority state; missing/corrupt state fails closed.
+
+    ``evidence_artifact_store`` is required when canonical financial history
+    contains BORROW evidence because replay reuses the full canonical financial
+    validator. CASH-only histories need no artifact store.
+    """
     if not isinstance(store, JournalStore):
         raise TypeError("store must be JournalStore")
     if not isinstance(authority_id, str) or not authority_id.strip():
@@ -406,5 +409,6 @@ def restore_authority_snapshot(
     _assert_authority_state_matches_canonical(
         restored.export_state(),
         store=store,
+        evidence_artifact_store=evidence_artifact_store,
     )
     return restored

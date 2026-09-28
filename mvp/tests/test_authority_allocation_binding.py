@@ -505,6 +505,14 @@ class AuthorityAllocationBindingTests(unittest.TestCase):
             binding = risk_event["payload"]["allocation_evidence"]
             self.assertEqual(binding["decision_digest"], result.decision_digest)
             self.assertEqual(
+                binding["policy_config_digest"],
+                result.policy_config_digest,
+            )
+            self.assertEqual(
+                binding["objective_search_config_digest"],
+                result.objective_search_config_digest,
+            )
+            self.assertEqual(
                 binding["reservation_state_version"],
                 0,
             )

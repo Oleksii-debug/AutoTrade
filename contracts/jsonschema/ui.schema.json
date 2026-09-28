@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.autotrade.local/3.0.1/ui.schema.json",
+  "$id": "https://schemas.autotrade.local/4.0.0/ui.schema.json",
   "title": "AutoTrade host/UI contracts",
   "$defs": {
     "UiSnapshot": {

@@ -31,19 +31,19 @@ public static partial class CommonScalarContracts
         };
     }
 
-    [GeneratedRegex(@"^(?:0|[1-9][0-9]*(?:\.[0-9]*[1-9])?|0\.[0-9]*[1-9]|-(?:[1-9][0-9]*(?:\.[0-9]*[1-9])?|0\.[0-9]*[1-9]))$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"^(?:0|[1-9][0-9]*(?:\.[0-9]*[1-9])?|0\.[0-9]*[1-9]|-(?:[1-9][0-9]*(?:\.[0-9]*[1-9])?|0\.[0-9]*[1-9]))(?![\s\S])", RegexOptions.CultureInvariant)]
     private static partial Regex DecimalPattern();
 
-    [GeneratedRegex(@"^(0|[1-9][0-9]*)$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"^(0|[1-9][0-9]*)(?![\s\S])", RegexOptions.CultureInvariant)]
     private static partial Regex SequencePattern();
 
-    [GeneratedRegex(@"^sha256:[0-9a-f]{64}$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"^sha256:[0-9a-f]{64}(?![\s\S])", RegexOptions.CultureInvariant)]
     private static partial Regex DigestPattern();
 
-    [GeneratedRegex(@"^[A-Za-z0-9._:-]+$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"^[A-Za-z0-9._:-]+(?![\s\S])", RegexOptions.CultureInvariant)]
     private static partial Regex CurrencyIdPattern();
 
-    [GeneratedRegex(@"^[A-Za-z0-9._:/-]+$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"^[A-Za-z0-9._:/-]+(?![\s\S])", RegexOptions.CultureInvariant)]
     private static partial Regex UnitIdPattern();
 
 }

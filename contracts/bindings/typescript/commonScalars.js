@@ -2,14 +2,14 @@
 
 // AUTO-GENERATED from contracts/jsonschema/common.schema.json. DO NOT EDIT.
 // Run python tools/generate_common_scalar_bindings.py to regenerate.
-const CONTRACT_VERSION = "3.0.1";
+const CONTRACT_VERSION = "4.0.0";
 
 const patterns = Object.freeze({
-  Decimal: /^(?:0|[1-9][0-9]*(?:\.[0-9]*[1-9])?|0\.[0-9]*[1-9]|-(?:[1-9][0-9]*(?:\.[0-9]*[1-9])?|0\.[0-9]*[1-9]))$/,
-  Sequence: /^(0|[1-9][0-9]*)$/,
-  Digest: /^sha256:[0-9a-f]{64}$/,
-  CurrencyId: /^[A-Za-z0-9._:-]+$/,
-  UnitId: /^[A-Za-z0-9._:\/-]+$/,
+  Decimal: /^(?:0|[1-9][0-9]*(?:\.[0-9]*[1-9])?|0\.[0-9]*[1-9]|-(?:[1-9][0-9]*(?:\.[0-9]*[1-9])?|0\.[0-9]*[1-9]))(?![\s\S])/,
+  Sequence: /^(0|[1-9][0-9]*)(?![\s\S])/,
+  Digest: /^sha256:[0-9a-f]{64}(?![\s\S])/,
+  CurrencyId: /^[A-Za-z0-9._:-]+(?![\s\S])/,
+  UnitId: /^[A-Za-z0-9._:\/-]+(?![\s\S])/,
 });
 const lengths = Object.freeze({
   CurrencyId: Object.freeze([1, 32]),

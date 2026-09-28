@@ -897,12 +897,13 @@ class AblationQualificationAuthority:
     ) -> CanonicalAblationOutcomeEvidence:
         if not isinstance(reference, AblationOutcomeArtifactRef):
             raise TypeError("outcome_refs must contain AblationOutcomeArtifactRef")
-        manifest = self.artifact_store.load_manifest(reference.artifact_id)
+        manifest, data = self.artifact_store.read_authenticated_snapshot(
+            reference.artifact_id
+        )
         if manifest.get("sha256") != reference.sha256:
             raise ValueError("ablation outcome artifact digest mismatch")
         if manifest.get("media_type") != _ABLATION_OUTCOME_MEDIA_TYPE:
             raise ValueError("ablation outcome artifact media type is not qualified")
-        data = self.artifact_store.read_bytes(reference.artifact_id)
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError as error:

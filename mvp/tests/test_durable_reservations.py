@@ -1,5 +1,6 @@
 from contextlib import closing
 from decimal import Decimal
+from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -264,6 +265,7 @@ class DurableReservationBookTests(unittest.TestCase):
                 ),
                 client_order_id=unknown.client_order_id,
                 instrument="TEST",
+                side="BUY",
                 quantity=provider_quantity,
                 price=provider_price,
                 fee_amount=provider_fee_amount,
@@ -636,6 +638,7 @@ class DurableReservationBookTests(unittest.TestCase):
             },
             account_id="paper-account",
             instrument_version="TEST",
+            read_at=datetime(2026, 9, 25, 0, 1, 10, tzinfo=timezone.utc),
         )
         normalized_fill, = normalize_authenticated_executions(
             observation,

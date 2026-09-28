@@ -842,6 +842,12 @@ class AlpacaAdapterTests(unittest.TestCase):
                 client_ids_by_order_id={order_id: "at-plan-1"},
                 fees_by_activity_id={row["id"]: ("0", "USD")},
             )
+        from mvp.autotrade_mvp.provider_core import ProviderCoreError, _issue_normalized_execution_fill
+
+        with self.assertRaisesRegex(ProviderCoreError, "independently verified provider economics"):
+            _issue_normalized_execution_fill(
+                observation, provider_fill, normalizer_id="alpaca.trade-activities.v1"
+            )
         self.assertIsNone(provider_fill.position_side)
         projected = ProjectedFillEvidence.create(
             fill_id="alpaca-fill-plan-1",

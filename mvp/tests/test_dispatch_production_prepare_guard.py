@@ -5,6 +5,8 @@ from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.tests._durable_dispatch_test_support import durable_order_preparation
+from mvp.tests.test_durable_order_projection import provider_evidence
+from research.autotrade_research.artifacts.store import ArtifactStore
 
 
 ORDER_PREPARATION_BINDING = {
@@ -307,6 +309,7 @@ class ProductionPrepareGuardTests(unittest.TestCase):
     def test_pre_send_block_requires_exact_rearm_before_new_attempt_can_send(self):
         with TemporaryDirectory() as directory:
             store = self._store(directory)
+            artifacts = ArtifactStore(f"{directory}/artifacts")
             dispatcher = GuardedDispatcher(
                 store,
                 environment="PAPER",
@@ -414,7 +417,12 @@ class ProductionPrepareGuardTests(unittest.TestCase):
                     "client_order_id": client_order_id,
                     "provider_order_id": "provider-1",
                     "outcome": "ACCEPTED",
-                    "evidence": [],
+                    "evidence": [provider_evidence(
+                        artifacts, operation="ACKNOWLEDGE",
+                        request={"client_order_id": client_order_id, "provider_order_id": "provider-1",
+                                 "status": "ACCEPTED", "attempt_id": "third-rearmed"},
+                        observed_at="2026-09-27T18:00:03Z", provider_id="PROVIDER", account_id="acct",
+                    )],
                 }
 
             rearmed = dispatcher.dispatch(
@@ -439,11 +447,107 @@ class ProductionPrepareGuardTests(unittest.TestCase):
                 environment="PAPER",
                 host_id="owner-restarted",
                 owner_epoch="2",
+                evidence_artifact_store=artifacts,
             )
             restarted_orders.sync_submission_attempt(attempt_id="third-rearmed")
             snapshot = restarted_orders.order(rearmed.client_order_id).snapshot()
             self.assertEqual(snapshot.state, "WORKING")
             self.assertEqual(snapshot.submission_attempt_id, "third-rearmed")
+
+    def test_cancel_during_pre_send_wait_blocks_at_final_barrier_and_after_restart(self):
+        for environment in ("PAPER", "LIVE"):
+            for cancel_at in ("transport", "sender", "authority", "commit"):
+                with self.subTest(environment=environment, cancel_at=cancel_at), TemporaryDirectory() as directory:
+                    store = self._store(directory)
+                    dispatcher = GuardedDispatcher(
+                        store, environment=environment, account_id="acct",
+                        owner_token="owner", owner_epoch=1,
+                    )
+                    orders = DurableOrderBookProjection(
+                        store, provider_id="provider", account_id="acct", environment=environment,
+                        host_id="owner", owner_epoch="1",
+                    )
+                    prepared = []
+                    sent = []
+                    authority_calls = []
+                    caller_checks = []
+
+                    def prepare(client, attempt, intent, _provider, _request, binding, now):
+                        prepared.append(client)
+                        orders.create_order(
+                            event_key=f"dispatch-order:{attempt}", client_order_id=client,
+                            instrument=binding["instrument"], side=binding["side"],
+                            requested_quantity=binding["requested_quantity"],
+                            quantity_unit=binding["quantity_unit"], origin_intent_id=intent,
+                            committed_at=now,
+                        )
+
+                    def cancel():
+                        orders.request_cancel(
+                            event_key="cancel-before-send", client_order_id=prepared[0],
+                            command_id="cancel-command", committed_at="2026-09-28T17:00:01Z",
+                        )
+
+                    original_commit = store.commit_command
+
+                    def commit_with_interleaved_cancel(**kwargs):
+                        if cancel_at == "commit" and any(
+                            envelope["event_type"] == "SubmissionSending"
+                            for envelope, _topic in kwargs["events"]
+                        ):
+                            cancel()
+                        return original_commit(**kwargs)
+
+                    store.commit_command = commit_with_interleaved_cancel
+
+                    def sender(_owner, _epoch):
+                        if cancel_at == "sender":
+                            cancel()
+
+                    def authority(_hash, _now):
+                        authority_calls.append(True)
+                        if len(authority_calls) == 2 and cancel_at == "authority":
+                            cancel()
+                        return True, "allowed"
+
+                    def transport(client, _request, final_guard):
+                        if cancel_at == "transport":
+                            cancel()
+                        final_guard()
+                        sent.append(client)
+                        return {"provider_order_id": "unexpected"}
+
+                    args = dict(
+                        attempt_id="cancel-at-barrier", intent_id="intent-1", intent_hash="intent-hash",
+                        provider="provider", request={"quantity": "1"}, now="2026-09-28T17:00:00Z",
+                        authority_check=authority, sender_check=sender, transport_send=transport,
+                        order_preparation_binding=ORDER_PREPARATION_BINDING, prepare_order=prepare,
+                        order_preparation_check=lambda: caller_checks.append(True),
+                        final_barrier_clock=lambda: "2026-09-28T17:00:02Z",
+                    )
+                    outcome = dispatcher.dispatch(**args)
+                    self.assertEqual(outcome.status, "BLOCKED")
+                    expected_reason = (
+                        "journal_changed_during_final_send_validation" if cancel_at == "commit"
+                        else "durable_order_preparation_changed_at_final_barrier"
+                    )
+                    self.assertIn(expected_reason, outcome.reason)
+                    self.assertEqual(sent, [])
+                    self.assertEqual(caller_checks, [])
+                    self.assertEqual(len(prepared), 1)
+                    events = store.load_events("submission_attempt", dispatcher._aggregate_id(args["attempt_id"]))
+                    self.assertEqual([event["event_type"] for event in events],
+                                     ["SubmissionPrepared", "SubmissionBlocked"])
+                    before = store.current_journal_sequence()
+                    reopened = self._store(directory)
+                    restarted = GuardedDispatcher(
+                        reopened, environment=environment, account_id="acct",
+                        owner_token="owner", owner_epoch=1,
+                    )
+                    self.assertEqual(restarted.dispatch(**args).status, "BLOCKED")
+                    self.assertEqual(reopened.current_journal_sequence(), before)
+                    self.assertEqual(sent, [])
+                    self.assertEqual(len(prepared), 1)
 
     def test_simulation_keeps_prepare_order_optional(self):
         with TemporaryDirectory() as directory:

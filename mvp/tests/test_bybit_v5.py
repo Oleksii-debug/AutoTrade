@@ -44,8 +44,8 @@ from mvp.tests._durable_dispatch_test_support import durable_order_preparation
 READ_AT = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 
 
-def read_capability(*, account_id="paper-1", environment="PAPER", instrument_version="BTCUSDT@v1"):
-    observed_at = READ_AT - timedelta(hours=1)
+def read_capability(*, account_id="paper-1", environment="PAPER", instrument_version="BTCUSDT@v1", at=READ_AT):
+    observed_at = at - timedelta(hours=1)
     claims = tuple(
         CapabilityClaim(
             source=source,
@@ -55,7 +55,7 @@ def read_capability(*, account_id="paper-1", environment="PAPER", instrument_ver
             environment=environment,
             instrument_version=instrument_version,
             observed_at=observed_at,
-            expires_at=READ_AT + timedelta(hours=1),
+            expires_at=at + timedelta(hours=1),
             supported_order_types=frozenset({"LIMIT", "MARKET"}),
             time_in_force=frozenset({"GTC", "IOC"}),
             permission_scopes=frozenset({"ORDER.READ"}),
@@ -75,7 +75,7 @@ def read_capability(*, account_id="paper-1", environment="PAPER", instrument_ver
     return derive_capability_snapshot(
         snapshot_id=str(uuid4()),
         claims=claims,
-        observed_at=READ_AT,
+        observed_at=at,
         evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
     )
 
@@ -179,17 +179,19 @@ def bound_execution_response(
     environment="PAPER",
     instrument_version="BTCUSDT@v1",
     symbol=None,
+    read_at=READ_AT,
 ):
     query = prepare_authenticated_read_query(
         capability=read_capability(
             account_id=account_id,
             environment=environment,
             instrument_version=instrument_version,
+            at=read_at,
         ),
         surface=Surface.AUTHENTICATED_READ,
         endpoint="/v5/execution/list",
         query={"category": "spot", "limit": "100", **({"symbol": symbol} if symbol else {})},
-        at=READ_AT,
+        at=read_at,
         permission_scope="ORDER.READ",
     )
     raw = json.dumps(
@@ -203,7 +205,7 @@ def bound_execution_response(
         query_binding=query,
         http_status=200,
         response_bytes=raw,
-        observed_at=READ_AT,
+        observed_at=read_at,
     )
 
 

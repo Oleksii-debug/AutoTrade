@@ -546,6 +546,13 @@ class NormalizedExecutionFill:
             from .bybit_v5 import verify_normalized_execution
 
             verify_normalized_execution(self.observation, fill)
+        else:
+            # Scope/reference equality is not source economics. Other adapters
+            # still depend on caller-supplied fee/client/instrument joins; the
+            # generic issuer must not bypass their missing provenance gates.
+            raise ProviderCoreError(
+                "production normalized fill requires independently verified provider economics and joins"
+            )
         object.__setattr__(self, "normalizer_id", normalizer)
 
 

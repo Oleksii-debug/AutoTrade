@@ -113,6 +113,40 @@ class DispatchTests(unittest.TestCase):
                 self.assertEqual(len(outbound), 1)
                 self.assertEqual(reopened.current_journal_sequence(), before)
 
+    def test_committed_send_barrier_retry_is_not_a_second_send_permission(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store, environment="SIMULATION", account_id="acct", owner_token="owner",
+            )
+
+            def crash_after_marker(_client, _request, final_guard):
+                final_guard()
+                raise SimulatedProcessDeath("lost reply after durable send marker")
+
+            args = dict(
+                attempt_id="barrier-dedupe", intent_id="intent-1", intent_hash="h1",
+                provider="sim", request={}, now="2026-09-28T17:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=crash_after_marker,
+            )
+            with self.assertRaises(SimulatedProcessDeath):
+                dispatcher.dispatch(**args)
+            prepared, sending = store.load_events("submission_attempt", dispatcher._aggregate_id("barrier-dedupe"))
+            before = store.current_journal_sequence()
+            with self.assertRaisesRegex(DispatchBlocked, "send_barrier_already_committed"):
+                dispatcher._append(
+                    attempt_id="barrier-dedupe", event_type="SubmissionSending", version=2,
+                    payload=sending["payload"], now=args["now"],
+                    expected_journal_sequence=prepared["journal_sequence"],
+                )
+            self.assertEqual(store.current_journal_sequence(), before)
+            restarted = GuardedDispatcher(
+                self.store(directory), environment="SIMULATION", account_id="acct", owner_token="owner",
+            )
+            args["transport_send"] = lambda *_args: self.fail("restart must not resend")
+            self.assertEqual(restarted.dispatch(**args).status, "UNKNOWN")
+
     def test_dispatch_scope_is_required_and_separates_client_ids(self):
         with TemporaryDirectory() as directory:
             store = self.store(directory)

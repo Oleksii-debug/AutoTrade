@@ -213,3 +213,39 @@ After the dispatch retry repair, 173 dispatch/recovery/transport/Bybit tests pas
 The initial broad run in the resumed environment failed because jsonschema was
 missing; the pinned hash-checked development dependencies were installed before
 the successful rerun. Local .NET and real Windows/NVDA checks were not performed.
+
+### Final send cut and unqualified normalization admission (2026-09-28 UTC)
+
+The production preparation proof now runs again after the final sender and
+financial-authority checks, without repeating the order-mutation callback.
+It preserves the existing CREATE/REARM_SUBMISSION and PRE_SEND_ABORTED machinery.
+One global journal sequence is captured before final validation; the existing
+JournalStore.commit_command compare-and-append atomically records SubmissionSending
+and its outbox entry only if that cut is unchanged. A duplicate committed marker
+cannot grant a second send. This conservatively blocks on unrelated intervening
+journal writes too. It does not prove external process/credential fencing after
+the local send barrier, or bind the admitted risk intent to provider request bytes.
+
+Recorded PAPER/LIVE tests cancel during transport wait, sender check, authority
+check and the final commit seam. All cases preserve zero outbound sends; blocked
+restart is idempotent. A lost-reply send-marker retry remains UNKNOWN and never
+resends. Tests preserve the immutable provider-evidence requirements.
+
+The generic normalized-fill issuer now rejects non-Bybit providers until an
+independently verified source/joins implementation exists. This closes issuance
+through the generic helper for Kraken and intentionally-unqualified Alpaca;
+it does not implement or qualify their missing fee/client/instrument joins.
+Their parser-only paths remain available without production normalized authority.
+Bybit still re-derives economics through its canonical exact-response parser.
+
+Convergence base: 10ea8bdb6704a3ced5fbe20cc68d028202d291e2. Its persisted
+provider-fill reconciliation/release joins are retained. Three pre-existing
+fixture failures were independently reproduced on that pristine head and repaired:
+acknowledgment now has scoped ArtifactStore evidence; late fill observations have
+valid contemporaneous capabilities/time and matching BUY identity; the integration
+fixture binds its origin intent and expects idempotent local PRE_SEND_ABORTED,
+without inventing provider acceptance or fills.
+
+Verification: full composed MVP suite 2,522 tests, OK with one platform-specific
+skip; 90 contracts passed; 187 focused provider/accounting tests passed. Local
+.NET/Windows/NVDA and real-provider/release qualification remain unavailable.

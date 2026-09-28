@@ -487,13 +487,17 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
         self.assertEqual(fill.trade_time, "2026-09-24T20:00:00.123Z")
         self.assertEqual(fill.account_id, "paper-1")
         self.assertEqual(fill.environment, "PAPER")
-        normalized_fill, = normalize_authenticated_position_executions(
-            observation,
-            instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
-            execution_client_ids={"exec-1": "hedge-007"},
-        )
-        self.assertEqual(normalized_fill.provider_fill, fill)
-        self.assertEqual(normalized_fill.observation.response_bytes, observation.response_bytes)
+        from mvp.autotrade_mvp.provider_core import ProviderCoreError, _issue_normalized_execution_fill
+
+        with self.assertRaisesRegex(ProviderCoreError, "independently verified provider economics"):
+            normalize_authenticated_position_executions(
+                observation,
+                instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
+                execution_client_ids={"exec-1": "hedge-007"},
+            )
+        with self.assertRaisesRegex(ProviderCoreError, "independently verified provider economics"):
+            _issue_normalized_execution_fill(observation, fill, normalizer_id="unverified.provider.v1")
+
 
     def test_position_history_requires_exact_bound_endpoint(self):
         observation = futures_position_observation(

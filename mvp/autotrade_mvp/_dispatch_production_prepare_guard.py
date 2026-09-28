@@ -119,8 +119,9 @@ def install_production_prepare_guard() -> None:
             kwargs["prepare_order"] = invalid_prepare_order
             return original(self, *args, **kwargs)
 
-        @wraps(supplied)
-        def verified_prepare_order(
+        prepared_context = None
+
+        def verify_order(
             client_order_id: str,
             attempt_id: str,
             intent_id: str,
@@ -146,15 +147,6 @@ def install_production_prepare_guard() -> None:
                 raise _MissingDurableOrderPreparation(
                     "submission attempt lacks canonical order preparation binding hash"
                 )
-            supplied(
-                client_order_id,
-                attempt_id,
-                intent_id,
-                provider,
-                request,
-                scope,
-                prepared_at,
-            )
 
             # Lazy import avoids the durable projection's intentional import of
             # dispatch.submission_attempt_aggregate_id during module composition.
@@ -267,6 +259,25 @@ def install_production_prepare_guard() -> None:
                     "pre-send durable order must still be PENDING"
                 )
 
+        @wraps(supplied)
+        def verified_prepare_order(*context) -> None:
+            nonlocal prepared_context
+            _required_scope(context[5])
+            supplied(*context)
+            verify_order(*context)
+            prepared_context = context
+
+        def final_order_check() -> None:
+            if prepared_context is None:
+                raise _MissingDurableOrderPreparation(
+                    "canonical order preparation was not verified"
+                )
+            verify_order(*prepared_context)
+
+        # Always install our proof, even if a caller supplied a different check.
+        # This executes after sender and financial-authority checks at the final
+        # barrier, without invoking the mutation callback a second time.
+        kwargs["order_preparation_check"] = final_order_check
         kwargs["prepare_order"] = verified_prepare_order
         return original(self, *args, **kwargs)
 

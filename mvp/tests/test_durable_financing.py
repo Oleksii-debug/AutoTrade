@@ -8,6 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 import tempfile
 import unittest
+from typing import Mapping
 
 from mvp.autotrade_mvp.durable_financing import (
     DurableFinancingBook,
@@ -79,6 +80,8 @@ def bybit_activity_observation(
     *,
     observed_at: datetime,
     query_category: str = "linear",
+    account_type: str = "UNIFIED",
+    extra_query: Mapping[str, str] | None = None,
     capability_instrument_version: str | None = None,
 ):
     capability_observed = BASE - timedelta(minutes=5)
@@ -126,7 +129,11 @@ def bybit_activity_observation(
         capability=capability,
         surface=Surface.ACTIVITIES,
         endpoint="/v5/account/transaction-log",
-        query={"accountType": "UNIFIED", "category": query_category},
+        query={
+            "accountType": account_type,
+            "category": query_category,
+            **({} if extra_query is None else dict(extra_query)),
+        },
         at=BASE,
         permission_scope="ORDER.READ",
     )

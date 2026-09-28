@@ -12,6 +12,12 @@ workflow authority is rejected as well. A PR that deletes or renames away both a
 material absolute number and a material fraction of base-tree paths is blocked;
 copies do not count as source disappearance.
 
+Trusted scope approval is deliberately external to the candidate tree. The
+``pull_request_target`` workflow may consume an exact-head OWNER issue comment
+whose first line is ``AUTOTRADE_RECONVERGENCE_SCOPE_V1`` followed by one exact
+``head:`` line and explicit ``path:`` lines. The parser here validates that
+external record; PR body/title content remains non-authoritative.
+
 This directly protects against commits accidentally built from a stale or partial
 tree, candidate-controlled rewrites/spoofs of integration check authorities, and
 small unrelated changes hidden inside otherwise valid work.
@@ -27,6 +33,9 @@ import subprocess
 from typing import Iterable, Sequence
 
 from control.tools.registry_state import _normalized_scopes, path_covers
+
+TRUSTED_SCOPE_APPROVAL_MARKER = "AUTOTRADE_RECONVERGENCE_SCOPE_V1"
+_SHA40 = re.compile(r"^[0-9a-f]{40}$")
 
 PROTECTED_SENTINELS = frozenset(
     {
@@ -120,6 +129,50 @@ def _validate_changed_path(value: object, *, name: str) -> str:
     if any(part in {"", ".", ".."} for part in value.split("/")):
         raise ValueError(f"{name} must not contain empty/dot path segments")
     return value
+
+
+def parse_trusted_scope_approval(
+    body: object,
+    *,
+    expected_head_sha: str,
+) -> tuple[str, ...] | None:
+    """Parse one external exact-head scope approval comment.
+
+    A comment is unrelated when its first line is not the version marker and is
+    ignored by returning ``None``. A marked comment is an attempted authority
+    record: malformed shape, stale head identity, duplicate paths, directory-like
+    spellings, or empty scope all fail closed with ``ValueError``.
+    """
+
+    if not isinstance(body, str):
+        return None
+    lines = body.splitlines()
+    if not lines or lines[0].strip() != TRUSTED_SCOPE_APPROVAL_MARKER:
+        return None
+    if not _SHA40.fullmatch(expected_head_sha):
+        raise ValueError("expected approval head must be a lowercase 40-hex SHA")
+    if len(lines) < 3 or not lines[1].startswith("head: "):
+        raise ValueError("trusted scope approval requires one exact head line")
+    approved_head = lines[1].removeprefix("head: ").strip()
+    if approved_head != expected_head_sha:
+        raise ValueError("trusted scope approval is stale for this exact head")
+
+    paths: list[str] = []
+    for line in lines[2:]:
+        if not line.startswith("path: "):
+            raise ValueError("trusted scope approval permits only path lines after head")
+        path = _validate_changed_path(
+            line.removeprefix("path: ").strip(),
+            name="approved scope path",
+        )
+        if path.endswith("/"):
+            raise ValueError("approved scope path must name an exact repository path")
+        paths.append(path)
+    if not paths:
+        raise ValueError("trusted scope approval must contain at least one exact path")
+    if len(set(paths)) != len(paths):
+        raise ValueError("trusted scope approval must not repeat paths")
+    return tuple(paths)
 
 
 def _validated_change(change: Change) -> Change:
@@ -408,14 +461,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
-    allowed_scopes = args.allowed_scope
 
     assessment = assess_git_revisions(
         args.base,
         args.head,
         max_deletions=args.max_deletions,
         max_deleted_fraction=args.max_deleted_fraction,
-        allowed_scopes=allowed_scopes,
+        allowed_scopes=args.allowed_scope,
     )
     print(
         "Reconvergence tree guard: "

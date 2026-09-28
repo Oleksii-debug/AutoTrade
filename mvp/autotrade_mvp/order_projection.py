@@ -338,6 +338,7 @@ class OrderProjection:
             active=False,
             provider_revision=provider_revision,
             correction_fill_id=correction_fill_id,
+            correction_reference=correction_reference,
         )
 
     def correct_fill(
@@ -348,6 +349,7 @@ class OrderProjection:
         price,
         provider_revision: str,
         correction_fill_id: str | None = None,
+        correction_reference: str | None = None,
     ) -> bool:
         fid = _text(fill_id, name="fill_id")
         existing = self._fills.get(fid)

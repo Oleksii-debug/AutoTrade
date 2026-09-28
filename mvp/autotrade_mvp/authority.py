@@ -596,6 +596,46 @@ def _risk_policy_fingerprint(policy: RiskPolicy) -> str:
     return _risk_object_fingerprint(policy)
 
 
+def _provider_domain(
+    *,
+    provider_id: str,
+    environment: str,
+    provider_environment: str | None,
+    name: str,
+) -> str:
+    provider = _text(provider_id, name=f"{name} provider_id").upper()
+    runtime_environment = _text(
+        environment, name=f"{name} environment"
+    ).upper()
+    normalized = (
+        runtime_environment
+        if provider_environment is None
+        else _text(
+            provider_environment,
+            name=f"{name} provider_environment",
+        ).upper()
+    )
+    if provider == "BYBIT":
+        if provider_environment is None:
+            raise ValueError(
+                f"{name} BYBIT requires explicit provider_environment"
+            )
+        if normalized not in {"MAINNET", "TESTNET", "DEMO"}:
+            raise ValueError(
+                f"{name} BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
+            )
+        if (
+            runtime_environment == "LIVE" and normalized != "MAINNET"
+        ) or (
+            runtime_environment == "PAPER"
+            and normalized not in {"TESTNET", "DEMO"}
+        ):
+            raise ValueError(
+                f"{name} BYBIT provider_environment does not match runtime environment"
+            )
+    return normalized
+
+
 @dataclass(frozen=True)
 class RiskAuthorityRequest:
     """Scope presented to the service-owned authoritative risk resolver.
@@ -617,6 +657,7 @@ class RiskAuthorityRequest:
     authority_policy_id: str
     authority_policy_version: int
     evaluated_at: str
+    provider_environment: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.risk_intent, RiskIntent):
@@ -630,6 +671,12 @@ class RiskAuthorityRequest:
         provider = _text(
             self.provider_id, name="risk authority provider_id"
         ).upper()
+        provider_environment = _provider_domain(
+            provider_id=provider,
+            environment=environment,
+            provider_environment=self.provider_environment,
+            name="risk authority",
+        )
         if type(self.journal_sequence_cut) is not int or self.journal_sequence_cut < 0:
             raise ValueError("journal_sequence_cut must be a non-negative integer")
         if type(self.reservation_version) is not int or self.reservation_version < 0:
@@ -644,6 +691,9 @@ class RiskAuthorityRequest:
         object.__setattr__(self, "account_id", account)
         object.__setattr__(self, "environment", environment)
         object.__setattr__(self, "provider_id", provider)
+        object.__setattr__(
+            self, "provider_environment", provider_environment
+        )
         object.__setattr__(
             self,
             "instrument_version",
@@ -707,6 +757,7 @@ class AuthoritativeRiskSnapshot:
     evaluated_at: str
     valid_until: str
     evidence_refs: Mapping[str, str]
+    provider_environment: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.context, RiskContext):
@@ -723,6 +774,12 @@ class AuthoritativeRiskSnapshot:
         provider = _text(
             self.provider_id, name="authoritative risk provider_id"
         ).upper()
+        provider_environment = _provider_domain(
+            provider_id=provider,
+            environment=environment,
+            provider_environment=self.provider_environment,
+            name="authoritative risk",
+        )
         if type(self.journal_sequence_cut) is not int or self.journal_sequence_cut < 0:
             raise ValueError("journal_sequence_cut must be a non-negative integer")
         if type(self.reservation_version) is not int or self.reservation_version < 0:
@@ -806,6 +863,9 @@ class AuthoritativeRiskSnapshot:
         object.__setattr__(self, "environment", environment)
         object.__setattr__(self, "provider_id", provider)
         object.__setattr__(
+            self, "provider_environment", provider_environment
+        )
+        object.__setattr__(
             self,
             "instrument_version",
             _instrument_identity(
@@ -861,6 +921,7 @@ class AuthoritativeRiskSnapshot:
             "account_id": self.account_id,
             "environment": self.environment,
             "provider_id": self.provider_id,
+            "provider_environment": self.provider_environment,
             "instrument": {
                 "instrument_id": self.instrument_version.instrument_id,
                 "version": self.instrument_version.version,
@@ -971,6 +1032,7 @@ class AuthorityService:
             request.account_id,
             request.environment,
             request.provider_id,
+            request.provider_environment,
             request.instrument_version,
             request.capability_snapshot_id,
             request.reconciliation_checkpoint_event_id,
@@ -985,6 +1047,7 @@ class AuthorityService:
             snapshot.account_id,
             snapshot.environment,
             snapshot.provider_id,
+            snapshot.provider_environment,
             snapshot.instrument_version,
             snapshot.capability_snapshot_id,
             snapshot.reconciliation_checkpoint_event_id,
@@ -2632,14 +2695,24 @@ class AuthorityService:
             raise ValueError(
                 "BYBIT admission requires explicit reservation_provider_environment"
             )
-        if (
-            snapshot_provider_id == "BYBIT"
-            and snapshot_provider_environment
-            not in {"MAINNET", "TESTNET", "DEMO"}
-        ):
-            raise ValueError(
-                "BYBIT reservation_provider_environment must be MAINNET, TESTNET or DEMO"
-            )
+        if snapshot_provider_id == "BYBIT":
+            if snapshot_provider_environment not in {"MAINNET", "TESTNET", "DEMO"}:
+                raise ValueError(
+                    "BYBIT reservation_provider_environment must be MAINNET, TESTNET or DEMO"
+                )
+            runtime_environment = _text(
+                environment, name="environment"
+            ).upper()
+            if (
+                runtime_environment == "LIVE"
+                and snapshot_provider_environment != "MAINNET"
+            ) or (
+                runtime_environment == "PAPER"
+                and snapshot_provider_environment not in {"TESTNET", "DEMO"}
+            ):
+                raise ValueError(
+                    "BYBIT reservation_provider_environment does not match runtime environment"
+                )
         snapshot_checkpoint_event_id = _text(
             reservation_checkpoint_event_id,
             name="reservation_checkpoint_event_id",
@@ -2662,6 +2735,7 @@ class AuthorityService:
                 account_id=account_id,
                 environment=environment,
                 provider_id=snapshot_provider_id,
+                provider_environment=snapshot_provider_environment,
                 instrument_version=snapshot_instrument,
                 capability_snapshot_id=capability,
                 reconciliation_checkpoint_event_id=(
@@ -2761,6 +2835,8 @@ class AuthorityService:
                 != _text(account_id, name="account_id")
                 or durable_snapshot.get("environment")
                 != _text(environment, name="environment").upper()
+                or durable_snapshot.get("provider_environment")
+                != snapshot_provider_environment
                 or durable_snapshot.get("capability_snapshot_id") != capability
                 or durable_snapshot.get("reconciliation_checkpoint_event_id")
                 != snapshot_checkpoint_event_id

@@ -392,6 +392,19 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
                     string operationId = CanonicalGuid(
                         RequiredString(result, "operation_id"),
                         "operation_id");
+                    string expectedOperationId = HostOperationIdentity.Derive(
+                        pending.AccountId,
+                        pending.Environment,
+                        pending.CommandId);
+                    if (!string.Equals(
+                            operationId,
+                            expectedOperationId,
+                            StringComparison.Ordinal))
+                    {
+                        throw new EmergencyCommandUncertainException(
+                            pending.CommandId,
+                            "The host response operation identity was not derived from the unresolved command scope.");
+                    }
                     try
                     {
                         EmergencyOperationStatus operation = await GetOperationAsync(

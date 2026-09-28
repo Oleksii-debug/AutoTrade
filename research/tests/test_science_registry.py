@@ -246,6 +246,50 @@ class ScientificRegistryTests(unittest.TestCase):
                         0,
                     )
 
+    def test_corrupt_trial_population_cannot_unlock_holdout(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "science.sqlite3"
+            store = ScientificRegistry(path)
+            value = protocol()
+            value["trial_budget"] = 1
+            registered = store.register_protocol(value)
+            store.record_trial(
+                registered.protocol_id,
+                status="COMPLETED",
+                payload={"trial_index": 0, "result": "registered"},
+                trial_id="11111111-1111-4111-8111-111111111111",
+            )
+
+            import sqlite3
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "UPDATE trials SET payload_json=? WHERE trial_id=?",
+                    (
+                        '{"result":"tampered","trial_index":0}',
+                        "11111111-1111-4111-8111-111111111111",
+                    ),
+                )
+                connection.commit()
+
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "trial population integrity mismatch",
+            ):
+                store.register_evaluation(
+                    registered.protocol_id,
+                    holdout_id="holdout-corrupt-trials",
+                    holdout_identity=holdout_identity(),
+                    result={"score": "0.1"},
+                )
+
+            self.assertEqual(
+                store.holdout_access_count(
+                    registered.protocol_id,
+                    "holdout-corrupt-trials",
+                ),
+                0,
+            )
+
     def test_full_trial_closure_allows_locked_evaluation_without_early_stop_authority(self):
         with TemporaryDirectory() as directory:
             store = ScientificRegistry(Path(directory) / "science.sqlite3")

@@ -290,6 +290,23 @@ Require(!zeroFeeEquivalent.HasOrderFee, "LEAN OrderFee.Zero must canonicalize as
 Require(zeroFeeEquivalent.FeeAmount == "0", "Canonical zero fee amount changed.");
 Require(zeroFeeEquivalent.FeeCurrency == string.Empty, "Canonical zero fee currency must be empty.");
 
+ExpectFailure<ArgumentException>(
+    () => callbacks.Observe(new OrderEvent
+    {
+        OrderId = 43,
+        Id = 1,
+        Symbol = symbol,
+        UtcTime = instant.AddMilliseconds(2),
+        Status = OrderStatus.Filled,
+        Direction = OrderDirection.Buy,
+        FillQuantity = 1m,
+        FillPrice = 451.125m,
+        FillPriceCurrency = "USD",
+        OrderFee = new OrderFee(new CashAmount(0.01m, Currencies.NullCurrency)),
+        Quantity = 1m
+    }),
+    "non-zero fee in LEAN null currency must fail closed");
+
 var zeroFeeCheckpoint = zeroFeeCallbacks.ExportRestartState();
 var zeroFeeResumed = LeanCallbackCharacterizer.RestoreRestartState(zeroFeeCheckpoint);
 var zeroFeeAfterRestart = zeroFeeResumed.Observe(new OrderEvent
@@ -454,7 +471,7 @@ ExpectFailure<InvalidDataException>(
     "tampered LEAN callback restart economics must fail integrity verification");
 
 var oldSchemaCheckpoint = restartCheckpoint.Replace(
-    "\"SchemaVersion\":\"2.1.0\"",
+    "\"SchemaVersion\":\"2.2.0\"",
     "\"SchemaVersion\":\"2.1.0\"",
     StringComparison.Ordinal);
 Require(
@@ -486,8 +503,8 @@ ExpectFailure<InvalidDataException>(
     "unknown callback restart state fields must fail closed");
 
 var checkpointWithDuplicateTopLevel = restartCheckpoint.Replace(
-    "\"SchemaVersion\":\"2.1.0\"",
-    "\"SchemaVersion\":\"2.1.0\",\"SchemaVersion\":\"2.1.0\"",
+    "\"SchemaVersion\":\"2.2.0\"",
+    "\"SchemaVersion\":\"2.2.0\",\"SchemaVersion\":\"2.2.0\"",
     StringComparison.Ordinal);
 Require(
     checkpointWithDuplicateTopLevel != restartCheckpoint,

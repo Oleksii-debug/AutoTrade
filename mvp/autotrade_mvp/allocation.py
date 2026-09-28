@@ -1583,6 +1583,8 @@ class ImmutableAllocationEvidence:
 class EvidenceBoundObjectiveAllocationResult:
     objective: ObjectiveAllocationResult
     decision_digest: str
+    policy_config_digest: str
+    objective_search_config_digest: str
     evidence_refs: tuple[tuple[str, str], ...]
     environment: str
     policy_version: str
@@ -1744,12 +1746,55 @@ def _candidate_evidence_matches(
     )
 
 
+_EXECUTION_SEARCH_ALGORITHM = "bounded-execution-state-enumeration-v1"
+_OBJECTIVE_SEARCH_ALGORITHM = "complete-subset-enumeration-v4"
+
+
+def _allocation_policy_digest(policy: AllocationPolicy) -> str:
+    if not isinstance(policy, AllocationPolicy):
+        raise TypeError("policy must be an AllocationPolicy")
+    payload = {
+        "execution_search_algorithm": _EXECUTION_SEARCH_ALGORITHM,
+        "cash_available": policy.cash_available,
+        "max_gross_notional": policy.max_gross_notional,
+        "max_net_notional": policy.max_net_notional,
+        "max_symbol_notional": policy.max_symbol_notional,
+        "max_total_cost": policy.max_total_cost,
+        "max_stress_loss": policy.max_stress_loss,
+        "stress_loss_penalty_rate": policy.stress_loss_penalty_rate,
+        "max_turnover_notional": policy.max_turnover_notional,
+        "minimum_cash_reserve": policy.minimum_cash_reserve,
+        "max_iterations": policy.max_iterations,
+        "min_scale_tolerance": policy.min_scale_tolerance,
+        "require_adverse_stress_evidence": policy.require_adverse_stress_evidence,
+        "require_fresh_stress_evidence": policy.require_fresh_stress_evidence,
+        "max_execution_states": policy.max_execution_states,
+    }
+    return sha256(_canonical_evidence_json(payload).encode("utf-8")).hexdigest()
+
+
+def _objective_search_config_digest(max_candidate_sets: int) -> str:
+    if (
+        not isinstance(max_candidate_sets, int)
+        or isinstance(max_candidate_sets, bool)
+        or max_candidate_sets < 1
+    ):
+        raise ValueError("max_candidate_sets must be a positive integer")
+    payload = {
+        "objective_search_algorithm": _OBJECTIVE_SEARCH_ALGORITHM,
+        "max_candidate_sets": max_candidate_sets,
+    }
+    return sha256(_canonical_evidence_json(payload).encode("utf-8")).hexdigest()
+
+
 def _allocation_decision_digest(
     result: ObjectiveAllocationResult,
     *,
     evidence_refs: Sequence[tuple[str, str]],
     environment: str,
     policy_version: str,
+    policy_config_digest: str,
+    objective_search_config_digest: str,
     decision_time: str,
     provider_id: str,
     account_id: str,
@@ -1765,6 +1810,8 @@ def _allocation_decision_digest(
     payload = {
         "environment": environment,
         "policy_version": policy_version,
+        "policy_config_digest": policy_config_digest,
+        "objective_search_config_digest": objective_search_config_digest,
         "decision_time": decision_time,
         "provider_id": provider_id,
         "account_id": account_id,
@@ -2188,11 +2235,17 @@ def allocate_evidence_bound_objective_targets(
     )
     bound_instrument_versions = tuple(sorted(instrument_versions.items()))
     bound_capability_snapshot_ids = tuple(sorted(capability_snapshot_ids.items()))
+    policy_config_digest = _allocation_policy_digest(policy)
+    objective_search_config_digest = _objective_search_config_digest(
+        max_candidate_sets
+    )
     decision_digest = _allocation_decision_digest(
         objective_result,
         evidence_refs=evidence_refs,
         environment=normalized_environment,
         policy_version=normalized_policy_version,
+        policy_config_digest=policy_config_digest,
+        objective_search_config_digest=objective_search_config_digest,
         decision_time=normalized_decision_time,
         provider_id=provider_id,
         account_id=account_id,
@@ -2208,6 +2261,8 @@ def allocate_evidence_bound_objective_targets(
     return EvidenceBoundObjectiveAllocationResult(
         objective=objective_result,
         decision_digest=decision_digest,
+        policy_config_digest=policy_config_digest,
+        objective_search_config_digest=objective_search_config_digest,
         evidence_refs=evidence_refs,
         environment=normalized_environment,
         policy_version=normalized_policy_version,
@@ -2248,6 +2303,8 @@ def revalidate_evidence_bound_allocation(
     environment: str,
     as_of: str,
     current_policy_version: str,
+    current_policy: AllocationPolicy,
+    current_max_candidate_sets: int,
     current_provider_id: str,
     current_instrument_versions: Mapping[str, str],
     current_capability_snapshot_ids: Mapping[str, str],
@@ -2275,6 +2332,13 @@ def revalidate_evidence_bound_allocation(
     point = point_instant.isoformat().replace("+00:00", "Z")
     if _text(current_policy_version, name="current_policy_version") != result.policy_version:
         raise ValueError("policy version changed after allocation proposal")
+    if _allocation_policy_digest(current_policy) != result.policy_config_digest:
+        raise ValueError("allocation policy configuration changed after proposal")
+    if (
+        _objective_search_config_digest(current_max_candidate_sets)
+        != result.objective_search_config_digest
+    ):
+        raise ValueError("objective search configuration changed after proposal")
     if _text(current_provider_id, name="current_provider_id") != result.provider_id:
         raise ValueError("provider identity changed after allocation proposal")
     if _normalize_current_scope_mapping(
@@ -2337,6 +2401,8 @@ def revalidate_evidence_bound_allocation(
         evidence_refs=result.evidence_refs,
         environment=result.environment,
         policy_version=result.policy_version,
+        policy_config_digest=result.policy_config_digest,
+        objective_search_config_digest=result.objective_search_config_digest,
         decision_time=result.decision_time,
         provider_id=result.provider_id,
         account_id=result.account_id,

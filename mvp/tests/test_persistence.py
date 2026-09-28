@@ -2643,6 +2643,72 @@ class JournalStoreTests(unittest.TestCase):
                     state_version=1,
                 )
 
+    def test_record_command_replay_rejects_changed_command_id(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            request = {"action": "TEST"}
+            result = {"status": "ACCEPTED"}
+            store.record_command(
+                command_id="cmd-original",
+                actor="alice",
+                environment="PAPER",
+                idempotency_key="stable-key",
+                request=request,
+                result=result,
+                state_version=0,
+            )
+            reopened = JournalStore(path)
+            with self.assertRaisesRegex(ValueError, "different command_id"):
+                reopened.record_command(
+                    command_id="cmd-forged-retry",
+                    actor="alice",
+                    environment="PAPER",
+                    idempotency_key="stable-key",
+                    request=request,
+                    result={"status": "MUST_NOT_REPLACE"},
+                    state_version=1,
+                )
+            saved, inserted = reopened.record_command(
+                command_id="cmd-original",
+                actor="alice",
+                environment="PAPER",
+                idempotency_key="stable-key",
+                request=request,
+                result={"status": "MUST_NOT_REPLACE"},
+                state_version=1,
+            )
+            self.assertFalse(inserted)
+            self.assertEqual(saved, result)
+
+    def test_commit_command_replay_rejects_changed_command_id(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            request = {"action": "ORDER.SUBMIT", "intent_id": "intent-1"}
+            result = {"status": "ACCEPTED"}
+            args = {
+                "actor": "alice",
+                "environment": "PAPER",
+                "command_id": "cmd-original",
+                "idempotency_key": "stable-key",
+                "request": request,
+                "result": result,
+                "state_version": 1,
+                "events": [(event(), "events")],
+                "expected_journal_sequence": 0,
+            }
+            store.commit_command(**args)
+            reopened = JournalStore(path)
+            with self.assertRaisesRegex(ValueError, "different command_id"):
+                reopened.commit_command(
+                    **{**args, "command_id": "cmd-forged-retry"}
+                )
+            saved, inserted, appended = reopened.commit_command(**args)
+            self.assertFalse(inserted)
+            self.assertEqual(saved, result)
+            self.assertEqual(appended, ())
+
     def test_record_and_commit_command_effect_kinds_cannot_alias(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from control.tools.reconvergence_integrity import (
+    BOOTSTRAP_TRUST_ROOTS,
     Change,
     INTEGRATION_HARNESS_ROOTS,
     TRUSTED_SCOPE_APPROVAL_MARKER,
@@ -58,6 +59,11 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
             "tools/check_nvda_qualification.py",
             "tools/verify.py",
             "tools/write_ci_evidence.py",
+            "tests/Contracts.DotNet/Contracts.DotNet.csproj",
+            "tests/Contracts.DotNet/Program.cs",
+            "tests/Desktop.Client/Desktop.Client.csproj",
+            "tests/Desktop.Client/Program.cs",
+            "contracts/fixtures/common-scalars.corpus.json",
         }
         self.assertEqual(INTEGRATION_HARNESS_ROOTS, expected)
 
@@ -72,6 +78,80 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
                 self.assertEqual(
                     result.protected_violations,
                     (f"{path} (unauthorized trust-root modification)",),
+                )
+
+    def test_bootstrap_trust_roots_are_exact_and_fail_closed(self):
+        expected = {
+            "control/__init__.py",
+            "control/tools/__init__.py",
+            "control/tools/reconvergence_integrity.py",
+            "control/tools/registry_state.py",
+        }
+        self.assertEqual(BOOTSTRAP_TRUST_ROOTS, expected)
+
+        for path in (
+            "control/tools/__init__.py",
+            "control/tools/registry_state.py",
+        ):
+            with self.subTest(path=path):
+                result = assess_reconvergence(
+                    base_paths=[path, "owned/change.py"],
+                    changes=[Change(status="M", path=path)],
+                )
+                self.assertFalse(result.allowed)
+                self.assertEqual(
+                    result.protected_violations,
+                    (f"{path} (unauthorized trust-root modification)",),
+                )
+
+        created = assess_reconvergence(
+            base_paths=["control/tools/registry_state.py", "owned/change.py"],
+            changes=[Change(status="A", path="control/__init__.py")],
+        )
+        self.assertFalse(created.allowed)
+        self.assertEqual(
+            created.protected_violations,
+            ("control/__init__.py (unauthorized bootstrap trust-root creation)",),
+        )
+
+    def test_exact_scope_can_authorize_bootstrap_trust_root_evolution(self):
+        path = "control/__init__.py"
+        result = assess_reconvergence(
+            base_paths=["control/tools/registry_state.py", "owned/change.py"],
+            changes=[Change(status="A", path=path)],
+            allowed_scopes=(path,),
+        )
+        self.assertTrue(result.allowed)
+        self.assertEqual(result.protected_violations, ())
+        self.assertEqual(result.scope_violations, ())
+
+    def test_fixed_verifier_authorities_cannot_be_deleted_or_renamed(self):
+        for path in (
+            "tests/Contracts.DotNet/Program.cs",
+            "tests/Desktop.Client/Program.cs",
+            "contracts/fixtures/common-scalars.corpus.json",
+        ):
+            with self.subTest(path=path):
+                deleted = assess_reconvergence(
+                    base_paths=[path, "owned/change.py"],
+                    changes=[Change(status="D", path=path)],
+                )
+                self.assertFalse(deleted.allowed)
+                self.assertIn(path, deleted.protected_deletions)
+
+                renamed = assess_reconvergence(
+                    base_paths=[path, "owned/change.py"],
+                    changes=[
+                        Change(
+                            status="R100",
+                            previous_path=path,
+                            path=f"{path}.old",
+                        )
+                    ],
+                )
+                self.assertFalse(renamed.allowed)
+                self.assertTrue(
+                    any(path in item for item in renamed.protected_violations)
                 )
 
     def test_new_workflow_cannot_spoof_required_check_authority(self):

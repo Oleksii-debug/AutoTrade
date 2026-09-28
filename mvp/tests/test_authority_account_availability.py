@@ -329,6 +329,8 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 reservation_provider_environment="TESTNET",
             )
             self.assertEqual(record.outcome, "ADMITTED")
+            self.assertEqual(record.provider_id, "BYBIT")
+            self.assertEqual(record.provider_environment, "TESTNET")
             risk_events = store.load_events(
                 "risk_decision",
                 record.risk_decision_id,
@@ -342,9 +344,31 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 "TESTNET",
             )
 
+            restarted_store = JournalStore(f"{directory}/journal.sqlite3")
+            restarted_authority = AuthorityService(restarted_store)
+            restarted_reservations = DurableReservationBook(
+                restarted_store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            replay = _admit(
+                restarted_authority,
+                restarted_reservations,
+                checkpoint,
+                command_id="bybit-testnet-command",
+                idempotency_key="bybit-testnet-command",
+                admission_id="bybit-testnet-admission",
+                reservation_id="bybit-testnet-reservation",
+                reservation_provider_id="BYBIT",
+                reservation_provider_environment="TESTNET",
+            )
+            self.assertEqual(replay.provider_id, "BYBIT")
+            self.assertEqual(replay.provider_environment, "TESTNET")
+            self.assertEqual(replay, record)
+
             with self.assertRaisesRegex(
                 AuthorityConflict,
-                "availability evidence changed",
+                "another financial command",
             ):
                 _admit(
                     authority,

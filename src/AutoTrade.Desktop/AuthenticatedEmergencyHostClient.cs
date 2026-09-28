@@ -686,6 +686,11 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         string eventCursor = CanonicalSequence(
             RequiredString(value, "event_cursor"),
             "event_cursor");
+        if (!string.Equals(stateVersion, eventCursor, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "Host snapshot state_version and event_cursor must identify the same canonical host state.");
+        }
         DateTimeOffset serverObservedAt =
             RequiredUtcInstant(value, "server_time");
 
@@ -731,6 +736,11 @@ public sealed class AuthenticatedEmergencyHostClient : IEmergencyHostClient
         }
 
         string hostFreshness = RequiredString(freshness, "host");
+        if (hostFreshness is not ("CURRENT" or "STALE"))
+        {
+            throw new InvalidOperationException(
+                "Host snapshot connection_freshness.host is not canonical.");
+        }
         DateTimeOffset freshnessObservedAt =
             RequiredUtcInstant(freshness, "as_of");
         bool isCurrent = string.Equals(

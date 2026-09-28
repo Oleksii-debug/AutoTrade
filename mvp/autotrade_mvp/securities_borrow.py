@@ -672,6 +672,43 @@ class DurableBorrowRecallProjection:
             raise KeyError(rid)
         return recall.quantity - self._resolved.get(rid, Decimal("0"))
 
+    def remaining_at(self, recall_id: str, now: str) -> Decimal:
+        """Project one recall at a financial decision cut.
+
+        A provider resolution cannot release short authority before it was both
+        effective and observed. Historical/future evidence remains durable; it
+        simply has no authority at an earlier cut.
+        """
+        rid = _text(recall_id, name="recall_id")
+        recall = self._recalls.get(rid)
+        if recall is None:
+            raise KeyError(rid)
+        decision_time = _dt(_instant(now, name="now"))
+        resolved = Decimal("0")
+        for evidence in self._resolutions.values():
+            if evidence.recall_id != rid:
+                continue
+            if (
+                _dt(evidence.effective_at) <= decision_time
+                and _dt(evidence.observed_at) <= decision_time
+            ):
+                resolved += evidence.resolved_quantity
+        return recall.quantity - resolved
+
+    def active_quantity_at(self, now: str) -> Decimal:
+        return sum(
+            (self.remaining_at(rid, now) for rid in self._recalls),
+            Decimal("0"),
+        )
+
+    def active_recall_ids_at(self, now: str) -> tuple[str, ...]:
+        return tuple(
+            sorted(rid for rid in self._recalls if self.remaining_at(rid, now) > 0)
+        )
+
+    def active_blocking_resources_at(self, now: str) -> tuple[str, ...]:
+        return (self.resource_key,) if self.active_quantity_at(now) > 0 else ()
+
     @property
     def active_quantity(self) -> Decimal:
         return sum((self.remaining(rid) for rid in self._recalls), Decimal("0"))

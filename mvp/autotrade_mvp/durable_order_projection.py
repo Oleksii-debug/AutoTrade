@@ -1279,8 +1279,14 @@ class DurableOrderBookProjection:
                 raise OrderProjectionConflict(
                     "pre-send rearm submission identity differs from canonical order"
                 )
-        old_binding = old_prepared.get("order_preparation_binding_hash")
-        new_binding = new_prepared.get("order_preparation_binding_hash")
+        old_binding = old_prepared.get(
+            "order_preparation_binding_hash",
+            old_prepared.get("submission_scope_hash"),
+        )
+        new_binding = new_prepared.get(
+            "order_preparation_binding_hash",
+            new_prepared.get("submission_scope_hash"),
+        )
         if (
             not isinstance(old_binding, str)
             or not old_binding
@@ -1508,7 +1514,10 @@ class DurableOrderBookProjection:
                         "blocked submission cannot follow send-start"
                     )
                 terminal_seen = True
-                binding_hash = prepared_payload.get("order_preparation_binding_hash")
+                binding_hash = prepared_payload.get(
+                    "order_preparation_binding_hash",
+                    prepared_payload.get("submission_scope_hash"),
+                )
                 origin_intent = prepared_payload.get("intent_id")
                 if not isinstance(binding_hash, str) or not binding_hash:
                     raise OrderProjectionConflict(

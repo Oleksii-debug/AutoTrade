@@ -92,7 +92,7 @@ class JournalStore:
     publication intent; a separate qualified dispatcher must perform delivery.
     """
 
-    SCHEMA_VERSION = 8
+    SCHEMA_VERSION = 9
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -243,6 +243,17 @@ class JournalStore:
             # only derived checkpoints and rebuild them from the authoritative
             # event journal under the v8 digest semantics.
             return ("DELETE FROM projection_checkpoints",)
+        if version == 9:
+            # Pre-v9 command rows do not prove whether they came from the
+            # result-only API or from an atomic event-batch commit. Preserve them
+            # as explicitly ambiguous instead of inventing transactional proof.
+            return (
+                "ALTER TABLE command_dedupe ADD COLUMN effect_kind TEXT",
+                "ALTER TABLE command_dedupe ADD COLUMN effect_json TEXT",
+                "ALTER TABLE command_dedupe ADD COLUMN effect_hash TEXT",
+                "UPDATE command_dedupe SET effect_kind = 'LEGACY_UNKNOWN' "
+                "WHERE effect_kind IS NULL",
+            )
         raise ValueError(f"Unsupported journal migration version: {version}")
 
     @classmethod
@@ -255,6 +266,8 @@ class JournalStore:
             command_columns.update({"actor", "environment"})
         if cls.SCHEMA_VERSION >= 5:
             command_columns.add("result_hash")
+        if cls.SCHEMA_VERSION >= 9:
+            command_columns.update({"effect_kind", "effect_json", "effect_hash"})
         required = {
             "schema_migrations": frozenset({"version", "applied_at"}),
             "events": frozenset({
@@ -2011,6 +2024,117 @@ class JournalStore:
         except (json.JSONDecodeError, TypeError) as error:
             raise ValueError("command result is not valid JSON") from error
 
+    @staticmethod
+    def _require_command_effect_kind(row: sqlite3.Row, expected: str) -> None:
+        kind = row["effect_kind"]
+        if kind == "LEGACY_UNKNOWN":
+            raise ValueError(
+                "legacy command history has ambiguous transactional effect; "
+                "use a new idempotency key"
+            )
+        if kind != expected:
+            raise ValueError(
+                "idempotency_key belongs to a different command effect kind"
+            )
+
+    @staticmethod
+    def _event_batch_effect(prepared: list[dict[str, Any]]) -> tuple[str, str]:
+        effect = {
+            "events": [
+                {
+                    "event_id": item["event_id"],
+                    "aggregate_type": item["aggregate_type"],
+                    "aggregate_id": item["aggregate_id"],
+                    "aggregate_version": item["aggregate_version"],
+                    "envelope_hash": item["envelope_hash"],
+                    "outbox_topic": item["outbox_topic"],
+                    "outbox_hash": (
+                        _outbox_envelope_digest(
+                            item["outbox_topic"],
+                            item["outbox_payload"],
+                        )
+                        if item["outbox_topic"] is not None
+                        else None
+                    ),
+                }
+                for item in prepared
+            ]
+        }
+        effect_json = canonical_json(effect)
+        return effect_json, (
+            "sha256:" + sha256(effect_json.encode("utf-8")).hexdigest()
+        )
+
+    def _verify_stored_event_batch_effect(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        effect_json: str,
+        effect_hash: str,
+    ) -> None:
+        expected_hash = "sha256:" + sha256(effect_json.encode("utf-8")).hexdigest()
+        if effect_hash != expected_hash:
+            raise ValueError("command effect hash does not match stored effect")
+        try:
+            effect = json.loads(effect_json)
+        except (json.JSONDecodeError, TypeError) as error:
+            raise ValueError("command effect is not valid JSON") from error
+        if canonical_json(effect) != effect_json:
+            raise ValueError("command effect is not canonical JSON")
+        if not isinstance(effect, dict) or set(effect) != {"events"}:
+            raise ValueError("command event-batch effect shape is invalid")
+        rows = effect["events"]
+        if not isinstance(rows, list) or not rows:
+            raise ValueError("command event-batch effect is empty or invalid")
+        for descriptor in rows:
+            if not isinstance(descriptor, dict) or set(descriptor) != {
+                "event_id", "aggregate_type", "aggregate_id", "aggregate_version",
+                "envelope_hash", "outbox_topic", "outbox_hash",
+            }:
+                raise ValueError("command event-batch descriptor is invalid")
+            event_row = connection.execute(
+                """
+                SELECT event_id, aggregate_type, aggregate_id, aggregate_version,
+                       envelope_json, envelope_hash
+                FROM events
+                WHERE event_id = ?
+                """,
+                (descriptor["event_id"],),
+            ).fetchone()
+            if event_row is None:
+                raise ValueError("command event-batch event is missing")
+            if (
+                event_row["aggregate_type"] != descriptor["aggregate_type"]
+                or event_row["aggregate_id"] != descriptor["aggregate_id"]
+                or event_row["aggregate_version"] != descriptor["aggregate_version"]
+                or event_row["envelope_hash"] != descriptor["envelope_hash"]
+            ):
+                raise ValueError("command event-batch event identity changed")
+            raw_envelope = event_row["envelope_json"]
+            if not isinstance(raw_envelope, str):
+                raise ValueError("command event-batch envelope is missing")
+            if _event_envelope_digest(raw_envelope) != descriptor["envelope_hash"]:
+                raise ValueError("command event-batch envelope hash changed")
+            outbox = connection.execute(
+                "SELECT topic, payload_json, envelope_hash FROM outbox WHERE event_id = ?",
+                (descriptor["event_id"],),
+            ).fetchone()
+            if descriptor["outbox_topic"] is None:
+                if outbox is not None:
+                    raise ValueError("command event-batch publication intent changed")
+            else:
+                if outbox is None:
+                    raise ValueError("command event-batch publication intent is missing")
+                if (
+                    outbox["topic"] != descriptor["outbox_topic"]
+                    or outbox["payload_json"] != raw_envelope
+                    or outbox["envelope_hash"] != descriptor["outbox_hash"]
+                    or _outbox_envelope_digest(
+                        str(outbox["topic"]), str(outbox["payload_json"])
+                    ) != descriptor["outbox_hash"]
+                ):
+                    raise ValueError("command event-batch publication intent changed")
+
     def record_command(
         self,
         *,
@@ -2053,6 +2177,7 @@ class JournalStore:
                 if existing["request_hash"] != request_hash:
                     connection.rollback()
                     raise ValueError("idempotency_key was already used for a different request")
+                self._require_command_effect_kind(existing, "RESULT_ONLY")
                 connection.commit()
                 return saved_result, False
             if connection.execute(
@@ -2064,12 +2189,14 @@ class JournalStore:
                 """
                 INSERT INTO command_dedupe(
                     command_id, actor, environment, idempotency_key,
-                    request_hash, result_json, result_hash, state_version, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    request_hash, result_json, result_hash, state_version, created_at,
+                    effect_kind, effect_json, effect_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     command_id, actor, environment, idempotency_key,
                     request_hash, result_json, result_hash, state_version, self._now(),
+                    "RESULT_ONLY", None, None,
                 ),
             )
             connection.commit()
@@ -2165,6 +2292,8 @@ class JournalStore:
                 }
             )
 
+        effect_json, effect_hash = self._event_batch_effect(prepared)
+
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -2180,10 +2309,22 @@ class JournalStore:
                         raise ValueError(
                             "idempotency_key was already used for a different request"
                         )
-                    # A deduplicated financial command must not turn journal
-                    # corruption into an apparently successful replay. Validate
-                    # the current global cut and every aggregate implicated by
-                    # the supplied deterministic event batch before returning.
+                    self._require_command_effect_kind(existing, "EVENT_BATCH")
+                    stored_effect_json = existing["effect_json"]
+                    stored_effect_hash = existing["effect_hash"]
+                    if not isinstance(stored_effect_json, str) or not isinstance(
+                        stored_effect_hash, str
+                    ):
+                        raise ValueError("command event-batch effect authority is missing")
+                    if stored_effect_json != effect_json or stored_effect_hash != effect_hash:
+                        raise ValueError(
+                            "idempotency_key retry event batch differs from original effect"
+                        )
+                    self._verify_stored_event_batch_effect(
+                        connection,
+                        effect_json=stored_effect_json,
+                        effect_hash=stored_effect_hash,
+                    )
                     if self.SCHEMA_VERSION >= 6:
                         self._journal_sequence_value(connection)
                     validated_aggregates: set[tuple[str, str]] = set()
@@ -2246,8 +2387,8 @@ class JournalStore:
                     INSERT INTO command_dedupe(
                         command_id, actor, environment, idempotency_key,
                         request_hash, result_json, result_hash,
-                        state_version, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        state_version, created_at, effect_kind, effect_json, effect_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         command_id,
@@ -2259,6 +2400,9 @@ class JournalStore:
                         result_hash,
                         state_version,
                         self._now(),
+                        "EVENT_BATCH",
+                        effect_json,
+                        effect_hash,
                     ),
                 )
 

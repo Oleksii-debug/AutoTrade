@@ -1,4 +1,5 @@
 from hashlib import sha256
+import os
 import json
 from pathlib import Path
 import subprocess
@@ -92,6 +93,41 @@ class NvdaQualificationGateTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        status = json.loads(result.stdout)
+        self.assertFalse(status["qualified"])
+        self.assertEqual(status["reason"], "NO_REAL_NVDA_RELEASE_EVIDENCE")
+
+    def test_unqualified_check_status_does_not_import_mutable_product_packages(self):
+        with TemporaryDirectory() as directory:
+            hook = Path(directory) / "sitecustomize.py"
+            hook.write_text(
+                """
+import importlib.abc
+import sys
+
+class BlockMutableVerifierImports(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "mvp" or fullname.startswith("mvp."):
+            raise RuntimeError("mutable mvp import attempted before verifier verdict")
+        if fullname == "research" or fullname.startswith("research."):
+            raise RuntimeError("mutable research import attempted before verifier verdict")
+        return None
+
+sys.meta_path.insert(0, BlockMutableVerifierImports())
+""",
+                encoding="utf-8",
+            )
+            env = dict(os.environ)
+            env["PYTHONPATH"] = directory
+            result = subprocess.run(
+                [sys.executable, "tools/check_nvda_qualification.py", "--check-status"],
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
         self.assertEqual(result.returncode, 0, result.stderr)
         status = json.loads(result.stdout)
         self.assertFalse(status["qualified"])

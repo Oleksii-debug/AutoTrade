@@ -1035,6 +1035,49 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
                     self.assertEqual(store.current_journal_sequence(), before_sequence)
                     self.assertEqual(book.audit_digest(), before_digest)
 
+    def test_correction_observation_cannot_predate_predecessor_after_restart(self):
+        original = sealed_funding(observed_offset=1)
+        first_correction = sealed_funding(
+            external_event_id="funding-correction-1",
+            revision="2",
+            rate="0.002",
+            observed_offset=3,
+            corrects="funding-1",
+        )
+        regressed_correction = sealed_funding(
+            external_event_id="funding-correction-2",
+            revision="3",
+            rate="0.003",
+            observed_offset=2,
+            corrects="funding-correction-1",
+        )
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            authority, _ = self.authority(
+                JournalStore(path),
+                [original, first_correction, regressed_correction],
+            )
+            authority.apply(original.evidence_ref)
+            authority.apply(first_correction.evidence_ref)
+
+            reopened = JournalStore(path)
+            restarted, restarted_book = self.authority(
+                reopened,
+                [original, first_correction, regressed_correction],
+                seed=False,
+            )
+            before_sequence = reopened.current_journal_sequence()
+            before_digest = restarted_book.audit_digest()
+
+            with self.assertRaisesRegex(
+                PerpetualFundingConflict,
+                "correction observation cannot predate",
+            ):
+                restarted.apply(regressed_correction.evidence_ref)
+
+            self.assertEqual(reopened.current_journal_sequence(), before_sequence)
+            self.assertEqual(restarted_book.audit_digest(), before_digest)
+
     def test_inverse_provider_correction_reverses_quantized_cashflow(self):
         original = sealed_funding(collateral_currency="BTC")
         correction = sealed_funding(

@@ -1424,9 +1424,15 @@ class WhiteBitAdapterTests(unittest.TestCase):
 
         execution_history = paged_execution_history_request(
             offset=0,
-            limit=500,
+            limit=100,
         )
         self.assertEqual(execution_history.surface, "EXECUTIONS")
+        self.assertEqual(
+            execution_history.body,
+            {"offset": 0, "limit": 100},
+        )
+        with self.assertRaisesRegex(WhiteBitAdapterError, "cannot exceed 100"):
+            paged_execution_history_request(offset=0, limit=101)
 
         active = paged_open_orders_request(offset=0, limit=100)
         self.assertEqual(active.surface, "OPEN_ORDERS")

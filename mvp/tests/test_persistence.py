@@ -2531,5 +2531,181 @@ class JournalStoreTests(unittest.TestCase):
             ):
                 store.commit_command(**command_args)
 
+    def test_transactional_command_retry_binds_original_event_batch(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            original = event("evt-bound-a", 1)
+            args = {
+                "command_id": "cmd-bound",
+                "actor": "alice",
+                "environment": "PAPER",
+                "idempotency_key": "key-bound",
+                "request": {"action": "ORDER.SUBMIT", "intent_id": "intent-1"},
+                "result": {"status": "ACCEPTED"},
+                "state_version": 1,
+                "events": [(original, "events.account")],
+                "expected_journal_sequence": 0,
+            }
+            saved, inserted, appended = store.commit_command(**args)
+            self.assertTrue(inserted)
+            self.assertEqual(saved, {"status": "ACCEPTED"})
+            self.assertEqual(len(appended), 1)
+
+            saved_again, inserted_again, appended_again = store.commit_command(**args)
+            self.assertFalse(inserted_again)
+            self.assertEqual(saved_again, saved)
+            self.assertEqual(appended_again, ())
+
+            substitute = event("evt-bound-b", 1)
+            substitute["aggregate_id"] = "healthy"
+            with self.assertRaisesRegex(
+                ValueError,
+                "retry event batch differs from original effect",
+            ):
+                store.commit_command(**{**args, "events": [(substitute, "events.account")]})
+
+    def test_transactional_command_retry_rejects_reaggregated_or_rewritten_event(self):
+        for mutation in ("aggregate", "envelope"):
+            with self.subTest(mutation=mutation), TemporaryDirectory() as directory:
+                path = f"{directory}/journal.sqlite3"
+                store = JournalStore(path)
+                original = event("evt-bound", 1)
+                args = {
+                    "command_id": "cmd-bound",
+                    "actor": "alice",
+                    "environment": "PAPER",
+                    "idempotency_key": "key-bound",
+                    "request": {"action": "ORDER.SUBMIT"},
+                    "result": {"status": "ACCEPTED"},
+                    "state_version": 1,
+                    "events": [(original, None)],
+                    "expected_journal_sequence": 0,
+                }
+                store.commit_command(**args)
+
+                connection = sqlite3.connect(path)
+                try:
+                    if mutation == "aggregate":
+                        connection.execute(
+                            "UPDATE events SET aggregate_id = ? WHERE event_id = ?",
+                            ("moved-account", "evt-bound"),
+                        )
+                    else:
+                        row = connection.execute(
+                            "SELECT envelope_json FROM events WHERE event_id = ?",
+                            ("evt-bound",),
+                        ).fetchone()
+                        forged = json.loads(row[0])
+                        forged["aggregate_id"] = "rewritten-account"
+                        forged_json = json.dumps(
+                            forged,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                        )
+                        connection.execute(
+                            "UPDATE events SET envelope_json = ?, envelope_hash = ? "
+                            "WHERE event_id = ?",
+                            (
+                                forged_json,
+                                _event_envelope_digest(forged_json),
+                                "evt-bound",
+                            ),
+                        )
+                    connection.commit()
+                finally:
+                    connection.close()
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "event identity changed|envelope hash changed",
+                ):
+                    store.commit_command(**args)
+
+    def test_transactional_command_retry_rejects_outbox_publication_drift(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            original = event("evt-publish", 1)
+            args = {
+                "command_id": "cmd-publish",
+                "actor": "alice",
+                "environment": "PAPER",
+                "idempotency_key": "key-publish",
+                "request": {"action": "ORDER.SUBMIT"},
+                "result": {"status": "ACCEPTED"},
+                "state_version": 1,
+                "events": [(original, "events.original")],
+                "expected_journal_sequence": 0,
+            }
+            store.commit_command(**args)
+
+            connection = sqlite3.connect(path)
+            try:
+                row = connection.execute(
+                    "SELECT payload_json FROM outbox WHERE event_id = ?",
+                    ("evt-publish",),
+                ).fetchone()
+                forged_topic = "events.other"
+                connection.execute(
+                    "UPDATE outbox SET topic = ?, envelope_hash = ? WHERE event_id = ?",
+                    (
+                        forged_topic,
+                        _outbox_envelope_digest(forged_topic, row[0]),
+                        "evt-publish",
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "publication intent changed",
+            ):
+                store.commit_command(**args)
+
+    def test_command_dedupe_rejects_cross_api_effect_kind_replay(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            shared = {
+                "actor": "alice",
+                "environment": "PAPER",
+                "request": {"action": "ORDER.SUBMIT"},
+                "result": {"status": "ACCEPTED"},
+                "state_version": 1,
+            }
+            store.record_command(
+                command_id="cmd-result",
+                idempotency_key="key-result",
+                **shared,
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "different command effect kind",
+            ):
+                store.commit_command(
+                    command_id="cmd-result-retry",
+                    idempotency_key="key-result",
+                    events=[(event("evt-cross-a", 1), None)],
+                    **shared,
+                )
+
+            store.commit_command(
+                command_id="cmd-event",
+                idempotency_key="key-event",
+                events=[(event("evt-cross-b", 1), None)],
+                **shared,
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "different command effect kind",
+            ):
+                store.record_command(
+                    command_id="cmd-event-retry",
+                    idempotency_key="key-event",
+                    **shared,
+                )
+
 if __name__ == "__main__":
     unittest.main()

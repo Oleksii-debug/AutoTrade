@@ -68,6 +68,11 @@ PROTECTED_SENTINELS = frozenset(
         "tools/check_nvda_qualification.py",
         "tools/verify.py",
         "tools/write_ci_evidence.py",
+        "tests/Contracts.DotNet/Contracts.DotNet.csproj",
+        "tests/Contracts.DotNet/Program.cs",
+        "tests/Desktop.Client/Desktop.Client.csproj",
+        "tests/Desktop.Client/Program.cs",
+        "contracts/fixtures/common-scalars.corpus.json",
     }
 )
 

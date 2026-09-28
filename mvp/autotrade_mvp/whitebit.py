@@ -1245,18 +1245,46 @@ def parse_execution_history(
 def parse_execution_history_response(
     raw_response: str | bytes,
     *,
-    market: str,
+    request: WhiteBitLookupRequest,
     observed_at: datetime,
     response_evidence: Mapping[str, object],
 ) -> tuple[WhiteBitExecutionDeal, ...]:
-    """Bind execution economics to one exact immutable WhiteBIT response.
+    """Bind execution economics to one exact immutable, market-scoped response.
 
     The low-level mapping parser remains useful for diagnostics and fixtures, but
     parser-only rows are intentionally non-authoritative for reconciliation.
-    This entrypoint holds the exact UTF-8 response bytes, verifies their digest
-    and observation time against one immutable EvidenceRef, then attaches that
-    provenance to every normalized deal before financial reconciliation.
+    This entrypoint verifies the exact UTF-8 response bytes against one immutable
+    EvidenceRef and also binds them to the exact execution-history query that
+    established market, window and pagination scope.
     """
+
+    if not isinstance(request, WhiteBitLookupRequest):
+        raise TypeError("request must be WhiteBitLookupRequest")
+    if (
+        request.surface != "EXECUTIONS"
+        or request.endpoint != "/api/v4/trade-account/executed-history"
+    ):
+        raise WhiteBitAdapterError(
+            "authoritative execution history requires canonical EXECUTIONS request"
+        )
+    body = dict(request.body)
+    required_query = {"startDate", "endDate", "offset", "limit", "market"}
+    if set(body) != required_query:
+        raise WhiteBitAdapterError(
+            "authoritative execution history requires exact market-scoped query"
+        )
+    _history_window(
+        start_unix=body["startDate"],
+        end_unix=body["endDate"],
+    )
+    page = WhiteBitPageEvidence(
+        offset=body["offset"],
+        limit=body["limit"],
+        record_count=0,
+    )
+    if page.limit > 500:
+        raise WhiteBitAdapterError("execution-history limit cannot exceed 500")
+    market = _text(str(body["market"]), name="market").upper()
 
     raw = _response_bytes(raw_response)
     digest = "sha256:" + hashlib.sha256(raw).hexdigest()
@@ -1271,12 +1299,29 @@ def parse_execution_history_response(
         raise WhiteBitAdapterError(
             "execution-history provider response must be a JSON array"
         )
+    if len(payload) > page.limit:
+        raise WhiteBitAdapterError(
+            "execution-history response exceeds requested page limit"
+        )
     deals = parse_execution_history(payload, market=market)
+    query_fingerprint = "sha256:" + hashlib.sha256(
+        json.dumps(
+            {
+                "surface": request.surface,
+                "endpoint": request.endpoint,
+                "body": body,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     evidence_ref = (
         "whitebit-response:"
         + evidence["artifact_id"]
         + ":"
         + evidence["sha256"]
+        + ":query-"
+        + query_fingerprint
     )
     return tuple(
         WhiteBitExecutionDeal(

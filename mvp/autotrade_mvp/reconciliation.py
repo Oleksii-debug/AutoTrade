@@ -774,6 +774,7 @@ class SubmissionResolution:
     evidence_reason: str
     provider_order_ids: tuple[str, ...] = ()
     provider_execution_ids: tuple[str, ...] = ()
+    provider_fills: tuple[ProviderFillEvidence, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1377,22 +1378,27 @@ def reconcile_account(
         )
         provider_order_ids: tuple[str, ...] = ()
         provider_execution_ids: tuple[str, ...] = ()
+        provider_resolution_fills: tuple[ProviderFillEvidence, ...] = ()
         matching_fill_times = provider_client_fill_times.get(
             submission.client_order_id, ()
         )
         matching_fills = provider_client_fills.get(
             submission.client_order_id, ()
         )
-        provider_execution_ids = tuple(
+        provider_resolution_fills = tuple(
             sorted(
-                {
-                    fill.provider_execution_id
+                (
+                    fill
                     for fill in matching_fills
                     if submission_time
                     <= _instant(fill.trade_time, name="provider_fill.trade_time")
                     <= end
-                }
+                ),
+                key=lambda fill: fill.provider_execution_id,
             )
+        )
+        provider_execution_ids = tuple(
+            fill.provider_execution_id for fill in provider_resolution_fills
         )
         causal_execution_observed = bool(provider_execution_ids)
         working_snapshot_is_causal = bool(
@@ -1451,6 +1457,11 @@ def reconcile_account(
                 evidence_reason=reason,
                 provider_order_ids=provider_order_ids,
                 provider_execution_ids=provider_execution_ids,
+                provider_fills=(
+                    provider_resolution_fills
+                    if outcome == "OBSERVED_EXECUTION"
+                    else ()
+                ),
             )
         )
 

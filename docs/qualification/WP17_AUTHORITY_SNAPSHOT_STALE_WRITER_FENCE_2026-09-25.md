@@ -2,52 +2,65 @@
 
 Original qualified delta base: `main@7b8bd88aa09d32d3295b1f38465ec7fa7c73920b`.
 
-The original reconvergence was rooted at `main@d1d6419daa905ca7d54db3461475cc5b7bf407a3`. The current clean successor is based on repaired `main@8e0e3d39aa9edc63c1cbf21de97b4caf2e15a7bc`; the owned WP-17 paths were unchanged across that base movement, so the successor preserves reviewed lineage without importing stale ancestry.
+The original reconvergence was rooted at `main@d1d6419daa905ca7d54db3461475cc5b7bf407a3`. This successor was rebuilt from repaired `main@8e0e3d39aa9edc63c1cbf21de97b4caf2e15a7bc`. At the latest source review, live main had advanced to `595ed24fe4244f05d722eae570b27e46bf976f04` only through unrelated WP-04 strict-JSON paths; the WP-17 owned paths were unchanged. Final integration still requires a fresh live-main ancestry/convergence check.
 
 ## Defects
 
 The persistence adapter stores complete `AuthorityService` snapshots as immutable `financial-authority` journal events. Without a lineage-extension fence, two processes restored from the same prior snapshot can diverge: one can persist newer revocation/confirmation/admission facts while the stale process later appends an older complete state under a new event ID. Restart would then restore the later stale snapshot and forget durable authority facts.
 
-A second fail-open path existed in `new_exposure_blocks`. Emergency no-new-risk state is changed by canonical `AuthorityNewExposureBlocked` / `AuthorityNewExposureRestored` events in `authority_state/canonical`, but block/restore does not advance the ordinary snapshot epoch. A stale or forged snapshot could therefore omit, rewrite, invent, or resurrect active block state unless snapshot publication was explicitly bound to that canonical authority.
+The first stale-writer fence compared a candidate only with the preceding `financial-authority` snapshot. That is insufficient when canonical `authority_state/canonical` advances without an intermediate snapshot. A concrete falsifier is S0 -> canonical `AuthorityPolicyRevoked` -> stale S0 publication: previous snapshot and candidate can still be identical, and the global-sequence compare-and-append does not reject a canonical event that already existed before the captured cut. The latest snapshot could then resurrect an unrevoked policy on restart.
 
-For financial authority both defects are safety critical: a revocation, consumed confirmation, or active emergency exposure block must not be erased by stale snapshot publication or restart.
+The same no-intermediate-snapshot class applies to canonical confirmation/admission/used-confirmation progression. A stale snapshot must not make a durably consumed confirmation reusable merely because no snapshot was published between canonical admission and the stale publication.
+
+A separate fail-open path existed in `new_exposure_blocks`. Emergency no-new-risk state is changed by canonical `AuthorityNewExposureBlocked` / `AuthorityNewExposureRestored` events in `authority_state/canonical`, but block/restore does not advance the ordinary policy/revocation epoch. A stale or forged snapshot could therefore omit, rewrite, invent, or resurrect active block state unless snapshot publication was explicitly bound to canonical authority.
+
+For financial authority all of these defects are safety critical: canonical revocation, confirmation consumption, admission history, or active emergency exposure block must not be erased or invented by snapshot publication or restart.
 
 ## Increment
 
-Every genuinely new snapshot must monotonically extend the latest durable snapshot state:
+Every genuinely new snapshot still has to monotonically extend the latest durable snapshot lineage:
 
 - schema version cannot silently change inside one snapshot lineage;
 - authority epoch cannot decrease;
 - existing policy, revocation, confirmation, and admission records cannot disappear;
 - an existing immutable record cannot be rewritten under the same identity;
-- used confirmations are append-only and cannot be forgotten;
+- used confirmations cannot be forgotten;
 - malformed or duplicate snapshot collections fail closed.
 
-Active no-new-exposure state is not treated as naively append-only because an exact canonical restore is legitimate. Instead the adapter performs a focused replay of only block/restore transitions from the existing `authority_state/canonical` journal, validating contiguous aggregate versions plus exact block/restore payload identity and timestamps. The candidate snapshot's active block map must equal that canonical replay exactly. This rejects stale omission, forged addition, identity rewrite, and resurrection after restore without introducing another authority. The focused replay deliberately avoids full financial-admission replay so emergency block persistence does not acquire an unrelated dependency on external evidence-artifact resolvers.
+That snapshot-to-snapshot fence is now only a first line of defense. If `authority_state/canonical` contains any event, the complete candidate snapshot must also equal the complete deterministic state projected from that canonical aggregate at the captured journal cut: schema/epoch, policies, revocations, confirmations, admissions, used confirmations, and active new-exposure blocks.
 
-For a new snapshot, the adapter records the global journal sequence before reading durable snapshot/canonical-block evidence and commits the snapshot through the existing `JournalStore.commit_command(..., expected_journal_sequence=...)` transaction. Any intervening journal write invalidates the cut inside the write transaction, closing the proof-to-append race. The adapter maps that conflict into the same stale aggregate-version/journal-sequence failure class used by the existing stale-writer regression.
+The projection does **not** implement a second transition parser. A private read-only `AuthorityService` subclass invokes the existing canonical `AuthorityService._restore_journal()` state machine and changes one replay seam only: it does not re-resolve external durable financial-evidence/artifact dependencies while computing persistence equality. Journal ordering, policy/revocation semantics, confirmation/admission relationships, policy scope, used-confirmation consumption, block/restore semantics, timestamps, identities, and unknown-event failure behavior remain those of the canonical authority replay. This keeps snapshot persistence from acquiring an unrelated artifact-availability dependency while avoiding a looser parallel authority implementation.
 
-`restore_authority_snapshot()` also compares the restored snapshot block map with current canonical block/restore replay. A lagging snapshot therefore fails closed after a newly durable block or restore until a matching snapshot is published; it cannot silently resurrect new-risk eligibility or an already-restored obsolete block.
+Active no-new-exposure state remains exactly bound to canonical block/restore history. The adapter preserves specific fail-closed diagnostics for stale omission, forged addition, identity rewrite, and resurrection after restore.
 
-Immutable historical event-id retries remain lost-reply retries: they reproduce the original envelope and do not re-interpret later canonical state.
+A deliberately narrow legacy boundary remains: if the canonical authority aggregate is genuinely absent, historical snapshot-only state remains readable/publishable under the existing monotonic snapshot lineage rules. Active `new_exposure_blocks` are not permitted in that mode because their authority is the canonical block/restore journal. Once any canonical authority event exists, full snapshot equality to canonical projection is mandatory; canonical and snapshot-only authority are not allowed to diverge thereafter.
+
+For a new snapshot, the adapter records the global journal sequence before reading previous snapshot/canonical evidence and commits through the existing `JournalStore.commit_command(..., expected_journal_sequence=...)` transaction. Any intervening journal write invalidates the cut inside the write transaction. Together with full canonical projection, this closes both sides of the stale window: canonical mutations already present before the cut must be represented in the candidate, and mutations after proof invalidate append.
+
+`restore_authority_snapshot()` revalidates the complete restored snapshot against current canonical projection whenever canonical authority exists. A lagging snapshot therefore fails closed after revocation, admission/confirmation consumption, block, or restore until a matching snapshot is durably published.
+
+Immutable historical event-id retries remain lost-reply retries: they reproduce the original envelope and do not reinterpret later canonical state.
 
 ## Focused regressions
 
 The current successor covers:
 
-- stale writer attempting to erase a newer operator revocation;
-- restart still observing the revocation and refusing dispatch;
-- stale snapshot attempting to forget consumed-confirmation/admission history;
-- interleaved newer snapshot invalidating the stale writer transaction;
+- canonical revocation after S0 with no intermediate snapshot: stale S0 publication fails before journal mutation;
+- the same lagging S0 snapshot fails restart after canonical revocation;
+- canonical SIMULATION admission consuming a confirmation after S0 with no intermediate snapshot cannot be erased or made reusable by stale publication;
+- once a matching canonical snapshot is published, restart preserves the consumed confirmation and rejects reuse;
+- a snapshot cannot invent an additional confirmation/fact once canonical authority exists;
+- malformed canonical transition history is rejected by the shared `AuthorityService` replay instead of being accepted by a separate projector;
+- existing snapshot-lineage stale revocation/history-loss and interleaving CAS regressions;
 - stale pre-block snapshot rejected even when no intermediate blocked snapshot exists;
-- stale omission, forged addition, and active-block identity rewrite;
+- stale block omission, forged addition, and active-block identity rewrite;
 - exact durable restore, including fail-closed restart while the snapshot lags canonical restore state;
 - a block appearing between canonical proof and snapshot append invalidating the global journal cut;
 - historical blocked-snapshot lost-reply retry remaining idempotent after a later restore;
-- failed stale publications leaving authoritative snapshot history unchanged.
+- failed stale/forged publications leaving authoritative snapshot history unchanged.
 
 ## Qualification boundary
 
-This increment hardens persisted operator authority and emergency no-new-exposure state. It does not itself establish provider/LIVE qualification, economic edge, release/accessibility readiness, or merge-time branch/rules enforcement. Fresh exact-head baseline, trusted reconvergence-integrity and dual-OS Verify AutoTrade remain mandatory before integration.
+This increment hardens persisted operator/financial authority consistency. It does not itself establish provider/LIVE qualification, economic edge, release/accessibility readiness, or merge-time branch/rules enforcement. Fresh exact-head focused tests, baseline, trusted reconvergence-integrity and dual-OS Verify AutoTrade remain mandatory before integration, followed by a fresh current-main ancestry check.
 
 Broader operator workflow UI, autonomous-policy coverage and production qualification remain separate WP-17 work. Repository-level merge/current-base/required-check enforcement remains a separate control-plane gap tracked outside this increment.

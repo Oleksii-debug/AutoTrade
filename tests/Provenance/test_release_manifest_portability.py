@@ -197,6 +197,22 @@ class ReleaseManifestPortabilityTests(unittest.TestCase):
                 (False, "unbound_advisory_source_evidence"),
             )
 
+    def test_advisory_source_must_be_distinct_from_policy_artifact(self):
+        graph, document = self._advisory_fixture()
+        with TemporaryDirectory() as directory:
+            policy = document["review_policy_evidence"]
+            same_authority = dict(document)
+            same_authority["advisory_source_evidence"] = [policy]
+            path = self._write_advisory(directory, same_authority)
+            self.assertEqual(
+                dependency_advisory_evidence_document(
+                    path,
+                    expected_dependency_graph=graph,
+                    expected_source_sha="b" * 40,
+                ),
+                (False, "advisory_source_must_be_distinct_from_policy"),
+            )
+
     def test_advisory_qualification_requires_exact_component_coverage(self):
         graph, document = self._advisory_fixture()
         with TemporaryDirectory() as directory:

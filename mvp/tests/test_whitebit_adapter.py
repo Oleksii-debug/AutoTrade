@@ -921,10 +921,14 @@ class WhiteBitAdapterTests(unittest.TestCase):
             limit=50,
             market="btc_usdt",
         )
-        query_fingerprint = execution_history_query_fingerprint(request)
+        query_fingerprint = execution_history_query_fingerprint(
+            request, account_id="paper-1", environment="PAPER"
+        )
         deals = parse_execution_history_response(
             raw,
             request=request,
+            account_id="paper-1",
+            environment="PAPER",
             observed_at=NOW,
             response_evidence={
                 "artifact_id": artifact_id,
@@ -943,6 +947,38 @@ class WhiteBitAdapterTests(unittest.TestCase):
         self.assertEqual(fill.quantity, Decimal("0.001"))
         self.assertEqual(fill.price, Decimal("40000"))
         self.assertEqual(fill.fee_amount, Decimal("0.04"))
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "account/environment differs",
+        ):
+            deals[0].to_reconciliation_fill(
+                account_id="paper-2",
+                environment="PAPER",
+            )
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "account/environment differs",
+        ):
+            deals[0].to_reconciliation_fill(
+                account_id="paper-1",
+                environment="LIVE",
+            )
+        self.assertNotEqual(
+            query_fingerprint,
+            execution_history_query_fingerprint(
+                request,
+                account_id="paper-2",
+                environment="PAPER",
+            ),
+        )
+        self.assertNotEqual(
+            query_fingerprint,
+            execution_history_query_fingerprint(
+                request,
+                account_id="paper-1",
+                environment="LIVE",
+            ),
+        )
         self.assertEqual(
             fill.evidence_refs,
             (
@@ -978,12 +1014,16 @@ class WhiteBitAdapterTests(unittest.TestCase):
         deal = parse_execution_history_response(
             raw,
             request=request,
+            account_id="paper-1",
+            environment="PAPER",
             observed_at=NOW,
             response_evidence={
                 "artifact_id": str(uuid4()),
                 "sha256": digest,
                 "observed_at": NOW.isoformat().replace("+00:00", "Z"),
-                "query_fingerprint": execution_history_query_fingerprint(request),
+                "query_fingerprint": execution_history_query_fingerprint(
+            request, account_id="paper-1", environment="PAPER"
+        ),
             },
         )[0]
         self.assertIsNone(
@@ -1034,7 +1074,9 @@ class WhiteBitAdapterTests(unittest.TestCase):
             limit=50,
             market="btc_usdt",
         )
-        query_fingerprint = execution_history_query_fingerprint(request)
+        query_fingerprint = execution_history_query_fingerprint(
+            request, account_id="paper-1", environment="PAPER"
+        )
         evidence = {
             "artifact_id": str(uuid4()),
             "sha256": digest,
@@ -1046,6 +1088,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
             parse_execution_history_response(
                 raw,
                 request=request,
+                account_id="paper-1",
+                environment="PAPER",
                 observed_at=NOW,
                 response_evidence={**evidence, "sha256": "sha256:" + "0" * 64},
             )
@@ -1054,6 +1098,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
             parse_execution_history_response(
                 raw,
                 request=request,
+                account_id="paper-1",
+                environment="PAPER",
                 observed_at=NOW,
                 response_evidence={
                     **evidence,
@@ -1077,6 +1123,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
             parse_execution_history_response(
                 raw,
                 request=other_market_request,
+                account_id="paper-1",
+                environment="PAPER",
                 observed_at=NOW,
                 response_evidence=evidence,
             )
@@ -1091,7 +1139,9 @@ class WhiteBitAdapterTests(unittest.TestCase):
             WhiteBitAdapterError,
             "exact market-scoped query",
         ):
-            execution_history_query_fingerprint(unscoped_request)
+            execution_history_query_fingerprint(
+            unscoped_request, account_id="paper-1", environment="PAPER"
+        )
 
         wrong_surface = paged_order_history_request(
             start_unix=1_700_000_000,
@@ -1107,6 +1157,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
             parse_execution_history_response(
                 raw,
                 request=wrong_surface,
+                account_id="paper-1",
+                environment="PAPER",
                 observed_at=NOW,
                 response_evidence=evidence,
             )
@@ -1119,6 +1171,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
             parse_execution_history_response(
                 object_raw,
                 request=request,
+                account_id="paper-1",
+                environment="PAPER",
                 observed_at=NOW,
                 response_evidence={
                     "artifact_id": str(uuid4()),
@@ -1138,7 +1192,9 @@ class WhiteBitAdapterTests(unittest.TestCase):
             limit=1,
             market="btc_usdt",
         )
-        one_row_query = execution_history_query_fingerprint(one_row_request)
+        one_row_query = execution_history_query_fingerprint(
+            one_row_request, account_id="paper-1", environment="PAPER"
+        )
         with self.assertRaisesRegex(
             WhiteBitAdapterError,
             "exceeds requested page limit",
@@ -1146,6 +1202,8 @@ class WhiteBitAdapterTests(unittest.TestCase):
             parse_execution_history_response(
                 too_many_raw,
                 request=one_row_request,
+                account_id="paper-1",
+                environment="PAPER",
                 observed_at=NOW,
                 response_evidence={
                     "artifact_id": str(uuid4()),

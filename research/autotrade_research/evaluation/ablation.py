@@ -6,6 +6,7 @@ economic edge by itself.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
@@ -1001,12 +1002,12 @@ class AblationQualificationAuthority:
             effective_payload = row.get("effective_payload")
             intended_action = (
                 effective_payload.get("intended_action")
-                if isinstance(effective_payload, dict)
+                if isinstance(effective_payload, Mapping)
                 else None
             )
             case_id = (
                 intended_action.get("case_id")
-                if isinstance(intended_action, dict)
+                if isinstance(intended_action, Mapping)
                 else None
             )
             if not isinstance(case_id, str) or not case_id.strip():

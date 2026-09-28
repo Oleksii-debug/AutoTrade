@@ -7,6 +7,7 @@ from mvp.autotrade_mvp.replay import (
     ReplayCheckpoint,
     ReplayError,
     ReplayEvent,
+    RuntimeStateSnapshot,
     dataset_digest,
     resume_from_composite_checkpoint,
 )
@@ -141,11 +142,15 @@ class CausalReplayTests(unittest.TestCase):
         return values
 
     @staticmethod
-    def _component_resolver(values):
-        snapshot = dict(values)
+    def _state_resolver(replay, values, *, cut_id="cut:stable"):
+        components = dict(values)
 
-        def resolve(name):
-            return snapshot[name]
+        def resolve():
+            return RuntimeStateSnapshot(
+                cut_id=cut_id,
+                replay=replay.checkpoint(),
+                runtime_components=components,
+            )
 
         return resolve
 
@@ -158,7 +163,7 @@ class CausalReplayTests(unittest.TestCase):
         replay.advance_to("2026-09-24T10:00:00Z")
         components = self._runtime_components()
         checkpoint = replay.composite_checkpoint(
-            runtime_component_resolver=self._component_resolver(components),
+            runtime_state_resolver=self._state_resolver(replay, components),
             build_sha="a" * 64,
             protocol_ref="protocol:walk-forward-v1",
         )
@@ -170,7 +175,7 @@ class CausalReplayTests(unittest.TestCase):
                 events,
                 start_at="2026-09-24T09:59:00Z",
                 checkpoint=checkpoint,
-                runtime_component_resolver=self._component_resolver(changed),
+                runtime_state_resolver=self._state_resolver(replay, changed),
                 build_sha="a" * 64,
                 protocol_ref="protocol:walk-forward-v1",
             )
@@ -182,9 +187,9 @@ class CausalReplayTests(unittest.TestCase):
         )
         incomplete = self._runtime_components()
         del incomplete["execution_state"]
-        with self.assertRaisesRegex(ReplayError, "runtime component authority failed for execution_state"):
+        with self.assertRaisesRegex(ReplayError, "missing required runtime components: execution_state"):
             replay.composite_checkpoint(
-                runtime_component_resolver=self._component_resolver(incomplete),
+                runtime_state_resolver=self._state_resolver(replay, incomplete),
                 build_sha="a" * 64,
                 protocol_ref="protocol:walk-forward-v1",
             )
@@ -194,7 +199,7 @@ class CausalReplayTests(unittest.TestCase):
         replay = CausalReplay(events, start_at="2026-09-24T09:59:00Z")
         components = self._runtime_components()
         checkpoint = replay.composite_checkpoint(
-            runtime_component_resolver=self._component_resolver(components),
+            runtime_state_resolver=self._state_resolver(replay, components),
             build_sha="a" * 64,
             protocol_ref="protocol:walk-forward-v1",
         )
@@ -218,7 +223,7 @@ class CausalReplayTests(unittest.TestCase):
         uninterrupted.advance_to("2026-09-24T10:00:00Z")
         components = self._runtime_components()
         checkpoint = uninterrupted.composite_checkpoint(
-            runtime_component_resolver=self._component_resolver(components),
+            runtime_state_resolver=self._state_resolver(uninterrupted, components),
             build_sha="b" * 64,
             protocol_ref="protocol:walk-forward-v1",
         )
@@ -227,6 +232,7 @@ class CausalReplayTests(unittest.TestCase):
             CompositeReplayCheckpoint(
                 replay=checkpoint.replay,
                 runtime_components=dict(reversed(tuple(components.items()))),
+                runtime_cut_id=checkpoint.runtime_cut_id,
                 build_sha="b" * 64,
                 protocol_ref="protocol:walk-forward-v1",
             ).fingerprint,
@@ -236,7 +242,7 @@ class CausalReplayTests(unittest.TestCase):
             events,
             start_at="2026-09-24T09:59:00Z",
             checkpoint=checkpoint,
-            runtime_component_resolver=self._component_resolver(components),
+            runtime_state_resolver=self._state_resolver(uninterrupted, components),
             build_sha="b" * 64,
             protocol_ref="protocol:walk-forward-v1",
         )
@@ -256,7 +262,7 @@ class CausalReplayTests(unittest.TestCase):
         replay.advance_to("2026-09-24T10:00:00Z")
         components = self._runtime_components()
         checkpoint = replay.composite_checkpoint(
-            runtime_component_resolver=self._component_resolver(components),
+            runtime_state_resolver=self._state_resolver(replay, components),
             build_sha="e" * 64,
             protocol_ref="protocol:durable-v1",
         )
@@ -279,7 +285,7 @@ class CausalReplayTests(unittest.TestCase):
             events,
             start_at="2026-09-24T09:59:00Z",
             checkpoint=restored,
-            runtime_component_resolver=self._component_resolver(components),
+            runtime_state_resolver=self._state_resolver(replay, components),
             build_sha="e" * 64,
             protocol_ref="protocol:durable-v1",
         )
@@ -294,8 +300,8 @@ class CausalReplayTests(unittest.TestCase):
             start_at="2026-09-24T09:59:00Z",
         )
         checkpoint = replay.composite_checkpoint(
-            runtime_component_resolver=self._component_resolver(
-                self._runtime_components()
+            runtime_state_resolver=self._state_resolver(
+                replay, self._runtime_components()
             ),
             build_sha="a" * 64,
             protocol_ref="protocol:durable-v1",
@@ -317,8 +323,8 @@ class CausalReplayTests(unittest.TestCase):
             start_at="2026-09-24T09:59:00Z",
         )
         checkpoint = replay.composite_checkpoint(
-            runtime_component_resolver=self._component_resolver(
-                self._runtime_components()
+            runtime_state_resolver=self._state_resolver(
+                replay, self._runtime_components()
             ),
             build_sha="a" * 64,
             protocol_ref="protocol:durable-v1",
@@ -356,8 +362,8 @@ class CausalReplayTests(unittest.TestCase):
             start_at="2026-09-24T09:59:00Z",
         )
         checkpoint = replay.composite_checkpoint(
-            runtime_component_resolver=self._component_resolver(
-                self._runtime_components()
+            runtime_state_resolver=self._state_resolver(
+                replay, self._runtime_components()
             ),
             build_sha="a" * 64,
             protocol_ref="protocol:durable-v1",
@@ -381,8 +387,8 @@ class CausalReplayTests(unittest.TestCase):
             start_at="2026-09-24T09:59:00Z",
         )
         checkpoint = replay.composite_checkpoint(
-            runtime_component_resolver=self._component_resolver(
-                self._runtime_components()
+            runtime_state_resolver=self._state_resolver(
+                replay, self._runtime_components()
             ),
             build_sha="a" * 64,
             protocol_ref="protocol:durable-v1",
@@ -404,8 +410,8 @@ class CausalReplayTests(unittest.TestCase):
             start_at="2026-09-24T09:59:00Z",
         )
         checkpoint = replay.composite_checkpoint(
-            runtime_component_resolver=self._component_resolver(
-                self._runtime_components()
+            runtime_state_resolver=self._state_resolver(
+                replay, self._runtime_components()
             ),
             build_sha="a" * 64,
             protocol_ref="protocol:durable-v1",
@@ -423,7 +429,7 @@ class CausalReplayTests(unittest.TestCase):
         replay = CausalReplay(events, start_at="2026-09-24T09:59:00Z")
         components = self._runtime_components()
         checkpoint = replay.composite_checkpoint(
-            runtime_component_resolver=self._component_resolver(components),
+            runtime_state_resolver=self._state_resolver(replay, components),
             build_sha="c" * 64,
             protocol_ref="protocol:registered-v1",
         )
@@ -437,10 +443,84 @@ class CausalReplayTests(unittest.TestCase):
                         events,
                         start_at="2026-09-24T09:59:00Z",
                         checkpoint=checkpoint,
-                        runtime_component_resolver=self._component_resolver(components),
+                        runtime_state_resolver=self._state_resolver(replay, components),
                         build_sha=build_sha,
                         protocol_ref=protocol_ref,
                     )
+
+    def test_composite_checkpoint_rejects_mixed_cut_capture_when_replay_moves(self):
+        events = [
+            event(1, "2026-09-24T10:00:00Z", 1),
+            event(2, "2026-09-24T10:01:00Z", 2),
+        ]
+        replay = CausalReplay(events, start_at="2026-09-24T09:59:00Z")
+        components = self._runtime_components()
+
+        def moving_authority():
+            cut = replay.checkpoint()
+            replay.advance_to("2026-09-24T10:00:00Z")
+            return RuntimeStateSnapshot(
+                cut_id="cut:mixed",
+                replay=cut,
+                runtime_components=components,
+            )
+
+        with self.assertRaisesRegex(
+            ReplayError,
+            "changed during runtime snapshot capture",
+        ):
+            replay.composite_checkpoint(
+                runtime_state_resolver=moving_authority,
+                build_sha="a" * 64,
+                protocol_ref="protocol:walk-forward-v1",
+            )
+
+    def test_resume_rejects_same_digests_under_different_common_cut_identity(self):
+        events = [event(1, "2026-09-24T10:00:00Z", 1)]
+        replay = CausalReplay(events, start_at="2026-09-24T09:59:00Z")
+        components = self._runtime_components()
+        checkpoint = replay.composite_checkpoint(
+            runtime_state_resolver=self._state_resolver(
+                replay, components, cut_id="cut:one"
+            ),
+            build_sha="a" * 64,
+            protocol_ref="protocol:walk-forward-v1",
+        )
+        with self.assertRaisesRegex(ReplayError, "runtime state cut"):
+            resume_from_composite_checkpoint(
+                events,
+                start_at="2026-09-24T09:59:00Z",
+                checkpoint=checkpoint,
+                runtime_state_resolver=self._state_resolver(
+                    replay, components, cut_id="cut:aba"
+                ),
+                build_sha="a" * 64,
+                protocol_ref="protocol:walk-forward-v1",
+            )
+
+    def test_runtime_snapshot_replay_cut_must_match_source_cut(self):
+        events = [event(1, "2026-09-24T10:00:00Z", 1)]
+        replay = CausalReplay(events, start_at="2026-09-24T09:59:00Z")
+        components = self._runtime_components()
+        stale = ReplayCheckpoint(
+            dataset_digest=replay.digest,
+            cursor=0,
+            clock="2026-09-24T09:58:00Z",
+        )
+
+        def stale_authority():
+            return RuntimeStateSnapshot(
+                cut_id="cut:stale",
+                replay=stale,
+                runtime_components=components,
+            )
+
+        with self.assertRaisesRegex(ReplayError, "not bound to the current replay cut"):
+            replay.composite_checkpoint(
+                runtime_state_resolver=stale_authority,
+                build_sha="a" * 64,
+                protocol_ref="protocol:walk-forward-v1",
+            )
 
     def test_clock_cannot_move_backwards(self):
         replay = CausalReplay(

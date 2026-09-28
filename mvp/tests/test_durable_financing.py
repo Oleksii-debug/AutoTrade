@@ -8,7 +8,11 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from autotrade_mvp.durable_financing import (\n    DurableFinancingBook,\n    _event_payload,\n    authenticated_financing_event,\n)
+from autotrade_mvp.durable_financing import (
+    DurableFinancingBook,
+    _event_payload,
+    authenticated_financing_event,
+)
 from autotrade_mvp.financing import FinancingConflict, FinancingError
 from autotrade_mvp.persistence import JournalStore
 from autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook

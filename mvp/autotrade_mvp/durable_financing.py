@@ -252,6 +252,10 @@ def authenticated_financing_event(
         ) from error
     if not isinstance(manifest, Mapping):
         raise FinancingError("authenticated artifact manifest is invalid")
+    if manifest.get("artifact_id") != aid:
+        raise FinancingError("authenticated artifact identity does not match request")
+    if manifest.get("media_type") != "application/json":
+        raise FinancingError("financing evidence artifact must be application/json")
     artifact_digest = _normalize_artifact_digest(manifest)
 
     evidence = _strict_json_object(data)
@@ -447,6 +451,10 @@ class DurableFinancingBook:
 
         if not update.accepted:
             economic_transaction = None
+            durable_event_id = _text(
+                durable_events[-1].get("event_id"),
+                name="durable financing event_id",
+            )
             if event.kind == "FINAL":
                 prior = self._book_from_durable_events(
                     event.charge_id,
@@ -460,10 +468,9 @@ class DurableFinancingBook:
                 )
                 expected_delta = event.amount - previous_final
                 if expected_delta != 0:
-                    event_id = durable_events[-1]["event_id"]
                     economic_transaction = self._economic_transaction(
                         aggregate_id=aggregate_id,
-                        event_id=event_id,
+                        event_id=durable_event_id,
                         event=event,
                         economic_delta=expected_delta,
                     )
@@ -474,6 +481,26 @@ class DurableFinancingBook:
                         raise FinancingConflict(
                             "durable financing revision is missing its economic posting"
                         )
+            else:
+                stray = tuple(
+                    transaction
+                    for transaction in self.economic_book.transactions
+                    if transaction.cause_event_id == durable_event_id
+                )
+                if stray:
+                    raise FinancingConflict(
+                        "non-economic financing revision has an economic posting"
+                    )
+            if event.kind == "FINAL" and expected_delta == 0:
+                stray = tuple(
+                    transaction
+                    for transaction in self.economic_book.transactions
+                    if transaction.cause_event_id == durable_event_id
+                )
+                if stray:
+                    raise FinancingConflict(
+                        "zero-delta financing revision has an economic posting"
+                    )
             return DurableFinancingResult(
                 inserted=False,
                 event=event,

@@ -881,6 +881,33 @@ class HostNetworkTests(unittest.TestCase):
         )
         conn.close()
 
+        # The request handler performs durable authority execution only after
+        # emitting ACCEPTED. On Windows an immediate TemporaryDirectory cleanup
+        # can otherwise race that daemon handler while SQLite still has the
+        # journal open. Observe the public terminal operation before teardown.
+        native_operation_id = native_payload["operation_id"]
+        deadline = time.monotonic() + 2.0
+        native_operation = None
+        while time.monotonic() < deadline:
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+            conn.request(
+                "GET",
+                "/api/v1/operations/" + native_operation_id,
+                headers=self._wire_headers(session, origin=origin),
+            )
+            operation_response = conn.getresponse()
+            native_operation = json.loads(
+                operation_response.read().decode("utf-8")
+            )
+            conn.close()
+            self.assertEqual(operation_response.status, 200)
+            if native_operation["phase"] in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+                break
+            time.sleep(0.01)
+
+        self.assertIsNotNone(native_operation)
+        self.assertEqual(native_operation["phase"], "SUCCEEDED")
+
     def test_concrete_server_rejects_duplicate_sensitive_headers_before_dispatch(self):
         origin, session, app, port = self._network_fixture()
         authorization = "AutoTrade-Session " + session.token

@@ -50,6 +50,17 @@ def holdout_identity(dataset_digit="a", *, start="2026-01-01", end="2026-06-30",
     }
 
 
+def exhaust_trials(registry: ScientificRegistry, protocol_id: str) -> None:
+    """Close the registered development population before testing holdout semantics."""
+    remaining = registry.completeness(protocol_id)["remaining_trial_budget"]
+    for index in range(remaining):
+        registry.record_trial(
+            protocol_id,
+            status="FAILED",
+            payload={"reason": "preregistered negative result", "index": index},
+        )
+
+
 class ProtocolRegistryHardeningTests(unittest.TestCase):
     def test_protocol_identity_is_immutable_and_idempotent(self):
         with TemporaryDirectory() as directory:
@@ -218,6 +229,7 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             registry = ScientificRegistry(Path(directory) / "science.sqlite3")
             registered = registry.register_protocol(protocol())
+            exhaust_trials(registry, registered.protocol_id)
             holdout = "forward-2026-h1"
 
             first = registry.register_evaluation(
@@ -249,6 +261,7 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             second_payload = protocol()
             second_payload["hypothesis"] = "independent candidate over same locked segment"
             second_protocol = registry.register_protocol(second_payload)
+            exhaust_trials(registry, second_protocol.protocol_id)
 
             holdout = "forward-2026-h1"
             registry.record_holdout_access(
@@ -287,6 +300,7 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
             second_payload = protocol()
             second_payload["hypothesis"] = "second candidate after prior holdout exposure"
             p2 = reopened.register_protocol(second_payload)
+            exhaust_trials(reopened, p2.protocol_id)
             evaluation = reopened.register_evaluation(
                 p2.protocol_id,
                 holdout_id="forward-display-B",
@@ -300,6 +314,7 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             registry = ScientificRegistry(Path(directory) / "science.sqlite3")
             p = registry.register_protocol(protocol())
+            exhaust_trials(registry, p.protocol_id)
 
             wrong_window = holdout_identity(
                 start="2026-02-01",
@@ -382,6 +397,7 @@ class ProtocolRegistryHardeningTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             registry = ScientificRegistry(Path(directory) / "science.sqlite3")
             registered = registry.register_protocol(protocol())
+            exhaust_trials(registry, registered.protocol_id)
             holdout = "forward-2026-h1"
             registry.record_holdout_access(
                 registered.protocol_id,

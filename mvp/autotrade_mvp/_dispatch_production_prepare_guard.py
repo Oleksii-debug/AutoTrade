@@ -130,6 +130,22 @@ def install_production_prepare_guard() -> None:
             prepared_at: str,
         ) -> None:
             instrument, side, requested_quantity, quantity_unit = _required_scope(scope)
+            submission_events = self._events(attempt_id)
+            prepared_payload = (
+                submission_events[0].get("payload")
+                if submission_events
+                and submission_events[0].get("event_type") == "SubmissionPrepared"
+                else None
+            )
+            order_preparation_binding_hash = (
+                prepared_payload.get("order_preparation_binding_hash")
+                if isinstance(prepared_payload, Mapping)
+                else None
+            )
+            if not isinstance(order_preparation_binding_hash, str):
+                raise _MissingDurableOrderPreparation(
+                    "submission attempt lacks canonical order preparation binding hash"
+                )
             supplied(
                 client_order_id,
                 attempt_id,

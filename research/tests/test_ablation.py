@@ -1026,6 +1026,15 @@ class AblationTests(unittest.TestCase):
                 required_lower_bound=Decimal("0"),
             )
 
+        # The terminal evaluator also invokes the canonical class method
+        # directly, so an instance attribute cannot virtual-dispatch forged evidence.
+        # This is asserted structurally because a fully initialized canonical authority
+        # requires persistent stores and is covered by the end-to-end terminal test.
+        self.assertIn(
+            "AblationQualificationAuthority.resolve",
+            evaluate_qualified_incremental_value.__code__.co_names,
+        )
+
     def test_trusted_qualification_rejects_case_reassignment_inside_complete_population(self):
         cases = [
             pair("case-a", "2", population_unit="unit-a"),
@@ -1055,19 +1064,18 @@ class AblationTests(unittest.TestCase):
             def resolve(self, pairs, *, outcome_refs):
                 return population, evidence
 
-        result = evaluate_qualified_incremental_value(
-            "agent",
-            cases,
-            authority=TrustedStub(),
-            outcome_refs=(),
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-        )
-        self.assertEqual(result.status, "INCONCLUSIVE")
-        self.assertEqual(
-            result.reason,
-            "registered_population_case_binding_mismatch",
-        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "canonical AblationQualificationAuthority",
+        ):
+            evaluate_qualified_incremental_value(
+                "agent",
+                cases,
+                authority=TrustedStub(),
+                outcome_refs=(),
+                minimum_pairs=2,
+                required_lower_bound=Decimal("0"),
+            )
 
     def test_qualified_pass_requires_canonical_outcome_evidence(self):
         cases = [

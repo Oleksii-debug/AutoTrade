@@ -690,30 +690,19 @@ class ScientificRegistry:
                 ).fetchone()[0]
             )
             if recorded_trials < trial_budget:
-                if result.get("stopping_rule_triggered") is not True:
-                    raise ProtocolViolation(
-                        "locked holdout cannot be accessed before registered trial "
-                        "budget is exhausted or a registered stopping rule is triggered"
-                    )
-                stopping_rules_hash = _hash(protocol_payload["stopping_rules"])
-                if result.get("stopping_rules_hash") != stopping_rules_hash:
-                    raise ProtocolViolation(
-                        "early locked evaluation must bind the registered stopping rules"
-                    )
-                try:
-                    self._verify_stopping_evidence(
-                        result.get("stopping_evidence_ref"),
-                        protocol_id=protocol,
-                        stopping_rules_hash=stopping_rules_hash,
-                    )
-                except ProtocolViolation:
-                    # Keep the verified artifact's precise failure reason.
-                    # ProtocolViolation itself extends ValueError.
-                    raise
-                except ValueError as error:
-                    raise ProtocolViolation(
-                        "early locked evaluation requires immutable stopping evidence"
-                    ) from error
+                # The protocol's stopping_rules remain immutable preregistered
+                # scientific material, but AutoTrade does not yet have a
+                # canonical adjudicator that can derive an early-stop decision
+                # from the exact registered trial population.  Caller booleans,
+                # artifact metadata and storage integrity are not scientific
+                # truth authority.  Until such an adjudicator exists, the one
+                # locked forward holdout is unavailable before full trial
+                # closure.
+                raise ProtocolViolation(
+                    "locked holdout cannot be accessed before registered trial "
+                    "budget is exhausted; early stopping is not an admitted "
+                    "holdout-access authority"
+                )
             forward_start, forward_end = _period(
                 protocol_payload["forward_period"],
                 "forward_period",

@@ -95,8 +95,17 @@ class JournalStore:
     SCHEMA_VERSION = 9
 
     def __init__(self, path: str | Path):
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        candidate = Path(path).expanduser()
+        if str(candidate) == ":memory:":
+            # Preserve SQLite's explicit in-memory test mode.
+            self.path = candidate
+        else:
+            # Freeze the selected backing file at construction time. Re-resolving
+            # a relative path on every later connect would let process CWD changes
+            # silently redirect durable financial authority to another database.
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            self.path = candidate.resolve(strict=False)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
     @contextmanager

@@ -1355,12 +1355,12 @@ class DurablePerpetualFundingAuthority:
                         NAMESPACE_URL,
                         "https://events.autotrade.local/perpetual-funding-reversal/"
                         + _identity(
-                    "funding-reversal",
-                    observation.provider_id,
-                    observation.account_id,
-                    observation.environment,
-                    _source_event_identity(observation),
-                ),
+                            "funding-reversal",
+                            observation.provider_id,
+                            observation.account_id,
+                            observation.environment,
+                            _source_event_identity(observation),
+                        ),
                     )
                 ),
                 cause_event_id=event_id + ":reversal",
@@ -1485,12 +1485,12 @@ class DurablePerpetualFundingAuthority:
                 idempotency_key=(
                     "perpetual-funding:"
                     + _identity(
-                    "idempotency",
-                    observation.provider_id,
-                    observation.account_id,
-                    observation.environment,
-                    _source_event_identity(observation),
-                )
+                        "idempotency",
+                        observation.provider_id,
+                        observation.account_id,
+                        observation.environment,
+                        _source_event_identity(observation),
+                    )
                 ),
                 request=request,
                 result=result,

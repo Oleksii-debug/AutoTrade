@@ -2095,6 +2095,30 @@ class JournalStore:
             "sha256:" + sha256(effect_json.encode("utf-8")).hexdigest()
         )
 
+    @staticmethod
+    def _stored_effect_journal_sequences(
+        effect_json: str,
+        effect_hash: str,
+    ) -> list[int]:
+        expected_hash = "sha256:" + sha256(effect_json.encode("utf-8")).hexdigest()
+        if effect_hash != expected_hash:
+            raise ValueError("command effect hash does not match stored effect")
+        try:
+            effect = json.loads(effect_json)
+        except (json.JSONDecodeError, TypeError) as error:
+            raise ValueError("command effect is not valid JSON") from error
+        if canonical_json(effect) != effect_json:
+            raise ValueError("command effect is not canonical JSON")
+        rows = effect.get("events") if isinstance(effect, dict) else None
+        if not isinstance(rows, list) or not rows:
+            raise ValueError("command event-batch effect is empty or invalid")
+        sequences = [row.get("journal_sequence") if isinstance(row, dict) else None for row in rows]
+        if any(type(value) is not int or value < 1 for value in sequences):
+            raise ValueError("command event-batch journal sequence is missing or invalid")
+        if len(set(sequences)) != len(sequences):
+            raise ValueError("command event-batch journal sequences are duplicated")
+        return sequences
+
     def _verify_stored_event_batch_effect(
         self,
         connection: sqlite3.Connection,

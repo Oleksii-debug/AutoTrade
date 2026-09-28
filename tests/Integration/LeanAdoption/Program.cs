@@ -213,6 +213,65 @@ Require(!submitted.DuplicateIdentity, "First callback identity was marked duplic
 Require(!submitted.IdentityConflict, "First callback identity cannot conflict.");
 Require(!submitted.TimeRegressed, "First callback cannot regress time.");
 
+var noFeeDefaultCallbacks = new LeanCallbackCharacterizer();
+var noFeeDefault = noFeeDefaultCallbacks.Observe(new OrderEvent
+{
+    OrderId = 41,
+    Id = 1,
+    Symbol = symbol,
+    UtcTime = instant,
+    Status = OrderStatus.Submitted,
+    Direction = OrderDirection.Buy,
+    FillQuantity = decimal.Zero,
+    FillPrice = decimal.Zero,
+    Quantity = 1m
+});
+var noFeeDefaultState = noFeeDefaultCallbacks.ExportRestartState();
+
+var noFeeZeroCallbacks = new LeanCallbackCharacterizer();
+var noFeeZero = noFeeZeroCallbacks.Observe(new OrderEvent
+{
+    OrderId = 41,
+    Id = 1,
+    Symbol = symbol,
+    UtcTime = instant,
+    Status = OrderStatus.Submitted,
+    Direction = OrderDirection.Buy,
+    FillQuantity = decimal.Zero,
+    FillPrice = decimal.Zero,
+    OrderFee = OrderFee.Zero,
+    Quantity = 1m
+});
+var noFeeZeroState = noFeeZeroCallbacks.ExportRestartState();
+
+Require(!noFeeDefault.HasOrderFee, "Default semantic no-fee was marked as a fee.");
+Require(!noFeeZero.HasOrderFee, "OrderFee.Zero semantic no-fee was marked as a fee.");
+Require(noFeeDefault.FeeAmount == "0" && noFeeZero.FeeAmount == "0",
+    "Semantic no-fee amount was not canonical zero.");
+Require(noFeeDefault.FeeCurrency == "" && noFeeZero.FeeCurrency == "",
+    "Semantic no-fee currency was not canonical empty.");
+Require(
+    noFeeDefaultState == noFeeZeroState,
+    "Equivalent default and OrderFee.Zero callbacks produced different restart identity.");
+
+var restoredZeroFee = LeanCallbackCharacterizer.RestoreRestartState(noFeeDefaultState);
+var replayedZeroFee = restoredZeroFee.Observe(new OrderEvent
+{
+    OrderId = 41,
+    Id = 1,
+    Symbol = symbol,
+    UtcTime = instant,
+    Status = OrderStatus.Submitted,
+    Direction = OrderDirection.Buy,
+    FillQuantity = decimal.Zero,
+    FillPrice = decimal.Zero,
+    OrderFee = OrderFee.Zero,
+    Quantity = 1m
+});
+Require(
+    replayedZeroFee.DuplicateIdentity && !replayedZeroFee.IdentityConflict,
+    "Semantic no-fee normalization did not survive restart/replay.");
+
 var partial = callbacks.Observe(new OrderEvent
 {
     OrderId = 42,

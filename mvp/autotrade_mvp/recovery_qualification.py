@@ -368,7 +368,7 @@ def _store_artifact_matches(
 ) -> bool:
     """Verify stored bytes and declared bindings, not independent producer trust."""
     try:
-        manifest = store.load_manifest(artifact_id)
+        manifest, data = store.read_authenticated_snapshot(artifact_id)
         if not isinstance(manifest.get("manifest_hash"), str):
             return False
         if manifest.get("sha256") != artifact_sha256:
@@ -379,12 +379,10 @@ def _store_artifact_matches(
             return False
         if manifest.get("metadata") != metadata:
             return False
-        data = store.read_bytes(artifact_id)
-        if expected_bytes is not None:
-            if data != expected_bytes:
-                return False
-            if "sha256:" + sha256(data).hexdigest() != artifact_sha256:
-                return False
+        if "sha256:" + sha256(data).hexdigest() != artifact_sha256:
+            return False
+        if expected_bytes is not None and data != expected_bytes:
+            return False
     except (
         ArtifactIntegrityError,
         FileNotFoundError,

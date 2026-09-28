@@ -8,7 +8,7 @@ guarded dispatcher and exact capability evidence.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
@@ -21,6 +21,7 @@ import json
 import re
 
 from .capabilities import CapabilitySnapshot
+from .provider_core import ProviderResponseObservation, Surface
 from .reconciliation import ProviderFillEvidence
 
 
@@ -1102,72 +1103,6 @@ class WhiteBitExecutionDeal:
     fee_amount: Decimal
     fee_currency: str
     trade_time: str
-    evidence_refs: tuple[str, ...] = field(default=(), compare=False)
-    evidence_account_id: str | None = field(default=None, compare=False)
-    evidence_environment: str | None = field(default=None, compare=False)
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.evidence_refs, tuple):
-            raise TypeError("evidence_refs must be a tuple of strings")
-        normalized: list[str] = []
-        for reference in self.evidence_refs:
-            ref = _text(reference, name="evidence_ref")
-            if ref in normalized:
-                raise WhiteBitAdapterError("evidence_refs must be unique")
-            normalized.append(ref)
-        object.__setattr__(self, "evidence_refs", tuple(normalized))
-        if normalized:
-            account = _text(self.evidence_account_id, name="evidence_account_id")
-            environment = _text(
-                self.evidence_environment,
-                name="evidence_environment",
-            ).upper()
-            if environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
-                raise WhiteBitAdapterError(
-                    "evidence_environment must be REPLAY, SIMULATION, PAPER, or LIVE"
-                )
-            object.__setattr__(self, "evidence_account_id", account)
-            object.__setattr__(self, "evidence_environment", environment)
-        elif self.evidence_account_id is not None or self.evidence_environment is not None:
-            raise WhiteBitAdapterError(
-                "parser-only execution deal cannot claim account/environment evidence scope"
-            )
-
-    def to_reconciliation_fill(
-        self,
-        *,
-        account_id: str,
-        environment: str,
-    ) -> ProviderFillEvidence:
-        if not self.evidence_refs:
-            raise WhiteBitAdapterError(
-                "execution fill requires immutable provider response evidence"
-            )
-        account = _text(account_id, name="account_id")
-        env = _text(environment, name="environment").upper()
-        if (
-            account != self.evidence_account_id
-            or env != self.evidence_environment
-        ):
-            raise WhiteBitAdapterError(
-                "execution fill account/environment differs from immutable response evidence"
-            )
-        return ProviderFillEvidence.create(
-            provider_id="WHITEBIT",
-            account_id=account_id,
-            environment=environment,
-            provider_execution_id=self.provider_execution_id,
-            client_order_id=self.client_order_id,
-            instrument=self.market,
-            side=self.side,
-            quantity=self.quantity,
-            price=self.price,
-            fee_amount=self.fee_amount,
-            fee_currency=self.fee_currency,
-            trade_time=self.trade_time,
-            evidence_refs=self.evidence_refs,
-        )
-
 
 def parse_execution_deal(
     payload: Mapping[str, object],
@@ -1269,129 +1204,59 @@ def parse_execution_history(
     return tuple(by_id[key] for key in sorted(by_id))
 
 
-def _canonical_execution_history_query(
-    request: WhiteBitLookupRequest,
-    *,
-    account_id: str,
-    environment: str,
-) -> tuple[dict[str, object], str, WhiteBitPageEvidence, str]:
-    if not isinstance(request, WhiteBitLookupRequest):
-        raise TypeError("request must be WhiteBitLookupRequest")
-    if (
-        request.surface != "EXECUTIONS"
-        or request.endpoint != "/api/v4/trade-account/executed-history"
-    ):
-        raise WhiteBitAdapterError(
-            "authoritative execution history requires canonical EXECUTIONS request"
-        )
-    body = dict(request.body)
+def parse_execution_history_response(
+    observation: ProviderResponseObservation,
+) -> tuple[ProviderFillEvidence, ...]:
+    """Map one canonical exact-byte WhiteBIT execution read into financial fills.
+
+    The observation is created only by provider_core from a verified capability,
+    immutable authenticated query binding and exact HTTP response bytes. Caller-
+    decoded mappings therefore cannot mint financial execution authority.
+    """
+
+    if not isinstance(observation, ProviderResponseObservation):
+        raise TypeError("observation must be ProviderResponseObservation")
+    observation.require_scope(
+        provider_id="WHITEBIT",
+        surface=Surface.AUTHENTICATED_READ,
+        endpoint="/api/v4/trade-account/executed-history",
+    )
+    query = dict(observation.query_binding.query)
     required_query = {"startDate", "endDate", "offset", "limit", "market"}
-    if set(body) != required_query:
+    if set(query) != required_query:
         raise WhiteBitAdapterError(
             "authoritative execution history requires exact market-scoped query"
         )
-    _history_window(
-        start_unix=body["startDate"],
-        end_unix=body["endDate"],
-    )
-    page = WhiteBitPageEvidence(
-        offset=body["offset"],
-        limit=body["limit"],
-        record_count=0,
-    )
+
+    def canonical_nonnegative_integer(name: str, *, positive: bool = False) -> int:
+        raw = query[name]
+        if re.fullmatch(r"0|[1-9][0-9]*", raw) is None:
+            raise WhiteBitAdapterError(
+                f"execution-history {name} must be canonical non-negative integer text"
+            )
+        value = int(raw)
+        if positive and value < 1:
+            raise WhiteBitAdapterError(
+                f"execution-history {name} must be positive"
+            )
+        return value
+
+    start_unix = canonical_nonnegative_integer("startDate")
+    end_unix = canonical_nonnegative_integer("endDate")
+    offset = canonical_nonnegative_integer("offset")
+    limit = canonical_nonnegative_integer("limit", positive=True)
+    _history_window(start_unix=start_unix, end_unix=end_unix)
+    page = WhiteBitPageEvidence(offset=offset, limit=limit, record_count=0)
     if page.limit > 500:
         raise WhiteBitAdapterError("execution-history limit cannot exceed 500")
-    market = _text(str(body["market"]), name="market").upper()
-    if market != body["market"]:
+    market = _text(query["market"], name="market").upper()
+    if market != query["market"]:
         raise WhiteBitAdapterError(
-            "authoritative execution-history market must already be canonical uppercase"
-        )
-    account = _text(account_id, name="account_id")
-    env = _text(environment, name="environment").upper()
-    if env not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
-        raise WhiteBitAdapterError(
-            "environment must be REPLAY, SIMULATION, PAPER, or LIVE"
-        )
-    fingerprint = "sha256:" + hashlib.sha256(
-        json.dumps(
-            {
-                "surface": request.surface,
-                "endpoint": request.endpoint,
-                "body": body,
-                "account_id": account,
-                "environment": env,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-    return body, market, page, fingerprint
-
-
-def execution_history_query_fingerprint(
-    request: WhiteBitLookupRequest,
-    *,
-    account_id: str,
-    environment: str,
-) -> str:
-    """Return the exact immutable identity of one authoritative history query."""
-
-    return _canonical_execution_history_query(
-        request,
-        account_id=account_id,
-        environment=environment,
-    )[3]
-
-
-def parse_execution_history_response(
-    raw_response: str | bytes,
-    *,
-    request: WhiteBitLookupRequest,
-    account_id: str,
-    environment: str,
-    observed_at: datetime,
-    response_evidence: Mapping[str, object],
-) -> tuple[WhiteBitExecutionDeal, ...]:
-    """Bind execution economics to exact immutable bytes and exact query scope.
-
-    Parser-only mappings remain diagnostic. Financial reconciliation additionally
-    requires immutable evidence that binds both the response digest and the exact
-    market/window/pagination query that produced those bytes.
-    """
-
-    _body, market, page, query_fingerprint = _canonical_execution_history_query(
-        request,
-        account_id=account_id,
-        environment=environment,
-    )
-    account = _text(account_id, name="account_id")
-    env = _text(environment, name="environment").upper()
-    if not isinstance(response_evidence, Mapping):
-        raise WhiteBitAdapterError("response evidence must be a mapping")
-    scoped_evidence = dict(response_evidence)
-    evidence_query_fingerprint = scoped_evidence.pop("query_fingerprint", None)
-    if not isinstance(evidence_query_fingerprint, str) or re.fullmatch(
-        r"sha256:[0-9a-f]{64}",
-        evidence_query_fingerprint,
-    ) is None:
-        raise WhiteBitAdapterError(
-            "execution response evidence requires canonical query_fingerprint"
-        )
-    if evidence_query_fingerprint != query_fingerprint:
-        raise WhiteBitAdapterError(
-            "execution response evidence query_fingerprint does not match exact request"
+            "authoritative execution-history market must be canonical uppercase"
         )
 
-    raw = _response_bytes(raw_response)
-    digest = "sha256:" + hashlib.sha256(raw).hexdigest()
-    point = _instant(observed_at, name="observed_at")
-    evidence = _canonical_evidence_ref(
-        scoped_evidence,
-        expected_sha256=digest,
-        expected_observed_at=point,
-    )
-    payload = decode_whitebit_json(raw)
-    if not isinstance(payload, list):
+    payload = observation.payload
+    if not isinstance(payload, (list, tuple)):
         raise WhiteBitAdapterError(
             "execution-history provider response must be a JSON array"
         )
@@ -1400,34 +1265,31 @@ def parse_execution_history_response(
             "execution-history response exceeds requested page limit"
         )
     deals = parse_execution_history(payload, market=market)
-    evidence_ref = (
-        "whitebit-response:"
-        + evidence["artifact_id"]
-        + ":"
-        + evidence["sha256"]
-        + ":query-"
-        + query_fingerprint
-    )
-    return tuple(
-        WhiteBitExecutionDeal(
+
+    by_execution: dict[str, ProviderFillEvidence] = {}
+    for deal in deals:
+        fill = ProviderFillEvidence.create(
+            provider_id="WHITEBIT",
+            account_id=observation.account_id,
+            environment=observation.environment,
             provider_execution_id=deal.provider_execution_id,
-            provider_order_id=deal.provider_order_id,
             client_order_id=deal.client_order_id,
-            market=deal.market,
+            instrument=observation.query_binding.instrument_version,
             side=deal.side,
-            role=deal.role,
             quantity=deal.quantity,
             price=deal.price,
-            deal_value=deal.deal_value,
             fee_amount=deal.fee_amount,
             fee_currency=deal.fee_currency,
             trade_time=deal.trade_time,
-            evidence_refs=(evidence_ref,),
-            evidence_account_id=account,
-            evidence_environment=env,
+            evidence_refs=(observation.evidence_ref,),
         )
-        for deal in deals
-    )
+        existing = by_execution.get(fill.provider_execution_id)
+        if existing is not None and existing != fill:
+            raise WhiteBitAdapterError(
+                "provider execution id has conflicting authoritative observations"
+            )
+        by_execution[fill.provider_execution_id] = fill
+    return tuple(by_execution[key] for key in sorted(by_execution))
 
 
 @dataclass(frozen=True)

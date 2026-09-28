@@ -333,7 +333,8 @@ class DurableFinancingBook:
         return FinancingRevisionBook(history)
 
     def latest(self, charge_id: str) -> FinancingEvent | None:
-        return self._replay(_text(charge_id, name="charge_id")).latest(charge_id)
+        normalized = _text(charge_id, name="charge_id")
+        return self._replay(normalized).latest(normalized)
 
     def record_authenticated_artifact(
         self,

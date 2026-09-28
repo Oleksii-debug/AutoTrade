@@ -1105,7 +1105,8 @@ def evaluate_qualified_incremental_value(
             raise ValueError(
                 "authority-backed qualification does not accept caller-authored population/outcomes"
             )
-        population, trusted_outcomes = authority.resolve(
+        population, trusted_outcomes = AblationQualificationAuthority.resolve(
+            authority,
             selected_input,
             outcome_refs=tuple(outcome_refs),
         )

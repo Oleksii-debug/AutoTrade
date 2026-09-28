@@ -35,6 +35,18 @@ def durable_order_preparation(
             host_id=dispatcher.owner_token,
             owner_epoch=str(dispatcher.owner_epoch),
         )
+        try:
+            existing = projection.order(client_order_id)
+        except KeyError:
+            existing = None
+        if existing is not None and existing.state == "PRE_SEND_ABORTED":
+            projection.rearm_submission(
+                event_key=f"dispatch-order:{attempt_id}",
+                client_order_id=client_order_id,
+                attempt_id=attempt_id,
+                committed_at=prepared_at,
+            )
+            return
         projection.create_order(
             event_key=f"dispatch-order:{attempt_id}",
             client_order_id=client_order_id,

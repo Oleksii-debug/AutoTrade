@@ -54,6 +54,29 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
             observed_duration_us=900_000,
         )
         values.update(overrides)
+        identity_count = max(
+            values["expected_financial_events"],
+            values["recovered_financial_events"],
+            len(values["financial_latency_us"]),
+            len(values["financial_staleness_us"]),
+        )
+        event_ids = tuple(f"financial-event-{index:04d}" for index in range(identity_count))
+        values.setdefault(
+            "expected_financial_event_ids",
+            event_ids[: values["expected_financial_events"]],
+        )
+        values.setdefault(
+            "recovered_financial_event_ids",
+            event_ids[: values["recovered_financial_events"]],
+        )
+        values.setdefault(
+            "financial_latency_event_ids",
+            event_ids[: len(values["financial_latency_us"])],
+        )
+        values.setdefault(
+            "financial_staleness_event_ids",
+            event_ids[: len(values["financial_staleness_us"])],
+        )
         return RuntimeLoadObservation.create(**values)
 
     def test_nearest_rank_percentile_is_integer_and_deterministic(self):
@@ -159,6 +182,184 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
         self.assertEqual(decision.status, "INCONCLUSIVE")
         self.assertIn("insufficient_financial_latency_samples", decision.reasons)
 
+    def test_every_recovered_financial_event_requires_latency_coverage(self):
+        spec = self.spec(min_financial_samples=5)
+        decision = evaluate_runtime_budget(
+            spec,
+            self.observation(
+                spec_digest=spec.digest,
+                financial_latency_us=[100_000] * 19,
+                financial_staleness_us=[100_000] * 20,
+            ),
+        )
+        self.assertEqual(decision.status, "INCONCLUSIVE")
+        self.assertIn("incomplete_financial_latency_coverage", decision.reasons)
+        self.assertEqual(decision.metrics["financial_latency_sample_count"], 19)
+
+    def test_every_recovered_financial_event_requires_staleness_coverage(self):
+        spec = self.spec(min_financial_samples=5)
+        decision = evaluate_runtime_budget(
+            spec,
+            self.observation(
+                spec_digest=spec.digest,
+                financial_latency_us=[100_000] * 20,
+                financial_staleness_us=[100_000] * 19,
+            ),
+        )
+        self.assertEqual(decision.status, "INCONCLUSIVE")
+        self.assertIn("incomplete_financial_staleness_coverage", decision.reasons)
+        self.assertEqual(decision.metrics["financial_staleness_sample_count"], 19)
+
+    def test_same_count_duplicate_latency_identity_cannot_pass(self):
+        event_ids = tuple(f"financial-event-{index:04d}" for index in range(20))
+        duplicate_and_missing = event_ids[:-1] + (event_ids[0],)
+        decision = evaluate_runtime_budget(
+            self.spec(),
+            self.observation(financial_latency_event_ids=duplicate_and_missing),
+        )
+        self.assertEqual(decision.status, "INCONCLUSIVE")
+        self.assertIn("duplicate_financial_latency_event_ids", decision.reasons)
+        self.assertIn("incomplete_financial_latency_coverage", decision.reasons)
+        self.assertNotIn("p95_financial_latency_us", decision.metrics)
+
+    def test_unknown_latency_identity_cannot_pass(self):
+        event_ids = tuple(f"financial-event-{index:04d}" for index in range(20))
+        with_unknown = event_ids[:-1] + ("financial-event-unknown",)
+        decision = evaluate_runtime_budget(
+            self.spec(),
+            self.observation(financial_latency_event_ids=with_unknown),
+        )
+        self.assertEqual(decision.status, "INCONCLUSIVE")
+        self.assertIn("unknown_financial_latency_event_ids", decision.reasons)
+        self.assertIn("incomplete_financial_latency_coverage", decision.reasons)
+        self.assertNotIn("p95_financial_latency_us", decision.metrics)
+
+    def test_equal_count_substituted_recovered_universe_cannot_pass(self):
+        expected_ids = tuple(f"financial-event-{index:04d}" for index in range(20))
+        substituted = expected_ids[:-1] + ("financial-event-unknown",)
+        decision = evaluate_runtime_budget(
+            self.spec(),
+            self.observation(
+                expected_financial_event_ids=expected_ids,
+                recovered_financial_event_ids=substituted,
+                financial_latency_event_ids=substituted,
+                financial_staleness_event_ids=substituted,
+            ),
+        )
+        self.assertEqual(decision.status, "INCONCLUSIVE")
+        self.assertIn("missing_expected_financial_event_ids", decision.reasons)
+        self.assertIn("unknown_recovered_financial_event_ids", decision.reasons)
+        self.assertNotIn("p95_financial_latency_us", decision.metrics)
+        self.assertNotIn("max_financial_staleness_us", decision.metrics)
+
+    def test_duplicate_expected_identity_cannot_pass(self):
+        expected_ids = tuple(f"financial-event-{index:04d}" for index in range(20))
+        duplicated = expected_ids[:-1] + (expected_ids[0],)
+        decision = evaluate_runtime_budget(
+            self.spec(),
+            self.observation(expected_financial_event_ids=duplicated),
+        )
+        self.assertEqual(decision.status, "INCONCLUSIVE")
+        self.assertIn("duplicate_expected_financial_event_ids", decision.reasons)
+        self.assertNotIn("p95_financial_latency_us", decision.metrics)
+
+    def test_missing_expected_identity_is_inconclusive_legacy_compatibility(self):
+        decision = evaluate_runtime_budget(
+            self.spec(),
+            self.observation(expected_financial_event_ids=()),
+        )
+        self.assertEqual(decision.status, "INCONCLUSIVE")
+        self.assertIn("incomplete_expected_financial_event_identity", decision.reasons)
+        self.assertIn("unknown_recovered_financial_event_ids", decision.reasons)
+        self.assertNotIn("p95_financial_latency_us", decision.metrics)
+
+    def test_anonymous_financial_samples_cannot_pass(self):
+        decision = evaluate_runtime_budget(
+            self.spec(),
+            self.observation(
+                recovered_financial_event_ids=(),
+                financial_latency_event_ids=(),
+                financial_staleness_event_ids=(),
+            ),
+        )
+        self.assertEqual(decision.status, "INCONCLUSIVE")
+        self.assertIn("incomplete_recovered_financial_event_identity", decision.reasons)
+        self.assertIn("unbound_financial_latency_samples", decision.reasons)
+        self.assertIn("unbound_financial_staleness_samples", decision.reasons)
+
+    def test_public_factory_rejects_non_sequence_before_canonicalization(self):
+        base = dict(
+            scenario_id="declared-host-load-a",
+            spec_digest=self.spec().digest,
+            release_sha=RELEASE_SHA,
+            configuration_hash=CONFIG_HASH,
+            host_fingerprint=HOST_HASH,
+            expected_financial_events=2,
+            recovered_financial_events=2,
+            financial_latency_us=(1, 2),
+            financial_staleness_us=(1, 2),
+            research_interference_us=(1,),
+            reconnect_backlog_remaining=0,
+            expected_financial_event_ids=("event-1", "event-2"),
+            recovered_financial_event_ids=("event-1", "event-2"),
+            financial_latency_event_ids=("event-1", "event-2"),
+            financial_staleness_event_ids=("event-1", "event-2"),
+        )
+        numeric_fields = (
+            "financial_latency_us",
+            "financial_staleness_us",
+            "research_interference_us",
+        )
+        numeric_bad = (
+            "12",
+            b"12",
+            {1, 2},
+            frozenset({1, 2}),
+            {0: 1, 1: 2},
+            (value for value in (1, 2)),
+        )
+        for field in numeric_fields:
+            for bad in numeric_bad:
+                with self.subTest(field=field, bad_type=type(bad).__name__):
+                    values = dict(base)
+                    values[field] = bad
+                    with self.assertRaisesRegex(RuntimeBudgetError, f"{field} must be a sequence"):
+                        RuntimeLoadObservation.create(**values)
+
+        event_fields = (
+            "expected_financial_event_ids",
+            "recovered_financial_event_ids",
+            "financial_latency_event_ids",
+            "financial_staleness_event_ids",
+        )
+        for field in event_fields:
+            bad_values = (
+                "event-1",
+                b"event-1",
+                {"event-1", "event-2"},
+                frozenset({"event-1", "event-2"}),
+                {"event-1": 1},
+                (value for value in ("event-1", "event-2")),
+            )
+            for bad in bad_values:
+                with self.subTest(field=field, bad_type=type(bad).__name__):
+                    values = dict(base)
+                    values[field] = bad
+                    with self.assertRaisesRegex(RuntimeBudgetError, f"{field} must be a sequence"):
+                        RuntimeLoadObservation.create(**values)
+
+        as_lists = dict(base)
+        as_lists["financial_latency_us"] = [1, 2]
+        as_lists["financial_staleness_us"] = [1, 2]
+        as_lists["research_interference_us"] = [1]
+        as_lists["expected_financial_event_ids"] = ["event-1", "event-2"]
+        as_lists["recovered_financial_event_ids"] = ["event-1", "event-2"]
+        as_lists["financial_latency_event_ids"] = ["event-1", "event-2"]
+        as_lists["financial_staleness_event_ids"] = ["event-1", "event-2"]
+        observation = RuntimeLoadObservation.create(**as_lists)
+        self.assertEqual(observation.financial_latency_us, (1, 2))
+        self.assertEqual(observation.expected_financial_event_ids, ("event-1", "event-2"))
+
     def test_failure_has_priority_over_insufficient_evidence(self):
         decision = evaluate_runtime_budget(
             self.spec(),
@@ -215,6 +416,8 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
             self.observation(host_fingerprint="host")
         with self.assertRaisesRegex(RuntimeBudgetError, "sha256"):
             self.observation(spec_digest="budget-v1")
+        with self.assertRaisesRegex(RuntimeBudgetError, "canonical non-empty event ids"):
+            self.observation(financial_latency_event_ids=(" financial-event-0000",))
 
     def test_real_journal_burst_probe_recovers_every_financial_event(self):
         # This is wiring evidence only. The generous thresholds deliberately do
@@ -222,12 +425,14 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
         with TemporaryDirectory() as folder:
             store = JournalStore(Path(folder) / "runtime-budget.sqlite3")
             latencies = []
+            measured_event_ids = []
             count = 30
             campaign_started = perf_counter_ns()
             for index in range(count):
                 payload = {"sequence": index, "kind": "financial_probe"}
+                event_id = str(uuid4())
                 envelope = {
-                    "event_id": str(uuid4()),
+                    "event_id": event_id,
                     "event_type": "FINANCIAL_PROBE",
                     "aggregate_type": "PERFORMANCE_PROBE",
                     "aggregate_id": "burst-a",
@@ -239,12 +444,14 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
                 started = perf_counter_ns()
                 store.append_event(envelope, outbox_topic="financial.probe")
                 latencies.append((perf_counter_ns() - started) // 1_000)
+                measured_event_ids.append(event_id)
 
             campaign_duration_us = max(
                 1,
                 (perf_counter_ns() - campaign_started + 999) // 1_000,
             )
             recovered = store.load_events("PERFORMANCE_PROBE", "burst-a")
+            recovered_event_ids = tuple(event["event_id"] for event in recovered)
             budget_spec = RuntimeBudgetSpec(
                 scenario_id="journal-wiring-ci",
                 release_sha=RELEASE_SHA,
@@ -271,6 +478,10 @@ class RuntimeResourceBudgetTests(unittest.TestCase):
                 reconnect_backlog_remaining=0,
                 declared_duration_us=60_000_000,
                 observed_duration_us=campaign_duration_us,
+                expected_financial_event_ids=tuple(measured_event_ids),
+                recovered_financial_event_ids=recovered_event_ids,
+                financial_latency_event_ids=tuple(measured_event_ids),
+                financial_staleness_event_ids=recovered_event_ids,
             )
             decision = evaluate_runtime_budget(
                 budget_spec,

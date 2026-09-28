@@ -120,6 +120,10 @@ class RuntimePerformanceQualificationTests(unittest.TestCase):
             reconnect_backlog_remaining=0,
             declared_duration_us=1_000_000,
             observed_duration_us=900_000,
+            expected_financial_event_ids=("financial-1", "financial-2"),
+            recovered_financial_event_ids=("financial-1", "financial-2"),
+            financial_latency_event_ids=("financial-1", "financial-2"),
+            financial_staleness_event_ids=("financial-1", "financial-2"),
         )
         decision = evaluate_runtime_budget(current, observation)
         self.assertEqual(decision.status, "PASS")

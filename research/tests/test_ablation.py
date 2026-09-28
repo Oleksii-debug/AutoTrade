@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import UUID
 
 from autotrade_research.evaluation.ablation import (
@@ -994,6 +995,41 @@ class AblationTests(unittest.TestCase):
             )
 
 
+    def test_terminal_authority_rejects_polymorphic_persistent_dependencies(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            science = ScientificRegistry(root / "science.sqlite3")
+            memory = ExperienceMemory(root / "memory.sqlite3")
+            artifacts = ArtifactStore(root / "artifacts")
+            common = dict(
+                protocol_id="protocol-test",
+                protocol_hash=FINGERPRINT_A,
+                source_revision="1" * 40,
+                causal_cutoff=CUT,
+                granted_permissions={"RESEARCH"},
+            )
+            with self.assertRaisesRegex(TypeError, "canonical ScientificRegistry"):
+                AblationQualificationAuthority(
+                    scientific_registry=ForgedScientificRegistry(),
+                    experience_memory=memory,
+                    artifact_store=artifacts,
+                    **common,
+                )
+            with self.assertRaisesRegex(TypeError, "canonical ExperienceMemory"):
+                AblationQualificationAuthority(
+                    scientific_registry=science,
+                    experience_memory=ForgedExperienceMemory(),
+                    artifact_store=artifacts,
+                    **common,
+                )
+            with self.assertRaisesRegex(TypeError, "canonical ArtifactStore"):
+                AblationQualificationAuthority(
+                    scientific_registry=science,
+                    experience_memory=memory,
+                    artifact_store=ForgedArtifactStore(),
+                    **common,
+                )
+
     def test_terminal_qualification_rejects_caller_defined_authority_subclass(self):
         cases = [
             pair("forged-authority-a", "2", population_unit="unit-a"),
@@ -1362,14 +1398,7 @@ class AblationTests(unittest.TestCase):
                             sha256=manifest["sha256"],
                         )
                     )
-            class SnapshotOnlyArtifactStore(ArtifactStore):
-                def load_manifest(self, artifact_id):
-                    raise AssertionError("split manifest read is forbidden")
-
-                def read_bytes(self, artifact_id):
-                    raise AssertionError("split object read is forbidden")
-
-            artifacts = SnapshotOnlyArtifactStore(root / "artifacts")
+            artifacts = ArtifactStore(root / "artifacts")
             authority = AblationQualificationAuthority(
                 scientific_registry=science,
                 experience_memory=memory,
@@ -1382,14 +1411,23 @@ class AblationTests(unittest.TestCase):
                 task="ablation-qualification",
                 instrument_family="EQUITY",
             )
-            result = evaluate_qualified_incremental_value(
-                "agent",
-                cases,
-                authority=authority,
-                outcome_refs=refs,
-                minimum_pairs=2,
-                required_lower_bound=Decimal("0"),
-            )
+            with patch.object(
+                artifacts,
+                "load_manifest",
+                side_effect=AssertionError("split manifest read is forbidden"),
+            ), patch.object(
+                artifacts,
+                "read_bytes",
+                side_effect=AssertionError("split object read is forbidden"),
+            ):
+                result = evaluate_qualified_incremental_value(
+                    "agent",
+                    cases,
+                    authority=authority,
+                    outcome_refs=refs,
+                    minimum_pairs=2,
+                    required_lower_bound=Decimal("0"),
+                )
             self.assertEqual(result.status, "PASS")
             self.assertEqual(
                 result.reason,

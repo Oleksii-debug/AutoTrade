@@ -173,6 +173,10 @@ def _event_payload(
     artifact_digest: str,
     charge_scope_type: str,
     charge_scope_id: str,
+    previous_revision_digest: str,
+    resulting_revision_digest: str,
+    resulting_final_charge: Decimal,
+    economic_delta: Decimal,
 ) -> dict[str, Any]:
     return {
         "schema_version": "1.0.0",
@@ -189,6 +193,10 @@ def _event_payload(
         "source_account": event.source_account,
         "charge_scope_type": charge_scope_type,
         "charge_scope_id": charge_scope_id,
+        "previous_revision_digest": previous_revision_digest,
+        "resulting_revision_digest": resulting_revision_digest,
+        "resulting_final_charge": _decimal_text(resulting_final_charge),
+        "economic_delta": _decimal_text(economic_delta),
         "artifact_id": artifact_id,
         "artifact_digest": artifact_digest,
         "evidence_ref": event.evidence_ref,
@@ -211,6 +219,10 @@ def _event_from_payload(payload: Mapping[str, Any]) -> FinancingEvent:
         "source_account",
         "charge_scope_type",
         "charge_scope_id",
+        "previous_revision_digest",
+        "resulting_revision_digest",
+        "resulting_final_charge",
+        "economic_delta",
         "artifact_id",
         "artifact_digest",
         "evidence_ref",
@@ -256,6 +268,11 @@ def authenticated_financing_event(
         raise FinancingError("authenticated artifact identity does not match request")
     if manifest.get("media_type") != "application/json":
         raise FinancingError("financing evidence artifact must be application/json")
+    rights = manifest.get("rights")
+    if not isinstance(rights, Mapping) or rights.get("storage") is not True:
+        raise FinancingError(
+            "financing evidence artifact lacks canonical storage rights"
+        )
     artifact_digest = _normalize_artifact_digest(manifest)
 
     evidence = _strict_json_object(data)
@@ -309,6 +326,28 @@ def authenticated_financing_event(
         evidence_ref=evidence_ref,
     )
     return event, artifact_digest, charge_scope_type, charge_scope_id
+
+
+def _revision_book_digest(events: list[FinancingEvent]) -> str:
+    return payload_digest(
+        {
+            "schema_version": "1.0.0",
+            "events": [
+                {
+                    "charge_id": item.charge_id,
+                    "revision": item.revision,
+                    "kind": item.kind,
+                    "effective_at": _instant_text(item.effective_at),
+                    "available_at": _instant_text(item.available_at),
+                    "unit": item.unit,
+                    "amount": _decimal_text(item.amount),
+                    "source_account": item.source_account,
+                    "evidence_ref": item.evidence_ref,
+                }
+                for item in events
+            ],
+        }
+    )
 
 
 class DurableFinancingBook:
@@ -391,7 +430,24 @@ class DurableFinancingBook:
                 _text(payload.get("source_account"), name="source_account"),
                 _text(payload.get("unit"), name="unit"),
             )
-            history.append(_event_from_payload(payload))
+            candidate_event = _event_from_payload(payload)
+            previous_digest = _revision_book_digest(history)
+            candidate_book = FinancingRevisionBook(history)
+            candidate_update = candidate_book.record(candidate_event)
+            resulting_history = list(candidate_book.events)
+            if (
+                payload.get("previous_revision_digest") != previous_digest
+                or payload.get("resulting_revision_digest")
+                != _revision_book_digest(resulting_history)
+                or payload.get("resulting_final_charge")
+                != _decimal_text(candidate_update.current_final_charge)
+                or payload.get("economic_delta")
+                != _decimal_text(candidate_update.economic_delta)
+            ):
+                raise FinancingConflict(
+                    "durable financing revision-state binding is invalid"
+                )
+            history = resulting_history
         return FinancingRevisionBook(history)
 
     def _replay(self, charge_id: str) -> FinancingRevisionBook:
@@ -405,7 +461,7 @@ class DurableFinancingBook:
         event: FinancingEvent,
         economic_delta: Decimal,
     ) -> JournalTransaction:
-        return book_financing_delta(
+        base = book_financing_delta(
             transaction_id=str(
                 uuid5(
                     NAMESPACE_URL,
@@ -419,6 +475,19 @@ class DurableFinancingBook:
             unit=event.unit,
             source_account=event.source_account,
             economic_delta=economic_delta,
+        )
+        return JournalTransaction(
+            transaction_id=base.transaction_id,
+            cause_event_id=base.cause_event_id,
+            postings=base.postings,
+            economic_effective_at=_instant_text(event.effective_at),
+            economic_order_key=(
+                "provider-financing:"
+                + aggregate_id
+                + ":"
+                + str(event.revision)
+            ),
+            observed_at=_instant_text(event.available_at),
         )
 
     def latest(self, charge_id: str) -> FinancingEvent | None:
@@ -447,7 +516,9 @@ class DurableFinancingBook:
         aggregate_id = self._aggregate_id(event.charge_id)
         durable_events = self._events(event.charge_id)
         book = self._replay(event.charge_id)
+        previous_revision_digest = _revision_book_digest(list(book.events))
         update = book.record(event)
+        resulting_revision_digest = _revision_book_digest(list(book.events))
 
         if not update.accepted:
             economic_transaction = None
@@ -528,6 +599,10 @@ class DurableFinancingBook:
             artifact_digest=artifact_digest,
             charge_scope_type=charge_scope_type,
             charge_scope_id=charge_scope_id,
+            previous_revision_digest=previous_revision_digest,
+            resulting_revision_digest=resulting_revision_digest,
+            resulting_final_charge=update.current_final_charge,
+            economic_delta=update.economic_delta,
         )
         event_id = str(
             uuid5(

@@ -1026,15 +1026,6 @@ class AblationTests(unittest.TestCase):
                 required_lower_bound=Decimal("0"),
             )
 
-        # The terminal evaluator also invokes the canonical class method
-        # directly, so an instance attribute cannot virtual-dispatch forged evidence.
-        # This is asserted structurally because a fully initialized canonical authority
-        # requires persistent stores and is covered by the end-to-end terminal test.
-        self.assertIn(
-            "AblationQualificationAuthority.resolve",
-            evaluate_qualified_incremental_value.__code__.co_names,
-        )
-
     def test_trusted_qualification_rejects_case_reassignment_inside_complete_population(self):
         cases = [
             pair("case-a", "2", population_unit="unit-a"),
@@ -1402,6 +1393,23 @@ class AblationTests(unittest.TestCase):
             self.assertEqual(result.status, "PASS")
             self.assertEqual(
                 result.reason,
+                "qualified_registered_canonical_ablation_net_of_cost",
+            )
+
+            authority.resolve = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("caller-controlled virtual resolve must not execute")
+            )
+            direct_dispatch_result = evaluate_qualified_incremental_value(
+                "agent",
+                cases,
+                authority=authority,
+                outcome_refs=refs,
+                minimum_pairs=2,
+                required_lower_bound=Decimal("0"),
+            )
+            self.assertEqual(direct_dispatch_result.status, "PASS")
+            self.assertEqual(
+                direct_dispatch_result.reason,
                 "qualified_registered_canonical_ablation_net_of_cost",
             )
 

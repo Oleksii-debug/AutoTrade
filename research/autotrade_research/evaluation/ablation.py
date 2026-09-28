@@ -1097,8 +1097,10 @@ def evaluate_qualified_incremental_value(
     selected_input = tuple(pairs)
     trusted = authority is not None
     if trusted:
-        if not isinstance(authority, AblationQualificationAuthority):
-            raise TypeError("authority must be AblationQualificationAuthority or None")
+        if type(authority) is not AblationQualificationAuthority:
+            raise TypeError(
+                "terminal authority must be the canonical AblationQualificationAuthority"
+            )
         if population is not None or tuple(canonical_outcomes):
             raise ValueError(
                 "authority-backed qualification does not accept caller-authored population/outcomes"

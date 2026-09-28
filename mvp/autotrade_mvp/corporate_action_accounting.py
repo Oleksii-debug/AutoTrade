@@ -38,6 +38,8 @@ from .provider_activity_accounting import DurableProviderEconomicBook
 
 
 _SUPPORTED_DURABLE_KINDS = frozenset({"CASH_DIVIDEND", "SPLIT"})
+_ACTIVATION_AGGREGATE_TYPE = "corporate_action_activation"
+_ACTIVATION_EVENT_TYPE = "CorporateActionFinancialActivated"
 
 
 def _identity(kind: str, *parts: str) -> str:
@@ -48,6 +50,134 @@ def _identity(kind: str, *parts: str) -> str:
 
 def _order_key(external_event_id: str) -> str:
     return _identity("corporate-action-order", external_event_id)
+
+
+def _activation_aggregate_id(accepted: AuthoritativeCorporateAction) -> str:
+    return _identity(
+        "corporate-action-activation",
+        accepted.provider_id,
+        accepted.account_id,
+        accepted.environment,
+        accepted.external_event_id,
+        accepted.provenance_digest,
+    )
+
+
+def _activation_event_id(accepted: AuthoritativeCorporateAction) -> str:
+    return str(
+        uuid5(
+            NAMESPACE_URL,
+            "https://events.autotrade.local/corporate-action-activation/"
+            + _activation_aggregate_id(accepted),
+        )
+    )
+
+
+def _load_activation_fact(
+    store: JournalStore,
+    accepted: AuthoritativeCorporateAction,
+) -> dict[str, object] | None:
+    """Load one exact durable activation fact, independent of retained evidence."""
+
+    events = store.load_events(
+        _ACTIVATION_AGGREGATE_TYPE,
+        _activation_aggregate_id(accepted),
+    )
+    if not events:
+        return None
+    if len(events) != 1:
+        raise AccountingConflict(
+            "corporate-action activation history must contain exactly one fact"
+        )
+    event = events[0]
+    if (
+        event.get("event_id") != _activation_event_id(accepted)
+        or event.get("event_type") != _ACTIVATION_EVENT_TYPE
+        or event.get("aggregate_version") != 1
+    ):
+        raise AccountingConflict("corporate-action activation fact identity is invalid")
+    payload = event.get("payload")
+    if not isinstance(payload, Mapping):
+        raise AccountingConflict("corporate-action activation payload is invalid")
+    required = {
+        "schema_version",
+        "provider_id",
+        "account_id",
+        "environment",
+        "external_event_id",
+        "provenance_digest",
+        "corrects_external_event_id",
+        "activation_at",
+        "pre_activation_journal_sequence",
+        "entitlement_position_digest",
+        "transaction_ids",
+        "next_state_digest",
+    }
+    if set(payload) != required:
+        raise AccountingConflict("corporate-action activation payload shape is invalid")
+    if (
+        payload.get("schema_version") != "1.0.0"
+        or payload.get("provider_id") != accepted.provider_id
+        or payload.get("account_id") != accepted.account_id
+        or payload.get("environment") != accepted.environment
+        or payload.get("external_event_id") != accepted.external_event_id
+        or payload.get("provenance_digest") != accepted.provenance_digest
+        or payload.get("corrects_external_event_id")
+        != accepted.corrects_external_event_id
+    ):
+        raise AccountingConflict("corporate-action activation fact scope is invalid")
+    pre_cut = payload.get("pre_activation_journal_sequence")
+    journal_sequence = event.get("journal_sequence")
+    if (
+        type(pre_cut) is not int
+        or pre_cut < 0
+        or type(journal_sequence) is not int
+        or journal_sequence <= pre_cut
+    ):
+        raise AccountingConflict("corporate-action activation journal cut is invalid")
+    transaction_ids = payload.get("transaction_ids")
+    if (
+        not isinstance(transaction_ids, list)
+        or any(not isinstance(item, str) or not item for item in transaction_ids)
+        or len(transaction_ids) != len(set(transaction_ids))
+    ):
+        raise AccountingConflict("corporate-action activation transaction identity is invalid")
+    return dict(payload)
+
+
+def _activation_envelope(
+    accepted: AuthoritativeCorporateAction,
+    *,
+    activation_at: str,
+    pre_activation_journal_sequence: int,
+    entitlement_position_digest: str,
+    transaction_ids: tuple[str, ...],
+    next_state_digest: str,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schema_version": "1.0.0",
+        "provider_id": accepted.provider_id,
+        "account_id": accepted.account_id,
+        "environment": accepted.environment,
+        "external_event_id": accepted.external_event_id,
+        "provenance_digest": accepted.provenance_digest,
+        "corrects_external_event_id": accepted.corrects_external_event_id,
+        "activation_at": activation_at,
+        "pre_activation_journal_sequence": pre_activation_journal_sequence,
+        "entitlement_position_digest": entitlement_position_digest,
+        "transaction_ids": list(transaction_ids),
+        "next_state_digest": next_state_digest,
+    }
+    return {
+        "event_id": _activation_event_id(accepted),
+        "event_type": _ACTIVATION_EVENT_TYPE,
+        "aggregate_type": _ACTIVATION_AGGREGATE_TYPE,
+        "aggregate_id": _activation_aggregate_id(accepted),
+        "aggregate_version": "1",
+        "committed_at": activation_at,
+        "payload": payload,
+        "payload_hash": payload_digest(payload),
+    }
 
 
 def _transaction_id(accepted: AuthoritativeCorporateAction, suffix: str) -> str:
@@ -683,11 +813,13 @@ def commit_authoritative_corporate_action(
         )
     evidence_plan = evidence_store.prepare_record_mutation(accepted)
     activation_text = activation_cut.isoformat().replace("+00:00", "Z")
+    activation_fact = _load_activation_fact(store, accepted)
+    activation_already_committed = activation_fact is not None
     transactions = _economic_transactions(
         economic_book,
         accepted,
         transition,
-        exact_retry=evidence_plan.already_committed,
+        exact_retry=activation_already_committed,
         transaction_observed_at=activation_text,
     )
     economic_plan = (
@@ -698,19 +830,57 @@ def commit_authoritative_corporate_action(
         if transactions
         else None
     )
+    transaction_ids = tuple(item.transaction_id for item in transactions)
+    next_state_digest = payload_digest(
+        {
+            "symbol": candidate.state.symbol,
+            "quantity": str(candidate.state.quantity),
+            "total_basis": str(candidate.state.total_basis),
+            "settled_cash": str(candidate.state.settled_cash),
+            "unsettled_cash": str(candidate.state.unsettled_cash),
+            "currency": candidate.state.currency,
+        }
+    )
+    if activation_fact is not None:
+        if (
+            activation_fact.get("activation_at") != activation_text
+            or activation_fact.get("entitlement_position_digest")
+            != entitlement_position["digest"]
+            or activation_fact.get("transaction_ids") != list(transaction_ids)
+            or activation_fact.get("next_state_digest") != next_state_digest
+        ):
+            raise AccountingConflict(
+                "corporate-action activation retry differs from durable activation fact"
+            )
 
     economic_committed = (
         economic_plan is None or economic_plan.already_committed
     )
-    if evidence_plan.already_committed and economic_committed:
+    if (
+        activation_already_committed
+        and evidence_plan.already_committed
+        and economic_committed
+    ):
         return CorporateActionFinancialResult(
             inserted=False,
             source_event_id=evidence_plan.event_id,
             accepted_event=accepted.event,
             transition=transition,
             next_state=candidate.state,
-            transaction_ids=tuple(item.transaction_id for item in transactions),
+            transaction_ids=transaction_ids,
             economically_active=True,
+        )
+    if activation_already_committed and not evidence_plan.already_committed:
+        raise AccountingConflict(
+            "corporate-action activation exists without retained provider evidence"
+        )
+    if (
+        economic_plan is not None
+        and economic_plan.already_committed
+        and not activation_already_committed
+    ):
+        raise AccountingConflict(
+            "corporate-action economics are durable without matching activation fact"
         )
     if (
         not evidence_plan.already_committed
@@ -737,15 +907,19 @@ def commit_authoritative_corporate_action(
         events.append((evidence_plan.envelope, None))
     if economic_plan is not None and not economic_plan.already_committed:
         events.append((economic_plan.envelope, "autotrade.economic.events"))
-    if not events:
-        return CorporateActionFinancialResult(
-            inserted=False,
-            source_event_id=evidence_plan.event_id,
-            accepted_event=accepted.event,
-            transition=transition,
-            next_state=candidate.state,
-            transaction_ids=tuple(item.transaction_id for item in transactions),
-            economically_active=True,
+    if not activation_already_committed:
+        events.append(
+            (
+                _activation_envelope(
+                    accepted,
+                    activation_at=activation_text,
+                    pre_activation_journal_sequence=journal_read_cut,
+                    entitlement_position_digest=str(entitlement_position["digest"]),
+                    transaction_ids=transaction_ids,
+                    next_state_digest=next_state_digest,
+                ),
+                None,
+            )
         )
 
     request = {
@@ -762,19 +936,10 @@ def commit_authoritative_corporate_action(
         "source_event_id": evidence_plan.event_id,
         "external_event_id": accepted.external_event_id,
         "provenance_digest": accepted.provenance_digest,
-        "transaction_ids": [item.transaction_id for item in transactions],
+        "transaction_ids": list(transaction_ids),
         "activation_at": activation_text,
         "entitlement_position_digest": entitlement_position["digest"],
-        "next_state_digest": payload_digest(
-            {
-                "symbol": candidate.state.symbol,
-                "quantity": str(candidate.state.quantity),
-                "total_basis": str(candidate.state.total_basis),
-                "settled_cash": str(candidate.state.settled_cash),
-                "unsettled_cash": str(candidate.state.unsettled_cash),
-                "currency": candidate.state.currency,
-            }
-        ),
+        "next_state_digest": next_state_digest,
     }
     command_id = str(
         uuid5(
@@ -808,6 +973,7 @@ def commit_authoritative_corporate_action(
             request=request,
             result=result,
             state_version=max(
+                1,
                 evidence_plan.aggregate_version,
                 0 if economic_plan is None else economic_plan.aggregate_version,
             ),

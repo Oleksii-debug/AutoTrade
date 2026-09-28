@@ -515,6 +515,7 @@ class DurableOrderBookProjection:
                 price=request.get("price"),
                 provider_revision=request.get("provider_revision"),
                 correction_fill_id=request.get("correction_fill_id"),
+                correction_reference=request.get("correction_reference"),
             )
         elif operation == "BUST_FILL":
             order.bust_fill(

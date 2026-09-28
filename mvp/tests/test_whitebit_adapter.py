@@ -12,6 +12,13 @@ from mvp.autotrade_mvp.capabilities import (
     EvidenceVerification,
     derive_capability_snapshot,
 )
+from mvp.autotrade_mvp.provider_core import (
+    ProviderCoreError,
+    ProviderResponseObservation,
+    Surface,
+    observe_authenticated_json_response,
+    prepare_authenticated_read_query,
+)
 from mvp.autotrade_mvp.whitebit import (
     WhiteBitAbsenceEvidence,
     WhiteBitAdapterError,
@@ -27,7 +34,6 @@ from mvp.autotrade_mvp.whitebit import (
     collateral_balance_request,
     decode_whitebit_json,
     execution_history_coverage,
-    execution_history_query_fingerprint,
     funding_history_request,
     market_fee_request,
     open_order_coverage,
@@ -74,6 +80,7 @@ def capability(
     account_id="account-1",
     environment="PAPER",
     instrument_version="BTC_USDT:v1",
+    permission_scopes=("ORDER_WRITE",),
 ):
     observed_at = NOW - timedelta(hours=1)
     claims = tuple(
@@ -88,7 +95,7 @@ def capability(
             expires_at=NOW + timedelta(hours=1),
             supported_order_types=frozenset(order_types),
             time_in_force=frozenset(tif),
-            permission_scopes=frozenset({"ORDER_WRITE"}),
+            permission_scopes=frozenset(permission_scopes),
             position_mode="NET",
             native_protection=frozenset({"STOP"}),
             rate_limit_policy_id="whitebit-v4-test",
@@ -107,6 +114,44 @@ def capability(
         claims=claims,
         observed_at=observed_at,
         evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    )
+
+
+def execution_observation(
+    rows,
+    *,
+    market="BTC_USDT",
+    limit=50,
+    endpoint="/api/v4/trade-account/executed-history",
+    include_market=True,
+    instrument_version="BTC_USDT:v1",
+):
+    read_capability = capability(
+        instrument_version=instrument_version,
+        permission_scopes=("ORDER.READ",),
+    )
+    query = {
+        "startDate": "1700000000",
+        "endDate": "1700000100",
+        "offset": "0",
+        "limit": str(limit),
+    }
+    if include_market:
+        query["market"] = market
+    binding = prepare_authenticated_read_query(
+        capability=read_capability,
+        surface=Surface.AUTHENTICATED_READ,
+        endpoint=endpoint,
+        query=query,
+        at=NOW,
+        permission_scope="ORDER.READ",
+    )
+    response_bytes = json.dumps(rows, separators=(",", ":")).encode("utf-8")
+    return observe_authenticated_json_response(
+        query_binding=binding,
+        http_status=200,
+        response_bytes=response_bytes,
+        observed_at=NOW,
     )
 
 
@@ -883,7 +928,7 @@ class WhiteBitAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(WhiteBitAdapterError, "invalid"):
             decode_whitebit_json('{"broken":')
 
-    def test_execution_fill_requires_exact_immutable_response_evidence(self):
+    def test_execution_fill_requires_canonical_provider_response_observation(self):
         row = {
             "id": 123,
             "clientOrderId": "at-order-123",
@@ -902,89 +947,56 @@ class WhiteBitAdapterTests(unittest.TestCase):
         self.assertEqual(parser_only.provider_order_id, "456")
         self.assertEqual(parser_only.role, "TAKER")
         self.assertEqual(parser_only.trade_time, "2020-06-27T04:58:59.123456Z")
-        with self.assertRaisesRegex(
-            WhiteBitAdapterError,
-            "requires immutable provider response evidence",
-        ):
-            parser_only.to_reconciliation_fill(
-                account_id="paper-1",
-                environment="PAPER",
-            )
+        self.assertFalse(hasattr(parser_only, "to_reconciliation_fill"))
 
-        raw = json.dumps([row], separators=(",", ":"))
-        digest = "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
-        artifact_id = str(uuid4())
-        request = paged_execution_history_request(
-            start_unix=1_700_000_000,
-            end_unix=1_700_000_100,
-            offset=0,
-            limit=50,
-            market="btc_usdt",
-        )
-        query_fingerprint = execution_history_query_fingerprint(
-            request, account_id="paper-1", environment="PAPER"
-        )
-        deals = parse_execution_history_response(
-            raw,
-            request=request,
-            account_id="paper-1",
-            environment="PAPER",
-            observed_at=NOW,
-            response_evidence={
-                "artifact_id": artifact_id,
-                "sha256": digest,
-                "observed_at": NOW.isoformat().replace("+00:00", "Z"),
-                "source_uri": "https://docs.whitebit.com/api-reference/trade-account/executed-history",
-                "query_fingerprint": query_fingerprint,
-            },
-        )
-        self.assertEqual(len(deals), 1)
-        fill = deals[0].to_reconciliation_fill(
-            account_id="paper-1",
-            environment="PAPER",
-        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "observation must be ProviderResponseObservation",
+        ):
+            parse_execution_history_response({"caller": "mapping"})
+
+        observation = execution_observation([row])
+        fills = parse_execution_history_response(observation)
+        self.assertEqual(len(fills), 1)
+        fill = fills[0]
         self.assertEqual(fill.provider_execution_id, "123")
+        self.assertEqual(fill.account_id, "account-1")
+        self.assertEqual(fill.environment, "PAPER")
+        self.assertEqual(fill.instrument, "BTC_USDT:v1")
         self.assertEqual(fill.quantity, Decimal("0.001"))
         self.assertEqual(fill.price, Decimal("40000"))
         self.assertEqual(fill.fee_amount, Decimal("0.04"))
+        self.assertEqual(fill.evidence_refs, (observation.evidence_ref,))
+        self.assertTrue(fill.evidence_refs[0].startswith("provider-read:sha256:"))
+
+    def test_provider_response_observation_cannot_be_directly_forged(self):
+        read_capability = capability(permission_scopes=("ORDER.READ",))
+        binding = prepare_authenticated_read_query(
+            capability=read_capability,
+            surface=Surface.AUTHENTICATED_READ,
+            endpoint="/api/v4/trade-account/executed-history",
+            query={
+                "startDate": "1700000000",
+                "endDate": "1700000100",
+                "offset": "0",
+                "limit": "50",
+                "market": "BTC_USDT",
+            },
+            at=NOW,
+            permission_scope="ORDER.READ",
+        )
         with self.assertRaisesRegex(
-            WhiteBitAdapterError,
-            "account/environment differs",
+            ProviderCoreError,
+            "must come from exact response bytes",
         ):
-            deals[0].to_reconciliation_fill(
-                account_id="paper-2",
-                environment="PAPER",
+            ProviderResponseObservation(
+                query_binding=binding,
+                observed_at=NOW.isoformat().replace("+00:00", "Z"),
+                http_status=200,
+                response_sha256="sha256:" + "a" * 64,
+                evidence_ref="provider-read:sha256:" + "b" * 64,
+                payload=(),
             )
-        with self.assertRaisesRegex(
-            WhiteBitAdapterError,
-            "account/environment differs",
-        ):
-            deals[0].to_reconciliation_fill(
-                account_id="paper-1",
-                environment="LIVE",
-            )
-        self.assertNotEqual(
-            query_fingerprint,
-            execution_history_query_fingerprint(
-                request,
-                account_id="paper-2",
-                environment="PAPER",
-            ),
-        )
-        self.assertNotEqual(
-            query_fingerprint,
-            execution_history_query_fingerprint(
-                request,
-                account_id="paper-1",
-                environment="LIVE",
-            ),
-        )
-        self.assertEqual(
-            fill.evidence_refs,
-            (
-                f"whitebit-response:{artifact_id}:{digest}:query-{query_fingerprint}",
-            ),
-        )
 
     def test_execution_deal_without_client_id_remains_reconcilable_with_evidence(self):
         row = {
@@ -1002,36 +1014,12 @@ class WhiteBitAdapterTests(unittest.TestCase):
         }
         parser_only = parse_execution_deal(row, market="BTC_USDT")
         self.assertIsNone(parser_only.client_order_id)
-        raw = json.dumps([row], separators=(",", ":"))
-        digest = "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
-        request = paged_execution_history_request(
-            start_unix=1_700_000_000,
-            end_unix=1_700_000_100,
-            offset=0,
-            limit=50,
-            market="btc_usdt",
-        )
-        deal = parse_execution_history_response(
-            raw,
-            request=request,
-            account_id="paper-1",
-            environment="PAPER",
-            observed_at=NOW,
-            response_evidence={
-                "artifact_id": str(uuid4()),
-                "sha256": digest,
-                "observed_at": NOW.isoformat().replace("+00:00", "Z"),
-                "query_fingerprint": execution_history_query_fingerprint(
-            request, account_id="paper-1", environment="PAPER"
-        ),
-            },
+        fill = parse_execution_history_response(
+            execution_observation([row])
         )[0]
-        self.assertIsNone(
-            deal.to_reconciliation_fill(
-                account_id="paper-1",
-                environment="PAPER",
-            ).client_order_id
-        )
+        self.assertIsNone(fill.client_order_id)
+        self.assertEqual(fill.side, "SELL")
+        self.assertEqual(fill.evidence_refs[0][:21], "provider-read:sha256:")
 
     def test_execution_deal_requires_exact_economic_identity(self):
         with self.assertRaisesRegex(WhiteBitAdapterError, "multiplied by price"):
@@ -1051,7 +1039,7 @@ class WhiteBitAdapterTests(unittest.TestCase):
                 market="BTC_USDT",
             )
 
-    def test_execution_history_response_rejects_digest_time_query_and_shape_mismatch(self):
+    def test_execution_history_response_requires_exact_scoped_query_and_shape(self):
         row = {
             "id": 123,
             "clientOrderId": "at-order-123",
@@ -1065,155 +1053,71 @@ class WhiteBitAdapterTests(unittest.TestCase):
             "orderId": 456,
             "feeAsset": "USDT",
         }
-        raw = json.dumps([row], separators=(",", ":"))
-        digest = "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
-        request = paged_execution_history_request(
-            start_unix=1_700_000_000,
-            end_unix=1_700_000_100,
-            offset=0,
-            limit=50,
-            market="btc_usdt",
-        )
-        query_fingerprint = execution_history_query_fingerprint(
-            request, account_id="paper-1", environment="PAPER"
-        )
-        evidence = {
-            "artifact_id": str(uuid4()),
-            "sha256": digest,
-            "observed_at": NOW.isoformat().replace("+00:00", "Z"),
-            "query_fingerprint": query_fingerprint,
-        }
 
-        with self.assertRaisesRegex(WhiteBitAdapterError, "digest does not match"):
-            parse_execution_history_response(
-                raw,
-                request=request,
-                account_id="paper-1",
-                environment="PAPER",
-                observed_at=NOW,
-                response_evidence={**evidence, "sha256": "sha256:" + "0" * 64},
-            )
-
-        with self.assertRaisesRegex(WhiteBitAdapterError, "observed_at does not match"):
-            parse_execution_history_response(
-                raw,
-                request=request,
-                account_id="paper-1",
-                environment="PAPER",
-                observed_at=NOW,
-                response_evidence={
-                    **evidence,
-                    "observed_at": (NOW - timedelta(seconds=1))
-                    .isoformat()
-                    .replace("+00:00", "Z"),
-                },
-            )
-
-        other_market_request = paged_execution_history_request(
-            start_unix=1_700_000_000,
-            end_unix=1_700_000_100,
-            offset=0,
-            limit=50,
-            market="eth_usdt",
-        )
-        with self.assertRaisesRegex(
-            WhiteBitAdapterError,
-            "query_fingerprint does not match exact request",
-        ):
-            parse_execution_history_response(
-                raw,
-                request=other_market_request,
-                account_id="paper-1",
-                environment="PAPER",
-                observed_at=NOW,
-                response_evidence=evidence,
-            )
-
-        unscoped_request = paged_execution_history_request(
-            start_unix=1_700_000_000,
-            end_unix=1_700_000_100,
-            offset=0,
-            limit=50,
-        )
         with self.assertRaisesRegex(
             WhiteBitAdapterError,
             "exact market-scoped query",
         ):
-            execution_history_query_fingerprint(
-            unscoped_request, account_id="paper-1", environment="PAPER"
-        )
-
-        wrong_surface = paged_order_history_request(
-            start_unix=1_700_000_000,
-            end_unix=1_700_000_100,
-            offset=0,
-            limit=50,
-            market="btc_usdt",
-        )
-        with self.assertRaisesRegex(
-            WhiteBitAdapterError,
-            "canonical EXECUTIONS request",
-        ):
             parse_execution_history_response(
-                raw,
-                request=wrong_surface,
-                account_id="paper-1",
-                environment="PAPER",
-                observed_at=NOW,
-                response_evidence=evidence,
+                execution_observation([row], include_market=False)
             )
 
-        object_raw = json.dumps({"records": [row]}, separators=(",", ":"))
-        object_digest = "sha256:" + hashlib.sha256(
-            object_raw.encode("utf-8")
-        ).hexdigest()
-        with self.assertRaisesRegex(WhiteBitAdapterError, "must be a JSON array"):
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "endpoint mismatch",
+        ):
             parse_execution_history_response(
-                object_raw,
-                request=request,
-                account_id="paper-1",
-                environment="PAPER",
-                observed_at=NOW,
-                response_evidence={
-                    "artifact_id": str(uuid4()),
-                    "sha256": object_digest,
-                    "observed_at": NOW.isoformat().replace("+00:00", "Z"),
-                    "query_fingerprint": query_fingerprint,
-                },
+                execution_observation(
+                    [row],
+                    endpoint="/api/v4/trade-account/order/history",
+                )
+            )
+
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "must be a JSON array",
+        ):
+            parse_execution_history_response(
+                execution_observation({"records": [row]})
             )
 
         second = dict(row)
         second["id"] = 124
-        too_many_raw = json.dumps([row, second], separators=(",", ":"))
-        one_row_request = paged_execution_history_request(
-            start_unix=1_700_000_000,
-            end_unix=1_700_000_100,
-            offset=0,
-            limit=1,
-            market="btc_usdt",
-        )
-        one_row_query = execution_history_query_fingerprint(
-            one_row_request, account_id="paper-1", environment="PAPER"
-        )
         with self.assertRaisesRegex(
             WhiteBitAdapterError,
             "exceeds requested page limit",
         ):
             parse_execution_history_response(
-                too_many_raw,
-                request=one_row_request,
-                account_id="paper-1",
-                environment="PAPER",
-                observed_at=NOW,
-                response_evidence={
-                    "artifact_id": str(uuid4()),
-                    "sha256": "sha256:" + hashlib.sha256(
-                        too_many_raw.encode("utf-8")
-                    ).hexdigest(),
-                    "observed_at": NOW.isoformat().replace("+00:00", "Z"),
-                    "query_fingerprint": one_row_query,
-                },
+                execution_observation([row, second], limit=1)
             )
+
+    def test_execution_history_query_numbers_must_be_canonical(self):
+        read_capability = capability(permission_scopes=("ORDER.READ",))
+        binding = prepare_authenticated_read_query(
+            capability=read_capability,
+            surface=Surface.AUTHENTICATED_READ,
+            endpoint="/api/v4/trade-account/executed-history",
+            query={
+                "startDate": "01700000000",
+                "endDate": "1700000100",
+                "offset": "0",
+                "limit": "50",
+                "market": "BTC_USDT",
+            },
+            at=NOW,
+            permission_scope="ORDER.READ",
+        )
+        observation = observe_authenticated_json_response(
+            query_binding=binding,
+            http_status=200,
+            response_bytes=b"[]",
+            observed_at=NOW,
+        )
+        with self.assertRaisesRegex(
+            WhiteBitAdapterError,
+            "canonical non-negative integer text",
+        ):
+            parse_execution_history_response(observation)
 
     def test_execution_history_deduplicates_exact_rows_and_rejects_conflicts(self):
         row = {
@@ -1232,14 +1136,7 @@ class WhiteBitAdapterTests(unittest.TestCase):
         deals = parse_execution_history([row, dict(row)], market="BTC_USDT")
         self.assertEqual(len(deals), 1)
         self.assertEqual(deals[0].side, "BUY")
-        with self.assertRaisesRegex(
-            WhiteBitAdapterError,
-            "requires immutable provider response evidence",
-        ):
-            deals[0].to_reconciliation_fill(
-                account_id="paper-1",
-                environment="PAPER",
-            )
+        self.assertFalse(hasattr(deals[0], "to_reconciliation_fill"))
         conflicting = dict(row)
         conflicting["price"] = "41000"
         conflicting["deal"] = "41"

@@ -936,6 +936,20 @@ class DurableFinancingTests(unittest.TestCase):
                 committed_at=observed_at.isoformat(),
             )
 
+        rolled_registry, _ = bybit_instrument_registry(
+            successor_from=BASE - timedelta(hours=1)
+        )
+        with self.assertRaisesRegex(FinancingError, "event time"):
+            paper_financing.record_bybit_funding_observation(
+                observation,
+                raw_store,
+                artifact_id=artifact,
+                row_id="funding-row-instrument",
+                instrument_registry=rolled_registry,
+                instrument_versions={"XRPUSDT": exact_ref},
+                committed_at=observed_at.isoformat(),
+            )
+
         self.assertEqual(
             paper_economic.balance("FINANCING_EXPENSE:USDT", "USDT"),
             0,

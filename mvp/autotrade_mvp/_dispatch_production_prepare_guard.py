@@ -70,6 +70,18 @@ def install_production_prepare_guard() -> None:
             return original(self, *args, **kwargs)
 
         supplied = kwargs.get("prepare_order")
+        if kwargs.get("order_preparation_binding") is None:
+            def missing_order_binding(*_args: Any, **_kwargs: Any) -> None:
+                raise _MissingDurableOrderPreparation(
+                    "explicit order_preparation_binding is required for PAPER/LIVE submission"
+                )
+
+            # Never invoke a caller preparation callback when its independent
+            # canonical order binding is absent. The generic dispatcher records
+            # a local SubmissionBlocked result and cannot reach transport.
+            kwargs["prepare_order"] = missing_order_binding
+            return original(self, *args, **kwargs)
+
         if supplied is None:
             def missing_prepare_order(*_args: Any, **_kwargs: Any) -> None:
                 raise _MissingDurableOrderPreparation(

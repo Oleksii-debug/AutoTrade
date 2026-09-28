@@ -238,6 +238,44 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
                     resource_metrics={"cpu_peak_millis": 500},
                 )
 
+    def test_measurement_source_cannot_relabel_duplicate_event_ids_as_full_coverage(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec()
+            current_plan = plan(spec, "fin-1", "fin-2")
+            cut = begin_runtime_campaign(journal=journal, spec=spec, plan=current_plan)
+            journal.append_event(envelope("fin-1"))
+            journal.append_event(envelope("fin-2"))
+
+            evidence = collect_runtime_campaign_evidence(
+                journal=journal,
+                spec=spec,
+                plan=current_plan,
+                cut=cut,
+                financial_latency_us=(100, 120),
+                financial_latency_event_ids=("fin-1", "fin-1"),
+                financial_staleness_us=(80, 90),
+                financial_staleness_event_ids=("fin-1", "fin-2"),
+                research_interference_us=(50,),
+                resource_evidence_hash=RESOURCE,
+                resource_metrics={"cpu_peak_millis": 500},
+            )
+            self.assertEqual(
+                evidence.financial_latency_event_ids,
+                ("fin-1", "fin-1"),
+            )
+            decision = evaluate_runtime_campaign(spec, evidence)
+            self.assertEqual(decision.status, "INCONCLUSIVE")
+            self.assertIn(
+                "duplicate_financial_latency_event_ids",
+                decision.reasons,
+            )
+            self.assertIn(
+                "incomplete_financial_latency_coverage",
+                decision.reasons,
+            )
+            self.assertNotIn("p95_financial_latency_us", decision.metrics)
+
     def test_undeclared_financial_event_cannot_be_hidden_from_campaign_cut(self):
         with TemporaryDirectory() as directory:
             journal = JournalStore(f"{directory}/journal.sqlite3")

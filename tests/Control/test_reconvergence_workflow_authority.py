@@ -622,5 +622,54 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
         self.assertIn("tests/Contracts.DotNet/Program.cs", completed.stdout)
 
 
+    def test_unqualified_nvda_status_check_does_not_import_mutable_product_packages(self):
+        source = (REPO_ROOT / "tools" / "check_nvda_qualification.py").read_text(
+            encoding="utf-8"
+        )
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            tool = root / "tools" / "check_nvda_qualification.py"
+            tool.parent.mkdir(parents=True)
+            tool.write_text(source, encoding="utf-8")
+
+            qualification = root / "qualification" / "nvda"
+            qualification.mkdir(parents=True)
+            (qualification / "requirements.json").write_text("{}\n", encoding="utf-8")
+            (qualification / "status.json").write_text(
+                '{"qualified": false, "reason": "NO_REAL_NVDA_RELEASE_EVIDENCE"}\n',
+                encoding="utf-8",
+            )
+
+            marker = root / "mutable-package-imported.txt"
+            for package_init in (
+                root / "mvp" / "autotrade_mvp" / "__init__.py",
+                root / "research" / "autotrade_research" / "artifacts" / "__init__.py",
+            ):
+                package_init.parent.mkdir(parents=True, exist_ok=True)
+                package_init.write_text(
+                    "from pathlib import Path\n"
+                    f"Path({str(marker)!r}).write_text('imported', encoding='utf-8')\n"
+                    "raise SystemExit(0)\n",
+                    encoding="utf-8",
+                )
+
+            completed = subprocess.run(
+                [sys.executable, str(tool), "--check-status"],
+                cwd=root,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            self.assertEqual(
+                completed.returncode,
+                0,
+                completed.stdout + completed.stderr,
+            )
+            self.assertFalse(marker.exists())
+            self.assertIn('"qualified": false', completed.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

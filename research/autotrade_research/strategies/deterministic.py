@@ -598,6 +598,7 @@ class StrategyEconomicsBinding:
     capacity_assessment_sha256: str
     max_feasible_quantity: Decimal
     lot_size: Decimal
+    registered_run_receipt_sha256: str | None = None
     required_evidence_dimensions: tuple[str, ...] = ()
     dimension_evidence: tuple[tuple[str, str], ...] = ()
     status: str = "INCONCLUSIVE"
@@ -676,6 +677,15 @@ class StrategyEconomicsBinding:
             "execution_fidelity",
             _text(self.execution_fidelity, name="execution_fidelity").upper(),
         )
+        if self.registered_run_receipt_sha256 is not None:
+            object.__setattr__(
+                self,
+                "registered_run_receipt_sha256",
+                _digest(
+                    self.registered_run_receipt_sha256,
+                    name="registered_run_receipt_sha256",
+                ),
+            )
 
         lower_bound = _decimal(
             self.after_cost_lower_bound,
@@ -779,6 +789,7 @@ class StrategyEconomicsBinding:
             "capacity_assessment_sha256": self.capacity_assessment_sha256,
             "max_feasible_quantity": str(self.max_feasible_quantity),
             "lot_size": str(self.lot_size),
+            "registered_run_receipt_sha256": self.registered_run_receipt_sha256,
             "required_evidence_dimensions": list(
                 self.required_evidence_dimensions
             ),
@@ -795,6 +806,19 @@ class StrategyEconomicsBinding:
         return "sha256:" + sha256(
             _canonical_json(self.canonical_document()).encode("utf-8")
         ).hexdigest()
+
+
+def _require_registered_economics_join(
+    receipt: RegisteredStrategyRunReceipt,
+    economics: StrategyEconomicsBinding,
+) -> None:
+    """Require one economics evidence chain to name the exact registered run."""
+
+    receipt_digest = verify_registered_strategy_run(receipt.proposal, receipt)
+    if economics.registered_run_receipt_sha256 != receipt_digest:
+        raise ValueError(
+            "economics evidence is not bound to the exact registered strategy run"
+        )
 
 
 @dataclass(frozen=True)
@@ -838,6 +862,8 @@ class EconomicsBoundProposal:
                 raise ValueError(
                     "registered run instrument_version does not match economics binding"
                 )
+            if gross.action != "HOLD":
+                _require_registered_economics_join(receipt, economics)
         if gross.strategy_fingerprint != economics.strategy_fingerprint:
             raise ValueError("economics strategy fingerprint does not match proposal")
         if (
@@ -943,6 +969,11 @@ def bind_strategy_economics(
         if registered_run_receipt.instrument_version != instrument:
             raise ValueError(
                 "registered run instrument_version does not match economics binding"
+            )
+        if proposal.action != "HOLD":
+            _require_registered_economics_join(
+                registered_run_receipt,
+                economics,
             )
     if economics.strategy_fingerprint != proposal.strategy_fingerprint:
         raise ValueError("economics strategy fingerprint does not match proposal")

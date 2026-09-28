@@ -3,6 +3,8 @@ from decimal import Decimal
 from tempfile import TemporaryDirectory
 import unittest
 
+from research.autotrade_research.artifacts.store import ArtifactStore
+
 from mvp.autotrade_mvp.corporate_actions import EquityState
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.securities_borrow import (
@@ -116,7 +118,7 @@ class SecuritiesBorrowEvidenceTests(unittest.TestCase):
                     environment=ENVIRONMENT,
                     instrument_id=INSTRUMENT_ID,
                     instrument_version=1,
-                    quantity_unit="shares",
+                    quantity_unit="share",
                     evidence_artifact_store=forged,
                 )
 

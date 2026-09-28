@@ -1518,6 +1518,8 @@ def prepare_execution_history_read(
         raise TypeError("capability must be CapabilitySnapshot")
     if not isinstance(instrument_registry, InstrumentRegistry):
         raise TypeError("instrument_registry must be InstrumentRegistry")
+    if capability.provider_id.upper() != "WHITEBIT":
+        raise WhiteBitAdapterError("capability belongs to another provider")
     instrument = instrument_registry.exact(capability.instrument_version)
     if instrument.provider_id.upper() != "WHITEBIT":
         raise WhiteBitAdapterError(

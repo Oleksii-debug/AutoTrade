@@ -7,11 +7,13 @@ from mvp.autotrade_mvp.corporate_actions import EquityState
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.securities_borrow import (
     BorrowAvailabilityEvidence,
+    BorrowEvidenceError,
     BorrowRecallConflict,
     BorrowRecallEvidence,
     BorrowRecallResolutionEvidence,
     DurableBorrowRecallProjection,
     borrow_resource_key,
+    verify_provider_borrow_evidence,
 )
 from mvp.tests.securities_borrow_evidence_helpers import (
     EvidencedBorrowRecallProjection,
@@ -88,7 +90,36 @@ def resolution(**overrides):
     return BorrowRecallResolutionEvidence(**values)
 
 
+class ForgedArtifactStore(ArtifactStore):
+    def __init__(self):
+        pass
+
+    def read_authenticated_snapshot(self, artifact_id):
+        raise AssertionError("forged ArtifactStore method must never be trusted")
+
+
 class SecuritiesBorrowEvidenceTests(unittest.TestCase):
+    def test_financial_evidence_rejects_polymorphic_artifact_store_authority(self):
+        forged = ForgedArtifactStore()
+        with self.assertRaisesRegex(
+            BorrowEvidenceError,
+            "canonical ArtifactStore",
+        ):
+            verify_provider_borrow_evidence(recall(), forged)
+
+        with TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(TypeError, "canonical ArtifactStore"):
+                DurableBorrowRecallProjection(
+                    JournalStore(f"{directory}/journal.sqlite3"),
+                    provider_id=PROVIDER_ID,
+                    account_id=ACCOUNT_ID,
+                    environment=ENVIRONMENT,
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    quantity_unit="shares",
+                    evidence_artifact_store=forged,
+                )
+
     def test_resource_identity_is_scope_and_version_bound(self):
         base = borrow_resource_key(
             provider_id=PROVIDER_ID,

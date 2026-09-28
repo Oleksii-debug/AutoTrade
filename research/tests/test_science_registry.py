@@ -288,6 +288,12 @@ class ScientificRegistryTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 ProtocolViolation,
+                "exceeds preregistered trial budget",
+            ):
+                store.completeness(registered.protocol_id)
+
+            with self.assertRaisesRegex(
+                ProtocolViolation,
                 "exact registered trial budget",
             ):
                 store.register_evaluation(

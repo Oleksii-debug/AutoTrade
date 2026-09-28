@@ -500,9 +500,10 @@ def _composite_observation(
         or income_time < 0
     ):
         raise PerpetualFundingError("funding income time must be non-negative epoch milliseconds")
+    income_seconds, income_milliseconds = divmod(income_time, 1000)
     income_effective = datetime.fromtimestamp(
-        income_time / 1000, tz=timezone.utc
-    )
+        income_seconds, tz=timezone.utc
+    ) + timedelta(milliseconds=income_milliseconds)
     if income_effective != effective:
         raise PerpetualFundingError(
             "funding income event is not bound to the registered funding cut"
@@ -819,6 +820,7 @@ class DurablePerpetualFundingAuthority:
         position = Decimal("0")
         transaction_ids: list[str] = []
         transaction_digests: list[str] = []
+        same_cut_transaction_ids: list[str] = []
 
         for transaction in self.economic_book.transactions:
             position_postings = tuple(
@@ -856,6 +858,7 @@ class DurablePerpetualFundingAuthority:
                 effective_at == observation.effective_at
                 and observed_at <= observation.observed_at
             ):
+                same_cut_transaction_ids.append(transaction.transaction_id)
                 in_pre = transaction.transaction_id in observation.pre_cut_transaction_ids
                 in_post = transaction.transaction_id in observation.post_cut_transaction_ids
                 if in_pre == in_post:
@@ -870,6 +873,14 @@ class DurablePerpetualFundingAuthority:
                 )
                 transaction_ids.append(transaction.transaction_id)
                 transaction_digests.append(transaction_digest(transaction))
+
+        declared_same_cut = set(observation.pre_cut_transaction_ids) | set(
+            observation.post_cut_transaction_ids
+        )
+        if declared_same_cut != set(same_cut_transaction_ids):
+            raise PerpetualFundingConflict(
+                "funding cut evidence does not exactly match canonical same-cut position transactions"
+            )
 
         causal_material = {
             "schema_version": "1.0.0",

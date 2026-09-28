@@ -167,6 +167,30 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
             "TESTNET",
         )
 
+    def test_bybit_credential_runtime_provider_domain_mismatch_is_rejected(self):
+        for environment, provider_environment in (
+            ("PAPER", "MAINNET"),
+            ("LIVE", "TESTNET"),
+            ("LIVE", "DEMO"),
+        ):
+            with self.subTest(
+                environment=environment,
+                provider_environment=provider_environment,
+            ), self.assertRaisesRegex(
+                SecretVaultError,
+                "does not match runtime environment",
+            ):
+                self.vault.register(
+                    handle_id=f"cred-{environment}-{provider_environment}",
+                    owner_identity="windows-user-1",
+                    account_id="bybit-1",
+                    provider="BYBIT",
+                    environment=environment,
+                    provider_environment=provider_environment,
+                    purpose="TRADE",
+                    secret_value="scoped-secret",
+                )
+
     def test_v2_vault_requires_explicit_provider_environment_reattachment(self):
         self.path.unlink()
         self.path.write_text(

@@ -241,7 +241,11 @@ def dependency_advisory_evidence_document(
     ):
         return False, "invalid_residual_risks"
 
-    return True, None
+    # A repository JSON document is candidate-authored input. Structural
+    # completeness is necessary for diagnostics, but it is not independent
+    # qualification authority. Terminal advisory PASS belongs to the existing
+    # WP-64 ArtifactStore + canonical signed-attestation trust boundary.
+    return False, "authenticated_trust_required"
 
 
 def normalize_inspected_components(

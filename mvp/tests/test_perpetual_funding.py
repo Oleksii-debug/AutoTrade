@@ -210,7 +210,7 @@ def sealed_composite_funding(
             "income": income,
             "asset": "USDT",
             "info": "",
-            "time": 1790320800000,
+            "time": 1790330400000,
             "tranId": tran_id,
             "tradeId": "",
         },

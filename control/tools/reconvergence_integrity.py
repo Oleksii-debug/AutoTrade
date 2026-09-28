@@ -58,6 +58,8 @@ PROTECTED_SENTINELS = frozenset(
         "control/work-packages/bank.json",
         "control/__init__.py",
         "control/tools/__init__.py",
+        "control/__init__.py",
+        "control/tools/__init__.py",
         "control/tools/reconvergence_integrity.py",
         "control/tools/registry_state.py",
         "docs/product/PRODUCT_SPEC_CANONICAL.txt",
@@ -80,6 +82,15 @@ SELF_PROTECTING_TRUST_ROOTS = frozenset(
     {
         ".github/workflows/reconvergence-integrity.yml",
         "control/tools/reconvergence_integrity.py",
+    }
+)
+
+EXECUTABLE_BOOTSTRAP_ROOTS = frozenset(
+    {
+        "control/__init__.py",
+        "control/tools/__init__.py",
+        "control/tools/reconvergence_integrity.py",
+        "control/tools/registry_state.py",
     }
 )
 
@@ -328,12 +339,21 @@ def assess_reconvergence(
             )
         if (
             kind in {"A", "R", "C"}
-            and _is_workflow_authority_path(change.path)
+            and (
+                _is_workflow_authority_path(change.path)
+                or change.path in EXECUTABLE_BOOTSTRAP_ROOTS
+                or change.path in INTEGRATION_HARNESS_ROOTS
+            )
             and change.path not in base_path_set
             and not exactly_authorized(change.path)
         ):
+            authority_kind = (
+                "workflow-authority"
+                if _is_workflow_authority_path(change.path)
+                else "trust-root"
+            )
             protected_damage.add(
-                f"{change.path} (unauthorized workflow-authority creation)"
+                f"{change.path} (unauthorized {authority_kind} creation)"
             )
         if (
             kind in {"A", "R", "C"}

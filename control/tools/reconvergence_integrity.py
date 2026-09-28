@@ -16,7 +16,8 @@ Trusted scope approval is deliberately external to the candidate tree. The
 ``pull_request_target`` workflow may consume an exact-head OWNER issue comment
 whose first line is ``AUTOTRADE_RECONVERGENCE_SCOPE_V1`` followed by one exact
 ``head:`` line and explicit ``path:`` lines. The parser here validates that
-external record; PR body/title content remains non-authoritative.
+external record; PR body/title content remains non-authoritative. Approval for an
+older exact head is simply non-authoritative after the head moves.
 
 This directly protects against commits accidentally built from a stale or partial
 tree, candidate-controlled rewrites/spoofs of integration check authorities, and
@@ -139,9 +140,10 @@ def parse_trusted_scope_approval(
     """Parse one external exact-head scope approval comment.
 
     A comment is unrelated when its first line is not the version marker and is
-    ignored by returning ``None``. A marked comment is an attempted authority
-    record: malformed shape, stale head identity, duplicate paths, directory-like
-    spellings, or empty scope all fail closed with ``ValueError``.
+    ignored by returning ``None``. A marked record for another well-formed head
+    is also non-authoritative. A marked record targeting the current head is an
+    attempted authority record: malformed shape, duplicate paths, or empty scope
+    fail closed with ``ValueError``.
     """
 
     if not isinstance(body, str):
@@ -151,11 +153,15 @@ def parse_trusted_scope_approval(
         return None
     if not _SHA40.fullmatch(expected_head_sha):
         raise ValueError("expected approval head must be a lowercase 40-hex SHA")
-    if len(lines) < 3 or not lines[1].startswith("head: "):
+    if len(lines) < 2 or not lines[1].startswith("head: "):
         raise ValueError("trusted scope approval requires one exact head line")
     approved_head = lines[1].removeprefix("head: ").strip()
+    if not _SHA40.fullmatch(approved_head):
+        raise ValueError("trusted scope approval head must be a lowercase 40-hex SHA")
     if approved_head != expected_head_sha:
-        raise ValueError("trusted scope approval is stale for this exact head")
+        return None
+    if len(lines) < 3:
+        raise ValueError("trusted scope approval must contain at least one exact path")
 
     paths: list[str] = []
     for line in lines[2:]:
@@ -165,8 +171,6 @@ def parse_trusted_scope_approval(
             line.removeprefix("path: ").strip(),
             name="approved scope path",
         )
-        if path.endswith("/"):
-            raise ValueError("approved scope path must name an exact repository path")
         paths.append(path)
     if not paths:
         raise ValueError("trusted scope approval must contain at least one exact path")

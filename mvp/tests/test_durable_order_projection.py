@@ -1228,11 +1228,34 @@ class DurableOrderProjectionTests(unittest.TestCase):
             )
 
             self.assertEqual(corrected.snapshot.filled_quantity, Decimal("0.75"))
-            restarted = durable(store)
-            self.assertEqual(restarted.order("c1").filled_quantity, Decimal("0.75"))
+            live_order = book.order("c1")
             self.assertEqual(
-                [item.fill_id for item in restarted.order("c1").fill_history],
-                ["fill-1", "fill-1-r2", "fill-1-r3"],
+                [(item.fill_id, item.correction_of) for item in live_order.fill_history],
+                [
+                    ("fill-1", None),
+                    ("fill-1-r2", "fill-1"),
+                    ("fill-1-r3", "fill-1-r2"),
+                ],
+            )
+            self.assertEqual(
+                live_order.provider_execution_index["exec-1"],
+                "fill-1",
+            )
+
+            restarted = durable(store)
+            restarted_order = restarted.order("c1")
+            self.assertEqual(restarted_order.filled_quantity, Decimal("0.75"))
+            self.assertEqual(
+                [(item.fill_id, item.correction_of) for item in restarted_order.fill_history],
+                [
+                    ("fill-1", None),
+                    ("fill-1-r2", "fill-1"),
+                    ("fill-1-r3", "fill-1-r2"),
+                ],
+            )
+            self.assertEqual(
+                restarted_order.provider_execution_index["exec-1"],
+                "fill-1",
             )
 
     def test_canonical_execution_fill_correction_rejects_cross_execution_identity(self):

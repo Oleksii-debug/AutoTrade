@@ -3,6 +3,7 @@ using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using AutoTrade.Desktop;
+using AutoTrade.Contracts;
 
 namespace DesktopClientContracts;
 
@@ -411,7 +412,7 @@ internal static class Program
     {
         const string token = "session-token-stale-emergency";
         const string freshnessAsOf = "2026-09-25T09:29:00Z";
-        const string operationId = "23232323-2323-2323-2323-232323232323";
+        string? operationId = null;
         MutableSessionProvider sessions =
             new(PairedSession(token));
         int posts = 0;
@@ -437,12 +438,17 @@ internal static class Program
                 string body =
                     await request.Content!.ReadAsStringAsync(cancellationToken);
                 using JsonDocument parsed = JsonDocument.Parse(body);
+                string commandId =
+                    parsed.RootElement.GetProperty("command_id").GetString()!;
+                operationId = HostOperationIdentity.Derive(
+                    "paper-account-1",
+                    "PAPER",
+                    commandId);
                 return Json(
                     HttpStatusCode.OK,
                     new
                     {
-                        command_id =
-                            parsed.RootElement.GetProperty("command_id").GetString(),
+                        command_id = commandId,
                         status = "ACCEPTED",
                         state_version = "1",
                         reason_codes = Array.Empty<string>(),
@@ -452,6 +458,7 @@ internal static class Program
             }
 
             if (request.Method == HttpMethod.Get
+                && operationId is not null
                 && request.RequestUri!.AbsolutePath
                     == "/api/v1/operations/" + operationId)
             {
@@ -492,7 +499,7 @@ internal static class Program
             new(PairedSession(token));
         List<string> commandBodies = [];
         int postCount = 0;
-        const string operationId = "33333333-3333-3333-3333-333333333333";
+        string? operationId = null;
     
         DelegateHandler handler = new(async (request, _, cancellationToken) =>
         {
@@ -517,6 +524,10 @@ internal static class Program
                 using JsonDocument parsed = JsonDocument.Parse(body);
                 string commandId =
                     parsed.RootElement.GetProperty("command_id").GetString()!;
+                operationId = HostOperationIdentity.Derive(
+                    "paper-account-1",
+                    "PAPER",
+                    commandId);
                 return Json(
                     HttpStatusCode.OK,
                     new
@@ -531,6 +542,7 @@ internal static class Program
             }
     
             if (request.Method == HttpMethod.Get
+                && operationId is not null
                 && request.RequestUri!.AbsolutePath
                     == "/api/v1/operations/" + operationId)
             {
@@ -596,6 +608,78 @@ internal static class Program
             "command payload leaked the reusable bearer credential");
     }
     
+    static async Task ForeignOperationIdentityFailsClosedTest()
+    {
+        const string token = "session-token-operation-binding";
+        MutableSessionProvider sessions = new(PairedSession(token));
+        int operationReads = 0;
+        DelegateHandler handler = new(async (request, _, cancellationToken) =>
+        {
+            AssertAuth(request, token);
+            if (request.Method == HttpMethod.Get
+                && request.RequestUri!.AbsolutePath == "/api/v1/state")
+            {
+                return Json(HttpStatusCode.OK, Snapshot(token, "4"));
+            }
+
+            if (request.Method == HttpMethod.Post
+                && request.RequestUri!.AbsolutePath == "/api/v1/commands")
+            {
+                string body =
+                    await request.Content!.ReadAsStringAsync(cancellationToken);
+                using JsonDocument parsed = JsonDocument.Parse(body);
+                string commandId =
+                    parsed.RootElement.GetProperty("command_id").GetString()!;
+                string foreignOperationId = HostOperationIdentity.Derive(
+                    "paper-account-1",
+                    "PAPER",
+                    "ffffffff-ffff-ffff-ffff-ffffffffffff");
+                Check.True(
+                    foreignOperationId
+                        != HostOperationIdentity.Derive(
+                            "paper-account-1",
+                            "PAPER",
+                            commandId),
+                    "foreign-operation regression accidentally used the canonical operation");
+                return Json(
+                    HttpStatusCode.OK,
+                    new
+                    {
+                        command_id = commandId,
+                        status = "ACCEPTED",
+                        state_version = "5",
+                        reason_codes = Array.Empty<string>(),
+                        field_errors = Array.Empty<object>(),
+                        operation_id = foreignOperationId,
+                    });
+            }
+
+            if (request.Method == HttpMethod.Get
+                && request.RequestUri!.AbsolutePath.StartsWith(
+                    "/api/v1/operations/",
+                    StringComparison.Ordinal))
+            {
+                operationReads++;
+                throw new InvalidOperationException(
+                    "foreign operation must be rejected before operation lookup");
+            }
+
+            throw new InvalidOperationException(
+                "operation-binding test issued an unexpected request");
+        });
+
+        AuthenticatedEmergencyHostClient client = new(
+            new HttpClient(handler),
+            HostOrigin,
+            sessions);
+        await Check.ThrowsAsync<EmergencyCommandUncertainException>(
+            () => client.BlockNewExposureAsync(CancellationToken.None),
+            "foreign operation identity was accepted for the emergency command");
+        Check.True(
+            operationReads == 0,
+            "client queried a foreign operation before validating command scope");
+    }
+
     static async Task UncertainCommandCannotRetargetSessionTest()
     {
         const string originalToken = "session-token-c";
@@ -645,7 +729,7 @@ internal static class Program
         int posts = 0;
         int stateReads = 0;
         int operationReads = 0;
-        const string operationId = "44444444-4444-4444-4444-444444444444";
+        string? operationId = null;
 
         DelegateHandler handler = new(async (request, _, cancellationToken) =>
         {
@@ -670,12 +754,17 @@ internal static class Program
                 }
 
                 using JsonDocument parsed = JsonDocument.Parse(body);
+                string commandId =
+                    parsed.RootElement.GetProperty("command_id").GetString()!;
+                operationId = HostOperationIdentity.Derive(
+                    "paper-account-1",
+                    "PAPER",
+                    commandId);
                 return Json(
                     HttpStatusCode.OK,
                     new
                     {
-                        command_id =
-                            parsed.RootElement.GetProperty("command_id").GetString(),
+                        command_id = commandId,
                         status = "ACCEPTED",
                         state_version = "12",
                         reason_codes = Array.Empty<string>(),
@@ -685,6 +774,7 @@ internal static class Program
             }
 
             if (request.Method == HttpMethod.Get
+                && operationId is not null
                 && request.RequestUri!.AbsolutePath
                     == "/api/v1/operations/" + operationId)
             {
@@ -1074,6 +1164,7 @@ internal static class Program
         await SnapshotAuthorityRelationAndFreshnessEnumFailClosedTest();
         await StaleFreshnessDoesNotDisableEmergencyBlockTest();
         await AmbiguousPostExactRetryTest();
+        await ForeignOperationIdentityFailsClosedTest();
         await UncertainCommandCannotRetargetSessionTest();
         await UncertainCommandSurvivesDesktopRestartTest();
         await RestartedCommandCannotRetargetSessionTest();

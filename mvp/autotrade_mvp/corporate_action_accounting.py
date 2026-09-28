@@ -21,6 +21,8 @@ from .accounting import (
     AccountingConflict,
     JournalTransaction,
     Posting,
+    _canonical_equity_split_terms,
+    book_equity_split_adjustment,
     reverse_transaction,
     transaction_digest,
     validate_transaction,
@@ -35,7 +37,7 @@ from .persistence import JournalStore, canonical_json, payload_digest
 from .provider_activity_accounting import DurableProviderEconomicBook
 
 
-_SUPPORTED_DURABLE_KINDS = frozenset({"CASH_DIVIDEND"})
+_SUPPORTED_DURABLE_KINDS = frozenset({"CASH_DIVIDEND", "SPLIT"})
 
 
 def _identity(kind: str, *parts: str) -> str:
@@ -94,8 +96,10 @@ def _canonical_entitlement_position_proof(
     accepted: AuthoritativeCorporateAction,
     *,
     activation_cut: datetime,
+    expected_pre_action_quantity: Decimal,
+    excluded_order_key: str,
 ) -> dict[str, object]:
-    """Prove dividend quantity from causal durable position history.
+    """Prove the pre-action quantity from causal durable position history.
 
     The pure CorporateActionBook remains a calculator, not a position authority.
     Only POSITION postings already durable and causally knowable at the provider
@@ -129,7 +133,14 @@ def _canonical_entitlement_position_proof(
     contributors: list[dict[str, str]] = []
 
     economic_book.refresh()
+    if not isinstance(excluded_order_key, str) or not excluded_order_key.strip():
+        raise ValueError("excluded_order_key is required")
+    current_order_key = excluded_order_key.strip()
     for transaction in economic_book.transactions:
+        # Exact retry of a position-changing action must reconstruct the
+        # pre-action entitlement cut, not count its own already-durable effect.
+        if transaction.economic_order_key == current_order_key:
+            continue
         position_postings = tuple(
             posting
             for posting in transaction.postings
@@ -156,7 +167,11 @@ def _canonical_entitlement_position_proof(
             raise AccountingConflict(
                 "canonical position history contains invalid entitlement timestamps"
             ) from error
-        if effective <= event.effective_at and observed <= observed_cut:
+        if effective == event.effective_at and observed <= observed_cut:
+            raise AccountingConflict(
+                "same-effective-time position and corporate action lack qualified causal order"
+            )
+        if effective < event.effective_at and observed <= observed_cut:
             quantity += sum(
                 (posting.signed_amount for posting in position_postings),
                 Decimal("0"),
@@ -168,9 +183,10 @@ def _canonical_entitlement_position_proof(
                 }
             )
 
-    if quantity != corporate_book.state.quantity:
+    expected_quantity = Decimal(expected_pre_action_quantity)
+    if quantity != expected_quantity:
         raise AccountingConflict(
-            "corporate-action calculator quantity does not match canonical durable position at entitlement cut"
+            "corporate-action pre-action quantity does not match canonical durable position at entitlement cut"
         )
 
     proof: dict[str, object] = {
@@ -279,6 +295,58 @@ def _dividend_transaction(
     return transaction
 
 
+def _split_transaction(
+    accepted: AuthoritativeCorporateAction,
+    transition: Transition,
+    *,
+    order_key: str,
+    observed_at: str,
+    corrects_transaction_id: str | None = None,
+    economic_effective_at: str | None = None,
+) -> JournalTransaction | None:
+    before = transition.before
+    after = transition.after
+    if (
+        after.total_basis != before.total_basis
+        or after.settled_cash != before.settled_cash
+        or after.unsettled_cash != before.unsettled_cash
+        or after.currency != before.currency
+        or after.symbol != before.symbol
+    ):
+        raise AccountingConflict(
+            "equity split durable mapping requires zero cash/P&L and unchanged basis"
+        )
+    if after.quantity == before.quantity:
+        return None
+    try:
+        numerator = accepted.event.payload["numerator"]
+        denominator = accepted.event.payload["denominator"]
+    except KeyError as error:
+        raise AccountingConflict(
+            "equity split evidence lacks exact numerator/denominator"
+        ) from error
+    return book_equity_split_adjustment(
+        transaction_id=_transaction_id(accepted, "effect"),
+        cause_event_id=_identity(
+            "corporate-action-cause",
+            accepted.external_event_id,
+            accepted.provenance_digest,
+            "effect",
+        ),
+        instrument=after.symbol,
+        pre_split_quantity=before.quantity,
+        numerator=numerator,
+        denominator=denominator,
+        economic_effective_at=(
+            economic_effective_at
+            or accepted.event.effective_at.isoformat().replace("+00:00", "Z")
+        ),
+        economic_order_key=order_key,
+        observed_at=observed_at,
+        corrects_transaction_id=corrects_transaction_id,
+    )
+
+
 def _active_for_order_key(
     economic_book: DurableProviderEconomicBook,
     order_key: str,
@@ -304,6 +372,7 @@ def _correction_transactions(
     transition: Transition,
     *,
     exact_retry: bool,
+    transaction_observed_at: str,
 ) -> tuple[JournalTransaction, ...]:
     target_id = accepted.corrects_external_event_id
     if target_id is None:
@@ -339,19 +408,41 @@ def _correction_transactions(
             original,
             transaction_id=expected_reversal_id,
             cause_event_id=committed_reversal.cause_event_id,
-            observed_at=accepted.observed_at,
+            observed_at=transaction_observed_at,
         )
         if rebuilt_reversal != committed_reversal:
             raise AccountingConflict(
                 "corporate-action correction reversal conflicts with retained evidence"
             )
-        replacement = _dividend_transaction(
-            accepted,
-            transition,
-            order_key=original.economic_order_key or order_key,
-            corrects_transaction_id=original.transaction_id,
-            economic_effective_at=original.economic_effective_at,
-        )
+        if accepted.event.kind == "CASH_DIVIDEND":
+            replacement = _dividend_transaction(
+                accepted,
+                transition,
+                order_key=original.economic_order_key or order_key,
+                corrects_transaction_id=original.transaction_id,
+                economic_effective_at=original.economic_effective_at,
+                observed_at=transaction_observed_at,
+            )
+        elif accepted.event.kind == "SPLIT":
+            if _canonical_equity_split_terms(
+                original,
+                instrument=transition.after.symbol,
+            ) is None:
+                raise AccountingConflict(
+                    "equity split correction target lacks canonical split economics"
+                )
+            replacement = _split_transaction(
+                accepted,
+                transition,
+                order_key=original.economic_order_key or order_key,
+                observed_at=transaction_observed_at,
+                corrects_transaction_id=original.transaction_id,
+                economic_effective_at=original.economic_effective_at,
+            )
+        else:
+            raise AccountingConflict(
+                f"{accepted.event.kind} correction has no qualified durable mapping"
+            )
         committed_replacement = next(
             (
                 item
@@ -392,15 +483,37 @@ def _correction_transactions(
             accepted.provenance_digest,
             "reversal",
         ),
-        observed_at=accepted.observed_at,
+        observed_at=transaction_observed_at,
     )
-    replacement = _dividend_transaction(
-        accepted,
-        transition,
-        order_key=original.economic_order_key or order_key,
-        corrects_transaction_id=original.transaction_id,
-        economic_effective_at=original.economic_effective_at,
-    )
+    if accepted.event.kind == "CASH_DIVIDEND":
+        replacement = _dividend_transaction(
+            accepted,
+            transition,
+            order_key=original.economic_order_key or order_key,
+            corrects_transaction_id=original.transaction_id,
+            economic_effective_at=original.economic_effective_at,
+            observed_at=transaction_observed_at,
+        )
+    elif accepted.event.kind == "SPLIT":
+        if _canonical_equity_split_terms(
+            original,
+            instrument=transition.after.symbol,
+        ) is None:
+            raise AccountingConflict(
+                "equity split correction target lacks canonical split economics"
+            )
+        replacement = _split_transaction(
+            accepted,
+            transition,
+            order_key=original.economic_order_key or order_key,
+            observed_at=transaction_observed_at,
+            corrects_transaction_id=original.transaction_id,
+            economic_effective_at=original.economic_effective_at,
+        )
+    else:
+        raise AccountingConflict(
+            f"{accepted.event.kind} correction has no qualified durable mapping"
+        )
     return (reversal,) if replacement is None else (reversal, replacement)
 
 
@@ -418,20 +531,41 @@ def _economic_transactions(
         )
 
     if accepted.corrects_external_event_id is not None:
+        if transaction_observed_at is None:
+            raise AccountingConflict(
+                "corporate-action correction requires causal observation time"
+            )
         return _correction_transactions(
             economic_book,
             accepted,
             transition,
             exact_retry=exact_retry,
+            transaction_observed_at=transaction_observed_at,
         )
 
     order_key = _order_key(accepted.external_event_id)
-    transaction = _dividend_transaction(
-        accepted,
-        transition,
-        order_key=order_key,
-        observed_at=transaction_observed_at,
-    )
+    if accepted.event.kind == "CASH_DIVIDEND":
+        transaction = _dividend_transaction(
+            accepted,
+            transition,
+            order_key=order_key,
+            observed_at=transaction_observed_at,
+        )
+    elif accepted.event.kind == "SPLIT":
+        if transaction_observed_at is None:
+            raise AccountingConflict(
+                "equity split durable accounting requires causal observation time"
+            )
+        transaction = _split_transaction(
+            accepted,
+            transition,
+            order_key=order_key,
+            observed_at=transaction_observed_at,
+        )
+    else:
+        raise AccountingConflict(
+            f"{accepted.event.kind} has no qualified durable corporate-action accounting mapping"
+        )
     active = _active_for_order_key(economic_book, order_key)
     if active and not exact_retry:
         raise AccountingConflict(
@@ -517,14 +651,27 @@ def commit_authoritative_corporate_action(
             economically_active=False,
         )
 
+    # The position proof and the final commit must share one durable read cut.
+    # An action with no economic postings has no aggregate-version fence of
+    # its own, so a concurrent fill must still invalidate the activation.
+    journal_read_cut = store.current_journal_sequence()
+    candidate, transition = _candidate_book(corporate_book, accepted)
     entitlement_position = _canonical_entitlement_position_proof(
         economic_book,
         corporate_book,
         accepted,
         activation_cut=activation_cut,
+        expected_pre_action_quantity=transition.before.quantity,
+        excluded_order_key=_order_key(
+            accepted.corrects_external_event_id
+            or accepted.external_event_id
+        ),
     )
+    if store.current_journal_sequence() != journal_read_cut:
+        raise AccountingConflict(
+            "corporate-action entitlement journal changed during projection"
+        )
     evidence_plan = evidence_store.prepare_record_mutation(accepted)
-    candidate, transition = _candidate_book(corporate_book, accepted)
     activation_text = activation_cut.isoformat().replace("+00:00", "Z")
     transactions = _economic_transactions(
         economic_book,
@@ -655,6 +802,7 @@ def commit_authoritative_corporate_action(
                 0 if economic_plan is None else economic_plan.aggregate_version,
             ),
             events=events,
+            expected_journal_sequence=journal_read_cut,
         )
     except Exception:
         economic_book.refresh()
@@ -670,4 +818,3 @@ def commit_authoritative_corporate_action(
         transaction_ids=tuple(item.transaction_id for item in transactions),
         economically_active=True,
     )
-

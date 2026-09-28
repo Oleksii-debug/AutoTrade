@@ -1242,22 +1242,9 @@ def parse_execution_history(
     return tuple(by_id[key] for key in sorted(by_id))
 
 
-def parse_execution_history_response(
-    raw_response: str | bytes,
-    *,
+def _canonical_execution_history_query(
     request: WhiteBitLookupRequest,
-    observed_at: datetime,
-    response_evidence: Mapping[str, object],
-) -> tuple[WhiteBitExecutionDeal, ...]:
-    """Bind execution economics to one exact immutable, market-scoped response.
-
-    The low-level mapping parser remains useful for diagnostics and fixtures, but
-    parser-only rows are intentionally non-authoritative for reconciliation.
-    This entrypoint verifies the exact UTF-8 response bytes against one immutable
-    EvidenceRef and also binds them to the exact execution-history query that
-    established market, window and pagination scope.
-    """
-
+) -> tuple[dict[str, object], str, WhiteBitPageEvidence, str]:
     if not isinstance(request, WhiteBitLookupRequest):
         raise TypeError("request must be WhiteBitLookupRequest")
     if (
@@ -1285,12 +1272,70 @@ def parse_execution_history_response(
     if page.limit > 500:
         raise WhiteBitAdapterError("execution-history limit cannot exceed 500")
     market = _text(str(body["market"]), name="market").upper()
+    if market != body["market"]:
+        raise WhiteBitAdapterError(
+            "authoritative execution-history market must already be canonical uppercase"
+        )
+    fingerprint = "sha256:" + hashlib.sha256(
+        json.dumps(
+            {
+                "surface": request.surface,
+                "endpoint": request.endpoint,
+                "body": body,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return body, market, page, fingerprint
+
+
+def execution_history_query_fingerprint(
+    request: WhiteBitLookupRequest,
+) -> str:
+    """Return the exact immutable identity of one authoritative history query."""
+
+    return _canonical_execution_history_query(request)[3]
+
+
+def parse_execution_history_response(
+    raw_response: str | bytes,
+    *,
+    request: WhiteBitLookupRequest,
+    observed_at: datetime,
+    response_evidence: Mapping[str, object],
+) -> tuple[WhiteBitExecutionDeal, ...]:
+    """Bind execution economics to exact immutable bytes and exact query scope.
+
+    Parser-only mappings remain diagnostic. Financial reconciliation additionally
+    requires immutable evidence that binds both the response digest and the exact
+    market/window/pagination query that produced those bytes.
+    """
+
+    _body, market, page, query_fingerprint = _canonical_execution_history_query(
+        request
+    )
+    if not isinstance(response_evidence, Mapping):
+        raise WhiteBitAdapterError("response evidence must be a mapping")
+    scoped_evidence = dict(response_evidence)
+    evidence_query_fingerprint = scoped_evidence.pop("query_fingerprint", None)
+    if not isinstance(evidence_query_fingerprint, str) or re.fullmatch(
+        r"sha256:[0-9a-f]{64}",
+        evidence_query_fingerprint,
+    ) is None:
+        raise WhiteBitAdapterError(
+            "execution response evidence requires canonical query_fingerprint"
+        )
+    if evidence_query_fingerprint != query_fingerprint:
+        raise WhiteBitAdapterError(
+            "execution response evidence query_fingerprint does not match exact request"
+        )
 
     raw = _response_bytes(raw_response)
     digest = "sha256:" + hashlib.sha256(raw).hexdigest()
     point = _instant(observed_at, name="observed_at")
     evidence = _canonical_evidence_ref(
-        response_evidence,
+        scoped_evidence,
         expected_sha256=digest,
         expected_observed_at=point,
     )
@@ -1304,17 +1349,6 @@ def parse_execution_history_response(
             "execution-history response exceeds requested page limit"
         )
     deals = parse_execution_history(payload, market=market)
-    query_fingerprint = "sha256:" + hashlib.sha256(
-        json.dumps(
-            {
-                "surface": request.surface,
-                "endpoint": request.endpoint,
-                "body": body,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
     evidence_ref = (
         "whitebit-response:"
         + evidence["artifact_id"]

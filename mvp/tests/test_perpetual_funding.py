@@ -182,6 +182,7 @@ def sealed_composite_funding(
     corrects=None,
     environment="PAPER",
     income_time=1790330400000,
+    cut_observed_offset=4,
 ):
     capability = funding_capability(environment=environment)
 
@@ -249,7 +250,7 @@ def sealed_composite_funding(
             "preCutTransactionIds": list(pre_cut),
             "postCutTransactionIds": list(post_cut),
         },
-        4,
+        cut_observed_offset,
     )
     return FundingEvidenceBundle(
         income=income_source,
@@ -674,6 +675,40 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
             self.assertEqual(book.audit_digest(), before)
             self.assertEqual(
                 store.load_events("perpetual_funding", authority.aggregate_id), []
+            )
+
+    def test_composite_position_cut_cannot_learn_from_later_evidence_sources(self):
+        evidence = sealed_composite_funding(cut_observed_offset=1)
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority, book = self.authority(
+                store, [evidence], seed=False, environment="PAPER"
+            )
+            seed_position(book)
+            seed_position(
+                book,
+                transaction_id="late-local-knowledge",
+                contracts="1",
+                effective_at="2026-09-25T09:30:00Z",
+                observed_at="2026-09-25T10:00:02Z",
+            )
+            result = authority.apply(evidence.evidence_ref)
+            self.assertTrue(result.inserted)
+            self.assertEqual(result.cashflow, Decimal("-0.200000"))
+            event = store.load_events(
+                "perpetual_funding", authority.aggregate_id
+            )[0]
+            self.assertEqual(
+                event["payload"]["position_cut"]["position"],
+                "2",
+            )
+            self.assertEqual(
+                event["payload"]["position_cut"]["evidence_observed_at"],
+                "2026-09-25T10:00:01Z",
+            )
+            self.assertNotIn(
+                "late-local-knowledge",
+                event["payload"]["position_cut"]["contributing_transaction_ids"],
             )
 
     def test_composite_official_evidence_books_and_replays_deterministically(self):

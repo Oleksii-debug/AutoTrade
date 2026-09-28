@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+from decimal import Decimal
 import json
 from pathlib import Path
 import tempfile
@@ -148,7 +149,7 @@ class DurableFinancingTests(unittest.TestCase):
             artifact_id=second,
             committed_at=(BASE + timedelta(minutes=1)).isoformat(),
         )
-        self.assertEqual(result.update.economic_delta, result.event.amount - 1.20)
+        self.assertEqual(result.update.economic_delta, Decimal("-0.10"))
         self.assertEqual(
             self.economic.balance("FINANCING_EXPENSE:BTC", "BTC"),
             result.event.amount,

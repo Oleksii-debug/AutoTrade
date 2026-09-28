@@ -124,6 +124,64 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
             with self.subTest(values=values), self.assertRaises(PermissionError):
                 self.vault.resolve(handle, **values)
 
+    def test_provider_environment_is_separate_from_runtime_environment(self):
+        handle = self.vault.register(
+            handle_id="cred-bybit-testnet",
+            owner_identity="windows-user-1",
+            account_id="paper-1",
+            provider="BYBIT",
+            environment="PAPER",
+            provider_environment="TESTNET",
+            purpose="TRADE",
+            secret_value="testnet-secret",
+        )
+        self.assertEqual(handle.environment, "PAPER")
+        self.assertEqual(handle.provider_environment, "TESTNET")
+        self.assertEqual(
+            self.vault.resolve(
+                handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="BYBIT",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                purpose="TRADE",
+            ),
+            "testnet-secret",
+        )
+        with self.assertRaisesRegex(PermissionError, "scope mismatch"):
+            self.vault.resolve(
+                handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="BYBIT",
+                environment="PAPER",
+                provider_environment="DEMO",
+                purpose="TRADE",
+            )
+
+        raw = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(raw["version"], 3)
+        self.assertEqual(
+            raw["records"][handle.handle_id]["handle"]["provider_environment"],
+            "TESTNET",
+        )
+
+    def test_v2_vault_requires_explicit_provider_environment_reattachment(self):
+        self.path.unlink()
+        self.path.write_text(
+            json.dumps({"version": 2, "records": {}}),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            SecretVaultError,
+            "provider-environment binding",
+        ):
+            ProtectedCredentialVault(
+                self.path,
+                protector=DeterministicProtector(),
+            )
+
     def test_rotation_invalidates_old_generation_across_restart(self):
         old = self.register()
         new = self.vault.rotate(

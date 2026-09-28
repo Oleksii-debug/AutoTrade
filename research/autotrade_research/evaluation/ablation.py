@@ -864,12 +864,12 @@ class AblationQualificationAuthority:
         task: str | None = None,
         instrument_family: str | None = None,
     ) -> None:
-        if not isinstance(scientific_registry, ScientificRegistry):
-            raise TypeError("scientific_registry must be ScientificRegistry")
-        if not isinstance(experience_memory, ExperienceMemory):
-            raise TypeError("experience_memory must be ExperienceMemory")
-        if not isinstance(artifact_store, ArtifactStore):
-            raise TypeError("artifact_store must be ArtifactStore")
+        if type(scientific_registry) is not ScientificRegistry:
+            raise TypeError("scientific_registry must be canonical ScientificRegistry")
+        if type(experience_memory) is not ExperienceMemory:
+            raise TypeError("experience_memory must be canonical ExperienceMemory")
+        if type(artifact_store) is not ArtifactStore:
+            raise TypeError("artifact_store must be canonical ArtifactStore")
         if not isinstance(protocol_id, str) or not protocol_id.strip():
             raise ValueError("protocol_id is required")
         if not isinstance(protocol_hash, str):
@@ -897,8 +897,9 @@ class AblationQualificationAuthority:
     ) -> CanonicalAblationOutcomeEvidence:
         if not isinstance(reference, AblationOutcomeArtifactRef):
             raise TypeError("outcome_refs must contain AblationOutcomeArtifactRef")
-        manifest, data = self.artifact_store.read_authenticated_snapshot(
-            reference.artifact_id
+        manifest, data = ArtifactStore.read_authenticated_snapshot(
+            self.artifact_store,
+            reference.artifact_id,
         )
         if manifest.get("sha256") != reference.sha256:
             raise ValueError("ablation outcome artifact digest mismatch")

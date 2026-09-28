@@ -77,6 +77,29 @@ def _identity(kind: str, *parts: str) -> str:
     return f"{kind}:sha256:{digest}"
 
 
+def _source_event_identity(
+    observation: "PerpetualFundingObservation",
+    external_event_id: str | None = None,
+) -> str:
+    """Canonical provider source-event identity.
+
+    Opaque provider event IDs are not assumed account-global. Until a versioned
+    provider contract proves a broader uniqueness domain, bind them to the exact
+    canonical instrument version inside the already account/provider/environment
+    scoped funding aggregate.
+    """
+
+    if not isinstance(observation, PerpetualFundingObservation):
+        raise TypeError("observation must be PerpetualFundingObservation")
+    return _identity(
+        "funding-source-event",
+        observation.instrument_version,
+        observation.external_event_id
+        if external_event_id is None
+        else _text(external_event_id, "external_event_id"),
+    )
+
+
 def _inverse_settlement_policy(
     version: InstrumentVersion,
 ) -> tuple[Decimal, str]:
@@ -1078,6 +1101,7 @@ class DurablePerpetualFundingAuthority:
                     observation.provider_id,
                     observation.account_id,
                     observation.environment,
+                    observation.instrument_version,
                     observation.external_event_id,
                 ),
             )
@@ -1148,8 +1172,12 @@ class DurablePerpetualFundingAuthority:
         same = [
             event
             for event in events
-            if self._payload(event).get("external_event_id")
-            == observation.external_event_id
+            if (
+                self._payload(event).get("instrument_version")
+                == observation.instrument_version
+                and self._payload(event).get("external_event_id")
+                == observation.external_event_id
+            )
         ]
         if same:
             if len(same) != 1:
@@ -1212,15 +1240,21 @@ class DurablePerpetualFundingAuthority:
             matches = [
                 event
                 for event in events
-                if self._payload(event).get("external_event_id")
-                == observation.corrects_external_event_id
+                if (
+                    self._payload(event).get("instrument_version")
+                    == observation.instrument_version
+                    and self._payload(event).get("external_event_id")
+                    == observation.corrects_external_event_id
+                )
             ]
             if len(matches) != 1:
                 raise PerpetualFundingConflict(
                     "funding correction target must identify exactly one prior event"
                 )
             if any(
-                self._payload(event).get("corrects_external_event_id")
+                self._payload(event).get("instrument_version")
+                == observation.instrument_version
+                and self._payload(event).get("corrects_external_event_id")
                 == observation.corrects_external_event_id
                 for event in events
             ):
@@ -1298,6 +1332,7 @@ class DurablePerpetualFundingAuthority:
                     observation.provider_id,
                     observation.account_id,
                     observation.environment,
+                    observation.instrument_version,
                     observation.external_event_id,
                 ),
             )
@@ -1440,6 +1475,7 @@ class DurablePerpetualFundingAuthority:
                     observation.provider_id,
                     observation.account_id,
                     observation.environment,
+                    observation.instrument_version,
                     observation.external_event_id,
                 ),
             )

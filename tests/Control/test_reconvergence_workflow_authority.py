@@ -54,6 +54,9 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
 
     def test_untrusted_modification_of_integration_harness_roots_fails_closed(self):
         expected = {
+            "Directory.Build.props",
+            "Directory.Build.targets",
+            "global.json",
             "requirements-dev.txt",
             "tools/baseline.py",
             "tools/build_provenance_manifest.py",
@@ -183,6 +186,17 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
         self.assertFalse(created.allowed)
         self.assertIn(
             "control/__init__.py (unauthorized trust-root creation)",
+            created.protected_violations,
+        )
+
+    def test_candidate_cannot_seed_dotnet_build_authority(self):
+        created = assess_reconvergence(
+            base_paths=["Directory.Build.props", "global.json", "owned/change.py"],
+            changes=[Change(status="A", path="Directory.Build.targets")],
+        )
+        self.assertFalse(created.allowed)
+        self.assertIn(
+            "Directory.Build.targets (unauthorized trust-root creation)",
             created.protected_violations,
         )
 

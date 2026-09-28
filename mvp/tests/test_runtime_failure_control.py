@@ -84,6 +84,67 @@ class DurableReconciliationAuthorityTests(unittest.TestCase):
             self.assertEqual(restarted.state, HostState.RECOVERING)
             self.assertFalse(restarted.provider_reconciled)
 
+    def test_bybit_recovery_readiness_requires_exact_provider_environment(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            controller = RecoveryController(
+                owner_store=store,
+                owner_scope="PAPER:bybit-account",
+            )
+            owner = controller.start("host-bybit")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="bybit-runtime-readiness",
+                result=reconciliation(
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                ),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id=owner.owner_id,
+                owner_epoch=str(owner.epoch),
+            )
+
+            with self.assertRaisesRegex(
+                PermissionError,
+                "requires explicit provider_environment",
+            ):
+                controller.record_reconciliation_checkpoint(
+                    reconciliation_id="bybit-runtime-readiness",
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                )
+            self.assertEqual(controller.state, HostState.RECOVERING)
+            self.assertFalse(controller.provider_reconciled)
+
+            with self.assertRaisesRegex(
+                PermissionError,
+                "bound to this recovery owner",
+            ):
+                controller.record_reconciliation_checkpoint(
+                    reconciliation_id="bybit-runtime-readiness",
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="DEMO",
+                )
+            self.assertEqual(controller.state, HostState.RECOVERING)
+            self.assertFalse(controller.provider_reconciled)
+
+            evidence = controller.record_reconciliation_checkpoint(
+                reconciliation_id="bybit-runtime-readiness",
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            self.assertEqual(controller.state, HostState.READY)
+            self.assertTrue(controller.provider_reconciled)
+            self.assertEqual(evidence["event_id"], checkpoint["event_id"])
+            self.assertEqual(evidence["provider_environment"], "TESTNET")
+
     def test_invalid_checkpoint_identity_cannot_mutate_controller_ready(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

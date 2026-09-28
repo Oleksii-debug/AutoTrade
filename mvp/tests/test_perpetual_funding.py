@@ -138,6 +138,8 @@ def sealed_funding(
     funding_period_id="2026-09-25T10:00:00Z",
     price_reference_at="2026-09-25T10:00:00Z",
     collateral_currency="USDT",
+    price_basis="MARK",
+    positive_rate_effect="LONG_PAYS",
 ):
     binding = prepare_authenticated_read_query(
         capability=funding_capability(),
@@ -158,9 +160,9 @@ def sealed_funding(
         "funding_rate": rate,
         "mark_price": "100000",
         "index_price": "100000",
-        "price_basis": "MARK",
+        "price_basis": price_basis,
         "collateral_currency": collateral_currency,
-        "positive_rate_effect": "LONG_PAYS",
+        "positive_rate_effect": positive_rate_effect,
         "corrects_external_event_id": corrects,
     }
     return observe_authenticated_json_response(
@@ -452,6 +454,37 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
             )
             self.assertEqual(book.audit_digest(), before)
             self.assertEqual(len(book.transactions), 1)
+
+    def test_provider_cannot_redefine_versioned_funding_convention(self):
+        variants = (
+            sealed_funding(
+                external_event_id="wrong-basis",
+                price_basis="INDEX",
+            ),
+            sealed_funding(
+                external_event_id="wrong-effect",
+                positive_rate_effect="LONG_RECEIVES",
+            ),
+        )
+        for evidence in variants:
+            with self.subTest(event=evidence.evidence_ref), TemporaryDirectory() as directory:
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                authority, book = self.authority(store, [evidence])
+                before_sequence = store.current_journal_sequence()
+                before_digest = book.audit_digest()
+
+                with self.assertRaisesRegex(
+                    PerpetualFundingConflict,
+                    "convention does not match immutable instrument version",
+                ):
+                    authority.apply(evidence.evidence_ref)
+
+                self.assertEqual(store.current_journal_sequence(), before_sequence)
+                self.assertEqual(book.audit_digest(), before_digest)
+                self.assertEqual(
+                    store.load_events("perpetual_funding", authority.aggregate_id),
+                    [],
+                )
 
     def test_sealed_funding_uses_canonical_registry_and_durable_position_cut(self):
         evidence = sealed_funding()

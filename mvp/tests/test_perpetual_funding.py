@@ -340,6 +340,12 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
                 {ENDPOINT, RATE_ENDPOINT, PRICE_ENDPOINT, CUT_ENDPOINT}
             ),
             permission_scope="ORDER.READ",
+            funding_evidence_endpoints={
+                "income": frozenset({ENDPOINT}),
+                "rate": frozenset({RATE_ENDPOINT}),
+                "prices": frozenset({PRICE_ENDPOINT}),
+                "cut": frozenset({CUT_ENDPOINT}),
+            },
         )
         return authority, book
 
@@ -731,6 +737,125 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
             ):
                 authority.apply(evidence.evidence_ref)
             self.assertEqual(book.audit_digest(), before)
+
+    def test_composite_role_endpoint_policy_fails_closed(self):
+        evidence = sealed_composite_funding()
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = DurableProviderEconomicBook(
+                store,
+                provider_id="BINANCE",
+                account_id="acct-1",
+                environment="PAPER",
+            )
+            seed_position(book)
+            authority = DurablePerpetualFundingAuthority(
+                store,
+                economic_book=book,
+                instrument_registry=InstrumentRegistry(
+                    versions=(perpetual_version(),)
+                ),
+                evidence_resolver={evidence.evidence_ref: evidence}.__getitem__,
+                funding_endpoints=frozenset(
+                    {ENDPOINT, RATE_ENDPOINT, PRICE_ENDPOINT, CUT_ENDPOINT}
+                ),
+                permission_scope="ORDER.READ",
+                funding_evidence_endpoints={
+                    "income": frozenset({ENDPOINT}),
+                    "rate": frozenset({PRICE_ENDPOINT}),
+                    "prices": frozenset({RATE_ENDPOINT}),
+                    "cut": frozenset({CUT_ENDPOINT}),
+                },
+            )
+            before = book.audit_digest()
+            with self.assertRaisesRegex(
+                PerpetualFundingError, "rate funding evidence endpoint is not allowed"
+            ):
+                authority.apply(evidence.evidence_ref)
+            self.assertEqual(book.audit_digest(), before)
+
+    def test_composite_correction_is_atomic_restart_safe_and_idempotent(self):
+        original = sealed_composite_funding(
+            tran_id="9001", income="-0.200000", rate="0.001"
+        )
+        correction = sealed_composite_funding(
+            tran_id="9002",
+            income="-0.400000",
+            rate="0.002",
+            corrects="9001",
+        )
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            authority, book = self.authority(
+                JournalStore(path),
+                [original, correction],
+                environment="PAPER",
+            )
+            first = authority.apply(original.evidence_ref)
+            corrected = authority.apply(correction.evidence_ref)
+            self.assertTrue(first.inserted)
+            self.assertTrue(corrected.inserted)
+            self.assertIsNotNone(corrected.reversal_transaction_id)
+            self.assertEqual(corrected.cashflow, Decimal("-0.400000"))
+            self.assertEqual(book.cash("USDT"), Decimal("-200000.400000"))
+
+            restarted, restarted_book = self.authority(
+                JournalStore(path),
+                [original, correction],
+                seed=False,
+                environment="PAPER",
+            )
+            replay = restarted.apply(correction.evidence_ref)
+            self.assertFalse(replay.inserted)
+            self.assertEqual(
+                replay.active_transaction_id, corrected.active_transaction_id
+            )
+            self.assertEqual(
+                replay.reversal_transaction_id,
+                corrected.reversal_transaction_id,
+            )
+            self.assertEqual(
+                restarted_book.cash("USDT"), Decimal("-200000.400000")
+            )
+
+    def test_composite_correction_cannot_reinterpret_same_cut_causality(self):
+        original = sealed_composite_funding(
+            tran_id="9001",
+            position="3",
+            income="-0.300000",
+            pre_cut=("same-cut",),
+        )
+        correction = sealed_composite_funding(
+            tran_id="9002",
+            position="2",
+            income="-0.400000",
+            rate="0.002",
+            post_cut=("same-cut",),
+            corrects="9001",
+        )
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority, book = self.authority(
+                store, [original, correction], seed=False, environment="PAPER"
+            )
+            seed_position(book, contracts="2")
+            seed_position(
+                book,
+                transaction_id="same-cut",
+                contracts="1",
+                effective_at="2026-09-25T10:00:00Z",
+                observed_at="2026-09-25T10:00:01Z",
+            )
+            authority.apply(original.evidence_ref)
+            before = book.audit_digest()
+            sequence = store.current_journal_sequence()
+            with self.assertRaisesRegex(
+                PerpetualFundingConflict,
+                "cannot reinterpret immutable funding-period position cut",
+            ):
+                authority.apply(correction.evidence_ref)
+            self.assertEqual(book.audit_digest(), before)
+            self.assertEqual(store.current_journal_sequence(), sequence)
 
     def test_composite_provider_income_conflict_rejects_before_mutation(self):
         evidence = sealed_composite_funding(income="-0.19")

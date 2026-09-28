@@ -561,6 +561,65 @@ class EconomicsBoundProposal:
     quantity: Decimal
     reason: str
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.gross_proposal, DeterministicProposal):
+            raise TypeError("gross_proposal must be DeterministicProposal")
+        if not isinstance(self.economics, StrategyEconomicsBinding):
+            raise TypeError("economics must be StrategyEconomicsBinding")
+        instrument = _text(self.instrument_version, name="instrument_version")
+        action = _text(self.action, name="action").upper()
+        if action not in {"BUY", "SELL", "HOLD"}:
+            raise ValueError("unsupported economics-bound proposal action")
+        quantity = _decimal(self.quantity, name="quantity")
+        if quantity < 0:
+            raise ValueError("economics-bound quantity must be non-negative")
+        if action == "HOLD" and quantity != 0:
+            raise ValueError("HOLD economics-bound proposal quantity must be zero")
+        if action in {"BUY", "SELL"} and quantity <= 0:
+            raise ValueError("BUY/SELL economics-bound proposal quantity must be positive")
+        gross = self.gross_proposal
+        economics = self.economics
+        if gross.strategy_fingerprint != economics.strategy_fingerprint:
+            raise ValueError("economics strategy fingerprint does not match proposal")
+        if (
+            gross.strategy_configuration_fingerprint
+            != economics.strategy_configuration_fingerprint
+        ):
+            raise ValueError(
+                "economics strategy configuration fingerprint does not match proposal"
+            )
+        if economics.instrument_version != instrument:
+            raise ValueError("economics instrument_version does not match proposal")
+        if economics.information_cutoff != gross.information_cutoff:
+            raise ValueError("economics information_cutoff does not match proposal")
+        if economics.decision_time != gross.decision_time:
+            raise ValueError("economics decision_time does not match proposal")
+        if economics.horizon_seconds != gross.horizon_seconds:
+            raise ValueError("economics horizon does not match proposal")
+        if economics.expiry != gross.expiry:
+            raise ValueError("economics expiry does not match proposal")
+        if action != "HOLD":
+            if action != gross.action:
+                raise ValueError("economics-bound action cannot change gross direction")
+            if quantity > gross.quantity:
+                raise ValueError("economics binding cannot increase proposal exposure")
+            if quantity > economics.max_feasible_quantity:
+                raise ValueError(
+                    "economics-bound quantity exceeds frozen capacity"
+                )
+            if quantity % economics.lot_size != 0:
+                raise ValueError(
+                    "economics-bound quantity must be an executable lot multiple"
+                )
+            if economics.status != "QUALIFIED":
+                raise ValueError(
+                    "non-HOLD economics-bound proposal requires QUALIFIED economics"
+                )
+        object.__setattr__(self, "instrument_version", instrument)
+        object.__setattr__(self, "action", action)
+        object.__setattr__(self, "quantity", quantity)
+        object.__setattr__(self, "reason", _text(self.reason, name="reason"))
+
     @property
     def fingerprint(self) -> str:
         gross = self.gross_proposal
@@ -757,6 +816,11 @@ class ReturnThresholdBaseline:
         if descriptor is not None:
             if not isinstance(descriptor, StrategyDescriptor):
                 raise TypeError("descriptor must be StrategyDescriptor or None")
+            if descriptor.family != "DETERMINISTIC_RETURN_THRESHOLD":
+                raise ValueError(
+                    "return-threshold descriptor family must be "
+                    "DETERMINISTIC_RETURN_THRESHOLD"
+                )
             if descriptor.minimum_history != lookback:
                 raise ValueError("descriptor minimum_history must equal lookback")
             bounds = {name: (Decimal(minimum), Decimal(maximum)) for name, minimum, maximum in descriptor.parameter_bounds}
@@ -790,6 +854,8 @@ class ReturnThresholdBaseline:
         ).hexdigest()
 
     def ingest(self, observation: CausalObservation, *, simulation_time: datetime) -> bool:
+        if not isinstance(observation, CausalObservation):
+            raise TypeError("observation must be CausalObservation")
         cutoff = _time(simulation_time, name="simulation_time")
         if observation.available_at > cutoff:
             raise ValueError("observation is not causally available at simulation_time")

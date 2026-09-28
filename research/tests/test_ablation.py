@@ -1363,6 +1363,14 @@ class AblationTests(unittest.TestCase):
                             sha256=manifest["sha256"],
                         )
                     )
+            class SnapshotOnlyArtifactStore(ArtifactStore):
+                def load_manifest(self, artifact_id):
+                    raise AssertionError("split manifest read is forbidden")
+
+                def read_bytes(self, artifact_id):
+                    raise AssertionError("split object read is forbidden")
+
+            artifacts = SnapshotOnlyArtifactStore(root / "artifacts")
             authority = AblationQualificationAuthority(
                 scientific_registry=science,
                 experience_memory=memory,

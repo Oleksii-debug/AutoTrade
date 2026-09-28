@@ -162,6 +162,41 @@ class ReleaseManifestPortabilityTests(unittest.TestCase):
                 (False, "unbound_review_policy_evidence"),
             )
 
+    def test_advisory_nested_evidence_must_match_top_level_digest_and_time(self):
+        graph, document = self._advisory_fixture()
+        with TemporaryDirectory() as directory:
+            wrong_policy_digest = dict(document)
+            wrong_policy_digest["review_policy_evidence"] = {
+                **document["review_policy_evidence"],
+                "sha256": "sha256:" + "4" * 64,
+            }
+            path = self._write_advisory(directory, wrong_policy_digest)
+            self.assertEqual(
+                dependency_advisory_evidence_document(
+                    path,
+                    expected_dependency_graph=graph,
+                    expected_source_sha="b" * 40,
+                ),
+                (False, "unbound_review_policy_evidence"),
+            )
+
+            wrong_source_time = dict(document)
+            wrong_source_time["advisory_source_evidence"] = [
+                {
+                    **document["advisory_source_evidence"][0],
+                    "observed_at": "2026-09-28T20:02:00Z",
+                }
+            ]
+            path = self._write_advisory(directory, wrong_source_time)
+            self.assertEqual(
+                dependency_advisory_evidence_document(
+                    path,
+                    expected_dependency_graph=graph,
+                    expected_source_sha="b" * 40,
+                ),
+                (False, "unbound_advisory_source_evidence"),
+            )
+
     def test_advisory_qualification_requires_exact_component_coverage(self):
         graph, document = self._advisory_fixture()
         with TemporaryDirectory() as directory:

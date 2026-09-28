@@ -2,12 +2,6 @@ import copy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
-
-from research.autotrade_research.artifacts.store import (
-    ArtifactIntegrityError,
-    ArtifactStore,
-)
 from research.autotrade_research.science.registry import (
     ProtocolConflict,
     ProtocolViolation,
@@ -62,31 +56,6 @@ def exhaust_trials(store, protocol_id):
             payload={"trial_index": index, "result": "registered"},
         )
 
-
-def publish_stopping_evidence(
-    artifact_store,
-    *,
-    protocol_id,
-    stopping_rules_hash,
-    artifact_id="11111111-1111-4111-8111-111111111111",
-    data=b"registered stopping-rule evidence",
-    metadata_overrides=None,
-):
-    metadata = {
-        "kind": "stopping-rule-evidence",
-        "protocol_id": protocol_id,
-        "stopping_rules_hash": stopping_rules_hash,
-    }
-    metadata.update(metadata_overrides or {})
-    manifest = artifact_store.publish_bytes(
-        artifact_id=artifact_id,
-        data=data,
-        media_type="application/json",
-        rights={"storage": True, "export": False},
-        source_refs=["science:registered-stopping-rule"],
-        metadata=metadata,
-    )
-    return "artifact:" + artifact_id + "@" + manifest["sha256"]
 
 
 class ScientificRegistryTests(unittest.TestCase):
@@ -213,19 +182,14 @@ class ScientificRegistryTests(unittest.TestCase):
 
     def test_all_caller_asserted_early_stop_forms_fail_before_holdout_access(self):
         with TemporaryDirectory() as directory:
-            artifact_store = ArtifactStore(Path(directory) / "artifacts")
-            store = ScientificRegistry(
-                Path(directory) / "science.sqlite3",
-                artifact_store=artifact_store,
-            )
+            store = ScientificRegistry(Path(directory) / "science.sqlite3")
             registered = store.register_protocol(protocol())
             rules_hash = store.completeness(
                 registered.protocol_id
             )["stopping_rules_hash"]
-            canonical_ref = publish_stopping_evidence(
-                artifact_store,
-                protocol_id=registered.protocol_id,
-                stopping_rules_hash=rules_hash,
+            canonical_ref = (
+                "artifact:11111111-1111-4111-8111-111111111111@sha256:"
+                + "a" * 64
             )
 
             variants = (

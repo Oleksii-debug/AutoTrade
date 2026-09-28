@@ -2235,6 +2235,11 @@ class JournalStore:
             ).fetchone()
             if existing is not None:
                 saved_result = self._decode_command_result(existing)
+                if existing["command_id"] != command_id:
+                    connection.rollback()
+                    raise ValueError(
+                        "idempotency_key is already bound to a different command_id"
+                    )
                 if existing["request_hash"] != request_hash:
                     connection.rollback()
                     raise ValueError("idempotency_key was already used for a different request")
@@ -2364,6 +2369,10 @@ class JournalStore:
                 ).fetchone()
                 if existing is not None:
                     saved_result = self._decode_command_result(existing)
+                    if existing["command_id"] != command_id:
+                        raise ValueError(
+                            "idempotency_key is already bound to a different command_id"
+                        )
                     if existing["request_hash"] != request_hash:
                         raise ValueError(
                             "idempotency_key was already used for a different request"

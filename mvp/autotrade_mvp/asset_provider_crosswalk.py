@@ -191,7 +191,10 @@ def lifecycle_evidence_bytes(item: LifecycleEvidence) -> bytes:
 
 def _stored_evidence_matches(store: ArtifactStore, item: LifecycleEvidence) -> bool:
     try:
-        manifest, data = store.read_authenticated_snapshot(item.artifact_id)
+        manifest, data = ArtifactStore.read_authenticated_snapshot(
+            store,
+            item.artifact_id,
+        )
         if manifest.get("sha256") != item.artifact_sha256:
             return False
         if "sha256:" + sha256(data).hexdigest() != item.artifact_sha256:
@@ -293,8 +296,8 @@ def qualify_asset_provider_crosswalk(
     """Fail closed unless every advertised combination has exact complete evidence."""
 
     source_sha = _sha(exact_source_sha, "exact_source_sha")
-    if evidence_store is not None and not isinstance(evidence_store, ArtifactStore):
-        raise TypeError("evidence_store must be ArtifactStore")
+    if evidence_store is not None and type(evidence_store) is not ArtifactStore:
+        raise TypeError("evidence_store must be canonical ArtifactStore")
     expected = advertised_lifecycle_keys()
     expected_set = set(expected)
 

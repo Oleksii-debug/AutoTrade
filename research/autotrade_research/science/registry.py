@@ -611,12 +611,34 @@ class ScientificRegistry:
             )
             protocol_payload = json.loads(p["payload_json"])
             trial_budget = protocol_payload["trial_budget"]
-            recorded_trials = int(
-                con.execute(
-                    "SELECT COUNT(*) FROM trials WHERE protocol_id=?",
-                    (protocol,),
-                ).fetchone()[0]
-            )
+            trial_rows = con.execute(
+                """
+                SELECT trial_id,status,payload_hash,payload_json
+                FROM trials
+                WHERE protocol_id=?
+                ORDER BY trial_id
+                """,
+                (protocol,),
+            ).fetchall()
+            recorded_trials = len(trial_rows)
+            for trial in trial_rows:
+                try:
+                    trial_payload = json.loads(trial["payload_json"])
+                except json.JSONDecodeError as error:
+                    raise ProtocolViolation(
+                        "registered trial payload is corrupt"
+                    ) from error
+                if (
+                    trial["status"]
+                    not in {"COMPLETED", "FAILED", "DISCARDED", "CANCELLED"}
+                    or not isinstance(trial_payload, dict)
+                    or not trial_payload
+                    or _canonical(trial_payload) != trial["payload_json"]
+                    or _hash(trial_payload) != trial["payload_hash"]
+                ):
+                    raise ProtocolViolation(
+                        "registered trial population integrity mismatch"
+                    )
             if recorded_trials < trial_budget:
                 # The protocol's stopping_rules remain immutable preregistered
                 # scientific material, but AutoTrade does not yet have a

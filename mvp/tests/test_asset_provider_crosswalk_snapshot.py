@@ -73,7 +73,24 @@ def _publish(store: ArtifactStore, item: LifecycleEvidence) -> None:
     )
 
 
+class ForgedArtifactStore(ArtifactStore):
+    def __init__(self):
+        pass
+
+    def read_authenticated_snapshot(self, artifact_id):
+        raise AssertionError("forged lifecycle evidence store must never be trusted")
+
+
 class AssetProviderCrosswalkSnapshotTests(unittest.TestCase):
+    def test_qualification_rejects_polymorphic_artifact_store_authority(self):
+        with self.assertRaisesRegex(TypeError, "canonical ArtifactStore"):
+            qualify_asset_provider_crosswalk(
+                (),
+                exact_source_sha="a" * 40,
+                exact_adapter_shas={},
+                evidence_store=ForgedArtifactStore(),
+            )
+
     def test_evidence_consumer_uses_exactly_one_authenticated_snapshot(self):
         key = advertised_lifecycle_keys()[0]
         item = _complete_evidence(key)

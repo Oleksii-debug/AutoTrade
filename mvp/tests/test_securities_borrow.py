@@ -250,6 +250,80 @@ class DurableBorrowRecallProjectionTests(unittest.TestCase):
         )
         self.assertEqual(restarted.active_blocking_resources, ())
 
+    def test_future_resolution_does_not_release_recall_before_observation_cut(self):
+        projection = self.projection()
+        projection.record_recall(recall())
+        projection.resolve_recall(
+            resolution(
+                resolved_quantity="3",
+                effective_at="2026-09-25T05:10:00Z",
+                observed_at="2026-09-25T05:11:00Z",
+            )
+        )
+
+        self.assertEqual(projection.active_quantity, Decimal("0"))
+        self.assertEqual(
+            projection.active_quantity_at("2026-09-25T05:02:00Z"),
+            Decimal("3"),
+        )
+        self.assertEqual(
+            projection.active_blocking_resources_at("2026-09-25T05:10:30Z"),
+            (availability().resource_key,),
+        )
+        self.assertEqual(
+            projection.active_quantity_at("2026-09-25T05:11:00Z"),
+            Decimal("0"),
+        )
+
+        restarted = self.projection(JournalStore(self.path))
+        self.assertEqual(
+            restarted.active_quantity_at("2026-09-25T05:02:00Z"),
+            Decimal("3"),
+        )
+        self.assertEqual(
+            restarted.active_blocking_resources_at("2026-09-25T05:11:00Z"),
+            (),
+        )
+
+    def test_partial_future_resolution_chain_is_projected_at_each_cut(self):
+        projection = self.projection()
+        projection.record_recall(recall(quantity="3"))
+        projection.resolve_recall(
+            resolution(
+                resolution_id="resolution-early",
+                provider_revision="recall-r2",
+                resolved_quantity="1",
+                effective_at="2026-09-25T05:04:00Z",
+                observed_at="2026-09-25T05:05:00Z",
+            )
+        )
+        projection.resolve_recall(
+            resolution(
+                resolution_id="resolution-late",
+                provider_revision="recall-r3",
+                resolved_quantity="2",
+                effective_at="2026-09-25T05:09:00Z",
+                observed_at="2026-09-25T05:10:00Z",
+            )
+        )
+
+        self.assertEqual(
+            projection.active_quantity_at("2026-09-25T05:04:30Z"),
+            Decimal("3"),
+        )
+        self.assertEqual(
+            projection.active_quantity_at("2026-09-25T05:05:00Z"),
+            Decimal("2"),
+        )
+        self.assertEqual(
+            projection.active_quantity_at("2026-09-25T05:09:30Z"),
+            Decimal("2"),
+        )
+        self.assertEqual(
+            projection.active_quantity_at("2026-09-25T05:10:00Z"),
+            Decimal("0"),
+        )
+
     def test_unknown_or_attempted_close_cannot_clear_recall_without_provider_resolution(self):
         projection = self.projection()
         projection.record_recall(recall())

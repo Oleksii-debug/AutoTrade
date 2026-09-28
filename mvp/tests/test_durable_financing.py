@@ -5,22 +5,88 @@ from hashlib import sha256
 from decimal import Decimal
 import json
 from pathlib import Path
+from uuid import uuid4
 import tempfile
 import unittest
 
-from autotrade_mvp.durable_financing import (
+from mvp.autotrade_mvp.durable_financing import (
     DurableFinancingBook,
     _event_payload,
     _revision_book_digest,
     authenticated_financing_event,
 )
-from autotrade_mvp.financing import FinancingConflict, FinancingError
-from autotrade_mvp.persistence import JournalStore
-from autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
+from mvp.autotrade_mvp.financing import FinancingConflict, FinancingError
+from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
+from mvp.autotrade_mvp.capabilities import (
+    CapabilityClaim,
+    EvidenceVerification,
+    derive_capability_snapshot,
+)
+from mvp.autotrade_mvp.provider_core import (
+    Surface,
+    observe_authenticated_json_response,
+    prepare_authenticated_read_query,
+)
 from autotrade_research.artifacts import ArtifactStore
 
 
 BASE = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
+
+
+def bybit_activity_observation(raw: bytes, *, observed_at: datetime):
+    capability_observed = BASE - timedelta(minutes=5)
+    claims = tuple(
+        CapabilityClaim(
+            source=source,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            entity_id="bybit-financing-test",
+            environment="PAPER",
+            instrument_version="XRPUSDT@v1",
+            observed_at=capability_observed,
+            expires_at=BASE + timedelta(hours=1),
+            supported_order_types=frozenset({"MARKET"}),
+            time_in_force=frozenset({"IOC"}),
+            permission_scopes=frozenset({"ORDER.READ"}),
+            position_mode="NET",
+            native_protection=frozenset(),
+            rate_limit_policy_id="bybit-financing-test",
+            data_entitlements=frozenset({"ACTIVITIES"}),
+            evidence_ref={
+                "artifact_id": str(uuid4()),
+                "sha256": "sha256:" + "a" * 64,
+                "observed_at": capability_observed.isoformat().replace(
+                    "+00:00", "Z"
+                ),
+                "source_uri": (
+                    "https://bybit-exchange.github.io/docs/v5/account/"
+                    "transaction-log"
+                ),
+            },
+        )
+        for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+    )
+    capability = derive_capability_snapshot(
+        snapshot_id=str(uuid4()),
+        claims=claims,
+        observed_at=BASE,
+        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    )
+    query = prepare_authenticated_read_query(
+        capability=capability,
+        surface=Surface.ACTIVITIES,
+        endpoint="/v5/account/transaction-log",
+        query={"accountType": "UNIFIED", "category": "linear"},
+        at=BASE,
+        permission_scope="ORDER.READ",
+    )
+    return observe_authenticated_json_response(
+        query_binding=query,
+        http_status=200,
+        response_bytes=raw,
+        observed_at=observed_at,
+    )
 
 
 class FakeArtifactStore:
@@ -350,7 +416,7 @@ class DurableFinancingTests(unittest.TestCase):
                 "aggregate_version": "1",
                 "committed_at": BASE.isoformat(),
                 "payload": payload,
-                "payload_hash": __import__("autotrade_mvp.persistence", fromlist=["payload_digest"]).payload_digest(payload),
+                "payload_hash": __import__("mvp.autotrade_mvp.persistence", fromlist=["payload_digest"]).payload_digest(payload),
             }
         )
         with self.assertRaisesRegex(FinancingConflict, "missing its economic posting"):
@@ -377,7 +443,7 @@ class DurableFinancingTests(unittest.TestCase):
             "provider_financing_charge",
             self.financing._aggregate_id("borrow-btc-2026-09-28"),
         )[0]
-        from autotrade_mvp.financing import book_financing_delta
+        from mvp.autotrade_mvp.financing import book_financing_delta
         stray = book_financing_delta(
             transaction_id="stray-financing-economic",
             cause_event_id=durable_event["event_id"],

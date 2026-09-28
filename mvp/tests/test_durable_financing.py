@@ -35,6 +35,8 @@ class FakeArtifactStore:
         environment: str = "PAPER",
         unit: str = "BTC",
         source_account: str = "BORROW_LIABILITY:BTC",
+        charge_scope_type: str = "ACCOUNT",
+        charge_scope_id: str | None = None,
     ) -> None:
         payload = {
             "schema_version": "1.0.0",
@@ -51,6 +53,8 @@ class FakeArtifactStore:
             "unit": unit,
             "amount": amount,
             "source_account": source_account,
+            "charge_scope_type": charge_scope_type,
+            "charge_scope_id": account_id if charge_scope_id is None else charge_scope_id,
         }
         self.items[artifact_id] = json.dumps(
             payload,
@@ -249,7 +253,12 @@ class DurableFinancingTests(unittest.TestCase):
     def test_exact_retry_detects_historical_partial_final_state(self):
         artifact = "00000000-0000-0000-0000-000000000059"
         self.artifacts.put(artifact, revision=1)
-        event, artifact_digest = authenticated_financing_event(
+        (
+            event,
+            artifact_digest,
+            charge_scope_type,
+            charge_scope_id,
+        ) = authenticated_financing_event(
             self.artifacts,
             artifact_id=artifact,
             provider_id="BYBIT",
@@ -264,6 +273,8 @@ class DurableFinancingTests(unittest.TestCase):
             event=event,
             artifact_id=artifact,
             artifact_digest=artifact_digest,
+            charge_scope_type=charge_scope_type,
+            charge_scope_id=charge_scope_id,
         )
         self.store.append_event(
             {
@@ -312,6 +323,36 @@ class DurableFinancingTests(unittest.TestCase):
             self.economic.balance("FINANCING_EXPENSE:BTC", "BTC"),
             0,
         )
+
+    def test_financing_charge_scope_and_unit_are_fail_closed(self):
+        wrong_scope = "00000000-0000-0000-0000-000000000069"
+        self.artifacts.put(
+            wrong_scope,
+            revision=1,
+            charge_scope_type="ACCOUNT",
+            charge_scope_id="other-account",
+        )
+        with self.assertRaisesRegex(FinancingError, "scope"):
+            self.financing.record_authenticated_artifact(
+                self.artifacts,
+                artifact_id=wrong_scope,
+                committed_at=BASE.isoformat(),
+            )
+
+        wrong_unit = "00000000-0000-0000-0000-000000000070"
+        self.artifacts.put(
+            wrong_unit,
+            revision=1,
+            unit="USD",
+            source_account="BORROW_LIABILITY:BTC",
+        )
+        with self.assertRaisesRegex(FinancingError, "denominated"):
+            self.financing.record_authenticated_artifact(
+                self.artifacts,
+                artifact_id=wrong_unit,
+                committed_at=BASE.isoformat(),
+            )
+        self.assertIsNone(self.financing.latest("borrow-btc-2026-09-28"))
 
     def test_authenticated_scope_mismatch_fails_before_journal_mutation(self):
         artifact = "00000000-0000-0000-0000-000000000071"

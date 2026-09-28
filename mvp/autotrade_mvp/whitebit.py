@@ -1232,7 +1232,7 @@ def parse_execution_history_response(
         endpoint="/api/v4/trade-account/executed-history",
     )
     query = dict(observation.query_binding.query)
-    required_query = {"startDate", "endDate", "offset", "limit", "market"}
+    required_query = {"offset", "limit", "market"}
     if set(query) != required_query:
         raise WhiteBitAdapterError(
             "authoritative execution history requires exact market-scoped query"
@@ -1251,14 +1251,11 @@ def parse_execution_history_response(
             )
         return value
 
-    start_unix = canonical_nonnegative_integer("startDate")
-    end_unix = canonical_nonnegative_integer("endDate")
     offset = canonical_nonnegative_integer("offset")
     limit = canonical_nonnegative_integer("limit", positive=True)
-    _history_window(start_unix=start_unix, end_unix=end_unix)
     page = WhiteBitPageEvidence(offset=offset, limit=limit, record_count=0)
-    if page.limit > 500:
-        raise WhiteBitAdapterError("execution-history limit cannot exceed 500")
+    if page.limit > 100:
+        raise WhiteBitAdapterError("execution-history limit cannot exceed 100")
     market = _text(query["market"], name="market").upper()
     if market != query["market"]:
         raise WhiteBitAdapterError(
@@ -1286,20 +1283,6 @@ def parse_execution_history_response(
             "execution-history response exceeds requested page limit"
         )
     deals = parse_execution_history(payload, market=market)
-    start_boundary = datetime.fromtimestamp(start_unix, tz=timezone.utc)
-    end_boundary_exclusive = datetime.fromtimestamp(
-        end_unix + 1,
-        tz=timezone.utc,
-    )
-    for deal in deals:
-        trade_time = datetime.fromisoformat(
-            deal.trade_time.replace("Z", "+00:00")
-        )
-        if not (start_boundary <= trade_time < end_boundary_exclusive):
-            raise WhiteBitAdapterError(
-                "execution-history response contains deal outside requested time window"
-            )
-
     by_execution: dict[str, ProviderFillEvidence] = {}
     for deal in deals:
         fill = ProviderFillEvidence.create(
@@ -1428,9 +1411,11 @@ def order_history_coverage() -> WhiteBitPaginationCoverage:
 
 
 def execution_history_coverage() -> WhiteBitPaginationCoverage:
+    # Current WhiteBIT/CCXT provider capability metadata qualifies at most
+    # 100 private trade records per page for this surface.
     return WhiteBitPaginationCoverage(
         surface="EXECUTIONS",
-        maximum_limit=500,
+        maximum_limit=100,
     )
 
 
@@ -1458,8 +1443,6 @@ def _history_window(*, start_unix: int, end_unix: int) -> tuple[int, int]:
 
 def paged_order_history_request(
     *,
-    start_unix: int,
-    end_unix: int,
     offset: int,
     limit: int = 50,
     market: str | None = None,
@@ -1485,19 +1468,21 @@ def paged_order_history_request(
 
 def paged_execution_history_request(
     *,
-    start_unix: int,
-    end_unix: int,
     offset: int,
     limit: int = 50,
     market: str | None = None,
 ) -> WhiteBitLookupRequest:
-    _history_window(start_unix=start_unix, end_unix=end_unix)
+    """Build the currently documented WhiteBIT executed-history request.
+
+    The current provider contract exposes market/offset/limit for this endpoint,
+    not a server-side start/end time filter.  This request therefore proves one
+    exact page only; callers must not promote it into time-window completeness.
+    """
+
     page = WhiteBitPageEvidence(offset=offset, limit=limit, record_count=0)
-    if page.limit > 500:
-        raise WhiteBitAdapterError("execution-history limit cannot exceed 500")
+    if page.limit > 100:
+        raise WhiteBitAdapterError("execution-history limit cannot exceed 100")
     body: dict[str, object] = {
-        "startDate": start_unix,
-        "endDate": end_unix,
         "offset": offset,
         "limit": limit,
     }
@@ -1539,8 +1524,6 @@ def prepare_execution_history_read(
             "instrument version belongs to another provider"
         )
     request = paged_execution_history_request(
-        start_unix=start_unix,
-        end_unix=end_unix,
         offset=offset,
         limit=limit,
         market=instrument.provider_symbol,

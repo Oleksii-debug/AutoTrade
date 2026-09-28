@@ -1005,7 +1005,10 @@ class WhiteBitAdapterTests(unittest.TestCase):
             TypeError,
             "observation must be ProviderResponseObservation",
         ):
-            parse_execution_history_response({"caller": "mapping"})
+            parse_execution_history_response(
+                {"caller": "mapping"},
+                instrument_registry=whitebit_registry(),
+            )
 
         observation, registry = execution_observation([row])
         fills = parse_execution_history_response(

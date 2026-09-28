@@ -554,7 +554,7 @@ class DurableFinancingTests(unittest.TestCase):
             unit="USD",
             source_account="BORROW_LIABILITY:BTC",
         )
-        with self.assertRaisesRegex(FinancingError, "internal ledger account"):
+        with self.assertRaisesRegex(FinancingError, "explicitly denominated"):
             self.financing.record_authenticated_artifact(
                 self.artifacts,
                 artifact_id=wrong_unit,

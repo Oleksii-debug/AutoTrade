@@ -1354,6 +1354,16 @@ class AblationTests(unittest.TestCase):
                 task="ablation-qualification",
                 instrument_family="EQUITY",
             )
+            frozen_payload = population.rows[0]["effective_payload"]
+            self.assertIsInstance(frozen_payload, Mapping)
+            self.assertNotIsInstance(frozen_payload, dict)
+            frozen_action = frozen_payload["intended_action"]
+            self.assertIsInstance(frozen_action, Mapping)
+            self.assertNotIsInstance(frozen_action, dict)
+            self.assertEqual(
+                frozen_action["case_id"],
+                cases[0].full.case_id,
+            )
             refs = []
             source_revision = "9" * 40
             artifact_index = 0

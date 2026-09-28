@@ -37,7 +37,7 @@ class FakeArtifactStore:
         available_at: datetime | None = None,
         provider_id: str = "BYBIT",
         account_id: str = "acct-1",
-        environment: str = "PAPER",
+        environment: str = "SIMULATION",
         unit: str = "BTC",
         source_account: str = "BORROW_LIABILITY:BTC",
         charge_scope_type: str = "ACCOUNT",
@@ -93,14 +93,14 @@ class DurableFinancingTests(unittest.TestCase):
             self.store,
             provider_id="BYBIT",
             account_id="acct-1",
-            environment="PAPER",
+            environment="SIMULATION",
         )
         self.financing = DurableFinancingBook(
             self.store,
             self.economic,
             provider_id="BYBIT",
             account_id="acct-1",
-            environment="PAPER",
+            environment="SIMULATION",
         )
         self.artifacts = FakeArtifactStore()
 
@@ -120,19 +120,32 @@ class DurableFinancingTests(unittest.TestCase):
             self.economic.balance("FINANCING_EXPENSE:BTC", "BTC"),
             result.update.economic_delta,
         )
+        self.assertIsNotNone(result.economic_transaction)
+        self.assertEqual(
+            result.economic_transaction.economic_effective_at,
+            BASE.isoformat().replace("+00:00", "Z"),
+        )
+        self.assertEqual(
+            result.economic_transaction.observed_at,
+            BASE.isoformat().replace("+00:00", "Z"),
+        )
+        self.assertIn(
+            "provider-financing:",
+            result.economic_transaction.economic_order_key,
+        )
 
         restarted_economic = DurableProviderEconomicBook(
             self.store,
             provider_id="BYBIT",
             account_id="acct-1",
-            environment="PAPER",
+            environment="SIMULATION",
         )
         restarted = DurableFinancingBook(
             self.store,
             restarted_economic,
             provider_id="BYBIT",
             account_id="acct-1",
-            environment="PAPER",
+            environment="SIMULATION",
         )
         latest = restarted.latest("borrow-btc-2026-09-28")
         self.assertIsNotNone(latest)
@@ -311,13 +324,13 @@ class DurableFinancingTests(unittest.TestCase):
             artifact_id=artifact,
             provider_id="BYBIT",
             account_id="acct-1",
-            environment="PAPER",
+            environment="SIMULATION",
         )
         aggregate_id = self.financing._aggregate_id(event.charge_id)
         payload = _event_payload(
             provider_id="BYBIT",
             account_id="acct-1",
-            environment="PAPER",
+            environment="SIMULATION",
             event=event,
             artifact_id=artifact,
             artifact_digest=artifact_digest,
@@ -404,6 +417,25 @@ class DurableFinancingTests(unittest.TestCase):
             self.economic.balance("FINANCING_EXPENSE:BTC", "BTC"),
             0,
         )
+        reopened_store = JournalStore(Path(self.temp.name) / "journal.sqlite3")
+        reopened_economic = DurableProviderEconomicBook(
+            reopened_store,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="SIMULATION",
+        )
+        reopened_financing = DurableFinancingBook(
+            reopened_store,
+            reopened_economic,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="SIMULATION",
+        )
+        self.assertIsNone(reopened_financing.latest("borrow-btc-2026-09-28"))
+        self.assertEqual(
+            reopened_economic.balance("FINANCING_EXPENSE:BTC", "BTC"),
+            0,
+        )
 
     def test_financing_charge_scope_and_unit_are_fail_closed(self):
         wrong_scope = "00000000-0000-0000-0000-000000000069"
@@ -469,6 +501,37 @@ class DurableFinancingTests(unittest.TestCase):
         self.assertEqual(
             str(self.economic.balance("FINANCING_EXPENSE:BTC", "BTC")),
             "1.20",
+        )
+
+    def test_generic_artifact_cannot_grant_paper_or_live_financial_authority(self):
+        artifact = "00000000-0000-0000-0000-000000000070"
+        self.artifacts.put(
+            artifact,
+            revision=1,
+            environment="PAPER",
+        )
+        paper_economic = DurableProviderEconomicBook(
+            self.store,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="PAPER",
+        )
+        paper_financing = DurableFinancingBook(
+            self.store,
+            paper_economic,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="PAPER",
+        )
+        with self.assertRaisesRegex(FinancingError, "provider-specific"):
+            paper_financing.record_authenticated_artifact(
+                self.artifacts,
+                artifact_id=artifact,
+                committed_at=BASE.isoformat(),
+            )
+        self.assertEqual(
+            paper_economic.balance("FINANCING_EXPENSE:BTC", "BTC"),
+            0,
         )
 
     def test_authenticated_scope_mismatch_fails_before_journal_mutation(self):

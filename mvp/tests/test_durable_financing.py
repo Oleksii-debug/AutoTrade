@@ -72,6 +72,7 @@ class FakeArtifactStore:
             {
                 "artifact_id": artifact_id,
                 "sha256": "sha256:" + sha256(data).hexdigest(),
+                "media_type": "application/json",
             },
             data,
         )
@@ -242,6 +243,47 @@ class DurableFinancingTests(unittest.TestCase):
             "0.75",
         )
 
+    def test_authenticated_snapshot_identity_and_media_type_are_bound(self):
+        artifact = "00000000-0000-0000-0000-000000000050"
+        self.artifacts.put(artifact, revision=1)
+        data = self.artifacts.items[artifact]
+
+        class WrongIdentityStore:
+            def read_authenticated_snapshot(self, artifact_id: str):
+                return (
+                    {
+                        "artifact_id": "00000000-0000-0000-0000-00000000ffff",
+                        "sha256": "sha256:" + sha256(data).hexdigest(),
+                        "media_type": "application/json",
+                    },
+                    data,
+                )
+
+        class WrongMediaStore:
+            def read_authenticated_snapshot(self, artifact_id: str):
+                return (
+                    {
+                        "artifact_id": artifact_id,
+                        "sha256": "sha256:" + sha256(data).hexdigest(),
+                        "media_type": "text/plain",
+                    },
+                    data,
+                )
+
+        with self.assertRaisesRegex(FinancingError, "identity"):
+            self.financing.record_authenticated_artifact(
+                WrongIdentityStore(),
+                artifact_id=artifact,
+                committed_at=BASE.isoformat(),
+            )
+        with self.assertRaisesRegex(FinancingError, "application/json"):
+            self.financing.record_authenticated_artifact(
+                WrongMediaStore(),
+                artifact_id=artifact,
+                committed_at=BASE.isoformat(),
+            )
+        self.assertIsNone(self.financing.latest("borrow-btc-2026-09-28"))
+
     def test_forged_or_unreadable_artifact_cannot_grant_economics(self):
         with self.assertRaises(FinancingError):
             self.financing.record_authenticated_artifact(
@@ -302,6 +344,35 @@ class DurableFinancingTests(unittest.TestCase):
             self.economic.balance("FINANCING_EXPENSE:BTC", "BTC"),
             0,
         )
+
+    def test_indicated_retry_rejects_stray_economic_posting(self):
+        artifact = "00000000-0000-0000-0000-000000000060"
+        self.artifacts.put(artifact, revision=1, kind="INDICATED", amount="2.50")
+        first = self.financing.record_authenticated_artifact(
+            self.artifacts,
+            artifact_id=artifact,
+            committed_at=BASE.isoformat(),
+        )
+        self.assertTrue(first.inserted)
+        durable_event = self.store.load_events(
+            "provider_financing_charge",
+            self.financing._aggregate_id("borrow-btc-2026-09-28"),
+        )[0]
+        from autotrade_mvp.financing import book_financing_delta
+        stray = book_financing_delta(
+            transaction_id="stray-financing-economic",
+            cause_event_id=durable_event["event_id"],
+            unit="BTC",
+            source_account="BORROW_LIABILITY:BTC",
+            economic_delta="1",
+        )
+        self.economic.append(stray)
+        with self.assertRaisesRegex(FinancingConflict, "non-economic"):
+            self.financing.record_authenticated_artifact(
+                self.artifacts,
+                artifact_id=artifact,
+                committed_at=BASE.isoformat(),
+            )
 
     def test_command_failure_exposes_neither_revision_nor_economics(self):
         artifact = "00000000-0000-0000-0000-000000000061"

@@ -1443,6 +1443,8 @@ def _history_window(*, start_unix: int, end_unix: int) -> tuple[int, int]:
 
 def paged_order_history_request(
     *,
+    start_unix: int,
+    end_unix: int,
     offset: int,
     limit: int = 50,
     market: str | None = None,
@@ -1499,8 +1501,6 @@ def prepare_execution_history_read(
     *,
     capability: CapabilitySnapshot,
     instrument_registry: InstrumentRegistry,
-    start_unix: int,
-    end_unix: int,
     offset: int,
     limit: int = 50,
     at: datetime,

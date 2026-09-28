@@ -21,7 +21,12 @@ import json
 import re
 
 from .capabilities import CapabilitySnapshot
-from .provider_core import ProviderResponseObservation, Surface
+from .provider_core import (
+    AuthenticatedReadQueryBinding,
+    ProviderResponseObservation,
+    Surface,
+    prepare_authenticated_read_query,
+)
 from .reconciliation import ProviderFillEvidence
 
 
@@ -1473,6 +1478,43 @@ def paged_execution_history_request(
         "EXECUTIONS",
         "/api/v4/trade-account/executed-history",
         body,
+    )
+
+
+def prepare_execution_history_read(
+    *,
+    capability: CapabilitySnapshot,
+    start_unix: int,
+    end_unix: int,
+    offset: int,
+    limit: int = 50,
+    market: str,
+    at: datetime,
+) -> AuthenticatedReadQueryBinding:
+    """Bind one WhiteBIT execution-history read to verified provider authority.
+
+    This is network-free preparation only. The returned canonical provider_core
+    binding is the sole query identity accepted by exact-byte response
+    observation; it does not itself perform I/O or grant fill authority.
+    """
+
+    request = paged_execution_history_request(
+        start_unix=start_unix,
+        end_unix=end_unix,
+        offset=offset,
+        limit=limit,
+        market=market,
+    )
+    return prepare_authenticated_read_query(
+        capability=capability,
+        surface=Surface.AUTHENTICATED_READ,
+        endpoint=request.endpoint,
+        query={
+            key: str(value)
+            for key, value in request.body.items()
+        },
+        at=at,
+        permission_scope="ORDER.READ",
     )
 
 

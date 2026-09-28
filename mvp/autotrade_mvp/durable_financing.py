@@ -33,6 +33,7 @@ from .financing import (
 )
 from .persistence import JournalStore, canonical_json, payload_digest
 from .provider_activity_accounting import DurableProviderEconomicBook
+from .provider_core import ProviderResponseObservation, Surface
 
 
 _FINANCING_AGGREGATE_TYPE = "provider_financing_charge"
@@ -332,6 +333,98 @@ def authenticated_financing_event(
     return event, artifact_digest, charge_scope_type, charge_scope_id
 
 
+def _milliseconds_instant(value: object, *, name: str) -> datetime:
+    if isinstance(value, bool):
+        raise FinancingError(f"{name} must be epoch milliseconds")
+    if isinstance(value, int):
+        milliseconds = value
+    elif isinstance(value, str) and value.isdigit():
+        milliseconds = int(value)
+    else:
+        raise FinancingError(f"{name} must be epoch milliseconds")
+    if milliseconds < 0:
+        raise FinancingError(f"{name} must be non-negative")
+    seconds, remainder = divmod(milliseconds, 1000)
+    return datetime.fromtimestamp(seconds, tz=timezone.utc).replace(
+        microsecond=remainder * 1000
+    )
+
+
+def _bybit_funding_event_from_exact_response(
+    raw: bytes,
+    *,
+    observation: ProviderResponseObservation,
+    artifact_id: str,
+    artifact_digest: str,
+    row_id: str,
+    instrument_versions: Mapping[str, str],
+) -> tuple[FinancingEvent, str, str]:
+    response = _strict_json_object(raw)
+    if response.get("retCode") != 0:
+        raise FinancingError("Bybit transaction-log response was not successful")
+    result = response.get("result")
+    if not isinstance(result, Mapping):
+        raise FinancingError("Bybit transaction-log result must be an object")
+    rows = result.get("list")
+    if not isinstance(rows, list):
+        raise FinancingError("Bybit transaction-log result.list must be an array")
+    target_id = _text(row_id, name="row_id")
+    matches = [
+        row
+        for row in rows
+        if isinstance(row, Mapping) and row.get("id") == target_id
+    ]
+    if len(matches) != 1:
+        raise FinancingError(
+            "Bybit funding row_id must resolve to exactly one transaction-log row"
+        )
+    row = matches[0]
+    if _text(row.get("type"), name="type").upper() != "SETTLEMENT":
+        raise FinancingError("Bybit financing row must be a SETTLEMENT record")
+    raw_funding = row.get("funding")
+    try:
+        funding = Decimal(raw_funding)
+    except (TypeError, ValueError) as error:
+        raise FinancingError("Bybit funding must be an exact decimal string") from error
+    if not funding.is_finite() or funding >= 0:
+        raise FinancingError(
+            "Bybit funding authority currently supports paid funding charges only"
+        )
+    currency = _text(row.get("currency"), name="currency").upper()
+    symbol = _text(row.get("symbol"), name="symbol")
+    if not isinstance(instrument_versions, Mapping):
+        raise FinancingError("instrument_versions must be a mapping")
+    try:
+        instrument_version = _text(
+            instrument_versions[symbol],
+            name="instrument_version",
+        )
+    except KeyError as error:
+        raise FinancingError(
+            "Bybit funding symbol lacks a qualified instrument version"
+        ) from error
+    effective_at = _milliseconds_instant(
+        row.get("transactionTime"),
+        name="transactionTime",
+    )
+    available_at = _instant(observation.observed_at, name="observed_at")
+    evidence_ref = (
+        f"artifact:{artifact_id}:{artifact_digest}|{observation.evidence_ref}"
+    )
+    event = FinancingEvent.create(
+        charge_id=f"BYBIT:TRANSACTION:{target_id}:FUNDING",
+        revision=1,
+        kind="FINAL",
+        effective_at=effective_at,
+        available_at=available_at,
+        unit=currency,
+        amount=-funding,
+        source_account=f"CASH:{currency}",
+        evidence_ref=evidence_ref,
+    )
+    return event, "INSTRUMENT", instrument_version
+
+
 def _revision_book_digest(events: list[FinancingEvent]) -> str:
     return payload_digest(
         {
@@ -517,6 +610,84 @@ class DurableFinancingBook:
             account_id=self.account_id,
             environment=self.environment,
         )
+        return self._record_preverified(
+            event=event,
+            artifact_id=artifact_id,
+            artifact_digest=artifact_digest,
+            charge_scope_type=charge_scope_type,
+            charge_scope_id=charge_scope_id,
+            committed_at=committed_at,
+        )
+
+    def record_bybit_funding_observation(
+        self,
+        observation: ProviderResponseObservation,
+        artifact_store: AuthenticatedArtifactStore,
+        *,
+        artifact_id: str,
+        row_id: str,
+        instrument_versions: Mapping[str, str],
+        committed_at: str | None = None,
+    ) -> DurableFinancingResult:
+        if not isinstance(observation, ProviderResponseObservation):
+            raise TypeError("observation must be ProviderResponseObservation")
+        observation.require_scope(
+            provider_id="BYBIT",
+            surface=Surface.ACTIVITIES,
+            endpoint="/v5/account/transaction-log",
+            account_id=self.account_id,
+            environment=self.environment,
+        )
+        if self.provider_id != "BYBIT":
+            raise FinancingError("Bybit financing observation requires BYBIT authority")
+        aid = _text(artifact_id, name="artifact_id")
+        try:
+            manifest, raw = artifact_store.read_authenticated_snapshot(aid)
+        except Exception as error:
+            raise FinancingError(
+                "Bybit financing artifact could not be authenticated"
+            ) from error
+        if not isinstance(manifest, Mapping) or manifest.get("artifact_id") != aid:
+            raise FinancingError("Bybit financing artifact identity mismatch")
+        if manifest.get("media_type") != "application/json":
+            raise FinancingError("Bybit financing artifact must be application/json")
+        rights = manifest.get("rights")
+        if not isinstance(rights, Mapping) or rights.get("storage") is not True:
+            raise FinancingError("Bybit financing artifact lacks storage rights")
+        artifact_digest = _normalize_artifact_digest(manifest)
+        if artifact_digest != observation.response_sha256:
+            raise FinancingError(
+                "Bybit financing artifact bytes do not match provider observation"
+            )
+        event, charge_scope_type, charge_scope_id = (
+            _bybit_funding_event_from_exact_response(
+                raw,
+                observation=observation,
+                artifact_id=aid,
+                artifact_digest=artifact_digest,
+                row_id=row_id,
+                instrument_versions=instrument_versions,
+            )
+        )
+        return self._record_preverified(
+            event=event,
+            artifact_id=aid,
+            artifact_digest=artifact_digest,
+            charge_scope_type=charge_scope_type,
+            charge_scope_id=charge_scope_id,
+            committed_at=committed_at,
+        )
+
+    def _record_preverified(
+        self,
+        *,
+        event: FinancingEvent,
+        artifact_id: str,
+        artifact_digest: str,
+        charge_scope_type: str,
+        charge_scope_id: str,
+        committed_at: str | None,
+    ) -> DurableFinancingResult:
         aggregate_id = self._aggregate_id(event.charge_id)
         durable_events = self._events(event.charge_id)
         book = self._replay(event.charge_id)

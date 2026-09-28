@@ -2447,6 +2447,91 @@ class JournalStoreTests(unittest.TestCase):
             ):
                 store.commit_command(**{**args, "events": [(replacement, None)]})
 
+    def test_commit_command_replay_rejects_journal_sequence_swap(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            first = event("evt-seq-a", 1, {"kind": "a"})
+            second = event("evt-seq-b", 2, {"kind": "b"})
+            args = {
+                "actor": "alice",
+                "environment": "PAPER",
+                "command_id": "cmd-sequence-swap",
+                "idempotency_key": "key-sequence-swap",
+                "request": {"action": "ORDER.SUBMIT", "intent_id": "intent-sequence"},
+                "result": {"status": "ACCEPTED"},
+                "state_version": 1,
+                "events": [(first, None), (second, None)],
+                "expected_journal_sequence": 0,
+            }
+            store.commit_command(**args)
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE events SET journal_sequence = 99 WHERE event_id = ?",
+                    ("evt-seq-a",),
+                )
+                connection.execute(
+                    "UPDATE events SET journal_sequence = 1 WHERE event_id = ?",
+                    ("evt-seq-b",),
+                )
+                connection.execute(
+                    "UPDATE events SET journal_sequence = 2 WHERE event_id = ?",
+                    ("evt-seq-a",),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "event identity changed"):
+                store.commit_command(**args)
+
+    def test_commit_command_replay_rejects_batch_event_moved_across_unrelated_event(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            first = event("evt-batch-a", 1, {"kind": "a"})
+            second = event("evt-batch-b", 2, {"kind": "b"})
+            args = {
+                "actor": "alice",
+                "environment": "PAPER",
+                "command_id": "cmd-cross-sequence",
+                "idempotency_key": "key-cross-sequence",
+                "request": {"action": "ORDER.SUBMIT", "intent_id": "intent-cross"},
+                "result": {"status": "ACCEPTED"},
+                "state_version": 1,
+                "events": [(first, None), (second, None)],
+                "expected_journal_sequence": 0,
+            }
+            store.commit_command(**args)
+
+            unrelated = event("evt-unrelated", 1, {"kind": "other"})
+            unrelated["aggregate_id"] = "other-account"
+            unrelated["payload_hash"] = payload_digest(unrelated["payload"])
+            store.append_event(unrelated)
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE events SET journal_sequence = 99 WHERE event_id = ?",
+                    ("evt-batch-b",),
+                )
+                connection.execute(
+                    "UPDATE events SET journal_sequence = 2 WHERE event_id = ?",
+                    ("evt-unrelated",),
+                )
+                connection.execute(
+                    "UPDATE events SET journal_sequence = 3 WHERE event_id = ?",
+                    ("evt-batch-b",),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "event identity changed"):
+                store.commit_command(**args)
+
     def test_commit_command_replay_detects_stored_event_identity_tamper(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

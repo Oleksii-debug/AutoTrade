@@ -21,6 +21,7 @@ import json
 import re
 
 from .capabilities import CapabilitySnapshot
+from .instruments import InstrumentRegistry
 from .provider_core import (
     AuthenticatedReadQueryBinding,
     ProviderResponseObservation,
@@ -1211,6 +1212,8 @@ def parse_execution_history(
 
 def parse_execution_history_response(
     observation: ProviderResponseObservation,
+    *,
+    instrument_registry: InstrumentRegistry,
 ) -> tuple[ProviderFillEvidence, ...]:
     """Map one canonical exact-byte WhiteBIT execution read into financial fills.
 
@@ -1221,6 +1224,8 @@ def parse_execution_history_response(
 
     if not isinstance(observation, ProviderResponseObservation):
         raise TypeError("observation must be ProviderResponseObservation")
+    if not isinstance(instrument_registry, InstrumentRegistry):
+        raise TypeError("instrument_registry must be InstrumentRegistry")
     observation.require_scope(
         provider_id="WHITEBIT",
         surface=Surface.AUTHENTICATED_READ,
@@ -1259,6 +1264,17 @@ def parse_execution_history_response(
         raise WhiteBitAdapterError(
             "authoritative execution-history market must be canonical uppercase"
         )
+    instrument = instrument_registry.exact(
+        observation.query_binding.instrument_version
+    )
+    if instrument.provider_id.upper() != "WHITEBIT":
+        raise WhiteBitAdapterError(
+            "instrument version belongs to another provider"
+        )
+    if instrument.provider_symbol != market:
+        raise WhiteBitAdapterError(
+            "execution-history market does not match canonical instrument mapping"
+        )
 
     payload = observation.payload
     if not isinstance(payload, (list, tuple)):
@@ -1279,7 +1295,7 @@ def parse_execution_history_response(
             environment=observation.environment,
             provider_execution_id=deal.provider_execution_id,
             client_order_id=deal.client_order_id,
-            instrument=observation.query_binding.instrument_version,
+            instrument=f"{instrument.instrument_id}@{instrument.version}",
             side=deal.side,
             quantity=deal.quantity,
             price=deal.price,
@@ -1484,35 +1500,41 @@ def paged_execution_history_request(
 def prepare_execution_history_read(
     *,
     capability: CapabilitySnapshot,
+    instrument_registry: InstrumentRegistry,
     start_unix: int,
     end_unix: int,
     offset: int,
     limit: int = 50,
-    market: str,
     at: datetime,
 ) -> AuthenticatedReadQueryBinding:
-    """Bind one WhiteBIT execution-history read to verified provider authority.
+    """Bind one WhiteBIT execution read to exact capability + instrument mapping.
 
-    This is network-free preparation only. The returned canonical provider_core
-    binding is the sole query identity accepted by exact-byte response
-    observation; it does not itself perform I/O or grant fill authority.
+    Provider-native market identity is derived from the immutable canonical
+    InstrumentVersion. A caller cannot pair a verified instrument capability
+    with an unrelated WhiteBIT market symbol.
     """
 
+    if not isinstance(capability, CapabilitySnapshot):
+        raise TypeError("capability must be CapabilitySnapshot")
+    if not isinstance(instrument_registry, InstrumentRegistry):
+        raise TypeError("instrument_registry must be InstrumentRegistry")
+    instrument = instrument_registry.exact(capability.instrument_version)
+    if instrument.provider_id.upper() != "WHITEBIT":
+        raise WhiteBitAdapterError(
+            "instrument version belongs to another provider"
+        )
     request = paged_execution_history_request(
         start_unix=start_unix,
         end_unix=end_unix,
         offset=offset,
         limit=limit,
-        market=market,
+        market=instrument.provider_symbol,
     )
     return prepare_authenticated_read_query(
         capability=capability,
         surface=Surface.AUTHENTICATED_READ,
         endpoint=request.endpoint,
-        query={
-            key: str(value)
-            for key, value in request.body.items()
-        },
+        query={key: str(value) for key, value in request.body.items()},
         at=at,
         permission_scope="ORDER.READ",
     )

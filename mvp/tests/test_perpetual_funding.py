@@ -597,32 +597,21 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
             ):
                 restarted.apply(evidence.evidence_ref)
 
-    def test_provider_collateral_currency_is_not_inferred_from_settlement(self):
+    def test_provider_reported_funding_asset_must_match_immutable_contract(self):
         evidence = sealed_funding(collateral_currency="USD")
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             authority, book = self.authority(store, [evidence])
-
-            applied = authority.apply(evidence.evidence_ref)
-
-            # Linear funding settles in the instrument settlement currency.
-            self.assertTrue(applied.inserted)
-            self.assertEqual(applied.currency, "USDT")
-            self.assertEqual(book.cash("USDT"), Decimal("-200000.200000"))
-            # Collateral is a distinct provider/account fact and must not be
-            # manufactured from the instrument settlement currency.
-            event = store.load_events(
-                "perpetual_funding", authority.aggregate_id
-            )[0]
+            before = book.audit_digest()
+            with self.assertRaisesRegex(
+                PerpetualFundingConflict,
+                "immutable contract settlement currency",
+            ):
+                authority.apply(evidence.evidence_ref)
+            self.assertEqual(book.audit_digest(), before)
             self.assertEqual(
-                event["payload"]["collateral_currency"],
-                "USD",
-            )
-            self.assertEqual(
-                authority.instrument_registry.exact(
-                    f"{FUNDING_ID}@1"
-                ).settlement_currency,
-                "USDT",
+                store.load_events("perpetual_funding", authority.aggregate_id),
+                [],
             )
 
     def test_missing_provider_collateral_currency_fails_closed(self):

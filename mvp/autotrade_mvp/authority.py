@@ -14,6 +14,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 from .allocation import (
+    AllocationPolicy,
     EvidenceBoundObjectiveAllocationResult,
     ImmutableAllocationEvidence,
     revalidate_evidence_bound_allocation,
@@ -409,6 +410,8 @@ class AllocationAuthoritySnapshot:
     provider_id: str
     account_id: str
     policy_version: str
+    allocation_policy: AllocationPolicy
+    max_candidate_sets: int
     instrument_versions: Mapping[str, str]
     financial_instruments: Mapping[str, InstrumentVersionIdentity]
     capability_snapshot_ids: Mapping[str, str]
@@ -417,6 +420,14 @@ class AllocationAuthoritySnapshot:
     account_state_version: int
 
     def __post_init__(self) -> None:
+        if not isinstance(self.allocation_policy, AllocationPolicy):
+            raise TypeError("allocation_policy must be an AllocationPolicy")
+        if (
+            not isinstance(self.max_candidate_sets, int)
+            or isinstance(self.max_candidate_sets, bool)
+            or self.max_candidate_sets < 1
+        ):
+            raise ValueError("max_candidate_sets must be a positive integer")
         if not isinstance(self.resolved_evidence, Mapping):
             raise TypeError("resolved_evidence must be a mapping")
         evidence: dict[str, ImmutableAllocationEvidence] = {}
@@ -2360,6 +2371,10 @@ class AuthorityService:
             if (
                 persisted.get("decision_digest")
                 != allocation_result.decision_digest
+                or persisted.get("policy_config_digest")
+                != allocation_result.policy_config_digest
+                or persisted.get("objective_search_config_digest")
+                != allocation_result.objective_search_config_digest
                 or persisted.get("evidence_refs") != expected_refs
             ):
                 raise AuthorityConflict(
@@ -2414,6 +2429,8 @@ class AuthorityService:
                 environment=env,
                 as_of=now,
                 current_policy_version=current.policy_version,
+                current_policy=current.allocation_policy,
+                current_max_candidate_sets=current.max_candidate_sets,
                 current_provider_id=current.provider_id,
                 current_instrument_versions=current.instrument_versions,
                 current_capability_snapshot_ids=current.capability_snapshot_ids,
@@ -2513,6 +2530,10 @@ class AuthorityService:
             "provider_id": allocation_result.provider_id,
             "account_id": allocation_result.account_id,
             "policy_version": allocation_result.policy_version,
+            "policy_config_digest": allocation_result.policy_config_digest,
+            "objective_search_config_digest": (
+                allocation_result.objective_search_config_digest
+            ),
             "valid_until": allocation_valid_until,
             "account_snapshot_id": allocation_result.account_snapshot_id,
             "reconciliation_run_id": allocation_result.reconciliation_run_id,

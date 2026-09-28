@@ -2531,6 +2531,85 @@ class JournalStoreTests(unittest.TestCase):
             ):
                 store.commit_command(**command_args)
 
+    def test_v8_command_rows_upgrade_to_legacy_unknown_and_fail_closed(self):
+        class LegacyV8JournalStore(JournalStore):
+            SCHEMA_VERSION = 8
+
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            legacy = LegacyV8JournalStore(path)
+            request = {"action": "ORDER.SUBMIT"}
+            result = {"status": "ACCEPTED"}
+            result_json = json.dumps(
+                result,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO command_dedupe(
+                        command_id, actor, environment, idempotency_key,
+                        request_hash, result_json, result_hash,
+                        state_version, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "legacy-v8-command",
+                        "alice",
+                        "PAPER",
+                        "legacy-v8-key",
+                        payload_digest(request),
+                        result_json,
+                        "sha256:" + __import__("hashlib").sha256(
+                            result_json.encode("utf-8")
+                        ).hexdigest(),
+                        1,
+                        "2026-09-24T16:00:00Z",
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            upgraded = JournalStore(path)
+            self.assertEqual(upgraded.current_schema_version(), 9)
+            connection = sqlite3.connect(path)
+            try:
+                kind, effect_json, effect_hash = connection.execute(
+                    "SELECT effect_kind, effect_json, effect_hash "
+                    "FROM command_dedupe WHERE idempotency_key = ?",
+                    ("legacy-v8-key",),
+                ).fetchone()
+            finally:
+                connection.close()
+            self.assertEqual(kind, "LEGACY_UNKNOWN")
+            self.assertIsNone(effect_json)
+            self.assertIsNone(effect_hash)
+
+            with self.assertRaisesRegex(ValueError, "ambiguous transactional effect"):
+                upgraded.record_command(
+                    command_id="legacy-v8-record-retry",
+                    actor="alice",
+                    environment="PAPER",
+                    idempotency_key="legacy-v8-key",
+                    request=request,
+                    result=result,
+                    state_version=1,
+                )
+            with self.assertRaisesRegex(ValueError, "ambiguous transactional effect"):
+                upgraded.commit_command(
+                    command_id="legacy-v8-event-retry",
+                    actor="alice",
+                    environment="PAPER",
+                    idempotency_key="legacy-v8-key",
+                    request=request,
+                    result=result,
+                    state_version=1,
+                    events=[(event("legacy-v8-event", 1), None)],
+                )
+
     def test_transactional_command_retry_binds_original_event_batch(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

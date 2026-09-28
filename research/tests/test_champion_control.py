@@ -493,41 +493,20 @@ class ChampionRegistryTests(unittest.TestCase):
                 "trial_budget": trial_state["trial_budget"],
                 "trial_log_hash": trial_state["trial_log_hash"],
             }
-            locked = science.register_evaluation(
-                registered.protocol_id,
-                holdout_id="holdout-early-stop",
-                holdout_identity=holdout_identity("holdout-early-stop"),
-                result=base_result,
-            )
-            approval_value = CandidateApproval.create(
-                candidate_id=candidate,
-                artifact_hash=artifact,
-                evidence_id="evidence:early-stop",
-                evidence_valid_until=valid_until,
-                evaluation_status="PASS",
-                retention_passed=True,
-                risk_passed=True,
-                authority_scope_id="paper-scope",
-                protocol_id=registered.protocol_id,
-                protocol_hash=registered.protocol_hash,
-                evaluation_id=locked["evaluation_id"],
-                evaluation_result_hash=locked["result_hash"],
-            )
-            registry = champion_registry(
-                Path(directory) / "champion.sqlite3",
-                scientific_registry=science,
-            )
             with self.assertRaisesRegex(
                 ProtocolViolation,
-                "trial-budget exhaustion",
+                "registered trial budget is exhausted or a registered stopping rule",
             ):
-                registry.promote(
-                    approval_value,
-                    expected_generation=0,
-                    now=BASE,
-                    open_position_count=0,
-                    existing_position_policy=None,
+                science.register_evaluation(
+                    registered.protocol_id,
+                    holdout_id="holdout-early-stop",
+                    holdout_identity=holdout_identity("holdout-early-stop"),
+                    result=base_result,
                 )
+            self.assertEqual(
+                science.holdout_access_count(registered.protocol_id, "holdout-early-stop"),
+                0,
+            )
 
     def test_locked_evaluation_trial_log_hash_detects_trial_log_tampering(self):
         with TemporaryDirectory() as directory:
@@ -878,15 +857,9 @@ class ChampionRegistryTests(unittest.TestCase):
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
-            candidate = approval(science, record_trial=False)
-            with self.assertRaisesRegex(ProtocolViolation, "registered trial"):
-                registry.promote(
-                    candidate,
-                    expected_generation=0,
-                    now=BASE,
-                    open_position_count=0,
-                    existing_position_policy=None,
-                )
+            with self.assertRaisesRegex(ProtocolViolation, "registered trial budget"):
+                approval(science, record_trial=False)
+            self.assertEqual(registry.state().generation, 0)
 
     def test_completed_trial_must_be_bound_to_exact_candidate_artifact(self):
         with TemporaryDirectory() as directory:

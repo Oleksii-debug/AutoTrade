@@ -174,16 +174,12 @@ def execution_observation(
         binding = prepare_execution_history_read(
             capability=read_capability,
             instrument_registry=registry,
-            start_unix=1_593_233_900,
-            end_unix=1_593_234_000,
             offset=0,
             limit=limit,
             at=NOW,
         )
     else:
         query = {
-            "startDate": "1593233900",
-            "endDate": "1593234000",
             "offset": "0",
             "limit": str(limit),
         }
@@ -1037,8 +1033,6 @@ class WhiteBitAdapterTests(unittest.TestCase):
         binding = prepare_execution_history_read(
             capability=read_capability,
             instrument_registry=registry,
-            start_unix=1_593_233_900,
-            end_unix=1_593_234_000,
             offset=0,
             limit=50,
             at=NOW,
@@ -1163,49 +1157,42 @@ class WhiteBitAdapterTests(unittest.TestCase):
                 instrument_registry=registry,
             )
 
-    def test_execution_history_response_rejects_deal_outside_issued_time_window(self):
-        row = {
-            "id": 130,
-            "clientOrderId": "at-order-130",
-            "time": "1593233939.123456",
-            "side": "buy",
-            "role": 1,
-            "amount": "0.001",
-            "price": "40000",
-            "deal": "40",
-            "fee": "0",
-            "orderId": 460,
-            "feeAsset": "USDT",
-        }
+    def test_execution_history_rejects_legacy_time_filter_authority(self):
         instrument = whitebit_spot_instrument()
         registry = whitebit_registry(instrument)
         read_capability = capability(
             instrument_version=f"{instrument.instrument_id}@{instrument.version}",
             permission_scopes=("ORDER.READ",),
         )
-        binding = prepare_execution_history_read(
+        binding = prepare_authenticated_read_query(
             capability=read_capability,
-            instrument_registry=registry,
-            start_unix=1_593_234_000,
-            end_unix=1_593_234_100,
-            offset=0,
-            limit=50,
+            surface=Surface.AUTHENTICATED_READ,
+            endpoint="/api/v4/trade-account/executed-history",
+            query={
+                "market": instrument.provider_symbol,
+                "startDate": "1593233900",
+                "endDate": "1593234000",
+                "offset": "0",
+                "limit": "50",
+            },
             at=NOW,
+            permission_scope="ORDER.READ",
         )
         observation = observe_authenticated_json_response(
             query_binding=binding,
             http_status=200,
-            response_bytes=json.dumps([row], separators=(",", ":")).encode("utf-8"),
+            response_bytes=b"[]",
             observed_at=NOW,
         )
         with self.assertRaisesRegex(
             WhiteBitAdapterError,
-            "outside requested time window",
+            "exact market-scoped query",
         ):
             parse_execution_history_response(
                 observation,
                 instrument_registry=registry,
             )
+
 
     def test_execution_history_query_numbers_must_be_canonical(self):
         instrument = whitebit_spot_instrument()
@@ -1219,9 +1206,7 @@ class WhiteBitAdapterTests(unittest.TestCase):
             surface=Surface.AUTHENTICATED_READ,
             endpoint="/api/v4/trade-account/executed-history",
             query={
-                "startDate": "01700000000",
-                "endDate": "1700000100",
-                "offset": "0",
+                "offset": "00",
                 "limit": "50",
                 "market": "BTC_USDT",
             },
@@ -1438,8 +1423,6 @@ class WhiteBitAdapterTests(unittest.TestCase):
         self.assertEqual(order_history.body["limit"], 500)
 
         execution_history = paged_execution_history_request(
-            start_unix=1_593_233_900,
-            end_unix=1_593_234_000,
             offset=0,
             limit=500,
         )

@@ -16,15 +16,49 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from mvp.autotrade_mvp.qualification_attestation import (
-    QualificationTrustError,
-    QualificationTrustPolicy,
-    SignedQualificationAttestation,
-    parse_qualification_trust_policy,
-    parse_signed_qualification_attestation,
-    verify_qualification_attestation,
-)
-from research.autotrade_research.artifacts.store import ArtifactStore
+# Trust/evidence authorities are loaded lazily. The default --check-status path must
+# remain stdlib-only so candidate package initializers cannot execute before this
+# verifier establishes whether signed qualification evidence is even required.
+QualificationTrustError = None
+QualificationTrustPolicy = None
+SignedQualificationAttestation = None
+parse_qualification_trust_policy = None
+parse_signed_qualification_attestation = None
+verify_qualification_attestation = None
+ArtifactStore = None
+
+
+def _load_trust_authorities() -> None:
+    global QualificationTrustError
+    global QualificationTrustPolicy
+    global SignedQualificationAttestation
+    global parse_qualification_trust_policy
+    global parse_signed_qualification_attestation
+    global verify_qualification_attestation
+    global ArtifactStore
+
+    if QualificationTrustError is None:
+        from mvp.autotrade_mvp.qualification_attestation import (
+            QualificationTrustError as _QualificationTrustError,
+            QualificationTrustPolicy as _QualificationTrustPolicy,
+            SignedQualificationAttestation as _SignedQualificationAttestation,
+            parse_qualification_trust_policy as _parse_qualification_trust_policy,
+            parse_signed_qualification_attestation as _parse_signed_qualification_attestation,
+            verify_qualification_attestation as _verify_qualification_attestation,
+        )
+
+        QualificationTrustError = _QualificationTrustError
+        QualificationTrustPolicy = _QualificationTrustPolicy
+        SignedQualificationAttestation = _SignedQualificationAttestation
+        parse_qualification_trust_policy = _parse_qualification_trust_policy
+        parse_signed_qualification_attestation = _parse_signed_qualification_attestation
+        if verify_qualification_attestation is None:
+            verify_qualification_attestation = _verify_qualification_attestation
+
+    if ArtifactStore is None:
+        from research.autotrade_research.artifacts.store import ArtifactStore as _ArtifactStore
+
+        ArtifactStore = _ArtifactStore
 
 DEFAULT_REQUIREMENTS = ROOT / "qualification" / "nvda" / "requirements.json"
 DEFAULT_STATUS = ROOT / "qualification" / "nvda" / "status.json"
@@ -332,6 +366,7 @@ def validate_trusted_nvda_qualification(
     expected_policy_id: str,
     expected_policy_version: str,
 ) -> dict[str, object]:
+    _load_trust_authorities()
     result = validate_evidence(evidence, requirements)
     if SHA256.fullmatch(evidence_sha256) is None:
         raise NvdaQualificationError("evidence_sha256 must be canonical")
@@ -449,6 +484,7 @@ def _load_trust_inputs(args):
         )
     if not all(value is not None for value in values):
         return None
+    _load_trust_authorities()
     if not args.evidence_store.is_dir():
         raise NvdaQualificationError(
             "NVDA evidence store must be an existing directory"

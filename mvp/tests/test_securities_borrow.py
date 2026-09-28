@@ -36,6 +36,7 @@ def availability(**overrides):
         locate_id="locate-1",
         provider_revision="borrow-r7",
         capacity_quantity="100",
+        quantity_unit="share",
         hard_to_borrow=True,
         observed_at="2026-09-25T05:00:30Z",
         effective_at="2026-09-25T05:00:00Z",
@@ -57,6 +58,7 @@ def recall(**overrides):
         instrument_version=1,
         provider_revision="recall-r1",
         quantity="3",
+        quantity_unit="share",
         observed_at="2026-09-25T05:01:00Z",
         effective_at="2026-09-25T05:00:45Z",
         deadline="2026-09-25T06:00:00Z",
@@ -77,6 +79,7 @@ def resolution(**overrides):
         instrument_version=1,
         provider_revision="recall-r2",
         resolved_quantity="1",
+        quantity_unit="share",
         observed_at="2026-09-25T05:10:00Z",
         effective_at="2026-09-25T05:09:30Z",
         evidence_ref="provider:recall-r2",
@@ -127,6 +130,25 @@ class SecuritiesBorrowEvidenceTests(unittest.TestCase):
         self.assertTrue(restored.hard_to_borrow)
         self.assertEqual(restored.indicative_rate, Decimal("0.0125"))
 
+    def test_quantity_unit_is_part_of_provider_evidence_identity(self):
+        evidence = availability()
+        self.assertEqual(evidence.resource_detail()["quantity_unit"], "share")
+        restored = BorrowAvailabilityEvidence.from_resource_detail(
+            evidence.resource_detail()
+        )
+        self.assertEqual(restored.quantity_unit, "share")
+        self.assertEqual(recall().payload()["quantity_unit"], "share")
+        self.assertEqual(resolution().payload()["quantity_unit"], "share")
+
+        with self.assertRaisesRegex(ValueError, "quantity_unit"):
+            BorrowAvailabilityEvidence.from_resource_detail(
+                {
+                    key: value
+                    for key, value in evidence.resource_detail().items()
+                    if key != "quantity_unit"
+                }
+            )
+
     def test_availability_rejects_ambiguous_or_non_exact_inputs(self):
         with self.assertRaises(TypeError):
             availability(capacity_quantity=100.0)
@@ -154,9 +176,21 @@ class DurableBorrowRecallProjectionTests(unittest.TestCase):
             environment=ENVIRONMENT,
             instrument_id=INSTRUMENT_ID,
             instrument_version=1,
+            quantity_unit="share",
         )
         values.update(overrides)
         return EvidencedBorrowRecallProjection(store or self.store, **values)
+
+    def test_recall_projection_rejects_quantity_unit_mismatch(self):
+        projection = self.projection()
+        with self.assertRaisesRegex(BorrowRecallConflict, "scope mismatch"):
+            projection.record_recall(recall(quantity_unit="contract"))
+
+        projection.record_recall(recall())
+        with self.assertRaisesRegex(BorrowRecallConflict, "scope mismatch"):
+            projection.resolve_recall(
+                resolution(quantity_unit="contract")
+            )
 
     def test_recall_survives_restart_and_projects_existing_equity_state(self):
         projection = self.projection()
@@ -355,6 +389,7 @@ class SecuritiesBorrowArtifactBindingTests(unittest.TestCase):
             environment=ENVIRONMENT,
             instrument_id=INSTRUMENT_ID,
             instrument_version=1,
+            quantity_unit="share",
             evidence_artifact_store=artifacts,
         )
         return store, artifacts, projection
@@ -427,6 +462,7 @@ class SecuritiesBorrowArtifactBindingTests(unittest.TestCase):
                     environment=ENVIRONMENT,
                     instrument_id=INSTRUMENT_ID,
                     instrument_version=1,
+                    quantity_unit="share",
                     evidence_artifact_store=artifact_store_for(store),
                 )
 

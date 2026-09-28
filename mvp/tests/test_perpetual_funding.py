@@ -17,7 +17,7 @@ from mvp.autotrade_mvp.perpetual_funding import (
     PerpetualFundingError,
     PerpetualFundingObservation,
 )
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
 from mvp.autotrade_mvp.provider_core import (
     Surface,
@@ -665,6 +665,116 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
                 store.load_events("perpetual_funding", authority.aggregate_id),
                 [],
             )
+
+    def test_restart_correction_rejects_reused_version_with_changed_contract(self):
+        original = sealed_funding(collateral_currency="BTC")
+        correction = sealed_funding(
+            external_event_id="funding-corrected", revision="2", rate="0.002",
+            observed_offset=2, corrects="funding-1", collateral_currency="BTC",
+        )
+
+        def registry(quantum="0.00000001", rounding="HALF_EVEN"):
+            return InstrumentRegistry(versions=(perpetual_version(
+                payoff="INVERSE", settlement_currency="BTC", multiplier="100",
+                funding_schedule={"interval_hours": 8, "settlement_quantum": quantum,
+                                  "settlement_rounding": rounding},
+            ),))
+
+        for changed in (registry("0.0001"), registry(rounding="DOWN")):
+            with self.subTest(contract=changed), TemporaryDirectory() as directory:
+                path = f"{directory}/journal.sqlite3"
+                original_authority, _ = self.authority(
+                    JournalStore(path), [original, correction], registry=registry()
+                )
+                original_authority.apply(original.evidence_ref)
+                reopened = JournalStore(path)
+                changed_authority, changed_book = self.authority(
+                    reopened, [original, correction], registry=changed, seed=False
+                )
+                before_sequence = reopened.current_journal_sequence()
+                before_digest = changed_book.audit_digest()
+                with self.assertRaisesRegex(PerpetualFundingConflict, "immutable instrument contract"):
+                    changed_authority.apply(correction.evidence_ref)
+                self.assertEqual(reopened.current_journal_sequence(), before_sequence)
+                self.assertEqual(changed_book.audit_digest(), before_digest)
+                restored, book = self.authority(
+                    JournalStore(path), [original, correction], registry=registry(), seed=False
+                )
+                result = restored.apply(correction.evidence_ref)
+                self.assertTrue(result.inserted)
+                self.assertEqual(book.cash("BTC"), Decimal("-0.00000400"))
+                self.assertFalse(restored.apply(correction.evidence_ref).inserted)
+
+    def test_legacy_funding_event_without_contract_identity_cannot_authorize_correction(self):
+        original = sealed_funding()
+        correction = sealed_funding(
+            external_event_id="funding-corrected", revision="2", rate="0.002",
+            observed_offset=2, corrects="funding-1",
+        )
+        with TemporaryDirectory() as directory:
+            source = JournalStore(f"{directory}/source.sqlite3")
+            authority, source_book = self.authority(source, [original, correction])
+            authority.apply(original.evidence_ref)
+            saved, = source.load_events("perpetual_funding", authority.aggregate_id)
+            for invalid_digest in (None, "", "sha256:invalid"):
+                with self.subTest(digest=invalid_digest), TemporaryDirectory() as legacy_dir:
+                    legacy = JournalStore(f"{legacy_dir}/legacy.sqlite3")
+                    legacy_authority, legacy_book = self.authority(
+                        legacy, [original, correction], seed=False
+                    )
+                    for transaction in source_book.transactions:
+                        legacy_book.append(transaction)
+                    payload = dict(saved["payload"])
+                    if invalid_digest is None:
+                        payload.pop("instrument_contract_digest")
+                    else:
+                        payload["instrument_contract_digest"] = invalid_digest
+                    envelope = {key: saved[key] for key in (
+                        "event_id", "event_type", "aggregate_type", "aggregate_id",
+                        "aggregate_version", "committed_at",
+                    )}
+                    envelope["aggregate_version"] = str(envelope["aggregate_version"])
+                    envelope.update(payload=payload, payload_hash=payload_digest(payload))
+                    legacy.append_event(envelope)
+                    before = legacy.current_journal_sequence()
+                    before_digest = legacy_book.audit_digest()
+                    restarted, restarted_book = self.authority(
+                        JournalStore(legacy.path), [original, correction], seed=False
+                    )
+                    with self.assertRaisesRegex(PerpetualFundingConflict, "immutable instrument contract"):
+                        restarted.apply(correction.evidence_ref)
+                    self.assertEqual(legacy.current_journal_sequence(), before)
+                    self.assertEqual(restarted_book.audit_digest(), before_digest)
+
+    def test_same_timestamp_position_cut_is_ambiguous_before_booking_or_correction(self):
+        for correcting in (False, True):
+            with self.subTest(correcting=correcting), TemporaryDirectory() as directory:
+                original = sealed_funding()
+                target = sealed_funding(
+                    external_event_id="funding-corrected" if correcting else "funding-1",
+                    revision="2" if correcting else "1", contracts="3", observed_offset=2,
+                    corrects="funding-1" if correcting else None,
+                )
+                path = f"{directory}/journal.sqlite3"
+                store = JournalStore(path)
+                authority, book = self.authority(store, [original, target])
+                if correcting:
+                    authority.apply(original.evidence_ref)
+                seed_position(
+                    book, transaction_id="opaque-execution-999", contracts="1",
+                    effective_at="2026-09-25T10:00:00Z", observed_at="2026-09-25T10:00:01Z",
+                )
+                before_sequence = store.current_journal_sequence()
+                before_digest = book.audit_digest()
+                for restart in (False, True):
+                    if restart:
+                        authority, book = self.authority(
+                            JournalStore(path), [original, target], seed=False
+                        )
+                    with self.assertRaisesRegex(PerpetualFundingConflict, "ambiguous.*funding cut"):
+                        authority.apply(target.evidence_ref)
+                    self.assertEqual(store.current_journal_sequence(), before_sequence)
+                    self.assertEqual(book.audit_digest(), before_digest)
 
     def test_inverse_provider_correction_reverses_quantized_cashflow(self):
         original = sealed_funding(collateral_currency="BTC")

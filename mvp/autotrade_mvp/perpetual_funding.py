@@ -569,7 +569,17 @@ class DurablePerpetualFundingAuthority:
                 ) from error
 
             if (
-                effective_at <= observation.effective_at
+                effective_at == observation.effective_at
+                and observed_at <= observation.observed_at
+            ):
+                # Opaque execution IDs and observation time do not establish
+                # provider ordering within a funding timestamp. A qualified
+                # provider cut/sequence contract is required to admit equality.
+                raise PerpetualFundingConflict(
+                    "ambiguous position ordering at funding cut requires provider cut evidence"
+                )
+            if (
+                effective_at < observation.effective_at
                 and observed_at <= observation.observed_at
             ):
                 position += sum(
@@ -808,6 +818,13 @@ class DurablePerpetualFundingAuthority:
                     raise PerpetualFundingConflict(
                         "funding correction cannot change immutable period identity"
                     )
+            # A version ID cannot be reused with new settlement metadata after
+            # restart. Missing legacy identity is not authority to reinterpret
+            # already-booked economics under the current registry.
+            if prior_payload.get("instrument_contract_digest") != contract_digest:
+                raise PerpetualFundingConflict(
+                    "funding correction cannot reinterpret immutable instrument contract"
+                )
             if prior_payload.get("provider_revision") == observation.provider_revision:
                 raise PerpetualFundingConflict(
                     "funding correction requires a new provider revision"

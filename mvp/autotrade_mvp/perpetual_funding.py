@@ -141,6 +141,7 @@ class PerpetualFundingObservation:
     pre_cut_transaction_ids: tuple[str, ...] = ()
     post_cut_transaction_ids: tuple[str, ...] = ()
     cut_evidence_digest: str | None = None
+    position_cut_observed_at: datetime | None = None
     corrects_external_event_id: str | None = None
 
     def __post_init__(self) -> None:
@@ -179,9 +180,19 @@ class PerpetualFundingObservation:
             raise PerpetualFundingError(
                 "funding price reference cannot be observed after provider evidence"
             )
+        cut_observed = (
+            observed
+            if self.position_cut_observed_at is None
+            else _utc(self.position_cut_observed_at, "position_cut_observed_at")
+        )
+        if cut_observed < effective or cut_observed > observed:
+            raise PerpetualFundingError(
+                "position_cut_observed_at must be between funding cut and composite observation time"
+            )
         object.__setattr__(self, "effective_at", effective)
         object.__setattr__(self, "observed_at", observed)
         object.__setattr__(self, "price_reference_at", price_reference)
+        object.__setattr__(self, "position_cut_observed_at", cut_observed)
         object.__setattr__(
             self, "signed_contracts", _decimal(self.signed_contracts, "signed_contracts")
         )
@@ -282,6 +293,7 @@ def canonical_perpetual_funding_observation(
         "pre_cut_transaction_ids": list(observation.pre_cut_transaction_ids),
         "post_cut_transaction_ids": list(observation.post_cut_transaction_ids),
         "cut_evidence_digest": observation.cut_evidence_digest,
+        "position_cut_observed_at": _utc_text(observation.position_cut_observed_at),
         "corrects_external_event_id": observation.corrects_external_event_id,
     }
 
@@ -592,6 +604,9 @@ def _composite_observation(
             cut["postCutTransactionIds"], "postCutTransactionIds"
         ),
         cut_evidence_digest=cut_digest,
+        position_cut_observed_at=_canonical_instant_text(
+            bundle.cut.observed_at, "cut observed_at"
+        ),
         corrects_external_event_id=bundle.corrects_external_event_id,
     )
 
@@ -912,11 +927,11 @@ class DurablePerpetualFundingAuthority:
 
             include = (
                 effective_at < observation.effective_at
-                and observed_at <= observation.observed_at
+                and observed_at <= observation.position_cut_observed_at
             )
             if (
                 effective_at == observation.effective_at
-                and observed_at <= observation.observed_at
+                and observed_at <= observation.position_cut_observed_at
             ):
                 same_cut_transaction_ids.append(transaction.transaction_id)
                 in_pre = transaction.transaction_id in observation.pre_cut_transaction_ids
@@ -948,6 +963,9 @@ class DurablePerpetualFundingAuthority:
             "effective_at": _utc_text(observation.effective_at),
             "position": format(position, "f"),
             "cut_evidence_digest": observation.cut_evidence_digest,
+            "position_cut_observed_at": _utc_text(
+                observation.position_cut_observed_at
+            ),
             "pre_cut_transaction_ids": list(observation.pre_cut_transaction_ids),
             "post_cut_transaction_ids": list(observation.post_cut_transaction_ids),
             "contributing_transactions": [
@@ -961,7 +979,9 @@ class DurablePerpetualFundingAuthority:
             "schema_version": "1.0.0",
             "instrument": instrument,
             "effective_at": _utc_text(observation.effective_at),
-            "evidence_observed_at": _utc_text(observation.observed_at),
+            "evidence_observed_at": _utc_text(
+                observation.position_cut_observed_at
+            ),
             "position": format(position, "f"),
             "economic_book_digest": book_digest,
             "journal_sequence": journal_sequence,

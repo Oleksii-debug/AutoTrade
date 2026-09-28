@@ -10,8 +10,10 @@ import unittest
 from control.tools.reconvergence_integrity import (
     Change,
     INTEGRATION_HARNESS_ROOTS,
+    TRUSTED_SCOPE_APPROVAL_MARKER,
     WORKFLOW_AUTHORITY_ROOTS,
     assess_reconvergence,
+    parse_trusted_scope_approval,
 )
 
 
@@ -176,6 +178,96 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
         self.assertTrue(result.allowed)
         self.assertEqual(result.protected_violations, ())
         self.assertEqual(result.scope_violations, ())
+
+    def test_trusted_scope_approval_is_exact_head_bound_and_stale_record_loses_authority(self):
+        head = "a" * 40
+        body = "\n".join(
+            (
+                TRUSTED_SCOPE_APPROVAL_MARKER,
+                f"head: {head}",
+                "path: .github/workflows/verify.yml",
+                "path: tools/verify.py",
+            )
+        )
+
+        self.assertEqual(
+            parse_trusted_scope_approval(body, expected_head_sha=head),
+            (".github/workflows/verify.yml", "tools/verify.py"),
+        )
+        self.assertIsNone(
+            parse_trusted_scope_approval(body, expected_head_sha="b" * 40)
+        )
+        self.assertIsNone(
+            parse_trusted_scope_approval(
+                "ordinary review comment",
+                expected_head_sha=head,
+            )
+        )
+
+    def test_current_head_scope_approval_malformed_records_fail_closed(self):
+        head = "a" * 40
+        malformed = (
+            TRUSTED_SCOPE_APPROVAL_MARKER,
+            "\n".join((TRUSTED_SCOPE_APPROVAL_MARKER, f"head: {head}")),
+            "\n".join(
+                (
+                    TRUSTED_SCOPE_APPROVAL_MARKER,
+                    f"head: {head}",
+                    "path: tools/verify.py",
+                    "path: tools/verify.py",
+                )
+            ),
+            "\n".join(
+                (
+                    TRUSTED_SCOPE_APPROVAL_MARKER,
+                    f"head: {head}",
+                    "not-path: tools/verify.py",
+                )
+            ),
+        )
+
+        for body in malformed:
+            with self.subTest(body=body):
+                with self.assertRaises(ValueError):
+                    parse_trusted_scope_approval(body, expected_head_sha=head)
+
+    def test_scope_approval_cannot_silently_cover_unlisted_candidate_change(self):
+        protected = ".github/workflows/verify.yml"
+        unlisted = "owned/change.py"
+        result = assess_reconvergence(
+            base_paths=[protected, unlisted],
+            changes=[
+                Change(status="M", path=protected),
+                Change(status="M", path=unlisted),
+            ],
+            allowed_scopes=(protected,),
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.protected_violations, ())
+        self.assertEqual(result.scope_violations, (unlisted,))
+
+    def test_trusted_workflow_resolves_only_owner_exact_head_comment_scopes(self):
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "reconvergence-integrity.yml"
+        ).read_text(encoding="utf-8")
+        resolver = workflow.split(
+            "- name: Resolve trusted exact-path scope approval",
+            1,
+        )[1].split("- name: Guard pull-request repository tree", 1)[0]
+        guard = workflow.split(
+            "- name: Guard pull-request repository tree with trusted base code",
+            1,
+        )[1].split("- name: Run trusted guard regression tests", 1)[0]
+
+        self.assertIn("issues: read", workflow)
+        self.assertIn('comment.get("author_association") != "OWNER"', resolver)
+        self.assertIn("parse_trusted_scope_approval", resolver)
+        self.assertIn("expected_head_sha=head_sha", resolver)
+        self.assertIn("/issues/{pr_number}/comments", resolver)
+        self.assertIn('args+=(--allowed-scope "${scope}")', guard)
+        self.assertNotIn("pull_request.body", resolver)
+        self.assertNotIn("pull_request.title", resolver)
 
     def test_unrelated_owned_path_remains_admissible(self):
         path = "mvp/autotrade_mvp/example.py"

@@ -45,7 +45,7 @@ from mvp.autotrade_mvp.settlement import (
 
 PROVIDER = "PROVIDER-A"
 ACCOUNT = "acct-1"
-ENVIRONMENT = "PAPER"
+ENVIRONMENT = "SIMULATION"
 
 
 def reservation_book(store: JournalStore, *, environment=ENVIRONMENT) -> DurableReservationBook:
@@ -198,6 +198,25 @@ def commit_fill(
 
 
 class AtomicFillFinancialCommitTests(unittest.TestCase):
+    def test_paper_and_live_economic_batches_require_order_and_fill_binding(self):
+        for environment in ("PAPER", "LIVE"):
+            with self.subTest(environment=environment), TemporaryDirectory() as directory:
+                store = JournalStore(Path(directory) / "journal.sqlite3")
+                reservations = reservation_book(store, environment=environment)
+                economics = economic_book(store, environment=environment)
+                reserve(reservations)
+
+                with self.assertRaisesRegex(
+                    AccountingConflict,
+                    "PAPER/LIVE economic batches require provider fill binding and atomic canonical order projection",
+                ):
+                    commit_fill(economics, reservations)
+
+                self.assertEqual(economics.transactions, ())
+                snapshot = reservations.get("reservation-1")
+                self.assertEqual(snapshot.consumed["CASH:USD"], Decimal("0"))
+                self.assertEqual(snapshot.remaining["CASH:USD"], Decimal("120"))
+
     def test_fill_economics_and_reservation_consumption_restart_together(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"
@@ -695,6 +714,35 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             observed_at="2026-09-25T09:00:01Z",
             committed_at="2026-09-25T09:00:02Z",
         )
+
+    def test_paper_and_live_provider_fills_require_atomic_order_projection(self):
+        for environment in ("PAPER", "LIVE"):
+            with self.subTest(environment=environment), TemporaryDirectory() as directory:
+                store = JournalStore(Path(directory) / "journal.sqlite3")
+                reservations = reservation_book(store, environment=environment)
+                economics = economic_book(store, environment=environment)
+                reserve(reservations)
+
+                with self.assertRaisesRegex(
+                    AccountingConflict,
+                    "PAPER/LIVE provider fills require atomic canonical order projection",
+                ):
+                    self.commit_evidenced_fill(
+                        economics,
+                        reservations,
+                        provider=self.provider_fill(environment=environment),
+                    )
+
+                self.assertEqual(economics.transactions, ())
+                snapshot = reservations.get("reservation-1")
+                self.assertEqual(snapshot.consumed["CASH:USD"], Decimal("0"))
+                self.assertEqual(snapshot.remaining["CASH:USD"], Decimal("120"))
+                self.assertEqual(
+                    store.load_events_by_aggregate_type(
+                        "provider_fill_financial_binding"
+                    ),
+                    [],
+                )
 
     def test_usage_is_derived_from_provider_fill_not_caller_input(self):
         with TemporaryDirectory() as directory:

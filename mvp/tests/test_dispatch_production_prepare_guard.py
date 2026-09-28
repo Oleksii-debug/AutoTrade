@@ -100,6 +100,82 @@ class ProductionPrepareGuardTests(unittest.TestCase):
             self.assertEqual(outcome.status, "BLOCKED")
             self.assertEqual(outbound, 0)
 
+    def test_attempt_key_bound_to_decoy_order_cannot_prove_target_preparation(self):
+        for environment in ("PAPER", "LIVE"):
+            with self.subTest(environment=environment), TemporaryDirectory() as directory:
+                store = self._store(directory)
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment=environment,
+                    account_id="acct",
+                    owner_token="owner",
+                    owner_epoch=1,
+                )
+                orders = DurableOrderBookProjection(
+                    store,
+                    provider_id="provider",
+                    account_id="acct",
+                    environment=environment,
+                    host_id="owner",
+                    owner_epoch="1",
+                )
+                outbound = 0
+
+                def prepare_order(
+                    client_order_id,
+                    attempt_id,
+                    intent_id,
+                    _provider,
+                    _request,
+                    binding,
+                    prepared_at,
+                ):
+                    # The requested order exists, but under a different key.
+                    orders.create_order(
+                        event_key=f"unrelated:{attempt_id}",
+                        client_order_id=client_order_id,
+                        instrument=binding["instrument"],
+                        side=binding["side"],
+                        requested_quantity=binding["requested_quantity"],
+                        quantity_unit=binding["quantity_unit"],
+                        origin_intent_id=intent_id,
+                        committed_at=prepared_at,
+                    )
+                    # The expected attempt key exists, but owns a different order.
+                    orders.create_order(
+                        event_key=f"dispatch-order:{attempt_id}",
+                        client_order_id=f"decoy-{client_order_id}",
+                        instrument=binding["instrument"],
+                        side=binding["side"],
+                        requested_quantity=binding["requested_quantity"],
+                        quantity_unit=binding["quantity_unit"],
+                        origin_intent_id=intent_id,
+                        committed_at=prepared_at,
+                    )
+
+                def transport(_client_id, _request, final_guard):
+                    nonlocal outbound
+                    final_guard()
+                    outbound += 1
+                    return {"provider_order_id": "must-not-happen"}
+
+                outcome = dispatcher.dispatch(
+                    attempt_id=f"{environment.lower()}-decoy-prepare",
+                    intent_id="intent-1",
+                    intent_hash="intent-hash",
+                    provider="provider",
+                    request={"instrument": "TEST@1", "side": "BUY", "quantity": "1"},
+                    now="2026-09-27T18:00:00Z",
+                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    transport_send=transport,
+                    sender_check=lambda _owner, _epoch: None,
+                    order_preparation_binding=ORDER_PREPARATION_BINDING,
+                    prepare_order=prepare_order,
+                )
+
+                self.assertEqual(outcome.status, "BLOCKED")
+                self.assertEqual(outbound, 0)
+
     def test_valid_paper_prepare_is_verified_before_transport(self):
         with TemporaryDirectory() as directory:
             store = self._store(directory)

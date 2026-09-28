@@ -129,9 +129,47 @@ def install_production_prepare_guard() -> None:
                 ) from error
 
             expected_event_key = f"dispatch-order:{attempt_id}"
-            if expected_event_key not in projection._idempotency:
+            idempotency_entry = projection._idempotency.get(expected_event_key)
+            if idempotency_entry is None:
                 raise _MissingDurableOrderPreparation(
                     "canonical order is not bound to this submission attempt"
+                )
+            # The key's mere presence is insufficient: a callback could bind a
+            # different CREATE event to this attempt while preparing the target
+            # order under another key. Verify the immutable event behind the
+            # binding is the CREATE for this exact order and intent.
+            bound_event = self.store.get_event(idempotency_entry[2])
+            bound_payload = bound_event.get("payload") if bound_event else None
+            bound_request = (
+                bound_payload.get("request")
+                if isinstance(bound_payload, Mapping)
+                else None
+            )
+            if (
+                bound_event is None
+                or bound_event.get("aggregate_type") != "order_projection_book"
+                or bound_event.get("aggregate_id") != projection.aggregate_id
+                or not isinstance(bound_payload, Mapping)
+                or bound_payload.get("operation") != "CREATE"
+                or not isinstance(bound_request, Mapping)
+                or bound_request.get("client_order_id") != client_order_id
+                or bound_request.get("origin_intent_id") != intent_id
+                or bound_request.get("instrument") != instrument
+                or bound_request.get("side") != side
+                or bound_request.get("quantity_unit") != quantity_unit
+            ):
+                raise _MissingDurableOrderPreparation(
+                    "submission attempt is bound to a different canonical order event"
+                )
+            try:
+                bound_quantity = Decimal(bound_request["requested_quantity"])
+            except (KeyError, InvalidOperation, TypeError, ValueError) as error:
+                raise _MissingDurableOrderPreparation(
+                    "submission attempt is bound to an invalid canonical order quantity"
+                ) from error
+            if bound_quantity != requested_quantity:
+                raise _MissingDurableOrderPreparation(
+                    "submission attempt is bound to a different canonical order quantity"
                 )
             if snapshot.client_order_id != client_order_id:
                 raise _MissingDurableOrderPreparation(

@@ -1321,6 +1321,14 @@ def commit_economic_batch_with_reservation_consumption(
         raise ValueError(
             "economic and reservation books must share account/environment scope"
         )
+    if economic_book.environment in {"PAPER", "LIVE"} and (
+        provider_fill_binding is None
+        or order_book is None
+        or order_mutation is None
+    ):
+        raise AccountingConflict(
+            "PAPER/LIVE economic batches require provider fill binding and atomic canonical order projection"
+        )
     if (order_book is None) != (order_mutation is None):
         raise ValueError("order_book and order_mutation must be supplied together")
     if order_book is not None:
@@ -1729,6 +1737,14 @@ def commit_economic_correction_with_settlement_replacement(
     ):
         raise ValueError(
             "settlement book must share provider/account/environment scope"
+        )
+    if economic_book.environment in {"PAPER", "LIVE"} and (
+        provider_fill_correction_binding is None
+        or order_book is None
+        or order_mutation is None
+    ):
+        raise AccountingConflict(
+            "PAPER/LIVE economic corrections require provider correction binding and atomic canonical order projection"
         )
     if (order_book is None) != (order_mutation is None):
         raise ValueError("order_book and order_mutation must be supplied together")
@@ -2290,6 +2306,12 @@ def commit_provider_fill_with_reservation_consumption(
         raise TypeError("economic_book must be DurableProviderEconomicBook")
     if not isinstance(reservation_book, DurableReservationBook):
         raise TypeError("reservation_book must be DurableReservationBook")
+    if _environment(provider_fill.environment) in {"PAPER", "LIVE"} and (
+        order_book is None or order_mutation is None
+    ):
+        raise AccountingConflict(
+            "PAPER/LIVE provider fills require atomic canonical order projection"
+        )
     if order_mutation is not None:
         if not isinstance(order_mutation, PreparedDurableOrderMutation):
             raise TypeError("order_mutation must be PreparedDurableOrderMutation")

@@ -38,7 +38,7 @@ from research.autotrade_research.artifacts.store import ArtifactStore
 
 PROVIDER = "PROVIDER-A"
 ACCOUNT = "acct-1"
-ENVIRONMENT = "PAPER"
+ENVIRONMENT = "SIMULATION"
 
 
 def artifact_store_for(store: JournalStore) -> ArtifactStore:
@@ -241,6 +241,42 @@ def bind_evidence(
 
 
 class DurableSettlementBookTests(unittest.TestCase):
+    def test_paper_economic_correction_requires_provider_and_order_evidence(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            economic = DurableProviderEconomicBook(
+                store,
+                provider_id=PROVIDER,
+                account_id=ACCOUNT,
+                environment="PAPER",
+            )
+            settlements = DurableSettlementBook(
+                store,
+                provider_id=PROVIDER,
+                account_id=ACCOUNT,
+                environment="PAPER",
+                evidence_artifact_store=artifact_store_for(store),
+            )
+            original = sell_transaction()
+            economic.append(original)
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "PAPER/LIVE economic corrections require provider correction binding and atomic canonical order projection",
+            ):
+                commit_economic_correction_with_settlement_replacement(
+                    economic,
+                    settlements,
+                    command_id="paper-unbound-correction",
+                    idempotency_key="paper-unbound-correction",
+                    reversal=original,
+                    replacement=original,
+                    settlement_obligations=(),
+                )
+
+            self.assertEqual(economic.transactions, (original,))
+            self.assertEqual(settlements.obligations, ())
+
     def test_registration_restarts_and_exact_retry_is_noop(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

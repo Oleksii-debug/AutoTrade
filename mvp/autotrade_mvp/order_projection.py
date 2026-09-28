@@ -270,6 +270,7 @@ class OrderProjection:
         active: bool,
         provider_revision: str,
         correction_fill_id: str | None = None,
+        correction_reference: str | None = None,
     ) -> bool:
         fid = _text(fill_id, name="fill_id")
         current = self._fills.get(fid)
@@ -281,6 +282,15 @@ class OrderProjection:
             if correction_fill_id is not None
             else fid
         )
+        predecessor_id = (
+            _text(correction_reference, name="correction_reference")
+            if correction_reference is not None
+            else current.fill_id
+        )
+        if predecessor_id != current.fill_id:
+            raise OrderProjectionConflict(
+                "correction_reference must identify the latest fill observation"
+            )
         candidate = FillRecord(
             fill_id=observation_id,
             provider_execution_id=current.provider_execution_id,
@@ -288,7 +298,7 @@ class OrderProjection:
             price=price,
             active=active,
             provider_revision=revision,
-            correction_of=fid,
+            correction_of=predecessor_id,
         )
         key = (fid, revision)
         prior = self._revision_records.get(key)
@@ -315,6 +325,7 @@ class OrderProjection:
         *,
         provider_revision: str,
         correction_fill_id: str | None = None,
+        correction_reference: str | None = None,
     ) -> bool:
         fid = _text(fill_id, name="fill_id")
         existing = self._fills.get(fid)
@@ -353,6 +364,7 @@ class OrderProjection:
             active=existing.active,
             provider_revision=provider_revision,
             correction_fill_id=correction_fill_id,
+            correction_reference=correction_reference,
         )
 
     def request_cancel(self, *, command_id: str) -> None:

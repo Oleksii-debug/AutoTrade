@@ -10,6 +10,7 @@ import unittest
 from control.tools.reconvergence_integrity import (
     BOOTSTRAP_TRUST_ROOTS,
     Change,
+    EXECUTABLE_BOOTSTRAP_ROOTS,
     INTEGRATION_HARNESS_ROOTS,
     TRUSTED_SCOPE_APPROVAL_MARKER,
     WORKFLOW_AUTHORITY_ROOTS,
@@ -153,6 +154,37 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
                 self.assertTrue(
                     any(path in item for item in renamed.protected_violations)
                 )
+
+    def test_executable_bootstrap_roots_require_exact_authority(self):
+        expected = {
+            "control/__init__.py",
+            "control/tools/__init__.py",
+            "control/tools/reconvergence_integrity.py",
+            "control/tools/registry_state.py",
+        }
+        self.assertEqual(EXECUTABLE_BOOTSTRAP_ROOTS, expected)
+
+        for path in sorted(expected - {"control/__init__.py"}):
+            with self.subTest(path=path):
+                result = assess_reconvergence(
+                    base_paths=[path, "owned/change.py"],
+                    changes=[Change(status="M", path=path)],
+                )
+                self.assertFalse(result.allowed)
+                self.assertIn(
+                    f"{path} (unauthorized trust-root modification)",
+                    result.protected_violations,
+                )
+
+        created = assess_reconvergence(
+            base_paths=["control/tools/__init__.py", "owned/change.py"],
+            changes=[Change(status="A", path="control/__init__.py")],
+        )
+        self.assertFalse(created.allowed)
+        self.assertIn(
+            "control/__init__.py (unauthorized trust-root creation)",
+            created.protected_violations,
+        )
 
     def test_new_workflow_cannot_spoof_required_check_authority(self):
         path = ".github/workflows/spoof-verify.yml"
@@ -473,6 +505,121 @@ class ReconvergenceWorkflowAuthorityTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
         self.assertIn("unauthorized trust-root modification", completed.stdout)
         self.assertIn("tools/verify.py", completed.stdout)
+
+
+    def test_public_entrypoint_rejects_candidate_bootstrap_rewrite(self):
+        with TemporaryDirectory() as directory:
+            git_root = Path(directory)
+            registry = git_root / "control" / "tools" / "registry_state.py"
+            package_init = git_root / "control" / "tools" / "__init__.py"
+            registry.parent.mkdir(parents=True)
+            registry.write_text("VALUE = 1\n", encoding="utf-8")
+            package_init.write_text("", encoding="utf-8")
+            (git_root / "README.md").write_text("base\n", encoding="utf-8")
+
+            def git(*args: str) -> str:
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=git_root,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout.strip()
+
+            git("init")
+            git("config", "user.email", "bootstrap-authority@example.invalid")
+            git("config", "user.name", "Bootstrap Authority Test")
+            git("add", ".")
+            git("commit", "-m", "base")
+            base_sha = git("rev-parse", "HEAD")
+
+            registry.write_text("raise SystemExit(0)\n", encoding="utf-8")
+            git("add", ".")
+            git("commit", "-m", "seed executable bootstrap")
+            head_sha = git("rev-parse", "HEAD")
+
+            env = dict(os.environ)
+            env.pop("PYTHONPATH", None)
+            env["GIT_DIR"] = str(git_root / ".git")
+            env["GIT_WORK_TREE"] = str(git_root)
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "control.tools.reconvergence_integrity",
+                    "--base",
+                    base_sha,
+                    "--head",
+                    head_sha,
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
+        self.assertIn("unauthorized trust-root modification", completed.stdout)
+        self.assertIn("control/tools/registry_state.py", completed.stdout)
+
+    def test_public_entrypoint_rejects_fixed_verifier_rewrite(self):
+        with TemporaryDirectory() as directory:
+            git_root = Path(directory)
+            verifier = git_root / "tests" / "Contracts.DotNet" / "Program.cs"
+            verifier.parent.mkdir(parents=True)
+            verifier.write_text("return 1;\n", encoding="utf-8")
+            (git_root / "README.md").write_text("base\n", encoding="utf-8")
+
+            def git(*args: str) -> str:
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=git_root,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ).stdout.strip()
+
+            git("init")
+            git("config", "user.email", "verifier-authority@example.invalid")
+            git("config", "user.name", "Verifier Authority Test")
+            git("add", ".")
+            git("commit", "-m", "base")
+            base_sha = git("rev-parse", "HEAD")
+
+            verifier.write_text("return 0;\n", encoding="utf-8")
+            git("add", ".")
+            git("commit", "-m", "weaken fixed verifier")
+            head_sha = git("rev-parse", "HEAD")
+
+            env = dict(os.environ)
+            env.pop("PYTHONPATH", None)
+            env["GIT_DIR"] = str(git_root / ".git")
+            env["GIT_WORK_TREE"] = str(git_root)
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "control.tools.reconvergence_integrity",
+                    "--base",
+                    base_sha,
+                    "--head",
+                    head_sha,
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
+        self.assertIn("unauthorized trust-root modification", completed.stdout)
+        self.assertIn("tests/Contracts.DotNet/Program.cs", completed.stdout)
 
 
 if __name__ == "__main__":

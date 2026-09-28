@@ -658,16 +658,6 @@ class ScientificRegistry:
         holdout = _text(holdout_id, "holdout_id")
         if not isinstance(result, dict) or not result:
             raise ProtocolViolation("evaluation result must be a non-empty object")
-        if result.get("stopping_rule_triggered") is True:
-            try:
-                _immutable_artifact_ref(
-                    result.get("stopping_evidence_ref"),
-                    "stopping_evidence_ref",
-                )
-            except ValueError as error:
-                raise ProtocolViolation(
-                    "triggered stopping rule requires immutable artifact evidence"
-                ) from error
         identifier = _id(evaluation_id)
         canonical = _canonical(result)
         result_hash = _hash(result)

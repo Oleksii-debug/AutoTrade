@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.autotrade.local/3.0.1/market.schema.json",
+  "$id": "https://schemas.autotrade.local/4.0.0/market.schema.json",
   "title": "AutoTrade market/instrument contracts",
   "$defs": {
     "CapabilitySnapshot": {

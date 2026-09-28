@@ -1,6 +1,6 @@
 {
-  "corpus_version": "3.0.1",
-  "contract_version": "3.0.1",
+  "corpus_version": "4.0.0",
+  "contract_version": "4.0.0",
   "scope": "common-scalar-subset",
   "cases": [
     {
@@ -163,6 +163,66 @@
       "name": "unit-too-long",
       "type": "UnitId",
       "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "expected": false
+    },
+    {
+      "name": "decimal-terminal-lf",
+      "type": "Decimal",
+      "value": "1\n",
+      "expected": false
+    },
+    {
+      "name": "decimal-terminal-crlf",
+      "type": "Decimal",
+      "value": "1\r\n",
+      "expected": false
+    },
+    {
+      "name": "sequence-terminal-lf",
+      "type": "Sequence",
+      "value": "1\n",
+      "expected": false
+    },
+    {
+      "name": "sequence-terminal-crlf",
+      "type": "Sequence",
+      "value": "1\r\n",
+      "expected": false
+    },
+    {
+      "name": "digest-terminal-lf",
+      "type": "Digest",
+      "value": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+      "expected": false
+    },
+    {
+      "name": "digest-terminal-crlf",
+      "type": "Digest",
+      "value": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n",
+      "expected": false
+    },
+    {
+      "name": "currency-terminal-lf",
+      "type": "CurrencyId",
+      "value": "USD\n",
+      "expected": false
+    },
+    {
+      "name": "currency-terminal-crlf",
+      "type": "CurrencyId",
+      "value": "USD\r\n",
+      "expected": false
+    },
+    {
+      "name": "unit-terminal-lf",
+      "type": "UnitId",
+      "value": "shares\n",
+      "expected": false
+    },
+    {
+      "name": "unit-terminal-crlf",
+      "type": "UnitId",
+      "value": "shares\r\n",
       "expected": false
     },
     {

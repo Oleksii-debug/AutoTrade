@@ -230,7 +230,7 @@ def verify_provider_borrow_evidence(
     expected_receipt = provider_borrow_evidence_receipt(evidence)
     expected_metadata = provider_borrow_evidence_metadata(evidence)
     try:
-        manifest = artifact_store.load_manifest(artifact_id)
+        manifest, raw = artifact_store.read_authenticated_snapshot(artifact_id)
         manifest_hash = manifest.get("manifest_hash")
         if (
             not isinstance(manifest_hash, str)
@@ -257,11 +257,10 @@ def verify_provider_borrow_evidence(
             raise ArtifactIntegrityError(
                 "borrow evidence lacks storage provenance"
             )
-        raw = artifact_store.read_bytes(artifact_id)
         parsed = strict_json_loads(raw.decode("utf-8"))
     except (
         ArtifactIntegrityError,
-        FileNotFoundError,
+        OSError,
         UnicodeError,
         ValueError,
         TypeError,
@@ -671,6 +670,52 @@ class DurableBorrowRecallProjection:
         if recall is None:
             raise KeyError(rid)
         return recall.quantity - self._resolved.get(rid, Decimal("0"))
+
+    def remaining_at(self, recall_id: str, now: str) -> Decimal:
+        """Recall obligation at one financial decision cut.
+
+        Durable future evidence remains in the journal, but a resolution cannot
+        release exposure before both its provider effective time and the time at
+        which that fact was observed by AutoTrade.
+        """
+        rid = _text(recall_id, name="recall_id")
+        recall = self._recalls.get(rid)
+        if recall is None:
+            raise KeyError(rid)
+        point = _dt(_instant(now, name="now"))
+        resolved = sum(
+            (
+                evidence.resolved_quantity
+                for evidence in self._resolutions.values()
+                if evidence.recall_id == rid
+                and _dt(evidence.effective_at) <= point
+                and _dt(evidence.observed_at) <= point
+            ),
+            Decimal("0"),
+        )
+        if resolved > recall.quantity:
+            raise BorrowRecallConflict(
+                "decision-cut resolution exceeds recalled quantity"
+            )
+        return recall.quantity - resolved
+
+    def active_quantity_at(self, now: str) -> Decimal:
+        return sum(
+            (self.remaining_at(rid, now) for rid in self._recalls),
+            Decimal("0"),
+        )
+
+    def active_recall_ids_at(self, now: str) -> tuple[str, ...]:
+        return tuple(
+            sorted(
+                rid
+                for rid in self._recalls
+                if self.remaining_at(rid, now) > 0
+            )
+        )
+
+    def active_blocking_resources_at(self, now: str) -> tuple[str, ...]:
+        return (self.resource_key,) if self.active_quantity_at(now) > 0 else ()
 
     @property
     def active_quantity(self) -> Decimal:

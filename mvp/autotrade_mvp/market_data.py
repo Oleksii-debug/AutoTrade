@@ -182,7 +182,21 @@ class RawMarketUpdate:
         if not isinstance(self.payload, Mapping):
             raise MarketDataError("payload must be an object")
         object.__setattr__(self, "payload", MappingProxyType(dict(self.payload)))
-        object.__setattr__(self, "raw_evidence_ref", _evidence(self.raw_evidence_ref))
+        normalized_evidence = _evidence(self.raw_evidence_ref)
+        evidence_observed_text = normalized_evidence["observed_at"]
+        assert isinstance(evidence_observed_text, str)
+        evidence_observed = datetime.fromisoformat(
+            evidence_observed_text[:-1] + "+00:00"
+        ).astimezone(timezone.utc)
+        if evidence_observed < source:
+            raise MarketDataError(
+                "raw evidence cannot be observed before source_event_at"
+            )
+        if evidence_observed > ingested:
+            raise MarketDataError(
+                "raw evidence cannot be observed after ingested_at"
+            )
+        object.__setattr__(self, "raw_evidence_ref", normalized_evidence)
         if self.sequence_stream is not None:
             object.__setattr__(
                 self,

@@ -1,1 +1,0 @@
-"""AutoTrade deterministic MVP package."""

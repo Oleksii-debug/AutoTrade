@@ -2,6 +2,9 @@ from dataclasses import replace
 from decimal import Decimal
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
+
+from research.autotrade_research.artifacts.store import ArtifactIntegrityError
 
 from mvp.autotrade_mvp.corporate_actions import EquityState
 from mvp.autotrade_mvp.persistence import JournalStore
@@ -304,6 +307,73 @@ class SecuritiesBorrowArtifactBindingTests(unittest.TestCase):
                     projection.aggregate_id,
                 ),
                 [],
+            )
+
+    def test_recall_resolution_and_restart_use_authenticated_snapshots(self):
+        with TemporaryDirectory() as directory:
+            store, artifacts, projection = self.make_projection(directory)
+            bound_recall = bind_provider_evidence(artifacts, recall())
+            bound_resolution = bind_provider_evidence(artifacts, resolution())
+            with (
+                patch.object(
+                    artifacts,
+                    "read_authenticated_snapshot",
+                    wraps=artifacts.read_authenticated_snapshot,
+                ) as snapshot_read,
+                patch.object(artifacts, "load_manifest", side_effect=AssertionError("split read")),
+                patch.object(artifacts, "read_bytes", side_effect=AssertionError("split read")),
+            ):
+                projection.record_recall(bound_recall)
+                projection.resolve_recall(bound_resolution)
+                restarted = DurableBorrowRecallProjection(
+                    JournalStore(store.path),
+                    provider_id=PROVIDER_ID,
+                    account_id=ACCOUNT_ID,
+                    environment=ENVIRONMENT,
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    evidence_artifact_store=artifacts,
+                )
+                self.assertEqual(restarted.active_quantity, Decimal("2"))
+                self.assertGreaterEqual(snapshot_read.call_count, 4)
+                self.assertEqual(
+                    {call.args[0] for call in snapshot_read.call_args_list},
+                    {
+                        bound_recall.evidence_ref[len("artifact:"):].split("@sha256:", 1)[0],
+                        bound_resolution.evidence_ref[len("artifact:"):].split("@sha256:", 1)[0],
+                    },
+                )
+
+    def test_untrusted_snapshot_keeps_recall_and_resolution_journal_unchanged(self):
+        with TemporaryDirectory() as directory:
+            store, artifacts, projection = self.make_projection(directory)
+            bound_recall = bind_provider_evidence(artifacts, recall())
+            with patch.object(
+                artifacts,
+                "read_authenticated_snapshot",
+                side_effect=ArtifactIntegrityError("identity changed"),
+            ):
+                with self.assertRaisesRegex(ValueError, "verification failed"):
+                    projection.record_recall(bound_recall)
+            self.assertEqual(projection.version, 0)
+            self.assertEqual(
+                store.load_events("securities_borrow_recall", projection.aggregate_id),
+                [],
+            )
+            projection.record_recall(bound_recall)
+            bound_resolution = bind_provider_evidence(artifacts, resolution())
+            with patch.object(
+                artifacts,
+                "read_authenticated_snapshot",
+                side_effect=ArtifactIntegrityError("identity changed"),
+            ):
+                with self.assertRaisesRegex(ValueError, "verification failed"):
+                    projection.resolve_recall(bound_resolution)
+            self.assertEqual(projection.version, 1)
+            self.assertEqual(projection.active_quantity, Decimal("3"))
+            self.assertEqual(
+                len(store.load_events("securities_borrow_recall", projection.aggregate_id)),
+                1,
             )
 
     def test_same_artifact_cannot_authorize_changed_recall_or_resolution(self):

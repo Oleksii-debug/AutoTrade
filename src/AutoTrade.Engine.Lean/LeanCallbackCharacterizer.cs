@@ -208,10 +208,15 @@ public sealed class LeanCallbackCharacterizer
 
             var key = (entry.OrderId, entry.EventId);
             if (entry.HasOrderFee &&
-                (entry.FeeAmount == decimal.Zero || string.IsNullOrWhiteSpace(entry.FeeCurrency)))
+                (entry.FeeAmount == decimal.Zero ||
+                 string.IsNullOrWhiteSpace(entry.FeeCurrency) ||
+                 string.Equals(
+                     entry.FeeCurrency,
+                     QuantConnect.Currencies.NullCurrency,
+                     StringComparison.Ordinal)))
             {
                 throw new InvalidDataException(
-                    "LEAN callback restart economic fee requires a non-zero amount and explicit currency.");
+                    "LEAN callback restart economic fee requires a non-zero amount and real currency identity.");
             }
             if (!entry.HasOrderFee &&
                 (entry.FeeAmount != decimal.Zero || !string.IsNullOrEmpty(entry.FeeCurrency)))
@@ -267,10 +272,11 @@ public sealed class LeanCallbackCharacterizer
         }
 
         var currency = value.Currency ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(currency))
+        if (string.IsNullOrWhiteSpace(currency) ||
+            string.Equals(currency, QuantConnect.Currencies.NullCurrency, StringComparison.Ordinal))
         {
             throw new ArgumentException(
-                "Non-zero LEAN order fee requires explicit currency.",
+                "Non-zero LEAN order fee requires a real currency identity.",
                 nameof(orderEvent));
         }
 

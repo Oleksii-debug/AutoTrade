@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
 from typing import Any, Mapping, Protocol
@@ -186,7 +186,16 @@ def _strict_json_object(data: bytes) -> dict[str, Any]:
         return result
 
     try:
-        value = json.loads(text, object_pairs_hook=pairs_hook)
+        value = json.loads(
+            text,
+            object_pairs_hook=pairs_hook,
+            parse_float=Decimal,
+            parse_constant=lambda value: (_ for _ in ()).throw(
+                FinancingError(
+                    f"financing evidence contains non-finite JSON constant: {value}"
+                )
+            ),
+        )
     except (json.JSONDecodeError, TypeError) as error:
         raise FinancingError("financing evidence must be valid JSON") from error
     if not isinstance(value, dict):
@@ -426,9 +435,11 @@ def _bybit_funding_event_from_exact_response(
     if _text(row.get("type"), name="type").upper() != "SETTLEMENT":
         raise FinancingError("Bybit financing row must be a SETTLEMENT record")
     raw_funding = row.get("funding")
+    if not isinstance(raw_funding, str) or raw_funding != raw_funding.strip():
+        raise FinancingError("Bybit funding must be an exact decimal string")
     try:
         funding = Decimal(raw_funding)
-    except (TypeError, ValueError) as error:
+    except InvalidOperation as error:
         raise FinancingError("Bybit funding must be an exact decimal string") from error
     if not funding.is_finite() or funding >= 0:
         raise FinancingError(

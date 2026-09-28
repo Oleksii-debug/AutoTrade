@@ -207,6 +207,8 @@ def dependency_advisory_evidence_document(
             return False, "duplicate_advisory_source_evidence"
         if identity not in top_level_evidence:
             return False, "unbound_advisory_source_evidence"
+        if artifact_id == policy_evidence[0]:
+            return False, "advisory_source_must_be_distinct_from_policy"
         source_artifact_ids.add(artifact_id)
         source_evidence.append(identity)
 

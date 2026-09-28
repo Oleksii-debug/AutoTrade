@@ -488,13 +488,21 @@ def observe_authenticated_json_response(
         if provider_environment is None
         else _text(provider_environment, "provider_environment").upper()
     )
-    if (
-        query_binding.provider_id == "BYBIT"
-        and provider_env not in {"MAINNET", "TESTNET", "DEMO"}
-    ):
-        raise ProviderCoreError(
-            "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
-        )
+    if query_binding.provider_id == "BYBIT":
+        if provider_env not in {"MAINNET", "TESTNET", "DEMO"}:
+            raise ProviderCoreError(
+                "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
+            )
+        if (
+            query_binding.environment == "LIVE"
+            and provider_env != "MAINNET"
+        ) or (
+            query_binding.environment == "PAPER"
+            and provider_env not in {"TESTNET", "DEMO"}
+        ):
+            raise ProviderCoreError(
+                "BYBIT provider_environment does not match runtime environment"
+            )
     response_digest = "sha256:" + sha256(response_bytes).hexdigest()
     identity_material = (
         query_binding.query_digest
@@ -716,10 +724,26 @@ def observe_submission_json_response(
             "BYBIT durable submission requires explicit provider_environment"
         )
     if provider_environment is not None:
-        expected_scope["provider_environment"] = _text(
+        provider_env = _text(
             provider_environment,
             "provider_environment",
         ).upper()
+        if provider == "BYBIT":
+            if provider_env not in {"MAINNET", "TESTNET", "DEMO"}:
+                raise ProviderCoreError(
+                    "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
+                )
+            runtime_environment = response_binding.environment.upper()
+            if (
+                runtime_environment == "LIVE" and provider_env != "MAINNET"
+            ) or (
+                runtime_environment == "PAPER"
+                and provider_env not in {"TESTNET", "DEMO"}
+            ):
+                raise ProviderCoreError(
+                    "BYBIT provider_environment does not match runtime environment"
+                )
+        expected_scope["provider_environment"] = provider_env
     actual_scope = _thaw_json(response_binding.submission_scope)
     if actual_scope != expected_scope:
         raise ProviderCoreError(

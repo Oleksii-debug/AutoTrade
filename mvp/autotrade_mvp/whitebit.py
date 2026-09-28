@@ -8,7 +8,7 @@ guarded dispatcher and exact capability evidence.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
@@ -1102,6 +1102,18 @@ class WhiteBitExecutionDeal:
     fee_amount: Decimal
     fee_currency: str
     trade_time: str
+    evidence_refs: tuple[str, ...] = field(default=(), compare=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.evidence_refs, tuple):
+            raise TypeError("evidence_refs must be a tuple of strings")
+        normalized: list[str] = []
+        for reference in self.evidence_refs:
+            ref = _text(reference, name="evidence_ref")
+            if ref in normalized:
+                raise WhiteBitAdapterError("evidence_refs must be unique")
+            normalized.append(ref)
+        object.__setattr__(self, "evidence_refs", tuple(normalized))
 
     def to_reconciliation_fill(
         self,
@@ -1109,6 +1121,10 @@ class WhiteBitExecutionDeal:
         account_id: str,
         environment: str,
     ) -> ProviderFillEvidence:
+        if not self.evidence_refs:
+            raise WhiteBitAdapterError(
+                "execution fill requires immutable provider response evidence"
+            )
         return ProviderFillEvidence.create(
             provider_id="WHITEBIT",
             account_id=account_id,
@@ -1122,6 +1138,7 @@ class WhiteBitExecutionDeal:
             fee_amount=self.fee_amount,
             fee_currency=self.fee_currency,
             trade_time=self.trade_time,
+            evidence_refs=self.evidence_refs,
         )
 
 
@@ -1223,6 +1240,62 @@ def parse_execution_history(
             continue
         by_id[deal.provider_execution_id] = deal
     return tuple(by_id[key] for key in sorted(by_id))
+
+
+def parse_execution_history_response(
+    raw_response: str | bytes,
+    *,
+    market: str,
+    observed_at: datetime,
+    response_evidence: Mapping[str, object],
+) -> tuple[WhiteBitExecutionDeal, ...]:
+    """Bind execution economics to one exact immutable WhiteBIT response.
+
+    The low-level mapping parser remains useful for diagnostics and fixtures, but
+    parser-only rows are intentionally non-authoritative for reconciliation.
+    This entrypoint holds the exact UTF-8 response bytes, verifies their digest
+    and observation time against one immutable EvidenceRef, then attaches that
+    provenance to every normalized deal before financial reconciliation.
+    """
+
+    raw = _response_bytes(raw_response)
+    digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+    point = _instant(observed_at, name="observed_at")
+    evidence = _canonical_evidence_ref(
+        response_evidence,
+        expected_sha256=digest,
+        expected_observed_at=point,
+    )
+    payload = decode_whitebit_json(raw)
+    if not isinstance(payload, list):
+        raise WhiteBitAdapterError(
+            "execution-history provider response must be a JSON array"
+        )
+    deals = parse_execution_history(payload, market=market)
+    evidence_ref = (
+        "whitebit-response:"
+        + evidence["artifact_id"]
+        + ":"
+        + evidence["sha256"]
+    )
+    return tuple(
+        WhiteBitExecutionDeal(
+            provider_execution_id=deal.provider_execution_id,
+            provider_order_id=deal.provider_order_id,
+            client_order_id=deal.client_order_id,
+            market=deal.market,
+            side=deal.side,
+            role=deal.role,
+            quantity=deal.quantity,
+            price=deal.price,
+            deal_value=deal.deal_value,
+            fee_amount=deal.fee_amount,
+            fee_currency=deal.fee_currency,
+            trade_time=deal.trade_time,
+            evidence_refs=(evidence_ref,),
+        )
+        for deal in deals
+    )
 
 
 @dataclass(frozen=True)

@@ -152,8 +152,8 @@ def _artifact_ref(
     *,
     name: str,
 ) -> tuple[str, dict[str, Any], bytes]:
-    if not isinstance(artifact_store, ArtifactStore):
-        raise TypeError("artifact_store must be ArtifactStore")
+    if type(artifact_store) is not ArtifactStore:
+        raise TypeError("artifact_store must be canonical ArtifactStore")
     ref = _text(reference, name=name)
     match = _ARTIFACT_REF_RE.fullmatch(ref)
     if match is None:
@@ -163,8 +163,10 @@ def _artifact_ref(
     artifact_id, digest = match.groups()
     if str(UUID(artifact_id)) != artifact_id:
         raise ValueError(f"{name} artifact id must use canonical UUID text")
-    manifest = artifact_store.load_manifest(artifact_id)
-    payload = artifact_store.read_bytes(artifact_id)
+    manifest, payload = ArtifactStore.read_authenticated_snapshot(
+        artifact_store,
+        artifact_id,
+    )
     expected = "sha256:" + digest
     if manifest.get("sha256") != expected or _digest_bytes(payload) != expected:
         raise ValueError(f"{name} does not match immutable artifact bytes")

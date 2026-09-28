@@ -126,10 +126,15 @@ def _validate_source_account_binding(
     unit: object,
 ) -> str:
     source = _text(source_account, name="source_account")
+    charge_unit = _text(unit, name="unit").upper()
+    if ":" not in source or source.rsplit(":", 1)[1].upper() != charge_unit:
+        raise FinancingError(
+            "financing source account must be explicitly denominated in event unit"
+        )
     expected = _canonical_financing_source_account(
         provider_id=provider_id,
         charge_scope_type=charge_scope_type,
-        unit=unit,
+        unit=charge_unit,
     )
     if source != expected:
         raise FinancingError(

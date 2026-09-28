@@ -14,7 +14,7 @@ namespace AutoTrade.Engine.Lean;
 /// </summary>
 public sealed class LeanCallbackCharacterizer
 {
-    private const string StateSchemaVersion = "1.0.0";
+    private const string StateSchemaVersion = "2.2.0";
 
     private static readonly JsonSerializerOptions StateJsonOptions = new()
     {
@@ -23,7 +23,7 @@ public sealed class LeanCallbackCharacterizer
     };
 
     private readonly Dictionary<(int OrderId, int EventId), CallbackFingerprint> _seen = new();
-    private DateTime? _lastArrivalUtc;
+    private DateTime? _arrivalHighWaterUtc;
 
     public LeanCallbackObservation Observe(OrderEvent orderEvent)
     {
@@ -37,11 +37,20 @@ public sealed class LeanCallbackCharacterizer
         }
 
         var identity = (orderEvent.OrderId, orderEvent.Id);
+        var fee = NormalizeOrderFee(orderEvent);
         var fingerprint = new CallbackFingerprint(
             orderEvent.Status,
             orderEvent.Symbol?.Value ?? string.Empty,
             orderEvent.FillQuantity,
             orderEvent.FillPrice,
+            orderEvent.FillPriceCurrency ?? string.Empty,
+            orderEvent.Direction,
+            fee.HasEconomicFee,
+            fee.Amount,
+            fee.Currency,
+            orderEvent.Quantity,
+            orderEvent.IsAssignment,
+            orderEvent.IsInTheMoney,
             orderEvent.UtcTime);
         var duplicateIdentity = _seen.TryGetValue(identity, out var existing);
         var identityConflict = duplicateIdentity && existing != fingerprint;
@@ -51,8 +60,12 @@ public sealed class LeanCallbackCharacterizer
         }
 
         var timeRegressed =
-            _lastArrivalUtc.HasValue && orderEvent.UtcTime < _lastArrivalUtc.Value;
-        _lastArrivalUtc = orderEvent.UtcTime;
+            _arrivalHighWaterUtc.HasValue && orderEvent.UtcTime < _arrivalHighWaterUtc.Value;
+        if (!_arrivalHighWaterUtc.HasValue ||
+            orderEvent.UtcTime > _arrivalHighWaterUtc.Value)
+        {
+            _arrivalHighWaterUtc = orderEvent.UtcTime;
+        }
 
         return new LeanCallbackObservation(
             orderEvent.OrderId,
@@ -61,6 +74,14 @@ public sealed class LeanCallbackCharacterizer
             orderEvent.Symbol?.Value ?? string.Empty,
             orderEvent.FillQuantity.ToString(CultureInfo.InvariantCulture),
             orderEvent.FillPrice.ToString(CultureInfo.InvariantCulture),
+            orderEvent.FillPriceCurrency ?? string.Empty,
+            orderEvent.Direction.ToString(),
+            fee.HasEconomicFee,
+            fee.Amount.ToString(CultureInfo.InvariantCulture),
+            fee.Currency,
+            orderEvent.Quantity.ToString(CultureInfo.InvariantCulture),
+            orderEvent.IsAssignment,
+            orderEvent.IsInTheMoney,
             orderEvent.FillQuantity != decimal.Zero,
             duplicateIdentity,
             identityConflict,
@@ -85,16 +106,24 @@ public sealed class LeanCallbackCharacterizer
                 item.Value.Symbol,
                 item.Value.FillQuantity,
                 item.Value.FillPrice,
+                item.Value.FillPriceCurrency,
+                item.Value.Direction,
+                item.Value.HasOrderFee,
+                item.Value.FeeAmount,
+                item.Value.FeeCurrency,
+                item.Value.Quantity,
+                item.Value.IsAssignment,
+                item.Value.IsInTheMoney,
                 item.Value.UtcTime))
             .ToArray();
 
         var payload = new LeanCallbackCharacterizerStatePayload(
             StateSchemaVersion,
-            _lastArrivalUtc,
+            _arrivalHighWaterUtc,
             callbacks);
         var state = new LeanCallbackCharacterizerState(
             payload.SchemaVersion,
-            payload.LastArrivalUtc,
+            payload.ArrivalHighWaterUtc,
             payload.Callbacks,
             ComputeStateHash(payload));
 
@@ -146,7 +175,7 @@ public sealed class LeanCallbackCharacterizer
 
         var payload = new LeanCallbackCharacterizerStatePayload(
             state.SchemaVersion,
-            state.LastArrivalUtc,
+            state.ArrivalHighWaterUtc,
             state.Callbacks);
         var expectedStateHash = ComputeStateHash(payload);
         if (!string.Equals(state.StateHash, expectedStateHash, StringComparison.Ordinal))
@@ -155,17 +184,17 @@ public sealed class LeanCallbackCharacterizer
                 "LEAN callback restart state integrity hash mismatch.");
         }
 
-        if (state.LastArrivalUtc.HasValue &&
-            state.LastArrivalUtc.Value.Kind != DateTimeKind.Utc)
+        if (state.ArrivalHighWaterUtc.HasValue &&
+            state.ArrivalHighWaterUtc.Value.Kind != DateTimeKind.Utc)
         {
             throw new InvalidDataException(
-                "LEAN callback restart last-arrival time must be explicitly UTC.");
+                "LEAN callback restart arrival high-water must be explicitly UTC.");
         }
 
-        if ((state.Callbacks.Count == 0) != !state.LastArrivalUtc.HasValue)
+        if ((state.Callbacks.Count == 0) != !state.ArrivalHighWaterUtc.HasValue)
         {
             throw new InvalidDataException(
-                "LEAN callback restart state arrival marker is inconsistent.");
+                "LEAN callback restart state arrival high-water is inconsistent.");
         }
 
         var result = new LeanCallbackCharacterizer();
@@ -178,11 +207,32 @@ public sealed class LeanCallbackCharacterizer
             }
 
             var key = (entry.OrderId, entry.EventId);
+            if (entry.HasOrderFee &&
+                (entry.FeeAmount == decimal.Zero || string.IsNullOrWhiteSpace(entry.FeeCurrency)))
+            {
+                throw new InvalidDataException(
+                    "LEAN callback restart economic fee requires a non-zero amount and explicit currency.");
+            }
+            if (!entry.HasOrderFee &&
+                (entry.FeeAmount != decimal.Zero || !string.IsNullOrEmpty(entry.FeeCurrency)))
+            {
+                throw new InvalidDataException(
+                    "LEAN callback restart no-fee tuple must be exactly zero with empty currency.");
+            }
+
             var fingerprint = new CallbackFingerprint(
                 entry.Status,
                 entry.Symbol ?? string.Empty,
                 entry.FillQuantity,
                 entry.FillPrice,
+                entry.FillPriceCurrency ?? string.Empty,
+                entry.Direction,
+                entry.HasOrderFee,
+                entry.FeeAmount,
+                entry.FeeCurrency ?? string.Empty,
+                entry.Quantity,
+                entry.IsAssignment,
+                entry.IsInTheMoney,
                 entry.UtcTime);
             if (!result._seen.TryAdd(key, fingerprint))
             {
@@ -191,8 +241,40 @@ public sealed class LeanCallbackCharacterizer
             }
         }
 
-        result._lastArrivalUtc = state.LastArrivalUtc;
+        if (state.ArrivalHighWaterUtc.HasValue &&
+            state.Callbacks.Any(entry => entry.UtcTime > state.ArrivalHighWaterUtc.Value))
+        {
+            throw new InvalidDataException(
+                "LEAN callback restart arrival high-water predates a stored callback.");
+        }
+
+        result._arrivalHighWaterUtc = state.ArrivalHighWaterUtc;
         return result;
+    }
+
+    private static CanonicalOrderFee NormalizeOrderFee(OrderEvent orderEvent)
+    {
+        var orderFee = orderEvent.OrderFee;
+        if (orderFee is null)
+        {
+            return new(false, decimal.Zero, string.Empty);
+        }
+
+        var value = orderFee.Value;
+        if (value.Amount == decimal.Zero)
+        {
+            return new(false, decimal.Zero, string.Empty);
+        }
+
+        var currency = value.Currency ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(currency))
+        {
+            throw new ArgumentException(
+                "Non-zero LEAN order fee requires explicit currency.",
+                nameof(orderEvent));
+        }
+
+        return new(true, value.Amount, currency);
     }
 
     private static void EnsureNoDuplicateJsonMembers(JsonElement element)
@@ -229,21 +311,34 @@ public sealed class LeanCallbackCharacterizer
     }
 }
 
+internal readonly record struct CanonicalOrderFee(
+    bool HasEconomicFee,
+    decimal Amount,
+    string Currency);
+
 internal readonly record struct CallbackFingerprint(
     OrderStatus Status,
     string Symbol,
     decimal FillQuantity,
     decimal FillPrice,
+    string FillPriceCurrency,
+    OrderDirection Direction,
+    bool HasOrderFee,
+    decimal FeeAmount,
+    string FeeCurrency,
+    decimal Quantity,
+    bool IsAssignment,
+    bool IsInTheMoney,
     DateTime UtcTime);
 
 internal sealed record LeanCallbackCharacterizerStatePayload(
     string SchemaVersion,
-    DateTime? LastArrivalUtc,
+    DateTime? ArrivalHighWaterUtc,
     IReadOnlyList<LeanCallbackStateEntry> Callbacks);
 
 public sealed record LeanCallbackCharacterizerState(
     string SchemaVersion,
-    DateTime? LastArrivalUtc,
+    DateTime? ArrivalHighWaterUtc,
     IReadOnlyList<LeanCallbackStateEntry> Callbacks,
     string StateHash);
 
@@ -254,6 +349,14 @@ public readonly record struct LeanCallbackStateEntry(
     string Symbol,
     decimal FillQuantity,
     decimal FillPrice,
+    string FillPriceCurrency,
+    OrderDirection Direction,
+    bool HasOrderFee,
+    decimal FeeAmount,
+    string FeeCurrency,
+    decimal Quantity,
+    bool IsAssignment,
+    bool IsInTheMoney,
     DateTime UtcTime);
 
 public readonly record struct LeanCallbackObservation(
@@ -263,6 +366,14 @@ public readonly record struct LeanCallbackObservation(
     string Symbol,
     string FillQuantity,
     string FillPrice,
+    string FillPriceCurrency,
+    string Direction,
+    bool HasOrderFee,
+    string FeeAmount,
+    string FeeCurrency,
+    string Quantity,
+    bool IsAssignment,
+    bool IsInTheMoney,
     bool HasEconomicFill,
     bool DuplicateIdentity,
     bool IdentityConflict,

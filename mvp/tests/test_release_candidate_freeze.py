@@ -3,9 +3,10 @@ from hashlib import sha256
 import json
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
-from research.autotrade_research.artifacts.store import ArtifactStore
+from research.autotrade_research.artifacts.store import ArtifactIntegrityError, ArtifactStore
 
 import mvp.autotrade_mvp.release_candidate as release_candidate_module
 from mvp.autotrade_mvp.qualification_attestation import (
@@ -15,6 +16,7 @@ from mvp.autotrade_mvp.qualification_attestation import (
     QualificationTrustPolicy,
     SignedQualificationAttestation,
     TrustRoot,
+    verify_qualification_attestation,
 )
 from mvp.autotrade_mvp.release_candidate import (
     ReleaseArtifactEvidence,
@@ -175,6 +177,73 @@ def _qualification(candidate, trust_root, *, artifacts=None, result="PASS"):
     return SignedQualificationAttestation(value, _sign(value))
 
 
+def _populate_store(store, candidate, *, omit_roles=(), corrupt_role=None):
+    for item in candidate.artifacts:
+        if item.role in omit_roles:
+            continue
+        data = _ARTIFACT_BYTES[item.artifact_id]
+        store.publish_bytes(
+            artifact_id=item.artifact_id,
+            data=data,
+            media_type=RELEASE_MEDIA_TYPE,
+            rights={"storage": True, "export": False},
+            source_refs=[f"git:{item.source_sha}"],
+            metadata={
+                "evidence_kind": RELEASE_EVIDENCE_KIND,
+                "role": item.role,
+                "source_sha": item.source_sha,
+                "signature_status": item.signature_status,
+                "evidence_status": item.evidence_status,
+            },
+        )
+    if corrupt_role is not None:
+        item = next(
+            artifact for artifact in candidate.artifacts
+            if artifact.role == corrupt_role
+        )
+        digest = item.artifact_sha256.removeprefix("sha256:")
+        object_path = store.objects / digest[:2] / digest
+        object_path.write_bytes(b"corrupt")
+
+
+def _canonical_test_verifier(policy):
+    def verify(
+        receipt,
+        *,
+        evidence_store,
+        expected_source_sha,
+        expected_domain,
+        expected_gate,
+        expected_package_id,
+        expected_protocol_id,
+        expected_protocol_version,
+        expected_requirement_id,
+        expected_release_artifact_id=None,
+        expected_release_artifact_sha256=None,
+    ):
+        return verify_qualification_attestation(
+            receipt,
+            policy=policy,
+            evidence_store=evidence_store,
+            expected_policy_id=policy.policy_id,
+            expected_policy_version=policy.policy_version,
+            expected_source_sha=expected_source_sha,
+            expected_domain=expected_domain,
+            expected_gate=expected_gate,
+            expected_package_id=expected_package_id,
+            expected_protocol_id=expected_protocol_id,
+            expected_protocol_version=expected_protocol_version,
+            expected_requirement_id=expected_requirement_id,
+            expected_release_artifact_id=expected_release_artifact_id,
+            expected_release_artifact_sha256=expected_release_artifact_sha256,
+        )
+
+    return patch(
+        "mvp.autotrade_mvp.release_candidate.verify_canonical_qualification_attestation",
+        side_effect=verify,
+    )
+
+
 def freeze_with_integrity_store(
     candidate,
     *,
@@ -186,32 +255,12 @@ def freeze_with_integrity_store(
 ):
     with TemporaryDirectory() as directory:
         store = ArtifactStore(directory)
-        for item in candidate.artifacts:
-            if item.role in omit_roles:
-                continue
-            data = _ARTIFACT_BYTES[item.artifact_id]
-            store.publish_bytes(
-                artifact_id=item.artifact_id,
-                data=data,
-                media_type=RELEASE_MEDIA_TYPE,
-                rights={"storage": True, "export": False},
-                source_refs=[f"git:{item.source_sha}"],
-                metadata={
-                    "evidence_kind": RELEASE_EVIDENCE_KIND,
-                    "role": item.role,
-                    "source_sha": item.source_sha,
-                    "signature_status": item.signature_status,
-                    "evidence_status": item.evidence_status,
-                },
-            )
-        if corrupt_role is not None:
-            item = next(
-                artifact for artifact in candidate.artifacts
-                if artifact.role == corrupt_role
-            )
-            digest = item.artifact_sha256.removeprefix("sha256:")
-            object_path = store.objects / digest[:2] / digest
-            object_path.write_bytes(b"corrupt")
+        _populate_store(
+            store,
+            candidate,
+            omit_roles=omit_roles,
+            corrupt_role=corrupt_role,
+        )
         if not with_attestation and receipt_override is None:
             return freeze_release_candidate(candidate, evidence_store=store)
         trust_root = _trust_root()
@@ -228,16 +277,111 @@ def freeze_with_integrity_store(
             if receipt_override is not None
             else _qualification(candidate, trust_root)
         )
-        return freeze_release_candidate(
-            candidate,
-            evidence_store=store,
-            qualification_receipt=receipt,
-            qualification_policy=trust_policy,
-            expected_policy_id=trust_policy.policy_id,
-            expected_policy_version=trust_policy.policy_version,
-        )
+        with _canonical_test_verifier(trust_policy):
+            return freeze_release_candidate(
+                candidate,
+                evidence_store=store,
+                qualification_receipt=receipt,
+            )
+
+class _SnapshotOnlyEvidenceStore:
+    def __init__(self, manifest, data, *, fail_snapshot=False):
+        self.manifest = manifest
+        self.data = data
+        self.fail_snapshot = fail_snapshot
+        self.snapshot_calls = []
+        self.legacy_calls = []
+
+    def read_authenticated_snapshot(self, artifact_id):
+        self.snapshot_calls.append(artifact_id)
+        if self.fail_snapshot:
+            raise ArtifactIntegrityError("authenticated snapshot changed")
+        return self.manifest, self.data
+
+    def load_manifest(self, artifact_id):
+        self.legacy_calls.append(("load_manifest", artifact_id))
+        return self.manifest
+
+    def read_bytes(self, artifact_id):
+        self.legacy_calls.append(("read_bytes", artifact_id))
+        return b"legacy-second-lookup-bytes"
+
 
 class ReleaseCandidateFreezeTests(unittest.TestCase):
+    def test_release_evidence_uses_one_authenticated_snapshot_only(self):
+        item = artifact("HOST")
+        data = _ARTIFACT_BYTES[item.artifact_id]
+        manifest = {
+            "manifest_hash": "sha256:" + "a" * 64,
+            "artifact_id": item.artifact_id,
+            "sha256": item.artifact_sha256,
+            "media_type": RELEASE_MEDIA_TYPE,
+            "source_refs": [f"git:{item.source_sha}"],
+            "metadata": {
+                "evidence_kind": RELEASE_EVIDENCE_KIND,
+                "role": item.role,
+                "source_sha": item.source_sha,
+                "signature_status": item.signature_status,
+                "evidence_status": item.evidence_status,
+            },
+        }
+        store = _SnapshotOnlyEvidenceStore(manifest, data)
+        self.assertTrue(
+            release_candidate_module._stored_evidence_is_verified(store, item)
+        )
+        self.assertEqual(store.snapshot_calls, [item.artifact_id])
+        self.assertEqual(store.legacy_calls, [])
+
+    def test_release_evidence_rejects_snapshot_replacement_without_legacy_fallback(self):
+        item = artifact("HOST")
+        data = _ARTIFACT_BYTES[item.artifact_id]
+        manifest = {
+            "manifest_hash": "sha256:" + "b" * 64,
+            "artifact_id": item.artifact_id,
+            "sha256": item.artifact_sha256,
+            "media_type": RELEASE_MEDIA_TYPE,
+            "source_refs": [f"git:{item.source_sha}"],
+            "metadata": {
+                "evidence_kind": RELEASE_EVIDENCE_KIND,
+                "role": item.role,
+                "source_sha": item.source_sha,
+                "signature_status": item.signature_status,
+                "evidence_status": item.evidence_status,
+            },
+        }
+        store = _SnapshotOnlyEvidenceStore(
+            manifest,
+            data,
+            fail_snapshot=True,
+        )
+        self.assertFalse(
+            release_candidate_module._stored_evidence_is_verified(store, item)
+        )
+        self.assertEqual(store.snapshot_calls, [item.artifact_id])
+        self.assertEqual(store.legacy_calls, [])
+
+    def test_release_evidence_rejects_snapshot_bytes_digest_mismatch(self):
+        item = artifact("HOST")
+        manifest = {
+            "manifest_hash": "sha256:" + "c" * 64,
+            "artifact_id": item.artifact_id,
+            "sha256": item.artifact_sha256,
+            "media_type": RELEASE_MEDIA_TYPE,
+            "source_refs": [f"git:{item.source_sha}"],
+            "metadata": {
+                "evidence_kind": RELEASE_EVIDENCE_KIND,
+                "role": item.role,
+                "source_sha": item.source_sha,
+                "signature_status": item.signature_status,
+                "evidence_status": item.evidence_status,
+            },
+        }
+        store = _SnapshotOnlyEvidenceStore(manifest, b"different-bytes")
+        self.assertFalse(
+            release_candidate_module._stored_evidence_is_verified(store, item)
+        )
+        self.assertEqual(store.legacy_calls, [])
+
     def candidate(self, **overrides):
         values = dict(
             release_id="autotrade-rc-20260924-1",
@@ -370,7 +514,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ReleaseCandidateError,
-            "requires verified factory authority",
+            "requires canonical evidence verification",
         ):
             ReleaseCandidateDecision(
                 status="FROZEN",
@@ -382,6 +526,67 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                 qualification_policy_id=decision.qualification_policy_id,
                 qualification_trust_root_id=decision.qualification_trust_root_id,
             )
+
+    def test_frozen_rehydration_reverifies_embedded_signature(self):
+        candidate = self.candidate()
+        decision = freeze_with_integrity_store(
+            candidate,
+            with_attestation=True,
+        )
+        trust_root = _trust_root()
+        trust_policy = QualificationTrustPolicy(
+            policy_version="2026.09",
+            roots=(trust_root,),
+        )
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            _populate_store(store, candidate)
+            with _canonical_test_verifier(trust_policy):
+                restored = ReleaseCandidateDecision(
+                    status="FROZEN",
+                    reasons=(),
+                    manifest_json=decision.manifest_json,
+                    manifest_sha256=decision.manifest_sha256,
+                    qualification_attestation_id=decision.qualification_attestation_id,
+                    qualification_attestation_digest=decision.qualification_attestation_digest,
+                    qualification_policy_id=decision.qualification_policy_id,
+                    qualification_trust_root_id=decision.qualification_trust_root_id,
+                    verification_store=store,
+                )
+            self.assertEqual(restored, decision)
+
+            body = json.loads(decision.manifest_json)
+            body["qualification"]["receipt"]["signature_b64"] = base64.b64encode(
+                b"\x00" * 256
+            ).decode("ascii")
+            forged_json = json.dumps(
+                body,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            forged_sha = "sha256:" + sha256(
+                forged_json.encode("utf-8")
+            ).hexdigest()
+            with (
+                _canonical_test_verifier(trust_policy),
+                self.assertRaisesRegex(
+                    ReleaseCandidateError,
+                    "canonical qualification verification failed",
+                ),
+            ):
+                ReleaseCandidateDecision(
+                    status="FROZEN",
+                    reasons=(),
+                    manifest_json=forged_json,
+                    manifest_sha256=forged_sha,
+                    qualification_attestation_id=decision.qualification_attestation_id,
+                    qualification_attestation_digest=decision.qualification_attestation_digest,
+                    qualification_policy_id=decision.qualification_policy_id,
+                    qualification_trust_root_id=decision.qualification_trust_root_id,
+                    verification_store=store,
+                )
 
     def test_imported_factory_token_cannot_bypass_signed_artifact_binding(self):
         decision = freeze_with_integrity_store(
@@ -416,7 +621,6 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                 qualification_attestation_digest=decision.qualification_attestation_digest,
                 qualification_policy_id=decision.qualification_policy_id,
                 qualification_trust_root_id=decision.qualification_trust_root_id,
-                _freeze_token=release_candidate_module._FROZEN_DECISION_TOKEN,
             )
 
     def test_imported_factory_token_cannot_bypass_signed_role_binding(self):
@@ -454,7 +658,6 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                 qualification_attestation_digest=decision.qualification_attestation_digest,
                 qualification_policy_id=decision.qualification_policy_id,
                 qualification_trust_root_id=decision.qualification_trust_root_id,
-                _freeze_token=release_candidate_module._FROZEN_DECISION_TOKEN,
             )
 
     def test_direct_frozen_decision_rejects_noncanonical_artifact_manifest(self):

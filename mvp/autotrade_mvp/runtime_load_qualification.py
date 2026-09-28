@@ -447,6 +447,7 @@ class RuntimeCampaignEvidence:
             or spec.host_fingerprint != self.host_fingerprint
         ):
             raise RuntimeBudgetError("campaign evidence identity does not match runtime budget spec")
+        recovered_ids = self.recovered_financial_event_ids
         return RuntimeLoadObservation.create(
             scenario_id=spec.scenario_id,
             spec_digest=spec.digest,
@@ -461,6 +462,10 @@ class RuntimeCampaignEvidence:
             reconnect_backlog_remaining=self.reconnect_backlog_remaining,
             declared_duration_us=self.declared_duration_us,
             observed_duration_us=self.observed_duration_us,
+            expected_financial_event_ids=self.expected_financial_event_ids,
+            recovered_financial_event_ids=recovered_ids,
+            financial_latency_event_ids=recovered_ids,
+            financial_staleness_event_ids=recovered_ids,
         )
 
 
@@ -523,6 +528,16 @@ def collect_runtime_campaign_evidence(
         raise TypeError("cut must be RuntimeCampaignCut")
     if cut.plan_digest != plan.digest or cut.spec_digest != spec.digest:
         raise RuntimeBudgetError("campaign cut belongs to another plan or spec")
+
+    # Preserve the public Sequence contract instead of tuple-canonicalizing
+    # arbitrary iterables before validation.
+    normalized_latency = _series(financial_latency_us, name="financial_latency_us")
+    normalized_staleness = _series(financial_staleness_us, name="financial_staleness_us")
+    normalized_research = _series(
+        research_interference_us,
+        name="research_interference_us",
+    )
+
     ended_monotonic_ns = _positive_int(
         monotonic_ns(),
         name="ended_monotonic_ns",
@@ -582,9 +597,9 @@ def collect_runtime_campaign_evidence(
         end_journal_sequence=end_sequence,
         expected_financial_event_ids=plan.expected_financial_event_ids,
         recovered_financial_event_bindings=tuple(recovered),
-        financial_latency_us=tuple(financial_latency_us),
-        financial_staleness_us=tuple(financial_staleness_us),
-        research_interference_us=tuple(research_interference_us),
+        financial_latency_us=normalized_latency,
+        financial_staleness_us=normalized_staleness,
+        research_interference_us=normalized_research,
         reconnect_backlog_remaining=backlog_remaining,
         resource_evidence_hash=resource_evidence_hash,
         resource_metrics=resource_metrics,

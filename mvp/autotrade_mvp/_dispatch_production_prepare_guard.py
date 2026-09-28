@@ -146,14 +146,18 @@ def install_production_prepare_guard() -> None:
                 raise _MissingDurableOrderPreparation(
                     "canonical order is not bound to this submission attempt"
                 )
-            # The key's mere presence is insufficient: a callback could bind a
-            # different CREATE event to this attempt while preparing the target
-            # order under another key. Verify the immutable event behind the
-            # binding is the CREATE for this exact order and intent.
+            # The key's mere presence is insufficient: prove the immutable
+            # attempt binding is either the initial CREATE or an explicit REARM
+            # from a provider-free PRE_SEND_ABORTED order.
             bound_event = self.store.get_event(idempotency_entry[2])
             bound_payload = bound_event.get("payload") if bound_event else None
             bound_request = (
                 bound_payload.get("request")
+                if isinstance(bound_payload, Mapping)
+                else None
+            )
+            bound_operation = (
+                bound_payload.get("operation")
                 if isinstance(bound_payload, Mapping)
                 else None
             )
@@ -162,27 +166,43 @@ def install_production_prepare_guard() -> None:
                 or bound_event.get("aggregate_type") != "order_projection_book"
                 or bound_event.get("aggregate_id") != projection.aggregate_id
                 or not isinstance(bound_payload, Mapping)
-                or bound_payload.get("operation") != "CREATE"
                 or not isinstance(bound_request, Mapping)
+                or bound_operation not in {"CREATE", "REARM_SUBMISSION"}
                 or bound_request.get("client_order_id") != client_order_id
                 or bound_request.get("origin_intent_id") != intent_id
-                or bound_request.get("instrument") != instrument
-                or bound_request.get("side") != side
-                or bound_request.get("quantity_unit") != quantity_unit
             ):
                 raise _MissingDurableOrderPreparation(
                     "submission attempt is bound to a different canonical order event"
                 )
-            try:
-                bound_quantity = Decimal(bound_request["requested_quantity"])
-            except (KeyError, InvalidOperation, TypeError, ValueError) as error:
-                raise _MissingDurableOrderPreparation(
-                    "submission attempt is bound to an invalid canonical order quantity"
-                ) from error
-            if bound_quantity != requested_quantity:
-                raise _MissingDurableOrderPreparation(
-                    "submission attempt is bound to a different canonical order quantity"
-                )
+            if bound_operation == "CREATE":
+                if (
+                    bound_request.get("instrument") != instrument
+                    or bound_request.get("side") != side
+                    or bound_request.get("quantity_unit") != quantity_unit
+                ):
+                    raise _MissingDurableOrderPreparation(
+                        "submission attempt CREATE differs from canonical order scope"
+                    )
+                try:
+                    bound_quantity = Decimal(bound_request["requested_quantity"])
+                except (KeyError, InvalidOperation, TypeError, ValueError) as error:
+                    raise _MissingDurableOrderPreparation(
+                        "submission attempt is bound to an invalid canonical order quantity"
+                    ) from error
+                if bound_quantity != requested_quantity:
+                    raise _MissingDurableOrderPreparation(
+                        "submission attempt is bound to a different canonical order quantity"
+                    )
+            else:
+                if (
+                    bound_request.get("attempt_id") != attempt_id
+                    or bound_request.get("preparation_binding_hash")
+                    != order_preparation_binding_hash
+                    or not isinstance(bound_request.get("previous_attempt_id"), str)
+                ):
+                    raise _MissingDurableOrderPreparation(
+                        "submission rearm is not bound to this exact preparation"
+                    )
             if snapshot.client_order_id != client_order_id:
                 raise _MissingDurableOrderPreparation(
                     "durable order client identity differs from submission"

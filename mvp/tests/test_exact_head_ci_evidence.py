@@ -1,0 +1,217 @@
+import os
+from pathlib import Path
+import unittest
+from unittest.mock import patch
+
+from tools.write_ci_evidence import build_evidence
+
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+class ExactHeadCiEvidenceTests(unittest.TestCase):
+    def env(self, *, event="pull_request", source="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", pr_head=None):
+        return {
+            "AUTOTRADE_SOURCE_SHA": source,
+            "AUTOTRADE_PR_HEAD_SHA": source if pr_head is None else pr_head,
+            "GITHUB_EVENT_NAME": event,
+            "RUNNER_OS": "Linux",
+            "GITHUB_RUN_ID": "123",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_WORKFLOW": "Verify AutoTrade",
+        }
+
+    def test_pr_evidence_requires_checkout_to_exact_head(self):
+        with patch.dict(os.environ, self.env(), clear=True), patch(
+            "tools.write_ci_evidence.checked_out_sha",
+            return_value="a" * 40,
+        ):
+            evidence = build_evidence(
+                suite="full-repository",
+                command="python tools/verify.py",
+            )
+        self.assertEqual(evidence["source_sha"], "a" * 40)
+        self.assertEqual(evidence["checked_out_sha"], "a" * 40)
+        self.assertEqual(evidence["result"], "PASS")
+        self.assertFalse(evidence["contains_secrets"])
+
+    def test_synthetic_merge_or_other_checkout_is_rejected(self):
+        with patch.dict(os.environ, self.env(), clear=True), patch(
+            "tools.write_ci_evidence.checked_out_sha",
+            return_value="b" * 40,
+        ):
+            with self.assertRaisesRegex(ValueError, "checkout SHA mismatch"):
+                build_evidence(
+                    suite="full-repository",
+                    command="python tools/verify.py",
+                )
+
+    def test_pr_head_environment_must_match_source_sha(self):
+        with patch.dict(
+            os.environ,
+            self.env(pr_head="b" * 40),
+            clear=True,
+        ), patch(
+            "tools.write_ci_evidence.checked_out_sha",
+            return_value="a" * 40,
+        ):
+            with self.assertRaisesRegex(ValueError, "pull_request.head.sha"):
+                build_evidence(
+                    suite="full-repository",
+                    command="python tools/verify.py",
+                )
+
+    def test_push_evidence_uses_checked_out_github_sha_without_pr_head(self):
+        environment = self.env(event="push", pr_head="")
+        with patch.dict(os.environ, environment, clear=True), patch(
+            "tools.write_ci_evidence.checked_out_sha",
+            return_value="a" * 40,
+        ):
+            evidence = build_evidence(
+                suite="baseline",
+                command="python tools/verify.py",
+            )
+        self.assertEqual(evidence["github"]["event_name"], "push")
+
+    def test_primary_python_gates_checkout_explicit_exact_head_and_use_no_secrets(self):
+        for relative in (
+            ".github/workflows/verify.yml",
+            ".github/workflows/baseline.yml",
+        ):
+            with self.subTest(relative=relative):
+                text = (ROOT / relative).read_text(encoding="utf-8")
+                self.assertIn(
+                    "AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}",
+                    text,
+                )
+                self.assertIn("ref: ${{ env.AUTOTRADE_SOURCE_SHA }}", text)
+                self.assertIn("tools/write_ci_evidence.py", text)
+                self.assertIn("actions/upload-artifact@v4", text)
+                self.assertNotIn("${{ secrets.", text)
+
+    def test_dotnet_foundation_checks_exact_head_and_emits_evidence(self):
+        workflow = (ROOT / ".github" / "workflows" / "dotnet-foundation.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}",
+            workflow,
+        )
+        self.assertIn(
+            "AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}",
+            workflow,
+        )
+        self.assertEqual(
+            workflow.count("ref: ${{ env.AUTOTRADE_SOURCE_SHA }}"),
+            2,
+        )
+        self.assertEqual(
+            workflow.count("python tools/write_ci_evidence.py"),
+            2,
+        )
+        self.assertEqual(
+            workflow.count("actions/upload-artifact@v4"),
+            2,
+        )
+        self.assertNotIn("${{ secrets.", workflow)
+
+    def test_control_plane_checks_exact_head_and_emits_evidence(self):
+        workflow = (ROOT / ".github" / "workflows" / "control-plane.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}",
+            workflow,
+        )
+        self.assertIn(
+            "AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}",
+            workflow,
+        )
+        self.assertIn("ref: ${{ env.AUTOTRADE_SOURCE_SHA }}", workflow)
+        self.assertIn("python tools/write_ci_evidence.py", workflow)
+        self.assertIn("actions/upload-artifact@v4", workflow)
+        self.assertNotIn("${{ secrets.", workflow)
+
+    def test_futures_qualification_persists_exact_head_evidence(self):
+        workflow = (ROOT / ".github" / "workflows" / "futures-qualification.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}",
+            workflow,
+        )
+        self.assertIn(
+            "AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}",
+            workflow,
+        )
+        self.assertIn(
+            "ref: ${{ github.event.pull_request.head.sha || github.sha }}",
+            workflow,
+        )
+        self.assertIn("python tools/write_ci_evidence.py", workflow)
+        self.assertIn("actions/upload-artifact@v4", workflow)
+        self.assertNotIn("${{ secrets.", workflow)
+
+    def test_all_pull_request_workflows_cancel_stale_runs_for_the_same_pr_or_ref(self):
+        workflow_dir = ROOT / ".github" / "workflows"
+        checked = []
+        for path in sorted(workflow_dir.glob("*.y*ml")):
+            text = path.read_text(encoding="utf-8")
+            if (
+                "pull_request:" not in text
+                and "pull_request_target:" not in text
+            ):
+                continue
+            relative = path.relative_to(ROOT).as_posix()
+            checked.append(relative)
+            with self.subTest(relative=relative):
+                self.assertIn("concurrency:", text)
+                self.assertIn(
+                    "group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}",
+                    text,
+                )
+                self.assertIn("cancel-in-progress: true", text)
+        self.assertGreaterEqual(len(checked), 10)
+        self.assertIn(
+            ".github/workflows/zero-model-qualification.yml",
+            checked,
+        )
+        self.assertIn(
+            ".github/workflows/reconvergence-integrity.yml",
+            checked,
+        )
+
+    def test_path_scoped_workflows_do_not_duplicate_feature_branch_push_and_pr_runs(self):
+        for relative in (
+            ".github/workflows/contracts.yml",
+            ".github/workflows/research-primitives.yml",
+            ".github/workflows/dotnet-foundation.yml",
+            ".github/workflows/control-plane.yml",
+        ):
+            with self.subTest(relative=relative):
+                text = (ROOT / relative).read_text(encoding="utf-8")
+                push_section = text.split("  pull_request:", 1)[0]
+                self.assertIn("  push:\n    branches: [main]\n", push_section)
+    def test_baseline_and_full_verify_have_distinct_scopes(self):
+        baseline = (ROOT / ".github/workflows/baseline.yml").read_text(encoding="utf-8")
+        verify = (ROOT / ".github/workflows/verify.yml").read_text(encoding="utf-8")
+        self.assertIn("python tools/baseline.py check", baseline)
+        self.assertNotIn("python tools/verify.py", baseline)
+        self.assertIn("python tools/verify.py", verify)
+        self.assertIn('--suite baseline --command "python tools/baseline.py check"', baseline)
+
+    def test_ci_evidence_writer_rejects_non_exact_source_identifier(self):
+        environment = self.env(source="main", pr_head="main")
+        with patch.dict(os.environ, environment, clear=True), patch(
+            "tools.write_ci_evidence.checked_out_sha",
+            return_value="main",
+        ):
+            with self.assertRaisesRegex(ValueError, "exact Git SHA"):
+                build_evidence(
+                    suite="full-repository",
+                    command="python tools/verify.py",
+                )
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,10 @@
+{
+  "schema_version": "1.0.0",
+  "repository": "QuantConnect/Lean",
+  "commit": "985ef30ad3ac774218c5ac516b4cb0aa2655730f",
+  "tree": "4b163abf9fca60e731b76510b9ae6721ffff7e6c",
+  "license": "Apache-2.0",
+  "license_blob_sha": "6faed93d21a1a9551b11434e87c9000a393d73f2",
+  "source_import_allowed": "PENDING_EXACT_COMPOSITION_AND_NOTICE_REVIEW",
+  "authority_boundary": "AutoTrade journal, risk, authority and reconciliation remain canonical; LEAN is a derived financial-engine runtime only."
+}

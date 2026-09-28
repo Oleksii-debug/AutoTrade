@@ -495,7 +495,7 @@ class ChampionRegistryTests(unittest.TestCase):
             }
             with self.assertRaisesRegex(
                 ProtocolViolation,
-                "registered trial budget is exhausted or a registered stopping rule",
+                "exact registered trial budget",
             ):
                 science.register_evaluation(
                     registered.protocol_id,
@@ -933,7 +933,7 @@ class ChampionRegistryTests(unittest.TestCase):
                 Path(directory) / "champion.sqlite3",
                 scientific_registry=science,
             )
-            with self.assertRaisesRegex(ProtocolViolation, "registered trial budget"):
+            with self.assertRaisesRegex(ProtocolViolation, "exact registered trial budget"):
                 approval(science, record_trial=False)
             self.assertEqual(registry.state().generation, 0)
 

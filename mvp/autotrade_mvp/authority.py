@@ -3786,7 +3786,7 @@ class AuthorityService:
                             instrument_version=borrow.instrument_version,
                             evidence_artifact_store=self.evidence_artifact_store,
                         )
-                        if projection.active_quantity > 0:
+                        if projection.active_quantity_at(now) > 0:
                             return False, "borrow_recall_active"
             except Exception:
                 return False, "financial_evidence_invalid"

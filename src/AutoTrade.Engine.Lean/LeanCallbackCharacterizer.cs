@@ -4,7 +4,6 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using QuantConnect.Orders;
-using QuantConnect.Securities;
 
 namespace AutoTrade.Engine.Lean;
 
@@ -50,7 +49,7 @@ public sealed class LeanCallbackCharacterizer
              (string.IsNullOrEmpty(feeValue.Value.Currency) ||
               string.Equals(
                   feeValue.Value.Currency,
-                  CashAmount.NullCurrency,
+                  QuantConnect.Currencies.NullCurrency,
                   StringComparison.Ordinal)));
         var hasOrderFee = !semanticNoFee;
         var feeAmount = hasOrderFee ? feeValue!.Value.Amount : decimal.Zero;

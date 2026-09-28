@@ -8,7 +8,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from autotrade_mvp.durable_financing import DurableFinancingBook
+from autotrade_mvp.durable_financing import (\n    DurableFinancingBook,\n    _event_payload,\n    authenticated_financing_event,\n)
 from autotrade_mvp.financing import FinancingConflict, FinancingError
 from autotrade_mvp.persistence import JournalStore
 from autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
@@ -215,6 +215,48 @@ class DurableFinancingTests(unittest.TestCase):
             self.financing.record_authenticated_artifact(
                 RejectingArtifactStore(),
                 artifact_id="00000000-0000-0000-0000-000000000051",
+                committed_at=BASE.isoformat(),
+            )
+        self.assertEqual(
+            self.economic.balance("FINANCING_EXPENSE:BTC", "BTC"),
+            0,
+        )
+
+    def test_exact_retry_detects_historical_partial_final_state(self):
+        artifact = "00000000-0000-0000-0000-000000000059"
+        self.artifacts.put(artifact, revision=1)
+        event, artifact_digest = authenticated_financing_event(
+            self.artifacts,
+            artifact_id=artifact,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="PAPER",
+        )
+        aggregate_id = self.financing._aggregate_id(event.charge_id)
+        payload = _event_payload(
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="PAPER",
+            event=event,
+            artifact_id=artifact,
+            artifact_digest=artifact_digest,
+        )
+        self.store.append_event(
+            {
+                "event_id": "00000000-0000-0000-0000-00000000f059",
+                "event_type": "ProviderFinancingRevisionAccepted",
+                "aggregate_type": "provider_financing_charge",
+                "aggregate_id": aggregate_id,
+                "aggregate_version": "1",
+                "committed_at": BASE.isoformat(),
+                "payload": payload,
+                "payload_hash": __import__("autotrade_mvp.persistence", fromlist=["payload_digest"]).payload_digest(payload),
+            }
+        )
+        with self.assertRaisesRegex(FinancingConflict, "missing its economic posting"):
+            self.financing.record_authenticated_artifact(
+                self.artifacts,
+                artifact_id=artifact,
                 committed_at=BASE.isoformat(),
             )
         self.assertEqual(

@@ -308,8 +308,11 @@ class DurableFinancingBook:
             self._aggregate_id(charge_id),
         )
 
-    def _replay(self, charge_id: str) -> FinancingRevisionBook:
-        events = self._events(charge_id)
+    def _book_from_durable_events(
+        self,
+        charge_id: str,
+        events: list[dict[str, Any]],
+    ) -> FinancingRevisionBook:
         history: list[FinancingEvent] = []
         for expected_version, durable in enumerate(events, 1):
             if (
@@ -331,6 +334,33 @@ class DurableFinancingBook:
                 raise FinancingConflict("durable financing scope is invalid")
             history.append(_event_from_payload(payload))
         return FinancingRevisionBook(history)
+
+    def _replay(self, charge_id: str) -> FinancingRevisionBook:
+        return self._book_from_durable_events(charge_id, self._events(charge_id))
+
+    def _economic_transaction(
+        self,
+        *,
+        aggregate_id: str,
+        event_id: str,
+        event: FinancingEvent,
+        economic_delta: Decimal,
+    ) -> JournalTransaction:
+        return book_financing_delta(
+            transaction_id=str(
+                uuid5(
+                    NAMESPACE_URL,
+                    "https://transactions.autotrade.local/provider-financing/"
+                    + aggregate_id
+                    + "/"
+                    + str(event.revision),
+                )
+            ),
+            cause_event_id=event_id,
+            unit=event.unit,
+            source_account=event.source_account,
+            economic_delta=economic_delta,
+        )
 
     def latest(self, charge_id: str) -> FinancingEvent | None:
         normalized = _text(charge_id, name="charge_id")
@@ -356,11 +386,39 @@ class DurableFinancingBook:
         update = book.record(event)
 
         if not update.accepted:
+            economic_transaction = None
+            if event.kind == "FINAL":
+                prior = self._book_from_durable_events(
+                    event.charge_id,
+                    durable_events[:-1],
+                )
+                previous = prior.latest(event.charge_id)
+                previous_final = (
+                    previous.amount
+                    if previous is not None and previous.kind == "FINAL"
+                    else Decimal("0")
+                )
+                expected_delta = event.amount - previous_final
+                if expected_delta != 0:
+                    event_id = durable_events[-1]["event_id"]
+                    economic_transaction = self._economic_transaction(
+                        aggregate_id=aggregate_id,
+                        event_id=event_id,
+                        event=event,
+                        economic_delta=expected_delta,
+                    )
+                    existing_economics = self.economic_book.prepare_batch_mutation(
+                        (economic_transaction,)
+                    )
+                    if not existing_economics.already_committed:
+                        raise FinancingConflict(
+                            "durable financing revision is missing its economic posting"
+                        )
             return DurableFinancingResult(
                 inserted=False,
                 event=event,
                 update=update,
-                economic_transaction=None,
+                economic_transaction=economic_transaction,
             )
 
         next_version = len(durable_events) + 1
@@ -400,19 +458,10 @@ class DurableFinancingBook:
         economic_transaction: JournalTransaction | None = None
         economic_plan = None
         if update.economic_delta != 0:
-            economic_transaction = book_financing_delta(
-                transaction_id=str(
-                    uuid5(
-                        NAMESPACE_URL,
-                        "https://transactions.autotrade.local/provider-financing/"
-                        + aggregate_id
-                        + "/"
-                        + str(event.revision),
-                    )
-                ),
-                cause_event_id=event_id,
-                unit=event.unit,
-                source_account=event.source_account,
+            economic_transaction = self._economic_transaction(
+                aggregate_id=aggregate_id,
+                event_id=event_id,
+                event=event,
                 economic_delta=update.economic_delta,
             )
             economic_plan = self.economic_book.prepare_batch_mutation(

@@ -588,6 +588,76 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
             )
             self.assertEqual(len(restarted_economics.transactions), 1)
 
+    def test_retained_correction_does_not_reverse_never_activated_original(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            durable_evidence = evidence_store(store)
+            economics = economic_book(store)
+
+            original = resolve_action(
+                sealed_action(
+                    external_event_id="corp-pending-original",
+                    revision="1",
+                    per_share="1.25",
+                    observed_offset=1,
+                    effective_offset=10,
+                )
+            )
+            pending_original = commit_authoritative_corporate_action(
+                store=store,
+                evidence_store=durable_evidence,
+                economic_book=economics,
+                corporate_book=pure_book(),
+                accepted=original,
+            )
+            self.assertFalse(pending_original.economically_active)
+
+            correction = resolve_action(
+                sealed_action(
+                    external_event_id="corp-pending-correction",
+                    revision="2",
+                    per_share="2.00",
+                    observed_offset=2,
+                    effective_offset=10,
+                    corrects="corp-pending-original",
+                ),
+                corrects="corp-pending-original",
+            )
+            pending_correction = commit_authoritative_corporate_action(
+                store=store,
+                evidence_store=durable_evidence,
+                economic_book=economics,
+                corporate_book=pure_book(),
+                accepted=correction,
+            )
+            self.assertFalse(pending_correction.economically_active)
+            self.assertEqual(len(economics.transactions), 1)
+
+            retained_history = pure_book()
+            retained_history.apply(original.event)
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "requires one active target economic fact",
+            ):
+                commit_authoritative_corporate_action(
+                    store=store,
+                    evidence_store=durable_evidence,
+                    economic_book=economics,
+                    corporate_book=retained_history,
+                    accepted=correction,
+                    activation_at=correction.event.effective_at,
+                )
+
+            economics.refresh()
+            self.assertEqual(len(economics.transactions), 1)
+            self.assertEqual(
+                store.load_events_by_aggregate_type(
+                    "corporate_action_activation"
+                ),
+                [],
+            )
+
     def test_sealed_split_commits_atomically_and_preserves_fifo_basis(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

@@ -290,6 +290,27 @@ Require(!zeroFeeEquivalent.HasOrderFee, "LEAN OrderFee.Zero must canonicalize as
 Require(zeroFeeEquivalent.FeeAmount == "0", "Canonical zero fee amount changed.");
 Require(zeroFeeEquivalent.FeeCurrency == string.Empty, "Canonical zero fee currency must be empty.");
 
+var zeroFeeRealCurrency = zeroFeeCallbacks.Observe(new OrderEvent
+{
+    OrderId = 43,
+    Id = 1,
+    Symbol = symbol,
+    UtcTime = instant.AddMilliseconds(2),
+    Status = OrderStatus.Submitted,
+    Direction = OrderDirection.Buy,
+    FillQuantity = decimal.Zero,
+    FillPrice = decimal.Zero,
+    OrderFee = new OrderFee(new CashAmount(decimal.Zero, "USD")),
+    Quantity = 1m
+});
+Require(
+    zeroFeeRealCurrency.DuplicateIdentity &&
+    !zeroFeeRealCurrency.IdentityConflict &&
+    !zeroFeeRealCurrency.HasOrderFee &&
+    zeroFeeRealCurrency.FeeAmount == "0" &&
+    zeroFeeRealCurrency.FeeCurrency == string.Empty,
+    "Economically-zero real-currency fee must share the canonical no-fee identity.");
+
 ExpectFailure<ArgumentException>(
     () => callbacks.Observe(new OrderEvent
     {

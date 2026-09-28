@@ -16,6 +16,7 @@ from mvp.autotrade_mvp.durable_financing import (
     authenticated_financing_event,
 )
 from mvp.autotrade_mvp.financing import FinancingConflict, FinancingError
+from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
 from mvp.autotrade_mvp.capabilities import (
@@ -32,6 +33,45 @@ from autotrade_research.artifacts import ArtifactStore
 
 
 BASE = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
+
+
+BYBIT_XRP_INSTRUMENT_ID = "77777777-7777-4777-8777-777777777777"
+BYBIT_XRP_UNDERLYING_ID = "88888888-8888-4888-8888-888888888888"
+
+
+def bybit_instrument_registry(
+    *,
+    symbol: str = "XRPUSDT",
+    settlement_currency: str = "USDT",
+    provider_id: str = "BYBIT",
+    effective_from: datetime | None = None,
+):
+    version = InstrumentVersion(
+        instrument_id=BYBIT_XRP_INSTRUMENT_ID,
+        version=1,
+        provider_id=provider_id,
+        venue_id="BYBIT-LINEAR",
+        provider_symbol=symbol,
+        asset_class="PERPETUAL",
+        base_currency="XRP",
+        quote_currency="USDT",
+        settlement_currency=settlement_currency,
+        quantity_unit="XRP",
+        contract_multiplier=Decimal("1"),
+        price_tick=Decimal("0.0001"),
+        quantity_step=Decimal("0.1"),
+        minimum_quantity=Decimal("0.1"),
+        calendar_id="CONTINUOUS_24_7",
+        timezone_id="UTC",
+        effective_from=effective_from or BASE - timedelta(days=30),
+        payoff="LINEAR",
+        underlying_id=f"{BYBIT_XRP_UNDERLYING_ID}@1",
+        settlement_method="CASH",
+        funding_schedule={"interval_hours": 8},
+        margin_model_id="BYBIT-USDT-PERP",
+    )
+    registry = InstrumentRegistry(versions=(version,))
+    return registry, f"{version.instrument_id}@{version.version}"
 
 
 def bybit_activity_observation(raw: bytes, *, observed_at: datetime):
@@ -722,7 +762,8 @@ class DurableFinancingTests(unittest.TestCase):
             raw_store,
             artifact_id=artifact,
             row_id="funding-row-1",
-            instrument_versions={"XRPUSDT": "XRPUSDT@v1"},
+            instrument_registry=bybit_instrument_registry()[0],
+            instrument_versions={"XRPUSDT": f"{BYBIT_XRP_INSTRUMENT_ID}@1"},
             committed_at=observed_at.isoformat(),
         )
         self.assertTrue(result.inserted)
@@ -801,7 +842,8 @@ class DurableFinancingTests(unittest.TestCase):
                 LyingBybitSnapshotStore(),
                 artifact_id=artifact,
                 row_id="funding-row-digest",
-                instrument_versions={"XRPUSDT": "XRPUSDT@v1"},
+                instrument_registry=bybit_instrument_registry()[0],
+            instrument_versions={"XRPUSDT": f"{BYBIT_XRP_INSTRUMENT_ID}@1"},
                 committed_at=observed_at.isoformat(),
             )
         self.assertEqual(
@@ -863,7 +905,8 @@ class DurableFinancingTests(unittest.TestCase):
                 raw_store,
                 artifact_id=artifact,
                 row_id="funding-income",
-                instrument_versions={"XRPUSDT": "XRPUSDT@v1"},
+                instrument_registry=bybit_instrument_registry()[0],
+            instrument_versions={"XRPUSDT": f"{BYBIT_XRP_INSTRUMENT_ID}@1"},
                 committed_at=(BASE + timedelta(seconds=1)).isoformat(),
             )
         self.assertEqual(

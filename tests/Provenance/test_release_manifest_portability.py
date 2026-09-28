@@ -131,7 +131,7 @@ class ReleaseManifestPortabilityTests(unittest.TestCase):
                     expected_dependency_graph=graph,
                     expected_source_sha="b" * 40,
                 ),
-                (True, None),
+                (False, "authenticated_trust_required"),
             )
 
             legacy = dict(document)
@@ -161,6 +161,18 @@ class ReleaseManifestPortabilityTests(unittest.TestCase):
                 ),
                 (False, "unbound_review_policy_evidence"),
             )
+
+    def test_shape_valid_candidate_advisory_cannot_mint_release_pass(self):
+        graph, document = self._advisory_fixture()
+        with TemporaryDirectory() as directory:
+            path = self._write_advisory(directory, document)
+            qualified, reason = dependency_advisory_evidence_document(
+                path,
+                expected_dependency_graph=graph,
+                expected_source_sha="b" * 40,
+            )
+            self.assertFalse(qualified)
+            self.assertEqual(reason, "authenticated_trust_required")
 
     def test_advisory_nested_evidence_must_match_top_level_digest_and_time(self):
         graph, document = self._advisory_fixture()

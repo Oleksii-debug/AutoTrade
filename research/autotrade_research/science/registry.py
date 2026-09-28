@@ -962,24 +962,15 @@ class ScientificRegistry:
                     f"locked evaluation does not prove {required_true}"
                 )
         if trial_state["remaining_trial_budget"] > 0:
-            if result.get("stopping_rule_triggered") is not True:
-                raise ProtocolViolation(
-                    "candidate promotion before trial-budget exhaustion requires "
-                    "an explicitly triggered registered stopping rule"
-                )
-            if result.get("stopping_rules_hash") != trial_state["stopping_rules_hash"]:
-                raise ProtocolViolation(
-                    "early-stop evidence is not bound to the registered stopping rules"
-                )
-            try:
-                _immutable_artifact_ref(
-                    result.get("stopping_evidence_ref"),
-                    "stopping_evidence_ref",
-                )
-            except ValueError as error:
-                raise ProtocolViolation(
-                    "early-stop promotion requires immutable stopping evidence"
-                ) from error
+            # Historical databases may already contain a locked evaluation
+            # created by an older build that treated caller-declared stopping
+            # evidence as authority.  The current scientific contract has no
+            # canonical stopping adjudicator, so restart/migration must not
+            # preserve that obsolete bypass at promotion time.
+            raise ProtocolViolation(
+                "candidate promotion requires full registered trial closure; "
+                "early stopping is not an admitted promotion authority"
+            )
         return evidence
 
     def completeness(self, protocol_id: str) -> dict[str, Any]:

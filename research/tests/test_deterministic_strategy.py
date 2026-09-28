@@ -10,6 +10,7 @@ from referencing import Registry, Resource
 from research.autotrade_research.strategies.deterministic import (
     CausalObservation,
     DeterministicProposal,
+    EconomicsBoundProposal,
     NoTradeBaseline,
     ReturnThresholdBaseline,
     StrategyDescriptor,
@@ -107,6 +108,21 @@ class DeterministicStrategyTests(unittest.TestCase):
         self.assertEqual(normalized.symbol, "AAA")
         self.assertEqual(normalized.available_at, BASE)
         self.assertEqual(normalized.price, Decimal("100.00"))
+
+    def test_ingest_rejects_duck_typed_observation_bypass(self):
+        class FakeObservation:
+            event_id = "fake"
+            symbol = "AAA"
+            available_at = BASE
+            price = Decimal("100")
+
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="1",
+        )
+        with self.assertRaisesRegex(TypeError, "CausalObservation"):
+            strategy.ingest(FakeObservation(), simulation_time=BASE)
 
     def test_future_observation_is_rejected(self):
         strategy = ReturnThresholdBaseline(lookback=2, threshold="0.01", proposal_quantity="1")
@@ -330,6 +346,25 @@ class DeterministicStrategyTests(unittest.TestCase):
                     ("threshold", "0", "1"),
                     ("threshold", "0", "2"),
                 )
+            )
+
+    def test_return_threshold_rejects_descriptor_from_other_strategy_family(self):
+        descriptor = self.descriptor(
+            family="NO_TRADE_CONTROL",
+            parameter_bounds=(
+                ("threshold", "0", "0.10"),
+                ("proposal_quantity", "0.0001", "100"),
+            ),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "descriptor family must be DETERMINISTIC_RETURN_THRESHOLD",
+        ):
+            ReturnThresholdBaseline(
+                lookback=2,
+                threshold="0.01",
+                proposal_quantity="2",
+                descriptor=descriptor,
             )
 
     def test_strategy_configuration_must_fit_registered_descriptor(self):
@@ -911,6 +946,102 @@ class DeterministicStrategyTests(unittest.TestCase):
             )
 
 
+
+    def test_direct_economics_bound_proposal_cannot_expand_or_change_direction(self):
+        descriptor = self.descriptor()
+        strategy = ReturnThresholdBaseline(
+            lookback=2,
+            threshold="0.01",
+            proposal_quantity="2",
+            descriptor=descriptor,
+        )
+        proposal = run_baseline(
+            strategy,
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA",
+        )
+        economics = economics_binding(
+            proposal,
+            instrument_version="instrument:aaa@1",
+            max_feasible_quantity="1",
+        )
+        with self.assertRaisesRegex(ValueError, "cannot increase"):
+            EconomicsBoundProposal(
+                gross_proposal=proposal,
+                economics=economics,
+                instrument_version="instrument:aaa@1",
+                action="BUY",
+                quantity=Decimal("3"),
+                reason="bypass",
+            )
+        with self.assertRaisesRegex(ValueError, "frozen capacity"):
+            EconomicsBoundProposal(
+                gross_proposal=proposal,
+                economics=economics,
+                instrument_version="instrument:aaa@1",
+                action="BUY",
+                quantity=Decimal("2"),
+                reason="capacity bypass",
+            )
+        lot_economics = economics_binding(
+            proposal,
+            instrument_version="instrument:aaa@1",
+            max_feasible_quantity="2",
+            lot_size="1",
+        )
+        with self.assertRaisesRegex(ValueError, "lot multiple"):
+            EconomicsBoundProposal(
+                gross_proposal=proposal,
+                economics=lot_economics,
+                instrument_version="instrument:aaa@1",
+                action="BUY",
+                quantity=Decimal("0.5"),
+                reason="lot bypass",
+            )
+        with self.assertRaisesRegex(ValueError, "cannot change gross direction"):
+            EconomicsBoundProposal(
+                gross_proposal=proposal,
+                economics=economics,
+                instrument_version="instrument:aaa@1",
+                action="SELL",
+                quantity=Decimal("1"),
+                reason="bypass",
+            )
+        with self.assertRaisesRegex(ValueError, "HOLD.*zero"):
+            EconomicsBoundProposal(
+                gross_proposal=proposal,
+                economics=economics,
+                instrument_version="instrument:aaa@1",
+                action="HOLD",
+                quantity=Decimal("1"),
+                reason="bypass",
+            )
+
+        later_proposal = run_baseline(
+            ReturnThresholdBaseline(
+                lookback=2,
+                threshold="0.01",
+                proposal_quantity="2",
+                descriptor=descriptor,
+            ),
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=2),
+            symbol="AAA",
+        )
+        later_economics = economics_binding(
+            later_proposal,
+            instrument_version="instrument:aaa@1",
+        )
+        with self.assertRaisesRegex(ValueError, "information_cutoff"):
+            EconomicsBoundProposal(
+                gross_proposal=proposal,
+                economics=later_economics,
+                instrument_version="instrument:aaa@1",
+                action="HOLD",
+                quantity=Decimal("0"),
+                reason="mismatched causal cut",
+            )
 
     def test_positive_gross_signal_with_nonpositive_after_cost_bound_cannot_qualify(self):
         descriptor = self.descriptor()

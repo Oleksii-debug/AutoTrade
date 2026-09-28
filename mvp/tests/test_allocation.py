@@ -1363,6 +1363,44 @@ class AllocationTests(unittest.TestCase):
                 Decimal(current),
             )
 
+    def test_objective_reversal_zero_crossing_uses_resulting_direction(self):
+        policy = self.policy(
+            cash_available="1000",
+            max_gross_notional="1000",
+            max_net_notional="1000",
+            max_symbol_notional="1000",
+            max_total_cost="100",
+        )
+        def reversal(cap):
+            return allocate_objective_targets(
+                [
+                    ObjectiveCandidate.create(
+                        symbol="REV",
+                        desired_notional="-100",
+                        price="1",
+                        lot_size="1",
+                        expected_return_rate="0.10",
+                        current_quantity="100",
+                        max_executable_notional=cap,
+                        turnover_cost_rate="0",
+                        holding_cost_rate="0",
+                    )
+                ],
+                policy,
+            )
+
+        flat = reversal("100")
+        self.assertEqual(flat.allocation.status, "ALLOCATED")
+        self.assertEqual(flat.allocation.targets[0].notional, Decimal("0"))
+        self.assertEqual(flat.expected_net_utility, Decimal("0"))
+        self.assertEqual(flat.selected_symbols, ())
+
+        crossed = reversal("120")
+        self.assertEqual(crossed.allocation.status, "ALLOCATED")
+        self.assertEqual(crossed.allocation.targets[0].notional, Decimal("-20"))
+        self.assertEqual(crossed.expected_net_utility, Decimal("2.00"))
+        self.assertEqual(crossed.selected_symbols, ("REV",))
+
     def test_objective_utility_depends_on_portfolio_economics_not_subset_labels(self):
         result = allocate_objective_targets(
             [

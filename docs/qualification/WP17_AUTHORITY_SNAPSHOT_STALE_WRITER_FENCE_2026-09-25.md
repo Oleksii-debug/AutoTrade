@@ -29,7 +29,11 @@ Every genuinely new snapshot still has to monotonically extend the latest durabl
 
 That snapshot-to-snapshot fence is now only a first line of defense. If `authority_state/canonical` contains any event, the complete candidate snapshot must also equal the complete deterministic state projected from that canonical aggregate at the captured journal cut: schema/epoch, policies, revocations, confirmations, admissions, used confirmations, and active new-exposure blocks.
 
-The projection does **not** implement a second transition parser. A private read-only `AuthorityService` subclass invokes the existing canonical `AuthorityService._restore_journal()` state machine and changes one replay seam only: it does not re-resolve external durable financial-evidence/artifact dependencies while computing persistence equality. Journal ordering, policy/revocation semantics, confirmation/admission relationships, policy scope, used-confirmation consumption, block/restore semantics, timestamps, identities, and unknown-event failure behavior remain those of the canonical authority replay. This keeps snapshot persistence from acquiring an unrelated artifact-availability dependency while avoiding a looser parallel authority implementation.
+The projection does **not** implement a second transition parser or a weakened financial replay mode. It instantiates the ordinary canonical `AuthorityService` on the same `JournalStore`, so `_restore_journal()` performs the existing journal-order, policy/revocation, confirmation/admission, policy-scope, used-confirmation, block/restore and financial-evidence checks. A durable admitted financial record still has to match its risk decision, authoritative risk snapshot, reservation identity/delta, reconciliation availability evidence, journal cut and request fingerprint. A deliberately malformed canonical admission with no referenced risk-decision event is therefore rejected before snapshot publication.
+
+CASH financial evidence is reconstructed entirely from durable journal state. BORROW evidence also has a cryptographic artifact boundary in the canonical authority implementation. Snapshot publication reuses the candidate service's trusted `evidence_artifact_store`; snapshot restore accepts the same optional `ArtifactStore` explicitly. A canonical BORROW history without that trusted artifact authority fails closed rather than silently weakening replay. This is intentional: snapshot proof is not allowed to make securities-borrow evidence less strict than dispatch/financial authority.
+
+The adapter additionally rejects a durable `AuthorityService` bound to a different `JournalStore` than the target snapshot store. Candidate state, canonical projection and the compare-and-append cut must belong to one durable authority domain.
 
 Active no-new-exposure state remains exactly bound to canonical block/restore history. The adapter preserves specific fail-closed diagnostics for stale omission, forged addition, identity rewrite, and resurrection after restore.
 
@@ -51,6 +55,8 @@ The current successor covers:
 - once a matching canonical snapshot is published, restart preserves the consumed confirmation and rejects reuse;
 - a snapshot cannot invent an additional confirmation/fact once canonical authority exists;
 - malformed canonical transition history is rejected by the shared `AuthorityService` replay instead of being accepted by a separate projector;
+- malformed admitted financial canonical history with missing risk-decision evidence is rejected, proving snapshot projection does not bypass durable financial-evidence validation;
+- a service bound to another JournalStore cannot publish into the target snapshot store;
 - existing snapshot-lineage stale revocation/history-loss and interleaving CAS regressions;
 - stale pre-block snapshot rejected even when no intermediate blocked snapshot exists;
 - stale block omission, forged addition, and active-block identity rewrite;

@@ -569,6 +569,150 @@ class DurableFinancingTests(unittest.TestCase):
             "1.20",
         )
 
+    def test_bybit_exact_activity_funding_can_grant_paper_economics(self):
+        transaction_time = int(BASE.timestamp() * 1000)
+        response = {
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {
+                "nextPageCursor": "",
+                "list": [
+                    {
+                        "id": "funding-row-1",
+                        "symbol": "XRPUSDT",
+                        "category": "linear",
+                        "side": "Buy",
+                        "transactionTime": str(transaction_time),
+                        "type": "SETTLEMENT",
+                        "funding": "-0.003676",
+                        "currency": "USDT",
+                        "fee": "0",
+                        "cashFlow": "0",
+                        "change": "-0.003676",
+                    }
+                ],
+            },
+            "time": transaction_time + 1000,
+        }
+        raw = json.dumps(
+            response,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        observed_at = BASE + timedelta(seconds=2)
+        observation = bybit_activity_observation(raw, observed_at=observed_at)
+        artifact = "00000000-0000-0000-0000-000000000080"
+        raw_store = ArtifactStore(Path(self.temp.name) / "bybit-raw-artifacts")
+        raw_store.publish_bytes(
+            artifact_id=artifact,
+            data=raw,
+            media_type="application/json",
+            rights={"storage": True, "export": False},
+            source_refs=[observation.evidence_ref],
+            metadata={"evidence_class": "provider_response"},
+        )
+        paper_economic = DurableProviderEconomicBook(
+            self.store,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="PAPER",
+        )
+        paper_financing = DurableFinancingBook(
+            self.store,
+            paper_economic,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="PAPER",
+        )
+        result = paper_financing.record_bybit_funding_observation(
+            observation,
+            raw_store,
+            artifact_id=artifact,
+            row_id="funding-row-1",
+            instrument_versions={"XRPUSDT": "XRPUSDT@v1"},
+            committed_at=observed_at.isoformat(),
+        )
+        self.assertTrue(result.inserted)
+        self.assertEqual(result.event.amount, Decimal("0.003676"))
+        self.assertEqual(result.event.unit, "USDT")
+        self.assertEqual(result.event.source_account, "CASH:USDT")
+        self.assertEqual(
+            paper_economic.balance("FINANCING_EXPENSE:USDT", "USDT"),
+            Decimal("0.003676"),
+        )
+        self.assertEqual(
+            result.economic_transaction.economic_effective_at,
+            BASE.isoformat().replace("+00:00", "Z"),
+        )
+        self.assertEqual(
+            result.economic_transaction.observed_at,
+            observed_at.isoformat().replace("+00:00", "Z"),
+        )
+
+    def test_bybit_funding_rejects_income_or_mismatched_artifact(self):
+        transaction_time = int(BASE.timestamp() * 1000)
+        response = {
+            "retCode": 0,
+            "result": {
+                "nextPageCursor": "",
+                "list": [
+                    {
+                        "id": "funding-income",
+                        "symbol": "XRPUSDT",
+                        "category": "linear",
+                        "side": "Sell",
+                        "transactionTime": str(transaction_time),
+                        "type": "SETTLEMENT",
+                        "funding": "0.50",
+                        "currency": "USDT",
+                    }
+                ],
+            },
+        }
+        raw = json.dumps(response, sort_keys=True, separators=(",", ":")).encode()
+        observation = bybit_activity_observation(
+            raw,
+            observed_at=BASE + timedelta(seconds=1),
+        )
+        artifact = "00000000-0000-0000-0000-000000000081"
+        raw_store = ArtifactStore(Path(self.temp.name) / "bybit-reject-artifacts")
+        raw_store.publish_bytes(
+            artifact_id=artifact,
+            data=raw,
+            media_type="application/json",
+            rights={"storage": True, "export": False},
+            source_refs=[observation.evidence_ref],
+            metadata={"evidence_class": "provider_response"},
+        )
+        paper_economic = DurableProviderEconomicBook(
+            self.store,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="PAPER",
+        )
+        paper_financing = DurableFinancingBook(
+            self.store,
+            paper_economic,
+            provider_id="BYBIT",
+            account_id="acct-1",
+            environment="PAPER",
+        )
+        with self.assertRaisesRegex(FinancingError, "paid funding"):
+            paper_financing.record_bybit_funding_observation(
+                observation,
+                raw_store,
+                artifact_id=artifact,
+                row_id="funding-income",
+                instrument_versions={"XRPUSDT": "XRPUSDT@v1"},
+                committed_at=(BASE + timedelta(seconds=1)).isoformat(),
+            )
+        self.assertEqual(
+            paper_economic.balance("FINANCING_EXPENSE:USDT", "USDT"),
+            0,
+        )
+
     def test_generic_artifact_cannot_grant_paper_or_live_financial_authority(self):
         artifact = "00000000-0000-0000-0000-000000000070"
         self.artifacts.put(

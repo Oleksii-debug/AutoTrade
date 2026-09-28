@@ -760,6 +760,13 @@ class DurableFinancingBook:
         )
         if self.provider_id != "BYBIT":
             raise FinancingError("Bybit financing observation requires BYBIT authority")
+        if dict(observation.query_binding.query) != {
+            "accountType": "UNIFIED",
+            "category": "linear",
+        }:
+            raise FinancingError(
+                "Bybit funding requires the exact qualified transaction-log query"
+            )
         aid = _text(artifact_id, name="artifact_id")
         try:
             manifest, raw = artifact_store.read_authenticated_snapshot(aid)

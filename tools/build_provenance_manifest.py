@@ -24,8 +24,10 @@ UTC_EVIDENCE_TIME = re.compile(
 )
 
 
-def _canonical_evidence_ref_artifact_id(item: object) -> str | None:
-    """Return canonical artifact identity for one release evidence reference."""
+def _canonical_evidence_ref(
+    item: object,
+) -> tuple[str, str, str] | None:
+    """Return the exact canonical identity of one release evidence reference."""
 
     if not isinstance(item, dict):
         return None
@@ -52,7 +54,12 @@ def _canonical_evidence_ref_artifact_id(item: object) -> str | None:
         != observed_at
     ):
         return None
-    return artifact_id
+    return artifact_id, digest, observed_at
+
+
+def _canonical_evidence_ref_artifact_id(item: object) -> str | None:
+    identity = _canonical_evidence_ref(item)
+    return None if identity is None else identity[0]
 
 
 def _dependency_graph_component_identities(
@@ -172,33 +179,36 @@ def dependency_advisory_evidence_document(
     top_level_refs = value.get("evidence_refs")
     if not isinstance(top_level_refs, list):
         return False, "invalid_evidence_refs"
-    top_level_artifact_ids = {
-        artifact_id
+    top_level_evidence = {
+        identity
         for item in top_level_refs
-        if (artifact_id := _canonical_evidence_ref_artifact_id(item)) is not None
+        if (identity := _canonical_evidence_ref(item)) is not None
     }
 
-    policy_artifact_id = _canonical_evidence_ref_artifact_id(
+    policy_evidence = _canonical_evidence_ref(
         value.get("review_policy_evidence")
     )
-    if policy_artifact_id is None:
+    if policy_evidence is None:
         return False, "missing_review_policy_evidence"
-    if policy_artifact_id not in top_level_artifact_ids:
+    if policy_evidence not in top_level_evidence:
         return False, "unbound_review_policy_evidence"
 
     source_refs = value.get("advisory_source_evidence")
     if not isinstance(source_refs, list) or not source_refs:
         return False, "missing_advisory_source_evidence"
-    source_ids: list[str] = []
+    source_evidence: list[tuple[str, str, str]] = []
+    source_artifact_ids: set[str] = set()
     for item in source_refs:
-        artifact_id = _canonical_evidence_ref_artifact_id(item)
-        if artifact_id is None:
+        identity = _canonical_evidence_ref(item)
+        if identity is None:
             return False, "invalid_advisory_source_evidence"
-        if artifact_id in source_ids:
+        artifact_id = identity[0]
+        if artifact_id in source_artifact_ids:
             return False, "duplicate_advisory_source_evidence"
-        if artifact_id not in top_level_artifact_ids:
+        if identity not in top_level_evidence:
             return False, "unbound_advisory_source_evidence"
-        source_ids.append(artifact_id)
+        source_artifact_ids.add(artifact_id)
+        source_evidence.append(identity)
 
     reviewed = value.get("reviewed_components")
     if (

@@ -10,6 +10,7 @@ from mvp.autotrade_mvp.corporate_actions import EquityState
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.securities_borrow import (
     BorrowAvailabilityEvidence,
+    BorrowEvidenceError,
     BorrowRecallConflict,
     BorrowRecallEvidence,
     BorrowRecallResolutionEvidence,
@@ -101,7 +102,7 @@ class SecuritiesBorrowEvidenceTests(unittest.TestCase):
     def test_financial_evidence_rejects_polymorphic_artifact_store_authority(self):
         forged = ForgedArtifactStore()
         with self.assertRaisesRegex(
-            Exception,
+            BorrowEvidenceError,
             "canonical ArtifactStore",
         ):
             verify_provider_borrow_evidence(recall(), forged)

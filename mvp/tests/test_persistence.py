@@ -1,5 +1,6 @@
 from tempfile import TemporaryDirectory
 import json
+import os
 import sqlite3
 import unittest
 
@@ -26,6 +27,32 @@ def event(event_id="evt-1", version=1, payload=None):
 
 
 class JournalStoreTests(unittest.TestCase):
+    def test_relative_backing_path_is_frozen_across_cwd_changes(self):
+        with TemporaryDirectory() as directory:
+            original_cwd = os.getcwd()
+            first_dir = os.path.join(directory, "first")
+            second_dir = os.path.join(directory, "second")
+            os.makedirs(first_dir)
+            os.makedirs(second_dir)
+            try:
+                os.chdir(first_dir)
+                store = JournalStore("journal.sqlite3")
+                frozen_path = store.path
+                self.assertTrue(frozen_path.is_absolute())
+                store.append_event(event("evt-cwd-a", 1))
+
+                os.chdir(second_dir)
+                store.append_event(event("evt-cwd-b", 2))
+                self.assertEqual(store.current_journal_sequence(), 2)
+                self.assertEqual(
+                    [item["event_id"] for item in store.load_events("account", "paper-1")],
+                    ["evt-cwd-a", "evt-cwd-b"],
+                )
+                self.assertEqual(store.path, frozen_path)
+                self.assertFalse(os.path.exists(os.path.join(second_dir, "journal.sqlite3")))
+            finally:
+                os.chdir(original_cwd)
+
     def test_event_and_outbox_commit_atomically_and_replay_idempotently(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

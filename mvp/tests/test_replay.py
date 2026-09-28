@@ -522,6 +522,26 @@ class CausalReplayTests(unittest.TestCase):
                 protocol_ref="protocol:walk-forward-v1",
             )
 
+    def test_resume_rejects_checkpoint_clock_that_has_unconsumed_visible_events(self):
+        events = [
+            event(1, "2026-09-24T10:00:00Z", 1),
+            event(2, "2026-09-24T10:01:00Z", 2),
+        ]
+        forged = ReplayCheckpoint(
+            dataset_digest=dataset_digest(events),
+            cursor=0,
+            clock="2026-09-24T10:00:00Z",
+        )
+        with self.assertRaisesRegex(
+            ReplayError,
+            "omits events already visible at checkpoint clock",
+        ):
+            CausalReplay(
+                events,
+                start_at="2026-09-24T09:59:00Z",
+                checkpoint=forged,
+            )
+
     def test_clock_cannot_move_backwards(self):
         replay = CausalReplay(
             [event(1, "2026-09-24T10:00:00Z", 1)],

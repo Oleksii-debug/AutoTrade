@@ -1,3 +1,5 @@
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 from mvp.autotrade_mvp.durable_settlement import (
@@ -43,28 +45,30 @@ class DurableSettlementProviderDomainTests(unittest.TestCase):
             },
         )
 
-        store = JournalStore(":memory:")
-        artifacts = ArtifactStore(".autotrade-test-provider-domain-settlement")
-        testnet_book = DurableSettlementBook(
-            store,
-            provider_id="BYBIT",
-            account_id="acct-1",
-            environment="PAPER",
-            provider_environment="TESTNET",
-            evidence_artifact_store=artifacts,
-        )
-        demo_book = DurableSettlementBook(
-            store,
-            provider_id="BYBIT",
-            account_id="acct-1",
-            environment="PAPER",
-            provider_environment="DEMO",
-            evidence_artifact_store=artifacts,
-        )
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = JournalStore(root / "journal.sqlite3")
+            artifacts = ArtifactStore(root / "settlement-evidence")
+            testnet_book = DurableSettlementBook(
+                store,
+                provider_id="BYBIT",
+                account_id="acct-1",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                evidence_artifact_store=artifacts,
+            )
+            demo_book = DurableSettlementBook(
+                store,
+                provider_id="BYBIT",
+                account_id="acct-1",
+                environment="PAPER",
+                provider_environment="DEMO",
+                evidence_artifact_store=artifacts,
+            )
 
-        self.assertNotEqual(testnet_book.scope_id, demo_book.scope_id)
-        self.assertEqual(testnet_book.obligations, ())
-        self.assertEqual(demo_book.obligations, ())
+            self.assertNotEqual(testnet_book.scope_id, demo_book.scope_id)
+            self.assertEqual(testnet_book.obligations, ())
+            self.assertEqual(demo_book.obligations, ())
 
     def test_bybit_durable_scope_requires_exact_provider_environment(self):
         with self.assertRaises(ValueError):

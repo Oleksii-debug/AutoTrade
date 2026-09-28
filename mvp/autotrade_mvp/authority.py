@@ -254,6 +254,22 @@ class Confirmation:
         if environment not in {"SIMULATION", "PAPER", "LIVE"}:
             raise ValueError("confirmation environment is unsupported")
         object.__setattr__(self, "environment", environment)
+        if (self.provider_id is None) != (self.provider_environment is None):
+            raise ValueError(
+                "financial admission provider_id and provider_environment must be present together"
+            )
+        if self.provider_id is not None:
+            provider = _text(self.provider_id, name="admission provider_id").upper()
+            provider_environment = _provider_domain(
+                provider_id=provider,
+                environment=environment,
+                provider_environment=self.provider_environment,
+                name="admission",
+            )
+            object.__setattr__(self, "provider_id", provider)
+            object.__setattr__(
+                self, "provider_environment", provider_environment
+            )
         object.__setattr__(
             self,
             "instrument_version",
@@ -294,6 +310,8 @@ class AdmissionRecord:
     risk_valid_until: str | None = None
     policy_version: int | None = None
     financial_command_id: str | None = None
+    provider_id: str | None = None
+    provider_environment: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -366,6 +384,10 @@ class AdmissionRecord:
             self.financial_command_id,
         )
         if any(value is not None for value in evidence_values):
+            if self.provider_id is None or self.provider_environment is None:
+                raise ValueError(
+                    "financial admission requires durable provider-domain identity"
+                )
             if outcome == "ADMITTED" and any(value is None for value in evidence_values):
                 raise ValueError(
                     "admitted financial record requires complete risk/reservation evidence"
@@ -1106,6 +1128,8 @@ class AuthorityService:
             "intent_hash": record.intent_hash,
             "account_id": record.account_id,
             "environment": record.environment,
+            "provider_id": record.provider_id,
+            "provider_environment": record.provider_environment,
             "instrument": cls._instrument_payload(record.instrument_version),
             "action": record.action,
             "notional": _canonical_decimal_text(record.notional),
@@ -1311,6 +1335,8 @@ class AuthorityService:
                     intent_hash=payload["intent_hash"],
                     account_id=payload["account_id"],
                     environment=payload["environment"],
+                    provider_id=payload.get("provider_id"),
+                    provider_environment=payload.get("provider_environment"),
                     instrument_version=InstrumentVersionIdentity(
                         instrument["instrument_id"], instrument["version"]
                     ),
@@ -1470,6 +1496,8 @@ class AuthorityService:
             record.risk_valid_until,
             record.policy_version,
             record.financial_command_id,
+            record.provider_id,
+            record.provider_environment,
         )
         if any(value is None for value in required):
             raise AuthorityConflict(
@@ -1541,6 +1569,10 @@ class AuthorityService:
                 authoritative_snapshot.get("account_id") != record.account_id
                 or authoritative_snapshot.get("environment")
                 != record.environment
+                or authoritative_snapshot.get("provider_id")
+                != record.provider_id
+                or authoritative_snapshot.get("provider_environment")
+                != record.provider_environment
                 or authoritative_snapshot.get("capability_snapshot_id")
                 != record.capability_snapshot_id
                 or authoritative_snapshot.get("authority_policy_id")
@@ -1640,6 +1672,14 @@ class AuthorityService:
         if not isinstance(availability_evidence, Mapping):
             raise AuthorityConflict(
                 "durable admission lacks reservation availability evidence"
+            )
+        if (
+            availability_evidence.get("provider_id") != record.provider_id
+            or availability_evidence.get("provider_environment")
+            != record.provider_environment
+        ):
+            raise AuthorityConflict(
+                "durable reservation availability provider domain does not match admission"
             )
         try:
             regenerated_availability = (
@@ -3271,6 +3311,8 @@ class AuthorityService:
             allocation_binding=allocation_binding,
             authoritative_risk_snapshot=risk_snapshot_payload,
             journal_sequence_cut=journal_sequence_cut,
+            provider_id=snapshot_provider_id,
+            provider_environment=snapshot_provider_environment,
             confirmation_id=confirmation_id,
             risk_reducing=risk_reducing,
         )
@@ -3302,6 +3344,8 @@ class AuthorityService:
         allocation_binding: Mapping[str, Any] | None = None,
         authoritative_risk_snapshot: Mapping[str, Any] | None = None,
         journal_sequence_cut: int | None = None,
+        provider_id: str,
+        provider_environment: str,
         confirmation_id: str | None = None,
         risk_reducing: bool = False,
     ) -> AdmissionRecord:
@@ -3332,6 +3376,13 @@ class AuthorityService:
         ihash = _text(intent_hash, name="intent_hash")
         account = _text(account_id, name="account_id")
         env = _text(environment, name="environment").upper()
+        provider = _text(provider_id, name="provider_id").upper()
+        exact_provider_environment = _provider_domain(
+            provider_id=provider,
+            environment=env,
+            provider_environment=provider_environment,
+            name="financial admission",
+        )
         capability = _text(
             capability_snapshot_id, name="capability_snapshot_id"
         )
@@ -3430,6 +3481,8 @@ class AuthorityService:
                 and existing.intent_hash == ihash
                 and existing.account_id == account
                 and existing.environment == env
+                and existing.provider_id == provider
+                and existing.provider_environment == exact_provider_environment
                 and existing.instrument_version == expected_instrument
                 and existing.action == _text(action, name="action").upper()
                 and existing.notional == _decimal(notional, name="notional")
@@ -3545,6 +3598,8 @@ class AuthorityService:
             "intent_hash": ihash,
             "account_id": account,
             "environment": env,
+            "provider_id": provider,
+            "provider_environment": exact_provider_environment,
             "instrument_id": candidate.instrument_version.instrument_id,
             "instrument_version": candidate.instrument_version.version,
             "action": candidate.action,
@@ -3579,6 +3634,8 @@ class AuthorityService:
             risk_valid_until=risk_decision.valid_until,
             policy_version=policy.version,
             financial_command_id=cid,
+            provider_id=provider,
+            provider_environment=exact_provider_environment,
         )
 
         risk_payload = {
@@ -4213,6 +4270,8 @@ class AuthorityService:
                 intent_hash=_text(item.get("intent_hash"), name="intent_hash"),
                 account_id=_text(item.get("account_id"), name="account_id"),
                 environment=_text(item.get("environment"), name="environment").upper(),
+                provider_id=item.get("provider_id"),
+                provider_environment=item.get("provider_environment"),
                 instrument_version=identity,
                 action=_text(item.get("action"), name="action").upper(),
                 notional=amount,

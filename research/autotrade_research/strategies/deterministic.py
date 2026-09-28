@@ -862,7 +862,7 @@ class EconomicsBoundProposal:
                 raise ValueError(
                     "registered run instrument_version does not match economics binding"
                 )
-            if gross.action != "HOLD":
+            if action != "HOLD":
                 _require_registered_economics_join(receipt, economics)
         if gross.strategy_fingerprint != economics.strategy_fingerprint:
             raise ValueError("economics strategy fingerprint does not match proposal")
@@ -970,7 +970,7 @@ def bind_strategy_economics(
             raise ValueError(
                 "registered run instrument_version does not match economics binding"
             )
-        if proposal.action != "HOLD":
+        if proposal.action != "HOLD" and economics.status == "QUALIFIED":
             _require_registered_economics_join(
                 registered_run_receipt,
                 economics,

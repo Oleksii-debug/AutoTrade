@@ -19,7 +19,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    # Windows currently executes the full core/recovery/load suite beyond 10 minutes.
+    # Keep Ubuntu's existing hang budget while allowing Windows to finish the same tests.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 20 || 10 }}
     env:
       AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}

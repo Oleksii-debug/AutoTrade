@@ -13,6 +13,7 @@ from mvp.autotrade_mvp.capabilities import (
 from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
 from mvp.autotrade_mvp.perpetual_funding import (
     DurablePerpetualFundingAuthority,
+    FundingEvidenceBundle,
     PerpetualFundingConflict,
     PerpetualFundingError,
     PerpetualFundingObservation,
@@ -29,6 +30,9 @@ from mvp.autotrade_mvp.provider_core import (
 FUNDING_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 UNDERLYING_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 ENDPOINT = "/fapi/v1/income"
+RATE_ENDPOINT = "/fapi/v1/fundingRate"
+PRICE_ENDPOINT = "/fapi/v1/premiumIndex"
+CUT_ENDPOINT = "/fapi/v1/positionRisk"
 READ_NOW = datetime(2026, 9, 25, 10, 0, tzinfo=timezone.utc)
 ARTIFACT_IDS = {
     "DOCUMENTED": "11111111-1111-4111-8111-111111111111",
@@ -44,7 +48,7 @@ def _instant(value: str) -> datetime:
     )
 
 
-def funding_capability():
+def funding_capability(environment="SIMULATION"):
     observed = READ_NOW - timedelta(minutes=1)
     expires = READ_NOW + timedelta(minutes=10)
     claims = tuple(
@@ -53,7 +57,7 @@ def funding_capability():
             provider_id="BINANCE",
             account_id="acct-1",
             entity_id="entity-1",
-            environment="PAPER",
+            environment=environment,
             instrument_version=f"{FUNDING_ID}@1",
             observed_at=observed,
             expires_at=expires,
@@ -110,11 +114,12 @@ def perpetual_version(
         payoff=payoff,
         underlying_id=f"{UNDERLYING_ID}@1",
         settlement_method="CASH",
-        funding_schedule=(
-            {"interval_hours": 8}
-            if funding_schedule is None
-            else funding_schedule
-        ),
+        funding_schedule={
+            "interval_hours": 8,
+            "price_basis": "MARK",
+            "positive_rate_effect": "LONG_PAYS",
+            **({} if funding_schedule is None else funding_schedule),
+        },
         margin_model_id="binance-usdm-v1",
     )
 
@@ -162,6 +167,94 @@ def sealed_funding(
             payload, sort_keys=True, separators=(",", ":")
         ).encode("utf-8"),
         observed_at=READ_NOW + timedelta(seconds=observed_offset),
+    )
+
+
+def sealed_composite_funding(
+    *,
+    tran_id="9001",
+    income="-0.200000",
+    rate="0.001",
+    position="2",
+    pre_cut=(),
+    post_cut=(),
+    corrects=None,
+    environment="PAPER",
+):
+    capability = funding_capability(environment=environment)
+
+    def observe(endpoint, query, payload, offset):
+        binding = prepare_authenticated_read_query(
+            capability=capability,
+            surface=Surface.ACTIVITIES,
+            endpoint=endpoint,
+            query=query,
+            at=READ_NOW,
+            permission_scope="ORDER.READ",
+        )
+        return observe_authenticated_json_response(
+            query_binding=binding,
+            http_status=200,
+            response_bytes=json.dumps(
+                payload, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8"),
+            observed_at=READ_NOW + timedelta(seconds=offset),
+        )
+
+    income_source = observe(
+        ENDPOINT,
+        {"incomeType": "FUNDING_FEE", "symbol": "BTCUSDT"},
+        {
+            "symbol": "BTCUSDT",
+            "incomeType": "FUNDING_FEE",
+            "income": income,
+            "asset": "USDT",
+            "info": "",
+            "time": 1790320800000,
+            "tranId": tran_id,
+            "tradeId": "",
+        },
+        1,
+    )
+    rate_source = observe(
+        RATE_ENDPOINT,
+        {"symbol": "BTCUSDT"},
+        {
+            "symbol": "BTCUSDT",
+            "fundingTime": "2026-09-25T10:00:00Z",
+            "fundingRate": rate,
+        },
+        2,
+    )
+    price_source = observe(
+        PRICE_ENDPOINT,
+        {"symbol": "BTCUSDT"},
+        {
+            "symbol": "BTCUSDT",
+            "time": "2026-09-25T10:00:00Z",
+            "markPrice": "100000",
+            "indexPrice": "100000",
+        },
+        3,
+    )
+    cut_source = observe(
+        CUT_ENDPOINT,
+        {"symbol": "BTCUSDT"},
+        {
+            "symbol": "BTCUSDT",
+            "fundingTime": "2026-09-25T10:00:00Z",
+            "position": position,
+            "preCutTransactionIds": list(pre_cut),
+            "postCutTransactionIds": list(post_cut),
+        },
+        4,
+    )
+    return FundingEvidenceBundle(
+        income=income_source,
+        rate=rate_source,
+        prices=price_source,
+        cut=cut_source,
+        corrects_external_event_id=corrects,
     )
 
 
@@ -216,12 +309,21 @@ def seed_position(
 
 
 class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
-    def authority(self, store, evidence, *, registry=None, seed=True):
+    def authority(
+        self, store, evidence, *, registry=None, seed=True, environment=None
+    ):
+        if environment is None:
+            first = evidence[0]
+            environment = (
+                first.income.environment
+                if isinstance(first, FundingEvidenceBundle)
+                else first.environment
+            )
         book = DurableProviderEconomicBook(
             store,
             provider_id="BINANCE",
             account_id="acct-1",
-            environment="PAPER",
+            environment=environment,
         )
         if seed and not book.transactions:
             seed_position(book)
@@ -232,7 +334,9 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
             instrument_registry=registry
             or InstrumentRegistry(versions=(perpetual_version(),)),
             evidence_resolver=resolver.__getitem__,
-            funding_endpoints=frozenset({ENDPOINT}),
+            funding_endpoints=frozenset(
+                {ENDPOINT, RATE_ENDPOINT, PRICE_ENDPOINT, CUT_ENDPOINT}
+            ),
             permission_scope="ORDER.READ",
         )
         return authority, book
@@ -539,6 +643,161 @@ class DurablePerpetualFundingAuthorityTests(unittest.TestCase):
                 store.load_events("perpetual_funding", authority.aggregate_id),
                 [],
             )
+
+    def test_paper_official_income_row_alone_cannot_book(self):
+        composite = sealed_composite_funding()
+        income = composite.income
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            book = DurableProviderEconomicBook(
+                store,
+                provider_id="BINANCE",
+                account_id="acct-1",
+                environment="PAPER",
+            )
+            seed_position(book)
+            authority = DurablePerpetualFundingAuthority(
+                store,
+                economic_book=book,
+                instrument_registry=InstrumentRegistry(
+                    versions=(perpetual_version(),)
+                ),
+                evidence_resolver={income.evidence_ref: income}.__getitem__,
+                funding_endpoints=frozenset(
+                    {ENDPOINT, RATE_ENDPOINT, PRICE_ENDPOINT, CUT_ENDPOINT}
+                ),
+                permission_scope="ORDER.READ",
+            )
+            before = book.audit_digest()
+            with self.assertRaisesRegex(
+                PerpetualFundingError,
+                "separately authenticated income, rate, price and cut evidence",
+            ):
+                authority.apply(income.evidence_ref)
+            self.assertEqual(book.audit_digest(), before)
+            self.assertEqual(
+                store.load_events("perpetual_funding", authority.aggregate_id), []
+            )
+
+    def test_composite_official_evidence_books_and_replays_deterministically(self):
+        evidence = sealed_composite_funding()
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            authority, book = self.authority(
+                JournalStore(path), [evidence], environment="PAPER"
+            )
+            first = authority.apply(evidence.evidence_ref)
+            self.assertTrue(first.inserted)
+            self.assertEqual(first.cashflow, Decimal("-0.200000"))
+            events = authority.store.load_events(
+                "perpetual_funding", authority.aggregate_id
+            )
+            self.assertEqual(len(events), 1)
+            payload = events[0]["payload"]
+            self.assertIsNotNone(payload["composite_evidence_digest"])
+            self.assertEqual(payload["provider_income"], "-0.200000")
+            self.assertTrue(payload["position_cut"]["causal_digest"].startswith("sha256:"))
+
+            restarted, restarted_book = self.authority(
+                JournalStore(path), [evidence], seed=False, environment="PAPER"
+            )
+            replay = restarted.apply(evidence.evidence_ref)
+            self.assertFalse(replay.inserted)
+            self.assertEqual(replay.active_transaction_id, first.active_transaction_id)
+            self.assertEqual(restarted_book.cash("USDT"), book.cash("USDT"))
+
+    def test_composite_provider_income_conflict_rejects_before_mutation(self):
+        evidence = sealed_composite_funding(income="-0.19")
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority, book = self.authority(store, [evidence], environment="PAPER")
+            before = book.audit_digest()
+            sequence = store.current_journal_sequence()
+            with self.assertRaisesRegex(
+                PerpetualFundingConflict, "does not reconcile"
+            ):
+                authority.apply(evidence.evidence_ref)
+            self.assertEqual(book.audit_digest(), before)
+            self.assertEqual(store.current_journal_sequence(), sequence)
+
+    def test_same_timestamp_pre_cut_evidence_includes_execution(self):
+        evidence = sealed_composite_funding(
+            position="3", income="-0.300000", pre_cut=("same-cut",)
+        )
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority, book = self.authority(
+                store, [evidence], seed=False, environment="PAPER"
+            )
+            seed_position(book, contracts="2")
+            seed_position(
+                book,
+                transaction_id="same-cut",
+                contracts="1",
+                effective_at="2026-09-25T10:00:00Z",
+                observed_at="2026-09-25T10:00:01Z",
+            )
+            result = authority.apply(evidence.evidence_ref)
+            self.assertEqual(result.cashflow, Decimal("-0.300000"))
+            payload = store.load_events(
+                "perpetual_funding", authority.aggregate_id
+            )[0]["payload"]
+            self.assertIn(
+                "same-cut",
+                payload["position_cut"]["contributing_transaction_ids"],
+            )
+
+    def test_same_timestamp_post_cut_evidence_excludes_execution(self):
+        evidence = sealed_composite_funding(
+            position="2", income="-0.200000", post_cut=("same-cut",)
+        )
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority, book = self.authority(
+                store, [evidence], seed=False, environment="PAPER"
+            )
+            seed_position(book, contracts="2")
+            seed_position(
+                book,
+                transaction_id="same-cut",
+                contracts="1",
+                effective_at="2026-09-25T10:00:00Z",
+                observed_at="2026-09-25T10:00:01Z",
+            )
+            result = authority.apply(evidence.evidence_ref)
+            self.assertEqual(result.cashflow, Decimal("-0.200000"))
+
+    def test_same_timestamp_composite_without_ordering_fails_closed(self):
+        evidence = sealed_composite_funding(position="2")
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            authority, book = self.authority(
+                store, [evidence], seed=False, environment="PAPER"
+            )
+            seed_position(book, contracts="2")
+            seed_position(
+                book,
+                transaction_id="same-cut",
+                contracts="1",
+                effective_at="2026-09-25T10:00:00Z",
+                observed_at="2026-09-25T10:00:01Z",
+            )
+            before = book.audit_digest()
+            with self.assertRaisesRegex(
+                PerpetualFundingConflict, "ambiguous position ordering"
+            ):
+                authority.apply(evidence.evidence_ref)
+            self.assertEqual(book.audit_digest(), before)
+
+            restarted, restarted_book = self.authority(
+                JournalStore(path), [evidence], seed=False, environment="PAPER"
+            )
+            with self.assertRaisesRegex(
+                PerpetualFundingConflict, "ambiguous position ordering"
+            ):
+                restarted.apply(evidence.evidence_ref)
+            self.assertEqual(restarted_book.audit_digest(), before)
 
     def test_inverse_contract_remains_fail_closed_without_quantization_policy(self):
         evidence = sealed_funding()

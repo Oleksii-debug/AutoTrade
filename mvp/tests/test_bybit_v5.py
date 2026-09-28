@@ -283,6 +283,17 @@ class BybitV5AdapterTests(unittest.TestCase):
                 observed_at=READ_AT,
                 provider_environment="PAPER",
             )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "does not match runtime environment",
+        ):
+            observe_authenticated_json_response(
+                query_binding=query,
+                http_status=200,
+                response_bytes=b'{"retCode":0,"result":{"list":[]}}',
+                observed_at=READ_AT,
+                provider_environment="MAINNET",
+            )
 
     def test_spot_market_quantity_is_explicitly_base_coin(self):
         payload = build_order_payload(

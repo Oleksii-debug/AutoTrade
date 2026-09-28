@@ -83,7 +83,7 @@ def bybit_activity_observation(raw: bytes, *, observed_at: datetime):
             account_id="acct-1",
             entity_id="bybit-financing-test",
             environment="PAPER",
-            instrument_version="XRPUSDT@v1",
+            instrument_version=f"{BYBIT_XRP_INSTRUMENT_ID}@1",
             observed_at=capability_observed,
             expires_at=BASE + timedelta(hours=1),
             supported_order_types=frozenset({"MARKET"}),

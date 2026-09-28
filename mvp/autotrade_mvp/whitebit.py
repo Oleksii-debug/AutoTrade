@@ -1286,6 +1286,19 @@ def parse_execution_history_response(
             "execution-history response exceeds requested page limit"
         )
     deals = parse_execution_history(payload, market=market)
+    start_boundary = datetime.fromtimestamp(start_unix, tz=timezone.utc)
+    end_boundary_exclusive = datetime.fromtimestamp(
+        end_unix + 1,
+        tz=timezone.utc,
+    )
+    for deal in deals:
+        trade_time = datetime.fromisoformat(
+            deal.trade_time.replace("Z", "+00:00")
+        )
+        if not (start_boundary <= trade_time < end_boundary_exclusive):
+            raise WhiteBitAdapterError(
+                "execution-history response contains deal outside requested time window"
+            )
 
     by_execution: dict[str, ProviderFillEvidence] = {}
     for deal in deals:

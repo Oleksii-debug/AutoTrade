@@ -480,6 +480,14 @@ def _bybit_funding_event_from_exact_response(
             "Bybit funding authority currently supports paid funding charges only"
         )
     currency = _text(row.get("currency"), name="currency").upper()
+    query_currency = observation.query_binding.query.get("currency")
+    if (
+        query_currency is not None
+        and _text(query_currency, name="query currency").upper() != currency
+    ):
+        raise FinancingError(
+            "Bybit funding row currency does not match authenticated query"
+        )
     symbol = _text(row.get("symbol"), name="symbol")
     if not isinstance(instrument_registry, InstrumentRegistry):
         raise FinancingError(
@@ -528,6 +536,15 @@ def _bybit_funding_event_from_exact_response(
     if version.settlement_currency.strip().upper() != currency:
         raise FinancingError(
             "Bybit funding currency does not match canonical instrument settlement unit"
+        )
+    query_base_coin = observation.query_binding.query.get("baseCoin")
+    if (
+        query_base_coin is not None
+        and _text(query_base_coin, name="query baseCoin").upper()
+        != version.base_currency.strip().upper()
+    ):
+        raise FinancingError(
+            "Bybit funding instrument base currency does not match authenticated query"
         )
     if observation.query_binding.instrument_version != instrument_version:
         raise FinancingError(
@@ -769,12 +786,26 @@ class DurableFinancingBook:
         )
         if self.provider_id != "BYBIT":
             raise FinancingError("Bybit financing observation requires BYBIT authority")
-        if dict(observation.query_binding.query) != {
-            "accountType": "UNIFIED",
-            "category": "linear",
-        }:
+        query = dict(observation.query_binding.query)
+        allowed_query_keys = {
+            "accountType",
+            "category",
+            "currency",
+            "baseCoin",
+            "type",
+            "startTime",
+            "endTime",
+            "limit",
+            "cursor",
+        }
+        if (
+            query.get("accountType") != "UNIFIED"
+            or query.get("category") != "linear"
+            or set(query) - allowed_query_keys
+            or ("type" in query and query["type"] != "SETTLEMENT")
+        ):
             raise FinancingError(
-                "Bybit funding requires the exact qualified transaction-log query"
+                "Bybit funding requires a qualified linear transaction-log query"
             )
         aid = _text(artifact_id, name="artifact_id")
         try:

@@ -66,6 +66,69 @@ class ProductionPrepareGuardTests(unittest.TestCase):
                     events[-1]["payload"]["reason"],
                 )
 
+    def test_paper_and_live_submission_scope_cannot_substitute_for_explicit_order_binding(self):
+        for environment in ("PAPER", "LIVE"):
+            with self.subTest(environment=environment), TemporaryDirectory() as directory:
+                store = self._store(directory)
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment=environment,
+                    account_id="acct",
+                    owner_token="owner",
+                    owner_epoch=1,
+                )
+                outbound = 0
+                preparation_calls = 0
+
+                def prepare_order(*_args):
+                    nonlocal preparation_calls
+                    preparation_calls += 1
+                    raise AssertionError(
+                        "caller preparation must not run without an independent order binding"
+                    )
+
+                def transport(_client_id, _request, final_guard):
+                    nonlocal outbound
+                    final_guard()
+                    outbound += 1
+                    return {"provider_order_id": "must-not-happen"}
+
+                outcome = dispatcher.dispatch(
+                    attempt_id=f"{environment.lower()}-scope-is-not-order-binding",
+                    intent_id="intent-1",
+                    intent_hash="intent-hash",
+                    provider="provider",
+                    request={"instrument": "TEST@1", "side": "BUY", "quantity": "1"},
+                    now="2026-09-27T18:00:00Z",
+                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    transport_send=transport,
+                    sender_check=lambda _owner, _epoch: None,
+                    submission_scope=ORDER_PREPARATION_BINDING,
+                    prepare_order=prepare_order,
+                )
+
+                self.assertEqual(outcome.status, "BLOCKED")
+                self.assertEqual(
+                    outcome.reason,
+                    "durable_order_preparation_failed_before_send",
+                )
+                self.assertEqual(preparation_calls, 0)
+                self.assertEqual(outbound, 0)
+                events = store.load_events(
+                    "submission_attempt",
+                    dispatcher._aggregate_id(
+                        f"{environment.lower()}-scope-is-not-order-binding"
+                    ),
+                )
+                self.assertEqual(
+                    [event["event_type"] for event in events],
+                    ["SubmissionPrepared", "SubmissionBlocked"],
+                )
+                self.assertIn(
+                    "_MissingDurableOrderPreparation",
+                    events[-1]["payload"]["reason"],
+                )
+
     def test_noop_prepare_order_cannot_satisfy_production_proof(self):
         with TemporaryDirectory() as directory:
             store = self._store(directory)

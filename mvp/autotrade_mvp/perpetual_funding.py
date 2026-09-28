@@ -835,10 +835,15 @@ class DurablePerpetualFundingAuthority:
         if version.payoff not in {"LINEAR", "INVERSE"}:
             raise PerpetualFundingError("perpetual payoff is not canonically qualified")
 
+        canonical_collateral = version.settlement_currency
+        if observation.collateral_currency != canonical_collateral:
+            raise PerpetualFundingConflict(
+                "provider funding asset does not match immutable contract settlement currency"
+            )
         contract = PerpetualContract(
             instrument_id=version.provider_symbol,
             settlement_currency=version.settlement_currency,
-            collateral_currency=observation.collateral_currency,
+            collateral_currency=canonical_collateral,
             multiplier=version.contract_multiplier,
             payoff=version.payoff,
             face_currency=(
@@ -856,7 +861,7 @@ class DurablePerpetualFundingAuthority:
                 "schema_version": "1.0.0",
                 "instrument_version": observation.instrument_version,
                 "instrument_contract": version.to_contract_dict(),
-                "provider_collateral_currency": observation.collateral_currency,
+                "canonical_collateral_currency": canonical_collateral,
             }
         )
         return version, contract, contract_digest

@@ -55,6 +55,7 @@ from mvp.autotrade_mvp.whitebit import (
     parse_open_positions,
     parse_order_snapshot,
     parse_submission_result,
+    prepare_execution_history_read,
     prepare_order_request,
     redact_whitebit_debug,
     provider_collateral_borrow,
@@ -138,14 +139,25 @@ def execution_observation(
     }
     if include_market:
         query["market"] = market
-    binding = prepare_authenticated_read_query(
-        capability=read_capability,
-        surface=Surface.AUTHENTICATED_READ,
-        endpoint=endpoint,
-        query=query,
-        at=NOW,
-        permission_scope="ORDER.READ",
-    )
+    if endpoint == "/api/v4/trade-account/executed-history" and include_market:
+        binding = prepare_execution_history_read(
+            capability=read_capability,
+            start_unix=1_700_000_000,
+            end_unix=1_700_000_100,
+            offset=0,
+            limit=limit,
+            market=market,
+            at=NOW,
+        )
+    else:
+        binding = prepare_authenticated_read_query(
+            capability=read_capability,
+            surface=Surface.AUTHENTICATED_READ,
+            endpoint=endpoint,
+            query=query,
+            at=NOW,
+            permission_scope="ORDER.READ",
+        )
     response_bytes = json.dumps(rows, separators=(",", ":")).encode("utf-8")
     return observe_authenticated_json_response(
         query_binding=binding,
@@ -971,19 +983,14 @@ class WhiteBitAdapterTests(unittest.TestCase):
 
     def test_provider_response_observation_cannot_be_directly_forged(self):
         read_capability = capability(permission_scopes=("ORDER.READ",))
-        binding = prepare_authenticated_read_query(
+        binding = prepare_execution_history_read(
             capability=read_capability,
-            surface=Surface.AUTHENTICATED_READ,
-            endpoint="/api/v4/trade-account/executed-history",
-            query={
-                "startDate": "1700000000",
-                "endDate": "1700000100",
-                "offset": "0",
-                "limit": "50",
-                "market": "BTC_USDT",
-            },
+            start_unix=1_700_000_000,
+            end_unix=1_700_000_100,
+            offset=0,
+            limit=50,
+            market="BTC_USDT",
             at=NOW,
-            permission_scope="ORDER.READ",
         )
         with self.assertRaisesRegex(
             ProviderCoreError,

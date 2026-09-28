@@ -72,7 +72,7 @@ class AuthorityPersistenceCanonicalProjectionTests(unittest.TestCase):
                 revoked_at="2026-09-25T01:05:00Z",
             )
 
-            with self.assertRaisesRegex(ValueError, "revocations facts were removed"):
+            with self.assertRaisesRegex(ValueError, "authority snapshot is stale"):
                 self._snapshot(
                     store,
                     stale,
@@ -86,7 +86,7 @@ class AuthorityPersistenceCanonicalProjectionTests(unittest.TestCase):
 
             # The already-published pre-revocation snapshot is also too stale to
             # restart safely once canonical authority has advanced.
-            with self.assertRaisesRegex(ValueError, "revocations facts were removed"):
+            with self.assertRaisesRegex(ValueError, "authority snapshot is stale"):
                 restore_authority_snapshot(store, authority_id=AUTHORITY_ID)
 
             self._snapshot(

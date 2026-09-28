@@ -307,6 +307,16 @@ def _split_transaction(
     before = transition.before
     after = transition.after
     if (
+        before.quantity < 0
+        or before.borrowed_quantity != 0
+        or before.recalled_quantity != 0
+        or after.borrowed_quantity != 0
+        or after.recalled_quantity != 0
+    ):
+        raise AccountingConflict(
+            "equity split with short/borrow/recall state requires atomic borrow authority"
+        )
+    if (
         after.total_basis != before.total_basis
         or after.settled_cash != before.settled_cash
         or after.unsettled_cash != before.unsettled_cash

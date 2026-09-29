@@ -24,7 +24,10 @@ from mvp.autotrade_mvp.persistence import (
     canonical_json,
     payload_digest,
 )
-from research.autotrade_research.artifacts.store import ArtifactStore
+from research.autotrade_research.artifacts import (
+    ArtifactIntegrityError,
+    ArtifactStore,
+)
 from mvp.autotrade_mvp.reservations import (
     InsufficientAvailable,
     ReservationConflict,
@@ -39,7 +42,8 @@ class DurableReservationBookTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.path = Path(self.temp.name) / "journal.sqlite"
         self.store = JournalStore(self.path)
-        self.artifacts = ArtifactStore(Path(self.temp.name) / "artifacts")
+        self.artifact_root = Path(self.temp.name) / "artifacts"
+        self.artifacts = ArtifactStore(self.artifact_root)
         self.evidence = self.publish_resolution_evidence()
 
     def tearDown(self):
@@ -97,6 +101,7 @@ class DurableReservationBookTests(unittest.TestCase):
             environment="PAPER",
             account_id="paper-account",
             resolution_artifact_store=self.artifacts,
+            resolution_artifact_root=self.artifact_root,
         )
 
     def create_unknown_attempt(
@@ -845,7 +850,130 @@ class DurableReservationBookTests(unittest.TestCase):
                 environment="PAPER",
                 account_id="paper-account",
                 resolution_artifact_store=lambda reference: True,
+                resolution_artifact_root=self.artifact_root,
             )
+
+    def test_terminal_release_rejects_artifact_store_subclass_authority(self):
+        class ForgedArtifactStore(ArtifactStore):
+            def read_authenticated_snapshot(self, artifact_id):
+                raise AssertionError("subclass evidence authority must not be called")
+
+        forged = ForgedArtifactStore(Path(self.temp.name) / "forged-artifacts")
+        with self.assertRaisesRegex(TypeError, "canonical ArtifactStore"):
+            DurableReservationBook(
+                self.store,
+                environment="PAPER",
+                account_id="paper-account",
+                resolution_artifact_store=forged,
+                resolution_artifact_root=self.artifact_root,
+            )
+
+    def test_terminal_release_rejects_stable_attacker_selected_store_root(self):
+        attacker_root = Path(self.temp.name) / "attacker-selected-artifacts"
+        attacker_store = ArtifactStore(attacker_root)
+        attacker_store.publish_bytes(
+            artifact_id=ARTIFACT_ID,
+            data=b'{"forged":true}',
+            media_type="application/vnd.autotrade.reservation-resolution+json",
+            rights={"storage": True, "export": False},
+        )
+
+        with self.assertRaisesRegex(
+            ArtifactIntegrityError,
+            "does not match trusted artifact root",
+        ):
+            DurableReservationBook(
+                self.store,
+                environment="PAPER",
+                account_id="paper-account",
+                resolution_artifact_store=attacker_store,
+                resolution_artifact_root=self.artifact_root,
+            )
+
+    def test_terminal_release_private_reader_ignores_post_construction_store_poisoning(self):
+        book = self.book()
+        self.reserve(book)
+        book.mark_unknown(
+            command_id="cmd-unknown-private-reader",
+            idempotency_key="idem-unknown-private-reader",
+            reservation_id="r1",
+        )
+        self.create_unknown_attempt()
+        reconciliation = self.record_reconciliation_resolution()
+        evidence = self.publish_resolution_evidence(
+            artifact_id="99999999-9999-4999-8999-999999999999",
+            reconciliation_event=reconciliation,
+        )
+
+        redirected = Path(self.temp.name) / "redirected-artifacts"
+        object.__setattr__(self.artifacts, "root", redirected)
+        object.__setattr__(
+            self.artifacts,
+            "_read_verified_object_bytes",
+            lambda _manifest: b"forged resolution",
+        )
+        object.__setattr__(
+            self.artifacts,
+            "_manifest_path",
+            lambda _artifact_id: redirected / "forged.json",
+        )
+
+        book.mark_terminal(
+            command_id="cmd-terminal-private-reader",
+            idempotency_key="idem-terminal-private-reader",
+            reservation_id="r1",
+            outcome="PROVEN_ABSENT",
+            provider="SIMULATED",
+            attempt_id="attempt-r1",
+            resolution_evidence=evidence,
+        )
+        self.assertEqual(book.get("r1").state, "PROVEN_ABSENT")
+
+    def test_terminal_release_private_reader_ignores_pre_construction_store_poisoning(self):
+        writer = self.book()
+        self.reserve(writer)
+        writer.mark_unknown(
+            command_id="cmd-unknown-prebound-reader",
+            idempotency_key="idem-unknown-prebound-reader",
+            reservation_id="r1",
+        )
+        self.create_unknown_attempt()
+        reconciliation = self.record_reconciliation_resolution()
+        evidence = self.publish_resolution_evidence(
+            artifact_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            reconciliation_event=reconciliation,
+        )
+
+        redirected = Path(self.temp.name) / "redirected-before-construction"
+        object.__setattr__(self.artifacts, "root", redirected)
+        object.__setattr__(
+            self.artifacts,
+            "_decode_manifest_bytes",
+            lambda *_args, **_kwargs: {"forged": True},
+        )
+        object.__setattr__(
+            self.artifacts,
+            "_read_verified_object_bytes",
+            lambda _manifest: b"forged resolution",
+        )
+
+        restarted = DurableReservationBook(
+            JournalStore(self.path),
+            environment="PAPER",
+            account_id="paper-account",
+            resolution_artifact_store=self.artifacts,
+            resolution_artifact_root=self.artifact_root,
+        )
+        restarted.mark_terminal(
+            command_id="cmd-terminal-prebound-reader",
+            idempotency_key="idem-terminal-prebound-reader",
+            reservation_id="r1",
+            outcome="PROVEN_ABSENT",
+            provider="SIMULATED",
+            attempt_id="attempt-r1",
+            resolution_evidence=evidence,
+        )
+        self.assertEqual(restarted.get("r1").state, "PROVEN_ABSENT")
 
     def test_terminal_release_requires_existing_durable_attempt(self):
         book = self.book()
@@ -1092,6 +1220,7 @@ class DurableReservationBookTests(unittest.TestCase):
             environment="PAPER",
             account_id="paper-account",
             resolution_artifact_store=self.artifacts,
+            resolution_artifact_root=self.artifact_root,
         )
         self.assertEqual(restarted.version, 1)
         self.assertEqual(restarted.total_reserved("CASH:USD"), Decimal("70"))

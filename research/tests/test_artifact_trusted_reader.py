@@ -1,3 +1,4 @@
+import gc
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -99,6 +100,17 @@ class TrustedArtifactReaderTests(unittest.TestCase):
             observed_manifest, observed_data = read_snapshot(ARTIFACT_ID)
 
             self.assertEqual(observed_manifest, manifest)
+            self.assertEqual(observed_data, PAYLOAD)
+
+    def test_private_reader_keeps_root_binding_alive_after_injected_store_is_released(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            _publish(store)
+            read_snapshot = trusted_authenticated_reader(store)
+            del store
+            gc.collect()
+
+            _manifest, observed_data = read_snapshot(ARTIFACT_ID)
             self.assertEqual(observed_data, PAYLOAD)
 
     def test_private_reader_rejects_subclass_authority(self):

@@ -2657,9 +2657,25 @@ def book_external_provider_cash_activity(
             "provider cash durable command result conflicts with its financial effect"
         )
     if not inserted:
-        raise AccountingConflict(
-            "provider cash durable command exists without its financial effects"
+        raced_imported = store.get_event(imported_event_id)
+        raced_economic = store.get_event(economic_event_id)
+        if raced_imported is None or raced_economic is None:
+            raise AccountingConflict(
+                "provider cash durable command exists without its financial effects"
+            )
+        replayed_transaction, replay_inserted = book_external_provider_cash_activity(
+            store,
+            provider_id=provider,
+            account_id=account,
+            environment=scope,
+            activity=activity,
+            observed_at=observed_at,
         )
+        if replay_inserted or replayed_transaction != transaction:
+            raise AccountingConflict(
+                "provider cash concurrent replay did not resolve to the same financial effect"
+            )
+        return transaction, False
     return transaction, True
 
 

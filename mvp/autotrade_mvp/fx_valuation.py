@@ -11,22 +11,58 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from fractions import Fraction
 from hashlib import sha256
 import re
 from typing import Mapping
 
 from .exact_decimal import (
     ExactDecimalError,
-    as_fraction,
-    canonical_decimal_text,
-    exact_sum,
-    round_fraction_to_quantum,
-    terminating_decimal,
+    as_fraction as _exact_as_fraction,
+    canonical_decimal_text as _exact_canonical_decimal_text,
+    exact_sum as _exact_sum,
+    round_fraction_to_quantum as _exact_round_fraction_to_quantum,
+    terminating_decimal as _exact_terminating_decimal,
 )
 
 
 class FxValuationError(ValueError):
     pass
+
+
+def _translate_exact(operation, *args, name: str):
+    try:
+        return operation(*args)
+    except ExactDecimalError as error:
+        raise FxValuationError(
+            f"{name} exceeds the supported exact-decimal resource envelope"
+        ) from error
+
+
+def _as_fraction(value: Decimal, *, name: str) -> Fraction:
+    return _translate_exact(_exact_as_fraction, value, name=name)
+
+
+def _terminating_decimal(value: Fraction, *, name: str) -> Decimal:
+    return _translate_exact(_exact_terminating_decimal, value, name=name)
+
+
+def _round_fraction_to_quantum(
+    value: Fraction,
+    quantum: Decimal,
+    *,
+    name: str,
+) -> Decimal:
+    try:
+        return _exact_round_fraction_to_quantum(value, quantum, mode="FLOOR")
+    except ExactDecimalError as error:
+        raise FxValuationError(
+            f"{name} exceeds the supported exact-decimal resource envelope"
+        ) from error
+
+
+def _canonical_decimal_text(value: Decimal, *, name: str) -> str:
+    return _translate_exact(_exact_canonical_decimal_text, value, name=name)
 
 
 def _decimal(value, name: str) -> Decimal:
@@ -38,6 +74,9 @@ def _decimal(value, name: str) -> Decimal:
         raise FxValuationError(f"{name} must be a finite decimal") from error
     if not result.is_finite():
         raise FxValuationError(f"{name} must be a finite decimal")
+    if result == 0:
+        return Decimal("0")
+    _as_fraction(result, name=name)
     return result
 
 
@@ -73,6 +112,15 @@ def _age_limit(value: timedelta) -> timedelta:
     return value
 
 
+def _has_terminating_decimal(value: Fraction) -> bool:
+    denominator = value.denominator
+    while denominator % 2 == 0:
+        denominator //= 2
+    while denominator % 5 == 0:
+        denominator //= 5
+    return denominator == 1
+
+
 @dataclass(frozen=True)
 class FxRoundingPolicy:
     """Explicit conservative final-amount boundary for non-terminating FX math."""
@@ -100,7 +148,7 @@ class FxRoundingPolicy:
                 "FX_CONSERVATIVE_FINAL_AMOUNT",
                 self.version,
                 self.reporting_currency,
-                canonical_decimal_text(self.quantum),
+                _canonical_decimal_text(self.quantum, name="FX rounding quantum"),
                 "FLOOR",
             )
         ).encode("utf-8")
@@ -339,7 +387,7 @@ def value_amount(
         else:
             quoted_rate = quote.ask
             side = "ASK_FOR_LIABILITY"
-        rate_fraction = as_fraction(quoted_rate)
+        rate_fraction = _as_fraction(quoted_rate, name="FX quoted rate")
         rate_used = quoted_rate
     elif quote.quote_currency == source and quote.base_currency == reporting:
         if source_amount > 0:
@@ -348,21 +396,30 @@ def value_amount(
         else:
             quoted_rate = quote.bid
             side = "INVERSE_BID_FOR_LIABILITY"
-        rate_fraction = 1 / as_fraction(quoted_rate)
-        rate_used = None
+        quoted_fraction = _as_fraction(quoted_rate, name="FX quoted rate")
+        rate_fraction = Fraction(1, 1) / quoted_fraction
+        rate_used = (
+            _terminating_decimal(rate_fraction, name="inverse FX rate")
+            if _has_terminating_decimal(rate_fraction)
+            else None
+        )
     else:
         raise FxValuationError("quote does not connect source and reporting currencies")
 
-    converted_fraction = as_fraction(source_amount) * rate_fraction
+    converted_fraction = _as_fraction(source_amount, name="FX source amount") * rate_fraction
+    haircut_fraction = _as_fraction(haircut_value, name="FX haircut")
     if converted_fraction > 0:
-        converted_fraction *= 1 - as_fraction(haircut_value)
+        converted_fraction *= Fraction(1, 1) - haircut_fraction
     elif converted_fraction < 0:
-        converted_fraction *= 1 + as_fraction(haircut_value)
+        converted_fraction *= Fraction(1, 1) + haircut_fraction
 
     applied_policy: FxRoundingPolicy | None = None
-    try:
-        converted = terminating_decimal(converted_fraction)
-    except ExactDecimalError:
+    if _has_terminating_decimal(converted_fraction):
+        converted = _terminating_decimal(
+            converted_fraction,
+            name="FX converted amount",
+        )
+    else:
         if rounding_policy is None:
             return _unavailable(
                 source_amount=source_amount,
@@ -381,10 +438,10 @@ def value_amount(
                 rate_numerator=rate_fraction.numerator,
                 rate_denominator=rate_fraction.denominator,
             )
-        converted = round_fraction_to_quantum(
+        converted = _round_fraction_to_quantum(
             converted_fraction,
             rounding_policy.quantum,
-            mode="FLOOR",
+            name="FX rounded converted amount",
         )
         applied_policy = rounding_policy
 
@@ -467,11 +524,16 @@ def value_cash_balances(
             reasons=uncertain,
         )
 
-    total = exact_sum(
-        row.converted_amount
-        for row in components
-        if row.converted_amount is not None
-    )
+    try:
+        total = _exact_sum(
+            row.converted_amount
+            for row in components
+            if row.converted_amount is not None
+        )
+    except ExactDecimalError as error:
+        raise FxValuationError(
+            "portfolio FX total exceeds the supported exact-decimal resource envelope"
+        ) from error
     return PortfolioFxValuation(
         reporting_currency=reporting,
         total=total,

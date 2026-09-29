@@ -34,6 +34,25 @@ from .operator_authority_commands import (
 )
 
 
+def _rehydrate_committed_event(
+    event: Mapping[str, object],
+) -> dict[str, object]:
+    """Restore an authenticated journal event to its original envelope shape."""
+
+    if not isinstance(event, Mapping):
+        raise TypeError("durable host event must be a mapping")
+    version = event.get("aggregate_version")
+    if type(version) is not int or version <= 0:
+        raise ValueError("durable host event aggregate_version must be positive")
+    envelope = {
+        key: value
+        for key, value in event.items()
+        if key != "journal_sequence"
+    }
+    envelope["aggregate_version"] = str(version)
+    return envelope
+
+
 class JournalBackedHostCommandStore:
     """Durable host API semantics over the canonical journal."""
 
@@ -279,6 +298,139 @@ class JournalBackedHostCommandStore:
                 "Session is not authorized for actor, request origin, and action"
             )
 
+        scoped_command_id = self._scoped_command_uuid(
+            command_id,
+            purpose="commands",
+        )
+        scoped_idempotency_key = self._journal_idempotency_key(
+            idempotency_key
+        )
+        event_id = self._scoped_command_uuid(
+            command_id,
+            purpose="command-events",
+        )
+        operation_id = scoped_host_operation_id(
+            account_id=self.account_id,
+            environment=self.environment,
+            command_id=command_id,
+        )
+
+        # A durable accepted event is historical authority for an exact
+        # lost-response retry.  Resolve it before comparing the caller's
+        # historical expected_state_version with mutable current host state.
+        accepted_event = self._journal.get_event(event_id)
+        if accepted_event is not None:
+            if (
+                accepted_event.get("event_type") != "COMMAND_ACCEPTED"
+                or accepted_event.get("aggregate_type") != self.AGGREGATE_TYPE
+                or accepted_event.get("aggregate_id") != self.aggregate_id
+            ):
+                raise ValueError(
+                    "durable host command event identity is inconsistent"
+                )
+            accepted_payload = accepted_event.get("payload")
+            if not isinstance(accepted_payload, Mapping):
+                raise ValueError(
+                    "durable host accepted payload must be an object"
+                )
+            durable_command_id = self._required_text(
+                accepted_payload,
+                "command_id",
+            )
+            durable_operation_id = self._required_text(
+                accepted_payload,
+                "operation_id",
+            )
+            durable_actor = self._required_text(
+                accepted_payload,
+                "actor",
+            )
+            durable_account = self._required_text(
+                accepted_payload,
+                "account_id",
+            )
+            durable_environment = self._required_text(
+                accepted_payload,
+                "environment",
+            )
+            durable_action = canonical_host_action(
+                accepted_payload.get("action")
+            )
+            if (
+                durable_command_id != command_id
+                or durable_operation_id != operation_id
+                or durable_actor != actor
+                or durable_account != account_id
+                or durable_environment != environment
+                or durable_action != action
+            ):
+                # The deterministic event id belongs to this command identity;
+                # disagreement is never a basis to reinterpret durable history.
+                raise ValueError(
+                    "durable host accepted event conflicts with submitted command"
+                )
+            contract = self._authority_contract_if_present(
+                accepted_payload
+            )
+            if contract is None:
+                raise ValueError(
+                    "durable host accepted event predates action-payload binding"
+                )
+            contract_action, _, _, _ = contract
+            if contract_action != action:
+                raise ValueError(
+                    "durable host accepted action contract is inconsistent"
+                )
+            if accepted_payload.get("phase") != "QUEUED":
+                raise ValueError(
+                    "durable COMMAND_ACCEPTED replay must preserve QUEUED phase"
+                )
+
+            replay_result = CommandResult(
+                command_id=command_id,
+                status="ACCEPTED",
+                state_version=str(accepted_event["aggregate_version"]),
+                operation_id=durable_operation_id,
+            )
+            original_envelope = _rehydrate_committed_event(
+                accepted_event
+            )
+            try:
+                saved_result, inserted, _ = self._journal.commit_command(
+                    command_id=scoped_command_id,
+                    actor=actor,
+                    environment=environment,
+                    idempotency_key=scoped_idempotency_key,
+                    request=dict(command),
+                    result=self._result_dict(replay_result),
+                    state_version=int(accepted_event["aggregate_version"]),
+                    events=[(original_envelope, "ui.host-events")],
+                )
+            except ValueError as error:
+                message = str(error)
+                if (
+                    "idempotency_key" in message
+                    or "command_id" in message
+                    or "aggregate_version" in message
+                ):
+                    return CommandResult(
+                        command_id=command_id,
+                        status="CONFLICT",
+                        state_version=str(self.state_version),
+                        reason_codes=(self._conflict_reason(error),),
+                    )
+                raise
+            if inserted:
+                raise ValueError(
+                    "existing host accepted event unexpectedly inserted on replay"
+                )
+            expected_result = self._result_dict(replay_result)
+            if saved_result != expected_result:
+                raise ValueError(
+                    "host command result conflicts with durable accepted event"
+                )
+            return self._command_result(saved_result)
+
         current = self.state_version
         expected = int(expected_raw)
         if expected != current:
@@ -290,13 +442,10 @@ class JournalBackedHostCommandStore:
             )
             try:
                 stored, _ = self._journal.record_command(
-                    command_id=self._scoped_command_uuid(
-                        command_id,
-                        purpose="commands",
-                    ),
+                    command_id=scoped_command_id,
                     actor=actor,
                     environment=environment,
-                    idempotency_key=self._journal_idempotency_key(idempotency_key),
+                    idempotency_key=scoped_idempotency_key,
                     request=dict(command),
                     result=self._result_dict(conflict),
                     state_version=current,
@@ -320,21 +469,12 @@ class JournalBackedHostCommandStore:
         )
         action_payload_hash = payload_digest(action_payload)
 
-        operation_id = scoped_host_operation_id(
-            account_id=self.account_id,
-            environment=self.environment,
-            command_id=command_id,
-        )
         next_version = current + 1
         result = CommandResult(
             command_id=command_id,
             status="ACCEPTED",
             state_version=str(next_version),
             operation_id=operation_id,
-        )
-        event_id = self._scoped_command_uuid(
-            command_id,
-            purpose="command-events",
         )
         operation_time = self._now()
         envelope = self._event_envelope(
@@ -360,13 +500,10 @@ class JournalBackedHostCommandStore:
         )
         try:
             stored, inserted, _ = self._journal.commit_command(
-                command_id=self._scoped_command_uuid(
-                    command_id,
-                    purpose="commands",
-                ),
+                command_id=scoped_command_id,
                 actor=actor,
                 environment=environment,
-                idempotency_key=self._journal_idempotency_key(idempotency_key),
+                idempotency_key=scoped_idempotency_key,
                 request=dict(command),
                 result=self._result_dict(result),
                 state_version=next_version,

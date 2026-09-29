@@ -18,8 +18,6 @@ from typing import Iterable
 from autotrade_numeric.exact_decimal import (
     ExactDecimalError,
     as_fraction,
-    canonical_decimal_text as _shared_canonical_decimal_text,
-    round_fraction_to_quantum,
     terminating_decimal,
     validate_fraction,
 )
@@ -87,11 +85,12 @@ def _mean_fraction(values: list[Fraction]) -> Fraction | None:
 
 
 def _report_fraction(value: Fraction) -> Decimal:
-    return round_fraction_to_quantum(
-        _bounded(value),
-        _ABLATION_REPORT_QUANTUM,
-        mode="HALF_EVEN",
-    )
+    value = _bounded(value)
+    with localcontext() as context:
+        context.prec = _ABLATION_REPORT_PRECISION
+        context.rounding = ROUND_HALF_EVEN
+        projected = Decimal(value.numerator) / Decimal(value.denominator)
+        return projected.quantize(_ABLATION_REPORT_QUANTUM)
 
 
 def _report_sqrt(value: Fraction) -> Decimal:
@@ -835,7 +834,10 @@ class AblationEvidenceBundle:
 def _canonical_decimal_text(value: Decimal | None) -> str | None:
     if value is None:
         return None
-    return _shared_canonical_decimal_text(value)
+    rendered = format(value, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return "0" if rendered in {"", "-0"} else rendered
 
 
 def _fraction_payload(value: Fraction) -> dict[str, str]:

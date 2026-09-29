@@ -14,6 +14,7 @@ from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Mapping
 
+from .exact_decimal import exact_abs, exact_sum
 from .fx_valuation import FxQuote, FxValuationError, value_amount
 from .perpetuals import PerpetualError, linear_notional
 
@@ -403,7 +404,7 @@ def normalize_allocation_valuation(
                 f"{symbol_text} valuation FX evidence digest mismatch"
             )
 
-    unit_base_notional = abs(converted)
+    unit_base_notional = exact_abs(converted)
     if _positive(
         valuation.get("unit_base_notional"),
         name=f"{symbol_text} valuation unit_base_notional",
@@ -496,7 +497,7 @@ def normalize_allocation_valuation(
         )
         for key in _COST_COMPONENTS
     }
-    total_cost_rate = sum(components.values(), Decimal("0"))
+    total_cost_rate = exact_sum(components.values())
     if total_cost_rate != _positive(
         expected_cost_rate,
         name=f"{symbol_text} expected cost_rate",

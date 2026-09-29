@@ -1486,6 +1486,77 @@ class QualificationAttestationTests(unittest.TestCase):
                 requirement_ids=("same", "same"),
             )
 
+    def test_receipt_and_policy_subclasses_are_rejected_by_shared_verifier(self):
+        trust_root = root()
+        trust_policy = policy(trust_root)
+        value = attestation(trust_root)
+
+        class ForgedReceipt(SignedQualificationAttestation):
+            pass
+
+        class ForgedPolicy(QualificationTrustPolicy):
+            pass
+
+        forged_receipt = ForgedReceipt(value, sign(value))
+        forged_policy = ForgedPolicy(
+            policy_version=trust_policy.policy_version,
+            roots=trust_policy.roots,
+        )
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            with self.assertRaisesRegex(
+                TypeError,
+                "canonical SignedQualificationAttestation",
+            ):
+                verify(forged_receipt, store, trust_policy)
+            with self.assertRaisesRegex(
+                TypeError,
+                "canonical QualificationTrustPolicy",
+            ):
+                verify(
+                    SignedQualificationAttestation(value, sign(value)),
+                    store,
+                    forged_policy,
+                )
+
+    def test_canonical_verifier_rejects_receipt_subclass_before_policy_semantics(self):
+        trust_root = root()
+        trust_policy = policy(trust_root)
+        value = attestation(trust_root)
+
+        class ForgedReceipt(SignedQualificationAttestation):
+            pass
+
+        forged = ForgedReceipt(value, sign(value))
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            with (
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "load_canonical_qualification_trust_policy",
+                    return_value=trust_policy,
+                ),
+                self.assertRaisesRegex(
+                    TypeError,
+                    "canonical SignedQualificationAttestation",
+                ),
+            ):
+                verify_canonical_qualification_attestation(
+                    forged,
+                    evidence_store=store,
+                    expected_source_sha=SOURCE,
+                    expected_domain="RELEASE",
+                    expected_gate="FREEZE",
+                    expected_package_id="WP-54",
+                    expected_protocol_id="release-freeze-v1",
+                    expected_protocol_version="1.0.0",
+                    expected_requirement_id="release-candidate-freeze",
+                    expected_release_artifact_id=RELEASE_A,
+                    expected_release_artifact_sha256=RELEASE_A_SHA,
+                )
+
     def test_attestation_subclass_cannot_supply_signed_semantics(self):
         trust_root = root()
         original = attestation(trust_root)

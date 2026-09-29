@@ -400,8 +400,11 @@ def guard_windows_database_authority(
     database_handle = 0
     try:
         database_handle = _open_windows_database_file(canonical, create=create)
-        identity = _windows_identity_from_handle(canonical, database_handle)
+        # Transfer ownership to the cleanup stack immediately after a successful
+        # open. Native identity/link validation below is deliberately fail-closed
+        # and may raise; that failure must never leak a no-FILE_SHARE_DELETE handle.
         handles.append(database_handle)
+        identity = _windows_identity_from_handle(canonical, database_handle)
         try:
             yield identity
         except BaseException as primary:

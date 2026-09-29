@@ -1323,10 +1323,10 @@ class AblationQualificationAuthority:
         task: str | None = None,
         instrument_family: str | None = None,
     ) -> None:
-        if not isinstance(scientific_registry, ScientificRegistry):
-            raise TypeError("scientific_registry must be ScientificRegistry")
-        if not isinstance(experience_memory, ExperienceMemory):
-            raise TypeError("experience_memory must be ExperienceMemory")
+        if type(scientific_registry) is not ScientificRegistry:
+            raise TypeError("scientific_registry must be the canonical ScientificRegistry")
+        if type(experience_memory) is not ExperienceMemory:
+            raise TypeError("experience_memory must be the canonical ExperienceMemory")
         if type(artifact_store) is not ArtifactStore:
             raise TypeError("artifact_store must be the canonical ArtifactStore")
         if not isinstance(protocol_id, str) or not protocol_id.strip():
@@ -1560,13 +1560,19 @@ def evaluate_qualified_incremental_value(
     selected_input = tuple(pairs)
     trusted = authority is not None
     if trusted:
-        if not isinstance(authority, AblationQualificationAuthority):
-            raise TypeError("authority must be AblationQualificationAuthority or None")
+        if type(authority) is not AblationQualificationAuthority:
+            raise TypeError(
+                "authority must be the canonical AblationQualificationAuthority or None"
+            )
         if population is not None or tuple(canonical_outcomes):
             raise ValueError(
                 "authority-backed qualification does not accept caller-authored population/outcomes"
             )
-        population, trusted_outcomes = authority.resolve(
+        # Do not grant terminal qualification through subclass virtual dispatch.
+        # Exact-instance internal dependency hardening remains a separate concern,
+        # but a caller-defined authority subclass cannot replace resolve().
+        population, trusted_outcomes = AblationQualificationAuthority.resolve(
+            authority,
             selected_input,
             outcome_refs=tuple(outcome_refs),
         )

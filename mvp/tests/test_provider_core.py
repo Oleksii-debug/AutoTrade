@@ -86,6 +86,7 @@ class ProviderCoreTests(unittest.TestCase):
             now="2026-09-24T18:00:00Z",
             authority_check=lambda _hash, _now: (True, "allowed"),
             transport_send=transport,
+            sender_check=lambda _owner, _epoch: None,
             submission_scope=scope,
         )
         self.assertEqual(outcome.status, "SENT")

@@ -160,7 +160,7 @@ def attestation(trust_root, **overrides):
     return QualificationAttestation(**values)
 
 
-def verify(receipt, store, trust_policy, **overrides):
+def verify(receipt, store, trust_policy, *, evidence_root=None, **overrides):
     values = dict(
         expected_policy_id=trust_policy.policy_id,
         expected_policy_version=trust_policy.policy_version,
@@ -175,10 +175,13 @@ def verify(receipt, store, trust_policy, **overrides):
         expected_release_artifact_sha256=RELEASE_A_SHA,
     )
     values.update(overrides)
+    if evidence_root is None:
+        evidence_root = store.root
     return verify_qualification_attestation(
         receipt,
         policy=trust_policy,
         evidence_store=store,
+        evidence_root=evidence_root,
         **values,
     )
 
@@ -266,7 +269,8 @@ class QualificationAttestationTests(unittest.TestCase):
         receipt = SignedQualificationAttestation(value, sign(value))
 
         with TemporaryDirectory() as directory:
-            store = ArtifactStore(Path(directory) / "store")
+            artifact_root = Path(directory) / "store"
+            store = ArtifactStore(artifact_root)
             publish(store)
             redirected = Path(directory) / "attacker-store"
             object.__setattr__(store, "root", redirected)
@@ -283,7 +287,12 @@ class QualificationAttestationTests(unittest.TestCase):
                 lambda _artifact_id: redirected / "forged.json",
             )
 
-            accepted = verify(receipt, store, trust_policy)
+            accepted = verify(
+                receipt,
+                store,
+                trust_policy,
+                evidence_root=artifact_root,
+            )
 
         self.assertEqual(accepted.result, "PASS")
         self.assertEqual(accepted.attestation_id, value.attestation_id)
@@ -475,6 +484,7 @@ class QualificationAttestationTests(unittest.TestCase):
                     accepted = verify_canonical_qualification_attestation(
                         canonical_receipt,
                         evidence_store=store,
+                        evidence_root=Path(evidence_directory),
                         expected_source_sha=source_sha,
                         expected_domain="RELEASE",
                         expected_gate="FREEZE",
@@ -1606,6 +1616,7 @@ class QualificationAttestationTests(unittest.TestCase):
                     ),
                     policy=policy(trust_root),
                     evidence_store=store,
+                    evidence_root=Path(directory),
                     expected_policy_id=policy(trust_root).policy_id,
                     expected_policy_version=policy(trust_root).policy_version,
                     expected_source_sha=SOURCE,

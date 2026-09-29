@@ -1,0 +1,101 @@
+from __future__ import annotations
+
+import os
+import tempfile
+import unittest
+from pathlib import Path
+
+from autotrade_mvp.persistence import JournalStore
+
+
+class JournalStorePathIdentityRegressionTests(unittest.TestCase):
+    def test_relative_backing_path_is_frozen_at_construction(self) -> None:
+        original_cwd = Path.cwd()
+        try:
+            with tempfile.TemporaryDirectory() as first_dir, tempfile.TemporaryDirectory() as second_dir:
+                first = Path(first_dir)
+                second = Path(second_dir)
+                (first / "state").mkdir()
+                (second / "state").mkdir()
+
+                os.chdir(first)
+                store = JournalStore("state/journal.sqlite")
+                expected = (first / "state" / "journal.sqlite").resolve()
+
+                self.assertTrue(
+                    Path(store.path).is_absolute(),
+                    "JournalStore must freeze relative durable-state authority to an absolute path at construction",
+                )
+                self.assertEqual(Path(store.path), expected)
+
+                os.chdir(second)
+                self.assertEqual(
+                    Path(store.path),
+                    expected,
+                    "changing process CWD must not retarget an already-constructed JournalStore",
+                )
+        finally:
+            os.chdir(original_cwd)
+
+    def test_same_relative_text_in_different_cwds_is_not_same_store_identity(self) -> None:
+        original_cwd = Path.cwd()
+        try:
+            with tempfile.TemporaryDirectory() as first_dir, tempfile.TemporaryDirectory() as second_dir:
+                first = Path(first_dir)
+                second = Path(second_dir)
+                (first / "state").mkdir()
+                (second / "state").mkdir()
+
+                os.chdir(first)
+                first_store = JournalStore("state/journal.sqlite")
+
+                os.chdir(second)
+                second_store = JournalStore("state/journal.sqlite")
+
+                self.assertNotEqual(
+                    Path(first_store.path),
+                    Path(second_store.path),
+                    "equal caller path text in different CWDs must not alias two durable-state authorities",
+                )
+        finally:
+            os.chdir(original_cwd)
+
+    def test_store_identity_is_stable_across_cwd_change_and_restart(self) -> None:
+        original_cwd = Path.cwd()
+        try:
+            with tempfile.TemporaryDirectory() as first_dir, tempfile.TemporaryDirectory() as second_dir:
+                first = Path(first_dir)
+                second = Path(second_dir)
+                (first / "state").mkdir()
+
+                os.chdir(first)
+                first_store = JournalStore("state/journal.sqlite")
+                identity = first_store.store_identity
+
+                os.chdir(second)
+                self.assertEqual(first_store.store_identity, identity)
+
+                restarted = JournalStore(first / "state" / "journal.sqlite")
+                self.assertEqual(restarted.store_identity, identity)
+        finally:
+            os.chdir(original_cwd)
+
+    def test_replacing_backing_file_after_construction_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite"
+            store = JournalStore(path)
+            original_identity = store.store_identity
+
+            replacement = Path(directory) / "replacement.sqlite"
+            JournalStore(replacement)
+            path.unlink()
+            replacement.replace(path)
+
+            with self.assertRaises((RuntimeError, ValueError, OSError)):
+                store.current_journal_sequence()
+
+            self.assertEqual(store.store_identity, original_identity)
+
+
+if __name__ == "__main__":
+    unittest.main()

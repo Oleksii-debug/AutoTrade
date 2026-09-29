@@ -61,9 +61,9 @@ def normalize_provider_environment(
     """Return one canonical provider-domain identity for authority consumers.
 
     Runtime environment and provider environment stay separate. BYBIT retains
-    exact MAINNET/TESTNET/DEMO identity. Providers without a separately
-    qualified exact-domain policy may only use the runtime environment as their
-    provider environment, preventing caller-authored endpoint authority.
+    exact MAINNET/TESTNET/DEMO mapping semantics. Other providers retain any
+    canonical explicit provider-domain identity, but this function grants no
+    endpoint, credential, capability, or trading authority for that identity.
     """
 
     provider = _text(provider_id, "provider_id").upper()
@@ -104,11 +104,6 @@ def normalize_provider_environment(
         for character in normalized
     ):
         raise ProviderCoreError("provider_environment is not canonical")
-    if normalized != runtime_environment:
-        raise ProviderCoreError(
-            "provider_environment must equal runtime environment "
-            "until an exact provider-domain policy is qualified"
-        )
     return normalized
 
 

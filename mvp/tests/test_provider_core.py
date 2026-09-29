@@ -101,12 +101,19 @@ class ProviderCoreTests(unittest.TestCase):
                 provider_id="BYBIT", environment="PAPER",
                 provider_environment=None,
             )
-        with self.assertRaisesRegex(
-            ProviderCoreError, "must equal runtime environment"
-        ):
+        self.assertEqual(
             normalize_provider_environment(
                 provider_id="KRAKEN", environment="PAPER",
                 provider_environment="DEMO",
+            ),
+            "DEMO",
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError, "not canonical"
+        ):
+            normalize_provider_environment(
+                provider_id="KRAKEN", environment="PAPER",
+                provider_environment="bad domain",
             )
 
     def _durable_submission_binding(

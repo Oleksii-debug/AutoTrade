@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_activity_accounting import (
+    AccountingConflict,
     _activity_identity,
     _book_id,
     book_external_provider_cash_activity,
@@ -332,6 +333,42 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                 imported[0]["payload"]["observed_at"],
                 "2026-09-24T18:02:00Z",
             )
+
+    def test_repoll_rejects_durable_command_result_effect_mismatch(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            evidence = activity(
+                provider_id="IBKR",
+                account_id="acct-result-mismatch",
+                activity_id="dep-result-mismatch",
+            )
+            _, inserted = book_paper_activity(
+                store,
+                provider_id="IBKR",
+                account_id="acct-result-mismatch",
+                activity=evidence,
+                amount="100",
+                observed_at="2026-09-24T18:02:00Z",
+            )
+            self.assertTrue(inserted)
+
+            with patch.object(
+                store,
+                "commit_command",
+                return_value=({"tampered": True}, False, ()),
+            ):
+                with self.assertRaisesRegex(
+                    AccountingConflict,
+                    "durable command result conflicts with its financial effect",
+                ):
+                    book_paper_activity(
+                        store,
+                        provider_id="IBKR",
+                        account_id="acct-result-mismatch",
+                        activity=evidence,
+                        amount="100.00",
+                        observed_at="2026-09-24T18:12:00Z",
+                    )
 
     def test_same_activity_reobserved_later_is_idempotent(self):
         with TemporaryDirectory() as directory:

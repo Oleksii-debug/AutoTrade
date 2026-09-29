@@ -208,6 +208,22 @@ def linear_funding_cashflow(
 
 @dataclass(frozen=True)
 class SplitResult:
+    """Exact rational corporate-action split reference result.
+
+    Fractional entitlement policy belongs to the product/accounting boundary,
+    not this independent oracle. Quantity and unit basis therefore remain exact
+    Fractions even when their base-10 expansions are non-terminating.
+    """
+
+    quantity: Fraction
+    unit_basis: Fraction
+    total_basis: Fraction
+
+
+@dataclass(frozen=True)
+class DecimalSplitResult:
+    """Optional Decimal projection for splits whose exact values terminate."""
+
     quantity: Decimal
     unit_basis: Decimal
     total_basis: Decimal
@@ -220,6 +236,8 @@ def apply_split(
     numerator: Decimal | str | int,
     denominator: Decimal | str | int = 1,
 ) -> SplitResult:
+    """Return the exact split reference without inventing entitlement policy."""
+
     qty = _decimal(quantity, name="quantity")
     basis = _non_negative(unit_basis, name="unit_basis")
     num = _positive(numerator, name="numerator")
@@ -234,9 +252,26 @@ def apply_split(
         else Fraction(0, 1)
     )
     return SplitResult(
-        quantity=_finite(new_quantity_f),
-        unit_basis=_finite(new_unit_basis_f),
-        total_basis=_finite(total_basis_f),
+        quantity=new_quantity_f,
+        unit_basis=new_unit_basis_f,
+        total_basis=total_basis_f,
+    )
+
+
+def project_split_decimal(result: SplitResult) -> DecimalSplitResult:
+    """Project an exact split to Decimal only when all values terminate.
+
+    Non-terminating fractional entitlements intentionally fail closed here.
+    Production handling must cross a versioned quantity-quantum,
+    fractional-share, or cash-in-lieu policy boundary before projection.
+    """
+
+    if not isinstance(result, SplitResult):
+        raise TypeError("result must be SplitResult")
+    return DecimalSplitResult(
+        quantity=_finite(result.quantity),
+        unit_basis=_finite(result.unit_basis),
+        total_basis=_finite(result.total_basis),
     )
 
 

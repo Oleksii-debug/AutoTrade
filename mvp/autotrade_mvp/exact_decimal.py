@@ -71,6 +71,12 @@ def terminating_decimal(value: Fraction) -> Decimal:
     return _decimal_from_scaled_integer(coefficient, scale)
 
 
+def exact_abs(value: Decimal) -> Decimal:
+    """Return absolute value without Decimal.__abs__ applying ambient context."""
+
+    return terminating_decimal(abs(as_fraction(value)))
+
+
 def exact_add(left: Decimal, right: Decimal) -> Decimal:
     return terminating_decimal(as_fraction(left) + as_fraction(right))
 

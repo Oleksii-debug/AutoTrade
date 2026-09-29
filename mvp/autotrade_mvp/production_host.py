@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+from math import isfinite
 import os
 from pathlib import Path
 import ssl
@@ -30,6 +31,7 @@ from .security import SecurityBoundary, _authenticated_origin
 _ALLOWED_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 _COMMAND_PATH = "/api/v1/commands"
 _SHUTTING_DOWN_BODY = b'{"error":"HOST_SHUTTING_DOWN"}'
+_MAX_SERVE_POLL_SECONDS = 0.5
 _CONFIG_FIELDS = frozenset(
     {
         "journal_path",
@@ -310,8 +312,9 @@ class ProductionHostRuntime:
         self._serve_thread: Thread | None = None
         self._serve_error: BaseException | None = None
         self._lifecycle_lock = Lock()
-        # A deliberately tiny test seam for deterministic STARTING/close races.
+        # Tiny deterministic test seams around the two pre-I/O cancellation points.
         self._serve_entry_hook: Callable[[], None] = lambda: None
+        self._serve_loop_entry_hook: Callable[[], None] = lambda: None
 
     @property
     def closed(self) -> bool:
@@ -329,8 +332,29 @@ class ProductionHostRuntime:
             with self._lifecycle_lock:
                 if self._closed:
                     return
+                # ENTERING has passed worker startup admission but has not yet
+                # touched the server request loop. close() can still cancel it
+                # without any BaseServer shutdown handshake.
+                self._serve_state = "ENTERING"
+            self._serve_loop_entry_hook()
+            with self._lifecycle_lock:
+                if self._closed:
+                    return
+                # ProductionHostRuntime owns a cooperative loop over the canonical
+                # server's public handle_request() primitive. This removes the
+                # BaseServer.shutdown() pre-entry deadlock class entirely: close()
+                # only publishes cancellation and joins an already-active worker.
+                self.server.timeout = min(poll_interval, _MAX_SERVE_POLL_SECONDS)
                 self._serve_state = "SERVING"
-            self.server.serve_forever(poll_interval=poll_interval)
+
+            while True:
+                with self._lifecycle_lock:
+                    if self._closed:
+                        return
+                self.server.handle_request()
+                # Preserve ThreadingMixIn housekeeping that BaseServer.serve_forever
+                # normally invokes once per poll iteration.
+                self.server.service_actions()
         except BaseException as exc:
             self._serve_error = exc
         finally:
@@ -338,6 +362,15 @@ class ProductionHostRuntime:
                 self._serve_state = "IDLE"
 
     def serve_forever(self, *, poll_interval: float = 0.5) -> None:
+        if (
+            isinstance(poll_interval, bool)
+            or not isinstance(poll_interval, (int, float))
+        ):
+            raise TypeError("poll_interval must be a finite positive number")
+        poll_interval = float(poll_interval)
+        if not isfinite(poll_interval) or poll_interval <= 0:
+            raise ValueError("poll_interval must be a finite positive number")
+
         with self._lifecycle_lock:
             if self._closed:
                 raise RuntimeError("production host runtime is closed")
@@ -371,15 +404,14 @@ class ProductionHostRuntime:
         self._admission_gate.stop_and_drain()
 
         try:
-            if state == "SERVING":
-                # SERVING is published only by the dedicated worker after the
-                # deterministic STARTING cancellation point. shutdown() therefore
-                # cannot race a deliberately paused pre-entry transition.
-                self.server.shutdown()
-                if worker is not None:
-                    worker.join()
-            # STARTING is cancelled by _run_server's closed recheck. Do not call
-            # BaseServer.shutdown() there: it can block before serve_forever enters.
+            if state == "SERVING" and worker is not None:
+                # No BaseServer.shutdown() call is required or permitted here.
+                # The canonical server's handle_request() poll is capped, so the
+                # worker observes _closed and exits before listener teardown.
+                worker.join()
+            # STARTING/ENTERING workers have not touched server request I/O and
+            # recheck _closed before doing so. They may be cancelled without a
+            # blocking join, preserving deterministic pre-entry close semantics.
         finally:
             try:
                 self.server.server_close()

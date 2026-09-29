@@ -364,6 +364,76 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                         observed_at="2026-09-24T18:02:00Z",
                     )
 
+    def test_concurrent_exact_provider_cash_commit_replays_idempotently(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            evidence = activity(
+                provider_id="IBKR",
+                account_id="acct-race",
+                activity_id="dep-race",
+            )
+            original_commit_command = store.commit_command
+            calls = 0
+
+            def competing_exact_commit(**kwargs):
+                nonlocal calls
+                calls += 1
+                saved_result, inserted, topics = original_commit_command(**kwargs)
+                if calls == 1:
+                    self.assertTrue(inserted)
+                    return saved_result, False, ()
+                return saved_result, inserted, topics
+
+            with patch.object(
+                store,
+                "commit_command",
+                side_effect=competing_exact_commit,
+            ):
+                transaction, inserted = book_paper_activity(
+                    store,
+                    provider_id="IBKR",
+                    account_id="acct-race",
+                    activity=evidence,
+                    amount="100",
+                    observed_at="2026-09-24T18:02:00Z",
+                )
+
+            self.assertFalse(inserted)
+            self.assertGreaterEqual(calls, 2)
+            self.assertEqual(
+                load_paper_book(
+                    store,
+                    provider_id="IBKR",
+                    account_id="acct-race",
+                ).transactions,
+                (transaction,),
+            )
+            self.assertEqual(
+                len(
+                    store.load_events(
+                        "provider_activity",
+                        paper_activity_identity(
+                            provider_id="IBKR",
+                            account_id="acct-race",
+                            activity_id="dep-race",
+                        ),
+                    )
+                ),
+                1,
+            )
+            self.assertEqual(
+                len(
+                    store.load_events(
+                        "economic_book",
+                        paper_book_id(
+                            provider_id="IBKR",
+                            account_id="acct-race",
+                        ),
+                    )
+                ),
+                1,
+            )
+
     def test_repoll_rejects_durable_command_result_effect_mismatch(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

@@ -99,6 +99,16 @@ def exact_sum(values: Iterable[Decimal], *, start: Decimal = Decimal("0")) -> De
     return terminating_decimal(result)
 
 
+def exact_is_multiple(value: Decimal, quantum: Decimal) -> bool:
+    """Return whether value is an exact integer multiple of a non-zero quantum."""
+
+    quantum_fraction = as_fraction(quantum)
+    if quantum_fraction == 0:
+        raise ExactDecimalError("quantum must be non-zero")
+    ratio = as_fraction(value) / quantum_fraction
+    return ratio.denominator == 1
+
+
 def round_fraction_to_quantum(
     value: Fraction,
     quantum: Decimal,

@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import ssl
+from threading import Lock
 from typing import Callable
 from urllib.parse import urlsplit
 
@@ -86,22 +87,42 @@ class ProductionHostRuntime:
         self.application = application
         self.server = server
         self._closed = False
+        self._serving = False
+        self._lifecycle_lock = Lock()
 
     @property
     def closed(self) -> bool:
         return self._closed
 
+    @property
+    def serving(self) -> bool:
+        return self._serving
+
     def serve_forever(self, *, poll_interval: float = 0.5) -> None:
-        if self._closed:
-            raise RuntimeError("production host runtime is closed")
-        self.server.serve_forever(poll_interval=poll_interval)
+        with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("production host runtime is closed")
+            if self._serving:
+                raise RuntimeError("production host runtime is already serving")
+            self._serving = True
+        try:
+            self.server.serve_forever(poll_interval=poll_interval)
+        finally:
+            with self._lifecycle_lock:
+                self._serving = False
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            serving = self._serving
         try:
-            self.server.shutdown()
+            # BaseServer.shutdown() waits for serve_forever(). Calling it before
+            # serving can block indefinitely, so pre-serve teardown closes the
+            # listener directly while an active server is asked to stop first.
+            if serving:
+                self.server.shutdown()
         finally:
             self.server.server_close()
 

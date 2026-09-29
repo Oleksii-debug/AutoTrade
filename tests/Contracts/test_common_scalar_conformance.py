@@ -56,6 +56,17 @@ class CommonScalarConformanceTests(unittest.TestCase):
                 self.assertEqual(schema_result, case["expected"])
                 self.assertEqual(binding_result, case["expected"])
 
+    def test_utc_instant_terminal_lf_and_crlf_fail_at_schema_boundary(self):
+        validator = Draft202012Validator(
+            {"$ref": f"{self.common['$id']}#/$defs/UtcInstant"},
+            registry=self.registry,
+        )
+        valid = "2026-09-29T01:02:03Z"
+        self.assertTrue(validator.is_valid(valid))
+        for suffix in ("\n", "\r\n"):
+            with self.subTest(suffix=repr(suffix)):
+                self.assertFalse(validator.is_valid(valid + suffix))
+
 
 if __name__ == "__main__":
     unittest.main()

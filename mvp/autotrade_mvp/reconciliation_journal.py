@@ -958,6 +958,18 @@ def load_account_resource_availability_evidence(
     requested = tuple(_text(value, name="resource") for value in resources)
     if not requested or len(requested) != len(set(requested)):
         raise ValueError("resources must be non-empty and unique")
+    if (
+        provider == "BYBIT"
+        and scope == "PAPER"
+        and any(resource.startswith("BORROW:") for resource in requested)
+    ):
+        # Canonical securities-borrow evidence currently binds provider/account/
+        # runtime environment but not TESTNET-vs-DEMO. Until that typed evidence
+        # carries provider_environment, PAPER borrow capacity cannot authorize a
+        # provider-domain-scoped reservation.
+        raise ValueError(
+            "BYBIT PAPER BORROW capacity lacks exact provider_environment evidence"
+        )
 
     # A provider availability snapshot is only a safe CASH reservation authority
     # for the exact financial cut it reconciled. Durable settlement registration

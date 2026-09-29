@@ -3248,6 +3248,7 @@ class AuthorityService:
                 account_id=account_id,
                 environment=environment,
                 provider_id=snapshot_provider_id,
+                provider_environment=snapshot_provider_environment,
                 instrument_version=snapshot_instrument,
                 capability_snapshot_id=capability,
                 reconciliation_checkpoint_event_id=(

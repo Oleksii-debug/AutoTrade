@@ -116,6 +116,7 @@ def _register_trusted_root_binding(
     root_key: str,
 ) -> None:
     binding = _capture_trusted_root_binding(self, root_key=root_key)
+    registered = False
     try:
         with _TRUSTED_ROOT_BINDINGS_LOCK:
             if self in _TRUSTED_ROOT_BINDINGS:
@@ -123,8 +124,12 @@ def _register_trusted_root_binding(
                     "ArtifactStore authority cannot be reinitialized"
                 )
             _TRUSTED_ROOT_BINDINGS[self] = binding
+            registered = True
         weakref.finalize(self, _close_trusted_root_binding, binding)
     except Exception:
+        if registered:
+            with _TRUSTED_ROOT_BINDINGS_LOCK:
+                _TRUSTED_ROOT_BINDINGS.pop(self, None)
         _close_trusted_root_binding(binding)
         raise
 
@@ -212,7 +217,11 @@ def trusted_authenticated_reader(store: object):
     _assert_trusted_root_binding(binding)
     canonical_read = _store.ArtifactStore.read_authenticated_snapshot
 
-    def read_snapshot(artifact_id: str):
+    def read_snapshot(artifact_id: str, _authority_owner=store):
+        # Keep the original identity token alive for the lifetime of the reader
+        # so its independently retained root binding cannot be finalized early.
+        # The object is never consulted for paths, helpers, or read dispatch.
+        _ = _authority_owner
         _assert_trusted_root_binding(binding)
         result = canonical_read(private_store, artifact_id)
         _assert_trusted_root_binding(binding)

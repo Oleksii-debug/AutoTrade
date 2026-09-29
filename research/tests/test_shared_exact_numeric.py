@@ -1,5 +1,6 @@
 from decimal import Decimal
 from fractions import Fraction
+from pathlib import Path
 import unittest
 
 from autotrade_numeric import (
@@ -20,6 +21,19 @@ class SharedExactNumericDependencyTests(unittest.TestCase):
         self.assertEqual(MAX_RATIONAL_DIGITS, 1024)
         self.assertEqual(as_fraction(Decimal("0.125")), Fraction(1, 8))
         self.assertEqual(validate_fraction(Fraction(1, 3)), Fraction(1, 3))
+
+    def test_research_ci_gates_shared_numeric_pr_changes(self):
+        workflow = (
+            Path(__file__).resolve().parents[2]
+            / ".github"
+            / "workflows"
+            / "research-primitives.yml"
+        ).read_text(encoding="utf-8")
+        pull_request_block = workflow.split("  pull_request:", 1)[1].split(
+            "\n\n", 1
+        )[0]
+        self.assertIn('- "autotrade_numeric/**"', pull_request_block)
+        self.assertIn('- "pyproject.toml"', pull_request_block)
 
 
 if __name__ == "__main__":

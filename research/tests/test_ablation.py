@@ -24,7 +24,7 @@ from autotrade_research.evaluation.ablation import (
 )
 from autotrade_research.artifacts.store import ArtifactStore
 from autotrade_research.memory.episodes import ExperienceMemory
-from autotrade_research.science.registry import ScientificRegistry
+from autotrade_research.science.registry import ProtocolViolation, ScientificRegistry
 
 
 CUT = datetime(2026, 9, 25, 0, 0, tzinfo=timezone.utc)

@@ -631,7 +631,6 @@ class ReleaseCandidateDecision:
 def _canonical_manifest(
     candidate: ReleaseCandidateInput,
     accepted: AcceptedQualificationAttestation,
-    receipt: SignedQualificationAttestation,
 ) -> str:
     body = {
         "release_id": candidate.release_id,
@@ -644,8 +643,8 @@ def _canonical_manifest(
             "policy_id": accepted.policy_id,
             "trust_root_id": accepted.trust_root_id,
             "receipt": {
-                "attestation": receipt.attestation.canonical_payload(),
-                "signature_b64": receipt.signature_b64,
+                "attestation": json.loads(accepted.attestation_json),
+                "signature_b64": accepted.signature_b64,
             },
         },
         "artifacts": [
@@ -713,7 +712,7 @@ def _stored_evidence_is_verified(
 
 
 def _qualification_covers_exact_candidate(
-    receipt: SignedQualificationAttestation,
+    accepted: AcceptedQualificationAttestation,
     candidate: ReleaseCandidateInput,
 ) -> bool:
     expected = {
@@ -734,13 +733,13 @@ def _qualification_covers_exact_candidate(
             ref.media_type,
             ref.evidence_kind,
         )
-        for ref in receipt.attestation.evidence_refs
+        for ref in accepted.evidence_refs
     }
     if observed != expected:
         return False
     return (
         release_candidate_subject_requirement(candidate)
-        in receipt.attestation.requirement_ids
+        in accepted.requirement_ids
     )
 
 
@@ -806,10 +805,6 @@ def freeze_release_candidate(
         windows_package = by_role.get("WINDOWS_PACKAGE")
         if windows_package is None:
             reasons.append("independent_evidence_trust_invalid")
-        elif not _qualification_covers_exact_candidate(
-            qualification_receipt, candidate
-        ):
-            reasons.append("qualification_evidence_set_mismatch")
         else:
             try:
                 accepted = verify_qualification_attestation(
@@ -836,6 +831,10 @@ def freeze_release_candidate(
                     reasons.append(
                         f"qualification_result_not_pass:{accepted.result}"
                     )
+                elif not _qualification_covers_exact_candidate(
+                    accepted, candidate
+                ):
+                    reasons.append("qualification_evidence_set_mismatch")
 
     for artifact in candidate.artifacts:
         if artifact.source_sha != candidate.source_sha:
@@ -882,7 +881,6 @@ def freeze_release_candidate(
     manifest = _canonical_manifest(
         candidate,
         accepted,
-        qualification_receipt,
     )
     digest = "sha256:" + sha256(manifest.encode("utf-8")).hexdigest()
     return ReleaseCandidateDecision(

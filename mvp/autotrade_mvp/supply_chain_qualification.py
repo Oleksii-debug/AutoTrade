@@ -474,7 +474,7 @@ def qualify_supply_chain(
                     ref.media_type,
                     ref.evidence_kind,
                 )
-                for ref in trust_receipt.attestation.evidence_refs
+                for ref in accepted_trust.evidence_refs
             }
             if attested_refs != expected_refs:
                 record(
@@ -619,20 +619,14 @@ def qualify_supply_chain(
             "checks": checks,
             "reasons": sorted(set(reasons)),
             "trust": None
-            if trust_receipt is None
+            if accepted_trust is None
             else {
-                "attestation_digest": trust_receipt.attestation.content_digest,
+                "attestation_digest": accepted_trust.attestation_digest,
                 "signature_sha256": "sha256:"
-                + sha256(trust_receipt.signature_b64.encode("ascii")).hexdigest(),
-                "policy_id": (
-                    accepted_trust.policy_id if accepted_trust is not None else None
-                ),
-                "policy_version": (
-                    accepted_trust.policy_version if accepted_trust is not None else None
-                ),
-                "accepted_attestation_id": (
-                    accepted_trust.attestation_id if accepted_trust is not None else None
-                ),
+                + sha256(accepted_trust.signature_b64.encode("ascii")).hexdigest(),
+                "policy_id": accepted_trust.policy_id,
+                "policy_version": accepted_trust.policy_version,
+                "accepted_attestation_id": accepted_trust.attestation_id,
             },
         },
         sort_keys=True,

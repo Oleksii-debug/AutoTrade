@@ -1310,8 +1310,22 @@ class AcceptedQualificationAttestation:
     protocol_id: str
     protocol_version: str
     requirement_id: str
+    requirement_ids: tuple[str, ...]
+    evidence_refs: tuple[EvidenceArtifactRef, ...]
+    producer_id: str
+    verifier_id: str
+    runner_id: str
+    harness_version: str
+    started_at: str
+    completed_at: str
+    signed_at: str
+    unresolved_limits: tuple[str, ...]
+    schema_version: str
+    verification_method: str
     release_artifact_id: str | None
     release_artifact_sha256: str | None
+    attestation_json: str
+    signature_b64: str
 
 
 def _verify_rsa_pkcs1v15_sha256(
@@ -1583,8 +1597,27 @@ def verify_qualification_attestation(
         protocol_id=attestation.protocol_id,
         protocol_version=attestation.protocol_version,
         requirement_id=expected_requirement_id,
+        requirement_ids=tuple(attestation.requirement_ids),
+        evidence_refs=tuple(
+            _evidence_artifact_ref_snapshot(ref)
+            for ref in attestation.evidence_refs
+        ),
+        producer_id=attestation.producer_id,
+        verifier_id=attestation.verifier_id,
+        runner_id=attestation.runner_id,
+        harness_version=attestation.harness_version,
+        started_at=attestation.started_at,
+        completed_at=attestation.completed_at,
+        signed_at=attestation.signed_at,
+        unresolved_limits=tuple(attestation.unresolved_limits),
+        schema_version=attestation.schema_version,
+        verification_method=attestation.verification_method,
         release_artifact_id=attestation.release_artifact_id,
         release_artifact_sha256=attestation.release_artifact_sha256,
+        attestation_json=_qualification_attestation_bytes_exact(
+            attestation
+        ).decode("utf-8"),
+        signature_b64=receipt.signature_b64,
     )
 
 def verify_canonical_qualification_attestation(

@@ -587,7 +587,7 @@ def qualify_recovery_release(
         else:
             signed_refs = {
                 (item.artifact_id, item.sha256)
-                for item in qualification_receipt.attestation.evidence_refs
+                for item in accepted.evidence_refs
             }
             expected_refs = {
                 (item.evidence_artifact_id, item.evidence_artifact_sha256)

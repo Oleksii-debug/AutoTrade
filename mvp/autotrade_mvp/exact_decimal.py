@@ -114,6 +114,21 @@ def as_fraction(value: Decimal) -> Fraction:
     return result
 
 
+def is_exact_decimal_multiple(value: Decimal, quantum: Decimal) -> bool:
+    """Return whether bounded value is an exact integer multiple of quantum.
+
+    The test is pure rational/integer arithmetic. It never consults Decimal
+    precision or rounding, so grid admission is stable across process contexts.
+    """
+
+    value_fraction = as_fraction(value)
+    quantum_fraction = as_fraction(quantum)
+    if quantum_fraction <= 0:
+        raise ExactDecimalError("quantum must be positive")
+    units = value_fraction / quantum_fraction
+    _validate_fraction_intermediate(units)
+    return units.denominator == 1
+
 def _decimal_from_scaled_integer(coefficient: int, scale: int) -> Decimal:
     if scale < 0:
         raise ExactDecimalError("scale must be non-negative")

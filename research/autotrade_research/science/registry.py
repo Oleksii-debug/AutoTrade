@@ -15,6 +15,11 @@ import sqlite3
 from typing import Any
 from uuid import UUID, uuid4
 
+from autotrade_numeric.exact_decimal import (
+    ExactDecimalError,
+    canonical_decimal_text,
+)
+
 
 REQUIRED_PROTOCOL_FIELDS = {
     "hypothesis",
@@ -91,17 +96,17 @@ def _canonical_policy_decimal(
         raise ProtocolViolation(f"{name} must be canonical decimal text")
     try:
         number = Decimal(value)
-    except (InvalidOperation, ValueError) as error:
-        raise ProtocolViolation(f"{name} must be finite canonical decimal text") from error
-    if not number.is_finite():
-        raise ProtocolViolation(f"{name} must be finite canonical decimal text")
+        # Shared exact-decimal authority validates significant digits, scale and
+        # integer digits before fixed-point rendering. This prevents compact
+        # exponent text from requesting exponent-sized materialization merely to
+        # discover that the spelling is non-canonical.
+        rendered = canonical_decimal_text(number)
+    except (InvalidOperation, ValueError, ExactDecimalError) as error:
+        raise ProtocolViolation(
+            f"{name} exceeds the bounded canonical decimal resource envelope"
+        ) from error
     if non_negative and number < 0:
         raise ProtocolViolation(f"{name} must be non-negative")
-    rendered = format(number, "f")
-    if "." in rendered:
-        rendered = rendered.rstrip("0").rstrip(".")
-    if rendered in {"", "-0"}:
-        rendered = "0"
     if rendered != value:
         raise ProtocolViolation(f"{name} must be canonical decimal text")
     return rendered
@@ -143,6 +148,27 @@ def _validated_ablation_decision_policy(payload: Any) -> dict[str, Any]:
         "uncertainty_multiplier": multiplier,
         "decision_rule": decision_rule,
     }
+
+
+def _validated_protocol_ablation_decision_policy(
+    protocol_payload: dict[str, Any],
+) -> dict[str, Any]:
+    policy = _validated_ablation_decision_policy(
+        protocol_payload["ablation_decision_policy"]
+    )
+    practical_effect = _canonical_policy_decimal(
+        protocol_payload.get("minimum_practical_effect"),
+        "minimum_practical_effect",
+    )
+    # WP-63's required lower bound is the registered minimum practical
+    # after-cost effect for the same net-incremental-value estimand. Treating
+    # them as independent would permit contradictory/easier post-hoc hurdles.
+    if policy["required_lower_bound"] != practical_effect:
+        raise ProtocolViolation(
+            "ablation_decision_policy.required_lower_bound must equal "
+            "minimum_practical_effect for net_incremental_value"
+        )
+    return policy
 
 
 def _now() -> str:
@@ -505,7 +531,7 @@ class ScientificRegistry:
         if not isinstance(payload.get("trial_budget"), int) or isinstance(payload.get("trial_budget"), bool) or payload["trial_budget"] < 1:
             raise ProtocolViolation("trial_budget must be a positive integer")
         if "ablation_decision_policy" in payload:
-            _validated_ablation_decision_policy(payload["ablation_decision_policy"])
+            _validated_protocol_ablation_decision_policy(payload)
         _validate_causal_periods(payload)
         identifier = _id(protocol_id)
         canonical = _canonical(payload)
@@ -580,9 +606,7 @@ class ScientificRegistry:
             raise ProtocolViolation(
                 "registered protocol lacks ablation_decision_policy"
             )
-        policy = _validated_ablation_decision_policy(
-            payload["ablation_decision_policy"]
-        )
+        policy = _validated_protocol_ablation_decision_policy(payload)
         return RegisteredAblationDecisionPolicy(
             protocol_id=protocol,
             protocol_hash=row["protocol_hash"],

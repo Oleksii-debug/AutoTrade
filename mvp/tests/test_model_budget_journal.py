@@ -13,7 +13,7 @@ from mvp.autotrade_mvp.model_gateway import (
     RoutingMode,
     RoutingPolicy,
 )
-from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
 
 
 NOW = "2026-09-24T21:45:00+00:00"
@@ -413,6 +413,129 @@ class DurableModelBudgetTests(unittest.TestCase):
 
             self.assertEqual(
                 journal.load_events("model_budget", "legacy-policy"),
+                before,
+            )
+
+    def test_v9_event_batch_retries_preserve_journal_sequence_after_restart(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory, ceiling="2")
+
+            self.assertTrue(budget.reserve("req-reserve", "0.2"))
+            before = journal.current_journal_sequence()
+            _, restarted = open_budget(directory, ceiling="2")
+            self.assertFalse(restarted.reserve("req-reserve", "0.2"))
+            self.assertEqual(
+                restarted.journal.current_journal_sequence(),
+                before,
+            )
+
+            self.assertTrue(restarted.reserve("req-release", "0.2"))
+            self.assertTrue(restarted.release("req-release"))
+            before = restarted.journal.current_journal_sequence()
+            _, restarted = open_budget(directory, ceiling="2")
+            self.assertFalse(restarted.release("req-release"))
+            self.assertEqual(
+                restarted.journal.current_journal_sequence(),
+                before,
+            )
+
+            self.assertTrue(restarted.reserve("req-settle", "0.2"))
+            self.assertTrue(
+                restarted.settle(
+                    "req-settle",
+                    incurred="0.1",
+                    estimated_unbilled="0.05",
+                )
+            )
+            before = restarted.journal.current_journal_sequence()
+            _, restarted = open_budget(directory, ceiling="2")
+            self.assertFalse(
+                restarted.settle(
+                    "req-settle",
+                    incurred="0.1",
+                    estimated_unbilled="0.05",
+                )
+            )
+            self.assertEqual(
+                restarted.journal.current_journal_sequence(),
+                before,
+            )
+
+            self.assertTrue(restarted.reserve("req-billing", "0.2"))
+            self.assertTrue(
+                restarted.settle(
+                    "req-billing",
+                    incurred="0.05",
+                    estimated_unbilled="0.1",
+                )
+            )
+            self.assertTrue(
+                restarted.reconcile_unbilled(
+                    billing_id="invoice-v9",
+                    request_id="req-billing",
+                    billed="0.05",
+                )
+            )
+            before = restarted.journal.current_journal_sequence()
+            _, restarted = open_budget(directory, ceiling="2")
+            self.assertFalse(
+                restarted.reconcile_unbilled(
+                    billing_id="invoice-v9",
+                    request_id="req-billing",
+                    billed="0.05",
+                )
+            )
+            self.assertEqual(
+                restarted.journal.current_journal_sequence(),
+                before,
+            )
+
+    def test_v9_retry_rejects_resealed_result_inconsistent_with_durable_event(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory)
+            self.assertTrue(budget.reserve("req-1", "0.4"))
+            forged = {
+                "reserved": False,
+                "request_id": "req-1",
+                "amount": "0.4",
+            }
+            with sqlite3.connect(journal.path) as connection:
+                connection.execute(
+                    """
+                    UPDATE command_dedupe
+                    SET result_json = ?, result_hash = ?
+                    """,
+                    (
+                        canonical_json(forged),
+                        payload_digest(forged),
+                    ),
+                )
+                connection.commit()
+
+            _, restarted = open_budget(directory)
+            with self.assertRaisesRegex(
+                ValueError,
+                "result conflicts with durable event",
+            ):
+                restarted.reserve("req-1", "0.4")
+
+    def test_v9_retry_does_not_lazily_promote_orphan_event(self):
+        with TemporaryDirectory() as directory:
+            journal, budget = open_budget(directory)
+            self.assertTrue(budget.reserve("req-1", "0.4"))
+            with sqlite3.connect(journal.path) as connection:
+                connection.execute("DELETE FROM command_dedupe")
+                connection.commit()
+
+            _, restarted = open_budget(directory)
+            before = restarted.journal.current_journal_sequence()
+            with self.assertRaisesRegex(
+                ValueError,
+                "event_id already exists",
+            ):
+                restarted.reserve("req-1", "0.4")
+            self.assertEqual(
+                restarted.journal.current_journal_sequence(),
                 before,
             )
 

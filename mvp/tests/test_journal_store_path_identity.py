@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from autotrade_mvp.persistence import JournalStore
 
@@ -79,6 +81,37 @@ class JournalStorePathIdentityRegressionTests(unittest.TestCase):
                 self.assertEqual(restarted.store_identity, identity)
         finally:
             os.chdir(original_cwd)
+
+    def test_first_open_replacement_between_anchor_and_sqlite_open_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "journal.sqlite"
+            replacement = root / "replacement.sqlite"
+            real_connect = sqlite3.connect
+            raced = False
+
+            def racing_connect(database, *args, **kwargs):
+                nonlocal raced
+                database_path = Path(database)
+                if not raced and database_path == path:
+                    raced = True
+                    real_connect(replacement).close()
+                    path.unlink()
+                    replacement.replace(path)
+                return real_connect(database, *args, **kwargs)
+
+            with patch(
+                "autotrade_mvp.persistence.sqlite3.connect",
+                side_effect=racing_connect,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "first open does not match the anchored journal backing file",
+                ):
+                    JournalStore(path)
+
+            self.assertTrue(raced)
+            self.assertTrue(path.exists())
 
     def test_hard_link_aliases_are_rejected_before_wal_authority(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

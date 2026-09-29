@@ -218,6 +218,7 @@ def qualify(
             policy=policy,
             evidence=evidence,
             evidence_store=store,
+            evidence_root=directory,
             **trust_kwargs,
         )
 

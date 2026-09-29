@@ -8,6 +8,7 @@ not create a second journal, API server, authentication authority or trading pat
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 import ssl
@@ -29,6 +30,17 @@ from .security import SecurityBoundary, _authenticated_origin
 _ALLOWED_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 _COMMAND_PATH = "/api/v1/commands"
 _SHUTTING_DOWN_BODY = b'{"error":"HOST_SHUTTING_DOWN"}'
+_CONFIG_FIELDS = frozenset(
+    {
+        "journal_path",
+        "account_id",
+        "environment",
+        "host_id",
+        "bind_host",
+        "bind_port",
+        "public_origin",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -71,6 +83,89 @@ class ProductionHostConfig:
 
         object.__setattr__(self, "journal_path", journal_path)
         object.__setattr__(self, "public_origin", canonical_origin)
+
+
+def _strict_json_object(payload: bytes) -> dict[str, object]:
+    if not isinstance(payload, bytes):
+        raise TypeError("production host config payload must be bytes")
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("production host config must be UTF-8 JSON") from error
+
+    def object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate production host config field: {key}")
+            result[key] = value
+        return result
+
+    try:
+        parsed = json.loads(text, object_pairs_hook=object_pairs)
+    except json.JSONDecodeError as error:
+        raise ValueError("production host config is not valid JSON") from error
+    if not isinstance(parsed, dict):
+        raise ValueError("production host config must be one JSON object")
+    return parsed
+
+
+def parse_production_host_config(payload: bytes) -> ProductionHostConfig:
+    """Parse one immutable config snapshot without startup defaults or retargeting.
+
+    This is structural configuration validation only. It does not authenticate the
+    configuration, resolve credentials, or grant provider/financial authority.
+    """
+
+    parsed = _strict_json_object(payload)
+    actual = frozenset(parsed)
+    missing = _CONFIG_FIELDS - actual
+    unknown = actual - _CONFIG_FIELDS
+    if missing:
+        raise ValueError(
+            "production host config is missing fields: " + ", ".join(sorted(missing))
+        )
+    if unknown:
+        raise ValueError(
+            "production host config has unknown fields: " + ", ".join(sorted(unknown))
+        )
+
+    for field in (
+        "journal_path",
+        "account_id",
+        "environment",
+        "host_id",
+        "bind_host",
+        "public_origin",
+    ):
+        if not isinstance(parsed[field], str):
+            raise TypeError(f"production host config field {field} must be text")
+    bind_port = parsed["bind_port"]
+    if isinstance(bind_port, bool) or not isinstance(bind_port, int):
+        raise TypeError("production host config field bind_port must be an integer")
+
+    return ProductionHostConfig(
+        journal_path=parsed["journal_path"],
+        account_id=parsed["account_id"],
+        environment=parsed["environment"],
+        host_id=parsed["host_id"],
+        bind_host=parsed["bind_host"],
+        bind_port=bind_port,
+        public_origin=parsed["public_origin"],
+    )
+
+
+def load_production_host_config(path: str | Path) -> ProductionHostConfig:
+    """Read exactly one config payload from an explicit absolute config path."""
+
+    config_path = Path(path)
+    if not config_path.is_absolute():
+        raise ValueError("production host config path must be absolute")
+    canonical_path = config_path.resolve(strict=True)
+    if not canonical_path.is_file():
+        raise ValueError("production host config path must reference a file")
+    payload = canonical_path.read_bytes()
+    return parse_production_host_config(payload)
 
 
 class _InstanceFence:

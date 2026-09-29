@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore
 
 
 class JournalStorePathIdentityRegressionTests(unittest.TestCase):
@@ -114,6 +115,10 @@ class JournalStorePathIdentityRegressionTests(unittest.TestCase):
         finally:
             os.chdir(original_cwd)
 
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "Windows uses retained native namespace/file guards instead of post-open detection",
+    )
     def test_first_open_replacement_between_anchor_and_sqlite_open_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -133,7 +138,7 @@ class JournalStorePathIdentityRegressionTests(unittest.TestCase):
                 return real_connect(database, *args, **kwargs)
 
             with patch(
-                "autotrade_mvp.persistence.sqlite3.connect",
+                "mvp.autotrade_mvp.persistence.sqlite3.connect",
                 side_effect=racing_connect,
             ):
                 with self.assertRaisesRegex(
@@ -144,6 +149,57 @@ class JournalStorePathIdentityRegressionTests(unittest.TestCase):
 
             self.assertTrue(raced)
             self.assertTrue(path.exists())
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only namespace guard")
+    def test_windows_connect_guard_denies_file_and_parent_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent = root / "state"
+            parent.mkdir()
+            path = parent / "journal.sqlite"
+            moved_file = parent / "moved.sqlite"
+            moved_parent = root / "state-moved"
+            real_connect = sqlite3.connect
+            observed = {"file": False, "parent": False}
+
+            def guarded_connect(database, *args, **kwargs):
+                database_path = Path(database)
+                if database_path == path:
+                    with self.assertRaises(OSError):
+                        path.replace(moved_file)
+                    observed["file"] = True
+                    with self.assertRaises(OSError):
+                        parent.replace(moved_parent)
+                    observed["parent"] = True
+                return real_connect(database, *args, **kwargs)
+
+            with patch(
+                "mvp.autotrade_mvp.persistence.sqlite3.connect",
+                side_effect=guarded_connect,
+            ):
+                store = JournalStore(path)
+
+            self.assertEqual(observed, {"file": True, "parent": True})
+            self.assertEqual(store.store_identity.identity_source, "windows_by_handle")
+            self.assertTrue(path.exists())
+            self.assertTrue(parent.exists())
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only native identity")
+    def test_windows_replacement_after_guard_release_changes_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "journal.sqlite"
+            store = JournalStore(path)
+            original = store.store_identity
+            detached = root / "detached.sqlite"
+
+            path.replace(detached)
+            sqlite3.connect(path).close()
+
+            with self.assertRaises(RuntimeError):
+                store.current_journal_sequence()
+            replacement = JournalStore(path)
+            self.assertNotEqual(replacement.store_identity, original)
 
     def test_hard_link_aliases_are_rejected_before_wal_authority(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

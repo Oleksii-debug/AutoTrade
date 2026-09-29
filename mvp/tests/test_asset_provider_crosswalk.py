@@ -144,6 +144,7 @@ def trusted_qualify(evidence, *, signing_root=None, canonical_policy=None):
                 exact_source_sha=SOURCE,
                 exact_adapter_shas=adapter_map(),
                 evidence_store=store,
+                evidence_root=directory,
                 qualification_receipt=SignedQualificationAttestation(
                     signed,
                     sign(signed),
@@ -242,6 +243,7 @@ class AssetProviderCrosswalkTests(unittest.TestCase):
                 exact_source_sha=SOURCE,
                 exact_adapter_shas=adapter_map(),
                 evidence_store=store,
+                evidence_root=directory,
             )
         self.assertIn(key, verdict.invalid_keys)
         self.assertEqual(verdict.status, "INCOMPLETE")

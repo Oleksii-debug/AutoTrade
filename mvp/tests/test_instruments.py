@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import json
 from pathlib import Path
 import unittest
@@ -188,6 +188,69 @@ class InstrumentRegistryTests(unittest.TestCase):
             instrument.validate_quantity("10.001")
         with self.assertRaisesRegex(InstrumentRegistryError, "exact decimal"):
             instrument.validate_price(100.1)
+
+    def test_high_significance_contract_and_grid_are_context_independent(self):
+        observed_contracts = []
+        aligned = "1.234567890123456789"
+        off_grid = "1.2345678901234567891"
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        instrument = InstrumentVersion(
+                            instrument_id=A,
+                            version=1,
+                            provider_id="simulated",
+                            venue_id="exact-grid",
+                            provider_symbol="EXACT-USD",
+                            asset_class="CRYPTO_SPOT",
+                            base_currency="EXACT",
+                            quote_currency="USD",
+                            settlement_currency="USD",
+                            quantity_unit="EXACT",
+                            contract_multiplier="1.000000000000000001",
+                            price_tick="1e-18",
+                            quantity_step="1e-18",
+                            minimum_quantity="1e-18",
+                            maximum_quantity="10",
+                            calendar_id="CONTINUOUS_24_7",
+                            timezone_id="UTC",
+                            effective_from=when(1),
+                        )
+                        observed_contracts.append(instrument.to_contract_dict())
+                        self.assertEqual(
+                            instrument.validate_price(aligned),
+                            Decimal(aligned),
+                        )
+                        self.assertEqual(
+                            instrument.validate_quantity(aligned),
+                            Decimal(aligned),
+                        )
+                        with self.assertRaisesRegex(
+                            InstrumentRegistryError,
+                            "price_tick",
+                        ):
+                            instrument.validate_price(off_grid)
+                        with self.assertRaisesRegex(
+                            InstrumentRegistryError,
+                            "quantity_step",
+                        ):
+                            instrument.validate_quantity(off_grid)
+
+        self.assertTrue(
+            all(contract == observed_contracts[0] for contract in observed_contracts)
+        )
+        self.assertEqual(
+            observed_contracts[0]["contract_multiplier"],
+            "1.000000000000000001",
+        )
+        self.assertEqual(observed_contracts[0]["price_tick"], "0.000000000000000001")
+        self.assertEqual(
+            observed_contracts[0]["quantity_step"],
+            "0.000000000000000001",
+        )
 
     def test_calendar_uses_explicit_dst_transition_evidence(self):
         sessions = tuple(

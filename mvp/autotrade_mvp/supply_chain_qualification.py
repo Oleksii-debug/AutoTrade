@@ -10,8 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+from pathlib import Path
 from uuid import UUID
 
+from research.autotrade_research.artifacts import trusted_authenticated_reader
 from research.autotrade_research.artifacts.store import (
     ArtifactIntegrityError,
     ArtifactStore,
@@ -202,7 +204,7 @@ class SupplyChainQualification:
 
 
 def _store_artifact_matches(
-    store: ArtifactStore,
+    read_snapshot,
     *,
     artifact_id: str,
     artifact_hash: str,
@@ -213,7 +215,7 @@ def _store_artifact_matches(
     """Verify exact immutable bytes and declared bindings through ArtifactStore.\n\n    ArtifactStore is an integrity boundary, not an independent trust anchor: the\n    caller that opens a store may also have populated it. Producer/authenticator\n    trust is therefore evaluated separately and must remain fail-closed until a\n    qualified attestation boundary exists.\n    """
 
     try:
-        manifest = store.load_manifest(artifact_id)
+        manifest, _raw = read_snapshot(artifact_id)
         if not isinstance(manifest.get("manifest_hash"), str):
             return False
         if manifest.get("sha256") != artifact_hash:
@@ -224,7 +226,6 @@ def _store_artifact_matches(
             return False
         if manifest.get("metadata") != metadata:
             return False
-        store.read_bytes(artifact_id)
     except (
         ArtifactIntegrityError,
         FileNotFoundError,
@@ -240,18 +241,36 @@ def qualify_supply_chain(
     evidence: SupplyChainEvidence,
     *,
     evidence_store: ArtifactStore | None = None,
+    evidence_root: str | Path | None = None,
     trust_receipt: SignedQualificationAttestation | None = None,
 ) -> SupplyChainQualification:
     if not isinstance(evidence, SupplyChainEvidence):
         raise TypeError("evidence must be SupplyChainEvidence")
-    if evidence_store is not None and not isinstance(evidence_store, ArtifactStore):
-        raise TypeError("evidence_store must be ArtifactStore")
+    if evidence_store is not None and type(evidence_store) is not ArtifactStore:
+        raise TypeError(
+            "evidence_store must be ArtifactStore (canonical exact type required)"
+        )
     if trust_receipt is not None and not isinstance(
         trust_receipt, SignedQualificationAttestation
     ):
         raise TypeError("trust_receipt must be SignedQualificationAttestation")
     checks: list[tuple[str, str]] = []
     reasons: list[str] = []
+    trusted_read = None
+    if evidence_store is not None and evidence_root is not None:
+        try:
+            trusted_read = trusted_authenticated_reader(
+                evidence_root,
+                publication_store=evidence_store,
+            )
+        except (
+            ArtifactIntegrityError,
+            FileNotFoundError,
+            OSError,
+            TypeError,
+            ValueError,
+        ):
+            trusted_read = None
 
     def record(name: str, status: str, reason: str | None = None) -> None:
         checks.append((name, status))
@@ -259,13 +278,13 @@ def qualify_supply_chain(
             reasons.append(reason)
 
     immutable_checks: list[tuple[str, bool]] = []
-    if evidence_store is not None:
+    if trusted_read is not None:
         immutable_checks.extend(
             (
                 (
                     "sbom",
                     _store_artifact_matches(
-                        evidence_store,
+                        trusted_read,
                         artifact_id=evidence.sbom_artifact_id,
                         artifact_hash=evidence.sbom_hash,
                         media_type=_SBOM_MEDIA_TYPE,
@@ -279,7 +298,7 @@ def qualify_supply_chain(
                 (
                     "provenance",
                     _store_artifact_matches(
-                        evidence_store,
+                        trusted_read,
                         artifact_id=evidence.provenance_artifact_id,
                         artifact_hash=evidence.provenance_hash,
                         media_type=_PROVENANCE_MEDIA_TYPE,
@@ -293,7 +312,7 @@ def qualify_supply_chain(
                 (
                     "dependency_lock",
                     _store_artifact_matches(
-                        evidence_store,
+                        trusted_read,
                         artifact_id=evidence.dependency_lock_artifact_id,
                         artifact_hash=evidence.dependency_lock_hash,
                         media_type=_DEPENDENCY_LOCK_MEDIA_TYPE,
@@ -311,7 +330,7 @@ def qualify_supply_chain(
                 (
                     "component:" + item.component_id,
                     _store_artifact_matches(
-                        evidence_store,
+                        trusted_read,
                         artifact_id=item.artifact_id,
                         artifact_hash=item.observed_artifact_hash,
                         media_type=_COMPONENT_MEDIA_TYPE,
@@ -332,7 +351,7 @@ def qualify_supply_chain(
                     (
                         "advisory_exception:" + item.component_id,
                         _store_artifact_matches(
-                            evidence_store,
+                            trusted_read,
                             artifact_id=item.advisory_exception_id,
                             artifact_hash=item.advisory_exception_hash,
                             media_type=_ADVISORY_EXCEPTION_MEDIA_TYPE,
@@ -350,7 +369,7 @@ def qualify_supply_chain(
                 (
                     "rights:" + item.artifact_id,
                     _store_artifact_matches(
-                        evidence_store,
+                        trusted_read,
                         artifact_id=item.artifact_id,
                         artifact_hash=item.artifact_hash,
                         media_type=_RIGHTS_MEDIA_TYPE,
@@ -394,17 +413,18 @@ def qualify_supply_chain(
             _INCONCLUSIVE,
             "SUPPLY_CHAIN.TRUST_ANCHOR_UNAVAILABLE",
         )
-    elif evidence_store is None:
+    elif evidence_store is None or evidence_root is None:
         record(
             "independent_evidence_trust",
             _INCONCLUSIVE,
-            "SUPPLY_CHAIN.TRUST_EVIDENCE_STORE_MISSING",
+            "SUPPLY_CHAIN.TRUST_EVIDENCE_ROOT_INCOMPLETE",
         )
     else:
         try:
             accepted_trust = verify_canonical_qualification_attestation(
                 trust_receipt,
                 evidence_store=evidence_store,
+                evidence_root=evidence_root,
                 expected_source_sha=evidence.release_commit_sha,
                 expected_domain="SUPPLY_CHAIN",
                 expected_gate="RELEASE",

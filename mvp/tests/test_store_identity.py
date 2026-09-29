@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from autotrade_mvp.store_identity import (
+from mvp.autotrade_mvp.store_identity import (
     connection_main_identity,
     establish_database_anchor,
     freeze_database_path,
+    guard_windows_database_authority,
     observe_database_identity,
     require_database_identity,
 )
@@ -109,6 +112,55 @@ class StoreIdentityTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 require_database_identity(path, identity)
             self.assertFalse(path.exists())
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only handle cleanup")
+    def test_windows_identity_validation_failure_releases_all_guard_handles(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "journal.sqlite"
+            sqlite3.connect(path).close()
+            moved = root / "moved.sqlite"
+
+            with patch(
+                "mvp.autotrade_mvp.store_identity._windows_identity_from_handle",
+                side_effect=RuntimeError("injected native identity failure"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "injected native identity failure",
+                ):
+                    with guard_windows_database_authority(
+                        path,
+                        create=False,
+                    ):
+                        self.fail("identity failure must occur before guard yield")
+
+            # A leaked no-FILE_SHARE_DELETE file or namespace handle would make
+            # one of these rename operations fail on Windows.
+            path.replace(moved)
+            moved.replace(path)
+            self.assertTrue(path.exists())
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only native identity")
+    def test_windows_identity_is_native_by_handle_and_nonzero(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite"
+            sqlite3.connect(path).close()
+
+            identity = observe_database_identity(path)
+
+            self.assertEqual(identity.identity_source, "windows_by_handle")
+            self.assertIsNone(identity.filesystem_device)
+            self.assertIsNone(identity.filesystem_inode)
+            self.assertIsNotNone(identity.windows_volume_serial)
+            self.assertNotEqual(identity.windows_volume_serial, 0)
+            self.assertNotEqual(
+                (
+                    identity.windows_file_index_high,
+                    identity.windows_file_index_low,
+                ),
+                (0, 0),
+            )
 
     def test_sqlite_database_list_observes_exact_opened_main_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

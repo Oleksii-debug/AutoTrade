@@ -133,7 +133,7 @@ class ProductionHostCompositionTests(unittest.TestCase):
             self.assertIs(runtime.application, application)
             self.assertIs(runtime.server, server)
 
-    def test_runtime_shutdown_is_idempotent_and_terminal(self):
+    def test_pre_serve_shutdown_is_idempotent_and_never_waits_for_serve_loop(self):
         server = Mock()
         runtime = ProductionHostRuntime(
             config=Mock(),
@@ -143,7 +143,7 @@ class ProductionHostCompositionTests(unittest.TestCase):
         )
         runtime.close()
         runtime.close()
-        server.shutdown.assert_called_once_with()
+        server.shutdown.assert_not_called()
         server.server_close.assert_called_once_with()
         self.assertTrue(runtime.closed)
         with self.assertRaisesRegex(RuntimeError, "runtime is closed"):

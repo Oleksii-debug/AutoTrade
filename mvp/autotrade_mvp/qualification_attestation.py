@@ -6,8 +6,10 @@ import base64
 import binascii
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import re
+import subprocess
 from typing import Iterable, Mapping
 from uuid import UUID
 
@@ -28,9 +30,114 @@ class QualificationTrustUnavailable(QualificationTrustError):
 _CANONICAL_QUALIFICATION_TRUST_POLICY_PATH = Path(__file__).with_name(
     "qualification_trust_policy.json"
 )
+_CANONICAL_QUALIFICATION_TRUST_POLICY_GIT_PATH = (
+    "mvp/autotrade_mvp/qualification_trust_policy.json"
+)
+
+_QUALIFICATION_TRUST_SOURCE_ROOT = Path(__file__).resolve().parents[2]
+
+# Release builds do not ship a Git checkout.  A future independently reviewed
+# production trust policy may pin its canonical SHA-256 here so release composition
+# can inventory the exact policy bytes.  This digest is necessary but deliberately
+# insufficient for installed verification: a separate signed/delivered release
+# authority must independently authenticate the installed source SHA.  None means
+# packaged terminal trust is unavailable; callers cannot provide or override it.
+_CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256: str | None = None
+_MAX_QUALIFICATION_TRUST_POLICY_BYTES = 1_048_576
+
+
+def canonical_packaged_qualification_trust_policy_digest() -> str | None:
+    """Return the source-controlled release-policy digest, when configured.
+
+    Packaging may consume this value to prove that the exact policy bytes are
+    part of the release composition.  Callers cannot override the value used by
+    canonical verification; a missing pin intentionally means packaged terminal
+    trust is unavailable.
+    """
+
+    value = _CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256
+    if value is None:
+        return None
+    return _digest(value, name="packaged qualification trust policy digest")
+
+
+def _has_git_metadata_ancestor(source_root: Path) -> bool:
+    """Detect source/worktree metadata without depending on a Git executable."""
+
+    for candidate_root in (source_root, *source_root.parents):
+        marker = candidate_root / ".git"
+        try:
+            os.lstat(marker)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise QualificationTrustUnavailable(
+                "qualification trust source metadata cannot be inspected"
+            ) from error
+        return True
+    return False
+
+
+def _trusted_git_candidate_paths() -> tuple[Path, ...]:
+    """Return fail-closed OS-managed Git locations without consulting PATH."""
+
+    if os.name == "nt":
+        return (
+            Path(r"C:\\Program Files\\Git\\cmd\\git.exe"),
+            Path(r"C:\\Program Files\\Git\\bin\\git.exe"),
+        )
+    return (Path("/usr/bin/git"), Path("/bin/git"))
+
+
+def _trusted_git_executable(*, source_root: Path) -> str:
+    """Resolve Git without caller-controlled PATH or source-checkout authority."""
+
+    resolved_source_root = source_root.resolve()
+    for candidate in _trusted_git_candidate_paths():
+        try:
+            executable = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if not executable.is_file():
+            continue
+        try:
+            executable.relative_to(resolved_source_root)
+        except ValueError:
+            return os.fspath(executable)
+        raise QualificationTrustUnavailable(
+            "qualification trust Git executable originates from trusted source checkout"
+        )
+    raise QualificationTrustUnavailable(
+        "qualification trust Git executable is unavailable at an OS-managed location"
+    )
 
 
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _trusted_git_environment() -> dict[str, str]:
+    """Run trust-policy Git reads without caller-selected process authority."""
+
+    # Do not inherit the ambient process environment wholesale. An absolute Git
+    # executable is still vulnerable to dynamic-loader injection (for example
+    # LD_PRELOAD / DYLD_*), user-selected HOME config, and other process-level
+    # overrides if those variables are forwarded to the trust-critical child.
+    # Git's exact-object reads need only a tiny environment; retain the Windows
+    # process bootstrap variables when present and explicitly disable external
+    # Git configuration plus replacement-object semantics.
+    environment = {
+        key: value
+        for key in ("SYSTEMROOT", "WINDIR", "COMSPEC")
+        if (value := os.environ.get(key))
+    }
+    environment["GIT_CONFIG_NOSYSTEM"] = "1"
+    environment["GIT_CONFIG_GLOBAL"] = os.devnull
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    environment["LC_ALL"] = "C"
+    environment["LANG"] = "C"
+    return environment
+
+
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$")
 _RSA_METHOD = "RSA_PKCS1V15_SHA256"
@@ -46,6 +153,21 @@ def _canonical_json(value: object) -> bytes:
         ensure_ascii=False,
         allow_nan=False,
     ).encode("utf-8")
+
+
+def _reject_duplicate_json_object(
+    pairs: Iterable[tuple[str, object]],
+) -> dict[str, object]:
+    """Reject ambiguous trust-policy JSON before schema validation."""
+
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise QualificationTrustError(
+                "canonical qualification trust policy contains duplicate JSON object key"
+            )
+        result[key] = value
+    return result
 
 
 def _strict_mapping(
@@ -627,33 +749,200 @@ def parse_qualification_trust_policy(
     )
 
 
-def load_canonical_qualification_trust_policy() -> QualificationTrustPolicy:
-    """Load the release-controlled qualification policy from a fixed path.
+def _canonical_qualification_trust_policy_bytes(
+    *, expected_source_sha: str
+) -> bytes:
+    """Read policy bytes from the exact trusted Git source object."""
 
-    The evidence submitter cannot supply or redirect this path through the
-    qualification API. A deployment that has not installed an independently
-    reviewed public trust policy cannot produce terminal signed-trust PASS.
+    source_sha = _git_sha(expected_source_sha, name="expected_source_sha")
+    source_root = _QUALIFICATION_TRUST_SOURCE_ROOT.resolve()
+    # The Git object path is a source constant, not a filesystem-derived path.
+    # Resolving the working-tree policy path here would let a mutable symlink
+    # redirect exact-source lookup to a different blob in the same trusted commit.
+    relative_policy = _CANONICAL_QUALIFICATION_TRUST_POLICY_GIT_PATH
+    git_executable = _trusted_git_executable(source_root=source_root)
+    try:
+        top_level = subprocess.run(
+            [git_executable, "rev-parse", "--show-toplevel"],
+            cwd=source_root,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+            env=_trusted_git_environment(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise QualificationTrustUnavailable(
+            "qualification trust source repository root is unavailable"
+        ) from error
+    if top_level.returncode != 0:
+        raise QualificationTrustUnavailable(
+            "qualification trust source repository root could not be verified"
+        )
+    try:
+        resolved_top_level = Path(top_level.stdout.strip()).resolve(strict=True)
+    except OSError as error:
+        raise QualificationTrustUnavailable(
+            "qualification trust source repository root is unavailable"
+        ) from error
+    if resolved_top_level != source_root:
+        raise QualificationTrustError(
+            "qualification trust source root is not the Git top-level"
+        )
+
+    try:
+        head = subprocess.run(
+            [git_executable, "rev-parse", "HEAD"],
+            cwd=source_root,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+            env=_trusted_git_environment(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise QualificationTrustUnavailable(
+            "qualification trust source selection is unavailable"
+        ) from error
+    if head.returncode != 0:
+        raise QualificationTrustUnavailable(
+            "qualification trust source selection could not be verified"
+        )
+    if head.stdout.strip() != source_sha:
+        raise QualificationTrustError(
+            "qualification trust source SHA does not match checkout HEAD"
+        )
+
+    try:
+        completed = subprocess.run(
+            [git_executable, "cat-file", "blob", f"{source_sha}:{relative_policy}"],
+            cwd=source_root,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            env=_trusted_git_environment(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise QualificationTrustUnavailable(
+            "exact-source qualification trust policy is unavailable"
+        ) from error
+    if completed.returncode != 0:
+        raise QualificationTrustUnavailable(
+            "canonical qualification trust policy is not present in exact trusted source"
+        )
+    return bytes(completed.stdout)
+
+
+def _independently_authenticated_packaged_source_sha() -> str:
+    """Return installed source SHA from a separately authenticated release authority.
+
+    No such authority is wired yet.  Keeping this boundary fail-closed prevents a
+    policy digest pin or caller-provided expected_source_sha from becoming a
+    substitute for signed/delivered package identity.
     """
+
+    raise QualificationTrustUnavailable(
+        "independently authenticated packaged source identity is unavailable"
+    )
+
+
+def _canonical_packaged_qualification_trust_policy_bytes(
+    *, expected_source_sha: str
+) -> bytes:
+    """Read packaged policy only after independent installed-source authentication.
+
+    This is deliberately a non-Git release path, not a working-tree fallback.
+    The source-controlled policy digest can bind policy bytes into composition,
+    but it cannot authenticate the installed source identity.  That identity must
+    come from a separate signed/delivered release authority and equal the caller's
+    expected_source_sha before packaged policy bytes are trusted.
+    A source checkout remains on the Git-object authority path even when Git is
+    temporarily unavailable.
+    """
+
+    source_sha = _git_sha(expected_source_sha, name="expected_source_sha")
+    source_root = _QUALIFICATION_TRUST_SOURCE_ROOT.resolve()
+    if _has_git_metadata_ancestor(source_root):
+        raise QualificationTrustUnavailable(
+            "packaged qualification trust policy is forbidden in a source checkout"
+        )
+
+    authenticated_source_sha = _git_sha(
+        _independently_authenticated_packaged_source_sha(),
+        name="authenticated packaged source_sha",
+    )
+    if authenticated_source_sha != source_sha:
+        raise QualificationTrustError(
+            "packaged source identity does not match expected_source_sha"
+        )
+
+    expected_digest = _CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256
+    if expected_digest is None:
+        raise QualificationTrustUnavailable(
+            "packaged qualification trust policy digest is not pinned by release source"
+        )
+    expected_digest = _digest(
+        expected_digest,
+        name="packaged qualification trust policy digest",
+    )
 
     path = _CANONICAL_QUALIFICATION_TRUST_POLICY_PATH
     try:
         raw = path.read_bytes()
     except FileNotFoundError as error:
         raise QualificationTrustUnavailable(
-            "canonical qualification trust policy is not configured"
+            "packaged canonical qualification trust policy is not configured"
         ) from error
     except OSError as error:
         raise QualificationTrustUnavailable(
-            "canonical qualification trust policy is unavailable"
+            "packaged canonical qualification trust policy is unavailable"
         ) from error
+    if len(raw) > _MAX_QUALIFICATION_TRUST_POLICY_BYTES:
+        raise QualificationTrustError(
+            "packaged qualification trust policy exceeds the bounded release size"
+        )
+    observed_digest = "sha256:" + sha256(raw).hexdigest()
+    if observed_digest != expected_digest:
+        raise QualificationTrustError(
+            "packaged qualification trust policy digest does not match signed release pin"
+        )
+    return raw
+
+
+def load_canonical_qualification_trust_policy(
+    *, expected_source_sha: str
+) -> QualificationTrustPolicy:
+    """Load canonical policy from exact Git source or authenticated release state.
+
+    Checkout/dev verification uses the exact Git object and never mutable
+    working-tree policy bytes.  A delivered non-Git release may use the fixed
+    packaged policy only after an independent signed/delivered source identity
+    matches expected_source_sha and the policy bytes match the source-controlled
+    digest.  Until that release identity authority is wired, the packaged path is
+    intentionally unavailable.
+    """
+
     try:
-        payload = json.loads(raw.decode("utf-8"))
+        raw = _canonical_qualification_trust_policy_bytes(
+            expected_source_sha=expected_source_sha
+        )
+    except QualificationTrustUnavailable:
+        raw = _canonical_packaged_qualification_trust_policy_bytes(
+            expected_source_sha=expected_source_sha
+        )
+    try:
+        payload = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_json_object,
+        )
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise QualificationTrustError(
             "canonical qualification trust policy is malformed"
         ) from error
     return parse_qualification_trust_policy(payload)
-
 
 def parse_signed_qualification_attestation(
     value: object,
@@ -816,7 +1105,7 @@ def _resolve_evidence(
     store: ArtifactStore, ref: EvidenceArtifactRef
 ) -> None:
     try:
-        manifest = store.load_manifest(ref.artifact_id)
+        manifest, data = store.read_authenticated_snapshot(ref.artifact_id)
         if "manifest_hash" not in manifest:
             raise QualificationTrustError(
                 "evidence manifest lacks integrity binding"
@@ -845,7 +1134,6 @@ def _resolve_evidence(
             raise QualificationTrustError(
                 "evidence is not bound to the attested source SHA"
             )
-        data = store.read_bytes(ref.artifact_id)
     except (FileNotFoundError, ArtifactIntegrityError) as error:
         raise QualificationTrustError(
             "evidence artifact cannot be resolved with integrity"
@@ -1059,11 +1347,13 @@ def verify_canonical_qualification_attestation(
     """Verify a receipt only against the separately controlled canonical policy.
 
     Candidate/evidence callers provide no trust policy and no expected pin.
-    Policy identity/version are derived only after loading the fixed
-    release-controlled policy file.
+    Policy identity/version are derived only after loading policy bytes from
+    the exact expected source commit; mutable working-tree policy bytes are ignored.
     """
 
-    policy = load_canonical_qualification_trust_policy()
+    policy = load_canonical_qualification_trust_policy(
+        expected_source_sha=expected_source_sha
+    )
     return verify_qualification_attestation(
         receipt,
         policy=policy,

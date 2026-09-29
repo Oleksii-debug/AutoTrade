@@ -46,7 +46,7 @@ class StoreIdentityTests(unittest.TestCase):
                 observe_database_identity(target),
             )
 
-    def test_hard_link_alias_is_not_the_same_canonical_store_identity(self) -> None:
+    def test_hard_link_aliases_fail_closed_until_ambiguity_is_removed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             original = root / "journal.sqlite"
@@ -57,17 +57,14 @@ class StoreIdentityTests(unittest.TestCase):
             except OSError:
                 self.skipTest("filesystem does not permit hard-link creation")
 
-            original_identity = observe_database_identity(original)
-            alias_identity = observe_database_identity(alias)
-            self.assertEqual(
-                (original_identity.filesystem_device, original_identity.filesystem_inode),
-                (alias_identity.filesystem_device, alias_identity.filesystem_inode),
-            )
-            self.assertNotEqual(original_identity, alias_identity)
-            self.assertNotEqual(
-                original_identity.canonical_path,
-                alias_identity.canonical_path,
-            )
+            with self.assertRaisesRegex(RuntimeError, "exactly one hard-link"):
+                observe_database_identity(original)
+            with self.assertRaisesRegex(RuntimeError, "exactly one hard-link"):
+                observe_database_identity(alias)
+
+            alias.unlink()
+            identity = observe_database_identity(original)
+            self.assertEqual(identity.canonical_path, str(original.resolve()))
 
     def test_replacement_at_same_path_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -15,11 +15,52 @@ from hashlib import sha256
 import json
 from typing import Literal
 
-from .exact_decimal import as_fraction, exact_add, exact_multiply, exact_sum, terminating_decimal
+from .exact_decimal import (
+    ExactDecimalError,
+    as_fraction as _exact_as_fraction,
+    canonical_decimal_text as _exact_canonical_decimal_text,
+    exact_add as _exact_add,
+    exact_multiply as _exact_multiply,
+    exact_sum as _exact_sum,
+    terminating_decimal as _exact_terminating_decimal,
+)
 
 
 class PerpetualError(ValueError):
     pass
+
+
+def _translate_exact(operation, *args, **kwargs):
+    try:
+        return operation(*args, **kwargs)
+    except ExactDecimalError as error:
+        raise PerpetualError(
+            "exact financial arithmetic exceeds the supported resource envelope"
+        ) from error
+
+
+def as_fraction(value: Decimal) -> Fraction:
+    return _translate_exact(_exact_as_fraction, value)
+
+
+def exact_add(left: Decimal, right: Decimal) -> Decimal:
+    return _translate_exact(_exact_add, left, right)
+
+
+def exact_multiply(*values: Decimal) -> Decimal:
+    return _translate_exact(_exact_multiply, *values)
+
+
+def exact_sum(values, *, start: Decimal = Decimal("0")) -> Decimal:
+    return _translate_exact(_exact_sum, values, start=start)
+
+
+def terminating_decimal(value: Fraction) -> Decimal:
+    return _translate_exact(_exact_terminating_decimal, value)
+
+
+def canonical_decimal_text(value: Decimal) -> str:
+    return _translate_exact(_exact_canonical_decimal_text, value)
 
 
 def _decimal(value: Decimal | str | int, name: str, *, positive: bool = False) -> Decimal:
@@ -33,6 +74,14 @@ def _decimal(value: Decimal | str | int, name: str, *, positive: bool = False) -
         raise PerpetualError(f"{name} must be a finite decimal")
     if positive and result <= 0:
         raise PerpetualError(f"{name} must be positive")
+    if result == 0:
+        return Decimal("0")
+    try:
+        _exact_as_fraction(result)
+    except ExactDecimalError as error:
+        raise PerpetualError(
+            f"{name} exceeds the supported exact-decimal resource envelope"
+        ) from error
     return result
 
 
@@ -255,15 +304,19 @@ class LiquidationSnapshot:
         if point - self.observed_at > self.max_age:
             raise PerpetualError("liquidation snapshot is stale")
 
-    def headroom_fraction(self, mark_price: Decimal | str | int) -> Decimal:
+    def headroom_fraction(self, mark_price: Decimal | str | int) -> Fraction:
+        """Return exact rational liquidation headroom; never ambient-round."""
+
         mark = _decimal(mark_price, "mark_price", positive=True)
+        mark_fraction = _fraction(mark)
+        liquidation_fraction = _fraction(self.liquidation_price)
         if self.side == "LONG":
             if self.liquidation_price >= mark:
                 raise PerpetualError("long liquidation boundary must be below current mark")
-            return (mark - self.liquidation_price) / mark
+            return (mark_fraction - liquidation_fraction) / mark_fraction
         if self.liquidation_price <= mark:
             raise PerpetualError("short liquidation boundary must be above current mark")
-        return (self.liquidation_price - mark) / mark
+        return (liquidation_fraction - mark_fraction) / mark_fraction
 
 
 def require_liquidation_headroom(
@@ -272,8 +325,8 @@ def require_liquidation_headroom(
     market: MarketSnapshot,
     minimum_headroom_fraction: Decimal | str | int,
     at: datetime,
-) -> Decimal:
-    """Require fresh provider-tier evidence and a bounded liquidation buffer."""
+) -> Fraction:
+    """Require fresh provider-tier evidence and return exact liquidation headroom."""
 
     if not isinstance(liquidation, LiquidationSnapshot):
         raise TypeError("liquidation must be LiquidationSnapshot")
@@ -478,7 +531,7 @@ class FundingLedger:
             {
                 "instrument_id": instrument_id,
                 "currency": currency,
-                "amount": format(amount, "f"),
+                "amount": canonical_decimal_text(amount),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -519,9 +572,10 @@ class FundingLedger:
             self._events[identifier] = (fingerprint, period, unit, value)
             return old_amount
 
+        new_balance = exact_add(self._balances.get(unit, Decimal("0")), value)
         self._events[identifier] = (fingerprint, period, unit, value)
         self._periods[period_key] = (fingerprint, unit, value)
-        self._balances[unit] = exact_add(self._balances.get(unit, Decimal("0")), value)
+        self._balances[unit] = new_balance
         return value
 
     def balance(self, currency: str) -> Decimal:

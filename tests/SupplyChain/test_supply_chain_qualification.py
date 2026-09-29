@@ -1,7 +1,5 @@
 import base64
 from hashlib import sha256
-import json
-from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -428,19 +426,10 @@ def qualify_signed(value, *, receipt=None, canonical_policy=None):
             receipt, _ = _signed_review(value)
         if canonical_policy is None:
             canonical_policy = _trust_policy(_trust_root())
-        policy_path = Path(directory) / "qualification_trust_policy.json"
-        policy_path.write_text(
-            json.dumps(
-                qualification_trust_policy_payload(canonical_policy),
-                sort_keys=True,
-                separators=(",", ":"),
-            ),
-            encoding="utf-8",
-        )
         with patch(
             "mvp.autotrade_mvp.qualification_attestation."
-            "_CANONICAL_QUALIFICATION_TRUST_POLICY_PATH",
-            policy_path,
+            "load_canonical_qualification_trust_policy",
+            return_value=canonical_policy,
         ):
             return qualify_supply_chain(
                 value,

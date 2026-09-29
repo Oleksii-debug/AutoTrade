@@ -31,10 +31,21 @@ def freeze_database_path(path: str | Path) -> Path:
 
 
 def observe_database_identity(path: str | Path) -> JournalStoreIdentity:
-    """Observe one existing database file without treating inode as durable identity."""
+    """Observe one existing database file and reject unsafe hard-link aliases.
+
+    SQLite WAL/SHM sidecars are pathname-derived. If the main database inode has
+    multiple hard links, two different pathnames can address the same database
+    while acquiring different sidecar namespaces and independent path fences.
+    AutoTrade therefore treats a multi-link backing file as ambiguous authority
+    and fails closed before WAL/journal mutation.
+    """
 
     canonical = Path(path).resolve(strict=True)
     stat = canonical.stat()
+    if int(stat.st_nlink) != 1:
+        raise RuntimeError(
+            "journal backing file must have exactly one hard-link pathname"
+        )
     return JournalStoreIdentity(
         canonical_path=str(canonical),
         filesystem_device=int(stat.st_dev),
@@ -58,7 +69,13 @@ def require_database_identity(
 
 
 def connection_main_identity(connection: sqlite3.Connection) -> JournalStoreIdentity:
-    """Return SQLite's opened main-database identity from PRAGMA database_list."""
+    """Return SQLite's current main-database pathname identity.
+
+    The pathname reported by ``PRAGMA database_list`` is validated through the
+    same single-link rule as every other journal identity observation. This is a
+    bounded pathname/backing-file check, not a claim that SQLite exposes an
+    atomic OS handle identity through Python's sqlite3 API.
+    """
 
     main_path: str | None = None
     for row in connection.execute("PRAGMA database_list"):

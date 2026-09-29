@@ -76,6 +76,20 @@ _PROVIDER_FAMILY_LIFECYCLES: Mapping[
     ("ALPACA", "OPTIONS"): (Lifecycle.OPTIONS,),
 }
 
+# Every canonical provider product family must be classified exactly once:
+# either it participates in one or more WP-61 lifecycle rows above, or it is
+# explicitly outside WP-61's futures/perpetual/options/corporate scope.
+# Keeping this closed partition makes provider-registry expansion fail closed
+# until the integration crosswalk is deliberately reviewed.
+_NON_LIFECYCLE_PRODUCT_FAMILIES: Mapping[str, frozenset[str]] = {
+    "BYBIT": frozenset({"SPOT", "MARGIN"}),
+    "KRAKEN": frozenset({"SPOT", "MARGIN"}),
+    "WHITEBIT": frozenset({"SPOT", "COLLATERAL"}),
+    "BINANCE": frozenset({"SPOT", "MARGIN"}),
+    "IBKR": frozenset({"FX", "OTHER_ENTITLED"}),
+    "ALPACA": frozenset({"CRYPTO"}),
+}
+
 
 def _text(value: str, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
@@ -177,8 +191,10 @@ def lifecycle_evidence_bytes(item: LifecycleEvidence) -> bytes:
 
 def _stored_evidence_matches(store: ArtifactStore, item: LifecycleEvidence) -> bool:
     try:
-        manifest = store.load_manifest(item.artifact_id)
-        data = store.read_bytes(item.artifact_id)
+        manifest, data = ArtifactStore.read_authenticated_snapshot(
+            store,
+            item.artifact_id,
+        )
         if manifest.get("sha256") != item.artifact_sha256:
             return False
         if "sha256:" + sha256(data).hexdigest() != item.artifact_sha256:
@@ -216,16 +232,48 @@ class CrosswalkVerdict:
 def advertised_lifecycle_keys() -> tuple[CrosswalkKey, ...]:
     """Return every lifecycle combination explicitly advertised by the crosswalk.
 
-    Importantly, this function validates every pair against provider_core so the
-    crosswalk cannot silently advertise a provider family absent from the
-    canonical provider registry.
+    The lifecycle map and explicit out-of-scope map must form a closed,
+    non-overlapping partition of every product family in provider_core.PROVIDERS.
+    A provider-registry expansion therefore cannot silently escape WP-61 review.
     """
+
+    canonical_pairs = {
+        (provider_id, product_family)
+        for provider_id, definition in PROVIDERS.items()
+        for product_family in definition.product_families
+    }
+    lifecycle_pairs = set(_PROVIDER_FAMILY_LIFECYCLES)
+    exempt_pairs = {
+        (provider_id, product_family)
+        for provider_id, families in _NON_LIFECYCLE_PRODUCT_FAMILIES.items()
+        for product_family in families
+    }
+
+    overlap = lifecycle_pairs & exempt_pairs
+    if overlap:
+        raise CrosswalkError(
+            "provider product family is both lifecycle-qualified and explicitly out of scope"
+        )
+
+    classified_pairs = lifecycle_pairs | exempt_pairs
+    stale_pairs = classified_pairs - canonical_pairs
+    if stale_pairs:
+        raise CrosswalkError(
+            "crosswalk classification drifted from canonical provider registry"
+        )
+
+    unclassified_pairs = canonical_pairs - classified_pairs
+    if unclassified_pairs:
+        raise CrosswalkError(
+            "canonical provider registry contains unclassified product family"
+        )
 
     keys: list[CrosswalkKey] = []
     for (provider_id, product_family), lifecycles in _PROVIDER_FAMILY_LIFECYCLES.items():
-        definition = PROVIDERS.get(provider_id)
-        if definition is None or product_family not in definition.product_families:
-            raise CrosswalkError("crosswalk drifted from canonical provider registry")
+        if not lifecycles or len(set(lifecycles)) != len(lifecycles):
+            raise CrosswalkError(
+                "lifecycle classification must be non-empty and unique"
+            )
         for lifecycle in lifecycles:
             keys.append(CrosswalkKey(provider_id, product_family, lifecycle))
     return tuple(sorted(keys))
@@ -248,8 +296,8 @@ def qualify_asset_provider_crosswalk(
     """Fail closed unless every advertised combination has exact complete evidence."""
 
     source_sha = _sha(exact_source_sha, "exact_source_sha")
-    if evidence_store is not None and not isinstance(evidence_store, ArtifactStore):
-        raise TypeError("evidence_store must be ArtifactStore")
+    if evidence_store is not None and type(evidence_store) is not ArtifactStore:
+        raise TypeError("evidence_store must be canonical ArtifactStore")
     expected = advertised_lifecycle_keys()
     expected_set = set(expected)
 

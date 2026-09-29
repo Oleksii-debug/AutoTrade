@@ -14,6 +14,8 @@ on:
   pull_request:
     paths:
       - "research/**"
+      - "autotrade_numeric/**"
+      - "pyproject.toml"
       - "requirements-dev.txt"
       - "provenance/reuse/autosport-neutral-primitives.json"
       - ".github/workflows/research-primitives.yml"

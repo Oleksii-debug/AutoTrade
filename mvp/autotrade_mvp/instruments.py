@@ -11,6 +11,12 @@ from typing import Iterable, Mapping
 from urllib.parse import urlsplit
 from uuid import UUID
 
+from .exact_decimal import (
+    ExactDecimalError,
+    canonical_decimal_text,
+    is_exact_decimal_multiple,
+)
+
 
 class InstrumentRegistryError(ValueError):
     """Base error for invalid instrument metadata or lookups."""
@@ -55,12 +61,21 @@ def _utc_text(value: datetime) -> str:
 
 
 def _decimal_text(value: Decimal) -> str:
-    if value == 0:
-        return "0"
-    text = format(value.normalize(), "f")
-    if "." in text:
-        text = text.rstrip("0").rstrip(".")
-    return text
+    try:
+        return canonical_decimal_text(value)
+    except ExactDecimalError as error:
+        raise InstrumentRegistryError(
+            "decimal identity exceeds the supported exact-decimal resource envelope"
+        ) from error
+
+
+def _is_exact_multiple(value: Decimal, quantum: Decimal, *, field: str) -> bool:
+    try:
+        return is_exact_decimal_multiple(value, quantum)
+    except ExactDecimalError as error:
+        raise InstrumentRegistryError(
+            f"{field} exceeds the supported exact-decimal resource envelope"
+        ) from error
 
 
 def _instrument_version_ref(value: str, field: str = "instrument_version") -> str:
@@ -479,7 +494,7 @@ class InstrumentVersion:
 
     def validate_price(self, price: Decimal | str | int) -> Decimal:
         value = _decimal(price, "price", positive=True)
-        if value % self.price_tick != 0:
+        if not _is_exact_multiple(value, self.price_tick, field="price"):
             raise InstrumentRegistryError("price is not aligned to price_tick")
         if self.price_band_low is not None and value < self.price_band_low:
             raise InstrumentRegistryError("price is below price_band_low")
@@ -493,7 +508,7 @@ class InstrumentVersion:
             raise InstrumentRegistryError("quantity is below minimum_quantity")
         if self.maximum_quantity is not None and value > self.maximum_quantity:
             raise InstrumentRegistryError("quantity is above maximum_quantity")
-        if value % self.quantity_step != 0:
+        if not _is_exact_multiple(value, self.quantity_step, field="quantity"):
             raise InstrumentRegistryError("quantity is not aligned to quantity_step")
         return value
 

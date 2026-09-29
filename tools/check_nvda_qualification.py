@@ -329,6 +329,7 @@ def validate_trusted_nvda_qualification(
     receipt: SignedQualificationAttestation,
     policy: QualificationTrustPolicy,
     evidence_store: ArtifactStore,
+    evidence_root: str | Path,
     expected_policy_id: str,
     expected_policy_version: str,
 ) -> dict[str, object]:
@@ -386,6 +387,7 @@ def validate_trusted_nvda_qualification(
                 receipt,
                 policy=policy,
                 evidence_store=evidence_store,
+                evidence_root=evidence_root,
                 expected_policy_id=expected_policy_id,
                 expected_policy_version=expected_policy_version,
                 expected_source_sha=result["source_sha"],
@@ -468,6 +470,7 @@ def _load_trust_inputs(args):
         receipt,
         policy,
         ArtifactStore(args.evidence_store),
+        args.evidence_store,
         args.expected_policy_id,
         args.expected_policy_version,
     )
@@ -522,7 +525,7 @@ def main() -> int:
                     evidence,
                     args.release_artifact,
                 )
-                receipt, policy, evidence_store, policy_id, policy_version = trust
+                receipt, policy, evidence_store, evidence_root, policy_id, policy_version = trust
                 result = validate_trusted_nvda_qualification(
                     evidence,
                     requirements,
@@ -531,6 +534,7 @@ def main() -> int:
                     receipt=receipt,
                     policy=policy,
                     evidence_store=evidence_store,
+                    evidence_root=evidence_root,
                     expected_policy_id=policy_id,
                     expected_policy_version=policy_version,
                 )
@@ -575,7 +579,7 @@ def main() -> int:
             print(json.dumps(result, sort_keys=True))
             return 3
 
-        receipt, policy, evidence_store, policy_id, policy_version = trust
+        receipt, policy, evidence_store, evidence_root, policy_id, policy_version = trust
         result = validate_trusted_nvda_qualification(
             evidence,
             requirements,
@@ -584,6 +588,7 @@ def main() -> int:
             receipt=receipt,
             policy=policy,
             evidence_store=evidence_store,
+            evidence_root=evidence_root,
             expected_policy_id=policy_id,
             expected_policy_version=policy_version,
         )

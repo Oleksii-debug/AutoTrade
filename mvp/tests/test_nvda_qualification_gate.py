@@ -155,6 +155,16 @@ class NvdaQualificationGateTests(unittest.TestCase):
             attestation_digest="sha256:" + "1" * 64,
             policy_id="sha256:" + "2" * 64,
             trust_root_id="sha256:" + "3" * 64,
+            requirement_ids=requirement_ids,
+            release_artifact_id="11111111-1111-4111-8111-111111111111",
+            release_artifact_sha256=release_sha,
+            evidence_refs=(
+                SimpleNamespace(
+                    sha256=evidence_sha,
+                    evidence_kind="NVDA_REAL_RUN",
+                    source_sha=evidence["source_sha"],
+                ),
+            ),
         )
         with patch(
             "tools.check_nvda_qualification.verify_qualification_attestation",
@@ -176,21 +186,25 @@ class NvdaQualificationGateTests(unittest.TestCase):
         self.assertEqual(result["attestation_id"], accepted.attestation_id)
         self.assertEqual(verify.call_count, len(requirement_ids))
 
-        bad_receipt = SimpleNamespace(
-            attestation=SimpleNamespace(
-                requirement_ids=requirement_ids[:-1],
-                release_artifact_id=receipt.attestation.release_artifact_id,
-                release_artifact_sha256=release_sha,
-                evidence_refs=receipt.attestation.evidence_refs,
-            )
+        bad_accepted = SimpleNamespace(
+            **{
+                **accepted.__dict__,
+                "requirement_ids": requirement_ids[:-1],
+            }
         )
-        with self.assertRaisesRegex(NvdaQualificationError, "workflow set"):
+        with (
+            patch(
+                "tools.check_nvda_qualification.verify_qualification_attestation",
+                return_value=bad_accepted,
+            ),
+            self.assertRaisesRegex(NvdaQualificationError, "workflow set"),
+        ):
             validate_trusted_nvda_qualification(
                 evidence,
                 REQUIREMENTS,
                 evidence_sha256=evidence_sha,
                 release_artifact_sha256=release_sha,
-                receipt=bad_receipt,
+                receipt=receipt,
                 policy=SimpleNamespace(),
                 evidence_store=SimpleNamespace(),
                 evidence_root=ROOT,
@@ -198,21 +212,25 @@ class NvdaQualificationGateTests(unittest.TestCase):
                 expected_policy_version="2026.09",
             )
 
-        wrong_release_receipt = SimpleNamespace(
-            attestation=SimpleNamespace(
-                requirement_ids=requirement_ids,
-                release_artifact_id="22222222-2222-4222-8222-222222222222",
-                release_artifact_sha256=release_sha,
-                evidence_refs=receipt.attestation.evidence_refs,
-            )
+        wrong_release_accepted = SimpleNamespace(
+            **{
+                **accepted.__dict__,
+                "release_artifact_id": "22222222-2222-4222-8222-222222222222",
+            }
         )
-        with self.assertRaisesRegex(NvdaQualificationError, "release identity"):
+        with (
+            patch(
+                "tools.check_nvda_qualification.verify_qualification_attestation",
+                return_value=wrong_release_accepted,
+            ),
+            self.assertRaisesRegex(NvdaQualificationError, "release binding"),
+        ):
             validate_trusted_nvda_qualification(
                 evidence,
                 REQUIREMENTS,
                 evidence_sha256=evidence_sha,
                 release_artifact_sha256=release_sha,
-                receipt=wrong_release_receipt,
+                receipt=receipt,
                 policy=SimpleNamespace(),
                 evidence_store=SimpleNamespace(),
                 evidence_root=ROOT,

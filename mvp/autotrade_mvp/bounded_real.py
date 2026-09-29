@@ -24,7 +24,7 @@ from .qualification_attestation import (
     QualificationTrustError,
     QualificationTrustPolicy,
     SignedQualificationAttestation,
-    verify_qualification_attestation,
+    verify_canonical_qualification_attestation,
 )
 
 
@@ -598,6 +598,8 @@ def assess_bounded_real_qualification(
     prerequisite_evidence: Iterable[QualificationEvidence],
     observations: BoundedRealObservations,
     evidence_verifier: ArtifactStoreEvidenceVerifier | None = None,
+    evidence_store: ArtifactStore | None = None,
+    evidence_root: str | Path | None = None,
     qualification_receipt: SignedQualificationAttestation | None = None,
     qualification_policy: QualificationTrustPolicy | None = None,
     expected_policy_id: str | None = None,
@@ -698,62 +700,89 @@ def assess_bounded_real_qualification(
 
     verifier_identity: str | None = None
     accepted: AcceptedQualificationAttestation | None = None
-    if evidence_verifier is None:
+
+    # A caller-created verifier object is useful for diagnostics/backward
+    # compatibility, but it is not terminal authority: its backing fields are
+    # ordinary mutable Python state. Terminal assessment instead receives the
+    # canonical publication store and independently selected evidence root, then
+    # constructs one private exact verifier for this assessment.
+    private_verifier: ArtifactStoreEvidenceVerifier | None = None
+    authority_supplied = evidence_store is not None or evidence_root is not None
+    if authority_supplied:
+        if evidence_store is None or evidence_root is None:
+            reasons.append("trusted_immutable_evidence_authority_incomplete")
+        elif type(evidence_store) is not ArtifactStore:
+            reasons.append("untrusted_immutable_evidence_store")
+        else:
+            try:
+                private_verifier = ArtifactStoreEvidenceVerifier(
+                    evidence_store,
+                    evidence_root=evidence_root,
+                )
+            except (ArtifactIntegrityError, OSError, TypeError, ValueError):
+                reasons.append("trusted_immutable_evidence_authority_invalid")
+    elif evidence_verifier is None:
         reasons.append("trusted_immutable_evidence_verifier_required")
-    elif not isinstance(evidence_verifier, ArtifactStoreEvidenceVerifier):
+    elif type(evidence_verifier) is not ArtifactStoreEvidenceVerifier:
         reasons.append("untrusted_immutable_evidence_verifier")
     else:
-        verifier_identity = evidence_verifier.identity
+        # Legacy/caller-owned verifier execution is deliberately diagnostic-only.
+        # Its success can never remove the lack of a private terminal authority.
+        reasons.append("caller_immutable_evidence_verifier_non_terminal")
+
+    diagnostic_verifier = (
+        private_verifier
+        if private_verifier is not None
+        else (
+            evidence_verifier
+            if type(evidence_verifier) is ArtifactStoreEvidenceVerifier
+            else None
+        )
+    )
+    if diagnostic_verifier is not None:
+        verifier_identity = ArtifactStoreEvidenceVerifier.identity.fget(
+            diagnostic_verifier
+        )
         for label, ref in all_refs:
             try:
-                verification = evidence_verifier.verify(ref)
+                verification = ArtifactStoreEvidenceVerifier.verify(
+                    diagnostic_verifier,
+                    ref,
+                )
             except Exception:
                 verification = EvidenceVerification(
                     valid=False,
                     conflicted=True,
                     reason="trusted immutable evidence verifier raised",
                 )
-            if not isinstance(verification, EvidenceVerification):
+            if type(verification) is not EvidenceVerification:
                 raise TypeError(
-                    "trusted evidence verifier must return EvidenceVerification"
+                    "trusted evidence verifier must return exact EvidenceVerification"
                 )
             if not verification.valid:
                 suffix = "conflicted" if verification.conflicted else "unverified"
                 reasons.append(f"immutable_evidence_{suffix}:{label}")
 
-    trust_inputs = (
-        qualification_receipt,
-        qualification_policy,
-        expected_policy_id,
-        expected_policy_version,
-    )
-    if all(value is None for value in trust_inputs):
+    # Terminal signer authority is selected only by the canonical exact-source
+    # trust policy. Caller-provided policy/pin arguments remain accepted solely
+    # for API compatibility/diagnostics and never participate in completion.
+    if qualification_receipt is None:
         reasons.append("independent_evidence_trust_unavailable")
-    elif any(value is None for value in trust_inputs):
-        reasons.append("independent_evidence_trust_incomplete")
-    elif not isinstance(evidence_verifier, ArtifactStoreEvidenceVerifier):
+    elif private_verifier is None:
+        # Signed qualification cannot upgrade a caller-owned verifier into
+        # terminal bounded-real metadata authority.
         reasons.append("independent_evidence_trust_unavailable")
     else:
         required_scope = f"envelope/{envelope.envelope_digest}"
-        signed_requirements = frozenset(
-            qualification_receipt.attestation.requirement_ids
-        )
-        signed_refs = frozenset(
-            (ref.artifact_id, ref.sha256, ref.evidence_kind)
-            for ref in qualification_receipt.attestation.evidence_refs
-        )
         expected_refs = frozenset(
             (ref.artifact_id, ref.sha256, ref.evidence_kind)
             for _, ref in all_refs
         )
         try:
-            accepted = verify_qualification_attestation(
+            accepted = verify_canonical_qualification_attestation(
                 qualification_receipt,
-                policy=qualification_policy,
-                evidence_store=evidence_verifier.store,
-                evidence_root=evidence_verifier.evidence_root,
-                expected_policy_id=expected_policy_id,
-                expected_policy_version=expected_policy_version,
+                evidence_store=evidence_store,
+                evidence_root=evidence_root,
                 expected_source_sha=envelope.source_sha,
                 expected_domain=_QUALIFICATION_DOMAIN,
                 expected_gate=_QUALIFICATION_GATE,
@@ -769,9 +798,14 @@ def assess_bounded_real_qualification(
                 reasons.append("independent_evidence_attestation_failed")
             elif accepted.result != "PASS":
                 reasons.append("independent_evidence_attestation_inconclusive")
-            if required_scope not in signed_requirements:
+            accepted_requirements = frozenset(accepted.requirement_ids)
+            accepted_refs = frozenset(
+                (ref.artifact_id, ref.sha256, ref.evidence_kind)
+                for ref in accepted.evidence_refs
+            )
+            if required_scope not in accepted_requirements:
                 reasons.append("independent_evidence_scope_mismatch")
-            if signed_refs != expected_refs:
+            if accepted_refs != expected_refs:
                 reasons.append("independent_evidence_set_mismatch")
 
     if observations.observed_fill_count < 1:

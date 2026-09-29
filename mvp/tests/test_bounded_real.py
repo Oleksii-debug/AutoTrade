@@ -1,7 +1,10 @@
 import hashlib
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
+
+import mvp.autotrade_mvp.bounded_real as bounded_real_module
 
 from research.autotrade_research.artifacts.store import (
     ArtifactIntegrityError,
@@ -9,6 +12,7 @@ from research.autotrade_research.artifacts.store import (
 )
 
 from mvp.autotrade_mvp.bounded_real import (
+    ArtifactStoreEvidenceVerifier,
     BoundedRealEnvelope,
     BoundedRealObservations,
     EvidenceVerification,
@@ -209,6 +213,14 @@ def _all_refs(prerequisite_items, observed):
     )
 
 
+def _canonical_policy_fixture(trust_policy):
+    return patch(
+        "mvp.autotrade_mvp.qualification_attestation."
+        "load_canonical_qualification_trust_policy",
+        return_value=trust_policy,
+    )
+
+
 def _signed_bounded_receipt(bounded, refs):
     trust_root = attestation_root(
         scopes=(QualificationScope("BOUNDED_REAL", "QUALIFICATION"),)
@@ -327,16 +339,15 @@ class BoundedRealQualificationTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)
             _populate_bundle(store, prerequisite_items, observed)
-            result = assess_bounded_real_qualification(
-                envelope=bounded,
-                prerequisite_evidence=prerequisite_items,
-                observations=observed,
-                evidence_verifier=artifact_store_evidence_verifier(store, evidence_root=directory),
-                qualification_receipt=receipt,
-                qualification_policy=trust_policy,
-                expected_policy_id=trust_policy.policy_id,
-                expected_policy_version=trust_policy.policy_version,
-            )
+            with _canonical_policy_fixture(trust_policy):
+                result = assess_bounded_real_qualification(
+                    envelope=bounded,
+                    prerequisite_evidence=prerequisite_items,
+                    observations=observed,
+                    evidence_store=store,
+                    evidence_root=directory,
+                    qualification_receipt=receipt,
+                )
         self.assertTrue(result.complete)
         self.assertEqual(result.reason_codes, ())
         self.assertFalse(result.authorizes_trading)
@@ -349,6 +360,148 @@ class BoundedRealQualificationTests(unittest.TestCase):
             result.qualification_trust_root_id.startswith("sha256:")
         )
 
+    def test_caller_self_signed_policy_cannot_select_terminal_trust_root(self):
+        bounded = envelope()
+        prerequisite_items = prerequisites()
+        observed = observations()
+        refs = _all_refs(prerequisite_items, observed)
+        attacker_receipt, attacker_policy = _signed_bounded_receipt(bounded, refs)
+
+        canonical_root = attestation_root(
+            scopes=(QualificationScope("RELEASE", "FREEZE"),)
+        )
+        canonical_policy = attestation_policy(canonical_root)
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            _populate_bundle(store, prerequisite_items, observed)
+            with _canonical_policy_fixture(canonical_policy):
+                result = assess_bounded_real_qualification(
+                    envelope=bounded,
+                    prerequisite_evidence=prerequisite_items,
+                    observations=observed,
+                    evidence_store=store,
+                    evidence_root=directory,
+                    qualification_receipt=attacker_receipt,
+                    qualification_policy=attacker_policy,
+                    expected_policy_id=attacker_policy.policy_id,
+                    expected_policy_version=attacker_policy.policy_version,
+                )
+
+        self.assertFalse(result.complete)
+        self.assertIn(
+            "independent_evidence_trust_invalid",
+            result.reason_codes,
+        )
+        self.assertIsNone(result.qualification_policy_id)
+        self.assertIsNone(result.qualification_trust_root_id)
+
+    def test_verifier_subclass_cannot_waive_bounded_manifest_scope(self):
+        class ForgedVerifier(ArtifactStoreEvidenceVerifier):
+            def verify(self, _ref):
+                return EvidenceVerification(valid=True)
+
+        bounded = envelope()
+        prerequisite_items = prerequisites()
+        observed = observations()
+        refs = _all_refs(prerequisite_items, observed)
+        receipt, trust_policy = _signed_bounded_receipt(bounded, refs)
+        bad_ref = prerequisite_items[0].evidence_ref
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            _publish_ref(
+                store,
+                bad_ref,
+                metadata_overrides={"provider_id": "attacker-provider"},
+            )
+            _populate_bundle(
+                store,
+                prerequisite_items,
+                observed,
+                exclude=(bad_ref.artifact_id,),
+            )
+            forged = ForgedVerifier(store, evidence_root=directory)
+            with _canonical_policy_fixture(trust_policy):
+                result = assess_bounded_real_qualification(
+                    envelope=bounded,
+                    prerequisite_evidence=prerequisite_items,
+                    observations=observed,
+                    evidence_verifier=forged,
+                    evidence_store=store,
+                    evidence_root=directory,
+                    qualification_receipt=receipt,
+                )
+
+        self.assertFalse(result.complete)
+        self.assertIn(
+            "immutable_evidence_conflicted:PREREQUISITE:RELEASE_CANDIDATE",
+            result.reason_codes,
+        )
+
+    def test_exact_verifier_backing_rebind_cannot_waive_manifest_scope(self):
+        bounded = envelope()
+        prerequisite_items = prerequisites()
+        observed = observations()
+        refs = _all_refs(prerequisite_items, observed)
+        receipt, trust_policy = _signed_bounded_receipt(bounded, refs)
+        bad_ref = prerequisite_items[0].evidence_ref
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            _publish_ref(
+                store,
+                bad_ref,
+                metadata_overrides={"provider_id": "attacker-provider"},
+            )
+            _populate_bundle(
+                store,
+                prerequisite_items,
+                observed,
+                exclude=(bad_ref.artifact_id,),
+            )
+            verifier = artifact_store_evidence_verifier(
+                store,
+                evidence_root=directory,
+            )
+            # Reproduce the exact-instance low-level rebinding class from
+            # review: terminal assessment must not recover authority from these
+            # caller-owned backing fields.
+            with TemporaryDirectory() as attacker_directory:
+                attacker_store = ArtifactStore(attacker_directory)
+                verifier._read_snapshot = lambda _artifact_id: (
+                    {
+                        "artifact_id": bad_ref.artifact_id,
+                        "sha256": bad_ref.sha256,
+                        "metadata": {
+                            "provider_id": bounded.provider_id,
+                            "account_id": bounded.account_id,
+                            "outcome": "PASS",
+                        },
+                    },
+                    b"forged",
+                )
+                verifier._store = attacker_store
+                verifier._evidence_root = attacker_directory
+                verifier._store_identity = "sha256:" + ("0" * 64)
+                verifier.verify = lambda _ref: EvidenceVerification(valid=True)
+                with _canonical_policy_fixture(trust_policy):
+                    result = assess_bounded_real_qualification(
+                        envelope=bounded,
+                        prerequisite_evidence=prerequisite_items,
+                        observations=observed,
+                        evidence_verifier=verifier,
+                        evidence_store=store,
+                        evidence_root=directory,
+                        qualification_receipt=receipt,
+                    )
+
+        self.assertFalse(result.complete)
+        self.assertIn(
+            "immutable_evidence_conflicted:PREREQUISITE:RELEASE_CANDIDATE",
+            result.reason_codes,
+        )
+
     def test_signed_bounded_real_receipt_must_cover_exact_evidence_set(self):
         bounded = envelope()
         prerequisite_items = prerequisites()
@@ -358,19 +511,97 @@ class BoundedRealQualificationTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)
             _populate_bundle(store, prerequisite_items, observed)
+            with _canonical_policy_fixture(trust_policy):
+                result = assess_bounded_real_qualification(
+                    envelope=bounded,
+                    prerequisite_evidence=prerequisite_items,
+                    observations=observed,
+                    evidence_store=store,
+                    evidence_root=directory,
+                    qualification_receipt=receipt,
+                )
+        self.assertFalse(result.complete)
+        self.assertIn(
+            "independent_evidence_set_mismatch",
+            result.reason_codes,
+        )
+
+    def test_terminal_coverage_uses_accepted_snapshot_after_receipt_rebound(self):
+        bounded = envelope()
+        prerequisite_items = prerequisites()
+        observed = observations()
+        refs = _all_refs(prerequisite_items, observed)
+        forged_receipt, trust_policy = _signed_bounded_receipt(bounded, refs)
+        legitimate_receipt, _ = _signed_bounded_receipt(bounded, refs[:-1])
+
+        rebound = SignedQualificationAttestation(
+            forged_receipt.attestation,
+            legitimate_receipt.signature_b64,
+        )
+        real_verify = bounded_real_module.verify_canonical_qualification_attestation
+
+        def swap_then_verify(receipt, **kwargs):
+            object.__setattr__(
+                receipt,
+                "attestation",
+                legitimate_receipt.attestation,
+            )
+            return real_verify(receipt, **kwargs)
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            _populate_bundle(store, prerequisite_items, observed)
+            with (
+                _canonical_policy_fixture(trust_policy),
+                patch.object(
+                    bounded_real_module,
+                    "verify_canonical_qualification_attestation",
+                    side_effect=swap_then_verify,
+                ),
+            ):
+                result = assess_bounded_real_qualification(
+                    envelope=bounded,
+                    prerequisite_evidence=prerequisite_items,
+                    observations=observed,
+                    evidence_store=store,
+                    evidence_root=directory,
+                    qualification_receipt=rebound,
+                )
+
+        self.assertFalse(result.complete)
+        self.assertIn(
+            "independent_evidence_set_mismatch",
+            result.reason_codes,
+        )
+
+    def test_caller_owned_exact_verifier_is_diagnostic_only_for_terminal_signed_path(self):
+        bounded = envelope()
+        prerequisite_items = prerequisites()
+        observed = observations()
+        refs = _all_refs(prerequisite_items, observed)
+        receipt, trust_policy = _signed_bounded_receipt(bounded, refs)
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            _populate_bundle(store, prerequisite_items, observed)
+            caller_verifier = artifact_store_evidence_verifier(
+                store,
+                evidence_root=directory,
+            )
             result = assess_bounded_real_qualification(
                 envelope=bounded,
                 prerequisite_evidence=prerequisite_items,
                 observations=observed,
-                evidence_verifier=artifact_store_evidence_verifier(store, evidence_root=directory),
+                evidence_verifier=caller_verifier,
                 qualification_receipt=receipt,
-                qualification_policy=trust_policy,
-                expected_policy_id=trust_policy.policy_id,
-                expected_policy_version=trust_policy.policy_version,
             )
+
         self.assertFalse(result.complete)
         self.assertIn(
-            "independent_evidence_set_mismatch",
+            "caller_immutable_evidence_verifier_non_terminal",
+            result.reason_codes,
+        )
+        self.assertIn(
+            "independent_evidence_trust_unavailable",
             result.reason_codes,
         )
 

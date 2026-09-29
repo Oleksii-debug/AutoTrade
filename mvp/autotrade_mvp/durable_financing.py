@@ -22,7 +22,7 @@ import json
 from typing import Any, Mapping, Protocol
 from uuid import NAMESPACE_URL, uuid5
 
-from .accounting import JournalTransaction
+from .accounting import AccountingConflict, JournalTransaction
 from .financing import (
     FinancingConflict,
     FinancingError,
@@ -791,6 +791,16 @@ class DurableFinancingBook:
         if matches[0] != expected:
             raise FinancingConflict(
                 "durable financing revision economic posting does not match canonical financing delta"
+            )
+        try:
+            durable_batch = self.economic_book.prepare_batch_mutation((expected,))
+        except AccountingConflict as error:
+            raise FinancingConflict(
+                "durable financing revision canonical economic batch is invalid"
+            ) from error
+        if not durable_batch.already_committed:
+            raise FinancingConflict(
+                "durable financing revision is missing its canonical economic batch"
             )
         return expected
 

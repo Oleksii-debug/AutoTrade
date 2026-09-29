@@ -51,6 +51,7 @@ def _decimal(value: Decimal | int | str, field: str) -> Decimal:
 
 _ABLATION_REPORT_QUANTUM = Decimal("1e-50")
 _ABLATION_REPORT_PRECISION = 384
+_ABLATION_DECISION_RULE = "exact-rational-d2-sample-variance-v1"
 
 
 def _bounded(value: Fraction) -> Fraction:
@@ -900,6 +901,11 @@ class AblationEvidenceBundle:
             or policy.get("minimum_pairs") != self.minimum_pairs
             or policy.get("required_lower_bound") != _canonical_decimal_text(required)
             or policy.get("uncertainty_multiplier") != _canonical_decimal_text(multiplier)
+            or policy.get("decision_rule") != _ABLATION_DECISION_RULE
+            or policy.get("reporting_projection") != {
+                "precision": _ABLATION_REPORT_PRECISION,
+                "quantum": _canonical_decimal_text(_ABLATION_REPORT_QUANTUM),
+            }
         ):
             raise ValueError("payload metadata does not match bundle metadata")
 
@@ -1516,7 +1522,12 @@ def build_ablation_evidence_bundle(
         "dataset_digest": dataset,
         "evaluation": _evaluation_payload(evaluation),
         "evaluation_policy": {
+            "decision_rule": _ABLATION_DECISION_RULE,
             "minimum_pairs": minimum_pairs,
+            "reporting_projection": {
+                "precision": _ABLATION_REPORT_PRECISION,
+                "quantum": _canonical_decimal_text(_ABLATION_REPORT_QUANTUM),
+            },
             "required_lower_bound": _canonical_decimal_text(required),
             "uncertainty_multiplier": _canonical_decimal_text(multiplier),
         },

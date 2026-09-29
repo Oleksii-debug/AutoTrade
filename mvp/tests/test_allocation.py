@@ -108,6 +108,32 @@ class AllocationTests(unittest.TestCase):
         self.assertEqual(result.targets[0].notional, Decimal("200"))
         self.assertEqual(result.turnover_notional, Decimal("0"))
 
+    def test_no_increase_fallback_reports_preserved_capital_and_holding_cost(self):
+        result = allocate_targets(
+            [
+                self.candidate(
+                    desired="500",
+                    price="10",
+                    current_quantity="20",
+                    cost="0.02",
+                    capital_requirement="0.5",
+                    turnover_cost_rate="0",
+                    holding_cost_rate="0.02",
+                )
+            ],
+            self.policy(
+                cash_available="2000",
+                max_turnover_notional="0",
+            ),
+        )
+        self.assertEqual(result.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(result.targets[0].quantity, Decimal("20"))
+        self.assertEqual(result.targets[0].notional, Decimal("200"))
+        self.assertEqual(result.targets[0].turnover_notional, Decimal("0"))
+        self.assertEqual(result.targets[0].estimated_cost, Decimal("4.00"))
+        self.assertEqual(result.estimated_cost, Decimal("4.00"))
+        self.assertEqual(result.cash_required, Decimal("104.00"))
+
     def test_cost_split_prices_turnover_and_holding_exposure_separately(self):
         result = allocate_targets(
             [

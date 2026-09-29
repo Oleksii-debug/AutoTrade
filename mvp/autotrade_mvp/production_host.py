@@ -63,15 +63,18 @@ class ProductionHostConfig:
 
         canonical_origin = _authenticated_origin(self.public_origin)
         parsed = urlsplit(canonical_origin)
-        origin_host = parsed.hostname
         origin_port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        if origin_host is None:
+        if parsed.hostname is None:
             raise ValueError("public_origin host is required")
-        if origin_host.lower() != self.bind_host.lower():
-            raise ValueError("public_origin host must match bind_host")
         if origin_port != self.bind_port:
             raise ValueError("public_origin port must match bind_port")
 
+        # Listener and authenticated public identity are intentionally distinct.
+        # A TLS service commonly binds a wildcard/local interface while clients
+        # authenticate a canonical DNS origin. AuthenticatedHostServer owns the
+        # loopback/TLS transport rule and request Host is checked against the
+        # canonical public origin, so collapsing these identities here would make
+        # the supported remote-TLS deployment impossible without adding safety.
         object.__setattr__(self, "journal_path", journal_path)
         object.__setattr__(self, "public_origin", canonical_origin)
 

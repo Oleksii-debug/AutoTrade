@@ -76,6 +76,20 @@ class FxValuationTests(unittest.TestCase):
         self.assertEqual((liability.rate_numerator, liability.rate_denominator), (10, 11))
         self.assertIsNone(liability.rate_used)
 
+    def test_terminating_inverse_rate_keeps_exact_decimal_compatibility_identity(self):
+        quote = eurusd(bid="2", ask="2")
+        result = value_amount(
+            "10",
+            source_currency="USD",
+            reporting_currency="EUR",
+            quote=quote,
+            as_of=NOW,
+            max_age=timedelta(minutes=1),
+        )
+        self.assertEqual(result.converted_amount, Decimal("5"))
+        self.assertEqual(result.rate_used, Decimal("0.5"))
+        self.assertEqual((result.rate_numerator, result.rate_denominator), (1, 2))
+
     def test_nonterminating_inverse_requires_explicit_reporting_quantum(self):
         no_policy = value_amount(
             "1",
@@ -246,6 +260,31 @@ class FxValuationTests(unittest.TestCase):
                 max_age=timedelta(minutes=1),
             )
         self.assertEqual(result.total, Decimal("12345678901234567891"))
+
+    def test_resource_envelope_failure_is_reported_as_fx_error(self):
+        boundary = "9" * 256
+        with self.assertRaisesRegex(FxValuationError, "resource envelope"):
+            value_amount(
+                boundary,
+                source_currency="EUR",
+                reporting_currency="USD",
+                quote=eurusd(bid="10", ask="10"),
+                as_of=NOW,
+                max_age=timedelta(minutes=1),
+            )
+
+    def test_extreme_zero_exponent_is_canonicalized_before_fx_identity(self):
+        result = value_amount(
+            Decimal("0E-1000000"),
+            source_currency="EUR",
+            reporting_currency="USD",
+            quote=None,
+            as_of=NOW,
+            max_age=timedelta(0),
+        )
+        self.assertEqual(result.converted_amount, Decimal("0"))
+        self.assertEqual(result.source_amount, Decimal("0"))
+        self.assertEqual(result.status, "CERTAIN")
 
     def test_duplicate_normalized_currency_codes_cannot_double_count_capital(self):
         with self.assertRaisesRegex(

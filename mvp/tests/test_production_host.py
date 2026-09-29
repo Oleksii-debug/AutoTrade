@@ -344,43 +344,87 @@ class ProductionHostCompositionTests(unittest.TestCase):
         release.set()
         serve_thread.join(timeout=1)
         self.assertFalse(serve_thread.is_alive())
-        server.serve_forever.assert_not_called()
+        server.handle_request.assert_not_called()
         self.assertTrue(runtime.closed)
 
-    def test_active_serve_shutdown_waits_for_server_loop_before_listener_close(self):
+    def test_close_after_worker_admission_before_request_loop_cancels_without_shutdown(self):
+        server = Mock()
+        fence = Mock()
+        gate = Mock()
+        runtime = self._runtime(server=server, fence=fence, gate=gate)
+        admitted = Event()
+        release = Event()
+
+        def pause_after_worker_admission():
+            admitted.set()
+            release.wait()
+
+        runtime._serve_loop_entry_hook = pause_after_worker_admission
+        serve_thread = Thread(target=runtime.serve_forever)
+        serve_thread.start()
+        self.assertTrue(admitted.wait(timeout=1))
+        self.assertFalse(runtime.serving)
+
+        close_thread = Thread(target=runtime.close)
+        close_thread.start()
+        close_thread.join(timeout=1)
+        self.assertFalse(close_thread.is_alive())
+        server.shutdown.assert_not_called()
+        server.handle_request.assert_not_called()
+        server.server_close.assert_called_once_with()
+        fence.release.assert_called_once_with()
+
+        release.set()
+        serve_thread.join(timeout=1)
+        self.assertFalse(serve_thread.is_alive())
+        server.handle_request.assert_not_called()
+        self.assertTrue(runtime.closed)
+
+    def test_active_serve_shutdown_joins_request_loop_before_listener_close(self):
         entered = Event()
-        stop = Event()
         ordering = []
         server = Mock()
         gate = Mock()
         fence = Mock()
 
-        def serve_forever(*, poll_interval):
-            self.assertGreater(poll_interval, 0)
-            entered.set()
-            stop.wait()
-            ordering.append("serve-exited")
+        def handle_request():
+            if not entered.is_set():
+                ordering.append("request-loop-entered")
+                entered.set()
 
-        def shutdown():
-            ordering.append("shutdown")
-            stop.set()
-
-        server.serve_forever.side_effect = serve_forever
-        server.shutdown.side_effect = shutdown
-        server.server_close.side_effect = lambda: ordering.append("listener-closed")
-        fence.release.side_effect = lambda: ordering.append("fence-released")
+        server.handle_request.side_effect = handle_request
         runtime = self._runtime(server=server, fence=fence, gate=gate)
+
+        def listener_close():
+            worker = runtime._serve_thread
+            self.assertIsNotNone(worker)
+            self.assertFalse(worker.is_alive())
+            ordering.append("listener-closed")
+
+        server.server_close.side_effect = listener_close
+        fence.release.side_effect = lambda: ordering.append("fence-released")
         caller = Thread(target=runtime.serve_forever)
         caller.start()
         self.assertTrue(entered.wait(timeout=1))
+        self.assertTrue(runtime.serving)
 
         runtime.close()
         caller.join(timeout=1)
         self.assertFalse(caller.is_alive())
-        self.assertEqual(
-            ordering,
-            ["shutdown", "serve-exited", "listener-closed", "fence-released"],
-        )
+        server.shutdown.assert_not_called()
+        self.assertGreaterEqual(server.handle_request.call_count, 1)
+        self.assertGreaterEqual(server.service_actions.call_count, 1)
+        self.assertEqual(ordering[0], "request-loop-entered")
+        self.assertEqual(ordering[-2:], ["listener-closed", "fence-released"])
+
+    def test_serve_poll_interval_is_finite_positive(self):
+        runtime = self._runtime()
+        for value in (0, -1, float("inf"), float("nan")):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "finite positive"):
+                    runtime.serve_forever(poll_interval=value)
+        with self.assertRaisesRegex(TypeError, "finite positive"):
+            runtime.serve_forever(poll_interval=True)
 
     def test_fence_is_released_after_listener_close(self):
         ordering = []

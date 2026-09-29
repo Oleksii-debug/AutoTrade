@@ -943,6 +943,45 @@ class AblationTests(unittest.TestCase):
                 content_digest=tampered_digest,
             )
 
+    def test_coherently_rehashed_reporting_tamper_fails_rebuild_verification(self):
+        cases = [pair("report-tamper-a", "0"), pair("report-tamper-b", "2")]
+        locked = build_ablation_evidence_bundle(
+            "agent",
+            cases,
+            source_revision="b" * 40,
+            protocol_digest=FINGERPRINT_C,
+            dataset_digest=FINGERPRINT_D,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+            uncertainty_multiplier=Decimal("1"),
+        )
+        tampered_evaluation = replace(
+            locked.evaluation,
+            lower_bound=Decimal("999"),
+            mean_net_incremental_value=Decimal("999"),
+        )
+        decoded = json.loads(locked.payload)
+        decoded["evaluation"]["lower_bound"] = "999"
+        decoded["evaluation"]["mean_net_incremental_value"] = "999"
+        tampered_payload = json.dumps(
+            decoded,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        tampered = replace(
+            locked,
+            evaluation=tampered_evaluation,
+            payload=tampered_payload,
+            content_digest=(
+                "sha256:" + sha256(tampered_payload.encode("utf-8")).hexdigest()
+            ),
+        )
+        self.assertEqual(tampered.evaluation.status, locked.evaluation.status)
+        with self.assertRaisesRegex(ValueError, "locked ablation evidence"):
+            verify_ablation_evidence_bundle(tampered, cases)
+
     def test_v1_bundle_metadata_cannot_be_reinterpreted_as_exact_authority(self):
         cases = [pair("legacy-a", "1"), pair("legacy-b", "1")]
         locked = build_ablation_evidence_bundle(

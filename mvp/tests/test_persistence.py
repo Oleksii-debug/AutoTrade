@@ -2832,16 +2832,35 @@ class JournalStoreTests(unittest.TestCase):
 
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
-            legacy = V8JournalStore(path)
-            legacy.record_command(
-                command_id="cmd-legacy",
-                actor="alice",
-                environment="PAPER",
-                idempotency_key="legacy-key",
-                request={"action": "TEST"},
-                result={"status": "ACCEPTED"},
-                state_version=0,
-            )
+            V8JournalStore(path)
+            request = {"action": "TEST"}
+            result = {"status": "ACCEPTED"}
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO command_dedupe(
+                        command_id, actor, environment, idempotency_key,
+                        request_hash, result_json, state_version, created_at,
+                        result_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "cmd-legacy",
+                        "alice",
+                        "PAPER",
+                        "legacy-key",
+                        payload_digest(request),
+                        canonical_json(result),
+                        0,
+                        "2026-09-29T00:00:00Z",
+                        payload_digest(result),
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
             upgraded = JournalStore(path)
             self.assertEqual(upgraded.current_schema_version(), 9)
             with self.assertRaisesRegex(

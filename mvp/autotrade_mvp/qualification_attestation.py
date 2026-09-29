@@ -360,7 +360,7 @@ class TrustRoot:
             raise QualificationTrustError("public_exponent is invalid")
         scopes = tuple(self.allowed_scopes)
         if not scopes or not all(
-            isinstance(item, QualificationScope) for item in scopes
+            type(item) is QualificationScope for item in scopes
         ):
             raise QualificationTrustError(
                 "allowed_scopes must contain QualificationScope values"
@@ -425,7 +425,7 @@ class QualificationTrustPolicy:
             _token(self.policy_version, name="policy_version"),
         )
         roots = tuple(self.roots)
-        if not roots or not all(isinstance(item, TrustRoot) for item in roots):
+        if not roots or not all(type(item) is TrustRoot for item in roots):
             raise QualificationTrustError("roots must contain TrustRoot values")
         roots = tuple(sorted(roots, key=lambda item: item.root_id))
         if len({item.root_id for item in roots}) != len(roots):
@@ -516,7 +516,7 @@ class QualificationAttestation:
         )
         refs = tuple(self.evidence_refs)
         if not refs or not all(
-            isinstance(item, EvidenceArtifactRef) for item in refs
+            type(item) is EvidenceArtifactRef for item in refs
         ):
             raise QualificationTrustError(
                 "evidence_refs must contain evidence artifacts"
@@ -653,9 +653,9 @@ class SignedQualificationAttestation:
     signature_b64: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.attestation, QualificationAttestation):
+        if type(self.attestation) is not QualificationAttestation:
             raise TypeError(
-                "attestation must be QualificationAttestation"
+                "attestation must be the canonical QualificationAttestation"
             )
         signature = _text(self.signature_b64, name="signature_b64")
         try:
@@ -672,15 +672,260 @@ class SignedQualificationAttestation:
             raise QualificationTrustError("signature is empty")
 
 
+def _qualification_scope_snapshot(value: object) -> QualificationScope:
+    if type(value) is not QualificationScope:
+        raise TypeError("qualification scope must be the canonical QualificationScope")
+    snapshot = QualificationScope(value.domain, value.gate)
+    if snapshot != value:
+        raise QualificationTrustError("qualification scope is not canonical")
+    return snapshot
+
+
+def _trust_root_snapshot(value: object) -> TrustRoot:
+    if type(value) is not TrustRoot:
+        raise TypeError("trust root must be the canonical TrustRoot")
+    if type(value.allowed_scopes) is not tuple:
+        raise QualificationTrustError("trust root allowed_scopes must be a tuple")
+    scopes = tuple(_qualification_scope_snapshot(item) for item in value.allowed_scopes)
+    snapshot = TrustRoot(
+        producer_id=value.producer_id,
+        verifier_id=value.verifier_id,
+        public_modulus_hex=value.public_modulus_hex,
+        public_exponent=value.public_exponent,
+        allowed_scopes=scopes,
+        valid_from=value.valid_from,
+        valid_until=value.valid_until,
+        revoked_at=value.revoked_at,
+        verification_method=value.verification_method,
+    )
+    if snapshot != value:
+        raise QualificationTrustError("trust root is not canonical")
+    return snapshot
+
+
+def _trust_root_id_exact(root: TrustRoot) -> str:
+    if type(root) is not TrustRoot:
+        raise TypeError("trust root must be the canonical TrustRoot")
+    payload = {
+        "producer_id": root.producer_id,
+        "public_exponent": root.public_exponent,
+        "public_modulus_hex": root.public_modulus_hex,
+        "verification_method": root.verification_method,
+        "verifier_id": root.verifier_id,
+    }
+    return "sha256:" + sha256(_canonical_json(payload)).hexdigest()
+
+
+def _trust_root_payload_exact(root: TrustRoot) -> dict[str, object]:
+    root = _trust_root_snapshot(root)
+    return {
+        "allowed_scopes": [
+            {"domain": item.domain, "gate": item.gate}
+            for item in root.allowed_scopes
+        ],
+        "producer_id": root.producer_id,
+        "public_exponent": root.public_exponent,
+        "public_modulus_hex": root.public_modulus_hex,
+        "revoked_at": root.revoked_at,
+        "root_id": _trust_root_id_exact(root),
+        "valid_from": root.valid_from,
+        "valid_until": root.valid_until,
+        "verification_method": root.verification_method,
+        "verifier_id": root.verifier_id,
+    }
+
+
+def _qualification_trust_policy_snapshot(
+    value: object,
+) -> QualificationTrustPolicy:
+    if type(value) is not QualificationTrustPolicy:
+        raise TypeError(
+            "policy must be the canonical QualificationTrustPolicy"
+        )
+    if type(value.roots) is not tuple:
+        raise QualificationTrustError("qualification trust roots must be a tuple")
+    roots = tuple(_trust_root_snapshot(item) for item in value.roots)
+    snapshot = QualificationTrustPolicy(
+        policy_version=value.policy_version,
+        roots=roots,
+    )
+    if snapshot != value:
+        raise QualificationTrustError("qualification trust policy is not canonical")
+    return snapshot
+
+
+def _qualification_trust_policy_payload_exact(
+    policy: QualificationTrustPolicy,
+) -> dict[str, object]:
+    policy = _qualification_trust_policy_snapshot(policy)
+    return {
+        "policy_version": policy.policy_version,
+        "roots": [_trust_root_payload_exact(root) for root in policy.roots],
+    }
+
+
+def _qualification_trust_policy_id_exact(
+    policy: QualificationTrustPolicy,
+) -> str:
+    return "sha256:" + sha256(
+        _canonical_json(_qualification_trust_policy_payload_exact(policy))
+    ).hexdigest()
+
+
+def _qualification_policy_root_exact(
+    policy: QualificationTrustPolicy,
+    root_id: str,
+) -> TrustRoot:
+    policy = _qualification_trust_policy_snapshot(policy)
+    expected = _digest(root_id, name="trust_root_id")
+    for root in policy.roots:
+        if _trust_root_id_exact(root) == expected:
+            return root
+    raise QualificationTrustError(
+        "trust root is not authorized by qualification policy"
+    )
+
+
+def _evidence_artifact_ref_snapshot(value: object) -> EvidenceArtifactRef:
+    if type(value) is not EvidenceArtifactRef:
+        raise TypeError(
+            "evidence reference must be the canonical EvidenceArtifactRef"
+        )
+    snapshot = EvidenceArtifactRef(
+        artifact_id=value.artifact_id,
+        sha256=value.sha256,
+        media_type=value.media_type,
+        evidence_kind=value.evidence_kind,
+        source_sha=value.source_sha,
+    )
+    if snapshot != value:
+        raise QualificationTrustError("evidence reference is not canonical")
+    return snapshot
+
+
+def _evidence_artifact_ref_payload_exact(
+    ref: EvidenceArtifactRef,
+) -> dict[str, str]:
+    ref = _evidence_artifact_ref_snapshot(ref)
+    return {
+        "artifact_id": ref.artifact_id,
+        "evidence_kind": ref.evidence_kind,
+        "media_type": ref.media_type,
+        "sha256": ref.sha256,
+        "source_sha": ref.source_sha,
+    }
+
+
+def _qualification_attestation_snapshot(
+    value: object,
+) -> QualificationAttestation:
+    if type(value) is not QualificationAttestation:
+        raise TypeError(
+            "attestation must be the canonical QualificationAttestation"
+        )
+    if type(value.requirement_ids) is not tuple:
+        raise QualificationTrustError("requirement_ids must be a tuple")
+    if type(value.evidence_refs) is not tuple:
+        raise QualificationTrustError("evidence_refs must be a tuple")
+    if type(value.unresolved_limits) is not tuple:
+        raise QualificationTrustError("unresolved_limits must be a tuple")
+    refs = tuple(_evidence_artifact_ref_snapshot(item) for item in value.evidence_refs)
+    snapshot = QualificationAttestation(
+        attestation_id=value.attestation_id,
+        source_sha=value.source_sha,
+        domain=value.domain,
+        gate=value.gate,
+        package_id=value.package_id,
+        protocol_id=value.protocol_id,
+        protocol_version=value.protocol_version,
+        requirement_ids=tuple(value.requirement_ids),
+        evidence_refs=refs,
+        producer_id=value.producer_id,
+        verifier_id=value.verifier_id,
+        trust_root_id=value.trust_root_id,
+        runner_id=value.runner_id,
+        harness_version=value.harness_version,
+        started_at=value.started_at,
+        completed_at=value.completed_at,
+        signed_at=value.signed_at,
+        result=value.result,
+        unresolved_limits=tuple(value.unresolved_limits),
+        release_artifact_id=value.release_artifact_id,
+        release_artifact_sha256=value.release_artifact_sha256,
+        schema_version=value.schema_version,
+        verification_method=value.verification_method,
+    )
+    if snapshot != value:
+        raise QualificationTrustError("qualification attestation is not canonical")
+    return snapshot
+
+
+def _qualification_attestation_payload_exact(
+    attestation: QualificationAttestation,
+) -> dict[str, object]:
+    attestation = _qualification_attestation_snapshot(attestation)
+    return {
+        "attestation_id": attestation.attestation_id,
+        "completed_at": attestation.completed_at,
+        "domain": attestation.domain,
+        "evidence_refs": [
+            _evidence_artifact_ref_payload_exact(item)
+            for item in attestation.evidence_refs
+        ],
+        "gate": attestation.gate,
+        "harness_version": attestation.harness_version,
+        "package_id": attestation.package_id,
+        "producer_id": attestation.producer_id,
+        "protocol_id": attestation.protocol_id,
+        "protocol_version": attestation.protocol_version,
+        "release_artifact_id": attestation.release_artifact_id,
+        "release_artifact_sha256": attestation.release_artifact_sha256,
+        "requirement_ids": list(attestation.requirement_ids),
+        "result": attestation.result,
+        "runner_id": attestation.runner_id,
+        "schema_version": attestation.schema_version,
+        "signed_at": attestation.signed_at,
+        "source_sha": attestation.source_sha,
+        "started_at": attestation.started_at,
+        "trust_root_id": attestation.trust_root_id,
+        "unresolved_limits": list(attestation.unresolved_limits),
+        "verification_method": attestation.verification_method,
+        "verifier_id": attestation.verifier_id,
+    }
+
+
+def _qualification_attestation_bytes_exact(
+    attestation: QualificationAttestation,
+) -> bytes:
+    return _canonical_json(_qualification_attestation_payload_exact(attestation))
+
+
+def _qualification_attestation_digest_exact(
+    attestation: QualificationAttestation,
+) -> str:
+    return "sha256:" + sha256(
+        _qualification_attestation_bytes_exact(attestation)
+    ).hexdigest()
+
+
+def _signed_qualification_attestation_snapshot(
+    value: object,
+) -> SignedQualificationAttestation:
+    if type(value) is not SignedQualificationAttestation:
+        raise TypeError(
+            "receipt must be the canonical SignedQualificationAttestation"
+        )
+    attestation = _qualification_attestation_snapshot(value.attestation)
+    return SignedQualificationAttestation(
+        attestation=attestation,
+        signature_b64=value.signature_b64,
+    )
+
+
 def qualification_trust_policy_payload(
     policy: QualificationTrustPolicy,
 ) -> dict[str, object]:
-    if not isinstance(policy, QualificationTrustPolicy):
-        raise TypeError("policy must be QualificationTrustPolicy")
-    return {
-        "policy_version": policy.policy_version,
-        "roots": [root.canonical() for root in policy.roots],
-    }
+    return _qualification_trust_policy_payload_exact(policy)
 
 
 def parse_qualification_trust_policy(
@@ -739,7 +984,7 @@ def parse_qualification_trust_policy(
             revoked_at=root_payload["revoked_at"],
             verification_method=root_payload["verification_method"],
         )
-        if root_payload["root_id"] != root.root_id:
+        if root_payload["root_id"] != _trust_root_id_exact(root):
             raise QualificationTrustError(
                 f"qualification trust root[{index}] root_id mismatch"
             )
@@ -1040,7 +1285,7 @@ def parse_signed_qualification_attestation(
         schema_version=attestation_payload["schema_version"],
         verification_method=attestation_payload["verification_method"],
     )
-    if attestation.canonical_payload() != dict(attestation_payload):
+    if _qualification_attestation_payload_exact(attestation) != dict(attestation_payload):
         raise QualificationTrustError(
             "qualification attestation is not in canonical serialized form"
         )
@@ -1065,8 +1310,22 @@ class AcceptedQualificationAttestation:
     protocol_id: str
     protocol_version: str
     requirement_id: str
+    requirement_ids: tuple[str, ...]
+    evidence_refs: tuple[EvidenceArtifactRef, ...]
+    producer_id: str
+    verifier_id: str
+    runner_id: str
+    harness_version: str
+    started_at: str
+    completed_at: str
+    signed_at: str
+    unresolved_limits: tuple[str, ...]
+    schema_version: str
+    verification_method: str
     release_artifact_id: str | None
     release_artifact_sha256: str | None
+    attestation_json: str
+    signature_b64: str
 
 
 def _verify_rsa_pkcs1v15_sha256(
@@ -1164,14 +1423,8 @@ def verify_qualification_attestation(
     expected_release_artifact_id: str | None = None,
     expected_release_artifact_sha256: str | None = None,
 ) -> AcceptedQualificationAttestation:
-    if not isinstance(receipt, SignedQualificationAttestation):
-        raise TypeError(
-            "receipt must be SignedQualificationAttestation"
-        )
-    if not isinstance(policy, QualificationTrustPolicy):
-        raise TypeError(
-            "policy must be QualificationTrustPolicy"
-        )
+    receipt = _signed_qualification_attestation_snapshot(receipt)
+    policy = _qualification_trust_policy_snapshot(policy)
     if type(evidence_store) is not ArtifactStore:
         raise TypeError(
             "evidence_store must be the canonical ArtifactStore"
@@ -1193,7 +1446,8 @@ def verify_qualification_attestation(
         expected_policy_version,
         name="expected_policy_version",
     )
-    if policy.policy_id != expected_policy_id:
+    observed_policy_id = _qualification_trust_policy_id_exact(policy)
+    if observed_policy_id != expected_policy_id:
         raise QualificationTrustError(
             "qualification trust policy identity is not the pinned policy"
         )
@@ -1278,7 +1532,10 @@ def verify_qualification_attestation(
             "attestation is bound to a different release artifact"
         )
 
-    root = policy.root(attestation.trust_root_id)
+    root = _qualification_policy_root_exact(
+        policy,
+        attestation.trust_root_id,
+    )
     if attestation.producer_id != root.producer_id:
         raise QualificationTrustError(
             "attestation producer is not authorized by trust root"
@@ -1319,7 +1576,7 @@ def verify_qualification_attestation(
         receipt.signature_b64, validate=True
     )
     _verify_rsa_pkcs1v15_sha256(
-        payload=attestation.canonical_bytes(),
+        payload=_qualification_attestation_bytes_exact(attestation),
         signature=signature,
         root=root,
     )
@@ -1328,10 +1585,10 @@ def verify_qualification_attestation(
 
     return AcceptedQualificationAttestation(
         attestation_id=attestation.attestation_id,
-        attestation_digest=attestation.content_digest,
-        policy_id=policy.policy_id,
+        attestation_digest=_qualification_attestation_digest_exact(attestation),
+        policy_id=observed_policy_id,
         policy_version=policy.policy_version,
-        trust_root_id=root.root_id,
+        trust_root_id=_trust_root_id_exact(root),
         result=attestation.result,
         source_sha=attestation.source_sha,
         domain=attestation.domain,
@@ -1340,8 +1597,27 @@ def verify_qualification_attestation(
         protocol_id=attestation.protocol_id,
         protocol_version=attestation.protocol_version,
         requirement_id=expected_requirement_id,
+        requirement_ids=tuple(attestation.requirement_ids),
+        evidence_refs=tuple(
+            _evidence_artifact_ref_snapshot(ref)
+            for ref in attestation.evidence_refs
+        ),
+        producer_id=attestation.producer_id,
+        verifier_id=attestation.verifier_id,
+        runner_id=attestation.runner_id,
+        harness_version=attestation.harness_version,
+        started_at=attestation.started_at,
+        completed_at=attestation.completed_at,
+        signed_at=attestation.signed_at,
+        unresolved_limits=tuple(attestation.unresolved_limits),
+        schema_version=attestation.schema_version,
+        verification_method=attestation.verification_method,
         release_artifact_id=attestation.release_artifact_id,
         release_artifact_sha256=attestation.release_artifact_sha256,
+        attestation_json=_qualification_attestation_bytes_exact(
+            attestation
+        ).decode("utf-8"),
+        signature_b64=receipt.signature_b64,
     )
 
 def verify_canonical_qualification_attestation(
@@ -1374,7 +1650,7 @@ def verify_canonical_qualification_attestation(
         policy=policy,
         evidence_store=evidence_store,
         evidence_root=evidence_root,
-        expected_policy_id=policy.policy_id,
+        expected_policy_id=_qualification_trust_policy_id_exact(policy),
         expected_policy_version=policy.policy_version,
         expected_source_sha=expected_source_sha,
         expected_domain=expected_domain,

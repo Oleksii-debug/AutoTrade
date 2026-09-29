@@ -349,36 +349,10 @@ def validate_trusted_nvda_qualification(
             for item in required
         )
     )
-    if tuple(receipt.attestation.requirement_ids) != requirement_ids:
-        raise NvdaQualificationError(
-            "signed NVDA attestation requirements do not match the canonical workflow set"
-        )
-    release_artifact_id = receipt.attestation.release_artifact_id
-    if release_artifact_id is None:
-        raise NvdaQualificationError(
-            "signed NVDA attestation must bind the delivered release artifact"
-        )
-    if release_artifact_id != result["release_artifact_id"]:
-        raise NvdaQualificationError(
-            "signed NVDA attestation release identity does not match the observed release artifact"
-        )
-    if receipt.attestation.release_artifact_sha256 != release_artifact_sha256:
-        raise NvdaQualificationError(
-            "signed NVDA attestation release digest does not match the delivered artifact"
-        )
-    exact_refs = [
-        ref
-        for ref in receipt.attestation.evidence_refs
-        if (
-            ref.sha256 == evidence_sha256
-            and ref.evidence_kind == NVDA_EVIDENCE_KIND
-            and ref.source_sha == result["source_sha"]
-        )
-    ]
-    if len(exact_refs) != 1:
-        raise NvdaQualificationError(
-            "signed NVDA attestation must resolve the exact raw NVDA evidence payload"
-        )
+    release_artifact_id = _required_text(
+        result.get("release_artifact_id"),
+        name="release_artifact_id",
+    )
 
     accepted = None
     for requirement_id in requirement_ids:
@@ -421,6 +395,30 @@ def validate_trusted_nvda_qualification(
             )
     if accepted is None:
         raise NvdaQualificationError("signed NVDA qualification has no requirements")
+    if tuple(accepted.requirement_ids) != requirement_ids:
+        raise NvdaQualificationError(
+            "signed NVDA attestation requirements do not match the canonical workflow set"
+        )
+    if (
+        accepted.release_artifact_id != release_artifact_id
+        or accepted.release_artifact_sha256 != release_artifact_sha256
+    ):
+        raise NvdaQualificationError(
+            "accepted NVDA attestation release binding is inconsistent"
+        )
+    exact_refs = [
+        ref
+        for ref in accepted.evidence_refs
+        if (
+            ref.sha256 == evidence_sha256
+            and ref.evidence_kind == NVDA_EVIDENCE_KIND
+            and ref.source_sha == result["source_sha"]
+        )
+    ]
+    if len(exact_refs) != 1:
+        raise NvdaQualificationError(
+            "signed NVDA attestation must resolve the exact raw NVDA evidence payload"
+        )
     return {
         **result,
         "qualified": True,

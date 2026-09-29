@@ -531,6 +531,7 @@ class QualificationAttestationTests(unittest.TestCase):
                         verify_canonical_qualification_attestation(
                             hostile_receipt,
                             evidence_store=store,
+                            evidence_root=Path(evidence_directory),
                             expected_source_sha=source_sha,
                             expected_domain="RELEASE",
                             expected_gate="FREEZE",

@@ -49,7 +49,9 @@ class WindowsUpdateTrustContext:
 
     def __post_init__(self) -> None:
         if type(self.evidence_store) is not ArtifactStore:
-            raise TypeError("evidence_store must be the canonical ArtifactStore")
+            raise TypeError(
+            "evidence_store must be ArtifactStore (canonical exact type required)"
+        )
         if not isinstance(self.evidence_root, (str, Path)):
             raise TypeError("evidence_root must be a string or Path")
         if isinstance(self.evidence_root, str) and not self.evidence_root.strip():

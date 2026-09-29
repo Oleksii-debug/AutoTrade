@@ -766,7 +766,9 @@ def freeze_release_candidate(
     if not isinstance(candidate, ReleaseCandidateInput):
         raise TypeError("candidate must be ReleaseCandidateInput")
     if evidence_store is not None and type(evidence_store) is not ArtifactStore:
-        raise TypeError("evidence_store must be the canonical ArtifactStore")
+        raise TypeError(
+            "evidence_store must be ArtifactStore (canonical exact type required)"
+        )
     if qualification_receipt is not None and not isinstance(
         qualification_receipt, SignedQualificationAttestation
     ):

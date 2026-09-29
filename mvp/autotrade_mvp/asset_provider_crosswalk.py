@@ -251,7 +251,9 @@ def qualify_asset_provider_crosswalk(
 
     source_sha = _sha(exact_source_sha, "exact_source_sha")
     if evidence_store is not None and type(evidence_store) is not ArtifactStore:
-        raise TypeError("evidence_store must be the canonical ArtifactStore")
+        raise TypeError(
+            "evidence_store must be ArtifactStore (canonical exact type required)"
+        )
     trusted_read = None
     if evidence_store is not None and evidence_root is not None:
         try:

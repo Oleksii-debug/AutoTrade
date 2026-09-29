@@ -501,7 +501,9 @@ def qualify_recovery_release(
     if isinstance(evidence, (str, bytes)) or not isinstance(evidence, Sequence):
         raise TypeError("evidence must be a sequence")
     if evidence_store is not None and type(evidence_store) is not ArtifactStore:
-        raise TypeError("evidence_store must be the canonical ArtifactStore")
+        raise TypeError(
+            "evidence_store must be ArtifactStore (canonical exact type required)"
+        )
     if qualification_receipt is not None and not isinstance(
         qualification_receipt, SignedQualificationAttestation
     ):

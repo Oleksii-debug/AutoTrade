@@ -247,7 +247,9 @@ def qualify_supply_chain(
     if not isinstance(evidence, SupplyChainEvidence):
         raise TypeError("evidence must be SupplyChainEvidence")
     if evidence_store is not None and type(evidence_store) is not ArtifactStore:
-        raise TypeError("evidence_store must be the canonical ArtifactStore")
+        raise TypeError(
+            "evidence_store must be ArtifactStore (canonical exact type required)"
+        )
     if trust_receipt is not None and not isinstance(
         trust_receipt, SignedQualificationAttestation
     ):

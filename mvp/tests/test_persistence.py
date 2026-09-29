@@ -1039,7 +1039,7 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(legacy.current_schema_version(), 1)
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 8)
+            self.assertEqual(upgraded.current_schema_version(), 9)
             self.assertEqual(
                 upgraded.load_events("account", "paper-1")[0]["event_id"],
                 "evt-1",
@@ -1076,7 +1076,7 @@ class JournalStoreTests(unittest.TestCase):
                 connection.close()
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 8)
+            self.assertEqual(upgraded.current_schema_version(), 9)
             with self.assertRaisesRegex(ValueError, "legacy unscoped"):
                 upgraded.record_command(
                     actor="alice",
@@ -1140,18 +1140,35 @@ class JournalStoreTests(unittest.TestCase):
                 connection.close()
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 8)
-            replayed, inserted = upgraded.record_command(
-                actor="alice",
-                environment="PAPER",
-                command_id="ignored-on-replay",
-                idempotency_key="v4-key",
-                request=request,
-                result={"status": "MUST_NOT_REPLACE"},
-                state_version=999,
+            self.assertEqual(upgraded.current_schema_version(), 9)
+            connection = sqlite3.connect(path)
+            try:
+                command_row = connection.execute(
+                    "SELECT result_hash, effect_kind FROM command_dedupe "
+                    "WHERE command_id = ?",
+                    ("v4-command",),
+                ).fetchone()
+            finally:
+                connection.close()
+            self.assertIsNotNone(command_row)
+            self.assertEqual(
+                command_row[0],
+                payload_digest({"status": "ACCEPTED"}),
             )
-            self.assertFalse(inserted)
-            self.assertEqual(replayed, {"status": "ACCEPTED"})
+            self.assertEqual(command_row[1], "LEGACY_UNKNOWN")
+            with self.assertRaisesRegex(
+                ValueError,
+                "ambiguous transactional effect",
+            ):
+                upgraded.record_command(
+                    actor="alice",
+                    environment="PAPER",
+                    command_id="v4-command",
+                    idempotency_key="v4-key",
+                    request=request,
+                    result={"status": "MUST_NOT_REPLACE"},
+                    state_version=999,
+                )
             self.assertEqual(upgraded.pending_outbox()[0]["event_id"], "evt-1")
 
 
@@ -1839,7 +1856,7 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(legacy.current_schema_version(), 6)
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 8)
+            self.assertEqual(upgraded.current_schema_version(), 9)
             self.assertEqual(
                 [item["event_id"] for item in upgraded.load_events_after_journal_sequence(0)],
                 ["evt-1"],
@@ -2152,7 +2169,7 @@ class JournalStoreTests(unittest.TestCase):
             )
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 8)
+            self.assertEqual(upgraded.current_schema_version(), 9)
             self.assertIsNone(
                 upgraded.load_projection_checkpoint(
                     projection_name="position",
@@ -2449,7 +2466,7 @@ class JournalStoreTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 ValueError,
-                "contiguous canonical positive integer series",
+                "journal event sequence must be a positive integer",
             ):
                 store.commit_command(**command_args)
 
@@ -2604,7 +2621,7 @@ class JournalStoreTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 ValueError,
-                "event identity changed",
+                "envelope conflicts with core journal event",
             ):
                 store.commit_command(**args)
 
@@ -2676,7 +2693,7 @@ class JournalStoreTests(unittest.TestCase):
                 "result-only command carries unexpected effect authority",
             ):
                 store.record_command(
-                    command_id="cmd-result-tamper-retry",
+                    command_id="cmd-result-tamper",
                     actor="alice",
                     environment="PAPER",
                     idempotency_key="key-result-tamper",
@@ -2771,7 +2788,7 @@ class JournalStoreTests(unittest.TestCase):
                 "different command effect kind",
             ):
                 store.commit_command(
-                    command_id="cmd-event",
+                    command_id="cmd-result",
                     actor="alice",
                     environment="PAPER",
                     idempotency_key="shared-key",
@@ -2800,7 +2817,7 @@ class JournalStoreTests(unittest.TestCase):
                 "different command effect kind",
             ):
                 store.record_command(
-                    command_id="cmd-result",
+                    command_id="cmd-event",
                     actor="alice",
                     environment="PAPER",
                     idempotency_key="shared-key",

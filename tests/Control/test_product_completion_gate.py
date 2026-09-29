@@ -363,6 +363,37 @@ class ProductCompletionGateTests(unittest.TestCase):
         self.assertTrue(report["nvda_source_matches"])
         self.assertTrue(report["qualification_source_matches"])
 
+    def test_completion_ignores_post_capture_publication_store_poisoning(self):
+        with TemporaryDirectory() as directory:
+            (
+                qualification,
+                evidence_context,
+                nvda_status,
+            ) = verified_completion_fixture(directory)
+
+            attacker_root = Path(directory) / "attacker"
+            object.__setattr__(evidence_context.evidence_store, "root", attacker_root)
+            object.__setattr__(
+                evidence_context.evidence_store,
+                "objects",
+                attacker_root / "objects" / "sha256",
+            )
+            object.__setattr__(
+                evidence_context.evidence_store,
+                "read_bytes",
+                lambda _artifact_id: b"forged evidence",
+            )
+
+            report = evaluate(
+                qualification=qualification,
+                nvda_status=nvda_status,
+                evidence_context=evidence_context,
+            )
+
+        self.assertTrue(report["complete"])
+        self.assertTrue(report["nvda_qualified"])
+        self.assertEqual(report["nonpassing_evidence"], [])
+
     def test_completion_context_rejects_forged_publication_root_generation(self):
         with TemporaryDirectory() as directory:
             base = Path(directory)

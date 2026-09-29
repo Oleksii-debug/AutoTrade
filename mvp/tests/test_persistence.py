@@ -6,6 +6,7 @@ import unittest
 
 from mvp.autotrade_mvp.persistence import (
     JournalStore,
+    canonical_json,
     _event_envelope_digest,
     _outbox_envelope_digest,
     payload_digest,

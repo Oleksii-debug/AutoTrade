@@ -434,6 +434,7 @@ def qualify_signed(value, *, receipt=None, canonical_policy=None):
             return qualify_supply_chain(
                 value,
                 evidence_store=store,
+                evidence_root=directory,
                 trust_receipt=receipt,
             )
 

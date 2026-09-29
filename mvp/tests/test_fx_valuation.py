@@ -90,6 +90,21 @@ class FxValuationTests(unittest.TestCase):
         self.assertEqual(result.rate_used, Decimal("0.5"))
         self.assertEqual((result.rate_numerator, result.rate_denominator), (1, 2))
 
+    def test_inverse_rate_projection_cannot_veto_bounded_final_conversion(self):
+        quote_value = str(2**257)
+        result = value_amount(
+            quote_value,
+            source_currency="USD",
+            reporting_currency="EUR",
+            quote=eurusd(bid=quote_value, ask=quote_value),
+            as_of=NOW,
+            max_age=timedelta(minutes=1),
+        )
+        self.assertEqual(result.converted_amount, Decimal("1"))
+        self.assertIsNone(result.rate_used)
+        self.assertEqual(result.rate_numerator, 1)
+        self.assertEqual(result.rate_denominator, 2**257)
+
     def test_nonterminating_inverse_requires_explicit_reporting_quantum(self):
         no_policy = value_amount(
             "1",
@@ -273,6 +288,22 @@ class FxValuationTests(unittest.TestCase):
                 max_age=timedelta(minutes=1),
             )
 
+    def test_rounding_policy_cannot_reclassify_terminating_resource_overflow(self):
+        boundary = "9" * 256
+        with self.assertRaisesRegex(FxValuationError, "resource envelope"):
+            value_amount(
+                boundary,
+                source_currency="EUR",
+                reporting_currency="USD",
+                quote=eurusd(bid="10", ask="10"),
+                as_of=NOW,
+                max_age=timedelta(minutes=1),
+                rounding_policy=FxRoundingPolicy(
+                    reporting_currency="USD",
+                    quantum="0.01",
+                ),
+            )
+
     def test_extreme_zero_exponent_is_canonicalized_before_fx_identity(self):
         result = value_amount(
             Decimal("0E-1000000"),
@@ -285,6 +316,47 @@ class FxValuationTests(unittest.TestCase):
         self.assertEqual(result.converted_amount, Decimal("0"))
         self.assertEqual(result.source_amount, Decimal("0"))
         self.assertEqual(result.status, "CERTAIN")
+
+    def test_inverse_rate_projection_overflow_does_not_veto_exact_final_amount(self):
+        quote = eurusd(bid="1e-256", ask="1e-256")
+        observed = []
+        for precision in (6, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    result = value_amount(
+                        "1e-256",
+                        source_currency="USD",
+                        reporting_currency="EUR",
+                        quote=quote,
+                        as_of=NOW,
+                        max_age=timedelta(minutes=1),
+                    )
+                    observed.append(result)
+
+        self.assertTrue(all(row.converted_amount == Decimal("1") for row in observed))
+        self.assertTrue(all(row.rate_used is None for row in observed))
+        self.assertTrue(all(row.rate_numerator == 10**256 for row in observed))
+        self.assertTrue(all(row.rate_denominator == 1 for row in observed))
+        self.assertTrue(all(row.rounding_policy_id is None for row in observed))
+        self.assertTrue(all(row.rounding_quantum is None for row in observed))
+
+    def test_inverse_optional_rate_fallback_cannot_mask_final_amount_overflow(self):
+        quote = eurusd(bid="1e-256", ask="1e-256")
+        with self.assertRaisesRegex(FxValuationError, "resource envelope"):
+            value_amount(
+                "1",
+                source_currency="USD",
+                reporting_currency="EUR",
+                quote=quote,
+                as_of=NOW,
+                max_age=timedelta(minutes=1),
+                rounding_policy=FxRoundingPolicy(
+                    reporting_currency="EUR",
+                    quantum="0.01",
+                ),
+            )
 
     def test_duplicate_normalized_currency_codes_cannot_double_count_capital(self):
         with self.assertRaisesRegex(

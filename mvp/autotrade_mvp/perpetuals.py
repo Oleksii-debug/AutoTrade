@@ -18,6 +18,7 @@ from typing import Literal
 from .exact_decimal import (
     ExactDecimalError,
     as_fraction as _exact_as_fraction,
+    bounded_fraction as _exact_bounded_fraction,
     canonical_decimal_text as _exact_canonical_decimal_text,
     exact_add as _exact_add,
     exact_multiply as _exact_multiply,
@@ -41,6 +42,10 @@ def _translate_exact(operation, *args, **kwargs):
 
 def as_fraction(value: Decimal) -> Fraction:
     return _translate_exact(_exact_as_fraction, value)
+
+
+def bounded_fraction(value: Fraction) -> Fraction:
+    return _translate_exact(_exact_bounded_fraction, value)
 
 
 def exact_add(left: Decimal, right: Decimal) -> Decimal:
@@ -103,6 +108,24 @@ def _fraction(value: Decimal) -> Fraction:
 
 def _finite(value: Fraction) -> Decimal:
     return terminating_decimal(value)
+
+
+def _fadd(left: Fraction, right: Fraction) -> Fraction:
+    return bounded_fraction(left + right)
+
+
+def _fsub(left: Fraction, right: Fraction) -> Fraction:
+    return bounded_fraction(left - right)
+
+
+def _fmul(left: Fraction, right: Fraction) -> Fraction:
+    return bounded_fraction(left * right)
+
+
+def _fdiv(left: Fraction, right: Fraction) -> Fraction:
+    if right == 0:
+        raise ZeroDivisionError("exact rational divisor must be non-zero")
+    return bounded_fraction(left / right)
 
 
 @dataclass(frozen=True)
@@ -213,8 +236,11 @@ class MarketSnapshot:
             raise PerpetualError("market snapshot cannot come from the future")
         if point - self.observed_at > self.max_age:
             raise PerpetualError("market snapshot is stale")
-        distance = abs(_fraction(self.mark_price) - _fraction(self.index_price))
-        permitted = _fraction(self.max_mark_index_deviation) * _fraction(self.index_price)
+        distance = abs(_fsub(_fraction(self.mark_price), _fraction(self.index_price)))
+        permitted = _fmul(
+            _fraction(self.max_mark_index_deviation),
+            _fraction(self.index_price),
+        )
         if distance > permitted:
             raise PerpetualError("mark/index deviation exceeds configured bound")
 
@@ -313,10 +339,10 @@ class LiquidationSnapshot:
         if self.side == "LONG":
             if self.liquidation_price >= mark:
                 raise PerpetualError("long liquidation boundary must be below current mark")
-            return (mark_fraction - liquidation_fraction) / mark_fraction
+            return _fdiv(_fsub(mark_fraction, liquidation_fraction), mark_fraction)
         if self.liquidation_price <= mark:
             raise PerpetualError("short liquidation boundary must be above current mark")
-        return (liquidation_fraction - mark_fraction) / mark_fraction
+        return _fdiv(_fsub(liquidation_fraction, mark_fraction), mark_fraction)
 
 
 def require_liquidation_headroom(
@@ -341,12 +367,12 @@ def require_liquidation_headroom(
     if liquidation.side == "LONG":
         if liquidation.liquidation_price >= mark:
             raise PerpetualError("long liquidation boundary must be below current mark")
-        distance = _fraction(mark) - _fraction(liquidation.liquidation_price)
+        distance = _fsub(_fraction(mark), _fraction(liquidation.liquidation_price))
     else:
         if liquidation.liquidation_price <= mark:
             raise PerpetualError("short liquidation boundary must be above current mark")
-        distance = _fraction(liquidation.liquidation_price) - _fraction(mark)
-    required_distance = _fraction(minimum) * _fraction(mark)
+        distance = _fsub(_fraction(liquidation.liquidation_price), _fraction(mark))
+    required_distance = _fmul(_fraction(minimum), _fraction(mark))
     if distance < required_distance:
         raise PerpetualError("liquidation headroom is below configured minimum")
     return liquidation.headroom_fraction(mark)
@@ -383,11 +409,11 @@ def inverse_perpetual_pnl_exact(
     face = _decimal(contract.multiplier, "multiplier", positive=True)
     entry = _decimal(entry_price, "entry_price", positive=True)
     exit_value = _decimal(exit_price, "exit_price", positive=True)
-    return (
-        _fraction(contracts)
-        * _fraction(face)
-        * (Fraction(1, 1) / _fraction(entry) - Fraction(1, 1) / _fraction(exit_value))
-    )
+    notional = bounded_fraction(_fraction(contracts) * _fraction(face))
+    entry_inverse = bounded_fraction(Fraction(1, 1) / _fraction(entry))
+    exit_inverse = bounded_fraction(Fraction(1, 1) / _fraction(exit_value))
+    reciprocal_delta = bounded_fraction(entry_inverse - exit_inverse)
+    return bounded_fraction(notional * reciprocal_delta)
 
 
 def inverse_funding_cashflow_exact(
@@ -406,13 +432,14 @@ def inverse_funding_cashflow_exact(
     contracts = _decimal(signed_contracts, "signed_contracts")
     rate = _decimal(funding_rate, "funding_rate")
     basis = snapshot.mark_price if convention.price_basis == "MARK" else snapshot.index_price
-    position_value = (
-        _fraction(contracts)
-        * _fraction(contract.multiplier)
-        / _fraction(basis)
+    position_numerator = bounded_fraction(
+        _fraction(contracts) * _fraction(contract.multiplier)
     )
-    raw = position_value * _fraction(rate)
-    cashflow = -raw if convention.positive_rate_effect == "LONG_PAYS" else raw
+    position_value = bounded_fraction(position_numerator / _fraction(basis))
+    raw = bounded_fraction(position_value * _fraction(rate))
+    cashflow = bounded_fraction(
+        -raw if convention.positive_rate_effect == "LONG_PAYS" else raw
+    )
     return contract.settlement_currency, cashflow
 
 
@@ -437,13 +464,16 @@ def inverse_stressed_loss_exact(
     face_f = _fraction(contract.multiplier)
     mark_f = _fraction(mark)
     move_f = _fraction(move)
-    exit_f = mark_f * (
+    move_factor = bounded_fraction(
         Fraction(1, 1) - move_f if contracts > 0 else Fraction(1, 1) + move_f
     )
-    pnl = contracts_f * face_f * (
-        Fraction(1, 1) / mark_f - Fraction(1, 1) / exit_f
-    )
-    return -pnl if pnl < 0 else Fraction(0, 1)
+    exit_f = bounded_fraction(mark_f * move_factor)
+    mark_inverse = bounded_fraction(Fraction(1, 1) / mark_f)
+    exit_inverse = bounded_fraction(Fraction(1, 1) / exit_f)
+    reciprocal_delta = bounded_fraction(mark_inverse - exit_inverse)
+    notional = bounded_fraction(contracts_f * face_f)
+    pnl = bounded_fraction(notional * reciprocal_delta)
+    return bounded_fraction(-pnl if pnl < 0 else Fraction(0, 1))
 
 
 def funding_cashflow(
@@ -486,12 +516,10 @@ def stressed_loss(
     move = _decimal(adverse_move_fraction, "adverse_move_fraction", positive=True)
     if move >= 1:
         raise PerpetualError("adverse_move_fraction must be below one")
-    return _finite(
-        abs(_fraction(position))
-        * _fraction(contract.multiplier)
-        * _fraction(mark)
-        * _fraction(move)
-    )
+    loss = _fmul(abs(_fraction(position)), _fraction(contract.multiplier))
+    loss = _fmul(loss, _fraction(mark))
+    loss = _fmul(loss, _fraction(move))
+    return _finite(loss)
 
 
 def require_new_risk_capacity(

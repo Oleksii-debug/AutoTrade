@@ -19,6 +19,7 @@ from typing import Mapping
 from .exact_decimal import (
     ExactDecimalError,
     as_fraction as _exact_as_fraction,
+    bounded_fraction as _exact_bounded_fraction,
     canonical_decimal_text as _exact_canonical_decimal_text,
     exact_sum as _exact_sum,
     round_fraction_to_quantum as _exact_round_fraction_to_quantum,
@@ -41,6 +42,10 @@ def _translate_exact(operation, *args, name: str):
 
 def _as_fraction(value: Decimal, *, name: str) -> Fraction:
     return _translate_exact(_exact_as_fraction, value, name=name)
+
+
+def _bounded_fraction(value: Fraction, *, name: str) -> Fraction:
+    return _translate_exact(_exact_bounded_fraction, value, name=name)
 
 
 def _terminating_decimal(value: Fraction, *, name: str) -> Decimal:
@@ -119,6 +124,21 @@ def _has_terminating_decimal(value: Fraction) -> bool:
     while denominator % 5 == 0:
         denominator //= 5
     return denominator == 1
+
+
+def _optional_terminating_decimal(value: Fraction) -> Decimal | None:
+    """Project compatibility rate only when projection itself fits the envelope.
+
+    Exact rational rate identity is authoritative. A compatibility Decimal rate
+    must never veto an otherwise bounded final FX conversion.
+    """
+
+    if not _has_terminating_decimal(value):
+        return None
+    try:
+        return _exact_terminating_decimal(value)
+    except ExactDecimalError:
+        return None
 
 
 @dataclass(frozen=True)
@@ -397,21 +417,37 @@ def value_amount(
             quoted_rate = quote.bid
             side = "INVERSE_BID_FOR_LIABILITY"
         quoted_fraction = _as_fraction(quoted_rate, name="FX quoted rate")
-        rate_fraction = Fraction(1, 1) / quoted_fraction
-        rate_used = (
-            _terminating_decimal(rate_fraction, name="inverse FX rate")
-            if _has_terminating_decimal(rate_fraction)
-            else None
+        rate_fraction = _bounded_fraction(
+            Fraction(1, 1) / quoted_fraction,
+            name="inverse FX exact rate",
         )
+        rate_used = _optional_terminating_decimal(rate_fraction)
     else:
         raise FxValuationError("quote does not connect source and reporting currencies")
 
-    converted_fraction = _as_fraction(source_amount, name="FX source amount") * rate_fraction
+    converted_fraction = _bounded_fraction(
+        _as_fraction(source_amount, name="FX source amount") * rate_fraction,
+        name="FX exact converted amount",
+    )
     haircut_fraction = _as_fraction(haircut_value, name="FX haircut")
     if converted_fraction > 0:
-        converted_fraction *= Fraction(1, 1) - haircut_fraction
+        haircut_factor = _bounded_fraction(
+            Fraction(1, 1) - haircut_fraction,
+            name="FX asset haircut factor",
+        )
+        converted_fraction = _bounded_fraction(
+            converted_fraction * haircut_factor,
+            name="FX exact haircut-adjusted amount",
+        )
     elif converted_fraction < 0:
-        converted_fraction *= Fraction(1, 1) + haircut_fraction
+        haircut_factor = _bounded_fraction(
+            Fraction(1, 1) + haircut_fraction,
+            name="FX liability haircut factor",
+        )
+        converted_fraction = _bounded_fraction(
+            converted_fraction * haircut_factor,
+            name="FX exact haircut-adjusted amount",
+        )
 
     applied_policy: FxRoundingPolicy | None = None
     if _has_terminating_decimal(converted_fraction):

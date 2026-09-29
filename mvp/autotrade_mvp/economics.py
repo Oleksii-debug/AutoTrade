@@ -17,6 +17,7 @@ from typing import Any
 
 from .exact_decimal import (
     as_fraction,
+    bounded_fraction,
     exact_sum,
     round_fraction_to_quantum,
     terminating_decimal,
@@ -51,6 +52,28 @@ def _positive(value: Decimal | str | int, *, name: str) -> Decimal:
 
 def _finite(value: Fraction) -> Decimal:
     return terminating_decimal(value)
+
+
+def _bounded(value: Fraction) -> Fraction:
+    return bounded_fraction(value)
+
+
+def _fadd(left: Fraction, right: Fraction) -> Fraction:
+    return _bounded(left + right)
+
+
+def _fsub(left: Fraction, right: Fraction) -> Fraction:
+    return _bounded(left - right)
+
+
+def _fmul(left: Fraction, right: Fraction) -> Fraction:
+    return _bounded(left * right)
+
+
+def _fdiv(left: Fraction, right: Fraction) -> Fraction:
+    if right == 0:
+        raise ZeroDivisionError("exact rational divisor must be non-zero")
+    return _bounded(left / right)
 
 
 @dataclass(frozen=True)
@@ -100,18 +123,20 @@ def cash_round_trip(
     fee_buy_f = as_fraction(fee_buy)
     fee_sell_f = as_fraction(fee_sell)
 
-    position_f = bought_f - sold_f
-    cash_f = (
-        start_f
-        - bought_f * buy_px_f
-        - fee_buy_f
-        + sold_f * sell_px_f
-        - fee_sell_f
+    position_f = _fsub(bought_f, sold_f)
+    buy_notional_f = _fmul(bought_f, buy_px_f)
+    sell_notional_f = _fmul(sold_f, sell_px_f)
+    cash_f = _fsub(
+        _fadd(
+            _fsub(_fsub(start_f, buy_notional_f), fee_buy_f),
+            sell_notional_f,
+        ),
+        fee_sell_f,
     )
-    realized_f = sold_f * (sell_px_f - buy_px_f)
-    unrealized_f = position_f * (mark_f - buy_px_f)
-    fees_f = fee_buy_f + fee_sell_f
-    equity_f = cash_f + position_f * mark_f
+    realized_f = _fmul(sold_f, _fsub(sell_px_f, buy_px_f))
+    unrealized_f = _fmul(position_f, _fsub(mark_f, buy_px_f))
+    fees_f = _fadd(fee_buy_f, fee_sell_f)
+    equity_f = _fadd(cash_f, _fmul(position_f, mark_f))
     return CashRoundTripResult(
         cash=_finite(cash_f),
         position=_finite(position_f),
@@ -119,7 +144,7 @@ def cash_round_trip(
         gross_unrealized_pnl=_finite(unrealized_f),
         fees=_finite(fees_f),
         equity=_finite(equity_f),
-        net_pnl=_finite(equity_f - start_f),
+        net_pnl=_finite(_fsub(equity_f, start_f)),
     )
 
 
@@ -133,10 +158,12 @@ def linear_futures_mark_pnl(
     mult = _positive(multiplier, name="multiplier")
     entry = _positive(entry_price, name="entry_price")
     mark = _positive(mark_price, name="mark_price")
+    price_delta = _fsub(as_fraction(mark), as_fraction(entry))
     return _finite(
-        as_fraction(qty)
-        * as_fraction(mult)
-        * (as_fraction(mark) - as_fraction(entry))
+        _fmul(
+            _fmul(as_fraction(qty), as_fraction(mult)),
+            price_delta,
+        )
     )
 
 
@@ -152,14 +179,11 @@ def inverse_futures_pnl_exact(
     value = _positive(contract_value, name="contract_value")
     entry = _positive(entry_price, name="entry_price")
     exit_value = _positive(exit_price, name="exit_price")
-    return (
-        as_fraction(qty)
-        * as_fraction(value)
-        * (
-            Fraction(1, 1) / as_fraction(entry)
-            - Fraction(1, 1) / as_fraction(exit_value)
-        )
-    )
+    notional = bounded_fraction(as_fraction(qty) * as_fraction(value))
+    entry_inverse = bounded_fraction(Fraction(1, 1) / as_fraction(entry))
+    exit_inverse = bounded_fraction(Fraction(1, 1) / as_fraction(exit_value))
+    reciprocal_delta = bounded_fraction(entry_inverse - exit_inverse)
+    return bounded_fraction(notional * reciprocal_delta)
 
 
 INVERSE_REFERENCE_QUANTUM = Decimal("0.00000000000000000000000000000000000000000000000001")
@@ -203,7 +227,12 @@ def linear_funding_cashflow(
     if normalized_side not in {"LONG", "SHORT"}:
         raise ValueError("side must be LONG or SHORT")
     sign = -1 if normalized_side == "LONG" else 1
-    return _finite(Fraction(sign, 1) * as_fraction(value) * as_fraction(rate))
+    return _finite(
+        _fmul(
+            _fmul(Fraction(sign, 1), as_fraction(value)),
+            as_fraction(rate),
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -244,10 +273,11 @@ def apply_split(
     den = _positive(denominator, name="denominator")
     qty_f = as_fraction(qty)
     basis_f = as_fraction(basis)
-    total_basis_f = abs(qty_f) * basis_f
-    new_quantity_f = qty_f * as_fraction(num) / as_fraction(den)
+    total_basis_f = _fmul(abs(qty_f), basis_f)
+    scaled_quantity_f = _fmul(qty_f, as_fraction(num))
+    new_quantity_f = _fdiv(scaled_quantity_f, as_fraction(den))
     new_unit_basis_f = (
-        total_basis_f / abs(new_quantity_f)
+        _fdiv(total_basis_f, abs(new_quantity_f))
         if new_quantity_f
         else Fraction(0, 1)
     )
@@ -283,7 +313,12 @@ def investment_pnl_excluding_external_flows(
     previous = _decimal(previous_equity, name="previous_equity")
     current = _decimal(current_equity, name="current_equity")
     flow = _decimal(external_net_flow, name="external_net_flow")
-    return _finite(as_fraction(current) - as_fraction(previous) - as_fraction(flow))
+    return _finite(
+        _fsub(
+            _fsub(as_fraction(current), as_fraction(previous)),
+            as_fraction(flow),
+        )
+    )
 
 
 def corrected_fill_cash_difference(
@@ -299,9 +334,10 @@ def corrected_fill_cash_difference(
     normalized_side = side.upper()
     if normalized_side not in {"BUY", "SELL"}:
         raise ValueError("side must be BUY or SELL")
-    difference = as_fraction(corrected) - as_fraction(original)
-    signed = -as_fraction(qty) * difference if normalized_side == "BUY" else as_fraction(qty) * difference
-    return _finite(signed)
+    difference = _fsub(as_fraction(corrected), as_fraction(original))
+    unsigned = _fmul(as_fraction(qty), difference)
+    signed = -unsigned if normalized_side == "BUY" else unsigned
+    return _finite(_bounded(signed))
 
 
 REPORT_QUANTUM = Decimal("0.00000001")
@@ -375,15 +411,17 @@ def build_economic_report(state_dir: str | Path) -> EconomicReport:
     )
     turnover = exact_sum(
         _finite(
-            abs(as_fraction(_decimal(fill.get("quantity"), name="fill quantity")))
-            * as_fraction(_decimal(fill.get("price"), name="fill price"))
+            _fmul(
+                abs(as_fraction(_decimal(fill.get("quantity"), name="fill quantity"))),
+                as_fraction(_decimal(fill.get("price"), name="fill price")),
+            )
         )
         for fill in fills.values()
     )
-    net_pnl_f = as_fraction(final_equity) - as_fraction(initial_equity)
+    net_pnl_f = _fsub(as_fraction(final_equity), as_fraction(initial_equity))
     net_pnl = _finite(net_pnl_f)
-    gross_pnl = _finite(net_pnl_f + as_fraction(total_fees))
-    net_return_f = net_pnl_f / as_fraction(initial_equity)
+    gross_pnl = _finite(_fadd(net_pnl_f, as_fraction(total_fees)))
+    net_return_f = _fdiv(net_pnl_f, as_fraction(initial_equity))
 
     peak = initial_equity
     maximum_drawdown_f = Fraction(0, 1)
@@ -393,14 +431,15 @@ def build_economic_report(state_dir: str | Path) -> EconomicReport:
         if equity > peak:
             peak = equity
         if peak > 0:
-            drawdown_f = (
-                as_fraction(peak) - as_fraction(equity)
-            ) / as_fraction(peak)
+            drawdown_f = _fdiv(
+                _fsub(as_fraction(peak), as_fraction(equity)),
+                as_fraction(peak),
+            )
             maximum_drawdown_f = max(maximum_drawdown_f, drawdown_f)
         reconciled = reconciled and row.get("reconciled") is True
 
     effective_fee_rate_f = (
-        as_fraction(total_fees) / as_fraction(turnover)
+        _fdiv(as_fraction(total_fees), as_fraction(turnover))
         if turnover > 0
         else Fraction(0, 1)
     )

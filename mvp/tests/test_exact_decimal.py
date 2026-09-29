@@ -8,6 +8,7 @@ from mvp.autotrade_mvp.exact_decimal import (
     MAX_SCALE,
     MAX_SIGNIFICANT_DIGITS,
     as_fraction,
+    bounded_fraction,
     canonical_decimal_text,
     exact_abs,
     exact_add,
@@ -167,6 +168,12 @@ class ExactDecimalTests(unittest.TestCase):
             exact_add(boundary, Decimal("1"))
         with self.assertRaisesRegex(ExactDecimalError, "significant digits"):
             exact_multiply(boundary, Decimal("10"))
+
+    def test_bounded_fraction_rejects_authority_beyond_rational_envelope(self):
+        with self.assertRaisesRegex(ExactDecimalError, "numerator exceeds resource envelope"):
+            bounded_fraction(Fraction(10**1024, 1))
+        with self.assertRaisesRegex(ExactDecimalError, "denominator exceeds resource envelope"):
+            bounded_fraction(Fraction(1, 10**1024))
 
 
 if __name__ == "__main__":

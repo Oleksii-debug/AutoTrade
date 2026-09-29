@@ -1,11 +1,6 @@
-"""Compatibility facade for the shared AutoTrade exact numeric authority.
+"""Shared bounded exact numeric authority for AutoTrade."""
 
-The implementation lives in :mod:`autotrade_numeric.exact_decimal` so the MVP
-runtime and the separately installed research package consume one source of
-truth for Decimal/rational resource bounds and exact arithmetic.
-"""
-
-from autotrade_numeric.exact_decimal import (
+from .exact_decimal import (
     ExactDecimalError,
     MAX_INTEGER_DIGITS,
     MAX_RATIONAL_DIGITS,

@@ -149,6 +149,7 @@
     "components_blob_sha": "cba907e56f9442e2be0073955d97c5b52fbeac60",
     "global_json_blob_sha": "b4ffa1877d371d285f4a7ddf850071845a8dfe27",
     "requirements_dev_blob_sha": "76f5d233cc243db2e17262533de69e75f66163ef",
-    "research_pyproject_blob_sha": "9c587c43b3082ab14d062922f27713e828647157"
+    "research_pyproject_blob_sha": "1f944942af6dab2077c12ffe866da1c39ef2f817",
+    "root_pyproject_blob_sha": "cfab84895baf980c5c38f1ac6a4dd2055b350a8e"
   }
 }

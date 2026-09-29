@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import unittest
 
 from mvp.autotrade_mvp.allocation import (
@@ -302,6 +302,89 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
         self.assertEqual(target.notional, 120)
         self.assertEqual(target.estimated_cost, Decimal("2.4"))
         self.assertEqual(result.objective.allocation.cash_required, Decimal("122.4"))
+
+    def test_cross_currency_financial_normalization_ignores_ambient_decimal_context(self):
+        objective, market, capital, stress, resolved = self.cross_currency_bundle()
+
+        market_payload = dict(market.payload)
+        market_payload["cost_rate"] = "0.0010000001"
+        market = self.evidence(
+            evidence_id=market.evidence_id,
+            kind="MARKET_CONSTRAINT",
+            payload=market_payload,
+        )
+
+        valuation = resolved["valuation:aaa:v1"]
+        valuation_payload = dict(valuation.payload)
+        valuation_payload.update({
+            "fx_rate": "1.2000000001",
+            "unit_base_notional": "12.000000001",
+            "desired_notional_base": "120.00000001",
+            "min_notional_base": "12.000000001",
+            "fee_floor_base": "2.4000000002",
+            "max_executable_notional_base": "120.00000001",
+            "cost_rate_components": {
+                "execution": "0.00100000005",
+                "financing": "0",
+                "funding": "0",
+                "borrow": "0",
+                "fx": "0.00000000005",
+            },
+        })
+        valuation = self.evidence(
+            evidence_id=valuation.evidence_id,
+            kind="VALUATION",
+            payload=valuation_payload,
+        )
+        resolved = {
+            objective.evidence_id: objective,
+            market.evidence_id: market,
+            valuation.evidence_id: valuation,
+            capital.evidence_id: capital,
+            stress.evidence_id: stress,
+        }
+        bundle = (objective, market, capital, stress, resolved)
+        candidate = ObjectiveCandidate.create(
+            symbol="AAA",
+            desired_notional="100",
+            price="10",
+            lot_size="1",
+            expected_return_rate="0.10",
+            risk_penalty_rate="0.01",
+            cost_rate="0.0010000001",
+            capital_requirement_rate="1",
+            min_notional="10",
+            fee_floor="2",
+            max_executable_notional="100",
+        )
+
+        def snapshot():
+            result = self.allocate(candidate=candidate, bundle=bundle)
+            target = result.objective.allocation.targets[0]
+            return (
+                result.objective.allocation.status,
+                target.quantity,
+                target.notional,
+                target.estimated_cost,
+                result.objective.allocation.cash_required,
+                result.objective.selected_symbols,
+                result.objective.expected_net_utility,
+            )
+
+        baseline = snapshot()
+        self.assertEqual(baseline[0], "ALLOCATED")
+        self.assertEqual(baseline[2], Decimal("120.00000001"))
+        self.assertEqual(baseline[3], Decimal("2.4000000002"))
+        self.assertEqual(
+            baseline[4],
+            Decimal("122.4000000102"),
+        )
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    self.assertEqual(snapshot(), baseline)
 
     def test_cross_currency_rejects_unbound_desired_notional_currency(self):
         candidate = ObjectiveCandidate.create(

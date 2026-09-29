@@ -2183,13 +2183,25 @@ def allocate_evidence_bound_objective_targets(
         else:
             monetary_rate = valuation_fx_rate
 
-        desired_notional_base = item.candidate.desired_notional * monetary_rate
-        min_notional_base = item.candidate.min_notional * monetary_rate
-        fee_floor_base = item.candidate.fee_floor * monetary_rate
+        desired_notional_base = _exact_multiply(
+            item.candidate.desired_notional,
+            monetary_rate,
+        )
+        min_notional_base = _exact_multiply(
+            item.candidate.min_notional,
+            monetary_rate,
+        )
+        fee_floor_base = _exact_multiply(
+            item.candidate.fee_floor,
+            monetary_rate,
+        )
         max_executable_notional_base = (
             None
             if item.candidate.max_executable_notional is None
-            else item.candidate.max_executable_notional * monetary_rate
+            else _exact_multiply(
+                item.candidate.max_executable_notional,
+                monetary_rate,
+            )
         )
         if quote_currency != base_currency:
             if _payload_decimal(
@@ -2240,14 +2252,16 @@ def allocate_evidence_bound_objective_targets(
                     fee_floor=fee_floor_base,
                     max_executable_notional=max_executable_notional_base,
                     current_quantity=current_quantities[symbol],
-                    turnover_cost_rate=(
-                        normalized.cost_rate_components["execution"]
-                        + normalized.cost_rate_components["fx"]
+                    turnover_cost_rate=_exact_add(
+                        normalized.cost_rate_components["execution"],
+                        normalized.cost_rate_components["fx"],
                     ),
-                    holding_cost_rate=(
-                        normalized.cost_rate_components["financing"]
-                        + normalized.cost_rate_components["funding"]
-                        + normalized.cost_rate_components["borrow"]
+                    holding_cost_rate=_exact_sum(
+                        (
+                            normalized.cost_rate_components["financing"],
+                            normalized.cost_rate_components["funding"],
+                            normalized.cost_rate_components["borrow"],
+                        )
                     ),
                 ),
                 expected_return_rate=item.expected_return_rate,

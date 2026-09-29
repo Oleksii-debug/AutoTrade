@@ -2490,6 +2490,108 @@ def book_external_provider_cash_activity(
     if activity.provider_environment != scope:
         result["provider_environment"] = activity.provider_environment
 
+    imported_event_id = str(
+        uuid5(
+            NAMESPACE_URL,
+            f"https://events.autotrade.local/provider-activity-import/{identity}",
+        )
+    )
+    economic_event_id = str(
+        uuid5(
+            NAMESPACE_URL,
+            f"https://events.autotrade.local/economic-booking/{identity}",
+        )
+    )
+    command_identity = str(
+        uuid5(
+            NAMESPACE_URL,
+            f"https://commands.autotrade.local/provider-cash-import/{identity}",
+        )
+    )
+
+    existing_imported = store.get_event(imported_event_id)
+    existing_economic = store.get_event(economic_event_id)
+    if (existing_imported is None) != (existing_economic is None):
+        raise AccountingConflict(
+            "provider cash activity has only part of its durable financial effect"
+        )
+    if existing_imported is not None and existing_economic is not None:
+        imported_payload = existing_imported.get("payload")
+        economic_payload = existing_economic.get("payload")
+        if not isinstance(imported_payload, Mapping) or not isinstance(
+            economic_payload, Mapping
+        ):
+            raise AccountingConflict(
+                "provider cash activity replay found invalid durable payload"
+            )
+        if any(imported_payload.get(key) != value for key, value in request.items()):
+            raise AccountingConflict(
+                "provider cash activity replay conflicts with durable provider fact"
+            )
+        if (
+            imported_payload.get("economic_transaction_id") != transaction_id
+            or imported_payload.get("cause_event_id") != cause_event_id
+            or economic_payload.get("provider_id") != provider
+            or economic_payload.get("account_id") != account
+            or economic_payload.get("environment") != scope
+            or economic_payload.get("source_activity_identity") != identity
+            or economic_payload.get("transaction")
+            != _transaction_payload(transaction)
+        ):
+            raise AccountingConflict(
+                "provider cash activity replay conflicts with durable economic effect"
+            )
+        expected_provider_environment = (
+            None
+            if activity.provider_environment == scope
+            else activity.provider_environment
+        )
+        if (
+            imported_payload.get("provider_environment")
+            != expected_provider_environment
+            or economic_payload.get("provider_environment")
+            != expected_provider_environment
+        ):
+            raise AccountingConflict(
+                "provider cash activity replay conflicts with durable provider domain"
+            )
+
+        def replay_envelope(event: Mapping[str, object]) -> dict[str, object]:
+            envelope = {
+                key: value
+                for key, value in event.items()
+                if key != "journal_sequence"
+            }
+            version = event.get("aggregate_version")
+            if type(version) is not int or version <= 0:
+                raise AccountingConflict(
+                    "provider cash activity replay has invalid aggregate version"
+                )
+            envelope["aggregate_version"] = str(version)
+            return envelope
+
+        _, replay_inserted, _ = store.commit_command(
+            command_id=command_identity,
+            actor="provider-activity-accounting",
+            environment=scope,
+            idempotency_key=f"provider-cash-import:{identity}",
+            request=request,
+            result=result,
+            state_version=int(existing_economic["aggregate_version"]),
+            events=[
+                (replay_envelope(existing_imported), None),
+                (
+                    replay_envelope(existing_economic),
+                    "autotrade.economic.events",
+                ),
+            ],
+        )
+        if replay_inserted:
+            raise AccountingConflict(
+                "provider cash effects exist without their durable command authority"
+            )
+        return transaction, False
+
     activity_version = store.next_aggregate_version(
         "provider_activity", identity
     )
@@ -2501,12 +2603,6 @@ def book_external_provider_cash_activity(
         "economic_transaction_id": transaction_id,
         "cause_event_id": cause_event_id,
     }
-    imported_event_id = str(
-        uuid5(
-            NAMESPACE_URL,
-            f"https://events.autotrade.local/provider-activity-import/{identity}",
-        )
-    )
     imported_envelope = {
         "event_id": imported_event_id,
         "event_type": "ProviderActivityImported",
@@ -2528,12 +2624,6 @@ def book_external_provider_cash_activity(
     }
     if activity.provider_environment != scope:
         economic_payload["provider_environment"] = activity.provider_environment
-    economic_event_id = str(
-        uuid5(
-            NAMESPACE_URL,
-            f"https://events.autotrade.local/economic-booking/{identity}",
-        )
-    )
     economic_envelope = {
         "event_id": economic_event_id,
         "event_type": "EconomicTransactionBooked",
@@ -2545,12 +2635,6 @@ def book_external_provider_cash_activity(
         "payload_hash": payload_digest(economic_payload),
     }
 
-    command_identity = str(
-        uuid5(
-            NAMESPACE_URL,
-            f"https://commands.autotrade.local/provider-cash-import/{identity}",
-        )
-    )
     _, inserted, _ = store.commit_command(
         command_id=command_identity,
         actor="provider-activity-accounting",

@@ -24,7 +24,7 @@ from .qualification_attestation import (
     QualificationTrustError,
     QualificationTrustPolicy,
     SignedQualificationAttestation,
-    verify_qualification_attestation,
+    verify_canonical_qualification_attestation,
 )
 
 
@@ -763,16 +763,11 @@ def assess_bounded_real_qualification(
                 suffix = "conflicted" if verification.conflicted else "unverified"
                 reasons.append(f"immutable_evidence_{suffix}:{label}")
 
-    trust_inputs = (
-        qualification_receipt,
-        qualification_policy,
-        expected_policy_id,
-        expected_policy_version,
-    )
-    if all(value is None for value in trust_inputs):
+    # Terminal signer authority is selected only by the canonical exact-source
+    # trust policy. Caller-provided policy/pin arguments remain accepted solely
+    # for API compatibility/diagnostics and never participate in completion.
+    if qualification_receipt is None:
         reasons.append("independent_evidence_trust_unavailable")
-    elif any(value is None for value in trust_inputs):
-        reasons.append("independent_evidence_trust_incomplete")
     elif private_verifier is None:
         # Signed qualification cannot upgrade a caller-owned verifier into
         # terminal bounded-real metadata authority.
@@ -784,13 +779,10 @@ def assess_bounded_real_qualification(
             for _, ref in all_refs
         )
         try:
-            accepted = verify_qualification_attestation(
+            accepted = verify_canonical_qualification_attestation(
                 qualification_receipt,
-                policy=qualification_policy,
                 evidence_store=evidence_store,
                 evidence_root=evidence_root,
-                expected_policy_id=expected_policy_id,
-                expected_policy_version=expected_policy_version,
                 expected_source_sha=envelope.source_sha,
                 expected_domain=_QUALIFICATION_DOMAIN,
                 expected_gate=_QUALIFICATION_GATE,

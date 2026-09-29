@@ -10,13 +10,13 @@ import os
 from pathlib import Path
 import re
 import subprocess
-from typing import Iterable, Mapping
+from typing import Callable, Iterable, Mapping
 from uuid import UUID
 
-from research.autotrade_research.artifacts.store import (
+from research.autotrade_research.artifacts import (
     ArtifactIntegrityError,
     ArtifactStore,
-    read_trusted_authenticated_snapshot,
+    trusted_authenticated_reader,
 )
 
 
@@ -1103,13 +1103,11 @@ def _verify_rsa_pkcs1v15_sha256(
 
 
 def _resolve_evidence(
-    store: ArtifactStore, ref: EvidenceArtifactRef
+    read_snapshot: Callable[[str], tuple[dict[str, object], bytes]],
+    ref: EvidenceArtifactRef,
 ) -> None:
     try:
-        manifest, data = read_trusted_authenticated_snapshot(
-            store,
-            ref.artifact_id,
-        )
+        manifest, data = read_snapshot(ref.artifact_id)
         if "manifest_hash" not in manifest:
             raise QualificationTrustError(
                 "evidence manifest lacks integrity binding"
@@ -1177,6 +1175,12 @@ def verify_qualification_attestation(
         raise TypeError(
             "evidence_store must be the canonical ArtifactStore"
         )
+    try:
+        evidence_reader = trusted_authenticated_reader(evidence_store)
+    except (ArtifactIntegrityError, OSError) as error:
+        raise QualificationTrustError(
+            "evidence artifact authority cannot be bound"
+        ) from error
 
     expected_policy_id = _digest(
         expected_policy_id, name="expected_policy_id"
@@ -1316,7 +1320,7 @@ def verify_qualification_attestation(
         root=root,
     )
     for ref in attestation.evidence_refs:
-        _resolve_evidence(evidence_store, ref)
+        _resolve_evidence(evidence_reader, ref)
 
     return AcceptedQualificationAttestation(
         attestation_id=attestation.attestation_id,

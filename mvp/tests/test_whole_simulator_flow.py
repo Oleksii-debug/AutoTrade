@@ -84,6 +84,7 @@ def authority_service(store: JournalStore) -> AuthorityService:
             account_id=request.account_id,
             environment=request.environment,
             provider_id=request.provider_id,
+            provider_environment=request.provider_environment,
             instrument_version=request.instrument_version,
             capability_snapshot_id=request.capability_snapshot_id,
             reconciliation_checkpoint_event_id=request.reconciliation_checkpoint_event_id,

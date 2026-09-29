@@ -372,6 +372,85 @@ class JournalBackedHostApiTests(unittest.TestCase):
         ):
             restarted.submit(command)
 
+    def test_fresh_submit_concurrent_exact_winner_is_idempotent_without_growth(self):
+        store = self.store()
+        original_commit = store._journal.commit_command
+        raced = False
+
+        def race_then_commit(*args, **kwargs):
+            nonlocal raced
+            if not raced:
+                raced = True
+                winner = JournalStore(self.path)
+                saved, inserted, _ = winner.commit_command(*args, **kwargs)
+                self.assertTrue(inserted)
+                self.assertEqual(saved, kwargs["result"])
+            return original_commit(*args, **kwargs)
+
+        with patch.object(
+            store._journal,
+            "commit_command",
+            side_effect=race_then_commit,
+        ):
+            accepted = store.submit(self.command())
+
+        self.assertEqual(accepted.status, "ACCEPTED")
+        self.assertEqual(accepted.state_version, "1")
+        self.assertEqual(store.state_version, 1)
+        self.assertEqual(store.cursor, 1)
+        self.assertEqual(
+            JournalStore(self.path).current_journal_sequence(),
+            1,
+        )
+        self.assertEqual(
+            JournalStore(self.path).pending_outbox_count(),
+            1,
+        )
+        self.assertEqual(len(store.events_after(0)), 1)
+
+    def test_fresh_submit_rejects_concurrent_domain_inconsistent_saved_result(self):
+        store = self.store()
+        original_commit = store._journal.commit_command
+        raced = False
+
+        def race_then_commit(*args, **kwargs):
+            nonlocal raced
+            if not raced:
+                raced = True
+                forged_kwargs = dict(kwargs)
+                forged_result = dict(kwargs["result"])
+                forged_result["status"] = "CONFLICT"
+                forged_result["reason_codes"] = ["forged_race_result"]
+                forged_kwargs["result"] = forged_result
+                winner = JournalStore(self.path)
+                _saved, inserted, _ = winner.commit_command(
+                    *args,
+                    **forged_kwargs,
+                )
+                self.assertTrue(inserted)
+            return original_commit(*args, **kwargs)
+
+        with patch.object(
+            store._journal,
+            "commit_command",
+            side_effect=race_then_commit,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "result conflicts with durable accepted event",
+            ):
+                store.submit(self.command())
+
+        self.assertEqual(
+            JournalStore(self.path).current_journal_sequence(),
+            1,
+        )
+        self.assertEqual(
+            JournalStore(self.path).pending_outbox_count(),
+            1,
+        )
+        self.assertEqual(len(store.events_after(0)), 1)
+
     def test_exact_retry_does_not_lazily_promote_orphan_accepted_event(self):
         first = self.store()
         command = self.command()
@@ -403,11 +482,13 @@ class JournalBackedHostApiTests(unittest.TestCase):
         first = self.store()
         command = self.command()
         first.submit(command)
+        before_sequence = JournalStore(self.path).current_journal_sequence()
+        before_outbox = JournalStore(self.path).pending_outbox_count()
 
         restarted = self.store()
         changed_action = restarted.submit(
             self.command(
-                action="CANCEL_OPEN_ORDERS",
+                action="REVOKE_AUTHORITY",
             )
         )
         self.assertEqual(changed_action.status, "CONFLICT")
@@ -428,6 +509,14 @@ class JournalBackedHostApiTests(unittest.TestCase):
             changed_actor.reason_codes,
         )
         self.assertEqual(restarted.state_version, 1)
+        self.assertEqual(
+            JournalStore(self.path).current_journal_sequence(),
+            before_sequence,
+        )
+        self.assertEqual(
+            JournalStore(self.path).pending_outbox_count(),
+            before_outbox,
+        )
 
     def test_same_command_id_under_new_key_conflicts_after_restart(self):
         first = self.store()

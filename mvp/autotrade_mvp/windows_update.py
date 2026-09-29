@@ -748,6 +748,7 @@ def _validated_plan_release(
         decision = freeze_release_candidate(
             reconstructed,
             evidence_store=trust.evidence_store,
+            evidence_root=trust.evidence_root,
             qualification_receipt=receipt,
             qualification_policy=trust.qualification_policy,
             expected_policy_id=trust.expected_policy_id,

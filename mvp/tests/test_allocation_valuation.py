@@ -1,3 +1,4 @@
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import unittest
 
 from mvp.autotrade_mvp.allocation_valuation import (
@@ -109,6 +110,35 @@ class AllocationValuationBoundaryTests(unittest.TestCase):
         self.assertEqual(result.fx_rate, 1)
         self.assertEqual(result.fx_source_id, "IDENTITY")
         self.assertEqual(result.portfolio_base_currency, "USD")
+
+    def test_high_significance_notional_and_cost_sum_ignore_ambient_context(self):
+        source_price = "12345678901234567890.123456789"
+        cost_components = {
+            "execution": "0.1234567890123456789012345678",
+            "financing": "0.0000000000000000000000000001",
+            "funding": "0",
+            "borrow": "0",
+            "fx": "0",
+        }
+        expected_cost = "0.1234567890123456789012345679"
+        observed = []
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    result = self.normalize(
+                        self.market(),
+                        self.valuation(
+                            source_price=source_price,
+                            unit_base_notional=source_price,
+                            cost_rate_components=cost_components,
+                        ),
+                        source_price=source_price,
+                        cost_rate=expected_cost,
+                    )
+                    observed.append(result.unit_base_notional)
+        self.assertTrue(all(value == Decimal(source_price) for value in observed))
 
     def test_cross_currency_requires_fresh_exact_fx_evidence(self):
         digest = "sha256:" + "a" * 64

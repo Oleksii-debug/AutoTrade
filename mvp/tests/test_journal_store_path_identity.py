@@ -39,6 +39,38 @@ class JournalStorePathIdentityRegressionTests(unittest.TestCase):
         finally:
             os.chdir(original_cwd)
 
+    def test_construction_captures_cwd_before_parent_creation(self) -> None:
+        original_cwd = Path.cwd()
+        try:
+            with tempfile.TemporaryDirectory() as first_dir, tempfile.TemporaryDirectory() as second_dir:
+                first = Path(first_dir)
+                second = Path(second_dir)
+                real_mkdir = Path.mkdir
+                cwd_changed = False
+
+                def mkdir_after_cwd_change(path, *args, **kwargs):
+                    nonlocal cwd_changed
+                    if not cwd_changed:
+                        cwd_changed = True
+                        os.chdir(second)
+                    return real_mkdir(path, *args, **kwargs)
+
+                os.chdir(first)
+                with patch.object(Path, "mkdir", new=mkdir_after_cwd_change):
+                    store = JournalStore("state/journal.sqlite")
+
+                expected = (first / "state" / "journal.sqlite").resolve()
+                unexpected = second / "state" / "journal.sqlite"
+                self.assertTrue(cwd_changed)
+                self.assertEqual(Path(store.path), expected)
+                self.assertTrue(expected.exists())
+                self.assertFalse(
+                    unexpected.exists(),
+                    "construction-time CWD changes must not select a second journal authority",
+                )
+        finally:
+            os.chdir(original_cwd)
+
     def test_same_relative_text_in_different_cwds_is_not_same_store_identity(self) -> None:
         original_cwd = Path.cwd()
         try:

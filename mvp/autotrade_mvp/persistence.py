@@ -13,6 +13,7 @@ from ._persistence_impl import JournalStore as _JournalStoreImpl
 from .store_identity import (
     JournalStoreIdentity,
     connection_main_identity,
+    establish_database_anchor,
     freeze_database_path,
     require_database_identity,
 )
@@ -32,10 +33,10 @@ class JournalStore(_JournalStoreImpl):
     """JournalStore with immutable canonical backing-file authority.
 
     The configured path is resolved exactly once at construction. The first
-    SQLite open mints a process-lifetime identity from canonical path plus
-    filesystem device/inode evidence. Every later open verifies that identity
-    before and after use so deletion, replacement, CWD drift, or path rebinding
-    can never silently redirect an existing store object to another journal.
+    SQLite open is anchored to a pre-open filesystem identity, and every later
+    open verifies the same identity before and after use so deletion,
+    replacement, CWD drift, hard-link ambiguity, or path rebinding can never
+    silently redirect an existing store object to another journal.
     """
 
     def __init__(self, path: str | Path):
@@ -55,7 +56,10 @@ class JournalStore(_JournalStoreImpl):
     @contextmanager
     def _connect(self):
         expected = self._store_identity
-        if expected is not None:
+        first_open_anchor: JournalStoreIdentity | None = None
+        if expected is None:
+            first_open_anchor = establish_database_anchor(self.path)
+        else:
             # This check occurs before sqlite3.connect so a deleted/replaced
             # path cannot be silently recreated/adopted by an old store object.
             require_database_identity(self.path, expected)
@@ -69,6 +73,10 @@ class JournalStore(_JournalStoreImpl):
                     "SQLite main database path does not match canonical journal authority"
                 )
             if expected is None:
+                if opened != first_open_anchor:
+                    raise RuntimeError(
+                        "SQLite first open does not match the anchored journal backing file"
+                    )
                 self._store_identity = opened
                 expected = opened
             elif opened != expected:

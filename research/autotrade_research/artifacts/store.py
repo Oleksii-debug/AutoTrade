@@ -74,7 +74,22 @@ class ArtifactStore:
     immutable manifests. A crash after object publication but before manifest
     publication can only leave an unreferenced object; recovery may remove it
     after recomputing all manifest references under the store lock.
+
+    Canonical instances are sealed after construction.  Trusted consumers may
+    therefore rely on one exact ArtifactStore instance without caller-owned
+    instance attributes shadowing trust-critical reader helpers or redirecting
+    its namespace after the store has crossed an authority boundary.
     """
+
+    __slots__ = (
+        "_root",
+        "_export_authorizer",
+        "_objects",
+        "_manifests",
+        "_staging",
+        "_lock_path",
+        "_sealed",
+    )
 
     SCHEMA_VERSION = 1
 
@@ -84,17 +99,46 @@ class ArtifactStore:
         *,
         export_authorizer: Callable[[str, str], bool] | None = None,
     ):
-        self.root = Path(root)
+        root_path = Path(root)
+        object.__setattr__(self, "_root", root_path)
         # Manifest hashes detect corruption but do not authenticate mutable policy.
         # Export authority must come from a caller-controlled source outside this
         # writable artifact-store namespace and bind the artifact identity+digest.
-        self._export_authorizer = export_authorizer
-        self.objects = self.root / "objects" / "sha256"
-        self.manifests = self.root / "manifests"
-        self.staging = self.root / "staging"
-        self.lock_path = self.root / ".artifact-store.lock"
+        object.__setattr__(self, "_export_authorizer", export_authorizer)
+        object.__setattr__(self, "_objects", root_path / "objects" / "sha256")
+        object.__setattr__(self, "_manifests", root_path / "manifests")
+        object.__setattr__(self, "_staging", root_path / "staging")
+        object.__setattr__(self, "_lock_path", root_path / ".artifact-store.lock")
         for path in (self.objects, self.manifests, self.staging):
             path.mkdir(parents=True, exist_ok=True)
+        object.__setattr__(self, "_sealed", True)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if getattr(self, "_sealed", False):
+            raise AttributeError(
+                "ArtifactStore authority state is immutable after construction"
+            )
+        object.__setattr__(self, name, value)
+
+    @property
+    def root(self) -> Path:
+        return self._root
+
+    @property
+    def objects(self) -> Path:
+        return self._objects
+
+    @property
+    def manifests(self) -> Path:
+        return self._manifests
+
+    @property
+    def staging(self) -> Path:
+        return self._staging
+
+    @property
+    def lock_path(self) -> Path:
+        return self._lock_path
 
     @staticmethod
     def _artifact_id(value: str) -> str:
@@ -1278,3 +1322,22 @@ class ArtifactStore:
                         continue
             self._cleanup_staging_entries()
             return self.audit()
+
+def read_trusted_authenticated_snapshot(
+    store: object,
+    artifact_id: str,
+) -> tuple[dict[str, Any], bytes]:
+    """Read one authenticated snapshot through the sealed canonical store TCB.
+
+    Authority-bearing consumers must not virtual-dispatch through an injected
+    subclass or caller-shadowed instance method.  Exact type identity excludes
+    alternate construction semantics, while ArtifactStore's sealed slots make
+    the instance namespace/path state immutable after construction.  Calling the
+    base implementation directly then keeps the trusted read on that canonical
+    implementation.
+    """
+
+    if type(store) is not ArtifactStore:
+        raise TypeError("trusted artifact store must be the canonical ArtifactStore")
+    return ArtifactStore.read_authenticated_snapshot(store, artifact_id)
+

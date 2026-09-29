@@ -634,10 +634,6 @@ class ProviderSubmissionObservation:
             raise ProviderCoreError("provider-write provenance endpoint mismatch")
         if prepared_request_sha256 != self.request_sha256:
             raise ProviderCoreError("provider-write provenance request digest mismatch")
-        if tuple(capability_snapshot_ids) != self.capability_snapshot_ids:
-            raise ProviderCoreError("provider-write provenance capability mismatch")
-        if tuple(instrument_versions) != self.instrument_versions:
-            raise ProviderCoreError("provider-write provenance instrument mismatch")
         if account_id is not None and _text(account_id, "account_id") != self.account_id:
             raise ProviderCoreError("provider-write provenance account mismatch")
         if (
@@ -661,6 +657,10 @@ class ProviderSubmissionObservation:
                 raise ProviderCoreError(
                     "provider-write provenance provider-environment mismatch"
                 )
+        if tuple(capability_snapshot_ids) != self.capability_snapshot_ids:
+            raise ProviderCoreError("provider-write provenance capability mismatch")
+        if tuple(instrument_versions) != self.instrument_versions:
+            raise ProviderCoreError("provider-write provenance instrument mismatch")
         if (
             client_order_id is not None
             and _text(client_order_id, "client_order_id") != self.client_order_id

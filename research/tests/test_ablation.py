@@ -1621,6 +1621,13 @@ class AblationTests(unittest.TestCase):
                 "secondary_metrics": ["latency"],
                 "trial_budget": 2,
                 "stopping_rules": {"maximum_trials": 2},
+                "ablation_decision_policy": {
+                    "schema_version": "1.0.0",
+                    "minimum_pairs": 2,
+                    "required_lower_bound": "0",
+                    "uncertainty_multiplier": "2",
+                    "decision_rule": "exact-rational-d2-sample-variance-v1",
+                },
                 "statistical_estimator": "matched-lower-bound",
                 "multiplicity_treatment": "pre-registered-single-comparison",
                 "minimum_practical_effect": "0",
@@ -1632,6 +1639,46 @@ class AblationTests(unittest.TestCase):
                 protocol_payload,
                 protocol_id="11111111-1111-4111-8111-111111111111",
             )
+            registered_policy = science.ablation_decision_policy(
+                registration.protocol_id
+            )
+            self.assertEqual(registered_policy.protocol_hash, registration.protocol_hash)
+            self.assertEqual(registered_policy.minimum_pairs, 2)
+            self.assertEqual(registered_policy.required_lower_bound, "0")
+            self.assertEqual(registered_policy.uncertainty_multiplier, "2")
+            self.assertEqual(
+                registered_policy.decision_rule,
+                "exact-rational-d2-sample-variance-v1",
+            )
+
+            changed_policy_payload = dict(protocol_payload)
+            changed_policy_payload["ablation_decision_policy"] = {
+                **protocol_payload["ablation_decision_policy"],
+                "required_lower_bound": "1",
+            }
+            changed_registration = science.register_protocol(
+                changed_policy_payload,
+                protocol_id="77777777-7777-4777-8777-777777777777",
+            )
+            changed_policy = science.ablation_decision_policy(
+                changed_registration.protocol_id
+            )
+            self.assertNotEqual(
+                changed_registration.protocol_hash,
+                registration.protocol_hash,
+            )
+            self.assertNotEqual(
+                changed_policy.policy_digest,
+                registered_policy.policy_digest,
+            )
+
+            legacy_payload = dict(protocol_payload)
+            legacy_payload.pop("ablation_decision_policy")
+            legacy_registration = science.register_protocol(
+                legacy_payload,
+                protocol_id="88888888-8888-4888-8888-888888888888",
+            )
+
             registered_at = datetime.fromisoformat(registration.created_at)
             self.assertIsNotNone(registered_at.tzinfo)
             registered_at = registered_at.astimezone(timezone.utc)
@@ -1730,6 +1777,33 @@ class AblationTests(unittest.TestCase):
                 task="ablation-qualification",
                 instrument_family="EQUITY",
             )
+            legacy_authority = AblationQualificationAuthority(
+                scientific_registry=science,
+                experience_memory=memory,
+                artifact_store=artifacts,
+                evidence_root=root / "artifacts",
+                protocol_id=legacy_registration.protocol_id,
+                protocol_hash=legacy_registration.protocol_hash,
+                source_revision=source_revision,
+                causal_cutoff=evaluation_cutoff,
+                granted_permissions={"RESEARCH"},
+                task="ablation-qualification",
+                instrument_family="EQUITY",
+            )
+            legacy_result = evaluate_qualified_incremental_value(
+                "agent",
+                cases,
+                authority=legacy_authority,
+                outcome_refs=(),
+                minimum_pairs=2,
+                required_lower_bound=Decimal("-999"),
+                uncertainty_multiplier=Decimal("0"),
+            )
+            self.assertEqual(legacy_result.status, "INCONCLUSIVE")
+            self.assertEqual(
+                legacy_result.reason,
+                "registered_ablation_decision_policy_unavailable",
+            )
 
             def _caller_store_poison(*_args, **_kwargs):
                 raise AssertionError("caller ArtifactStore method must not execute")
@@ -1793,6 +1867,33 @@ class AblationTests(unittest.TestCase):
                 result.qualification_stopping_rule_digest,
                 trial_state["stopping_rules_hash"],
             )
+            self.assertEqual(
+                result.qualification_decision_policy_digest,
+                registered_policy.policy_digest,
+            )
+            self.assertEqual(result.required_lower_bound, Decimal("0"))
+            self.assertEqual(result.uncertainty_multiplier, Decimal("2"))
+
+            post_hoc_loosened = evaluate_qualified_incremental_value(
+                "agent",
+                cases,
+                authority=authority,
+                outcome_refs=refs,
+                minimum_pairs=2,
+                required_lower_bound=Decimal("-999"),
+                uncertainty_multiplier=Decimal("0"),
+            )
+            post_hoc_tightened = evaluate_qualified_incremental_value(
+                "agent",
+                cases,
+                authority=authority,
+                outcome_refs=refs,
+                minimum_pairs=999,
+                required_lower_bound=Decimal("999"),
+                uncertainty_multiplier=Decimal("999"),
+            )
+            self.assertEqual(post_hoc_loosened, result)
+            self.assertEqual(post_hoc_tightened, result)
 
             forged_first = AblationPair(
                 "agent",

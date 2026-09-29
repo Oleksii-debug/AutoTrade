@@ -88,16 +88,17 @@ def _validate_fraction_intermediate(
         raise ExactDecimalError("rational denominator exceeds resource envelope")
 
 
-def validate_fraction(value: Fraction) -> Fraction:
-    """Validate and return one bounded exact rational value.
-
-    This is the public resource-boundary primitive for callers that must keep
-    rational intermediates exact across multiple operations. Call it after each
-    material arithmetic step; it never rounds to fit the envelope.
-    """
+def bounded_fraction(value: Fraction) -> Fraction:
+    """Return an exact rational only if it satisfies the shared resource envelope."""
 
     _validate_fraction_intermediate(value)
     return value
+
+
+def validate_fraction(value: Fraction) -> Fraction:
+    """Compatibility name for the shared bounded-rational authority."""
+
+    return bounded_fraction(value)
 
 
 def as_fraction(value: Decimal) -> Fraction:
@@ -247,16 +248,6 @@ def round_fraction_to_quantum(
 
     rounded = quantum_fraction * rounded_units
     _validate_fraction_intermediate(rounded)
-    if rounded_units == 0:
-        # Exact zero loses denominator information when reduced to Fraction(0, 1).
-        # At an explicit reporting/rounding boundary, retain the caller's quantum
-        # exponent so e.g. an 1e-8 report remains 0E-8 without consulting the
-        # mutable Decimal context. Canonical identity rendering still collapses
-        # every signed/scaled zero to "0" via canonical_decimal_text().
-        quantum_exponent = quantum.as_tuple().exponent
-        if not isinstance(quantum_exponent, int):
-            raise ExactDecimalError("quantum must be a finite Decimal")
-        return Decimal((0, (0,), quantum_exponent))
     return terminating_decimal(rounded)
 
 

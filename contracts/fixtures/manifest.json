@@ -1,5 +1,5 @@
 {
-  "corpus_version": "3.0.1",
+  "corpus_version": "4.0.0",
   "fixtures": [
     {
       "path": "dataset-manifest.valid.json",

@@ -1,4 +1,5 @@
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
+from fractions import Fraction
 import unittest
 
 from mvp.autotrade_mvp.economics import (
@@ -6,6 +7,7 @@ from mvp.autotrade_mvp.economics import (
     cash_round_trip,
     corrected_fill_cash_difference,
     inverse_futures_pnl,
+    inverse_futures_pnl_exact,
     investment_pnl_excluding_external_flows,
     linear_funding_cashflow,
     linear_futures_mark_pnl,
@@ -67,6 +69,54 @@ class EconomicOracleExactnessTests(unittest.TestCase):
         self.assertEqual(result.position, Decimal("0"))
         self.assertEqual(result.net_pnl, Decimal("1.598"))
         self.assertEqual(result.equity, Decimal("1001.598"))
+
+    def test_reference_arithmetic_is_invariant_under_hostile_context(self):
+        observed = []
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    cash = cash_round_trip(
+                        start_cash="12345678901234567890.123456789",
+                        buy_quantity="2.000000001",
+                        buy_price="1000000000.000000001",
+                        buy_fee="0.000000001",
+                        sell_quantity="1.000000001",
+                        sell_price="1000000001.000000001",
+                        sell_fee="0.000000002",
+                        mark_price="1000000002.000000001",
+                    )
+                    linear = linear_futures_mark_pnl(
+                        "123456789.000000001",
+                        "0.000000001",
+                        "1000000000.000000001",
+                        "1000000001.000000001",
+                    )
+                    inverse = inverse_futures_pnl(
+                        "100",
+                        "1",
+                        "10000",
+                        "11000",
+                    )
+                    observed.append((cash, linear, inverse))
+        self.assertTrue(all(item == observed[0] for item in observed))
+
+    def test_inverse_reference_exposes_exact_rational_authority(self):
+        self.assertEqual(
+            inverse_futures_pnl_exact("100", "1", "10000", "11000"),
+            Fraction(1, 1100),
+        )
+        observed = []
+        for precision in (3, 6, 28, 80):
+            with localcontext() as context:
+                context.prec = precision
+                observed.append(inverse_futures_pnl("100", "1", "10000", "11000"))
+        self.assertTrue(all(value == observed[0] for value in observed))
+        self.assertEqual(
+            observed[0].quantize(Decimal("0.00000000001")),
+            Decimal("0.00090909091"),
+        )
 
 
 if __name__ == "__main__":

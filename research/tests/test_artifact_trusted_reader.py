@@ -27,10 +27,10 @@ class _ForgedArtifactStore(ArtifactStore):
         )
 
 
-def _publish(store: ArtifactStore):
+def _publish(store: ArtifactStore, payload: bytes = PAYLOAD):
     return store.publish_bytes(
         artifact_id=ARTIFACT_ID,
-        data=PAYLOAD,
+        data=payload,
         media_type="application/octet-stream",
         rights={"storage": True, "export": False},
     )
@@ -67,10 +67,14 @@ def _poison_injected_instance(store: ArtifactStore, directory: str) -> None:
 class TrustedArtifactReaderTests(unittest.TestCase):
     def test_private_reader_preserves_canonical_store_wrapper_contract(self):
         with TemporaryDirectory() as directory:
-            store = ArtifactStore(Path(directory) / "store")
+            root = Path(directory) / "store"
+            store = ArtifactStore(root)
             manifest = _publish(store)
 
-            read_snapshot = trusted_authenticated_reader(store)
+            read_snapshot = trusted_authenticated_reader(
+                root,
+                publication_store=store,
+            )
             observed_manifest, observed_data = read_snapshot(ARTIFACT_ID)
 
             self.assertEqual(observed_manifest, manifest)
@@ -80,11 +84,15 @@ class TrustedArtifactReaderTests(unittest.TestCase):
 
     def test_mutation_before_reader_construction_cannot_select_root_or_helpers(self):
         with TemporaryDirectory() as directory:
-            store = ArtifactStore(Path(directory) / "store")
+            root = Path(directory) / "store"
+            store = ArtifactStore(root)
             manifest = _publish(store)
             _poison_injected_instance(store, directory)
 
-            read_snapshot = trusted_authenticated_reader(store)
+            read_snapshot = trusted_authenticated_reader(
+                root,
+                publication_store=store,
+            )
             observed_manifest, observed_data = read_snapshot(ARTIFACT_ID)
 
             self.assertEqual(observed_manifest, manifest)
@@ -92,9 +100,13 @@ class TrustedArtifactReaderTests(unittest.TestCase):
 
     def test_mutation_after_reader_construction_cannot_redirect_later_reads(self):
         with TemporaryDirectory() as directory:
-            store = ArtifactStore(Path(directory) / "store")
+            root = Path(directory) / "store"
+            store = ArtifactStore(root)
             manifest = _publish(store)
-            read_snapshot = trusted_authenticated_reader(store)
+            read_snapshot = trusted_authenticated_reader(
+                root,
+                publication_store=store,
+            )
 
             _poison_injected_instance(store, directory)
             observed_manifest, observed_data = read_snapshot(ARTIFACT_ID)
@@ -102,52 +114,61 @@ class TrustedArtifactReaderTests(unittest.TestCase):
             self.assertEqual(observed_manifest, manifest)
             self.assertEqual(observed_data, PAYLOAD)
 
-    def test_private_reader_keeps_root_binding_alive_after_injected_store_is_released(self):
+    def test_stable_attacker_selected_publication_root_is_rejected(self):
         with TemporaryDirectory() as directory:
-            store = ArtifactStore(Path(directory) / "store")
+            trusted_root = Path(directory) / "trusted"
+            trusted_store = ArtifactStore(trusted_root)
+            _publish(trusted_store)
+
+            attacker_root = Path(directory) / "attacker"
+            attacker_store = ArtifactStore(attacker_root)
+            _publish(attacker_store, b"self-consistent forged bytes")
+
+            with self.assertRaisesRegex(
+                ArtifactIntegrityError,
+                "does not match trusted artifact root",
+            ):
+                trusted_authenticated_reader(
+                    trusted_root,
+                    publication_store=attacker_store,
+                )
+
+    def test_private_reader_rejects_subclass_publication_authority(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "store"
+            store = _ForgedArtifactStore(root)
+            with self.assertRaisesRegex(TypeError, "canonical ArtifactStore"):
+                trusted_authenticated_reader(
+                    root,
+                    publication_store=store,
+                )
+
+    def test_reader_does_not_depend_on_publication_store_lifetime(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "store"
+            store = ArtifactStore(root)
             _publish(store)
-            read_snapshot = trusted_authenticated_reader(store)
+            read_snapshot = trusted_authenticated_reader(
+                root,
+                publication_store=store,
+            )
             del store
             gc.collect()
 
             _manifest, observed_data = read_snapshot(ARTIFACT_ID)
             self.assertEqual(observed_data, PAYLOAD)
 
-    def test_private_reader_rejects_subclass_authority(self):
-        with TemporaryDirectory() as directory:
-            store = _ForgedArtifactStore(Path(directory) / "store")
-            with self.assertRaisesRegex(TypeError, "canonical ArtifactStore"):
-                trusted_authenticated_reader(store)
-
-    def test_exact_but_uninitialized_store_has_no_trusted_root_authority(self):
-        store = ArtifactStore.__new__(ArtifactStore)
-        with self.assertRaisesRegex(
-            ArtifactIntegrityError,
-            "lacks canonical root-authority binding",
-        ):
-            trusted_authenticated_reader(store)
-
-    def test_reinitializing_same_store_cannot_replace_root_authority(self):
-        with TemporaryDirectory() as directory:
-            store = ArtifactStore(Path(directory) / "store")
-            _publish(store)
-            with self.assertRaisesRegex(
-                ArtifactIntegrityError,
-                "cannot be reinitialized",
-            ):
-                ArtifactStore.__init__(store, Path(directory) / "other")
-
-            read_snapshot = trusted_authenticated_reader(store)
-            _manifest, observed_data = read_snapshot(ARTIFACT_ID)
-            self.assertEqual(observed_data, PAYLOAD)
-
     def test_missing_object_still_fails_closed_after_caller_instance_poisoning(self):
         with TemporaryDirectory() as directory:
-            store = ArtifactStore(Path(directory) / "store")
+            root = Path(directory) / "store"
+            store = ArtifactStore(root)
             manifest = _publish(store)
             digest = manifest["sha256"].removeprefix("sha256:")
             object_path = store.objects / digest[:2] / digest
-            read_snapshot = trusted_authenticated_reader(store)
+            read_snapshot = trusted_authenticated_reader(
+                root,
+                publication_store=store,
+            )
             object_path.unlink()
             _poison_injected_instance(store, directory)
 
@@ -155,12 +176,15 @@ class TrustedArtifactReaderTests(unittest.TestCase):
                 read_snapshot(ARTIFACT_ID)
 
     @unittest.skipIf(os.name == "nt", "Windows retained handles intentionally fence rename")
-    def test_lexical_root_replacement_is_detected_by_external_root_binding(self):
+    def test_lexical_root_replacement_is_detected_by_private_root_authority(self):
         with TemporaryDirectory() as directory:
             root = Path(directory) / "store"
             store = ArtifactStore(root)
             _publish(store)
-            read_snapshot = trusted_authenticated_reader(store)
+            read_snapshot = trusted_authenticated_reader(
+                root,
+                publication_store=store,
+            )
 
             detached = Path(directory) / "detached"
             root.rename(detached)
@@ -168,7 +192,7 @@ class TrustedArtifactReaderTests(unittest.TestCase):
             try:
                 with self.assertRaisesRegex(
                     ArtifactIntegrityError,
-                    "trusted artifact store root changed",
+                    "configured artifact store root",
                 ):
                     read_snapshot(ARTIFACT_ID)
             finally:

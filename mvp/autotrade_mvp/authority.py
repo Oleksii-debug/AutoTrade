@@ -254,22 +254,6 @@ class Confirmation:
         if environment not in {"SIMULATION", "PAPER", "LIVE"}:
             raise ValueError("confirmation environment is unsupported")
         object.__setattr__(self, "environment", environment)
-        if (self.provider_id is None) != (self.provider_environment is None):
-            raise ValueError(
-                "financial admission provider_id and provider_environment must be present together"
-            )
-        if self.provider_id is not None:
-            provider = _text(self.provider_id, name="admission provider_id").upper()
-            provider_environment = _provider_domain(
-                provider_id=provider,
-                environment=environment,
-                provider_environment=self.provider_environment,
-                name="admission",
-            )
-            object.__setattr__(self, "provider_id", provider)
-            object.__setattr__(
-                self, "provider_environment", provider_environment
-            )
         object.__setattr__(
             self,
             "instrument_version",
@@ -1335,8 +1319,6 @@ class AuthorityService:
                     intent_hash=payload["intent_hash"],
                     account_id=payload["account_id"],
                     environment=payload["environment"],
-                    provider_id=payload.get("provider_id"),
-                    provider_environment=payload.get("provider_environment"),
                     instrument_version=InstrumentVersionIdentity(
                         instrument["instrument_id"], instrument["version"]
                     ),
@@ -1360,6 +1342,8 @@ class AuthorityService:
                     intent_hash=payload["intent_hash"],
                     account_id=payload["account_id"],
                     environment=payload["environment"],
+                    provider_id=payload.get("provider_id"),
+                    provider_environment=payload.get("provider_environment"),
                     instrument_version=InstrumentVersionIdentity(
                         instrument["instrument_id"], instrument["version"]
                     ),
@@ -1942,6 +1926,8 @@ class AuthorityService:
             "intent_hash": record.intent_hash,
             "account_id": record.account_id,
             "environment": record.environment,
+            "provider_id": record.provider_id,
+            "provider_environment": record.provider_environment,
             "instrument_id": record.instrument_version.instrument_id,
             "instrument_version": record.instrument_version.version,
             "action": record.action,
@@ -4078,6 +4064,8 @@ class AuthorityService:
                     "intent_hash": record.intent_hash,
                     "account_id": record.account_id,
                     "environment": record.environment,
+                    "provider_id": record.provider_id,
+                    "provider_environment": record.provider_environment,
                     "instrument": instrument(record.instrument_version),
                     "action": record.action,
                     "notional": _canonical_decimal_text(record.notional),

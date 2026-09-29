@@ -105,7 +105,7 @@ def _canonical_financing_source_account(
     """Return the AutoTrade-owned ledger account for a financing charge.
 
     Provider evidence may describe the economic charge, but it cannot choose an
-    internal chart-of-accounts bucket.  The mapping is deliberately small and
+    internal chart-of-accounts bucket. The mapping is deliberately small and
     fail-closed until a qualified provider-specific normalizer owns additional
     financing classifications.
     """
@@ -643,6 +643,7 @@ class DurableFinancingBook:
         events: list[dict[str, Any]],
     ) -> FinancingRevisionBook:
         history: list[FinancingEvent] = []
+        aggregate_id = self._aggregate_id(charge_id)
         for expected_version, durable in enumerate(events, 1):
             if (
                 durable.get("event_type") != _FINANCING_EVENT_TYPE
@@ -689,10 +690,25 @@ class DurableFinancingBook:
                 raise FinancingConflict(
                     "durable financing revision-state binding is invalid"
                 )
+            event_id = _text(
+                durable.get("event_id"),
+                name="durable financing event_id",
+            )
+            self._validate_economic_conservation(
+                aggregate_id=aggregate_id,
+                event_id=event_id,
+                event=candidate_event,
+                economic_delta=candidate_update.economic_delta,
+            )
             history = resulting_history
         return FinancingRevisionBook(history)
 
     def _replay(self, charge_id: str) -> FinancingRevisionBook:
+        # DurableProviderEconomicBook keeps an in-memory projection for ordinary
+        # balance reads. Financing authority cannot trust a stale projection when
+        # validating journal conservation, so refresh from the shared JournalStore
+        # before replaying any financing aggregate.
+        self.economic_book.refresh()
         return self._book_from_durable_events(charge_id, self._events(charge_id))
 
     def _economic_transaction(
@@ -731,6 +747,52 @@ class DurableFinancingBook:
             ),
             observed_at=_instant_text(event.available_at),
         )
+
+    def _validate_economic_conservation(
+        self,
+        *,
+        aggregate_id: str,
+        event_id: str,
+        event: FinancingEvent,
+        economic_delta: Decimal,
+    ) -> JournalTransaction | None:
+        """Require exact one-to-one financing/economic durable conservation."""
+
+        matches = tuple(
+            transaction
+            for transaction in self.economic_book.transactions
+            if transaction.cause_event_id == event_id
+        )
+        if economic_delta == 0:
+            if matches:
+                if event.kind == "FINAL":
+                    raise FinancingConflict(
+                        "zero-delta financing revision has an economic posting"
+                    )
+                raise FinancingConflict(
+                    "non-economic financing revision has an economic posting"
+                )
+            return None
+
+        expected = self._economic_transaction(
+            aggregate_id=aggregate_id,
+            event_id=event_id,
+            event=event,
+            economic_delta=economic_delta,
+        )
+        if not matches:
+            raise FinancingConflict(
+                "durable financing revision is missing its economic posting"
+            )
+        if len(matches) != 1:
+            raise FinancingConflict(
+                "durable financing revision has duplicate economic postings"
+            )
+        if matches[0] != expected:
+            raise FinancingConflict(
+                "durable financing revision economic posting does not match canonical financing delta"
+            )
+        return expected
 
     def latest(self, charge_id: str) -> FinancingEvent | None:
         normalized = _text(charge_id, name="charge_id")

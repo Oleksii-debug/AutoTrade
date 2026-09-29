@@ -25,6 +25,7 @@ from mvp.autotrade_mvp.kraken_futures import (
 )
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import observe_submission_json_response
+from contract_order_fixture import make_contract_order_preparer
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -124,6 +125,19 @@ def durable_observation(payload, *, intent_id: str):
                 "capability_snapshot_ids": [request.capability_snapshot_id],
                 "instrument_versions": [request.instrument_version],
             },
+            order_preparation_binding={
+                "instrument": request.instrument_version,
+                "side": "BUY",
+                "requested_quantity": "1",
+                "quantity_unit": "unit:kraken-futures:contract",
+            },
+            prepare_order=make_contract_order_preparer(
+                store,
+                provider_id="KRAKEN",
+                account_id="contract-account",
+                environment="PAPER",
+                owner_token="owner",
+            ),
         )
         if outcome.status != "SENT":
             raise AssertionError("contract fixture submission was not SENT")

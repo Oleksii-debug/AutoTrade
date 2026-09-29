@@ -10,6 +10,7 @@ from mvp.autotrade_mvp.dispatch import (
 )
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.recovery import HostState, RecoveryController
+from mvp.tests._durable_dispatch_test_support import durable_order_preparation
 
 
 class DurableUnknownRestartTests(unittest.TestCase):
@@ -325,6 +326,13 @@ class DurableUnknownRestartTests(unittest.TestCase):
                 authority_check=lambda _intent_hash, _now: (True, "allowed"),
                 transport_send=transport,
                 sender_check=lambda _owner_token, _owner_epoch: None,
+                **durable_order_preparation(
+                    dispatcher,
+                    instrument="TEST",
+                    side="BUY",
+                    quantity="1",
+                    quantity_unit="unit:TEST",
+                ),
             )
 
             self.assertEqual(outcome.status, "UNKNOWN")

@@ -23,7 +23,9 @@ from research.autotrade_research.artifacts.store import (
 from research.autotrade_research.io.strict_json import strict_json_loads
 
 from .dispatch import submission_attempt_aggregate_id
+from .durable_order_projection import DurableOrderBookProjection
 from .persistence import JournalStore, canonical_json, payload_digest
+from .reconciliation_journal import require_current_reconciliation_checkpoint
 from .reservations import (
     ReservationBook,
     ReservationConflict,
@@ -266,6 +268,22 @@ class DurableReservationBook:
             try:
                 if operation == "MARK_TERMINAL":
                     current = book.get(request.get("reservation_id"))
+                    proof_sequence = payload.get("proof_journal_sequence")
+                    event_sequence = event.get("journal_sequence")
+                    if proof_sequence is None and type(event_sequence) is int:
+                        # Older terminal records did not serialize the cut.
+                        # Their global journal position bounds the evidence
+                        # available before the reservation release was written.
+                        proof_sequence = event_sequence - 1
+                    if (
+                        type(proof_sequence) is not int
+                        or type(event_sequence) is not int
+                        or proof_sequence < 0
+                        or proof_sequence != event_sequence - 1
+                    ):
+                        raise ReservationConflict(
+                            "terminal release proof is not bound to its journal cut"
+                        )
                     self._verify_resolution_evidence(
                         reservation_id=request.get("reservation_id"),
                         intent_id=current.intent_id,
@@ -273,6 +291,7 @@ class DurableReservationBook:
                         provider=request.get("provider"),
                         attempt_id=request.get("attempt_id"),
                         resolution_evidence=request.get("resolution_evidence"),
+                        journal_sequence_cut=proof_sequence,
                     )
                 snapshot = self._apply(book, operation, request)
             except Exception as error:
@@ -530,6 +549,8 @@ class DurableReservationBook:
         idempotency_key: str,
         operation: str,
         request: dict[str, object],
+        expected_journal_sequence: int | None = None,
+        proof_journal_sequence: int | None = None,
     ) -> ReservationSnapshot:
         cid = _text(command_id, name="command_id")
         idem = _text(idempotency_key, name="idempotency_key")
@@ -593,6 +614,8 @@ class DurableReservationBook:
             "request_hash": payload_digest(request),
             "snapshot": snapshot_value,
         }
+        if proof_journal_sequence is not None:
+            payload["proof_journal_sequence"] = proof_journal_sequence
         envelope = {
             "event_id": event_id,
             "event_type": _EVENT_TYPE,
@@ -621,6 +644,7 @@ class DurableReservationBook:
                 result=snapshot_value,
                 state_version=next_version,
                 events=[(envelope, None)],
+                expected_journal_sequence=expected_journal_sequence,
             )
         except Exception:
             # A competing writer may have committed after this projection was
@@ -742,7 +766,8 @@ class DurableReservationBook:
         provider: object,
         attempt_id: object,
         resolution_evidence: object,
-    ) -> str:
+        journal_sequence_cut: int | None = None,
+    ) -> tuple[str, str]:
         rid = _text(reservation_id, name="reservation_id")
         intent = _text(intent_id, name="intent_id")
         terminal_outcome = _text(outcome, name="outcome").upper()
@@ -953,12 +978,12 @@ class DurableReservationBook:
             matching[0].get("outcome"),
             name="reconciliation submission outcome",
         ).upper()
-        # Reconciliation can prove that at least one execution exists, but an
-        # execution observation alone does not prove that the order is fully
-        # filled.  Keep worst-case reservation capacity held until a canonical
-        # terminal order/fill projection can prove FILLED semantics.
+        # Reconciliation proves whether an unknown send was observed or absent.
+        # A FILLED reservation release additionally requires the single canonical
+        # durable order projection to prove full quantity for this exact attempt.
         required_outcome = {
             "PROVEN_ABSENT": "PROVEN_ABSENT",
+            "FILLED": "OBSERVED_EXECUTION",
         }.get(terminal_outcome)
         if required_outcome is None:
             raise ReservationConflict(
@@ -968,7 +993,149 @@ class DurableReservationBook:
             raise ReservationConflict(
                 "terminal outcome does not match durable reconciliation resolution"
             )
-        return evidence
+        if terminal_outcome == "FILLED":
+            try:
+                projection = DurableOrderBookProjection(
+                    self.store,
+                    provider_id=provider_name,
+                    account_id=self.account_id,
+                    environment=self.environment,
+                    host_id="reservation-resolution-verifier",
+                    owner_epoch="read-only",
+                    evidence_artifact_store=self.resolution_artifact_store,
+                    journal_sequence_cut=journal_sequence_cut,
+                )
+                order = projection.order(client_order_id)
+            except (KeyError, ValueError, TypeError) as error:
+                raise ReservationConflict(
+                    "FILLED release requires canonical durable order projection"
+                ) from error
+            if order.submission_attempt_id != attempt:
+                raise ReservationConflict(
+                    "FILLED release order projection belongs to another submission attempt"
+                )
+            reconciled_execution_ids = matching[0].get(
+                "provider_execution_ids"
+            )
+            if not isinstance(reconciled_execution_ids, list):
+                raise ReservationConflict(
+                    "FILLED release reconciliation lacks provider execution identities"
+                )
+            projected_execution_ids = set(order.provider_execution_index)
+            if (
+                not projected_execution_ids
+                or set(reconciled_execution_ids) != projected_execution_ids
+            ):
+                raise ReservationConflict(
+                    "FILLED release reconciliation execution identities differ from order projection"
+                )
+
+            provider_fill_bindings = matching[0].get("provider_fill_bindings")
+            if not isinstance(provider_fill_bindings, list):
+                raise ReservationConflict(
+                    "FILLED release reconciliation lacks exact provider fill bindings"
+                )
+            provider_identities: dict[str, dict[str, object]] = {}
+            for binding in provider_fill_bindings:
+                if not isinstance(binding, dict):
+                    raise ReservationConflict(
+                        "FILLED release provider fill binding is malformed"
+                    )
+                identity = binding.get("identity")
+                execution_id = binding.get("provider_execution_id")
+                identity_digest = binding.get("identity_digest")
+                if (
+                    not isinstance(identity, dict)
+                    or not isinstance(execution_id, str)
+                    or identity.get("provider_execution_id") != execution_id
+                    or identity_digest != payload_digest(identity)
+                    or execution_id in provider_identities
+                ):
+                    raise ReservationConflict(
+                        "FILLED release provider fill binding integrity failed"
+                    )
+                provider_identities[execution_id] = identity
+            if set(provider_identities) != projected_execution_ids:
+                raise ReservationConflict(
+                    "FILLED release provider fill bindings differ from order projection"
+                )
+
+            canonical_fills = projection.active_canonical_execution_fills(
+                client_order_id
+            )
+            if set(canonical_fills) != projected_execution_ids:
+                raise ReservationConflict(
+                    "FILLED release lacks canonical execution economics"
+                )
+            for execution_id in sorted(projected_execution_ids):
+                provider_identity = provider_identities[execution_id]
+                canonical_fill = canonical_fills[execution_id]
+                quantity = canonical_fill.get("last_quantity")
+                if not isinstance(quantity, dict):
+                    raise ReservationConflict(
+                        "FILLED release canonical execution quantity is malformed"
+                    )
+                required_pairs = {
+                    "provider_id": provider_name,
+                    "account_id": self.account_id,
+                    "environment": self.environment,
+                    "provider_execution_id": canonical_fill.get(
+                        "provider_execution_id"
+                    ),
+                    "client_order_id": canonical_fill.get("order_ref"),
+                    "instrument": canonical_fill.get("instrument_version"),
+                    "side": canonical_fill.get("side"),
+                    "quantity": quantity.get("value"),
+                    "price": canonical_fill.get("last_price"),
+                    "trade_time": canonical_fill.get("trade_time"),
+                }
+                if any(
+                    provider_identity.get(key) != value
+                    for key, value in required_pairs.items()
+                ):
+                    raise ReservationConflict(
+                        "FILLED release provider economics differ from canonical execution"
+                    )
+
+                fees = canonical_fill.get("fees")
+                if not isinstance(fees, list):
+                    raise ReservationConflict(
+                        "FILLED release canonical execution fees are malformed"
+                    )
+                provider_fee = provider_identity.get("fee_amount")
+                if fees:
+                    if len(fees) != 1 or not isinstance(fees[0], dict):
+                        raise ReservationConflict(
+                            "FILLED release cannot collapse multi-fee canonical execution identity"
+                        )
+                    fee = fees[0]
+                    if (
+                        provider_fee != fee.get("amount")
+                        or provider_identity.get("fee_currency")
+                        != fee.get("currency")
+                    ):
+                        raise ReservationConflict(
+                            "FILLED release provider fee differs from canonical execution"
+                        )
+                elif provider_fee != "0":
+                    raise ReservationConflict(
+                        "FILLED release provider fee differs from canonical execution"
+                    )
+            terminal_fill_states = {
+                "FILLED",
+                "FILLED_AFTER_CANCEL",
+                "FILLED_AFTER_EXPIRY",
+                "FILLED_AFTER_REJECT",
+            }
+            if (
+                order.state not in terminal_fill_states
+                or order.filled_quantity != order.requested_quantity
+                or order.open_quantity != Decimal("0")
+            ):
+                raise ReservationConflict(
+                    "FILLED release requires quantitative terminal closure without overfill"
+                )
+        return evidence, reconciliation_event_id
 
     def mark_terminal(
         self,
@@ -986,24 +1153,55 @@ class DurableReservationBook:
         terminal_outcome = _text(outcome, name="outcome").upper()
         provider_name = _text(provider, name="provider").upper()
         attempt = _text(attempt_id, name="attempt_id")
-        evidence = self._verify_resolution_evidence(
-            reservation_id=rid,
-            intent_id=current.intent_id,
-            outcome=terminal_outcome,
-            provider=provider_name,
-            attempt_id=attempt,
-            resolution_evidence=resolution_evidence,
+        artifact_id, digest, canonical_evidence = _immutable_evidence_ref(
+            resolution_evidence
         )
         request = {
             "reservation_id": rid,
             "outcome": terminal_outcome,
             "provider": provider_name,
             "attempt_id": attempt,
-            "resolution_evidence": evidence,
+            "resolution_evidence": canonical_evidence,
         }
+        existing = self._existing(
+            idempotency_key=idempotency_key,
+            request=request,
+        )
+        if existing is not None:
+            return self.get(rid)
+
+        cut_before = self.store.current_journal_sequence()
+        current = self.get(rid)
+        evidence, checkpoint_event_id = self._verify_resolution_evidence(
+            reservation_id=rid,
+            intent_id=current.intent_id,
+            outcome=terminal_outcome,
+            provider=provider_name,
+            attempt_id=attempt,
+            resolution_evidence=f"artifact:{artifact_id}@sha256:{digest}",
+            journal_sequence_cut=cut_before,
+        )
+        try:
+            require_current_reconciliation_checkpoint(
+                self.store,
+                checkpoint_event_id=checkpoint_event_id,
+                provider_id=provider_name,
+                account_id=self.account_id,
+                environment=self.environment,
+            )
+        except (KeyError, ValueError) as error:
+            raise ReservationConflict(str(error)) from error
+        if self.store.current_journal_sequence() != cut_before:
+            self._reload()
+            raise ReservationConflict(
+                "journal sequence changed while terminal evidence was validated"
+            )
+        request["resolution_evidence"] = evidence
         return self._commit(
             command_id=command_id,
             idempotency_key=idempotency_key,
             operation="MARK_TERMINAL",
             request=request,
+            expected_journal_sequence=cut_before,
+            proof_journal_sequence=cut_before,
         )

@@ -26,6 +26,7 @@ from mvp.autotrade_mvp.dispatch import (
     load_submission_response_binding,
     stable_client_order_id,
 )
+from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_core import (
     Surface,
@@ -57,6 +58,58 @@ from mvp.autotrade_mvp.provider_transport import (
     WhiteBitHttpTransport,
     _DurableProviderNonceAllocator,
 )
+
+
+def durable_order_preparer(dispatcher):
+    def prepare_order(
+        client_order_id,
+        attempt_id,
+        intent_id,
+        provider,
+        _request,
+        order_binding,
+        prepared_at,
+    ):
+        book = DurableOrderBookProjection(
+            dispatcher.store,
+            provider_id=provider,
+            account_id=dispatcher.account_id,
+            environment=dispatcher.environment,
+            host_id=dispatcher.owner_token,
+            owner_epoch=str(dispatcher.owner_epoch),
+        )
+        book.create_order(
+            event_key=f"dispatch-order:{attempt_id}",
+            client_order_id=client_order_id,
+            instrument=order_binding["instrument"],
+            side=order_binding["side"],
+            requested_quantity=order_binding["requested_quantity"],
+            quantity_unit=order_binding["quantity_unit"],
+            origin_intent_id=intent_id,
+            committed_at=prepared_at,
+        )
+
+    return prepare_order
+
+
+def attach_durable_order_preparation(
+    dispatcher,
+    arguments,
+    *,
+    instrument="TEST",
+    side="BUY",
+    quantity="1",
+    quantity_unit="unit:TEST",
+):
+    binding = {
+        "instrument": instrument,
+        "side": side,
+        "requested_quantity": quantity,
+        "quantity_unit": quantity_unit,
+    }
+    arguments["order_preparation_binding"] = binding
+    arguments["prepare_order"] = durable_order_preparer(dispatcher)
+    return arguments
 from mvp.autotrade_mvp.whitebit import WhiteBitPreparedRequest
 from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
 
@@ -1234,6 +1287,13 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                     "account_id": "acct-wb",
                     "environment": "LIVE",
                 },
+                order_preparation_binding={
+                    "instrument": "BTC_USDT",
+                    "side": "BUY",
+                    "requested_quantity": "0.001",
+                    "quantity_unit": "unit:BTC_USDT",
+                },
+                prepare_order=durable_order_preparer(dispatcher),
             )
             self.assertEqual(result.status, "UNKNOWN")
             self.assertEqual(result.reason, "transport_result_ambiguous")
@@ -1255,6 +1315,13 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                     "account_id": "acct-wb",
                     "environment": "LIVE",
                 },
+                order_preparation_binding={
+                    "instrument": "BTC_USDT",
+                    "side": "BUY",
+                    "requested_quantity": "0.001",
+                    "quantity_unit": "unit:BTC_USDT",
+                },
+                prepare_order=durable_order_preparer(dispatcher),
             )
             self.assertEqual(repeated.status, "UNKNOWN")
             self.assertEqual(events.count("wire"), 1)
@@ -1406,6 +1473,13 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                         "environment": "LIVE",
                     },
                 }
+                attach_durable_order_preparation(
+                    dispatcher,
+                    kwargs,
+                    instrument="BTC_USDT",
+                    quantity="0.001",
+                    quantity_unit="unit:BTC_USDT",
+                )
                 result = dispatcher.dispatch(**kwargs)
                 self.assertEqual(result.status, "UNKNOWN")
                 self.assertEqual(result.reason, expected_reason)
@@ -2384,6 +2458,7 @@ with open(path, "a+b") as stream:
                 "client_id_format": "UUID",
                 "final_barrier_clock": lambda: now,
             }
+            attach_durable_order_preparation(dispatcher, kwargs)
 
             outcome = dispatcher.dispatch(**kwargs)
             self.assertEqual(outcome.status, "UNKNOWN")
@@ -2475,6 +2550,13 @@ with open(path, "a+b") as stream:
                 client_id_max_length=36,
                 client_id_format="UUID",
                 final_barrier_clock=lambda: now,
+                order_preparation_binding={
+                    "instrument": "TEST",
+                    "side": "BUY",
+                    "requested_quantity": "1",
+                    "quantity_unit": "unit:TEST",
+                },
+                prepare_order=durable_order_preparer(dispatcher),
             )
 
             self.assertEqual(outcome.status, "UNKNOWN")
@@ -2778,6 +2860,13 @@ class ProviderTransportTests(unittest.TestCase):
                     "account_id": "acct-1",
                     "environment": "PAPER",
                 },
+                order_preparation_binding={
+                    "instrument": "TEST",
+                    "side": "BUY",
+                    "requested_quantity": "1",
+                    "quantity_unit": "unit:TEST",
+                },
+                prepare_order=durable_order_preparer(dispatcher),
             )
             self.assertEqual(result.status, "SENT")
             self.assertEqual(result.response["code"], -1013)
@@ -2846,6 +2935,13 @@ class ProviderTransportTests(unittest.TestCase):
                     "account_id": "acct-1",
                     "environment": "PAPER",
                 },
+                order_preparation_binding={
+                    "instrument": "TEST",
+                    "side": "BUY",
+                    "requested_quantity": "1",
+                    "quantity_unit": "unit:TEST",
+                },
+                prepare_order=durable_order_preparer(dispatcher),
             )
             self.assertEqual(result.status, "UNKNOWN")
             self.assertEqual(result.reason, "transport_result_ambiguous")
@@ -2885,6 +2981,13 @@ class ProviderTransportTests(unittest.TestCase):
                     "account_id": "acct-1",
                     "environment": "PAPER",
                 },
+                order_preparation_binding={
+                    "instrument": "TEST",
+                    "side": "BUY",
+                    "requested_quantity": "1",
+                    "quantity_unit": "unit:TEST",
+                },
+                prepare_order=durable_order_preparer(dispatcher),
             )
             self.assertEqual(repeated.status, "UNKNOWN")
             self.assertEqual(events.count("wire"), 1)
@@ -2927,6 +3030,13 @@ class ProviderTransportTests(unittest.TestCase):
                 authority_check=lambda _hash, _now: (True, "allowed"),
                 transport_send=transport,
                 sender_check=lambda _owner, _epoch: None,
+                order_preparation_binding={
+                    "instrument": "TEST",
+                    "side": "BUY",
+                    "requested_quantity": "1",
+                    "quantity_unit": "unit:TEST",
+                },
+                prepare_order=durable_order_preparer(dispatcher),
             )
             self.assertEqual(result.status, "BLOCKED")
             self.assertEqual(result.reason, "transport_failed_before_send")

@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 from decimal import Decimal
 import json
 from tempfile import TemporaryDirectory
@@ -7,6 +8,7 @@ from uuid import uuid4
 
 from mvp.autotrade_mvp.bybit_v5 import (
     build_order_payload,
+    normalize_authenticated_executions,
     prepare_order_submission,
     coverage_evidence,
     parse_executions,
@@ -25,7 +27,10 @@ from mvp.autotrade_mvp.dispatch import (
     load_submission_response_binding,
     stable_client_order_id,
 )
+from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
+from mvp.autotrade_mvp.order_projection import OrderProjectionConflict
 from mvp.autotrade_mvp.persistence import JournalStore
+from research.autotrade_research.artifacts.store import ArtifactStore
 from mvp.autotrade_mvp.provider_core import (
     ProviderCoreError,
     Surface,
@@ -33,13 +38,14 @@ from mvp.autotrade_mvp.provider_core import (
     observe_submission_json_response,
     prepare_authenticated_read_query,
 )
+from mvp.tests._durable_dispatch_test_support import durable_order_preparation
 
 
 READ_AT = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 
 
-def read_capability(*, account_id="paper-1", environment="PAPER", instrument_version="BTCUSDT@v1"):
-    observed_at = READ_AT - timedelta(hours=1)
+def read_capability(*, account_id="paper-1", environment="PAPER", instrument_version="BTCUSDT@v1", at=READ_AT):
+    observed_at = at - timedelta(hours=1)
     claims = tuple(
         CapabilityClaim(
             source=source,
@@ -49,7 +55,7 @@ def read_capability(*, account_id="paper-1", environment="PAPER", instrument_ver
             environment=environment,
             instrument_version=instrument_version,
             observed_at=observed_at,
-            expires_at=READ_AT + timedelta(hours=1),
+            expires_at=at + timedelta(hours=1),
             supported_order_types=frozenset({"LIMIT", "MARKET"}),
             time_in_force=frozenset({"GTC", "IOC"}),
             permission_scopes=frozenset({"ORDER.READ"}),
@@ -69,7 +75,7 @@ def read_capability(*, account_id="paper-1", environment="PAPER", instrument_ver
     return derive_capability_snapshot(
         snapshot_id=str(uuid4()),
         claims=claims,
-        observed_at=READ_AT,
+        observed_at=at,
         evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
     )
 
@@ -172,17 +178,20 @@ def bound_execution_response(
     account_id="paper-1",
     environment="PAPER",
     instrument_version="BTCUSDT@v1",
+    symbol=None,
+    read_at=READ_AT,
 ):
     query = prepare_authenticated_read_query(
         capability=read_capability(
             account_id=account_id,
             environment=environment,
             instrument_version=instrument_version,
+            at=read_at,
         ),
         surface=Surface.AUTHENTICATED_READ,
         endpoint="/v5/execution/list",
-        query={"category": "spot", "limit": "100"},
-        at=READ_AT,
+        query={"category": "spot", "limit": "100", **({"symbol": symbol} if symbol else {})},
+        at=read_at,
         permission_scope="ORDER.READ",
     )
     raw = json.dumps(
@@ -196,7 +205,7 @@ def bound_execution_response(
         query_binding=query,
         http_status=200,
         response_bytes=raw,
-        observed_at=READ_AT,
+        observed_at=read_at,
     )
 
 
@@ -566,6 +575,13 @@ class BybitV5AdapterTests(unittest.TestCase):
                     ),
                     "instrument_versions": list(prepared.instrument_versions),
                 },
+                **durable_order_preparation(
+                    dispatcher,
+                    instrument="BTCUSDT@1",
+                    side="BUY",
+                    quantity="0.01",
+                    quantity_unit="unit:BTCUSDT@1",
+                ),
             )
             self.assertEqual(outcome.status, "SENT")
             binding = load_submission_response_binding(
@@ -874,6 +890,140 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(fill.side, "BUY")
         self.assertIsNone(fill.position_side)
         self.assertEqual(fill.evidence_refs, (observation.evidence_ref,))
+
+    def test_authenticated_normalization_to_order_projection_retains_exact_response(self):
+        response = {
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {
+                "list": [
+                    {
+                        "execId": "exec-normalized-1",
+                        "orderLinkId": "client-1",
+                        "symbol": "BTCUSDT",
+                        "side": "Buy",
+                        "execQty": "0.25",
+                        "execPrice": "65000.10",
+                        "execFee": "1.23",
+                        "feeCurrency": "USDT",
+                        "execTime": "1790279999123",
+                    }
+                ]
+            },
+            "time": 1790280001000,
+        }
+        observation = bound_execution_response(response)
+        normalized, = normalize_authenticated_executions(
+            observation,
+            instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+        )
+        for wrong_instrument in ("ETHUSDT@v1", "BTCUSDT@v2"):
+            with self.subTest(wrong_instrument=wrong_instrument):
+                with self.assertRaisesRegex(ProviderCoreError, "exact provider observation"):
+                    normalize_authenticated_executions(
+                        observation, instrument_versions={"BTCUSDT": wrong_instrument}
+                    )
+        from mvp.autotrade_mvp.provider_core import _issue_normalized_execution_fill
+
+        for changes in (
+            {"quantity": Decimal("0.3")}, {"price": Decimal("1")},
+            {"fee_amount": Decimal("0")}, {"fee_currency": "EUR"},
+            {"side": "SELL"}, {"client_order_id": "other-order"},
+            {"provider_execution_id": "missing-execution"},
+            {"trade_time": "2026-09-24T19:59:00Z"},
+        ):
+            with self.subTest(changes=changes):
+                with self.assertRaisesRegex(ProviderCoreError, "exact response economics"):
+                    _issue_normalized_execution_fill(
+                        observation, replace(normalized.provider_fill, **changes),
+                        normalizer_id=normalized.normalizer_id,
+                    )
+        with self.assertRaisesRegex(ProviderCoreError, "unsupported Bybit"):
+            _issue_normalized_execution_fill(
+                observation, normalized.provider_fill, normalizer_id="unverified.normalizer"
+            )
+        with self.assertRaisesRegex(ProviderCoreError, "symbol differs from authenticated query"):
+            normalize_authenticated_executions(
+                bound_execution_response(response, symbol="ETHUSDT"),
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+            )
+        missing_fee = json.loads(json.dumps(response))
+        del missing_fee["result"]["list"][0]["feeCurrency"]
+        with self.assertRaisesRegex(ProviderCoreError, "fee currency is unresolved"):
+            normalize_authenticated_executions(
+                bound_execution_response(missing_fee),
+                instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
+                qualified_fee_currencies={"BTCUSDT@v1": "USDT"},
+            )
+        self.assertEqual(normalized.normalizer_id, "bybit.executions.v1")
+        self.assertEqual(normalized.observation.response_bytes, observation.response_bytes)
+        with self.assertRaisesRegex(ProviderCoreError, "provider adapter normalizer"):
+            type(normalized)(
+                observation=observation,
+                provider_fill=normalized.provider_fill,
+                normalizer_id=normalized.normalizer_id,
+            )
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(f"{directory}/artifacts")
+            orders = DurableOrderBookProjection(
+                store,
+                provider_id="BYBIT",
+                account_id="paper-1",
+                environment="PAPER",
+                host_id="host-1",
+                owner_epoch="1",
+                evidence_artifact_store=artifacts,
+            )
+            orders.create_order(
+                event_key="create-bybit-order",
+                client_order_id="client-1",
+                instrument="BTCUSDT@v1",
+                side="BUY",
+                requested_quantity="1",
+                quantity_unit="unit:BTCUSDT@v1",
+                origin_intent_id="intent-1",
+                committed_at="2026-09-24T19:00:00Z",
+            )
+            with self.assertRaisesRegex(
+                OrderProjectionConflict,
+                "must use canonical ExecutionFill ingestion",
+            ):
+                orders.ingest_execution_fill(
+                    event_key="caller-supplied-fill",
+                    client_order_id="client-1",
+                    execution_fill={"fill_id": "forged"},
+                    committed_at="2026-09-24T20:01:00Z",
+                )
+            ingested = orders.ingest_normalized_execution_fill(
+                event_key="bybit-authenticated-fill",
+                client_order_id="client-1",
+                normalized_fill=normalized,
+                settlement_date="2026-09-26",
+                committed_at="2026-09-24T20:01:00Z",
+            )
+            self.assertEqual(ingested.snapshot.filled_quantity, Decimal("0.25"))
+            evidence_ref = ingested.canonical_execution_fill["evidence"][0]
+            manifest, raw = artifacts.read_authenticated_snapshot(
+                evidence_ref["artifact_id"]
+            )
+            self.assertEqual(raw, observation.response_bytes)
+            self.assertEqual(manifest["sha256"], evidence_ref["sha256"])
+            self.assertEqual(
+                manifest["metadata"]["response_sha256"],
+                observation.response_sha256,
+            )
+            restarted = DurableOrderBookProjection(
+                JournalStore(f"{directory}/journal.sqlite3"),
+                provider_id="BYBIT",
+                account_id="paper-1",
+                environment="PAPER",
+                host_id="host-1",
+                owner_epoch="1",
+                evidence_artifact_store=artifacts,
+            )
+            self.assertEqual(restarted.order("client-1").filled_quantity, Decimal("0.25"))
 
     def test_execution_direction_is_evidenced_without_inventing_hedge_leg(self):
         base = {

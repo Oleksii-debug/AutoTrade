@@ -675,6 +675,10 @@ def build_provider_fill_financial_plan(
         raise AccountingConflict(
             "cash-equity reservation consumption rejects derivative position_side"
         )
+    if provider_fill.position_effect is not None:
+        raise AccountingConflict(
+            "cash-equity reservation consumption does not support position_effect"
+        )
 
     settlement = _text(settlement_currency, name="settlement_currency").upper()
     usage: dict[str, Decimal] = {
@@ -999,4 +1003,3 @@ def book_provider_fill_correction(
         correction_observed_at=correction_observed_at,
     )
     return book.append_batch((reversal, replacement))
-

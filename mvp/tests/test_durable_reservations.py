@@ -1,13 +1,16 @@
 from contextlib import closing
 from decimal import Decimal
+from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
+from uuid import uuid4
 
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
+from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
 from mvp.autotrade_mvp.reconciliation import (
     CoverageSurfaceEvidence,
     ProviderFillEvidence,
@@ -99,6 +102,42 @@ class DurableReservationBookTests(unittest.TestCase):
             resolution_artifact_store=self.artifacts,
         )
 
+    def provider_order_evidence(
+        self, *, operation, request, observed_at, provider_id="SIMULATED"
+    ):
+        artifact_id = str(uuid4())
+        source_uri = "https://provider.example.test/evidence"
+        payload = canonical_json(
+            {
+                "operation": operation,
+                "request": request,
+                "observed_at": observed_at,
+            }
+        ).encode("utf-8")
+        manifest = self.artifacts.publish_bytes(
+            artifact_id=artifact_id,
+            data=payload,
+            media_type="application/json",
+            rights={"storage": True, "export": False},
+            source_refs=[source_uri],
+            metadata={
+                "provider_id": provider_id,
+                "account_id": "paper-account",
+                "environment": "PAPER",
+                "order_operation": operation,
+                "request_hash": payload_digest(request),
+                "observed_at": observed_at,
+                "rights_id": "provider-test-evidence",
+            },
+        )
+        return {
+            "artifact_id": artifact_id,
+            "sha256": manifest["sha256"],
+            "source_uri": source_uri,
+            "observed_at": observed_at,
+            "rights_id": "provider-test-evidence",
+        }
+
     def create_unknown_attempt(
         self,
         *,
@@ -110,6 +149,8 @@ class DurableReservationBookTests(unittest.TestCase):
             self.store,
             environment="PAPER",
             account_id="paper-account",
+            owner_token="reservation-test-owner",
+            owner_epoch=1,
         )
 
         def ambiguous_transport(client_order_id, request, final_guard):
@@ -120,16 +161,51 @@ class DurableReservationBookTests(unittest.TestCase):
             self.assertTrue(owner_token)
             self.assertEqual(owner_epoch, 1)
 
+        def prepare_order(
+            client_order_id,
+            prepared_attempt_id,
+            prepared_intent_id,
+            prepared_provider,
+            _request,
+            binding,
+            prepared_at,
+        ):
+            orders = DurableOrderBookProjection(
+                self.store,
+                provider_id=prepared_provider,
+                account_id="paper-account",
+                environment="PAPER",
+                host_id="reservation-test-owner",
+                owner_epoch="1",
+            )
+            orders.create_order(
+                event_key=f"dispatch-order:{prepared_attempt_id}",
+                client_order_id=client_order_id,
+                instrument=binding["instrument"],
+                side=binding["side"],
+                requested_quantity=binding["requested_quantity"],
+                quantity_unit=binding["quantity_unit"],
+                origin_intent_id=prepared_intent_id,
+                committed_at=prepared_at,
+            )
+
         outcome = dispatcher.dispatch(
             attempt_id=attempt_id,
             intent_id=intent_id,
             intent_hash="sha256:" + "1" * 64,
             provider=provider,
-            request={"instrument": "TEST", "quantity": "1"},
+            request={"instrument": "TEST", "side": "BUY", "quantity": "1"},
             now="2026-09-25T00:00:00Z",
             authority_check=lambda intent_hash, now: (True, "allowed"),
             transport_send=ambiguous_transport,
             sender_check=sender_check,
+            order_preparation_binding={
+                "instrument": "TEST",
+                "side": "BUY",
+                "requested_quantity": "1",
+                "quantity_unit": "unit:TEST",
+            },
+            prepare_order=prepare_order,
         )
         self.assertEqual(outcome.status, "UNKNOWN")
         return outcome
@@ -139,7 +215,12 @@ class DurableReservationBookTests(unittest.TestCase):
         *,
         outcome="PROVEN_ABSENT",
         attempt_id="attempt-r1",
+        provider_execution_id=None,
         reconciliation_id=None,
+        provider_quantity="1",
+        provider_price="1",
+        provider_fee_amount="0",
+        provider_trade_time="2026-09-25T00:01:00Z",
     ):
         unknowns = unknown_submissions_from_dispatch(
             self.store,
@@ -179,14 +260,17 @@ class DurableReservationBookTests(unittest.TestCase):
                 provider_id=unknown.provider_id,
                 account_id=unknown.account_id,
                 environment=unknown.environment,
-                provider_execution_id="exec-" + attempt_id,
+                provider_execution_id=(
+                    provider_execution_id or "exec-" + attempt_id
+                ),
                 client_order_id=unknown.client_order_id,
                 instrument="TEST",
-                quantity="1",
-                price="1",
-                fee_amount="0",
+                side="BUY",
+                quantity=provider_quantity,
+                price=provider_price,
+                fee_amount=provider_fee_amount,
                 fee_currency="USD",
-                trade_time="2026-09-25T00:01:00Z",
+                trade_time=provider_trade_time,
             )
             provider_fills = (fill,)
             local_execution_ids = (fill.provider_execution_id,)
@@ -288,15 +372,34 @@ class DurableReservationBookTests(unittest.TestCase):
             artifact_id="66666666-6666-4666-8666-666666666666",
             reconciliation_event=reconciliation,
         )
-        first.mark_terminal(
-            command_id="cmd-terminal",
-            idempotency_key="idem-terminal",
-            reservation_id="r1",
-            outcome="PROVEN_ABSENT",
-            provider="SIMULATED",
-            attempt_id="attempt-r1",
-            resolution_evidence=evidence,
-        )
+        authenticated_read = self.artifacts.read_authenticated_snapshot
+        with (
+            patch.object(
+                self.artifacts,
+                "load_manifest",
+                side_effect=AssertionError("split manifest read"),
+            ),
+            patch.object(
+                self.artifacts,
+                "read_bytes",
+                side_effect=AssertionError("split object read"),
+            ),
+            patch.object(
+                self.artifacts,
+                "read_authenticated_snapshot",
+                wraps=authenticated_read,
+            ) as read_snapshot,
+        ):
+            first.mark_terminal(
+                command_id="cmd-terminal",
+                idempotency_key="idem-terminal",
+                reservation_id="r1",
+                outcome="PROVEN_ABSENT",
+                provider="SIMULATED",
+                attempt_id="attempt-r1",
+                resolution_evidence=evidence,
+            )
+        self.assertEqual(read_snapshot.call_count, 3)
 
         restarted = self.book()
         snapshot = restarted.get("r1")
@@ -306,6 +409,40 @@ class DurableReservationBookTests(unittest.TestCase):
             evidence,
         )
         self.assertEqual(restarted.total_reserved("CASH:USD"), Decimal("0"))
+
+    def test_superseded_reconciliation_checkpoint_cannot_release_reservation(self):
+        book = self.book()
+        self.reserve(book)
+        book.mark_unknown(
+            command_id="cmd-unknown-superseded",
+            idempotency_key="idem-unknown-superseded",
+            reservation_id="r1",
+        )
+        self.create_unknown_attempt()
+        first_checkpoint = self.record_reconciliation_resolution()
+        evidence = self.publish_resolution_evidence(
+            artifact_id="99999999-9999-4999-8999-999999999999",
+            reconciliation_event=first_checkpoint,
+        )
+        self.record_reconciliation_resolution(
+            reconciliation_id="newer-provider-truth"
+        )
+
+        with self.assertRaisesRegex(
+            ReservationConflict,
+            "superseded by newer provider truth",
+        ):
+            book.mark_terminal(
+                command_id="cmd-terminal-superseded",
+                idempotency_key="idem-terminal-superseded",
+                reservation_id="r1",
+                outcome="PROVEN_ABSENT",
+                provider="SIMULATED",
+                attempt_id="attempt-r1",
+                resolution_evidence=evidence,
+            )
+        self.assertEqual(book.get("r1").state, "UNKNOWN")
+        self.assertEqual(book.total_reserved("CASH:USD"), Decimal("70"))
 
     def test_terminal_release_rejects_cross_scope_reconciliation_after_restart(self):
         book = self.book()
@@ -414,7 +551,7 @@ class DurableReservationBookTests(unittest.TestCase):
         before = book.total_reserved("CASH:USD")
         with self.assertRaisesRegex(
             ReservationConflict,
-            "lacks canonical reconciliation semantics",
+            "order projection",
         ):
             book.mark_terminal(
                 command_id="cmd-terminal-filled",
@@ -434,6 +571,162 @@ class DurableReservationBookTests(unittest.TestCase):
         self.assertEqual(restored.state, "UNKNOWN")
         self.assertEqual(restored.consumed["CASH:USD"], Decimal("60"))
         self.assertEqual(restarted.total_reserved("CASH:USD"), before)
+
+    def test_fully_filled_after_cancel_closes_reservation_by_exact_quantity(self):
+        reservations = self.book()
+        self.reserve(reservations)
+        reservations.mark_unknown(
+            command_id="cmd-unknown-cancel-fill",
+            idempotency_key="idem-unknown-cancel-fill",
+            reservation_id="r1",
+        )
+        dispatched = self.create_unknown_attempt(provider="BYBIT")
+        reconciliation = self.record_reconciliation_resolution(outcome="FILLED")
+
+        orders = DurableOrderBookProjection(
+            self.store,
+            provider_id="BYBIT",
+            account_id="paper-account",
+            environment="PAPER",
+            host_id="order-host",
+            owner_epoch="1",
+            evidence_artifact_store=self.artifacts,
+        )
+        orders.sync_submission_attempt(attempt_id="attempt-r1")
+        orders.request_cancel(
+            event_key="cancel-request",
+            client_order_id=dispatched.client_order_id,
+            command_id="cancel-1",
+            committed_at="2026-09-25T00:00:30Z",
+        )
+        cancel_evidence = self.provider_order_evidence(
+            operation="CONFIRM_CANCEL",
+            request={"client_order_id": dispatched.client_order_id},
+            observed_at="2026-09-25T00:00:40Z",
+            provider_id="BYBIT",
+        )
+        orders.confirm_cancel(
+            event_key="cancel-confirmed",
+            client_order_id=dispatched.client_order_id,
+            committed_at="2026-09-25T00:00:40Z",
+            evidence_refs=[cancel_evidence],
+        )
+
+        from mvp.autotrade_mvp.bybit_v5 import normalize_authenticated_executions
+        from mvp.tests.test_bybit_v5 import bound_execution_response
+
+        observation = bound_execution_response(
+            {
+                "retCode": 0,
+                "retMsg": "OK",
+                "result": {
+                    "list": [
+                        {
+                            "execId": "exec-attempt-r1",
+                            "orderLinkId": dispatched.client_order_id,
+                            "symbol": "TEST",
+                            "side": "Buy",
+                            "execQty": "1",
+                            "execPrice": "1",
+                            "execFee": "0",
+                            "feeCurrency": "USD",
+                            "execTime": "1790294460000",
+                        }
+                    ]
+                },
+                "time": 1790280001000,
+            },
+            account_id="paper-account",
+            instrument_version="TEST",
+            read_at=datetime(2026, 9, 25, 0, 1, 10, tzinfo=timezone.utc),
+        )
+        normalized_fill, = normalize_authenticated_executions(
+            observation,
+            instrument_versions={"TEST": "TEST"},
+            qualified_fee_currencies={"USD": "USD"},
+        )
+        order_fill = orders.ingest_normalized_execution_fill(
+            event_key="late-full-fill",
+            client_order_id=dispatched.client_order_id,
+            normalized_fill=normalized_fill,
+            settlement_date="2026-09-25",
+            committed_at="2026-09-25T00:01:20Z",
+        )
+        self.assertEqual(order_fill.snapshot.state, "FILLED_AFTER_CANCEL")
+
+        mismatched_checkpoint = self.record_reconciliation_resolution(
+            outcome="FILLED",
+            provider_execution_id="exec-unrelated",
+            reconciliation_id="reconciliation-mismatched-execution-set",
+        )
+        mismatched_evidence = self.publish_resolution_evidence(
+            artifact_id="55555555-5555-4555-8555-555555555556",
+            provider="BYBIT",
+            outcome="FILLED",
+            reconciliation_event=mismatched_checkpoint,
+        )
+        with self.assertRaisesRegex(
+            ReservationConflict,
+            "execution identities differ",
+        ):
+            reservations.mark_terminal(
+                command_id="cmd-terminal-cancel-filled-mismatch",
+                idempotency_key="idem-terminal-cancel-filled-mismatch",
+                reservation_id="r1",
+                outcome="FILLED",
+                provider="BYBIT",
+                attempt_id="attempt-r1",
+                resolution_evidence=mismatched_evidence,
+            )
+
+        economic_mismatch_checkpoint = self.record_reconciliation_resolution(
+            outcome="FILLED",
+            reconciliation_id="reconciliation-mismatched-fill-economics",
+            provider_quantity="0.9",
+        )
+        economic_mismatch_evidence = self.publish_resolution_evidence(
+            artifact_id="55555555-5555-4555-8555-555555555558",
+            provider="BYBIT",
+            outcome="FILLED",
+            reconciliation_event=economic_mismatch_checkpoint,
+        )
+        with self.assertRaisesRegex(
+            ReservationConflict,
+            "provider economics differ",
+        ):
+            reservations.mark_terminal(
+                command_id="cmd-terminal-cancel-filled-economic-mismatch",
+                idempotency_key="idem-terminal-cancel-filled-economic-mismatch",
+                reservation_id="r1",
+                outcome="FILLED",
+                provider="BYBIT",
+                attempt_id="attempt-r1",
+                resolution_evidence=economic_mismatch_evidence,
+            )
+        self.assertEqual(reservations.get("r1").state, "UNKNOWN")
+        self.assertEqual(reservations.total_reserved("CASH:USD"), Decimal("70"))
+
+        matching_checkpoint = self.record_reconciliation_resolution(
+            outcome="FILLED",
+            reconciliation_id="reconciliation-matching-execution-set",
+        )
+        filled_evidence = self.publish_resolution_evidence(
+            artifact_id="55555555-5555-4555-8555-555555555557",
+            provider="BYBIT",
+            outcome="FILLED",
+            reconciliation_event=matching_checkpoint,
+        )
+        terminal = reservations.mark_terminal(
+            command_id="cmd-terminal-cancel-filled",
+            idempotency_key="idem-terminal-cancel-filled",
+            reservation_id="r1",
+            outcome="FILLED",
+            provider="BYBIT",
+            attempt_id="attempt-r1",
+            resolution_evidence=filled_evidence,
+        )
+        self.assertEqual(terminal.state, "FILLED")
+        self.assertEqual(reservations.total_reserved("CASH:USD"), Decimal("0"))
 
     def test_restart_does_not_make_reserved_cash_available_again(self):
         first = self.book()

@@ -119,6 +119,53 @@ def _checkpoint_owner(
     )
 
 
+def _submission_resolution_payload(
+    item: Any,
+    result: ReconciliationResult,
+) -> dict[str, Any]:
+    bindings: list[dict[str, Any]] = []
+    binding_ids: list[str] = []
+    for fill in item.provider_fills:
+        identity = provider_fill_identity_payload(fill)
+        if (
+            identity["provider_id"] != result.provider_id
+            or identity["account_id"] != result.account_id
+            or identity["environment"] != result.environment
+            or identity["client_order_id"] != item.client_order_id
+        ):
+            raise ValueError(
+                "submission provider fill binding scope must match reconciliation resolution"
+            )
+        execution_id = str(identity["provider_execution_id"])
+        if execution_id in binding_ids:
+            raise ValueError(
+                "submission provider fill bindings must be unique"
+            )
+        binding_ids.append(execution_id)
+        bindings.append(
+            {
+                "provider_execution_id": execution_id,
+                "identity_digest": payload_digest(identity),
+                "identity": identity,
+            }
+        )
+    if tuple(sorted(binding_ids)) != tuple(sorted(item.provider_execution_ids)):
+        raise ValueError(
+            "submission provider fill bindings must exactly match provider execution ids"
+        )
+    bindings.sort(key=lambda value: str(value["provider_execution_id"]))
+    return {
+        "attempt_id": item.attempt_id,
+        "intent_id": item.intent_id,
+        "client_order_id": item.client_order_id,
+        "outcome": item.outcome,
+        "evidence_reason": item.evidence_reason,
+        "provider_order_ids": list(item.provider_order_ids),
+        "provider_execution_ids": list(item.provider_execution_ids),
+        "provider_fill_bindings": bindings,
+    }
+
+
 def reconciliation_payload(
     result: ReconciliationResult,
     *,
@@ -199,15 +246,7 @@ def reconciliation_payload(
             result.borrow_differences or {}
         ),
         "submission_resolutions": [
-            {
-                "attempt_id": item.attempt_id,
-                "intent_id": item.intent_id,
-                "client_order_id": item.client_order_id,
-                "outcome": item.outcome,
-                "evidence_reason": item.evidence_reason,
-                "provider_order_ids": list(item.provider_order_ids),
-                "provider_execution_ids": list(item.provider_execution_ids),
-            }
+            _submission_resolution_payload(item, result)
             for item in result.submission_resolutions
         ],
         "matched_provider_activity_ids": list(

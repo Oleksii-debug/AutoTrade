@@ -83,6 +83,7 @@ class Surface(StrEnum):
 _PREPARED_READ_TOKEN = object()
 _OBSERVED_RESPONSE_TOKEN = object()
 _SUBMISSION_OBSERVED_RESPONSE_TOKEN = object()
+_NORMALIZED_EXECUTION_FILL_TOKEN = object()
 
 
 def _utc_text(value: datetime, name: str) -> str:
@@ -354,6 +355,7 @@ class ProviderResponseObservation:
     observed_at: str
     http_status: int
     response_sha256: str
+    response_bytes: bytes
     evidence_ref: str
     payload: object
     _observation_token: InitVar[object | None] = None
@@ -379,6 +381,12 @@ class ProviderResponseObservation:
         if re.fullmatch(r"sha256:[0-9a-f]{64}", self.response_sha256) is None:
             raise ProviderCoreError(
                 "response_sha256 must be a canonical SHA-256 digest"
+            )
+        if type(self.response_bytes) is not bytes or (
+            "sha256:" + sha256(self.response_bytes).hexdigest()
+        ) != self.response_sha256:
+            raise ProviderCoreError(
+                "response_bytes must preserve the exact observed response digest"
             )
         if re.fullmatch(
             r"provider-read:sha256:[0-9a-f]{64}",
@@ -476,9 +484,90 @@ def observe_authenticated_json_response(
         observed_at=observed,
         http_status=http_status,
         response_sha256=response_digest,
+        response_bytes=response_bytes,
         evidence_ref=evidence_ref,
         payload=payload,
         _observation_token=_OBSERVED_RESPONSE_TOKEN,
+    )
+
+
+@dataclass(frozen=True)
+class NormalizedExecutionFill:
+    """Adapter-issued fill normalization bound to one exact provider response.
+
+    Adapters issue this only after parsing their provider-specific response
+    through the canonical ProviderResponseObservation path. Ordinary callers
+    cannot instantiate the wrapper through its public constructor. Scope is
+    checked here; Bybit economics are additionally re-derived from the response.
+    """
+
+    observation: ProviderResponseObservation
+    provider_fill: object
+    normalizer_id: str
+    _normalization_token: InitVar[object | None] = None
+
+    def __post_init__(self, _normalization_token: object | None) -> None:
+        if _normalization_token is not _NORMALIZED_EXECUTION_FILL_TOKEN:
+            raise ProviderCoreError(
+                "normalized execution fills must come from a provider adapter normalizer"
+            )
+        if not isinstance(self.observation, ProviderResponseObservation):
+            raise TypeError("observation must be ProviderResponseObservation")
+        fill = self.provider_fill
+        if not all(
+            hasattr(fill, name)
+            for name in (
+                "provider_id",
+                "account_id",
+                "environment",
+                "provider_execution_id",
+                "instrument",
+                "evidence_refs",
+            )
+        ):
+            raise TypeError("provider_fill must be normalized provider fill evidence")
+        if (
+            str(fill.provider_id).upper() != self.observation.provider_id
+            or fill.account_id != self.observation.account_id
+            or fill.instrument != self.observation.query_binding.instrument_version
+            or fill.environment != self.observation.environment
+            or self.observation.evidence_ref not in tuple(fill.evidence_refs)
+        ):
+            raise ProviderCoreError(
+                "normalized execution fill is not bound to its exact provider observation"
+            )
+        normalizer = _text(self.normalizer_id, "normalizer_id")
+        if normalizer != normalizer.strip().lower():
+            raise ProviderCoreError("normalizer_id must be canonical lowercase text")
+        if self.observation.provider_id == "BYBIT":
+            if normalizer != "bybit.executions.v1":
+                raise ProviderCoreError("unsupported Bybit execution normalizer")
+            # Import lazily to reuse the adapter parser without a module cycle.
+            from .bybit_v5 import verify_normalized_execution
+
+            verify_normalized_execution(self.observation, fill)
+        else:
+            # Scope/reference equality is not source economics. Other adapters
+            # still depend on caller-supplied fee/client/instrument joins; the
+            # generic issuer must not bypass their missing provenance gates.
+            raise ProviderCoreError(
+                "production normalized fill requires independently verified provider economics and joins"
+            )
+        object.__setattr__(self, "normalizer_id", normalizer)
+
+
+def _issue_normalized_execution_fill(
+    observation: ProviderResponseObservation,
+    provider_fill: object,
+    *,
+    normalizer_id: str,
+) -> NormalizedExecutionFill:
+    """Internal adapter seam; callers should use provider-specific normalizers."""
+    return NormalizedExecutionFill(
+        observation=observation,
+        provider_fill=provider_fill,
+        normalizer_id=normalizer_id,
+        _normalization_token=_NORMALIZED_EXECUTION_FILL_TOKEN,
     )
 
 

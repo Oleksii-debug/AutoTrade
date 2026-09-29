@@ -6,6 +6,7 @@ import unittest
 from uuid import uuid4
 
 from mvp.autotrade_mvp.alpaca import (
+    normalize_authenticated_trade_activities,
     AlpacaAbsenceEvidence,
     AlpacaAdapterError,
     AlpacaOrderIntent,
@@ -41,6 +42,7 @@ from mvp.autotrade_mvp.provider_core import (
     observe_submission_json_response,
     prepare_authenticated_read_query,
 )
+from mvp.tests._durable_dispatch_test_support import durable_order_preparation
 
 
 NOW = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
@@ -546,6 +548,13 @@ class AlpacaAdapterTests(unittest.TestCase):
                     ),
                     "instrument_versions": list(prepared.instrument_versions),
                 },
+                **durable_order_preparation(
+                    dispatcher,
+                    instrument="AAPL:v1",
+                    side="BUY",
+                    quantity=prepared.body["qty"],
+                    quantity_unit="unit:AAPL:v1",
+                ),
             )
             self.assertEqual(outcome.status, "SENT")
             binding = load_submission_response_binding(
@@ -816,12 +825,29 @@ class AlpacaAdapterTests(unittest.TestCase):
             "price": "220.10",
             "transaction_time": "2026-09-24T20:01:00Z",
         }
+        observation = bound_activity_response([row])
         provider_fill = parse_trade_activities(
-            bound_activity_response([row]),
+            observation,
             instrument_versions={"AAPL": "AAPL:v1"},
             client_ids_by_order_id={order_id: "at-plan-1"},
             fees_by_activity_id={row["id"]: ("0", "USD")},
         )[0]
+        with self.assertRaisesRegex(
+            AlpacaAdapterError,
+            "independently bound fee evidence",
+        ):
+            normalize_authenticated_trade_activities(
+                observation,
+                instrument_versions={"AAPL": "AAPL:v1"},
+                client_ids_by_order_id={order_id: "at-plan-1"},
+                fees_by_activity_id={row["id"]: ("0", "USD")},
+            )
+        from mvp.autotrade_mvp.provider_core import ProviderCoreError, _issue_normalized_execution_fill
+
+        with self.assertRaisesRegex(ProviderCoreError, "independently verified provider economics"):
+            _issue_normalized_execution_fill(
+                observation, provider_fill, normalizer_id="alpaca.trade-activities.v1"
+            )
         self.assertIsNone(provider_fill.position_side)
         projected = ProjectedFillEvidence.create(
             fill_id="alpaca-fill-plan-1",

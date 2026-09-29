@@ -78,6 +78,7 @@ class OrderSnapshot:
     replace_requested: bool
     replace_command_id: str | None
     expired: bool
+    origin_intent_id: str | None = None
 
 
 class OrderProjectionConflict(ValueError):
@@ -97,6 +98,7 @@ class OrderProjection:
         requested_quantity,
         oco_group_id: str | None = None,
         parent_intent_id: str | None = None,
+        origin_intent_id: str | None = None,
     ):
         self.provider_id = _text(provider_id, name="provider_id").upper()
         self.account_id = _text(account_id, name="account_id")
@@ -121,11 +123,17 @@ class OrderProjection:
             if parent_intent_id is not None
             else None
         )
+        self.origin_intent_id = (
+            _text(origin_intent_id, name="origin_intent_id")
+            if origin_intent_id is not None
+            else None
+        )
         if self.parent_intent_id == self.client_order_id:
             raise ValueError("order cannot amend itself")
         self.provider_order_id: str | None = None
         self.submission_attempt_id: str | None = None
         self.submission_state = "PENDING"
+        self._rearmed_attempt_id: str | None = None
         self.cancel_requested = False
         self.cancelled = False
         self.cancel_command_id: str | None = None
@@ -150,9 +158,62 @@ class OrderProjection:
             )
         self.submission_attempt_id = attempt
 
+    def mark_pre_send_aborted(self, *, attempt_id: str) -> None:
+        """Project a provider-free local abort without inventing provider state."""
+        attempt = _text(attempt_id, name="attempt_id")
+        if self.submission_state == "PRE_SEND_ABORTED":
+            if self.submission_attempt_id == attempt:
+                return
+            raise OrderProjectionConflict(
+                "pre-send aborted order belongs to a different submission attempt"
+            )
+        if self.submission_attempt_id is not None or self.submission_state != "PENDING":
+            raise OrderProjectionConflict(
+                "pre-send abort is unavailable after send-start or provider outcome"
+            )
+        self.submission_attempt_id = attempt
+        self.submission_state = "PRE_SEND_ABORTED"
+        self._rearmed_attempt_id = None
+
+    def rearm_submission(
+        self,
+        *,
+        previous_attempt_id: str,
+        attempt_id: str,
+    ) -> None:
+        """Authorize exactly one new attempt after a provider-free local abort."""
+        previous = _text(previous_attempt_id, name="previous_attempt_id")
+        next_attempt = _text(attempt_id, name="attempt_id")
+        if previous == next_attempt:
+            raise OrderProjectionConflict("rearm requires a new submission attempt")
+        if (
+            self.submission_state != "PRE_SEND_ABORTED"
+            or self.submission_attempt_id != previous
+        ):
+            raise OrderProjectionConflict(
+                "submission rearm requires the exact pre-send aborted attempt"
+            )
+        if self.provider_order_id is not None or self._history:
+            raise OrderProjectionConflict(
+                "submission rearm is unavailable after provider lifecycle evidence"
+            )
+        self.submission_attempt_id = None
+        self.submission_state = "PENDING"
+        self._rearmed_attempt_id = next_attempt
+
     def mark_send_started(self, *, attempt_id: str) -> None:
         """Record the durable outbound-attempt identity without inventing ACK."""
-        self._bind_submission_attempt(attempt_id)
+        attempt = _text(attempt_id, name="attempt_id")
+        if self.submission_state == "PRE_SEND_ABORTED":
+            raise OrderProjectionConflict(
+                "pre-send aborted order must be explicitly rearmed"
+            )
+        if self._rearmed_attempt_id is not None and attempt != self._rearmed_attempt_id:
+            raise OrderProjectionConflict(
+                "send-start attempt differs from the exact rearm target"
+            )
+        self._bind_submission_attempt(attempt)
+        self._rearmed_attempt_id = None
 
     def acknowledge(
         self,
@@ -263,6 +324,7 @@ class OrderProjection:
         active: bool,
         provider_revision: str,
         correction_fill_id: str | None = None,
+        correction_reference: str | None = None,
     ) -> bool:
         fid = _text(fill_id, name="fill_id")
         current = self._fills.get(fid)
@@ -274,6 +336,38 @@ class OrderProjection:
             if correction_fill_id is not None
             else fid
         )
+        key = (fid, revision)
+        prior = self._revision_records.get(key)
+        if prior is not None:
+            predecessor_id = (
+                _text(correction_reference, name="correction_reference")
+                if correction_reference is not None
+                else prior.correction_of
+            )
+            candidate = FillRecord(
+                fill_id=observation_id,
+                provider_execution_id=current.provider_execution_id,
+                quantity=quantity,
+                price=price,
+                active=active,
+                provider_revision=revision,
+                correction_of=predecessor_id,
+            )
+            if prior == candidate:
+                return False
+            raise OrderProjectionConflict(
+                "provider revision already has different content"
+            )
+
+        predecessor_id = (
+            _text(correction_reference, name="correction_reference")
+            if correction_reference is not None
+            else current.fill_id
+        )
+        if predecessor_id != current.fill_id:
+            raise OrderProjectionConflict(
+                "correction_reference must identify the latest fill observation"
+            )
         candidate = FillRecord(
             fill_id=observation_id,
             provider_execution_id=current.provider_execution_id,
@@ -281,16 +375,8 @@ class OrderProjection:
             price=price,
             active=active,
             provider_revision=revision,
-            correction_of=fid,
+            correction_of=predecessor_id,
         )
-        key = (fid, revision)
-        prior = self._revision_records.get(key)
-        if prior is not None:
-            if prior == candidate:
-                return False
-            raise OrderProjectionConflict(
-                "provider revision already has different content"
-            )
         if observation_id != fid:
             for item in self._history:
                 if item.fill_id == observation_id and item != candidate:
@@ -308,6 +394,7 @@ class OrderProjection:
         *,
         provider_revision: str,
         correction_fill_id: str | None = None,
+        correction_reference: str | None = None,
     ) -> bool:
         fid = _text(fill_id, name="fill_id")
         existing = self._fills.get(fid)
@@ -320,6 +407,7 @@ class OrderProjection:
             active=False,
             provider_revision=provider_revision,
             correction_fill_id=correction_fill_id,
+            correction_reference=correction_reference,
         )
 
     def correct_fill(
@@ -330,6 +418,7 @@ class OrderProjection:
         price,
         provider_revision: str,
         correction_fill_id: str | None = None,
+        correction_reference: str | None = None,
     ) -> bool:
         fid = _text(fill_id, name="fill_id")
         existing = self._fills.get(fid)
@@ -346,6 +435,7 @@ class OrderProjection:
             active=existing.active,
             provider_revision=provider_revision,
             correction_fill_id=correction_fill_id,
+            correction_reference=correction_reference,
         )
 
     def request_cancel(self, *, command_id: str) -> None:
@@ -536,6 +626,8 @@ class OrderProjection:
             )
         if filled > 0:
             return "PARTIALLY_FILLED"
+        if self.submission_state == "PRE_SEND_ABORTED":
+            return "PRE_SEND_ABORTED"
         if self.submission_state == "ACCEPTED":
             return "WORKING"
         if self.submission_state == "UNKNOWN":
@@ -589,6 +681,7 @@ class OrderProjection:
             replace_requested=self.replace_requested,
             replace_command_id=self.replace_command_id,
             expired=self.expired,
+            origin_intent_id=self.origin_intent_id,
         )
 
 
@@ -659,6 +752,7 @@ class OrderBookProjection:
         requested_quantity,
         oco_group_id: str | None = None,
         parent_intent_id: str | None = None,
+        origin_intent_id: str | None = None,
     ) -> OrderProjection:
         order = OrderProjection(
             provider_id=self.provider_id,
@@ -670,6 +764,7 @@ class OrderBookProjection:
             requested_quantity=requested_quantity,
             oco_group_id=oco_group_id,
             parent_intent_id=parent_intent_id,
+            origin_intent_id=origin_intent_id,
         )
         self.register(order)
         return order

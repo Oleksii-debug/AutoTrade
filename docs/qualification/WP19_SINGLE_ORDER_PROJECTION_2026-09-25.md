@@ -124,3 +124,128 @@ WP-19 now carries `submission_attempt_id` and the explicit `SEND_STARTED` state 
 - repeated sync is idempotent because event keys are derived from immutable source event IDs.
 
 The adapter is read-only with respect to WP-18: it never sends, retries, edits or replaces dispatch events. A different outbound attempt trying to bind the same external order after send-start fails closed.
+
+## Pre-send canonical order preparation
+
+`GuardedDispatcher.dispatch()` accepts an idempotent `prepare_order` callback for the already-authorized request. It runs after the durable `SubmissionPrepared` fact and authority check, but before transport is invoked. The callback receives the stable client-order ID, attempt and intent IDs, immutable request, canonical submission scope, and preparation timestamp. It should durably create the canonical order in the existing WP-19 projection. If preparation raises, the dispatcher records `SubmissionBlocked` and does not invoke transport.
+
+The whole-simulator path and process-death-after-send regression use this hook. The order identity therefore exists before any outbound request, and an UNKNOWN attempt can be projected into that same order after restart. The dispatcher and order projection still use separate JournalStore aggregates: a crash between durable order preparation and WP-18 send-start can leave a pending order for an attempt that never sent. Reconciliation and cross-aggregate transaction composition remain necessary; this hook does not claim atomicity.
+
+
+## Canonical ExecutionFill ingestion increment
+
+This lineage adds a narrow provider-normalization seam into the same durable WP-19 authority. Provider-specific adapters and reconciliation still own raw parsing; the order projection accepts only the canonical `ExecutionFill` shape and delegates the economic lifecycle mutation to its existing `record_fill` / `correct_fill` paths.
+
+New fail-closed checks bind the normalized fill to the selected canonical order:
+- exact order reference when supplied;
+- exact instrument version and BUY/SELL side;
+- exact parent intent when supplied;
+- receipt time cannot precede trade time, and durable commit cannot precede receipt;
+- unknown canonical fields and missing required fields are rejected rather than ignored;
+- correction facts require provider revision and reuse the existing immutable fill correction lineage.
+
+Focused tests cover normal canonical fill ingestion, restart reconstruction, scope/unknown-field rejection without mutation, and correction replay. This does not claim that every provider adapter already emits the canonical fill shape, nor does it complete Transaction C atomic accounting/reservation/reconciliation composition. Those remain separate integration gates.
+
+For PAPER/LIVE, the reduced durable `record_fill()` and `correct_fill()` entry points fail closed; provider fill facts must enter through canonical `ExecutionFill` ingestion. Provider evidence metadata binds to the complete normalized observation body, excluding only its attached evidence references and derived digest to avoid self-reference. Direct durable bust commands are blocked in PAPER/LIVE until a canonical provider bust observation exists. Simulation and replay retain the lower-level lifecycle operations for deterministic testing and reconstruction.
+
+New PAPER/LIVE order creation requires an explicit canonical quantity unit. Legacy orders without one remain replayable but cannot accept canonical fills until an audited `BIND_QUANTITY_UNIT` event supplies the instrument-qualified unit. Binding is rejected if any fill history already exists because its historical quantity unit cannot be inferred safely. Such legacy orders require manual reconciliation/migration evidence before they can return to financial authority.
+
+
+## Whole-simulator terminal reservation integration
+
+The same lineage now closes one WP-55 semantic integration seam without creating a second reservation or order authority. A reservation may publish terminal outcome `FILLED` only when two independent durable facts agree for the exact provider/account/environment/submission attempt:
+
+- account reconciliation is complete, non-blocking, and resolves the submission as `OBSERVED_EXECUTION`;
+- the canonical durable order projection reconstructs the same client order and submission attempt at exact terminal state `FILLED`.
+
+An execution observation by itself remains insufficient. Partial fills, missing order projection, another submission attempt, and non-`FILLED` order states keep residual reservation capacity held. PAPER/LIVE replay reuses the trusted evidence ArtifactStore rather than bypassing provider-evidence verification.
+
+The durable reservation gate evaluates quantitative closure: active filled quantity must equal requested quantity exactly, open quantity must be zero, and the lifecycle state must be `FILLED` or a full-quantity `FILLED_AFTER_CANCEL` / `FILLED_AFTER_EXPIRY` / `FILLED_AFTER_REJECT`. Any overfill, partial terminal outcome, or non-terminal state leaves the reservation held for reconciliation and risk handling.
+
+The whole-simulator regression now exercises authority -> reservation -> guarded dispatch -> order projection -> fill -> accounting -> reconciliation -> terminal reservation and then reconstructs order and reservation state after restart. For the initial provider-fill path, the order fill event, provider-fill financial binding, economic transaction, and reservation consumption now share one `JournalStore.commit_command` transaction. The adapter validates that the prepared fill matches both projected and provider evidence, that its immutable order event belongs to the same scoped order aggregate, and that each component is all committed or all absent after an injected transaction failure. Reopening SQLite reconstructs the order, economics, and reservation from the same commit; an exact retry does not append duplicate events.
+
+For provider corrections, `commit_provider_fill_correction_with_settlement_replacement()` composes the canonical order correction, provider correction binding, economic reversal/replacement, replacement settlement obligation, and any positive reservation delta in one `JournalStore.commit_command`. The per-execution high-water binding prevents double consumption; a downward correction does not release capacity. Focused regressions cover correction failure atomicity, restart/retry idempotency, settlement replacement, fee deltas, and reservation fencing. The lower-level PAPER/LIVE economic batch and correction entry points now fail closed unless provider-fill/correction binding and the canonical order mutation participate in the same command. SIMULATION retains the lower-level composition primitives for isolated ledger tests.
+
+Account reconciliation remains a separate durable authority and is still required before terminal reservation release; it is not included in the fill commit transaction. Provider busts remain blocked in PAPER/LIVE until a canonical authenticated bust observation and matching atomic economic/settlement/reservation correction path exist. Dispatcher preparation and WP-18 send-start also remain separate aggregates, so a crash between them can leave an unsent pending order. These are still recovery and provider-qualification gates; this increment does not qualify live trading or claim whole-product completion.
+
+## Settlement currency and exact financial identity (2026-09-28)
+
+PAPER/LIVE known-order fill commits now require the existing `DurableSettlementBook` and authenticated `SettlementRuleBinding` evidence. Exactly one principal obligation identifies trade currency; the provider/account/environment, instrument version, provider trade date and rule interval must agree. Caller currency must match that rule. The lower atomic barriers independently verify this binding and reconstruct the principal cash obligation from the canonical economic transaction. Fee currencies remain independent cash legs with their own rule evidence.
+
+The initial financial binding persists the principal rule digest (request schema 1.2.0). Corrections retain that identity (request schema 1.1.0) and reject a different rule, including an otherwise authenticated replacement. Existing PAPER/LIVE bindings lacking this evidence cannot gain new correction authority automatically; an explicit migration/reconciliation remains required. No general currency-rule migration is implemented here.
+
+Financial identity serialization no longer uses context-sensitive `Decimal.normalize()`. It retains every digit while canonicalizing insignificant trailing zeros. Regressions exercise low precision with rounding traps, distinct financial identities, production-scope recorded Bybit fills with settlement, one-shot obligation iterables, restart/idempotent retry, invalid rule/currency/instrument/date/evidence, and injected failure during a SQLite economic-event insert. These are deterministic fixture tests, not real provider qualification. Provider-normalization provenance, typed instrument quantities, risk-to-request binding, bust semantics and full release qualification remain open.
+
+### Instrument binding and independent fee currency (2026-09-28)
+
+Normalized execution fills now require their instrument version to equal the
+instrument version admitted by the authenticated read query. Bybit regression
+coverage rejects both a different instrument and a different version of the same
+instrument. This structural boundary does not authenticate arbitrary caller
+normalization mappings or fee joins; full normalization provenance remains open.
+
+Recorded PAPER/LIVE fixtures separately book USD principal and EUR fees, including
+independent authenticated settlement rules, reservation consumption and journal
+restart. These fixtures exercise production admission code without provider calls
+or real trading. Full MVP discovery: 2,517 tests, OK, one platform-specific skip.
+
+### Bybit source economics and restart identity (2026-09-28)
+
+Bybit normalized-fill construction now reuses the canonical execution parser to
+re-derive financial fields from the immutable provider observation. Quantity,
+price, fee amount/currency, side, client order, execution identity and trade time
+must match a parsed execution. Unsupported normalizer identifiers are rejected.
+When the authenticated query names a symbol, response symbols must match it.
+A caller fee-currency fallback is insufficient for this production wrapper;
+parser-only support remains available without granting normalized-fill authority.
+Symbol-to-instrument metadata qualification and the other providers' independently
+authenticated joins remain unfinished; this is not whole-provider qualification.
+
+A restart retry now compares a previously stored explicit order-preparation hash
+even when the caller omits the optional binding argument. The effective fallback
+scope cannot erase initial order identity. A regression failed in PAPER and LIVE
+before repair, then passed: omitted binding is rejected without a journal write;
+exact retry remains UNKNOWN and sends nothing a second time.
+
+Validation: 117 focused normalization/order/accounting tests passed, then the full
+MVP suite passed 2,517 tests (one platform skip) and 90 contract tests passed.
+After the dispatch retry repair, 173 dispatch/recovery/transport/Bybit tests passed.
+The initial broad run in the resumed environment failed because jsonschema was
+missing; the pinned hash-checked development dependencies were installed before
+the successful rerun. Local .NET and real Windows/NVDA checks were not performed.
+
+### Final send cut and unqualified normalization admission (2026-09-28 UTC)
+
+The production preparation proof now runs again after the final sender and
+financial-authority checks, without repeating the order-mutation callback.
+It preserves the existing CREATE/REARM_SUBMISSION and PRE_SEND_ABORTED machinery.
+One global journal sequence is captured before final validation; the existing
+JournalStore.commit_command compare-and-append atomically records SubmissionSending
+and its outbox entry only if that cut is unchanged. A duplicate committed marker
+cannot grant a second send. This conservatively blocks on unrelated intervening
+journal writes too. It does not prove external process/credential fencing after
+the local send barrier, or bind the admitted risk intent to provider request bytes.
+
+Recorded PAPER/LIVE tests cancel during transport wait, sender check, authority
+check and the final commit seam. All cases preserve zero outbound sends; blocked
+restart is idempotent. A lost-reply send-marker retry remains UNKNOWN and never
+resends. Tests preserve the immutable provider-evidence requirements.
+
+The generic normalized-fill issuer now rejects non-Bybit providers until an
+independently verified source/joins implementation exists. This closes issuance
+through the generic helper for Kraken and intentionally-unqualified Alpaca;
+it does not implement or qualify their missing fee/client/instrument joins.
+Their parser-only paths remain available without production normalized authority.
+Bybit still re-derives economics through its canonical exact-response parser.
+
+Convergence base: 10ea8bdb6704a3ced5fbe20cc68d028202d291e2. Its persisted
+provider-fill reconciliation/release joins are retained. Three pre-existing
+fixture failures were independently reproduced on that pristine head and repaired:
+acknowledgment now has scoped ArtifactStore evidence; late fill observations have
+valid contemporaneous capabilities/time and matching BUY identity; the integration
+fixture binds its origin intent and expects idempotent local PRE_SEND_ABORTED,
+without inventing provider acceptance or fills.
+
+Verification: full composed MVP suite 2,522 tests, OK with one platform-specific
+skip; 90 contracts passed; 187 focused provider/accounting tests passed. Local
+.NET/Windows/NVDA and real-provider/release qualification remain unavailable.

@@ -8,9 +8,10 @@ then the in-memory OrderBookProjection is rebuilt from that immutable history.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Mapping, Sequence
+from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from research.autotrade_research.artifacts.store import (
@@ -25,11 +26,13 @@ from .order_projection import (
     OrderSnapshot,
 )
 from .persistence import JournalStore, canonical_json, payload_digest
+from .provider_core import NormalizedExecutionFill
 
 
 _AGGREGATE_TYPE = "order_projection_book"
 _EVENT_TYPE = "OrderProjectionMutationCommitted"
 _OUTBOX_TOPIC = "autotrade.order-projection.events"
+_CANONICAL_EXECUTION_FILL_INGEST = object()
 _PROVIDER_EVIDENCE_OPERATIONS = frozenset(
     {
         "RECORD_FILL",
@@ -92,6 +95,57 @@ def _optional_text(value: str | None, *, name: str) -> str | None:
     return None if value is None else _text(value, name=name)
 
 
+def _canonical_uri(value: object, *, name: str) -> str:
+    text = _text(value, name=name)
+    if any(character.isspace() for character in text):
+        raise ValueError(f"{name} must be an absolute URI")
+    parsed = urlsplit(text)
+    if not parsed.scheme:
+        raise ValueError(f"{name} must be an absolute URI")
+    if parsed.scheme.lower() in {"http", "https"} and not parsed.netloc:
+        raise ValueError(f"{name} must be an absolute URI")
+    return text
+
+
+def _canonical_quantity_value(value: object, *, name: str) -> tuple[str, str]:
+    """Validate canonical Quantity and retain exact value/unit semantics."""
+    if not isinstance(value, Mapping):
+        raise OrderProjectionConflict(f"{name} must be a canonical Quantity object")
+    unknown = set(value) - {"value", "unit"}
+    missing = {"value", "unit"} - set(value)
+    if unknown or missing:
+        raise OrderProjectionConflict(
+            f"{name} must contain exactly value and unit"
+        )
+    raw_value = value.get("value")
+    if not isinstance(raw_value, str):
+        raise OrderProjectionConflict(f"{name}.value must be a decimal string")
+    canonical_value = _decimal_text(raw_value, name=f"{name}.value")
+    if canonical_value != raw_value:
+        raise OrderProjectionConflict(f"{name}.value must be canonical decimal text")
+    unit = _text(value.get("unit"), name=f"{name}.unit")
+    return raw_value, unit
+
+
+def _provider_evidence_request(
+    operation: object,
+    request: Mapping[str, object],
+) -> dict[str, object]:
+    """Return the signed observation body without its self-referential refs."""
+    result = dict(request)
+    canonical = result.get("canonical_execution_fill")
+    if operation not in {"RECORD_FILL", "CORRECT_FILL"} or not isinstance(
+        canonical,
+        Mapping,
+    ):
+        return result
+    canonical_body = dict(canonical)
+    canonical_body.pop("evidence", None)
+    result.pop("canonical_execution_fill_hash", None)
+    result["canonical_execution_fill"] = canonical_body
+    return result
+
+
 def _canonical_evidence_refs(
     value: Sequence[Mapping[str, object]] | None,
 ) -> tuple[dict[str, str], ...]:
@@ -128,9 +182,13 @@ def _canonical_evidence_refs(
             "sha256": digest,
             "observed_at": _instant(raw.get("observed_at"), name="observed_at"),
         }
-        for optional in ("source_uri", "rights_id"):
-            if raw.get(optional) is not None:
-                ref[optional] = _text(raw.get(optional), name=optional)
+        if raw.get("source_uri") is not None:
+            ref["source_uri"] = _canonical_uri(
+                raw.get("source_uri"),
+                name="source_uri",
+            )
+        if raw.get("rights_id") is not None:
+            ref["rights_id"] = _text(raw.get("rights_id"), name="rights_id")
         identity = canonical_json(ref)
         if identity in identities:
             raise ValueError("evidence_refs must be unique")
@@ -140,7 +198,7 @@ def _canonical_evidence_refs(
 
 
 def _snapshot_payload(snapshot: OrderSnapshot) -> dict[str, object]:
-    return {
+    payload = {
         "provider_id": snapshot.provider_id,
         "account_id": snapshot.account_id,
         "environment": snapshot.environment,
@@ -183,6 +241,11 @@ def _snapshot_payload(snapshot: OrderSnapshot) -> dict[str, object]:
         "replace_command_id": snapshot.replace_command_id,
         "expired": snapshot.expired,
     }
+    # Keep old journal snapshots byte-compatible while recording originating
+    # intent identity separately from amendment parent-order identity.
+    if snapshot.origin_intent_id is not None:
+        payload["origin_intent_id"] = snapshot.origin_intent_id
+    return payload
 
 
 def _scope_id(provider_id: str, account_id: str, environment: str) -> str:
@@ -200,6 +263,20 @@ class DurableOrderMutationResult:
     event_id: str
     inserted: bool
     snapshot: OrderSnapshot
+    canonical_execution_fill: dict[str, object] | None = None
+
+
+@dataclass(frozen=True)
+class PreparedDurableOrderMutation:
+    """Validated order event awaiting an enclosing JournalStore transaction."""
+
+    envelope: dict[str, object] | None
+    event_id: str
+    request: dict[str, object]
+    snapshot: OrderSnapshot
+    aggregate_version: int
+    already_committed: bool
+    canonical_execution_fill: dict[str, object] | None = None
 
 
 class DurableOrderBookProjection:
@@ -215,6 +292,7 @@ class DurableOrderBookProjection:
         host_id: str,
         owner_epoch: str,
         evidence_artifact_store: ArtifactStore | None = None,
+        journal_sequence_cut: int | None = None,
     ):
         if not isinstance(store, JournalStore):
             raise TypeError("store must be JournalStore")
@@ -229,6 +307,11 @@ class DurableOrderBookProjection:
         ):
             raise TypeError("evidence_artifact_store must be ArtifactStore")
         self.evidence_artifact_store = evidence_artifact_store
+        if journal_sequence_cut is not None and (
+            type(journal_sequence_cut) is not int or journal_sequence_cut < 0
+        ):
+            raise ValueError("journal_sequence_cut must be a non-negative integer")
+        self.journal_sequence_cut = journal_sequence_cut
         self.aggregate_id = _scope_id(
             self.provider_id,
             self.account_id,
@@ -239,6 +322,12 @@ class DurableOrderBookProjection:
             str,
             tuple[str, OrderSnapshot, str],
         ] = {}
+        self._quantity_units: dict[str, str] = {}
+        self._provider_execution_owners: dict[
+            str,
+            tuple[str, str, str | None],
+        ] = {}
+        self._canonical_fill_hashes: dict[tuple[str, str, str], str] = {}
         self._reload()
 
     def _new_book(self) -> OrderBookProjection:
@@ -249,7 +338,19 @@ class DurableOrderBookProjection:
         )
 
     def _events(self) -> list[dict[str, object]]:
-        return self.store.load_events(_AGGREGATE_TYPE, self.aggregate_id)
+        events = self.store.load_events(_AGGREGATE_TYPE, self.aggregate_id)
+        if self.journal_sequence_cut is None:
+            return events
+        bounded = []
+        for event in events:
+            sequence = event.get("journal_sequence")
+            if type(sequence) is not int or sequence < 1:
+                raise OrderProjectionConflict(
+                    "journal-sequence-bound order replay requires explicit sequence values"
+                )
+            if sequence <= self.journal_sequence_cut:
+                bounded.append(event)
+        return bounded
 
     @staticmethod
     def _requires_provider_evidence(
@@ -260,6 +361,17 @@ class DurableOrderBookProjection:
             status = str(request.get("status", "")).upper()
             return status in {"ACKNOWLEDGED", "ACCEPTED", "REJECTED"}
         return operation in _PROVIDER_EVIDENCE_OPERATIONS
+
+    def _require_canonical_execution_ingest(
+        self,
+        token: object | None,
+        *,
+        operation: str,
+    ) -> None:
+        if self.environment in {"PAPER", "LIVE"} and token is not _CANONICAL_EXECUTION_FILL_INGEST:
+            raise OrderProjectionConflict(
+                f"PAPER/LIVE {operation} must use canonical ExecutionFill ingestion"
+            )
 
     def _verify_provider_evidence(
         self,
@@ -281,21 +393,21 @@ class DurableOrderBookProjection:
             raise OrderProjectionConflict(
                 "local lifecycle mutation must not claim provider-result evidence"
             )
-        if self.evidence_artifact_store is None:
-            if self.environment in {"PAPER", "LIVE"}:
-                raise OrderProjectionConflict(
-                    "provider evidence requires the trusted ArtifactStore boundary"
-                )
-            # REPLAY/SIMULATION are deterministic synthetic environments. They
-            # may carry canonical evidence identity without claiming that a
-            # real provider artifact has been qualified by the trusted store.
+        if self.environment in {"REPLAY", "SIMULATION"}:
+            # Synthetic provider evidence is a deterministic fixture identity,
+            # not a production ArtifactStore claim. A store may also be
+            # configured for unrelated resolution receipts in this environment.
             return refs
+        if self.evidence_artifact_store is None:
+            raise OrderProjectionConflict(
+                "provider evidence requires the trusted ArtifactStore boundary"
+            )
 
         committed = _instant(committed_at, name="committed_at")
         committed_dt = datetime.fromisoformat(
             committed.replace("Z", "+00:00")
         )
-        request_hash = payload_digest(dict(request))
+        request_hash = payload_digest(_provider_evidence_request(operation, request))
         for ref in refs:
             observed_dt = datetime.fromisoformat(
                 ref["observed_at"].replace("Z", "+00:00")
@@ -305,10 +417,9 @@ class DurableOrderBookProjection:
                     "provider evidence observation cannot be later than commit time"
                 )
             try:
-                manifest = self.evidence_artifact_store.load_manifest(
+                manifest, _raw = self.evidence_artifact_store.read_authenticated_snapshot(
                     ref["artifact_id"]
                 )
-                self.evidence_artifact_store.read_bytes(ref["artifact_id"])
             except (FileNotFoundError, ArtifactIntegrityError, ValueError) as error:
                 raise OrderProjectionConflict(
                     "provider evidence artifact is not resolvable and intact"
@@ -374,11 +485,21 @@ class DurableOrderBookProjection:
                 requested_quantity=request.get("requested_quantity"),
                 oco_group_id=request.get("oco_group_id"),
                 parent_intent_id=request.get("parent_intent_id"),
+                origin_intent_id=request.get("origin_intent_id"),
             )
             return order.snapshot()
 
         order = book.order(client_order_id)
-        if operation == "MARK_SEND_STARTED":
+        if operation == "BIND_QUANTITY_UNIT":
+            return order.snapshot()
+        if operation == "MARK_PRE_SEND_ABORTED":
+            order.mark_pre_send_aborted(attempt_id=request.get("attempt_id"))
+        elif operation == "REARM_SUBMISSION":
+            order.rearm_submission(
+                previous_attempt_id=request.get("previous_attempt_id"),
+                attempt_id=request.get("attempt_id"),
+            )
+        elif operation == "MARK_SEND_STARTED":
             order.mark_send_started(attempt_id=request.get("attempt_id"))
         elif operation == "ACKNOWLEDGE":
             order.acknowledge(
@@ -401,6 +522,7 @@ class DurableOrderBookProjection:
                 price=request.get("price"),
                 provider_revision=request.get("provider_revision"),
                 correction_fill_id=request.get("correction_fill_id"),
+                correction_reference=request.get("correction_reference"),
             )
         elif operation == "BUST_FILL":
             order.bust_fill(
@@ -433,9 +555,18 @@ class DurableOrderBookProjection:
     ) -> tuple[
         OrderBookProjection,
         dict[str, tuple[str, OrderSnapshot, str]],
+        dict[str, str],
+        dict[str, tuple[str, str, str | None]],
+        dict[tuple[str, str, str], str],
     ]:
         book = self._new_book()
         idempotency: dict[str, tuple[str, OrderSnapshot, str]] = {}
+        quantity_units: dict[str, str] = {}
+        provider_execution_owners: dict[
+            str,
+            tuple[str, str, str | None],
+        ] = {}
+        canonical_fill_hashes: dict[tuple[str, str, str], str] = {}
         expected_version = 1
 
         for event in events:
@@ -477,6 +608,16 @@ class DurableOrderBookProjection:
                 raise OrderProjectionConflict(
                     "order projection journal request hash mismatch"
                 )
+            canonical_fill_hash = request.get("canonical_execution_fill_hash")
+            canonical_fill = request.get("canonical_execution_fill")
+            if canonical_fill is not None:
+                if (
+                    not isinstance(canonical_fill, dict)
+                    or canonical_fill_hash != payload_digest(canonical_fill)
+                ):
+                    raise OrderProjectionConflict(
+                        "durable canonical ExecutionFill payload does not match its identity hash"
+                    )
             evidence_refs = self._verify_provider_evidence(
                 operation=operation,
                 request=request,
@@ -493,6 +634,16 @@ class DurableOrderBookProjection:
                 raise OrderProjectionConflict(
                     "order projection journal snapshot must be an object"
                 )
+            self._check_provider_execution_owner(
+                provider_execution_owners,
+                operation,
+                request,
+            )
+            self._check_canonical_fill_hash(
+                canonical_fill_hashes,
+                operation,
+                request,
+            )
             if event_key in idempotency:
                 raise OrderProjectionConflict(
                     "duplicate durable order event_key in journal"
@@ -508,16 +659,274 @@ class DurableOrderBookProjection:
                 raise OrderProjectionConflict(
                     "order projection journal snapshot differs from replay"
                 )
+            if operation == "RECORD_FILL":
+                provider_execution_id = request.get("provider_execution_id")
+                if provider_execution_id is not None:
+                    provider_execution_owners[
+                        _text(provider_execution_id, name="provider_execution_id")
+                    ] = (
+                        _text(request.get("client_order_id"), name="client_order_id"),
+                        _text(request.get("fill_id"), name="fill_id"),
+                        _optional_text(
+                            request.get("canonical_execution_fill_hash"),
+                            name="canonical_execution_fill_hash",
+                        ),
+                    )
+            if operation == "CORRECT_FILL":
+                provider_execution_id = request.get("provider_execution_id")
+                canonical_hash = request.get("canonical_execution_fill_hash")
+                if provider_execution_id is not None and canonical_hash is not None:
+                    canonical_fill_hashes[
+                        (
+                            "CORRECT_FILL",
+                            _text(provider_execution_id, name="provider_execution_id"),
+                            _text(request.get("provider_revision"), name="provider_revision"),
+                        )
+                    ] = _text(
+                        canonical_hash,
+                        name="canonical_execution_fill_hash",
+                    )
+            if operation == "CREATE" and request.get("quantity_unit") is not None:
+                order_id = _text(
+                    request.get("client_order_id"),
+                    name="client_order_id",
+                )
+                unit = _text(
+                    request.get("quantity_unit"),
+                    name="quantity_unit",
+                )
+                prior_unit = quantity_units.get(order_id)
+                if prior_unit is not None and prior_unit != unit:
+                    raise OrderProjectionConflict(
+                        "durable order quantity unit changed across replay"
+                    )
+                quantity_units[order_id] = unit
+            elif operation == "BIND_QUANTITY_UNIT":
+                order_id = _text(
+                    request.get("client_order_id"),
+                    name="client_order_id",
+                )
+                if order_id in quantity_units:
+                    raise OrderProjectionConflict(
+                        "legacy order quantity unit is already bound"
+                    )
+                if book.order(order_id).fill_history:
+                    raise OrderProjectionConflict(
+                        "legacy order with fill history cannot be assigned a quantity unit"
+                    )
+                quantity_units[order_id] = _text(
+                    request.get("quantity_unit"),
+                    name="quantity_unit",
+                )
             idempotency[event_key] = (
                 mutation_hash,
                 snapshot,
                 str(event["event_id"]),
             )
 
-        return book, idempotency
+        return (
+            book,
+            idempotency,
+            quantity_units,
+            provider_execution_owners,
+            canonical_fill_hashes,
+        )
+
+    @staticmethod
+    def _check_canonical_fill_hash(
+        hashes: Mapping[tuple[str, str, str], str],
+        operation: object,
+        request: Mapping[str, object],
+    ) -> None:
+        canonical_hash = request.get("canonical_execution_fill_hash")
+        if canonical_hash is None:
+            return
+        if operation == "RECORD_FILL":
+            identity = (
+                "RECORD_FILL",
+                _text(request.get("provider_execution_id"), name="provider_execution_id"),
+                _text(request.get("fill_id"), name="fill_id"),
+            )
+        elif operation == "CORRECT_FILL":
+            identity = (
+                "CORRECT_FILL",
+                _text(request.get("provider_execution_id"), name="provider_execution_id"),
+                _text(request.get("provider_revision"), name="provider_revision"),
+            )
+        else:
+            return
+        canonical_hash = _text(
+            canonical_hash,
+            name="canonical_execution_fill_hash",
+        )
+        previous = hashes.get(identity)
+        if previous is not None and previous != canonical_hash:
+            raise OrderProjectionConflict(
+                "provider execution observation is bound to different canonical economics"
+            )
+
+    @staticmethod
+    def _check_provider_execution_owner(
+        owners: Mapping[str, tuple[str, str, str | None]],
+        operation: object,
+        request: Mapping[str, object],
+    ) -> None:
+        if operation != "RECORD_FILL":
+            return
+        provider_execution_id = request.get("provider_execution_id")
+        if provider_execution_id is None:
+            return
+        execution_id = _text(
+            provider_execution_id,
+            name="provider_execution_id",
+        )
+        owner = (
+            _text(request.get("client_order_id"), name="client_order_id"),
+            _text(request.get("fill_id"), name="fill_id"),
+            _optional_text(
+                request.get("canonical_execution_fill_hash"),
+                name="canonical_execution_fill_hash",
+            ),
+        )
+        prior = owners.get(execution_id)
+        if prior is not None:
+            if prior[:2] != owner[:2]:
+                raise OrderProjectionConflict(
+                    "provider execution id is already owned by another order fill"
+                )
+            if prior[2] != owner[2]:
+                raise OrderProjectionConflict(
+                    "provider execution observation is bound to different canonical economics"
+                )
 
     def _reload(self) -> None:
-        self._book, self._idempotency = self._replay(self._events())
+        (
+            self._book,
+            self._idempotency,
+            self._quantity_units,
+            self._provider_execution_owners,
+            self._canonical_fill_hashes,
+        ) = self._replay(self._events())
+
+    def refresh(self) -> None:
+        """Rebuild after a surrounding multi-aggregate JournalStore commit."""
+        self._reload()
+
+    def active_canonical_execution_fills(
+        self,
+        client_order_id: str,
+    ) -> dict[str, dict[str, object]]:
+        """Return the latest durable canonical observation per provider execution.
+
+        The method is journal-cut bounded by this projection instance and does
+        not query provider state. Corrections replace the prior observation for
+        the same provider execution id while immutable event history remains.
+        """
+        order_id = _text(client_order_id, name="client_order_id")
+        result: dict[str, dict[str, object]] = {}
+        for event in self._events():
+            payload = event.get("payload")
+            request = payload.get("request") if isinstance(payload, dict) else None
+            operation = payload.get("operation") if isinstance(payload, dict) else None
+            if operation not in {"RECORD_FILL", "CORRECT_FILL"} or not isinstance(
+                request, dict
+            ):
+                continue
+            if request.get("client_order_id") != order_id:
+                continue
+            canonical = request.get("canonical_execution_fill")
+            if not isinstance(canonical, dict):
+                continue
+            execution_id = _text(
+                canonical.get("provider_execution_id"),
+                name="provider_execution_id",
+            )
+            result[execution_id] = dict(canonical)
+        return result
+
+
+    def _prepared_existing(
+        self,
+        result: DurableOrderMutationResult,
+    ) -> PreparedDurableOrderMutation:
+        event = self.store.get_event(result.event_id)
+        if event is None:
+            raise RuntimeError("prepared order retry event disappeared")
+        payload = event.get("payload")
+        request = payload.get("request") if isinstance(payload, dict) else None
+        return PreparedDurableOrderMutation(
+            envelope=None,
+            event_id=result.event_id,
+            request=dict(request) if isinstance(request, dict) else {},
+            snapshot=result.snapshot,
+            aggregate_version=int(event["aggregate_version"]),
+            already_committed=True,
+            canonical_execution_fill=result.canonical_execution_fill,
+        )
+
+    def _canonical_execution_fill_for_event(
+        self,
+        event_id: str,
+    ) -> dict[str, object] | None:
+        event = self.store.get_event(event_id)
+        payload = None if event is None else event.get("payload")
+        request = payload.get("request") if isinstance(payload, dict) else None
+        canonical = (
+            request.get("canonical_execution_fill")
+            if isinstance(request, dict)
+            else None
+        )
+        return dict(canonical) if isinstance(canonical, dict) else None
+
+    def _existing_canonical_fill_retry(
+        self,
+        *,
+        event_key: str,
+        operation: str,
+        canonical_hash: str,
+        committed_at: str,
+        evidence_refs: Sequence[Mapping[str, object]] | None,
+    ) -> DurableOrderMutationResult | None:
+        self._reload()
+        prior = self._idempotency.get(_text(event_key, name="event_key"))
+        if prior is None:
+            return None
+        event = self.store.get_event(prior[2])
+        payload = event.get("payload") if isinstance(event, dict) else None
+        request = payload.get("request") if isinstance(payload, dict) else None
+        if (
+            not isinstance(payload, dict)
+            or payload.get("operation") != operation
+            or not isinstance(request, dict)
+            or request.get("canonical_execution_fill_hash") != canonical_hash
+        ):
+            raise OrderProjectionConflict(
+                "event_key was already used for a different canonical fill observation"
+            )
+        verified_evidence = self._verify_provider_evidence(
+            operation=operation,
+            request=request,
+            evidence_refs=evidence_refs,
+            committed_at=_instant(committed_at, name="committed_at"),
+        )
+        mutation_hash = payload_digest(
+            {
+                "request_hash": payload_digest(request),
+                "evidence_refs": list(verified_evidence),
+            }
+        )
+        if prior[0] != mutation_hash:
+            raise OrderProjectionConflict(
+                "event_key was already used for a different canonical fill observation"
+            )
+        return DurableOrderMutationResult(
+            event_id=prior[2],
+            inserted=False,
+            snapshot=prior[1],
+            canonical_execution_fill=self._canonical_execution_fill_for_event(
+                prior[2]
+            ),
+        )
 
     def _commit(
         self,
@@ -527,7 +936,8 @@ class DurableOrderBookProjection:
         request: dict[str, object],
         committed_at: str,
         evidence_refs: Sequence[Mapping[str, object]] | None = None,
-    ) -> DurableOrderMutationResult:
+        prepare_only: bool = False,
+    ) -> DurableOrderMutationResult | PreparedDurableOrderMutation:
         key = _text(event_key, name="event_key")
         timestamp = _instant(committed_at, name="committed_at")
         request_hash = payload_digest(request)
@@ -551,14 +961,74 @@ class DurableOrderBookProjection:
                 raise OrderProjectionConflict(
                     "event_key was already used for a different order request"
                 )
-            return DurableOrderMutationResult(
+            result = DurableOrderMutationResult(
                 event_id=prior[2],
                 inserted=False,
                 snapshot=prior[1],
+                canonical_execution_fill=self._canonical_execution_fill_for_event(
+                    prior[2]
+                ),
             )
+            if prepare_only:
+                event = self.store.get_event(prior[2])
+                if event is None:
+                    raise RuntimeError("prepared order retry event disappeared")
+                return PreparedDurableOrderMutation(
+                    envelope=None,
+                    event_id=prior[2],
+                    request=dict(request),
+                    snapshot=prior[1],
+                    aggregate_version=int(event["aggregate_version"]),
+                    already_committed=True,
+                    canonical_execution_fill=result.canonical_execution_fill,
+                )
+            return result
 
         events = self._events()
-        candidate, _ = self._replay(events)
+        candidate, _, _, execution_owners, canonical_fill_hashes = self._replay(events)
+        self._check_provider_execution_owner(
+            execution_owners,
+            operation,
+            request,
+        )
+        self._check_canonical_fill_hash(
+            canonical_fill_hashes,
+            operation,
+            request,
+        )
+        if operation == "CORRECT_FILL" and request.get("correction_reference") is not None:
+            order_id = _text(request.get("client_order_id"), name="client_order_id")
+            execution_id = _text(
+                request.get("provider_execution_id"),
+                name="provider_execution_id",
+            )
+            predecessor = _text(
+                request.get("correction_reference"),
+                name="correction_reference",
+            )
+            current_order = candidate.order(order_id)
+            latest = next(
+                (
+                    item
+                    for item in reversed(current_order.fill_history)
+                    if item.provider_execution_id == execution_id
+                ),
+                None,
+            )
+            if latest is None or latest.fill_id != predecessor:
+                raise OrderProjectionConflict(
+                    "correction predecessor changed before its durable append"
+                )
+        if operation == "BIND_QUANTITY_UNIT":
+            order_id = _text(request.get("client_order_id"), name="client_order_id")
+            if order_id in self._quantity_units:
+                raise OrderProjectionConflict(
+                    "order already has a canonical quantity unit"
+                )
+            if candidate.order(order_id).fill_history:
+                raise OrderProjectionConflict(
+                    "legacy order with fill history cannot be assigned a quantity unit"
+                )
         snapshot = self._apply(candidate, operation, request)
         payload = {
             "schema_version": "1.0.0",
@@ -569,9 +1039,13 @@ class DurableOrderBookProjection:
             "request_hash": request_hash,
             "snapshot": _snapshot_payload(snapshot),
         }
-        version = self.store.next_aggregate_version(
-            _AGGREGATE_TYPE,
-            self.aggregate_id,
+        # The event snapshot above was computed from this exact journal cut.
+        # Never select a later version after another writer has committed: the
+        # store's transactional version check must reject this stale snapshot.
+        version = (
+            int(events[-1]["aggregate_version"]) + 1
+            if events
+            else 1
         )
         event_id = str(
             uuid5(
@@ -601,6 +1075,21 @@ class DurableOrderBookProjection:
             "payload_hash": payload_digest(payload),
             "evidence_refs": [dict(ref) for ref in verified_evidence],
         }
+        if prepare_only:
+            canonical_fill = request.get("canonical_execution_fill")
+            return PreparedDurableOrderMutation(
+                envelope=envelope,
+                event_id=event_id,
+                request=dict(request),
+                snapshot=snapshot,
+                aggregate_version=version,
+                already_committed=False,
+                canonical_execution_fill=(
+                    dict(canonical_fill)
+                    if isinstance(canonical_fill, dict)
+                    else None
+                ),
+            )
         try:
             append_result = self.store.append_event(
                 envelope,
@@ -617,6 +1106,9 @@ class DurableOrderBookProjection:
             event_id=recorded[2],
             inserted=append_result.inserted,
             snapshot=recorded[1],
+            canonical_execution_fill=self._canonical_execution_fill_for_event(
+                recorded[2]
+            ),
         )
 
     @property
@@ -644,9 +1136,15 @@ class DurableOrderBookProjection:
         side: str,
         requested_quantity,
         committed_at: str,
+        quantity_unit: str | None = None,
         oco_group_id: str | None = None,
         parent_intent_id: str | None = None,
+        origin_intent_id: str | None = None,
     ) -> DurableOrderMutationResult:
+        if self.environment in {"PAPER", "LIVE"} and quantity_unit is None:
+            raise OrderProjectionConflict(
+                "PAPER/LIVE order creation requires a canonical quantity unit"
+            )
         request = {
             "client_order_id": _text(client_order_id, name="client_order_id"),
             "instrument": _text(instrument, name="instrument"),
@@ -660,11 +1158,244 @@ class DurableOrderBookProjection:
                 parent_intent_id,
                 name="parent_intent_id",
             ),
+            "origin_intent_id": _optional_text(
+                origin_intent_id,
+                name="origin_intent_id",
+            ),
         }
+        if quantity_unit is not None:
+            request["quantity_unit"] = _text(
+                quantity_unit,
+                name="quantity_unit",
+            )
         return self._commit(
             event_key=event_key,
             operation="CREATE",
             request=request,
+            committed_at=committed_at,
+        )
+
+    def bind_legacy_quantity_unit(
+        self,
+        *,
+        event_key: str,
+        client_order_id: str,
+        quantity_unit: str,
+        committed_at: str,
+    ) -> DurableOrderMutationResult:
+        """Explicitly qualify a legacy unfilled order's previously absent unit."""
+        return self._commit(
+            event_key=event_key,
+            operation="BIND_QUANTITY_UNIT",
+            request={
+                "client_order_id": _text(client_order_id, name="client_order_id"),
+                "quantity_unit": _text(quantity_unit, name="quantity_unit"),
+            },
+            committed_at=committed_at,
+        )
+
+    def mark_pre_send_aborted(
+        self,
+        *,
+        event_key: str,
+        client_order_id: str,
+        attempt_id: str,
+        source_blocked_event_id: str,
+        source_blocked_payload_hash: str,
+        preparation_binding_hash: str,
+        origin_intent_id: str,
+        committed_at: str,
+    ) -> DurableOrderMutationResult:
+        order_id = _text(client_order_id, name="client_order_id")
+        attempt = _text(attempt_id, name="attempt_id")
+        source_event_id = _text(
+            source_blocked_event_id,
+            name="source_blocked_event_id",
+        )
+        source_hash = _text(
+            source_blocked_payload_hash,
+            name="source_blocked_payload_hash",
+        )
+        binding_hash = _text(
+            preparation_binding_hash,
+            name="preparation_binding_hash",
+        )
+        origin_intent = _text(origin_intent_id, name="origin_intent_id")
+        events = self.store.load_events(
+            "submission_attempt",
+            submission_attempt_aggregate_id(
+                environment=self.environment,
+                account_id=self.account_id,
+                attempt_id=attempt,
+            ),
+        )
+        if (
+            len(events) != 2
+            or events[0].get("event_type") != "SubmissionPrepared"
+            or events[1].get("event_type") != "SubmissionBlocked"
+        ):
+            raise OrderProjectionConflict(
+                "pre-send abort requires exactly prepared then blocked submission facts"
+            )
+        prepared_payload = events[0].get("payload")
+        blocked_payload = events[1].get("payload")
+        if not isinstance(prepared_payload, Mapping) or not isinstance(
+            blocked_payload,
+            Mapping,
+        ):
+            raise OrderProjectionConflict(
+                "pre-send abort submission evidence is malformed"
+            )
+        actual_binding = prepared_payload.get(
+            "order_preparation_binding_hash",
+            prepared_payload.get("submission_scope_hash"),
+        )
+        if (
+            events[1].get("event_id") != source_event_id
+            or payload_digest(dict(blocked_payload)) != source_hash
+            or actual_binding != binding_hash
+            or prepared_payload.get("attempt_id") != attempt
+            or prepared_payload.get("client_order_id") != order_id
+            or prepared_payload.get("intent_id") != origin_intent
+            or str(prepared_payload.get("provider", "")).upper() != self.provider_id
+            or prepared_payload.get("account_id") != self.account_id
+            or str(prepared_payload.get("environment", "")).upper() != self.environment
+        ):
+            raise OrderProjectionConflict(
+                "pre-send abort proof differs from durable submission facts"
+            )
+        self._reload()
+        order = self.order(order_id)
+        if order.origin_intent_id != origin_intent:
+            raise OrderProjectionConflict(
+                "pre-send abort origin intent differs from canonical order"
+            )
+        return self._commit(
+            event_key=event_key,
+            operation="MARK_PRE_SEND_ABORTED",
+            request={
+                "client_order_id": order_id,
+                "attempt_id": attempt,
+                "source_blocked_event_id": source_event_id,
+                "source_blocked_payload_hash": source_hash,
+                "preparation_binding_hash": binding_hash,
+                "origin_intent_id": origin_intent,
+            },
+            committed_at=committed_at,
+        )
+
+    def rearm_submission(
+        self,
+        *,
+        event_key: str,
+        client_order_id: str,
+        attempt_id: str,
+        committed_at: str,
+    ) -> DurableOrderMutationResult:
+        """Rearm only from exact durable provider-free blocked/new prepared facts."""
+        new_attempt = _text(attempt_id, name="attempt_id")
+        order_id = _text(client_order_id, name="client_order_id")
+        self._reload()
+        order = self.order(order_id)
+        if order.state != "PRE_SEND_ABORTED" or order.submission_attempt_id is None:
+            raise OrderProjectionConflict(
+                "submission rearm requires a durable pre-send aborted order"
+            )
+        previous_attempt = order.submission_attempt_id
+        old_events = self.store.load_events(
+            "submission_attempt",
+            submission_attempt_aggregate_id(
+                environment=self.environment,
+                account_id=self.account_id,
+                attempt_id=previous_attempt,
+            ),
+        )
+        new_events = self.store.load_events(
+            "submission_attempt",
+            submission_attempt_aggregate_id(
+                environment=self.environment,
+                account_id=self.account_id,
+                attempt_id=new_attempt,
+            ),
+        )
+        if (
+            len(old_events) != 2
+            or old_events[0].get("event_type") != "SubmissionPrepared"
+            or old_events[1].get("event_type") != "SubmissionBlocked"
+        ):
+            raise OrderProjectionConflict(
+                "pre-send rearm source must be exactly prepared then blocked"
+            )
+        if (
+            not new_events
+            or new_events[0].get("event_type") != "SubmissionPrepared"
+            or any(event.get("event_type") == "SubmissionSending" for event in new_events)
+        ):
+            raise OrderProjectionConflict(
+                "pre-send rearm target must have durable preparation and no send-start"
+            )
+        old_prepared = old_events[0].get("payload")
+        new_prepared = new_events[0].get("payload")
+        old_blocked = old_events[1].get("payload")
+        if not all(
+            isinstance(payload, Mapping)
+            for payload in (old_prepared, new_prepared, old_blocked)
+        ):
+            raise OrderProjectionConflict(
+                "pre-send rearm submission evidence is malformed"
+            )
+        origin_intent = order.origin_intent_id
+        if origin_intent is None:
+            raise OrderProjectionConflict(
+                "pre-send rearm requires canonical order origin intent"
+            )
+        for prepared, expected_attempt in (
+            (old_prepared, previous_attempt),
+            (new_prepared, new_attempt),
+        ):
+            if (
+                prepared.get("attempt_id") != expected_attempt
+                or prepared.get("client_order_id") != order_id
+                or str(prepared.get("provider", "")).upper() != self.provider_id
+                or prepared.get("account_id") != self.account_id
+                or str(prepared.get("environment", "")).upper() != self.environment
+                or prepared.get("intent_id") != origin_intent
+            ):
+                raise OrderProjectionConflict(
+                    "pre-send rearm submission identity differs from canonical order"
+                )
+        old_binding = old_prepared.get(
+            "order_preparation_binding_hash",
+            old_prepared.get("submission_scope_hash"),
+        )
+        new_binding = new_prepared.get(
+            "order_preparation_binding_hash",
+            new_prepared.get("submission_scope_hash"),
+        )
+        if (
+            not isinstance(old_binding, str)
+            or not old_binding
+            or old_binding != new_binding
+        ):
+            raise OrderProjectionConflict(
+                "pre-send rearm requires unchanged canonical preparation binding"
+            )
+        blocked_event_id = _text(
+            old_events[1].get("event_id"),
+            name="source blocked event_id",
+        )
+        return self._commit(
+            event_key=event_key,
+            operation="REARM_SUBMISSION",
+            request={
+                "client_order_id": order_id,
+                "previous_attempt_id": previous_attempt,
+                "attempt_id": new_attempt,
+                "source_blocked_event_id": blocked_event_id,
+                "source_blocked_payload_hash": payload_digest(dict(old_blocked)),
+                "preparation_binding_hash": old_binding,
+                "origin_intent_id": origin_intent,
+            },
             committed_at=committed_at,
         )
 
@@ -863,12 +1594,41 @@ class DurableOrderBookProjection:
                 continue
 
             if event_type == "SubmissionBlocked":
-                if sending_seen:
+                if sending_seen or terminal_seen:
                     raise OrderProjectionConflict(
-                        "blocked submission cannot follow send-start"
+                        "blocked submission cannot follow send-start or terminal outcome"
                     )
-                # No provider-side order lifecycle fact exists when the send
-                # barrier blocked the attempt. Keep the pre-send order pending.
+                terminal_seen = True
+                binding_hash = prepared_payload.get(
+                    "order_preparation_binding_hash",
+                    prepared_payload.get("submission_scope_hash"),
+                )
+                origin_intent = prepared_payload.get("intent_id")
+                if not isinstance(binding_hash, str) or not binding_hash:
+                    raise OrderProjectionConflict(
+                        "blocked production submission lacks preparation binding"
+                    )
+                if not isinstance(origin_intent, str) or not origin_intent:
+                    raise OrderProjectionConflict(
+                        "blocked submission lacks origin intent"
+                    )
+                payload = event.get("payload")
+                if not isinstance(payload, Mapping):
+                    raise OrderProjectionConflict(
+                        "blocked submission payload must be an object"
+                    )
+                results.append(
+                    self.mark_pre_send_aborted(
+                        event_key=event_key,
+                        client_order_id=client_order_id,
+                        attempt_id=attempt,
+                        source_blocked_event_id=source_event_id,
+                        source_blocked_payload_hash=payload_digest(dict(payload)),
+                        preparation_binding_hash=binding_hash,
+                        origin_intent_id=origin_intent,
+                        committed_at=committed_at,
+                    )
+                )
                 continue
 
         return tuple(results)
@@ -885,7 +1645,15 @@ class DurableOrderBookProjection:
         committed_at: str,
         provider_revision: str | None = None,
         evidence_refs: Sequence[Mapping[str, object]] | None = None,
-    ) -> DurableOrderMutationResult:
+        canonical_execution_fill_hash: str | None = None,
+        canonical_execution_fill: Mapping[str, object] | None = None,
+        _canonical_ingest_token: object | None = None,
+        _prepare_only: bool = False,
+    ) -> DurableOrderMutationResult | PreparedDurableOrderMutation:
+        self._require_canonical_execution_ingest(
+            _canonical_ingest_token,
+            operation="fill recording",
+        )
         request = {
             "client_order_id": _text(client_order_id, name="client_order_id"),
             "fill_id": _text(fill_id, name="fill_id"),
@@ -900,12 +1668,561 @@ class DurableOrderBookProjection:
                 name="provider_revision",
             ),
         }
+        if canonical_execution_fill_hash is not None:
+            request["canonical_execution_fill_hash"] = _text(
+                canonical_execution_fill_hash,
+                name="canonical_execution_fill_hash",
+            )
+        if canonical_execution_fill is not None:
+            if not isinstance(canonical_execution_fill, Mapping):
+                raise TypeError("canonical_execution_fill must be a mapping")
+            request["canonical_execution_fill"] = dict(canonical_execution_fill)
         return self._commit(
             event_key=event_key,
             operation="RECORD_FILL",
             request=request,
             committed_at=committed_at,
             evidence_refs=evidence_refs,
+            prepare_only=_prepare_only,
+        )
+
+    def ingest_execution_fill(
+        self,
+        *,
+        client_order_id: str,
+        execution_fill: Mapping[str, object],
+        event_key: str,
+        committed_at: str,
+        _canonical_ingest_token: object | None = None,
+        _prepare_only: bool = False,
+    ) -> DurableOrderMutationResult | PreparedDurableOrderMutation:
+        """Apply one canonical ExecutionFill through the existing order authority.
+
+        Provider adapters and reconciliation normalize provider-specific payloads
+        before this boundary. This method deliberately does not interpret raw
+        provider responses and does not create a second lifecycle state machine.
+        """
+        self._require_canonical_execution_ingest(
+            _canonical_ingest_token,
+            operation="ExecutionFill ingestion",
+        )
+        if not isinstance(execution_fill, Mapping):
+            raise TypeError("execution_fill must be a mapping")
+
+        allowed = {
+            "fill_id",
+            "provider_execution_id",
+            "provider_revision",
+            "order_ref",
+            "intent_ref",
+            "instrument_version",
+            "side",
+            "last_quantity",
+            "last_price",
+            "trade_time",
+            "receipt_time",
+            "fees",
+            "liquidity_flag",
+            "settlement_date",
+            "correction_reference",
+            "evidence",
+        }
+        required = {
+            "fill_id",
+            "provider_execution_id",
+            "order_ref",
+            "instrument_version",
+            "side",
+            "last_quantity",
+            "last_price",
+            "trade_time",
+            "receipt_time",
+            "fees",
+            "settlement_date",
+            "evidence",
+        }
+        unknown = set(execution_fill) - allowed
+        if unknown:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill contains unsupported fields: "
+                + ", ".join(sorted(str(item) for item in unknown))
+            )
+        missing = required - set(execution_fill)
+        if missing:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill is missing required fields: "
+                + ", ".join(sorted(missing))
+            )
+
+        client_id = _text(client_order_id, name="client_order_id")
+        order = self.order(client_id)
+        order_ref = _text(
+            execution_fill.get("order_ref"),
+            name="order_ref",
+        )
+        if order_ref != client_id:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill order_ref differs from target order"
+            )
+        if (
+            _text(execution_fill.get("instrument_version"), name="instrument_version")
+            != order.instrument
+        ):
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill instrument differs from target order"
+            )
+        fill_side = _text(execution_fill.get("side"), name="side")
+        if fill_side not in {"BUY", "SELL"}:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill side must be BUY or SELL"
+            )
+        if fill_side != order.side:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill side differs from target order"
+            )
+
+        intent_ref = execution_fill.get("intent_ref")
+        if intent_ref is not None:
+            normalized_intent_ref = _text(intent_ref, name="intent_ref")
+            if (
+                order.origin_intent_id is None
+                or normalized_intent_ref != order.origin_intent_id
+            ):
+                raise OrderProjectionConflict(
+                    "canonical ExecutionFill intent_ref differs from target order"
+                )
+
+        trade_time = _instant(execution_fill.get("trade_time"), name="trade_time")
+        receipt_time = _instant(
+            execution_fill.get("receipt_time"),
+            name="receipt_time",
+        )
+        committed = _instant(committed_at, name="committed_at")
+        trade_dt = datetime.fromisoformat(trade_time.replace("Z", "+00:00"))
+        receipt_dt = datetime.fromisoformat(receipt_time.replace("Z", "+00:00"))
+        committed_dt = datetime.fromisoformat(committed.replace("Z", "+00:00"))
+        if receipt_dt < trade_dt:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill receipt_time precedes trade_time"
+            )
+        if committed_dt < receipt_dt:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill cannot be committed before receipt_time"
+            )
+
+        quantity_value, quantity_unit = _canonical_quantity_value(
+            execution_fill.get("last_quantity"),
+            name="last_quantity",
+        )
+        expected_quantity_unit = self._quantity_units.get(client_id)
+        if expected_quantity_unit is None:
+            raise OrderProjectionConflict(
+                "target order lacks canonical quantity unit"
+            )
+        if quantity_unit != expected_quantity_unit:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill quantity unit differs from target order"
+            )
+        last_price = execution_fill.get("last_price")
+        if not isinstance(last_price, str):
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill last_price must be a decimal string"
+            )
+        if _decimal_text(last_price, name="last_price") != last_price:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill last_price must be canonical decimal text"
+            )
+
+        fees = execution_fill.get("fees")
+        if isinstance(fees, (str, bytes)) or not isinstance(fees, Sequence):
+            raise OrderProjectionConflict("canonical ExecutionFill fees must be an array")
+        for index, fee in enumerate(fees):
+            if not isinstance(fee, Mapping) or set(fee) != {"amount", "currency"}:
+                raise OrderProjectionConflict(
+                    f"canonical ExecutionFill fees[{index}] must be Money"
+                )
+            amount = fee.get("amount")
+            if not isinstance(amount, str) or _decimal_text(
+                amount, name=f"fees[{index}].amount"
+            ) != amount:
+                raise OrderProjectionConflict(
+                    f"canonical ExecutionFill fees[{index}].amount must be canonical decimal text"
+                )
+            _text(fee.get("currency"), name=f"fees[{index}].currency")
+
+        liquidity_flag = execution_fill.get("liquidity_flag")
+        if liquidity_flag is not None:
+            _text(liquidity_flag, name="liquidity_flag")
+
+        evidence = execution_fill.get("evidence")
+        if isinstance(evidence, (str, bytes)) or not isinstance(evidence, Sequence):
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill evidence must be an array"
+            )
+        settlement_date = _text(
+            execution_fill.get("settlement_date"),
+            name="settlement_date",
+        )
+        try:
+            parsed_settlement_date = date.fromisoformat(settlement_date)
+        except ValueError as error:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill settlement_date must be an ISO calendar date"
+            ) from error
+        if parsed_settlement_date.isoformat() != settlement_date:
+            raise OrderProjectionConflict(
+                "canonical ExecutionFill settlement_date must be canonical YYYY-MM-DD"
+            )
+
+        canonical_fill: dict[str, object] = {
+            "fill_id": _text(execution_fill.get("fill_id"), name="fill_id"),
+            "provider_execution_id": _text(
+                execution_fill.get("provider_execution_id"),
+                name="provider_execution_id",
+            ),
+            "instrument_version": order.instrument,
+            "side": fill_side,
+            "last_quantity": {
+                "value": quantity_value,
+                "unit": quantity_unit,
+            },
+            "last_price": last_price,
+            "trade_time": trade_time,
+            "receipt_time": receipt_time,
+            "fees": [
+                {
+                    "amount": str(fee["amount"]),
+                    "currency": _text(
+                        fee["currency"],
+                        name=f"fees[{index}].currency",
+                    ),
+                }
+                for index, fee in enumerate(fees)
+            ],
+            "settlement_date": settlement_date,
+            "evidence": [
+                dict(ref) for ref in _canonical_evidence_refs(evidence)
+            ],
+        }
+        for optional in (
+            "provider_revision",
+            "order_ref",
+            "intent_ref",
+            "liquidity_flag",
+            "correction_reference",
+        ):
+            if execution_fill.get(optional) is not None:
+                canonical_fill[optional] = _text(
+                    execution_fill.get(optional),
+                    name=optional,
+                )
+        canonical_execution_fill_hash = payload_digest(canonical_fill)
+
+        correction_reference = execution_fill.get("correction_reference")
+        if correction_reference is not None:
+            provider_revision = execution_fill.get("provider_revision")
+            if provider_revision is None:
+                raise OrderProjectionConflict(
+                    "corrected ExecutionFill requires provider_revision"
+                )
+            correction_target = _text(
+                correction_reference,
+                name="correction_reference",
+            )
+            incoming_execution_id = _text(
+                execution_fill.get("provider_execution_id"),
+                name="provider_execution_id",
+            )
+            exact_retry = self._existing_canonical_fill_retry(
+                event_key=event_key,
+                operation="CORRECT_FILL",
+                canonical_hash=canonical_execution_fill_hash,
+                committed_at=committed,
+                evidence_refs=evidence,
+            )
+            if exact_retry is not None:
+                return (
+                    self._prepared_existing(exact_retry)
+                    if _prepare_only
+                    else exact_retry
+                )
+            self._reload()
+            order = self.order(client_id)
+            target_observation = next(
+                (
+                    item
+                    for item in reversed(order.fill_history)
+                    if item.fill_id == correction_target
+                    or item.correction_of == correction_target
+                ),
+                None,
+            )
+            if target_observation is None:
+                raise OrderProjectionConflict(
+                    "corrected ExecutionFill references an unknown fill"
+                )
+            if target_observation.provider_execution_id != incoming_execution_id:
+                raise OrderProjectionConflict(
+                    "corrected ExecutionFill provider_execution_id differs from target fill"
+                )
+            self._reload()
+            self._check_canonical_fill_hash(
+                self._canonical_fill_hashes,
+                "CORRECT_FILL",
+                {
+                    "provider_execution_id": incoming_execution_id,
+                    "provider_revision": _text(
+                        provider_revision,
+                        name="provider_revision",
+                    ),
+                    "canonical_execution_fill_hash": canonical_execution_fill_hash,
+                },
+            )
+            latest_observation = next(
+                (
+                    item
+                    for item in reversed(order.fill_history)
+                    if item.provider_execution_id == incoming_execution_id
+                ),
+                None,
+            )
+            if (
+                latest_observation is None
+                or correction_target != latest_observation.fill_id
+            ):
+                raise OrderProjectionConflict(
+                    "correction_reference must extend the latest authoritative provider revision"
+                )
+            root_fill_id = order.provider_execution_index.get(incoming_execution_id)
+            if root_fill_id is None:
+                raise OrderProjectionConflict(
+                    "corrected ExecutionFill execution lineage is not indexed"
+                )
+            return self.correct_fill(
+                event_key=event_key,
+                client_order_id=client_id,
+                fill_id=root_fill_id,
+                correction_fill_id=_text(
+                    execution_fill.get("fill_id"),
+                    name="fill_id",
+                ),
+                quantity=quantity_value,
+                price=last_price,
+                provider_revision=_text(
+                    provider_revision,
+                    name="provider_revision",
+                ),
+                provider_execution_id=incoming_execution_id,
+                correction_reference=correction_target,
+                committed_at=committed,
+                evidence_refs=evidence,
+                canonical_execution_fill_hash=canonical_execution_fill_hash,
+                canonical_execution_fill=canonical_fill,
+                _canonical_ingest_token=_CANONICAL_EXECUTION_FILL_INGEST,
+                _prepare_only=_prepare_only,
+            )
+
+        return self.record_fill(
+            event_key=event_key,
+            client_order_id=client_id,
+            fill_id=_text(execution_fill.get("fill_id"), name="fill_id"),
+            provider_execution_id=_text(
+                execution_fill.get("provider_execution_id"),
+                name="provider_execution_id",
+            ),
+            quantity=quantity_value,
+            price=last_price,
+            provider_revision=_optional_text(
+                execution_fill.get("provider_revision"),
+                name="provider_revision",
+            ),
+            committed_at=committed,
+            evidence_refs=evidence,
+            canonical_execution_fill_hash=canonical_execution_fill_hash,
+            canonical_execution_fill=canonical_fill,
+            _canonical_ingest_token=_CANONICAL_EXECUTION_FILL_INGEST,
+            _prepare_only=_prepare_only,
+        )
+
+    def ingest_normalized_execution_fill(
+        self,
+        *,
+        event_key: str,
+        client_order_id: str,
+        normalized_fill: NormalizedExecutionFill,
+        settlement_date: str,
+        committed_at: str,
+        _prepare_only: bool = False,
+    ) -> DurableOrderMutationResult | PreparedDurableOrderMutation:
+        """Persist an adapter-issued fill, retaining exact provider response bytes.
+
+        Provider-specific parsers create ``NormalizedExecutionFill`` only from
+        ProviderResponseObservation. The raw response becomes an immutable
+        ArtifactStore receipt bound to the exact canonical order mutation.
+        """
+        if not isinstance(normalized_fill, NormalizedExecutionFill):
+            raise TypeError("normalized_fill must be NormalizedExecutionFill")
+        if self.environment not in {"PAPER", "LIVE"}:
+            raise OrderProjectionConflict(
+                "authenticated provider normalization is reserved for PAPER/LIVE"
+            )
+        if self.evidence_artifact_store is None:
+            raise OrderProjectionConflict(
+                "authenticated provider normalization requires ArtifactStore"
+            )
+        observation = normalized_fill.observation
+        fill = normalized_fill.provider_fill
+        if (
+            observation.provider_id != self.provider_id
+            or observation.account_id != self.account_id
+            or observation.environment != self.environment
+            or str(fill.provider_id).upper() != self.provider_id
+            or fill.account_id != self.account_id
+            or fill.environment != self.environment
+            or fill.client_order_id != client_order_id
+            or observation.evidence_ref not in tuple(fill.evidence_refs)
+        ):
+            raise OrderProjectionConflict(
+                "normalized provider fill differs from durable order-book scope"
+            )
+        order = self.order(client_order_id)
+        if fill.instrument != order.instrument or fill.side != order.side:
+            raise OrderProjectionConflict(
+                "normalized provider fill differs from durable order instrument or side"
+            )
+        quantity_unit = self._quantity_units.get(client_order_id)
+        if quantity_unit is None:
+            raise OrderProjectionConflict(
+                "target order lacks canonical quantity unit"
+            )
+        try:
+            trade_time = _instant(fill.trade_time, name="provider_fill.trade_time")
+            observed_at = _instant(
+                observation.observed_at,
+                name="provider_observation.observed_at",
+            )
+            parsed_settlement_date = date.fromisoformat(settlement_date)
+        except ValueError as error:
+            raise OrderProjectionConflict(
+                "normalized fill dates are invalid"
+            ) from error
+        if parsed_settlement_date.isoformat() != settlement_date:
+            raise OrderProjectionConflict(
+                "settlement_date must be canonical YYYY-MM-DD"
+            )
+        if datetime.fromisoformat(observed_at.replace("Z", "+00:00")) < datetime.fromisoformat(
+            trade_time.replace("Z", "+00:00")
+        ):
+            raise OrderProjectionConflict(
+                "provider observation cannot precede execution trade time"
+            )
+        canonical_fill: dict[str, object] = {
+            "fill_id": fill.provider_execution_id,
+            "provider_execution_id": fill.provider_execution_id,
+            "order_ref": client_order_id,
+            "intent_ref": order.origin_intent_id,
+            "instrument_version": order.instrument,
+            "side": order.side,
+            "last_quantity": {
+                "value": _decimal_text(fill.quantity, name="provider_fill.quantity"),
+                "unit": quantity_unit,
+            },
+            "last_price": _decimal_text(fill.price, name="provider_fill.price"),
+            "trade_time": trade_time,
+            "receipt_time": observed_at,
+            "fees": [
+                {
+                    "amount": _decimal_text(
+                        fill.fee_amount,
+                        name="provider_fill.fee_amount",
+                    ),
+                    "currency": fill.fee_currency,
+                }
+            ],
+            "settlement_date": settlement_date,
+            "evidence": [],
+        }
+        if order.origin_intent_id is None:
+            canonical_fill.pop("intent_ref")
+        preview_request: dict[str, object] = {
+            "client_order_id": client_order_id,
+            "fill_id": fill.provider_execution_id,
+            "provider_execution_id": fill.provider_execution_id,
+            "quantity": canonical_fill["last_quantity"]["value"],
+            "price": canonical_fill["last_price"],
+            "provider_revision": None,
+            "canonical_execution_fill": canonical_fill,
+        }
+        request_hash = payload_digest(
+            _provider_evidence_request("RECORD_FILL", preview_request)
+        )
+        rights_id = "authenticated-provider-execution-response"
+        source_uri = observation.evidence_ref
+        artifact_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                "https://evidence.autotrade.local/provider-execution/"
+                + canonical_json(
+                    [
+                        self.provider_id,
+                        self.account_id,
+                        self.environment,
+                        observation.response_sha256,
+                        fill.provider_execution_id,
+                    ]
+                ),
+            )
+        )
+        manifest = self.evidence_artifact_store.publish_bytes(
+            artifact_id=artifact_id,
+            data=observation.response_bytes,
+            media_type="application/json",
+            rights={"storage": True, "export": False},
+            source_refs=[source_uri],
+            metadata={
+                "provider_id": self.provider_id,
+                "account_id": self.account_id,
+                "environment": self.environment,
+                "order_operation": "RECORD_FILL",
+                "request_hash": request_hash,
+                "observed_at": observed_at,
+                "rights_id": rights_id,
+                "response_sha256": observation.response_sha256,
+                "provider_query_digest": observation.query_binding.query_digest,
+                "normalizer_id": normalized_fill.normalizer_id,
+            },
+        )
+        canonical_fill["evidence"] = [
+            {
+                "artifact_id": artifact_id,
+                "sha256": manifest["sha256"],
+                "source_uri": source_uri,
+                "observed_at": observed_at,
+                "rights_id": rights_id,
+            }
+        ]
+        execution_fill: dict[str, object] = {
+            "fill_id": canonical_fill["fill_id"],
+            "provider_execution_id": canonical_fill["provider_execution_id"],
+            "order_ref": client_order_id,
+            "intent_ref": order.origin_intent_id,
+            "instrument_version": order.instrument,
+            "side": order.side,
+            "last_quantity": canonical_fill["last_quantity"],
+            "last_price": canonical_fill["last_price"],
+            "trade_time": trade_time,
+            "receipt_time": observed_at,
+            "fees": canonical_fill["fees"],
+            "settlement_date": settlement_date,
+            "evidence": canonical_fill["evidence"],
+        }
+        return self.ingest_execution_fill(
+            event_key=event_key,
+            client_order_id=client_order_id,
+            execution_fill=execution_fill,
+            committed_at=committed_at,
+            _canonical_ingest_token=_CANONICAL_EXECUTION_FILL_INGEST,
+            _prepare_only=_prepare_only,
         )
 
     def correct_fill(
@@ -919,8 +2236,18 @@ class DurableOrderBookProjection:
         provider_revision: str,
         committed_at: str,
         correction_fill_id: str | None = None,
+        provider_execution_id: str | None = None,
+        correction_reference: str | None = None,
         evidence_refs: Sequence[Mapping[str, object]] | None = None,
-    ) -> DurableOrderMutationResult:
+        canonical_execution_fill_hash: str | None = None,
+        canonical_execution_fill: Mapping[str, object] | None = None,
+        _canonical_ingest_token: object | None = None,
+        _prepare_only: bool = False,
+    ) -> DurableOrderMutationResult | PreparedDurableOrderMutation:
+        self._require_canonical_execution_ingest(
+            _canonical_ingest_token,
+            operation="fill correction",
+        )
         request = {
             "client_order_id": _text(client_order_id, name="client_order_id"),
             "fill_id": _text(fill_id, name="fill_id"),
@@ -934,13 +2261,32 @@ class DurableOrderBookProjection:
                 correction_fill_id,
                 name="correction_fill_id",
             ),
+            "provider_execution_id": _optional_text(
+                provider_execution_id,
+                name="provider_execution_id",
+            ),
         }
+        if correction_reference is not None:
+            request["correction_reference"] = _text(
+                correction_reference,
+                name="correction_reference",
+            )
+        if canonical_execution_fill_hash is not None:
+            request["canonical_execution_fill_hash"] = _text(
+                canonical_execution_fill_hash,
+                name="canonical_execution_fill_hash",
+            )
+        if canonical_execution_fill is not None:
+            if not isinstance(canonical_execution_fill, Mapping):
+                raise TypeError("canonical_execution_fill must be a mapping")
+            request["canonical_execution_fill"] = dict(canonical_execution_fill)
         return self._commit(
             event_key=event_key,
             operation="CORRECT_FILL",
             request=request,
             committed_at=committed_at,
             evidence_refs=evidence_refs,
+            prepare_only=_prepare_only,
         )
 
     def bust_fill(
@@ -954,6 +2300,10 @@ class DurableOrderBookProjection:
         correction_fill_id: str | None = None,
         evidence_refs: Sequence[Mapping[str, object]] | None = None,
     ) -> DurableOrderMutationResult:
+        if self.environment in {"PAPER", "LIVE"}:
+            raise OrderProjectionConflict(
+                "PAPER/LIVE fill bust requires a canonical provider bust event"
+            )
         request = {
             "client_order_id": _text(client_order_id, name="client_order_id"),
             "fill_id": _text(fill_id, name="fill_id"),

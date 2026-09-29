@@ -18,6 +18,10 @@ from .persistence import JournalStore, canonical_json, payload_digest
 AuthorityCheck = Callable[[str, str], tuple[bool, str]]
 SenderCheck = Callable[[str, int], None]
 TransportSend = Callable[[str, Mapping[str, Any], Callable[[], None]], Any]
+PrepareOrder = Callable[
+    [str, str, str, str, Mapping[str, Any], Mapping[str, Any], str],
+    None,
+]
 
 _SUBMISSION_RESPONSE_BINDING_TOKEN = object()
 
@@ -516,21 +520,35 @@ class GuardedDispatcher:
         version: int,
         payload: dict[str, Any],
         now: str,
+        expected_journal_sequence: int | None = None,
     ):
-        return self.store.append_event(
-            _envelope(
-                scope_key=self.scope_key,
-                aggregate_id=self._aggregate_id(attempt_id),
-                environment=self.environment,
-                attempt_id=attempt_id,
-                event_type=event_type,
-                version=version,
-                payload=payload,
-                now=now,
-                owner_epoch=self.owner_epoch,
-            ),
-            outbox_topic="autotrade.submission.events",
+        envelope = _envelope(
+            scope_key=self.scope_key,
+            aggregate_id=self._aggregate_id(attempt_id),
+            environment=self.environment,
+            attempt_id=attempt_id,
+            event_type=event_type,
+            version=version,
+            payload=payload,
+            now=now,
+            owner_epoch=self.owner_epoch,
         )
+        if expected_journal_sequence is None:
+            return self.store.append_event(
+                envelope, outbox_topic="autotrade.submission.events"
+            )
+        _, inserted, appended = self.store.commit_command(
+            command_id=envelope["event_id"], actor=f"dispatcher:{self.scope_key}",
+            environment=self.environment, idempotency_key=f"send-barrier:{envelope['event_id']}",
+            request={"event": envelope, "journal_sequence": expected_journal_sequence},
+            result={"event_id": envelope["event_id"]}, state_version=expected_journal_sequence,
+            events=[(envelope, "autotrade.submission.events")],
+            expected_journal_sequence=expected_journal_sequence,
+        )
+        if not inserted:
+            # Replaying a committed send marker is never permission to send twice.
+            raise DispatchBlocked("send_barrier_already_committed")
+        return appended[0]
 
     @staticmethod
     def _outcome_from_terminal(event: dict[str, Any], client_order_id: str) -> DispatchOutcome:
@@ -605,6 +623,9 @@ class GuardedDispatcher:
         final_barrier_clock: Callable[[], str] | None = None,
         sender_check: SenderCheck | None = None,
         submission_scope: Mapping[str, Any] | None = None,
+        order_preparation_binding: Mapping[str, Any] | None = None,
+        prepare_order: PrepareOrder | None = None,
+        order_preparation_check: Callable[[], None] | None = None,
     ) -> DispatchOutcome:
         for value, name in (
             (attempt_id, "attempt_id"),
@@ -632,6 +653,22 @@ class GuardedDispatcher:
         submission_scope_hash = (
             "sha256:" + sha256(scope_canonical.encode("utf-8")).hexdigest()
         )
+        has_order_preparation_binding = order_preparation_binding is not None
+        if order_preparation_binding is None:
+            # Keep the historic callback contract for existing dispatch callers.
+            # New callers provide an explicit independent order binding.
+            order_binding: dict[str, Any] = scope_dict
+        else:
+            if not isinstance(order_preparation_binding, Mapping):
+                raise TypeError("order_preparation_binding must be a mapping")
+            order_binding = json.loads(
+                canonical_json(dict(order_preparation_binding))
+            )
+        order_binding_canonical = canonical_json(order_binding)
+        order_preparation_binding_hash = (
+            "sha256:"
+            + sha256(order_binding_canonical.encode("utf-8")).hexdigest()
+        )
         client_order_id = stable_client_order_id(
             provider,
             intent_id,
@@ -655,6 +692,13 @@ class GuardedDispatcher:
                 "account_id": self.account_id,
                 "submission_scope_hash": submission_scope_hash,
             }
+            # Persisted binding remains part of attempt identity even when a
+            # retry omits the optional argument. Compare its effective fallback
+            # scope; omission must not erase a previously explicit order binding.
+            if has_order_preparation_binding or "order_preparation_binding_hash" in prepared:
+                expected["order_preparation_binding_hash"] = (
+                    order_preparation_binding_hash
+                )
             if any(prepared.get(key) != value for key, value in expected.items()):
                 raise ValueError("attempt_id conflicts with existing submission content")
             return self._recover_existing(
@@ -678,6 +722,11 @@ class GuardedDispatcher:
             "submission_scope": scope_dict,
             "submission_scope_hash": submission_scope_hash,
         }
+        if has_order_preparation_binding:
+            prepared_payload["order_preparation_binding"] = order_binding
+            prepared_payload["order_preparation_binding_hash"] = (
+                order_preparation_binding_hash
+            )
         prepared = self._append(
             attempt_id=attempt_id,
             event_type="SubmissionPrepared",
@@ -719,6 +768,36 @@ class GuardedDispatcher:
                 now=now,
             )
             return DispatchOutcome("BLOCKED", client_order_id, None, reason)
+
+        if prepare_order is not None:
+            try:
+                # The order projection must exist durably before the transport
+                # can cross its final send barrier. Callers should make this
+                # callback idempotent using the stable client/attempt IDs.
+                prepare_order(
+                    client_order_id,
+                    attempt_id,
+                    intent_id,
+                    provider,
+                    request_frozen,
+                    _freeze_json(order_binding),
+                    now,
+                )
+            except Exception as error:
+                reason = f"durable_order_preparation_failed_before_send:{type(error).__name__}"
+                self._append(
+                    attempt_id=attempt_id,
+                    event_type="SubmissionBlocked",
+                    version=2,
+                    payload={"client_order_id": client_order_id, "reason": reason},
+                    now=now,
+                )
+                return DispatchOutcome(
+                    "BLOCKED",
+                    client_order_id,
+                    None,
+                    "durable_order_preparation_failed_before_send",
+                )
 
         guard_called = False
         barrier_passed = False
@@ -766,6 +845,9 @@ class GuardedDispatcher:
                         now=barrier_now,
                     )
                     raise DispatchBlocked("final_barrier_clock_moved_backwards")
+            # One journal cut covers all final sender/authority/order proofs.
+            # The send marker is committed with a compare-and-append fence below.
+            barrier_journal_sequence = self.store.current_journal_sequence()
             if self.environment in {"PAPER", "LIVE"} and sender_check is None:
                 barrier_reason = "sender_fence_required"
                 self._append(
@@ -824,18 +906,46 @@ class GuardedDispatcher:
                     now=barrier_now,
                 )
                 raise DispatchBlocked(barrier_reason)
-            self._append(
-                attempt_id=attempt_id,
-                event_type="SubmissionSending",
-                version=2,
-                payload={
-                    "client_order_id": client_order_id,
-                    "owner_token": self.owner_token,
-                    "owner_epoch": self.owner_epoch,
-                    "reason": "final_send_barrier_passed",
-                },
-                now=barrier_now,
-            )
+            if order_preparation_check is not None:
+                try:
+                    order_preparation_check()
+                except Exception as error:
+                    barrier_reason = (
+                        "durable_order_preparation_changed_at_final_barrier:"
+                        + type(error).__name__
+                    )
+                    self._append(
+                        attempt_id=attempt_id,
+                        event_type="SubmissionBlocked",
+                        version=2,
+                        payload={"client_order_id": client_order_id, "reason": barrier_reason},
+                        now=barrier_now,
+                    )
+                    raise DispatchBlocked(barrier_reason) from error
+            try:
+                self._append(
+                    attempt_id=attempt_id,
+                    event_type="SubmissionSending",
+                    version=2,
+                    payload={
+                        "client_order_id": client_order_id,
+                        "owner_token": self.owner_token,
+                        "owner_epoch": self.owner_epoch,
+                        "reason": "final_send_barrier_passed",
+                    },
+                    now=barrier_now,
+                    expected_journal_sequence=barrier_journal_sequence,
+                )
+            except ValueError as error:
+                reason = "journal_changed_during_final_send_validation"
+                latest = self._events(attempt_id)
+                if latest and latest[-1]["event_type"] == "SubmissionPrepared":
+                    self._append(
+                        attempt_id=attempt_id, event_type="SubmissionBlocked", version=2,
+                        payload={"client_order_id": client_order_id, "reason": reason},
+                        now=barrier_now,
+                    )
+                raise DispatchBlocked(reason) from error
             barrier_passed = True
 
         try:

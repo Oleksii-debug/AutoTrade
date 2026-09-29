@@ -26,6 +26,7 @@ from mvp.autotrade_mvp.kraken_spot import (
 )
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import observe_submission_json_response
+from contract_order_fixture import make_contract_order_preparer
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -155,6 +156,18 @@ class KrakenSpotContractTests(unittest.TestCase):
                         prepared_request.instrument_version
                     ],
                 },
+                order_preparation_binding={
+                    "instrument": prepared_request.instrument_version,
+                    "side": "BUY",
+                    "requested_quantity": "0.01",
+                    "quantity_unit": "unit:crypto:XBT",
+                },
+                prepare_order=make_contract_order_preparer(
+                    store,
+                    provider_id="KRAKEN",
+                    account_id=prepared_request.account_id,
+                    environment=prepared_request.environment,
+                ),
             )
             self.assertEqual(outcome.status, "SENT")
             binding = load_submission_response_binding(

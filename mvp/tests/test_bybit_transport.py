@@ -17,6 +17,7 @@ from mvp.autotrade_mvp.provider_transport import (
     BybitV5Signer,
     ProviderTransportScopeError,
 )
+from mvp.tests._durable_dispatch_test_support import durable_order_preparation
 from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
 from mvp.autotrade_mvp.provider_core import Surface, prepare_authenticated_read_query
 from mvp.tests.test_bybit_v5 import READ_AT, read_capability, write_capability
@@ -597,6 +598,13 @@ class BybitV5SharedTransportTests(unittest.TestCase):
                     "environment": "PAPER",
                     "provider_environment": "TESTNET",
                 },
+                **durable_order_preparation(
+                    dispatcher,
+                    instrument="BTCUSDT@1",
+                    side="BUY",
+                    quantity="1",
+                    quantity_unit="unit:BTCUSDT@1",
+                ),
             )
             self.assertEqual(result.status, "UNKNOWN")
             self.assertEqual(result.reason, "transport_result_ambiguous")
@@ -619,6 +627,13 @@ class BybitV5SharedTransportTests(unittest.TestCase):
                     "environment": "PAPER",
                     "provider_environment": "TESTNET",
                 },
+                **durable_order_preparation(
+                    dispatcher,
+                    instrument="BTCUSDT@1",
+                    side="BUY",
+                    quantity="1",
+                    quantity_unit="unit:BTCUSDT@1",
+                ),
             )
             self.assertEqual(repeated.status, "UNKNOWN")
             self.assertEqual(events.count("wire"), 1)

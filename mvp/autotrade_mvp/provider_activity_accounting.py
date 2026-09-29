@@ -32,7 +32,11 @@ from .durable_reservations import (
     DurableReservationBook,
     reservation_snapshot_digest,
 )
-from .durable_settlement import DurableSettlementBook
+from .durable_order_projection import (
+    DurableOrderBookProjection,
+    PreparedDurableOrderMutation,
+)
+from .durable_settlement import DurableSettlementBook, verify_settlement_rule_evidence
 from .fill_accounting import (
     ProjectedFillEvidence,
     ProviderFillFinancialPlan,
@@ -41,7 +45,7 @@ from .fill_accounting import (
 )
 from .persistence import JournalStore, canonical_json, payload_digest
 from .reconciliation import ProviderActivityEvidence, ProviderFillEvidence
-from .settlement import SettlementObligation
+from .settlement import SettlementObligation, equity_cash_obligation_from_transaction
 
 
 _ALLOWED_EXTERNAL_CASH_TYPES = frozenset({"DEPOSIT", "WITHDRAWAL"})
@@ -76,8 +80,12 @@ def _decimal(value: Decimal | str | int, *, name: str) -> Decimal:
 
 
 def _decimal_text(value: Decimal) -> str:
-    normalized = value.normalize()
-    return format(normalized, "f")
+    # normalize() applies the ambient Decimal precision before stripping zeros.
+    # Financial identity must preserve every supplied digit in every context.
+    if value == 0:
+        return "0"
+    rendered = format(value, "f")
+    return rendered.rstrip("0").rstrip(".") if "." in rendered else rendered
 
 
 def _instant(value: str, *, name: str) -> datetime:
@@ -348,6 +356,84 @@ def _provider_fill_binding_payload(
     }
 
 
+def _verified_fill_settlement_rule(
+    economic_book: "DurableProviderEconomicBook",
+    settlement_book: DurableSettlementBook | None,
+    obligations: tuple[SettlementObligation, ...],
+    *,
+    instrument: str,
+    trade_time: str,
+    currency: str | None,
+) -> tuple[str, str]:
+    """Resolve trade currency from the existing evidenced settlement authority."""
+    if not isinstance(settlement_book, DurableSettlementBook) or not obligations:
+        raise AccountingConflict("provider fill requires evidenced settlement obligations")
+    if settlement_book.store is not economic_book.store or (
+        settlement_book.scope.provider_id,
+        settlement_book.scope.account_id,
+        settlement_book.scope.environment,
+    ) != (
+        economic_book.provider_id,
+        economic_book.account_id,
+        economic_book.environment,
+    ):
+        raise AccountingConflict("provider fill settlement book scope differs")
+    trade_date = _instant(trade_time, name="provider trade_time").date()
+    principal = []
+    for obligation in obligations:
+        if not isinstance(obligation, SettlementObligation):
+            raise TypeError("settlement_obligations must contain SettlementObligation")
+        rule = obligation.rule_binding
+        if (
+            rule is None
+            or rule.scope != settlement_book.scope
+            or rule.instrument_version != instrument
+            or obligation.trade_date != trade_date
+            or not rule.applies_on(trade_date)
+            or rule.settlement_currency != obligation.currency
+        ):
+            raise AccountingConflict("provider fill settlement rule scope/instrument/date differs")
+        verify_settlement_rule_evidence(
+            rule,
+            settlement_book.evidence_artifact_store,
+            trade_date=trade_date,
+            expected_settlement_date=obligation.settlement_date,
+        )
+        if obligation.component_id == "PRINCIPAL_AND_SAME_CURRENCY_FEE":
+            principal.append(rule)
+    if len(principal) != 1:
+        raise AccountingConflict("provider fill requires exactly one principal settlement rule")
+    rule = principal[0]
+    if currency is not None and rule.settlement_currency != _text(currency, name="settlement_currency").upper():
+        raise AccountingConflict("settlement currency differs from evidenced principal rule")
+    return rule.settlement_currency, rule.digest
+
+
+def _verify_principal_cash_transaction(
+    transactions: Iterable[JournalTransaction],
+    obligations: tuple[SettlementObligation, ...],
+    *,
+    instrument: str,
+) -> None:
+    principal, = (
+        item for item in obligations
+        if item.component_id == "PRINCIPAL_AND_SAME_CURRENCY_FEE"
+    )
+    matching = [
+        item for item in transactions
+        if item.transaction_id == principal.source_transaction_id
+    ]
+    if len(matching) != 1:
+        raise AccountingConflict("principal settlement source transaction differs")
+    expected = equity_cash_obligation_from_transaction(
+        matching[0], obligation_id=principal.obligation_id, instrument=instrument,
+        settlement_currency=principal.currency, settlement_date=principal.settlement_date,
+        rule_binding=principal.rule_binding,
+    )
+    if expected != principal:
+        raise AccountingConflict("principal settlement differs from canonical trade cash")
+
+
 def _prepare_provider_fill_binding(
     economic_book: "DurableProviderEconomicBook",
     *,
@@ -355,6 +441,7 @@ def _prepare_provider_fill_binding(
     projected_fill: ProjectedFillEvidence,
     provider_fill: ProviderFillEvidence,
     committed_at: str,
+    settlement_rule_digest: str | None = None,
 ) -> PreparedProviderFillBinding:
     if not isinstance(plan, ProviderFillFinancialPlan):
         raise TypeError("plan must be ProviderFillFinancialPlan")
@@ -407,6 +494,9 @@ def _prepare_provider_fill_binding(
         ),
         "derived_usage": usage,
     }
+    if settlement_rule_digest is not None:
+        request["schema_version"] = "1.2.0"
+        request["settlement_rule_digest"] = settlement_rule_digest
     events = economic_book.store.load_events(
         _PROVIDER_FILL_BINDING_AGGREGATE_TYPE,
         aggregate_id,
@@ -621,6 +711,7 @@ def _prepare_provider_fill_correction_binding(
     replacement: JournalTransaction,
     asset_family: str,
     committed_at: str,
+    settlement_rule_digest: str | None = None,
 ) -> PreparedProviderFillCorrectionBinding:
     """Prepare correction high-water evidence without mutating financial state."""
 
@@ -690,6 +781,11 @@ def _prepare_provider_fill_correction_binding(
     if not isinstance(initial_request, Mapping):
         raise AccountingConflict("initial provider fill binding request is invalid")
     initial_request = dict(initial_request)
+    if economic_book.environment in {"PAPER", "LIVE"} and (
+        settlement_rule_digest is None
+        or initial_request.get("settlement_rule_digest") != settlement_rule_digest
+    ):
+        raise AccountingConflict("correction settlement rule differs from initial fill binding")
     if initial_payload.get("request_digest") != payload_digest(initial_request):
         raise AccountingConflict("initial provider fill binding request digest is invalid")
     if (
@@ -776,6 +872,10 @@ def _prepare_provider_fill_correction_binding(
             raise AccountingConflict(
                 "provider fill correction request digest is invalid"
             )
+        if economic_book.environment in {"PAPER", "LIVE"} and (
+            request.get("settlement_rule_digest") != settlement_rule_digest
+        ):
+            raise AccountingConflict("persisted correction settlement rule differs from initial fill")
         if (
             request.get("reservation_id") != rid
             or request.get("intent_id") != corrected_projected_fill.intent_id
@@ -847,6 +947,8 @@ def _prepare_provider_fill_correction_binding(
         "corrected_provider_fill_digest": payload_digest(corrected_provider_payload),
         "replacement_transaction_digest": replacement_digest,
     }
+    if settlement_rule_digest is not None:
+        stable_request["settlement_rule_digest"] = settlement_rule_digest
 
     if (
         last_request is not None
@@ -919,7 +1021,7 @@ def _prepare_provider_fill_correction_binding(
     }
     reservation_cut = reservation_snapshot_digest(snapshot)
     request = {
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0" if settlement_rule_digest is not None else "1.0.0",
         "provider_id": economic_book.provider_id,
         "account_id": economic_book.account_id,
         "environment": economic_book.environment,
@@ -1288,6 +1390,8 @@ def commit_economic_batch_with_reservation_consumption(
     settlement_book: DurableSettlementBook | None = None,
     settlement_obligations: Iterable[SettlementObligation] = (),
     provider_fill_binding: PreparedProviderFillBinding | None = None,
+    order_book: DurableOrderBookProjection | None = None,
+    order_mutation: PreparedDurableOrderMutation | None = None,
 ) -> bool:
     """Atomically commit canonical economics and reservation consumption.
 
@@ -1315,6 +1419,63 @@ def commit_economic_batch_with_reservation_consumption(
         raise ValueError(
             "economic and reservation books must share account/environment scope"
         )
+    if economic_book.environment in {"PAPER", "LIVE"} and (
+        provider_fill_binding is None
+        or order_book is None
+        or order_mutation is None
+    ):
+        raise AccountingConflict(
+            "PAPER/LIVE economic batches require provider fill binding and atomic canonical order projection"
+        )
+    if (order_book is None) != (order_mutation is None):
+        raise ValueError("order_book and order_mutation must be supplied together")
+    if order_book is not None:
+        if not isinstance(order_book, DurableOrderBookProjection):
+            raise TypeError("order_book must be DurableOrderBookProjection")
+        if not isinstance(order_mutation, PreparedDurableOrderMutation):
+            raise TypeError(
+                "order_mutation must be PreparedDurableOrderMutation"
+            )
+        if order_book.store is not economic_book.store:
+            raise ValueError(
+                "order, economic and reservation books must share one JournalStore"
+            )
+        if (
+            order_book.provider_id != economic_book.provider_id
+            or order_book.account_id != economic_book.account_id
+            or order_book.environment != economic_book.environment
+        ):
+            raise ValueError(
+                "order, economic and reservation books must share provider/account/environment scope"
+            )
+        order_envelope = order_mutation.envelope
+        order_event = economic_book.store.get_event(order_mutation.event_id)
+        durable_order_envelope = (
+            order_envelope
+            if order_envelope is not None
+            else order_event
+        )
+        if (
+            durable_order_envelope is None
+            or durable_order_envelope.get("event_id") != order_mutation.event_id
+            or durable_order_envelope.get("aggregate_id") != order_book.aggregate_id
+            or durable_order_envelope.get("aggregate_type") != "order_projection_book"
+            or int(durable_order_envelope.get("aggregate_version", "0"))
+            != order_mutation.aggregate_version
+        ):
+            raise AccountingConflict(
+                "prepared order mutation does not belong to the scoped order projection"
+            )
+        durable_payload = durable_order_envelope.get("payload")
+        durable_request = (
+            durable_payload.get("request")
+            if isinstance(durable_payload, Mapping)
+            else None
+        )
+        if durable_request != order_mutation.request:
+            raise AccountingConflict(
+                "prepared order mutation request differs from its immutable event"
+            )
 
     if provider_fill_binding is not None:
         if not isinstance(provider_fill_binding, PreparedProviderFillBinding):
@@ -1335,6 +1496,18 @@ def commit_economic_batch_with_reservation_consumption(
             )
 
     settlement_items = tuple(settlement_obligations)
+    if economic_book.environment in {"PAPER", "LIVE"}:
+        fill_payload = provider_fill_binding.request.get("provider_fill")
+        if not isinstance(fill_payload, Mapping):
+            raise AccountingConflict("provider fill settlement requires bound fill evidence")
+        _, rule_digest = _verified_fill_settlement_rule(
+            economic_book, settlement_book, settlement_items,
+            instrument=fill_payload.get("instrument"),
+            trade_time=fill_payload.get("trade_time"),
+            currency=None,
+        )
+        if provider_fill_binding.request.get("settlement_rule_digest") != rule_digest:
+            raise AccountingConflict("provider fill binding settlement rule differs")
     if settlement_book is None and settlement_items:
         raise ValueError(
             "settlement obligations require the canonical durable settlement book"
@@ -1392,6 +1565,11 @@ def commit_economic_batch_with_reservation_consumption(
         transactions,
         committed_at=when,
     )
+    if economic_book.environment in {"PAPER", "LIVE"}:
+        _verify_principal_cash_transaction(
+            economic_plan.transactions, settlement_items,
+            instrument=provider_fill_binding.request["provider_fill"]["instrument"],
+        )
 
     settlement_plan = None
     if settlement_book is not None:
@@ -1458,6 +1636,8 @@ def commit_economic_batch_with_reservation_consumption(
         reservation_plan.already_committed,
         economic_plan.already_committed,
     ]
+    if order_mutation is not None:
+        commit_states.append(order_mutation.already_committed)
     if settlement_plan is not None:
         commit_states.append(settlement_plan.already_committed)
     if provider_fill_binding is not None:
@@ -1467,6 +1647,8 @@ def commit_economic_batch_with_reservation_consumption(
         economic_book.refresh()
         if settlement_book is not None:
             settlement_book.refresh()
+        if order_book is not None:
+            order_book.refresh()
         raise AccountingConflict(
             "reservation/economic/settlement fill state is only partially committed"
         )
@@ -1475,6 +1657,8 @@ def commit_economic_batch_with_reservation_consumption(
         economic_book.refresh()
         if settlement_book is not None:
             settlement_book.refresh()
+        if order_book is not None:
+            order_book.refresh()
         return False
 
     if reservation_plan.envelope is None or economic_plan.envelope is None:
@@ -1489,6 +1673,10 @@ def commit_economic_batch_with_reservation_consumption(
     ):
         raise AccountingConflict(
             "fresh provider fill financial binding is missing durable event"
+        )
+    if order_mutation is not None and order_mutation.envelope is None:
+        raise AccountingConflict(
+            "fresh atomic order fill plan is missing durable event"
         )
 
     request = {
@@ -1506,6 +1694,14 @@ def commit_economic_batch_with_reservation_consumption(
             if provider_fill_binding is None
             else provider_fill_binding.request
         ),
+        "order_projection": (
+            None
+            if order_mutation is None
+            else {
+                "event_id": order_mutation.event_id,
+                "request": order_mutation.request,
+            }
+        ),
     }
     result = {
         "reservation": reservation_plan.snapshot_payload,
@@ -1517,6 +1713,15 @@ def commit_economic_batch_with_reservation_consumption(
             None
             if provider_fill_binding is None
             else provider_fill_binding.result
+        ),
+        "order_projection": (
+            None
+            if order_mutation is None
+            else {
+                "event_id": order_mutation.event_id,
+                "client_order_id": order_mutation.snapshot.client_order_id,
+                "state": order_mutation.snapshot.state,
+            }
         ),
     }
     command_identity = str(
@@ -1556,6 +1761,9 @@ def commit_economic_batch_with_reservation_consumption(
                 0
                 if provider_fill_binding is None
                 else provider_fill_binding.aggregate_version,
+                0
+                if order_mutation is None
+                else order_mutation.aggregate_version,
             ),
             events=(
                 [
@@ -1572,6 +1780,16 @@ def commit_economic_batch_with_reservation_consumption(
                     if provider_fill_binding is None
                     else [(provider_fill_binding.envelope, None)]
                 )
+                + (
+                    []
+                    if order_mutation is None
+                    else [
+                        (
+                            order_mutation.envelope,
+                            "autotrade.order-projection.events",
+                        )
+                    ]
+                )
             ),
         )
     except Exception:
@@ -1579,12 +1797,16 @@ def commit_economic_batch_with_reservation_consumption(
         economic_book.refresh()
         if settlement_book is not None:
             settlement_book.refresh()
+        if order_book is not None:
+            order_book.refresh()
         raise
 
     reservation_book.refresh()
     economic_book.refresh()
     if settlement_book is not None:
         settlement_book.refresh()
+    if order_book is not None:
+        order_book.refresh()
     return inserted
 
 
@@ -1603,6 +1825,8 @@ def commit_economic_correction_with_settlement_replacement(
     reservation_book: DurableReservationBook | None = None,
     reservation_id: str | None = None,
     provider_fill_correction_binding: PreparedProviderFillCorrectionBinding | None = None,
+    order_book: DurableOrderBookProjection | None = None,
+    order_mutation: PreparedDurableOrderMutation | None = None,
 ) -> bool:
     """Atomically bind correction economics, settlement and conservative capacity.
 
@@ -1629,6 +1853,56 @@ def commit_economic_correction_with_settlement_replacement(
         raise ValueError(
             "settlement book must share provider/account/environment scope"
         )
+    if economic_book.environment in {"PAPER", "LIVE"} and (
+        provider_fill_correction_binding is None
+        or order_book is None
+        or order_mutation is None
+    ):
+        raise AccountingConflict(
+            "PAPER/LIVE economic corrections require provider correction binding and atomic canonical order projection"
+        )
+    if (order_book is None) != (order_mutation is None):
+        raise ValueError("order_book and order_mutation must be supplied together")
+    if order_book is not None:
+        if not isinstance(order_book, DurableOrderBookProjection):
+            raise TypeError("order_book must be DurableOrderBookProjection")
+        if not isinstance(order_mutation, PreparedDurableOrderMutation):
+            raise TypeError("order_mutation must be PreparedDurableOrderMutation")
+        if order_book.store is not economic_book.store:
+            raise ValueError(
+                "order, economic and settlement books must share one JournalStore"
+            )
+        if (
+            order_book.provider_id != economic_book.provider_id
+            or order_book.account_id != economic_book.account_id
+            or order_book.environment != economic_book.environment
+        ):
+            raise ValueError(
+                "order, economic and settlement books must share provider/account/environment scope"
+            )
+        envelope = order_mutation.envelope
+        existing_event = economic_book.store.get_event(order_mutation.event_id)
+        immutable_event = envelope if envelope is not None else existing_event
+        if (
+            immutable_event is None
+            or immutable_event.get("event_id") != order_mutation.event_id
+            or immutable_event.get("aggregate_id") != order_book.aggregate_id
+            or immutable_event.get("aggregate_type") != "order_projection_book"
+            or int(immutable_event.get("aggregate_version", "0"))
+            != order_mutation.aggregate_version
+        ):
+            raise AccountingConflict(
+                "prepared order correction does not belong to the scoped order projection"
+            )
+        payload = immutable_event.get("payload")
+        if (
+            not isinstance(payload, Mapping)
+            or payload.get("operation") != "CORRECT_FILL"
+            or payload.get("request") != order_mutation.request
+        ):
+            raise AccountingConflict(
+                "prepared order mutation is not the matching immutable fill correction"
+            )
     if reservation_book is None:
         if reservation_id is not None or provider_fill_correction_binding is not None:
             raise ValueError(
@@ -1697,6 +1971,18 @@ def commit_economic_correction_with_settlement_replacement(
         raise ValueError(
             "correction replacement requires explicit settlement obligations"
         )
+    if economic_book.environment in {"PAPER", "LIVE"}:
+        fill_payload = provider_fill_correction_binding.request.get("corrected_provider_fill")
+        if not isinstance(fill_payload, Mapping):
+            raise AccountingConflict("correction settlement requires bound fill evidence")
+        _, rule_digest = _verified_fill_settlement_rule(
+            economic_book, settlement_book, items,
+            instrument=fill_payload.get("instrument"),
+            trade_time=fill_payload.get("trade_time"),
+            currency=None,
+        )
+        if provider_fill_correction_binding.request.get("settlement_rule_digest") != rule_digest:
+            raise AccountingConflict("correction binding settlement rule differs")
 
     cid = _text(command_id, name="command_id")
     idem = _text(idempotency_key, name="idempotency_key")
@@ -1710,6 +1996,11 @@ def commit_economic_correction_with_settlement_replacement(
         committed_at=when,
     )
     canonical_reversal, canonical_replacement = economic_plan.transactions
+    if economic_book.environment in {"PAPER", "LIVE"}:
+        _verify_principal_cash_transaction(
+            (canonical_replacement,), items,
+            instrument=provider_fill_correction_binding.request["corrected_provider_fill"]["instrument"],
+        )
     if (
         canonical_reversal.reverses_transaction_id is None
         or canonical_replacement.corrects_transaction_id
@@ -1805,6 +2096,8 @@ def commit_economic_correction_with_settlement_replacement(
         economic_plan.already_committed,
         settlement_plan.already_committed,
     ]
+    if order_mutation is not None:
+        states.append(order_mutation.already_committed)
     if reservation_plan is not None:
         states.append(reservation_plan.already_committed)
     if provider_fill_correction_binding is not None:
@@ -1814,14 +2107,18 @@ def commit_economic_correction_with_settlement_replacement(
         settlement_book.refresh()
         if reservation_book is not None:
             reservation_book.refresh()
+        if order_book is not None:
+            order_book.refresh()
         raise AccountingConflict(
-            "economic/settlement/reservation correction state is only partially committed"
+            "economic/settlement/reservation/order correction state is only partially committed"
         )
     if all(states):
         economic_book.refresh()
         settlement_book.refresh()
         if reservation_book is not None:
             reservation_book.refresh()
+        if order_book is not None:
+            order_book.refresh()
         return False
     if economic_plan.envelope is None or settlement_plan.envelope is None:
         raise AccountingConflict(
@@ -1838,6 +2135,8 @@ def commit_economic_correction_with_settlement_replacement(
         raise AccountingConflict(
             "fresh provider correction binding is missing durable event"
         )
+    if order_mutation is not None and order_mutation.envelope is None:
+        raise AccountingConflict("fresh order correction is missing durable event")
 
     if provider_fill_correction_binding is None:
         # Preserve the exact legacy durable command contract for upgrade-safe
@@ -1855,9 +2154,20 @@ def commit_economic_correction_with_settlement_replacement(
             "economic_correction": economic_plan.result,
             "replacement_settlement": settlement_plan.result,
         }
+        if order_mutation is not None:
+            request["schema_version"] = "1.1.0"
+            request["order_projection"] = {
+                "event_id": order_mutation.event_id,
+                "request": order_mutation.request,
+            }
+            result["order_projection"] = {
+                "event_id": order_mutation.event_id,
+                "client_order_id": order_mutation.snapshot.client_order_id,
+                "state": order_mutation.snapshot.state,
+            }
     else:
         request = {
-            "schema_version": "1.1.0",
+            "schema_version": "1.2.0" if order_mutation is not None else "1.1.0",
             "provider_id": economic_book.provider_id,
             "account_id": economic_book.account_id,
             "environment": economic_book.environment,
@@ -1869,6 +2179,14 @@ def commit_economic_correction_with_settlement_replacement(
             "provider_fill_correction_binding": (
                 provider_fill_correction_binding.request
             ),
+            "order_projection": (
+                None
+                if order_mutation is None
+                else {
+                    "event_id": order_mutation.event_id,
+                    "request": order_mutation.request,
+                }
+            ),
         }
         result = {
             "economic_correction": economic_plan.result,
@@ -1878,6 +2196,15 @@ def commit_economic_correction_with_settlement_replacement(
             ),
             "provider_fill_correction_binding": (
                 provider_fill_correction_binding.result
+            ),
+            "order_projection": (
+                None
+                if order_mutation is None
+                else {
+                    "event_id": order_mutation.event_id,
+                    "client_order_id": order_mutation.snapshot.client_order_id,
+                    "state": order_mutation.snapshot.state,
+                }
             ),
         }
     command_identity = str(
@@ -1911,6 +2238,10 @@ def commit_economic_correction_with_settlement_replacement(
         events.append((reservation_plan.envelope, None))
     if provider_fill_correction_binding is not None:
         events.append((provider_fill_correction_binding.envelope, None))
+    if order_mutation is not None:
+        events.append(
+            (order_mutation.envelope, "autotrade.order-projection.events")
+        )
 
     state_versions = [
         economic_plan.aggregate_version,
@@ -1920,6 +2251,8 @@ def commit_economic_correction_with_settlement_replacement(
         state_versions.append(reservation_plan.aggregate_version)
     if provider_fill_correction_binding is not None:
         state_versions.append(provider_fill_correction_binding.aggregate_version)
+    if order_mutation is not None:
+        state_versions.append(order_mutation.aggregate_version)
 
     try:
         _, inserted, _ = economic_book.store.commit_command(
@@ -1937,12 +2270,16 @@ def commit_economic_correction_with_settlement_replacement(
         settlement_book.refresh()
         if reservation_book is not None:
             reservation_book.refresh()
+        if order_book is not None:
+            order_book.refresh()
         raise
 
     economic_book.refresh()
     settlement_book.refresh()
     if reservation_book is not None:
         reservation_book.refresh()
+    if order_book is not None:
+        order_book.refresh()
     return inserted
 
 def commit_provider_fill_correction_with_settlement_replacement(
@@ -1963,6 +2300,8 @@ def commit_provider_fill_correction_with_settlement_replacement(
     settlement_obligations: Iterable[SettlementObligation],
     asset_family: str = "CASH_EQUITY",
     committed_at: str | None = None,
+    order_book: DurableOrderBookProjection | None = None,
+    order_mutation: PreparedDurableOrderMutation | None = None,
 ) -> bool:
     """Atomically correct provider economics, settlement and reservation capacity.
 
@@ -1971,6 +2310,18 @@ def commit_provider_fill_correction_with_settlement_replacement(
     The per-execution high-water binding prevents repeated corrections from
     double-consuming the same delta.
     """
+
+    settlement_obligations = tuple(settlement_obligations)
+    settlement_rule_digest = None
+    if economic_book.environment in {"PAPER", "LIVE"}:
+        if corrected_provider_fill.instrument != expected_instrument:
+            raise AccountingConflict("corrected provider instrument differs from expected instrument")
+        settlement_currency, settlement_rule_digest = _verified_fill_settlement_rule(
+            economic_book, settlement_book, settlement_obligations,
+            instrument=expected_instrument,
+            trade_time=corrected_provider_fill.trade_time,
+            currency=settlement_currency,
+        )
 
     when = (
         datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -1999,7 +2350,59 @@ def commit_provider_fill_correction_with_settlement_replacement(
         replacement=replacement,
         asset_family=asset_family,
         committed_at=when,
+        settlement_rule_digest=settlement_rule_digest,
     )
+    if (order_book is None) != (order_mutation is None):
+        raise ValueError("order_book and order_mutation must be supplied together")
+    if order_mutation is not None:
+        if not isinstance(order_mutation, PreparedDurableOrderMutation):
+            raise TypeError("order_mutation must be PreparedDurableOrderMutation")
+        canonical = order_mutation.canonical_execution_fill
+        quantity = (
+            None
+            if not isinstance(canonical, Mapping)
+            else canonical.get("last_quantity")
+        )
+        fees = None if not isinstance(canonical, Mapping) else canonical.get("fees")
+        if not isinstance(quantity, Mapping) or not isinstance(fees, (list, tuple)):
+            raise AccountingConflict(
+                "canonical order correction is missing fill quantity or fee evidence"
+            )
+        fee_totals: dict[str, Decimal] = {}
+        for fee in fees:
+            if not isinstance(fee, Mapping):
+                raise AccountingConflict("canonical correction fee evidence is malformed")
+            currency = _text(fee.get("currency"), name="canonical fee currency").upper()
+            amount = Decimal(_text(fee.get("amount"), name="canonical fee amount"))
+            fee_totals[currency] = fee_totals.get(currency, Decimal("0")) + amount
+        if (
+            canonical.get("fill_id") != corrected_projected_fill.fill_id
+            or canonical.get("provider_execution_id")
+            != corrected_projected_fill.provider_execution_id
+            or canonical.get("intent_ref") != corrected_projected_fill.intent_id
+            or canonical.get("order_ref") != corrected_projected_fill.client_order_id
+            or canonical.get("correction_reference")
+            != corrected_projected_fill.correction_of
+            or str(canonical.get("side", "")).upper()
+            != corrected_projected_fill.side
+            or Decimal(_text(quantity.get("value"), name="canonical fill quantity"))
+            != corrected_projected_fill.quantity
+            or Decimal(_text(canonical.get("last_price"), name="canonical fill price"))
+            != corrected_projected_fill.price
+            or canonical.get("provider_revision")
+            != corrected_projected_fill.provider_revision
+            or corrected_provider_fill.client_order_id
+            != corrected_projected_fill.client_order_id
+            or corrected_provider_fill.provider_execution_id
+            != corrected_projected_fill.provider_execution_id
+            or corrected_provider_fill.quantity != corrected_projected_fill.quantity
+            or corrected_provider_fill.price != corrected_projected_fill.price
+            or fee_totals
+            != {corrected_provider_fill.fee_currency: corrected_provider_fill.fee_amount}
+        ):
+            raise AccountingConflict(
+                "prepared canonical order correction differs from provider/projected financial evidence"
+            )
     return commit_economic_correction_with_settlement_replacement(
         economic_book,
         settlement_book,
@@ -2012,6 +2415,8 @@ def commit_provider_fill_correction_with_settlement_replacement(
         reservation_book=reservation_book,
         reservation_id=reservation_id,
         provider_fill_correction_binding=binding,
+        order_book=order_book,
+        order_mutation=order_mutation,
     )
 
 def commit_provider_fill_with_reservation_consumption(
@@ -2030,6 +2435,8 @@ def commit_provider_fill_with_reservation_consumption(
     committed_at: str | None = None,
     settlement_book: DurableSettlementBook | None = None,
     settlement_obligations: Iterable[SettlementObligation] = (),
+    order_book: DurableOrderBookProjection | None = None,
+    order_mutation: PreparedDurableOrderMutation | None = None,
 ) -> bool:
     """Atomically book one provider fill and consume only evidence-derived resources.
 
@@ -2044,6 +2451,75 @@ def commit_provider_fill_with_reservation_consumption(
         raise TypeError("economic_book must be DurableProviderEconomicBook")
     if not isinstance(reservation_book, DurableReservationBook):
         raise TypeError("reservation_book must be DurableReservationBook")
+    if _environment(provider_fill.environment) in {"PAPER", "LIVE"} and (
+        order_book is None or order_mutation is None
+    ):
+        raise AccountingConflict(
+            "PAPER/LIVE provider fills require atomic canonical order projection"
+        )
+    if order_mutation is not None:
+        if not isinstance(order_mutation, PreparedDurableOrderMutation):
+            raise TypeError("order_mutation must be PreparedDurableOrderMutation")
+        canonical = order_mutation.canonical_execution_fill
+        if not isinstance(canonical, Mapping):
+            raise AccountingConflict(
+                "atomic provider fill requires a canonical order execution fill"
+            )
+        quantity = canonical.get("last_quantity")
+        fees = canonical.get("fees")
+        if not isinstance(quantity, Mapping) or not isinstance(fees, (list, tuple)):
+            raise AccountingConflict(
+                "canonical order fill is missing quantity or fee evidence"
+            )
+        fee_totals: dict[str, Decimal] = {}
+        for fee in fees:
+            if not isinstance(fee, Mapping):
+                raise AccountingConflict("canonical fill fee evidence is malformed")
+            currency = _text(fee.get("currency"), name="canonical fee currency").upper()
+            amount = Decimal(_text(fee.get("amount"), name="canonical fee amount"))
+            fee_totals[currency] = fee_totals.get(currency, Decimal("0")) + amount
+        expected_fees = {
+            provider_fill.fee_currency: provider_fill.fee_amount
+        }
+        if (
+            canonical.get("fill_id") != projected_fill.fill_id
+            or canonical.get("provider_execution_id")
+            != projected_fill.provider_execution_id
+            or canonical.get("instrument_version") != expected_instrument
+            or canonical.get("intent_ref") != projected_fill.intent_id
+            or canonical.get("order_ref") != projected_fill.client_order_id
+            or str(canonical.get("side", "")).upper() != projected_fill.side
+            or Decimal(_text(quantity.get("value"), name="canonical fill quantity"))
+            != projected_fill.quantity
+            or Decimal(_text(canonical.get("last_price"), name="canonical fill price"))
+            != projected_fill.price
+            or canonical.get("provider_revision") != projected_fill.provider_revision
+            or provider_fill.client_order_id != projected_fill.client_order_id
+            or provider_fill.provider_execution_id != projected_fill.provider_execution_id
+            or provider_fill.quantity != projected_fill.quantity
+            or provider_fill.price != projected_fill.price
+            or fee_totals != expected_fees
+        ):
+            raise AccountingConflict(
+                "prepared canonical order fill differs from provider/projected financial evidence"
+            )
+        if order_book is None or order_book._quantity_units.get(
+            projected_fill.client_order_id
+        ) != quantity.get("unit"):
+            raise AccountingConflict(
+                "prepared canonical order quantity unit differs from the durable order"
+            )
+    settlement_obligations = tuple(settlement_obligations)
+    settlement_rule_digest = None
+    if economic_book.environment in {"PAPER", "LIVE"}:
+        if provider_fill.instrument != expected_instrument:
+            raise AccountingConflict("provider instrument differs from expected instrument")
+        settlement_currency, settlement_rule_digest = _verified_fill_settlement_rule(
+            economic_book, settlement_book, settlement_obligations,
+            instrument=expected_instrument,
+            trade_time=provider_fill.trade_time,
+            currency=settlement_currency,
+        )
     rid = _text(reservation_id, name="reservation_id")
     snapshot = reservation_book.get(rid)
     plan = build_provider_fill_financial_plan(
@@ -2074,6 +2550,7 @@ def commit_provider_fill_with_reservation_consumption(
         projected_fill=projected_fill,
         provider_fill=provider_fill,
         committed_at=when,
+        settlement_rule_digest=settlement_rule_digest,
     )
     return commit_economic_batch_with_reservation_consumption(
         economic_book,
@@ -2088,6 +2565,8 @@ def commit_provider_fill_with_reservation_consumption(
         settlement_book=settlement_book,
         settlement_obligations=settlement_obligations,
         provider_fill_binding=binding,
+        order_book=order_book,
+        order_mutation=order_mutation,
     )
 
 

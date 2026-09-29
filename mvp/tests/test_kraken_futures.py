@@ -11,6 +11,7 @@ from mvp.autotrade_mvp.capabilities import (
     derive_capability_snapshot,
 )
 from mvp.autotrade_mvp.kraken_futures import (
+    normalize_authenticated_position_executions,
     KrakenFuturesPreparedRequest,
     build_order_payload,
     coverage_evidence,
@@ -33,6 +34,7 @@ from mvp.autotrade_mvp.provider_core import (
     observe_submission_json_response,
     prepare_authenticated_read_query,
 )
+from mvp.tests._durable_dispatch_test_support import durable_order_preparation
 
 
 NOW_DT = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
@@ -272,6 +274,13 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                         prepared.instrument_version
                     ],
                 },
+                **durable_order_preparation(
+                    dispatcher,
+                    instrument=prepared.instrument_version,
+                    side="BUY",
+                    quantity="1",
+                    quantity_unit="unit:" + prepared.instrument_version,
+                ),
             )
             self.assertEqual(outcome.status, "SENT")
             binding = load_submission_response_binding(
@@ -442,8 +451,7 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
             )
 
     def test_position_history_maps_only_trade_execution_facts(self):
-        fills = parse_position_executions(
-            futures_position_observation({
+        observation = futures_position_observation({
                 "elements": [
                     {
                         "tradeable": "PI_XBTUSD",
@@ -463,7 +471,9 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                         "realizedFunding": "-0.10",
                     },
                 ]
-            }),
+            })
+        fills = parse_position_executions(
+            observation,
             instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
             execution_client_ids={"exec-1": "hedge-007"},
         )
@@ -477,6 +487,17 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
         self.assertEqual(fill.trade_time, "2026-09-24T20:00:00.123Z")
         self.assertEqual(fill.account_id, "paper-1")
         self.assertEqual(fill.environment, "PAPER")
+        from mvp.autotrade_mvp.provider_core import ProviderCoreError, _issue_normalized_execution_fill
+
+        with self.assertRaisesRegex(ProviderCoreError, "independently verified provider economics"):
+            normalize_authenticated_position_executions(
+                observation,
+                instrument_versions={"PI_XBTUSD": "PI_XBTUSD@v1"},
+                execution_client_ids={"exec-1": "hedge-007"},
+            )
+        with self.assertRaisesRegex(ProviderCoreError, "independently verified provider economics"):
+            _issue_normalized_execution_fill(observation, fill, normalizer_id="unverified.provider.v1")
+
 
     def test_position_history_requires_exact_bound_endpoint(self):
         observation = futures_position_observation(

@@ -11,6 +11,7 @@ from mvp.autotrade_mvp.dispatch import (
     stable_client_order_id,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.durable_order_projection import DurableOrderBookProjection
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
 from mvp.tests.test_reconciliation_journal import reconciliation
 from mvp.autotrade_mvp.recovery import RecoveryController
@@ -45,6 +46,106 @@ class DispatchTests(unittest.TestCase):
 
     def store(self, directory):
         return JournalStore(f"{directory}/journal.sqlite3")
+
+    def prepare_order_callback(self, dispatcher, store):
+        def prepare_order(client_order_id, attempt_id, intent_id, provider, _request, binding, prepared_at):
+            orders = DurableOrderBookProjection(
+                store,
+                provider_id=provider,
+                account_id=dispatcher.account_id,
+                environment=dispatcher.environment,
+                host_id=dispatcher.owner_token,
+                owner_epoch=str(dispatcher.owner_epoch),
+            )
+            orders.create_order(
+                event_key=f"dispatch-order:{attempt_id}",
+                client_order_id=client_order_id,
+                instrument=binding["instrument"],
+                side=binding["side"],
+                requested_quantity=binding["requested_quantity"],
+                quantity_unit=binding["quantity_unit"],
+                origin_intent_id=intent_id,
+                committed_at=prepared_at,
+            )
+        return prepare_order
+
+    def test_restart_retry_cannot_drop_canonical_order_binding(self):
+        for environment in ("PAPER", "LIVE"):
+            with self.subTest(environment=environment), TemporaryDirectory() as directory:
+                store = self.store(directory)
+                dispatcher = GuardedDispatcher(
+                    store, environment=environment, account_id="acct",
+                    owner_token="owner", owner_epoch=1,
+                )
+                outbound = []
+
+                def transport(client_id, _request, final_guard):
+                    final_guard()
+                    outbound.append(client_id)
+                    raise TimeoutError("recorded ambiguous response")
+
+                args = dict(
+                    attempt_id="order-binding-retry", intent_id="intent-1", intent_hash="h1",
+                    provider="provider", request={"quantity": "1"},
+                    now="2026-09-24T20:00:00Z",
+                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    transport_send=transport, sender_check=lambda _owner, _epoch: None,
+                    order_preparation_binding={
+                        "instrument": "TEST@1", "side": "BUY", "requested_quantity": "1",
+                        "quantity_unit": "unit:test:share",
+                    },
+                    prepare_order=self.prepare_order_callback(dispatcher, store),
+                )
+                self.assertEqual(dispatcher.dispatch(**args).status, "UNKNOWN")
+                reopened = self.store(directory)
+                recovered = GuardedDispatcher(
+                    reopened, environment=environment, account_id="acct",
+                    owner_token="owner", owner_epoch=1,
+                )
+                before = reopened.current_journal_sequence()
+                without_binding = {key: value for key, value in args.items()
+                                   if key != "order_preparation_binding"}
+                with self.assertRaisesRegex(ValueError, "conflicts with existing submission"):
+                    recovered.dispatch(**without_binding)
+                self.assertEqual(reopened.current_journal_sequence(), before)
+                self.assertEqual(len(outbound), 1)
+                self.assertEqual(recovered.dispatch(**args).status, "UNKNOWN")
+                self.assertEqual(len(outbound), 1)
+                self.assertEqual(reopened.current_journal_sequence(), before)
+
+    def test_committed_send_barrier_retry_is_not_a_second_send_permission(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store, environment="SIMULATION", account_id="acct", owner_token="owner",
+            )
+
+            def crash_after_marker(_client, _request, final_guard):
+                final_guard()
+                raise SimulatedProcessDeath("lost reply after durable send marker")
+
+            args = dict(
+                attempt_id="barrier-dedupe", intent_id="intent-1", intent_hash="h1",
+                provider="sim", request={}, now="2026-09-28T17:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=crash_after_marker,
+            )
+            with self.assertRaises(SimulatedProcessDeath):
+                dispatcher.dispatch(**args)
+            prepared, sending = store.load_events("submission_attempt", dispatcher._aggregate_id("barrier-dedupe"))
+            before = store.current_journal_sequence()
+            with self.assertRaisesRegex(DispatchBlocked, "send_barrier_already_committed"):
+                dispatcher._append(
+                    attempt_id="barrier-dedupe", event_type="SubmissionSending", version=2,
+                    payload=sending["payload"], now=args["now"],
+                    expected_journal_sequence=prepared["journal_sequence"],
+                )
+            self.assertEqual(store.current_journal_sequence(), before)
+            restarted = GuardedDispatcher(
+                self.store(directory), environment="SIMULATION", account_id="acct", owner_token="owner",
+            )
+            args["transport_send"] = lambda *_args: self.fail("restart must not resend")
+            self.assertEqual(restarted.dispatch(**args).status, "UNKNOWN")
 
     def test_dispatch_scope_is_required_and_separates_client_ids(self):
         with TemporaryDirectory() as directory:
@@ -179,6 +280,13 @@ class DispatchTests(unittest.TestCase):
                     authority_check=authority,
                     transport_send=transport,
                     sender_check=lambda _owner, _epoch: None,
+                    order_preparation_binding={
+                        "instrument": "TEST@1",
+                        "side": "BUY",
+                        "requested_quantity": "1",
+                        "quantity_unit": "unit:test:share",
+                    },
+                    prepare_order=self.prepare_order_callback(dispatcher, store),
                 )
                 self.assertEqual(outcome.status, "SENT")
 
@@ -951,6 +1059,59 @@ class DispatchTests(unittest.TestCase):
                 "authority_check_failed_before_send:RuntimeError",
             )
 
+    def test_order_preparation_is_durable_before_transport_and_failure_blocks_send(self):
+        for fail in (False, True):
+            with self.subTest(fail=fail), TemporaryDirectory() as directory:
+                store = self.store(directory)
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    owner_token="owner",
+                )
+                calls = []
+
+                def prepare_order(*args):
+                    calls.append(("prepare", args[0], args[1]))
+                    if fail:
+                        raise OSError("order journal unavailable")
+
+                def transport(client_id, _request, final_guard):
+                    calls.append(("transport", client_id, None))
+                    self.assertFalse(fail)
+                    final_guard()
+                    return {"provider_order_id": "provider-1"}
+
+                result = dispatcher.dispatch(
+                    attempt_id="pre-send-order",
+                    intent_id="intent-1",
+                    intent_hash="hash-1",
+                    provider="sim",
+                    request={"quantity": "1"},
+                    now="2026-09-24T18:00:00Z",
+                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    transport_send=transport,
+                    prepare_order=prepare_order,
+                )
+                self.assertEqual(calls[0][0], "prepare")
+                if fail:
+                    self.assertEqual(result.status, "BLOCKED")
+                    self.assertEqual(
+                        result.reason,
+                        "durable_order_preparation_failed_before_send",
+                    )
+                    self.assertEqual(calls, [("prepare", result.client_order_id, "pre-send-order")])
+                    self.assertEqual(
+                        [event["event_type"] for event in store.load_events(
+                            "submission_attempt",
+                            dispatcher._aggregate_id("pre-send-order"),
+                        )],
+                        ["SubmissionPrepared", "SubmissionBlocked"],
+                    )
+                else:
+                    self.assertEqual(result.status, "SENT")
+                    self.assertEqual(calls[1][0], "transport")
+
     def test_final_authority_exception_is_blocked_without_outbound_request(self):
         with TemporaryDirectory() as directory:
             store = self.store(directory)
@@ -1097,6 +1258,13 @@ class DispatchTests(unittest.TestCase):
                     now="2026-09-24T18:00:00Z",
                     authority_check=lambda _hash, _now: (True, "allowed"),
                     transport_send=transport,
+                    order_preparation_binding={
+                        "instrument": "TEST@1",
+                        "side": "BUY",
+                        "requested_quantity": "1",
+                        "quantity_unit": "unit:test:share",
+                    },
+                    prepare_order=self.prepare_order_callback(dispatcher, store),
                 )
                 self.assertEqual(result.status, "BLOCKED")
                 self.assertEqual(result.reason, "sender_fence_required")
@@ -1149,6 +1317,13 @@ class DispatchTests(unittest.TestCase):
                 authority_check=lambda _hash, _now: (True, "allowed"),
                 transport_send=transport,
                 sender_check=recovery.validate_sender,
+                order_preparation_binding={
+                    "instrument": "TEST@1",
+                    "side": "BUY",
+                    "requested_quantity": "1",
+                    "quantity_unit": "unit:test:share",
+                },
+                prepare_order=self.prepare_order_callback(dispatcher, store),
             )
             self.assertEqual(result.status, "BLOCKED")
             self.assertEqual(result.reason, "sender_fence_rejected:PermissionError")
@@ -1188,6 +1363,13 @@ class DispatchTests(unittest.TestCase):
                 authority_check=lambda _hash, _now: (True, "allowed"),
                 transport_send=transport,
                 sender_check=recovery.validate_sender,
+                order_preparation_binding={
+                    "instrument": "TEST@1",
+                    "side": "BUY",
+                    "requested_quantity": "1",
+                    "quantity_unit": "unit:test:share",
+                },
+                prepare_order=self.prepare_order_callback(dispatcher, store),
             )
             self.assertEqual(result.status, "SENT")
             self.assertEqual(outbound, 1)

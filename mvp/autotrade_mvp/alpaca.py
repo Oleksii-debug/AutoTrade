@@ -20,11 +20,38 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from .capabilities import CapabilitySnapshot
 from .provider_core import (
+    NormalizedExecutionFill,
     ProviderResponseObservation,
     ProviderSubmissionObservation,
     Surface,
 )
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
+
+
+def normalize_authenticated_trade_activities(
+    observation: ProviderResponseObservation,
+    *,
+    instrument_versions: Mapping[str, str],
+    client_ids_by_order_id: Mapping[str, str | None],
+    fees_by_activity_id: Mapping[str, tuple[object, str]],
+) -> tuple[NormalizedExecutionFill, ...]:
+    """Fail closed until fee joins have independent provider provenance.
+
+    Alpaca's fill activity response does not carry the fee values consumed by
+    ``parse_trade_activities``. A caller-provided ``fees_by_activity_id`` map
+    cannot be bound to this exact response, so it must not issue production
+    ``NormalizedExecutionFill`` authority.
+    """
+    if not isinstance(observation, ProviderResponseObservation):
+        raise TypeError("observation must be ProviderResponseObservation")
+    observation.require_scope(
+        provider_id="ALPACA",
+        surface=Surface.ACTIVITIES,
+        endpoint="/v2/account/activities/FILL",
+    )
+    raise AlpacaAdapterError(
+        "authenticated Alpaca fill normalization requires independently bound fee evidence"
+    )
 
 
 class AlpacaAdapterError(ValueError):

@@ -359,6 +359,7 @@ class DispatchOrderProjectionIntegrationTests(unittest.TestCase):
                 instrument=INSTRUMENT,
                 side="BUY",
                 requested_quantity="1",
+                origin_intent_id=intent_id,
                 committed_at=NOW,
             )
             attempt_id = "33333333-3333-4333-8333-333333333333"
@@ -384,13 +385,15 @@ class DispatchOrderProjectionIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(blocked.status, "BLOCKED")
             self.assertEqual(provider.outbound_request_count, 0)
-            self.assertEqual(
-                orders.sync_submission_attempt(attempt_id=attempt_id),
-                (),
-            )
+            synced = orders.sync_submission_attempt(attempt_id=attempt_id)
+            self.assertEqual(len(synced), 1)
+            self.assertTrue(synced[0].inserted)
+            self.assertFalse(orders.sync_submission_attempt(attempt_id=attempt_id)[0].inserted)
             snap = orders.order(client_order_id).snapshot()
-            self.assertEqual(snap.state, "PENDING")
-            self.assertIsNone(snap.submission_attempt_id)
+            self.assertEqual(snap.state, "PRE_SEND_ABORTED")
+            self.assertEqual(snap.submission_attempt_id, attempt_id)
+            self.assertIsNone(snap.provider_order_id)
+            self.assertEqual(snap.filled_quantity, Decimal("0"))
 
 
 if __name__ == "__main__":

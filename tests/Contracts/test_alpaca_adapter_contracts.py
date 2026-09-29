@@ -26,6 +26,7 @@ from mvp.autotrade_mvp.dispatch import (
 )
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import observe_submission_json_response
+from contract_order_fixture import make_contract_order_preparer
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -130,6 +131,18 @@ def durable_observation(*, payload, intent_id: str):
                 "capability_snapshot_ids": list(request.capability_snapshot_ids),
                 "instrument_versions": list(request.instrument_versions),
             },
+            order_preparation_binding={
+                "instrument": "AAPL:v1",
+                "side": "BUY",
+                "requested_quantity": "1",
+                "quantity_unit": "unit:equity:share",
+            },
+            prepare_order=make_contract_order_preparer(
+                store,
+                provider_id="ALPACA",
+                account_id="contract-account",
+                environment="PAPER",
+            ),
         )
         if outcome.status != "SENT":
             raise AssertionError(f"guarded dispatch did not persist SENT: {outcome}")

@@ -24,7 +24,10 @@ from mvp.autotrade_mvp.persistence import (
     canonical_json,
     payload_digest,
 )
-from research.autotrade_research.artifacts.store import ArtifactStore
+from research.autotrade_research.artifacts import (
+    ArtifactIntegrityError,
+    ArtifactStore,
+)
 from mvp.autotrade_mvp.reservations import (
     InsufficientAvailable,
     ReservationConflict,
@@ -39,7 +42,8 @@ class DurableReservationBookTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.path = Path(self.temp.name) / "journal.sqlite"
         self.store = JournalStore(self.path)
-        self.artifacts = ArtifactStore(Path(self.temp.name) / "artifacts")
+        self.artifact_root = Path(self.temp.name) / "artifacts"
+        self.artifacts = ArtifactStore(self.artifact_root)
         self.evidence = self.publish_resolution_evidence()
 
     def tearDown(self):
@@ -97,6 +101,7 @@ class DurableReservationBookTests(unittest.TestCase):
             environment="PAPER",
             account_id="paper-account",
             resolution_artifact_store=self.artifacts,
+            resolution_artifact_root=self.artifact_root,
         )
 
     def create_unknown_attempt(
@@ -845,6 +850,7 @@ class DurableReservationBookTests(unittest.TestCase):
                 environment="PAPER",
                 account_id="paper-account",
                 resolution_artifact_store=lambda reference: True,
+                resolution_artifact_root=self.artifact_root,
             )
 
     def test_terminal_release_rejects_artifact_store_subclass_authority(self):
@@ -859,6 +865,29 @@ class DurableReservationBookTests(unittest.TestCase):
                 environment="PAPER",
                 account_id="paper-account",
                 resolution_artifact_store=forged,
+                resolution_artifact_root=self.artifact_root,
+            )
+
+    def test_terminal_release_rejects_stable_attacker_selected_store_root(self):
+        attacker_root = Path(self.temp.name) / "attacker-selected-artifacts"
+        attacker_store = ArtifactStore(attacker_root)
+        attacker_store.publish_bytes(
+            artifact_id=ARTIFACT_ID,
+            data=b'{"forged":true}',
+            media_type="application/vnd.autotrade.reservation-resolution+json",
+            rights={"storage": True, "export": False},
+        )
+
+        with self.assertRaisesRegex(
+            ArtifactIntegrityError,
+            "does not match trusted artifact root",
+        ):
+            DurableReservationBook(
+                self.store,
+                environment="PAPER",
+                account_id="paper-account",
+                resolution_artifact_store=attacker_store,
+                resolution_artifact_root=self.artifact_root,
             )
 
     def test_terminal_release_private_reader_ignores_post_construction_store_poisoning(self):

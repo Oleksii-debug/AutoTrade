@@ -15,6 +15,7 @@ import json
 from typing import Literal
 
 from .accounting import JournalTransaction, posting, validate_transaction
+from .exact_decimal import ExactDecimalError, canonical_decimal_text
 from .instruments import InstrumentVersion
 
 
@@ -65,10 +66,12 @@ def _fraction(value: Decimal) -> Fraction:
 
 def _decimal_identity(value: Decimal) -> str:
     normalized = _decimal(value, "decimal identity")
-    if normalized == 0:
-        return "0"
-    text = format(normalized.normalize(), "f")
-    return text.rstrip("0").rstrip(".") if "." in text else text
+    try:
+        return canonical_decimal_text(normalized)
+    except ExactDecimalError as error:
+        raise FuturesError(
+            "decimal identity exceeds the supported exact-decimal resource envelope"
+        ) from error
 
 
 @dataclass(frozen=True)

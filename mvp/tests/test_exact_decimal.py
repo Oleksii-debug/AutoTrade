@@ -14,6 +14,7 @@ from mvp.autotrade_mvp.exact_decimal import (
     exact_add,
     exact_multiply,
     exact_sum,
+    is_exact_decimal_multiple,
     round_fraction_to_quantum,
     terminating_decimal,
 )
@@ -58,6 +59,25 @@ class ExactDecimalTests(unittest.TestCase):
                             ),
                             expected_sum,
                         )
+
+    def test_exact_decimal_multiple_is_context_independent(self):
+        aligned = Decimal("1.234567890123456789")
+        off_grid = Decimal("1.2345678901234567891")
+        quantum = Decimal("1e-18")
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        self.assertTrue(
+                            is_exact_decimal_multiple(aligned, quantum)
+                        )
+                        self.assertFalse(
+                            is_exact_decimal_multiple(off_grid, quantum)
+                        )
+        with self.assertRaisesRegex(ExactDecimalError, "quantum must be positive"):
+            is_exact_decimal_multiple(Decimal("1"), Decimal("0"))
 
     def test_fraction_rounding_is_context_independent_and_directional(self):
         value = Fraction(1, 3)

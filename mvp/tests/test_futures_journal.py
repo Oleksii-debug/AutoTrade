@@ -1,6 +1,6 @@
 from dataclasses import replace
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 from fractions import Fraction
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -134,6 +134,29 @@ class DurableFuturesVariationMarginTests(unittest.TestCase):
         return replace(
             settlement,
             evidence_ref=f"artifact:{artifact_id}@{manifest['sha256']}",
+        )
+
+    def test_provider_settlement_receipt_is_context_independent(self):
+        contract = self._contract()
+        observed = []
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        settlement = self._settlement(
+                            contract,
+                            "high-significance",
+                            "12345678901234567890.123456789",
+                            sequence=19,
+                        )
+                        receipt = provider_settlement_evidence_receipt(settlement)
+                        observed.append(canonical_json(receipt))
+        self.assertTrue(all(payload == observed[0] for payload in observed))
+        self.assertIn(
+            '"settlement_price":"12345678901234567890.123456789"',
+            observed[0],
         )
 
     def test_linear_commit_restart_retry_and_correction_are_exactly_once(self):

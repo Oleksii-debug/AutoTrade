@@ -2572,6 +2572,105 @@ class AuthorityTests(unittest.TestCase):
             )
 
 
+    def test_dispatch_guard_consumes_exact_dispatcher_prepared_scope(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = authority_service(store)
+            item = policy(autonomous=True)
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store, environment="PAPER", account_id="paper-1"
+            )
+            admitted = authority.admit(
+                command_id="scope-bind-command",
+                idempotency_key="scope-bind-command",
+                admission_id="scope-bind-admission",
+                policy_id=item.policy_id,
+                intent_id="scope-bind-intent",
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_book=reservations,
+                reservation_id="scope-bind-reservation",
+                **public_financial_kwargs(store),
+            )
+            admitted_scope = {
+                "provider_id": admitted.provider_id,
+                "provider_environment": admitted.provider_environment,
+                "account_id": admitted.account_id,
+                "environment": admitted.environment,
+            }
+            wrong_scope = dict(admitted_scope)
+            wrong_scope["provider_id"] = "OTHER_PROVIDER"
+            guard = authority.dispatch_guard(
+                admitted.admission_id,
+                account_id=admitted.account_id,
+                environment=admitted.environment,
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                capability_snapshot_id=PUBLIC_CAPABILITY_SNAPSHOT_ID,
+                submission_scope=admitted_scope,
+            )
+            dispatcher = GuardedDispatcher(
+                store,
+                environment=admitted.environment,
+                account_id=admitted.account_id,
+                owner_token="scope-bind-owner",
+            )
+            outbound = 0
+
+            def transport(_client_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return {"provider_order_id": "must-not-send"}
+
+            result = dispatcher.dispatch(
+                attempt_id="scope-bind-attempt",
+                intent_id="scope-bind-intent",
+                intent_hash=PUBLIC_INTENT_HASH,
+                provider="test-provider",
+                request={},
+                now="2026-09-24T18:01:15Z",
+                authority_check=guard,
+                transport_send=transport,
+                sender_check=lambda _owner, _epoch: None,
+                submission_scope=wrong_scope,
+            )
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.reason, "submission_scope_changed")
+            self.assertEqual(outbound, 0)
+
+            uncaptured_guard = authority.dispatch_guard(
+                admitted.admission_id,
+                account_id=admitted.account_id,
+                environment=admitted.environment,
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                capability_snapshot_id=PUBLIC_CAPABILITY_SNAPSHOT_ID,
+            )
+            second = dispatcher.dispatch(
+                attempt_id="scope-bind-attempt-2",
+                intent_id="scope-bind-intent",
+                intent_hash=PUBLIC_INTENT_HASH,
+                provider="test-provider",
+                request={},
+                now="2026-09-24T18:01:15Z",
+                authority_check=uncaptured_guard,
+                transport_send=transport,
+                sender_check=lambda _owner, _epoch: None,
+                submission_scope=wrong_scope,
+            )
+            self.assertEqual(second.status, "BLOCKED")
+            self.assertEqual(second.reason, "provider_domain_changed")
+            self.assertEqual(outbound, 0)
+
+
     def test_public_dispatch_blocks_after_other_reservation_advances_book(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

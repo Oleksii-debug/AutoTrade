@@ -16,6 +16,36 @@ from .persistence import JournalStore, canonical_json, payload_digest
 
 
 AuthorityCheck = Callable[[str, str], tuple[bool, str]]
+PreparedAuthorityCheck = Callable[
+    [str, str, Mapping[str, Any], str], tuple[bool, str]
+]
+
+
+@dataclass(frozen=True)
+class PreparedSubmissionAuthorityCheck:
+    """Authority callback that consumes the exact dispatcher-prepared scope."""
+
+    callback: PreparedAuthorityCheck
+
+    def __post_init__(self) -> None:
+        if not callable(self.callback):
+            raise TypeError("prepared authority callback must be callable")
+
+    def __call__(
+        self,
+        intent_hash: str,
+        now: str,
+        submission_scope: Mapping[str, Any],
+        submission_scope_hash: str,
+    ) -> tuple[bool, str]:
+        return self.callback(
+            intent_hash,
+            now,
+            submission_scope,
+            submission_scope_hash,
+        )
+
+
 SenderCheck = Callable[[str, int], None]
 TransportSend = Callable[[str, Mapping[str, Any], Callable[[], None]], Any]
 
@@ -219,6 +249,26 @@ def _validated_authority_result(result: Any) -> tuple[bool, str]:
     if not isinstance(reason, str) or not reason.strip():
         return False, "authority_check_invalid_reason"
     return allowed, reason.strip()
+
+
+def _invoke_authority_check(
+    authority_check: AuthorityCheck | PreparedSubmissionAuthorityCheck,
+    *,
+    intent_hash: str,
+    now: str,
+    submission_scope: Mapping[str, Any],
+    submission_scope_hash: str,
+) -> tuple[bool, str]:
+    """Invoke prepared-scope-aware authority without weakening legacy test seams."""
+
+    if isinstance(authority_check, PreparedSubmissionAuthorityCheck):
+        return authority_check(
+            intent_hash,
+            now,
+            submission_scope,
+            submission_scope_hash,
+        )
+    return authority_check(intent_hash, now)
 
 
 @dataclass(frozen=True)
@@ -598,7 +648,7 @@ class GuardedDispatcher:
         provider: str,
         request: Mapping[str, Any],
         now: str,
-        authority_check: AuthorityCheck,
+        authority_check: AuthorityCheck | PreparedSubmissionAuthorityCheck,
         transport_send: TransportSend,
         client_id_max_length: int = 32,
         client_id_format: str = "TOKEN",
@@ -632,6 +682,7 @@ class GuardedDispatcher:
         submission_scope_hash = (
             "sha256:" + sha256(scope_canonical.encode("utf-8")).hexdigest()
         )
+        prepared_submission_scope = _freeze_json(scope_dict)
         client_order_id = stable_client_order_id(
             provider,
             intent_id,
@@ -693,7 +744,13 @@ class GuardedDispatcher:
             )
 
         try:
-            authority_result = authority_check(intent_hash, now)
+            authority_result = _invoke_authority_check(
+                authority_check,
+                intent_hash=intent_hash,
+                now=now,
+                submission_scope=prepared_submission_scope,
+                submission_scope_hash=submission_scope_hash,
+            )
         except Exception as error:
             reason = f"authority_check_failed_before_send:{type(error).__name__}"
             self._append(
@@ -800,7 +857,13 @@ class GuardedDispatcher:
                     )
                     raise DispatchBlocked(barrier_reason) from error
             try:
-                authority_result = authority_check(intent_hash, barrier_now)
+                authority_result = _invoke_authority_check(
+                    authority_check,
+                    intent_hash=intent_hash,
+                    now=barrier_now,
+                    submission_scope=prepared_submission_scope,
+                    submission_scope_hash=submission_scope_hash,
+                )
             except Exception as error:
                 barrier_reason = (
                     "authority_check_failed_at_final_barrier:"

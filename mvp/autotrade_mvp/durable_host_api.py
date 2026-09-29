@@ -359,15 +359,15 @@ class JournalBackedHostCommandStore:
             if (
                 durable_command_id != command_id
                 or durable_operation_id != operation_id
-                or durable_actor != actor
-                or durable_account != account_id
-                or durable_environment != environment
-                or durable_action != action
+                or durable_account != self.account_id
+                or durable_environment != self.environment
             ):
-                # The deterministic event id belongs to this command identity;
-                # disagreement is never a basis to reinterpret durable history.
+                # These fields are intrinsic to the deterministic accepted-event
+                # identity.  Actor/action/session/request equality is proven by
+                # commit_command's scoped command + request-hash replay below so
+                # changed caller input retains normal CONFLICT semantics.
                 raise ValueError(
-                    "durable host accepted event conflicts with submitted command"
+                    "durable host accepted event identity is inconsistent"
                 )
             contract = self._authority_contract_if_present(
                 accepted_payload
@@ -428,6 +428,10 @@ class JournalBackedHostCommandStore:
             if saved_result != expected_result:
                 raise ValueError(
                     "host command result conflicts with durable accepted event"
+                )
+            if durable_actor != actor or durable_action != action:
+                raise ValueError(
+                    "host command replay scope conflicts with durable accepted event"
                 )
             return self._command_result(saved_result)
 

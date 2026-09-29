@@ -21,11 +21,15 @@ from .allocation_valuation import (
 )
 from .exact_decimal import (
     ExactDecimalError,
+    as_fraction as _shared_as_fraction,
+    bounded_fraction as _shared_bounded_fraction,
     exact_abs as _shared_exact_abs,
     exact_add as _shared_exact_add,
     exact_multiply as _shared_exact_multiply,
     exact_subtract as _shared_exact_subtract,
     exact_sum as _shared_exact_sum,
+    round_fraction_to_quantum as _shared_round_fraction_to_quantum,
+    terminating_decimal as _shared_terminating_decimal,
 )
 
 
@@ -63,6 +67,46 @@ def _exact_multiply(*values: Decimal) -> Decimal:
 def _exact_sum(values) -> Decimal:
     try:
         return _shared_exact_sum(values)
+    except ExactDecimalError as error:
+        raise ValueError(_EXACT_ARITHMETIC_ERROR) from error
+
+
+def _exact_fx_monetary_conversion(
+    value: Decimal,
+    *,
+    rate_numerator: int,
+    rate_denominator: int,
+    rounding_quantum: Decimal | None,
+) -> Decimal:
+    """Convert one monetary constraint through a validated exact FX identity.
+
+    The numerator/denominator and optional quantum come only from
+    normalize_allocation_valuation().  A non-terminating result is never
+    approximated through Decimal division: it requires the canonical
+    reporting-currency FLOOR quantum.
+    """
+
+    try:
+        converted = _shared_bounded_fraction(
+            _shared_as_fraction(value)
+            * Fraction(rate_numerator, rate_denominator)
+        )
+        try:
+            return _shared_terminating_decimal(converted)
+        except ExactDecimalError as error:
+            if str(error) != (
+                "rational value has a non-terminating decimal expansion"
+            ):
+                raise
+            if rounding_quantum is None:
+                raise ValueError(
+                    "allocation FX conversion requires explicit rounding policy"
+                ) from error
+            return _shared_round_fraction_to_quantum(
+                converted,
+                rounding_quantum,
+                mode="FLOOR",
+            )
     except ExactDecimalError as error:
         raise ValueError(_EXACT_ARITHMETIC_ERROR) from error
 
@@ -2137,8 +2181,7 @@ def allocate_evidence_bound_objective_targets(
             resolved_market[symbol],
             "quote_currency",
         ).upper()
-        valuation_fx_rate = _payload_decimal(valuation, "fx_rate")
-        # Monetary units are authority, including the identity-FX case.  Requiring
+        # Monetary units are authority, including the identity-FX case. Requiring
         # declarations only for cross-currency candidates lets a same-currency
         # caller omit or mislabel desired/minimum/fee/cap units while those raw
         # numbers are silently treated as portfolio-base amounts.
@@ -2174,51 +2217,30 @@ def allocate_evidence_bound_objective_targets(
             raise ValueError(
                 f"valuation desired_notional currency mismatch for {symbol}"
             )
-        if quote_currency == base_currency:
-            if valuation_fx_rate != Decimal("1"):
-                raise ValueError(
-                    f"identity-currency valuation for {symbol} must use unit FX"
-                )
-            monetary_rate = Decimal("1")
-        else:
-            monetary_rate = valuation_fx_rate
 
-        desired_notional_base = _exact_multiply(
-            item.candidate.desired_notional,
-            monetary_rate,
-        )
-        min_notional_base = _exact_multiply(
-            item.candidate.min_notional,
-            monetary_rate,
-        )
-        fee_floor_base = _exact_multiply(
-            item.candidate.fee_floor,
-            monetary_rate,
-        )
-        max_executable_notional_base = (
-            None
-            if item.candidate.max_executable_notional is None
-            else _exact_multiply(
-                item.candidate.max_executable_notional,
-                monetary_rate,
+        if quote_currency == base_currency:
+            provisional_min_notional_base = item.candidate.min_notional
+            provisional_fee_floor_base = item.candidate.fee_floor
+            provisional_max_executable_notional_base = (
+                item.candidate.max_executable_notional
             )
-        )
-        if quote_currency != base_currency:
-            if _payload_decimal(
+        else:
+            provisional_min_notional_base = _payload_decimal(
                 valuation,
-                "desired_notional_base",
-            ) != desired_notional_base:
-                raise ValueError(
-                    f"valuation desired_notional_base mismatch for {symbol}"
-                )
-        elif "desired_notional_base" in valuation.payload:
-            if _payload_decimal(
+                "min_notional_base",
+            )
+            provisional_fee_floor_base = _payload_decimal(
                 valuation,
-                "desired_notional_base",
-            ) != desired_notional_base:
-                raise ValueError(
-                    f"valuation desired_notional_base mismatch for {symbol}"
+                "fee_floor_base",
+            )
+            provisional_max_executable_notional_base = (
+                None
+                if item.candidate.max_executable_notional is None
+                else _payload_decimal(
+                    valuation,
+                    "max_executable_notional_base",
                 )
+            )
 
         try:
             normalized = normalize_allocation_valuation(
@@ -2228,9 +2250,11 @@ def allocate_evidence_bound_objective_targets(
                 source_price=item.candidate.price,
                 expected_cost_rate=item.candidate.cost_rate,
                 expected_capital_requirement_rate=item.candidate.capital_requirement_rate,
-                expected_min_notional_base=min_notional_base,
-                expected_fee_floor_base=fee_floor_base,
-                expected_max_executable_notional_base=max_executable_notional_base,
+                expected_min_notional_base=provisional_min_notional_base,
+                expected_fee_floor_base=provisional_fee_floor_base,
+                expected_max_executable_notional_base=(
+                    provisional_max_executable_notional_base
+                ),
                 decision_time=normalized_decision_time,
                 portfolio_base_currency=base_currency,
             )
@@ -2238,6 +2262,65 @@ def allocate_evidence_bound_objective_targets(
             raise ValueError(
                 f"allocation valuation evidence is unusable for {symbol}: {error}"
             ) from error
+
+        conversion = {
+            "rate_numerator": normalized.fx_rate_numerator,
+            "rate_denominator": normalized.fx_rate_denominator,
+            "rounding_quantum": normalized.fx_rounding_quantum,
+        }
+        desired_notional_base = _exact_fx_monetary_conversion(
+            item.candidate.desired_notional,
+            **conversion,
+        )
+        min_notional_base = _exact_fx_monetary_conversion(
+            item.candidate.min_notional,
+            **conversion,
+        )
+        fee_floor_base = _exact_fx_monetary_conversion(
+            item.candidate.fee_floor,
+            **conversion,
+        )
+        max_executable_notional_base = (
+            None
+            if item.candidate.max_executable_notional is None
+            else _exact_fx_monetary_conversion(
+                item.candidate.max_executable_notional,
+                **conversion,
+            )
+        )
+
+        if quote_currency != base_currency:
+            declared_desired = _payload_decimal(
+                valuation,
+                "desired_notional_base",
+            )
+            if declared_desired != desired_notional_base:
+                raise ValueError(
+                    f"valuation desired_notional_base mismatch for {symbol}"
+                )
+            if provisional_min_notional_base != min_notional_base:
+                raise ValueError(
+                    f"valuation min_notional_base mismatch for {symbol}"
+                )
+            if provisional_fee_floor_base != fee_floor_base:
+                raise ValueError(
+                    f"valuation fee_floor_base mismatch for {symbol}"
+                )
+            if (
+                provisional_max_executable_notional_base
+                != max_executable_notional_base
+            ):
+                raise ValueError(
+                    f"valuation max_executable_notional_base mismatch for {symbol}"
+                )
+        elif "desired_notional_base" in valuation.payload:
+            if _payload_decimal(
+                valuation,
+                "desired_notional_base",
+            ) != desired_notional_base:
+                raise ValueError(
+                    f"valuation desired_notional_base mismatch for {symbol}"
+                )
         resolved_valuation[symbol] = valuation
         normalized_candidates.append(
             ObjectiveCandidate(

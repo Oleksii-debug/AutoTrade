@@ -1,6 +1,7 @@
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import unittest
 
+from mvp.autotrade_mvp.fx_valuation import FxRoundingPolicy
 from mvp.autotrade_mvp.allocation import (
     AllocationPolicy,
     ImmutableAllocationEvidence,
@@ -385,6 +386,136 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
             baseline[4],
             Decimal("122.4000000102"),
         )
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    self.assertEqual(snapshot(), baseline)
+
+    def test_inverse_fx_exact_identity_reaches_allocator_without_fabricated_rate(self):
+        objective, market, capital, stress, resolved = self.bundle()
+        digest = "sha256:" + "b" * 64
+        policy = FxRoundingPolicy(
+            reporting_currency="EUR",
+            quantum=Decimal("0.01"),
+        )
+
+        objective_payload = dict(objective.payload)
+        objective_payload["desired_notional"] = "100"
+        objective = self.evidence(
+            evidence_id=objective.evidence_id,
+            kind="OBJECTIVE",
+            payload=objective_payload,
+        )
+
+        market_payload = dict(market.payload)
+        market_payload.update({
+            "price": "110.02",
+            "lot_size": "0.0001",
+            "min_notional": "0",
+            "fee_floor": "0",
+            "max_executable_notional": "100",
+        })
+        market = self.evidence(
+            evidence_id=market.evidence_id,
+            kind="MARKET_CONSTRAINT",
+            payload=market_payload,
+        )
+
+        valuation = resolved["valuation:aaa:v1"]
+        valuation_payload = dict(valuation.payload)
+        valuation_payload.update({
+            "source_price": "110.02",
+            "portfolio_base_currency": "EUR",
+            "fx_rate": None,
+            "fx_rate_numerator": 5000,
+            "fx_rate_denominator": 5501,
+            "fx_source_id": "fx:eurusd:venue:v8",
+            "fx_quote": {
+                "base_currency": "EUR",
+                "quote_currency": "USD",
+                "bid": "1.1000",
+                "ask": "1.1002",
+                "available_at": "2026-09-25T18:29:30Z",
+                "source_id": "fx:eurusd:venue:v8",
+                "evidence_sha256": digest,
+                "max_age_seconds": 60,
+                "haircut": "0",
+            },
+            "fx_evidence_sha256": digest,
+            "fx_rounding_policy_id": policy.policy_id,
+            "fx_rounding_quantum": "0.01",
+            "unit_base_notional": "100",
+            "desired_notional_base": "90.89",
+            "min_notional_base": "0",
+            "fee_floor_base": "0",
+            "max_executable_notional_base": "90.89",
+            "cost_evidence_refs": {
+                "execution": "execution-cost:aaa:v1",
+                "financing": "financing:none:aaa:v1",
+                "funding": "funding:none:aaa:v1",
+                "borrow": "borrow:none:aaa:v1",
+                "fx": "fx:eurusd:venue:v8",
+            },
+        })
+        valuation = self.evidence(
+            evidence_id=valuation.evidence_id,
+            kind="VALUATION",
+            payload=valuation_payload,
+        )
+
+        capital_payload = dict(capital.payload)
+        capital_payload["base_currency"] = "EUR"
+        capital = self.evidence(
+            evidence_id=capital.evidence_id,
+            kind="CAPITAL_STATE",
+            payload=capital_payload,
+        )
+
+        resolved = {
+            objective.evidence_id: objective,
+            market.evidence_id: market,
+            valuation.evidence_id: valuation,
+            capital.evidence_id: capital,
+            stress.evidence_id: stress,
+        }
+        bundle = (objective, market, capital, stress, resolved)
+        candidate = ObjectiveCandidate.create(
+            symbol="AAA",
+            desired_notional="100",
+            price="110.02",
+            lot_size="0.0001",
+            expected_return_rate="0.10",
+            risk_penalty_rate="0.01",
+            cost_rate="0.001",
+            capital_requirement_rate="1",
+            min_notional="0",
+            fee_floor="0",
+            max_executable_notional="100",
+        )
+
+        def snapshot():
+            result = self.allocate(candidate=candidate, bundle=bundle)
+            target = result.objective.allocation.targets[0]
+            return (
+                result.objective.allocation.status,
+                target.quantity,
+                target.notional,
+                target.estimated_cost,
+                result.objective.allocation.cash_required,
+                result.objective.selected_symbols,
+                result.objective.expected_net_utility,
+            )
+
+        baseline = snapshot()
+        self.assertEqual(baseline[0], "ALLOCATED")
+        self.assertEqual(baseline[1], Decimal("0.9089"))
+        self.assertEqual(baseline[2], Decimal("90.89"))
+        self.assertEqual(baseline[3], Decimal("0.09089"))
+        self.assertEqual(baseline[4], Decimal("90.98089"))
+        self.assertEqual(baseline[5], ("AAA",))
+        self.assertEqual(baseline[6], Decimal("8.08921"))
         for precision in (6, 10, 28, 80):
             for rounding in (ROUND_FLOOR, ROUND_CEILING):
                 with localcontext() as context:

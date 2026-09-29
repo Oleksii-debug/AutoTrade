@@ -15,7 +15,12 @@ from types import MappingProxyType
 from typing import Mapping
 
 from .exact_decimal import ExactDecimalError, exact_abs, exact_sum
-from .fx_valuation import FxQuote, FxValuationError, value_amount
+from .fx_valuation import (
+    FxQuote,
+    FxRoundingPolicy,
+    FxValuationError,
+    value_amount,
+)
 from .perpetuals import PerpetualError, linear_notional
 
 
@@ -143,6 +148,44 @@ def _validate_optional_rate_identity(
         raise AllocationValuationError(
             f"{symbol} valuation exact FX rate identity mismatch"
         )
+
+
+def _declared_fx_rounding_policy(
+    valuation: Mapping[str, object],
+    *,
+    symbol: str,
+    reporting_currency: str,
+) -> FxRoundingPolicy | None:
+    raw_policy_id = valuation.get("fx_rounding_policy_id")
+    raw_quantum = valuation.get("fx_rounding_quantum")
+    if raw_policy_id is None and raw_quantum is None:
+        return None
+    if raw_policy_id is None or raw_quantum is None:
+        raise AllocationValuationError(
+            f"{symbol} FX rounding policy id and quantum must be supplied together"
+        )
+    policy_id = _text(
+        raw_policy_id,
+        name=f"{symbol} valuation fx_rounding_policy_id",
+    )
+    quantum = _positive(
+        raw_quantum,
+        name=f"{symbol} valuation fx_rounding_quantum",
+    )
+    try:
+        policy = FxRoundingPolicy(
+            reporting_currency=reporting_currency,
+            quantum=quantum,
+        )
+    except FxValuationError as error:
+        raise AllocationValuationError(
+            f"{symbol} valuation FX rounding policy is invalid"
+        ) from error
+    if policy.policy_id != policy_id:
+        raise AllocationValuationError(
+            f"{symbol} valuation FX rounding policy identity mismatch"
+        )
+    return policy
 
 
 @dataclass(frozen=True)
@@ -406,6 +449,11 @@ def normalize_allocation_valuation(
             quote_payload.get("evidence_sha256"),
             name=f"{symbol_text} fx evidence_sha256",
         )
+        rounding_policy = _declared_fx_rounding_policy(
+            valuation,
+            symbol=symbol_text,
+            reporting_currency=base_currency,
+        )
         try:
             quote = FxQuote.create(
                 base_currency=_currency(
@@ -442,6 +490,7 @@ def normalize_allocation_valuation(
                 as_of=point,
                 max_age=timedelta(seconds=max_age_seconds),
                 haircut=Decimal("0"),
+                rounding_policy=rounding_policy,
             )
         except FxValuationError as error:
             raise AllocationValuationError(
@@ -489,18 +538,40 @@ def normalize_allocation_valuation(
             raise AllocationValuationError(
                 f"{symbol_text} valuation FX evidence digest mismatch"
             )
-        fx_rounding_policy_id = fx_value.rounding_policy_id
-        fx_rounding_quantum = fx_value.rounding_quantum
-        if valuation.get("fx_rounding_policy_id") != fx_rounding_policy_id:
-            if valuation.get("fx_rounding_policy_id") is not None or fx_rounding_policy_id is not None:
+        if rate_used is not None and rounding_policy is not None:
+            raise AllocationValuationError(
+                f"{symbol_text} FX rounding policy is only valid for exact inverse FX"
+            )
+        if rounding_policy is None:
+            if (
+                fx_value.rounding_policy_id is not None
+                or fx_value.rounding_quantum is not None
+            ):
                 raise AllocationValuationError(
-                    f"{symbol_text} valuation FX rounding policy identity mismatch"
+                    f"{symbol_text} canonical FX valuation applied an undeclared rounding policy"
                 )
-        _optional_decimal_equal(
-            valuation.get("fx_rounding_quantum"),
-            fx_rounding_quantum,
-            name=f"{symbol_text} valuation fx_rounding_quantum",
-        )
+            fx_rounding_policy_id = None
+            fx_rounding_quantum = None
+        else:
+            if fx_value.rounding_policy_id not in (
+                None,
+                rounding_policy.policy_id,
+            ):
+                raise AllocationValuationError(
+                    f"{symbol_text} canonical FX rounding policy identity mismatch"
+                )
+            if fx_value.rounding_quantum not in (
+                None,
+                rounding_policy.quantum,
+            ):
+                raise AllocationValuationError(
+                    f"{symbol_text} canonical FX rounding quantum mismatch"
+                )
+            # The policy is authoritative and available for other monetary
+            # constraints even when this particular unit-price conversion
+            # happens to terminate exactly and therefore did not apply it.
+            fx_rounding_policy_id = rounding_policy.policy_id
+            fx_rounding_quantum = rounding_policy.quantum
         converted = fx_value.converted_amount
 
     try:

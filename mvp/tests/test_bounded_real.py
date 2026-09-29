@@ -399,7 +399,7 @@ class BoundedRealQualificationTests(unittest.TestCase):
             result.reason_codes,
         )
 
-    def test_exact_verifier_method_rebind_cannot_waive_manifest_scope(self):
+    def test_exact_verifier_backing_rebind_cannot_waive_manifest_scope(self):
         bounded = envelope()
         prerequisite_items = prerequisites()
         observed = observations()
@@ -424,19 +424,39 @@ class BoundedRealQualificationTests(unittest.TestCase):
                 store,
                 evidence_root=directory,
             )
-            verifier.verify = lambda _ref: EvidenceVerification(valid=True)
-            result = assess_bounded_real_qualification(
-                envelope=bounded,
-                prerequisite_evidence=prerequisite_items,
-                observations=observed,
-                evidence_verifier=verifier,
-                evidence_store=store,
-                evidence_root=directory,
-                qualification_receipt=receipt,
-                qualification_policy=trust_policy,
-                expected_policy_id=trust_policy.policy_id,
-                expected_policy_version=trust_policy.policy_version,
-            )
+            # Reproduce the exact-instance low-level rebinding class from
+            # review: terminal assessment must not recover authority from these
+            # caller-owned backing fields.
+            with TemporaryDirectory() as attacker_directory:
+                attacker_store = ArtifactStore(attacker_directory)
+                verifier._read_snapshot = lambda _artifact_id: (
+                    {
+                        "artifact_id": bad_ref.artifact_id,
+                        "sha256": bad_ref.sha256,
+                        "metadata": {
+                            "provider_id": bounded.provider_id,
+                            "account_id": bounded.account_id,
+                            "outcome": "PASS",
+                        },
+                    },
+                    b"forged",
+                )
+                verifier._store = attacker_store
+                verifier._evidence_root = attacker_directory
+                verifier._store_identity = "sha256:" + ("0" * 64)
+                verifier.verify = lambda _ref: EvidenceVerification(valid=True)
+                result = assess_bounded_real_qualification(
+                    envelope=bounded,
+                    prerequisite_evidence=prerequisite_items,
+                    observations=observed,
+                    evidence_verifier=verifier,
+                    evidence_store=store,
+                    evidence_root=directory,
+                    qualification_receipt=receipt,
+                    qualification_policy=trust_policy,
+                    expected_policy_id=trust_policy.policy_id,
+                    expected_policy_version=trust_policy.policy_version,
+                )
 
         self.assertFalse(result.complete)
         self.assertIn(

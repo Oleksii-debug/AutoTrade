@@ -159,12 +159,14 @@ class WholeSimulatorFlowTests(unittest.TestCase):
             )
 
             authority = authority_service(journal)
-            artifacts = ArtifactStore(Path(directory) / "artifacts")
+            artifact_root = Path(directory) / "artifacts"
+            artifacts = ArtifactStore(artifact_root)
             reservations = DurableReservationBook(
                 journal,
                 environment="SIMULATION",
                 account_id="sim-account",
                 resolution_artifact_store=artifacts,
+                resolution_artifact_root=artifact_root,
             )
             initial_snapshot = provider.account_snapshot(now=NOW)
             availability_result = reconcile_account(

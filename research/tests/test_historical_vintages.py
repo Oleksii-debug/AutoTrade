@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -402,6 +402,19 @@ class HistoricalVintageTests(unittest.TestCase):
                 {"d1": "0.5"},
             )
 
+    def test_adjustment_consistency_does_not_depend_on_ambient_precision(self):
+        raw = {"d1": "123456789.01"}
+        factor = {"d1": "1.01"}
+        with localcontext() as context:
+            context.prec = 6
+            validate_multiplicative_adjustment(
+                raw, {"d1": "124691356.9001"}, factor
+            )
+            with self.assertRaises(HistoricalDataError):
+                validate_multiplicative_adjustment(
+                    raw, {"d1": "124691000"}, factor
+                )
+
     def _manifest(self, dataset_id: str, version: int, content: str) -> dict:
         return {
             "dataset_id": dataset_id,
@@ -460,6 +473,19 @@ class HistoricalVintageTests(unittest.TestCase):
             with self.assertRaisesRegex(HistoricalDataError, "created_at cannot precede"):
                 registry.commit(manifest)
 
+    def test_manifest_rejects_inconsistent_missingness_counts(self):
+        with TemporaryDirectory() as directory:
+            registry = HistoricalVintageRegistry(Path(directory))
+            manifest = self._manifest(str(uuid4()), 1, "missingness")
+            manifest["missingness_report"]["expected_count"] = 1
+            with self.assertRaisesRegex(HistoricalDataError, "missingness counts"):
+                registry.commit(manifest)
+
+            manifest["missingness_report"]["expected_count"] = 2
+            manifest["missingness_report"]["missing_keys"] = ["slot-2", "slot-2"]
+            with self.assertRaisesRegex(HistoricalDataError, "missing keys"):
+                registry.commit(manifest)
+
     def test_registry_is_append_only_and_old_vintage_digest_stays_stable(self):
         with TemporaryDirectory() as directory:
             registry = HistoricalVintageRegistry(Path(directory))
@@ -477,6 +503,23 @@ class HistoricalVintageTests(unittest.TestCase):
             self.assertEqual(registry.digest(dataset_id, 1), first_digest)
             self.assertEqual(registry.load(dataset_id, 1)["content_hashes"], [digest("first")])
             self.assertEqual(registry.load(dataset_id, 2)["content_hashes"], [digest("second")])
+
+    def test_registry_rejects_manifest_misfiled_under_another_identity(self):
+        with TemporaryDirectory() as directory:
+            registry = HistoricalVintageRegistry(Path(directory))
+            first_id, second_id = str(uuid4()), str(uuid4())
+            registry.commit(self._manifest(first_id, 1, "first"))
+            registry.commit(self._manifest(second_id, 1, "second"))
+            first_path = Path(directory) / first_id / "1.json"
+            second_path = Path(directory) / second_id / "1.json"
+            first_path.write_bytes(second_path.read_bytes())
+
+            with self.assertRaisesRegex(HistoricalConflict, "manifest identity"):
+                registry.load(first_id, 1)
+            with self.assertRaisesRegex(HistoricalConflict, "manifest identity"):
+                registry.digest(first_id, 1)
+            with self.assertRaisesRegex(HistoricalDataError, "version"):
+                registry.load(first_id, f"../{second_id}/1")
 
     def test_concurrent_conflicting_writers_cannot_replace_same_vintage(self):
         with TemporaryDirectory() as directory:

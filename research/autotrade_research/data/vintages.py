@@ -290,6 +290,25 @@ def validate_multiplicative_adjustment(
 ) -> None:
     """Validate an explicitly multiplicative adjustment policy with exact decimals."""
 
+    def exact_parts(value: Decimal) -> tuple[int, int]:
+        # Decimal multiplication uses the caller's mutable precision. Compare
+        # integer coefficients and powers of ten instead, so replay validation
+        # cannot accept a rounded adjustment or reject an exact one.
+        sign, digits, exponent = value.as_tuple()
+        if len(digits) > 256:
+            raise HistoricalDataError("adjustment input exceeds 256 significant digits")
+        coefficient = 0
+        for digit in digits:
+            coefficient = coefficient * 10 + digit
+        if sign:
+            coefficient = -coefficient
+        if coefficient == 0:
+            return (0, 0)
+        while coefficient % 10 == 0:
+            coefficient //= 10
+            exponent += 1
+        return (coefficient, exponent)
+
     if set(raw) != set(adjusted) or set(raw) != set(factors):
         raise HistoricalDataError("raw, adjusted and factor series must cover identical keys")
     for key in raw:
@@ -307,7 +326,18 @@ def validate_multiplicative_adjustment(
         raw_value, adjusted_value, factor = values
         if factor <= 0:
             raise HistoricalDataError("adjustment factor must be positive")
-        if raw_value * factor != adjusted_value:
+        raw_coefficient, raw_exponent = exact_parts(raw_value)
+        factor_coefficient, factor_exponent = exact_parts(factor)
+        product_coefficient = raw_coefficient * factor_coefficient
+        product_exponent = raw_exponent + factor_exponent
+        if product_coefficient == 0:
+            product = (0, 0)
+        else:
+            while product_coefficient % 10 == 0:
+                product_coefficient //= 10
+                product_exponent += 1
+            product = (product_coefficient, product_exponent)
+        if product != exact_parts(adjusted_value):
             raise HistoricalDataError(f"adjusted series is inconsistent at {key}")
 
 
@@ -392,7 +422,21 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
     _text(rights.get("basis"), "rights basis")
 
     missingness = dict(manifest["missingness_report"])
-    if missingness.get("invented_count") != 0:
+    if set(missingness) != {"expected_count", "observed_count", "missing_keys", "invented_count"}:
+        raise HistoricalDataError("missingness report has unexpected fields")
+    for name in ("expected_count", "observed_count", "invented_count"):
+        value = missingness[name]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise HistoricalDataError("missingness counts must be non-negative integers")
+    missing_keys = missingness["missing_keys"]
+    if not isinstance(missing_keys, list):
+        raise HistoricalDataError("missing keys must be a list")
+    keys = [_text(value, "missing key") for value in missing_keys]
+    if len(keys) != len(set(keys)):
+        raise HistoricalDataError("missing keys must be unique")
+    if missingness["expected_count"] != missingness["observed_count"] + len(keys):
+        raise HistoricalDataError("missingness counts do not reconcile")
+    if missingness["invented_count"] != 0:
         raise HistoricalDataError("historical dataset cannot invent missing observations")
 
     return {
@@ -425,7 +469,9 @@ class HistoricalVintageRegistry:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _path(self, dataset_id: str, version: int) -> Path:
-        return self.root / _uuid(dataset_id, "dataset_id") / f"{version}.json"
+        canonical_id = _uuid(dataset_id, "dataset_id")
+        canonical_version = _sequence(version, "version")
+        return self.root / canonical_id / f"{canonical_version}.json"
 
     def commit(self, manifest: Mapping[str, Any]) -> str:
         normalized = _validate_manifest(manifest)
@@ -448,14 +494,22 @@ class HistoricalVintageRegistry:
         return digest
 
     def load(self, dataset_id: str, version: int) -> dict[str, Any]:
-        path = self._path(dataset_id, version)
+        canonical_id = _uuid(dataset_id, "dataset_id")
+        canonical_version = _sequence(version, "version")
+        path = self._path(canonical_id, canonical_version)
         if not path.is_file():
             raise FileNotFoundError(path)
         try:
             value = strict_json_loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, ValueError) as error:
             raise HistoricalDataError("dataset manifest is unreadable") from error
-        return _validate_manifest(value)
+        manifest = _validate_manifest(value)
+        if (
+            manifest["dataset_id"] != canonical_id
+            or _sequence(manifest["version"], "version") != canonical_version
+        ):
+            raise HistoricalConflict("dataset manifest identity differs from requested path")
+        return manifest
 
     def digest(self, dataset_id: str, version: int) -> str:
         manifest = self.load(dataset_id, version)

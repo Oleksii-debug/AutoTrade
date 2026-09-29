@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import unittest
 from uuid import UUID
 
@@ -110,6 +110,67 @@ class MarketNormalizationTests(unittest.TestCase):
         self.assertEqual(contract["source_sequence"], "1")
         self.assertEqual(contract["revision"], "0")
         self.assertEqual(contract["quality_flags"], [])
+
+    def test_high_significance_market_identity_is_context_independent(self):
+        observed = []
+        price = "12345678901234567890.12"
+        correction_price = "12345678901234567890.13"
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        normalizer = MarketNormalizer(registry())
+                        first = normalizer.normalize(
+                            raw(
+                                "TRADE",
+                                {"price": price, "quantity": "1.250", "side": "buy"},
+                                sequence=77,
+                            )
+                        )
+                        duplicate = normalizer.normalize(
+                            raw(
+                                "TRADE",
+                                {"price": price, "quantity": "1.250", "side": "buy"},
+                                sequence=77,
+                                ingested=at() + timedelta(seconds=1),
+                            )
+                        )
+                        correction = normalizer.normalize(
+                            raw(
+                                "TRADE",
+                                {
+                                    "price": correction_price,
+                                    "quantity": "1.250",
+                                    "side": "buy",
+                                },
+                                sequence=77,
+                                revision=1,
+                                available=at() + timedelta(seconds=1),
+                                ingested=at() + timedelta(seconds=2),
+                            )
+                        )
+                        observed.append(
+                            (
+                                first.payload_json,
+                                first.event_id,
+                                first.quality_flags,
+                                duplicate.payload_json,
+                                duplicate.quality_flags,
+                                correction.payload_json,
+                                correction.event_id,
+                                correction.quality_flags,
+                            )
+                        )
+
+        self.assertTrue(all(item == observed[0] for item in observed))
+        self.assertEqual(
+            observed[0][0],
+            '{"price":"12345678901234567890.12","quantity":"1.25","side":"BUY"}',
+        )
+        self.assertIn("DUPLICATE", observed[0][4])
+        self.assertIn("CORRECTION", observed[0][7])
 
     def test_duplicate_sequence_is_explicit_but_changed_content_conflicts(self):
         normalizer = MarketNormalizer(registry())

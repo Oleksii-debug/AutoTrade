@@ -363,6 +363,32 @@ class ProductCompletionGateTests(unittest.TestCase):
         self.assertTrue(report["nvda_source_matches"])
         self.assertTrue(report["qualification_source_matches"])
 
+    def test_completion_context_rejects_forged_publication_root_generation(self):
+        with TemporaryDirectory() as directory:
+            base = Path(directory)
+            authoritative_root = base / "authoritative"
+            attacker_root = base / "attacker"
+            ArtifactStore(authoritative_root)
+            attacker_store = ArtifactStore(attacker_root)
+            object.__setattr__(attacker_store, "root", authoritative_root)
+
+            trust_root = fixture_root(
+                scopes=(QualificationScope("WHOLE_PRODUCT", "COMPLETION"),)
+            )
+            trust_policy = fixture_policy(trust_root)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "publication store does not match trusted artifact root",
+            ):
+                WholeProductEvidenceContext(
+                    evidence_store=attacker_store,
+                    evidence_root=authoritative_root,
+                    policy=trust_policy,
+                    expected_policy_id=trust_policy.policy_id,
+                    expected_policy_version=trust_policy.policy_version,
+                )
+
     def test_well_formed_but_unverified_nvda_identity_cannot_complete(self):
         with TemporaryDirectory() as directory:
             (

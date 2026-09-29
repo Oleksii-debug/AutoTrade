@@ -80,6 +80,27 @@ class JournalStorePathIdentityRegressionTests(unittest.TestCase):
         finally:
             os.chdir(original_cwd)
 
+    def test_hard_link_aliases_are_rejected_before_wal_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "journal.sqlite"
+            original = JournalStore(path)
+            original_identity = original.store_identity
+            alias = root / "hardlink.sqlite"
+            try:
+                os.link(path, alias)
+            except OSError:
+                self.skipTest("filesystem does not permit hard-link creation")
+
+            with self.assertRaisesRegex(RuntimeError, "exactly one hard-link"):
+                original.current_journal_sequence()
+            with self.assertRaisesRegex(RuntimeError, "exactly one hard-link"):
+                JournalStore(alias)
+
+            alias.unlink()
+            self.assertEqual(original.current_journal_sequence(), 0)
+            self.assertEqual(original.store_identity, original_identity)
+
     def test_replacing_backing_file_after_construction_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite"

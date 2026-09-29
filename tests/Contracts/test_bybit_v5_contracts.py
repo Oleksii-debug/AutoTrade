@@ -20,10 +20,11 @@ from mvp.autotrade_mvp.capabilities import (
 from mvp.autotrade_mvp.dispatch import (
     ExactJsonTransportResponse,
     GuardedDispatcher,
+    PreparedSubmissionAuthorityCheck,
     load_submission_response_binding,
     stable_client_order_id,
 )
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_core import observe_submission_json_response
 
 
@@ -106,6 +107,33 @@ def durable_submission(payload, *, intent_id):
             account_id="contract-account",
             owner_token="contract-owner",
         )
+        submission_scope = {
+            "endpoint": prepared.endpoint,
+            "prepared_request_sha256": prepared.body_sha256,
+            "capability_snapshot_ids": list(prepared.capability_snapshot_ids),
+            "instrument_versions": list(prepared.instrument_versions),
+            "provider_environment": "MAINNET",
+        }
+
+        def contract_authority(
+            _intent_hash,
+            _now,
+            prepared_scope,
+            prepared_scope_hash,
+        ):
+            if prepared_scope_hash != payload_digest(dict(prepared_scope)):
+                return False, "prepared_scope_hash_mismatch"
+            if prepared_scope.get("provider_environment") != "MAINNET":
+                return False, "provider_environment_mismatch"
+            if prepared_scope.get("endpoint") != prepared.endpoint:
+                return False, "endpoint_mismatch"
+            if (
+                prepared_scope.get("prepared_request_sha256")
+                != prepared.body_sha256
+            ):
+                return False, "prepared_request_mismatch"
+            return True, "allowed"
+
         outcome = dispatcher.dispatch(
             attempt_id=attempt_id,
             intent_id=intent_id,
@@ -113,19 +141,13 @@ def durable_submission(payload, *, intent_id):
             provider="BYBIT",
             request=prepared.body,
             now="2026-09-24T20:00:00Z",
-            authority_check=lambda _hash, _now: (True, "allowed"),
+            authority_check=PreparedSubmissionAuthorityCheck(contract_authority),
             transport_send=lambda _cid, _request, guard: (
                 guard(),
                 ExactJsonTransportResponse(raw),
             )[1],
             sender_check=lambda _owner, _epoch: None,
-            submission_scope={
-                "endpoint": prepared.endpoint,
-                "prepared_request_sha256": prepared.body_sha256,
-                "capability_snapshot_ids": list(prepared.capability_snapshot_ids),
-                "instrument_versions": list(prepared.instrument_versions),
-                "provider_environment": "MAINNET",
-            },
+            submission_scope=submission_scope,
         )
         if outcome.status != "SENT":
             raise AssertionError(f"guarded dispatch did not persist SENT: {outcome}")

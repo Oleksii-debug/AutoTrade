@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Callable, Mapping
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from contracts.bindings.python.common_scalars import is_valid_common_scalar
 
@@ -42,6 +42,38 @@ class JournalBackedHostCommandStore:
     TERMINAL_PHASES = {"SUCCEEDED", "FAILED", "CANCELLED"}
     UPDATE_PHASES = {"RUNNING", "WAITING_EXTERNAL", "UNKNOWN", *TERMINAL_PHASES}
     LEGACY_AUTHORITY_UNCERTAINTY = "legacy_authority_payload_unavailable"
+    SUPPORTED_EVENT_TYPES = frozenset({"COMMAND_ACCEPTED", "OPERATION_UPDATED"})
+    EVENT_PAYLOAD_FIELDS = {
+        "COMMAND_ACCEPTED": frozenset(
+            {
+                "command_id",
+                "operation_id",
+                "action",
+                "action_payload",
+                "action_payload_hash",
+                "actor",
+                "account_id",
+                "environment",
+                "phase",
+                "started_at",
+                "updated_at",
+                "affected_refs",
+                "evidence",
+                "remaining_uncertainty",
+            }
+        ),
+        "OPERATION_UPDATED": frozenset(
+            {
+                "operation_id",
+                "phase",
+                "started_at",
+                "updated_at",
+                "affected_refs",
+                "evidence",
+                "remaining_uncertainty",
+            }
+        ),
+    }
 
     def __init__(
         self,
@@ -97,6 +129,38 @@ class JournalBackedHostCommandStore:
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"{field} must be a non-empty string")
         return value.strip()
+
+    @staticmethod
+    def _replay_instant(
+        payload: Mapping[str, object],
+        field: str,
+        *,
+        default: object | None = None,
+    ) -> str:
+        value = payload.get(field, default)
+        if (
+            not isinstance(value, str)
+            or not value
+            or "T" not in value
+            or not value.endswith("Z")
+        ):
+            raise ValueError(
+                f"Host journal {field} must be a canonical UTC instant"
+            )
+        try:
+            parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+        except ValueError as error:
+            raise ValueError(
+                f"Host journal {field} must be a canonical UTC instant"
+            ) from error
+        if (
+            parsed.tzinfo is None
+            or parsed.utcoffset() != timezone.utc.utcoffset(None)
+        ):
+            raise ValueError(
+                f"Host journal {field} must be a canonical UTC instant"
+            )
+        return value
 
     @staticmethod
     def _command_result(value: Mapping[str, object]) -> CommandResult:
@@ -178,11 +242,34 @@ class JournalBackedHostCommandStore:
         return tuple(dict(item) for item in values)
 
     def _events(self) -> list[dict[str, object]]:
-        return self._journal.load_events(self.AGGREGATE_TYPE, self.aggregate_id)
+        events = self._journal.load_events(self.AGGREGATE_TYPE, self.aggregate_id)
+        for event in events:
+            event_type = event.get("event_type")
+            if event_type not in self.SUPPORTED_EVENT_TYPES:
+                raise ValueError(
+                    f"Host journal contains unsupported event type: {event_type!r}"
+                )
+            payload = event.get("payload")
+            if not isinstance(payload, Mapping):
+                raise ValueError("Host journal event payload must be an object")
+            unexpected = set(payload) - self.EVENT_PAYLOAD_FIELDS[str(event_type)]
+            if unexpected:
+                raise ValueError(
+                    "Host journal contains unsupported payload fields for "
+                    f"{event_type}: " + ", ".join(sorted(unexpected))
+                )
+        return events
 
     @property
     def state_version(self) -> int:
         events = self._events()
+        if events:
+            # A raw aggregate sequence is not a usable host state version until
+            # every durable event can be replayed under the current canonical
+            # semantics. This prevents callers from advancing commands/cursors
+            # on top of a known event whose scoped identity or transition is
+            # invalid after restart.
+            self._operation_projection()
         return int(events[-1]["aggregate_version"]) if events else 0
 
     @property
@@ -477,10 +564,9 @@ class JournalBackedHostCommandStore:
                     raise ValueError(
                         "Host journal command scope does not match active host account/environment"
                     )
+                command_id = self._required_text(payload, "command_id")
                 operation_id = self._required_text(payload, "operation_id")
-                authority_contracts[operation_id] = (
-                    self._authority_contract_if_present(payload)
-                )
+                authority_contract = self._authority_contract_if_present(payload)
                 if operation_id in operations:
                     raise ValueError(
                         "Host journal contains duplicate COMMAND_ACCEPTED operation identity"
@@ -498,10 +584,54 @@ class JournalBackedHostCommandStore:
                     raise ValueError(
                         "Queued operation must preserve financial uncertainty"
                     )
-                started_at = str(payload.get("started_at") or event["committed_at"])
-                updated_at = str(payload.get("updated_at") or started_at)
+                started_at = self._replay_instant(
+                    payload,
+                    "started_at",
+                    default=event["committed_at"],
+                )
+                updated_at = self._replay_instant(
+                    payload,
+                    "updated_at",
+                    default=started_at,
+                )
+                if datetime.fromisoformat(
+                    updated_at[:-1] + "+00:00"
+                ) < datetime.fromisoformat(started_at[:-1] + "+00:00"):
+                    raise ValueError(
+                        "Host journal updated_at cannot precede started_at"
+                    )
+                actor = payload.get("actor")
+                if actor is not None:
+                    self._required_text(payload, "actor")
+                action_value = payload.get("action")
+                if action_value is not None:
+                    canonical_host_action(action_value)
                 affected_refs = self._replay_text_array(payload, "affected_refs")
                 evidence = self._replay_evidence(payload)
+
+                expected_operation_id = scoped_host_operation_id(
+                    account_id=self.account_id,
+                    environment=self.environment,
+                    command_id=command_id,
+                )
+                if authority_contract is None:
+                    # Pre-action-payload records were intentionally kept readable
+                    # by the merged WP-17 recovery contract. They cannot execute
+                    # because _accepted_authority_contract() fails closed, but
+                    # their historical UUID must not be rewritten into a newer
+                    # account-scoped identity during replay.
+                    try:
+                        UUID(operation_id)
+                    except (ValueError, AttributeError) as error:
+                        raise ValueError(
+                            "Host journal legacy operation identity must be a UUID"
+                        ) from error
+                elif operation_id != expected_operation_id:
+                    raise ValueError(
+                        "Host journal operation identity does not match canonical command scope"
+                    )
+
+                authority_contracts[operation_id] = authority_contract
                 operations[operation_id] = OperationResult(
                     operation_id=operation_id,
                     phase=phase,
@@ -573,11 +703,34 @@ class JournalBackedHostCommandStore:
                             affected_refs,
                             evidence,
                         )
+                persisted_started_at = payload.get("started_at")
+                if persisted_started_at is not None:
+                    validated_started_at = self._replay_instant(
+                        payload,
+                        "started_at",
+                    )
+                    if validated_started_at != current.started_at:
+                        raise ValueError(
+                            "Host journal operation started_at changed"
+                        )
+                updated_at = self._replay_instant(
+                    payload,
+                    "updated_at",
+                    default=event["committed_at"],
+                )
+                if datetime.fromisoformat(
+                    updated_at[:-1] + "+00:00"
+                ) < datetime.fromisoformat(
+                    current.updated_at[:-1] + "+00:00"
+                ):
+                    raise ValueError(
+                        "Host journal operation updated_at moved backwards"
+                    )
                 operations[operation_id] = OperationResult(
                     operation_id=operation_id,
                     phase=phase,
                     started_at=current.started_at,
-                    updated_at=str(payload.get("updated_at") or event["committed_at"]),
+                    updated_at=updated_at,
                     state_version=str(event["aggregate_version"]),
                     affected_refs=affected_refs,
                     evidence=evidence,

@@ -861,28 +861,12 @@ class DurableReservationBookTests(unittest.TestCase):
                 resolution_artifact_store=forged,
             )
 
-    def test_terminal_release_store_cannot_be_redirected_after_construction(self):
+    def test_terminal_release_private_reader_ignores_post_construction_store_poisoning(self):
         book = self.book()
-        original_root = self.artifacts.root
-
-        with self.assertRaisesRegex(
-            AttributeError,
-            "immutable after construction",
-        ):
-            self.artifacts._read_verified_object_bytes = (
-                lambda manifest: b"forged resolution"
-            )
-        with self.assertRaisesRegex(
-            AttributeError,
-            "immutable after construction",
-        ):
-            self.artifacts.root = Path(self.temp.name) / "redirected-artifacts"
-
-        self.assertEqual(self.artifacts.root, original_root)
         self.reserve(book)
         book.mark_unknown(
-            command_id="cmd-unknown-sealed-store",
-            idempotency_key="idem-unknown-sealed-store",
+            command_id="cmd-unknown-private-reader",
+            idempotency_key="idem-unknown-private-reader",
             reservation_id="r1",
         )
         self.create_unknown_attempt()
@@ -891,9 +875,23 @@ class DurableReservationBookTests(unittest.TestCase):
             artifact_id="99999999-9999-4999-8999-999999999999",
             reconciliation_event=reconciliation,
         )
+
+        redirected = Path(self.temp.name) / "redirected-artifacts"
+        object.__setattr__(self.artifacts, "root", redirected)
+        object.__setattr__(
+            self.artifacts,
+            "_read_verified_object_bytes",
+            lambda _manifest: b"forged resolution",
+        )
+        object.__setattr__(
+            self.artifacts,
+            "_manifest_path",
+            lambda _artifact_id: redirected / "forged.json",
+        )
+
         book.mark_terminal(
-            command_id="cmd-terminal-sealed-store",
-            idempotency_key="idem-terminal-sealed-store",
+            command_id="cmd-terminal-private-reader",
+            idempotency_key="idem-terminal-private-reader",
             reservation_id="r1",
             outcome="PROVEN_ABSENT",
             provider="SIMULATED",
@@ -901,6 +899,51 @@ class DurableReservationBookTests(unittest.TestCase):
             resolution_evidence=evidence,
         )
         self.assertEqual(book.get("r1").state, "PROVEN_ABSENT")
+
+    def test_terminal_release_private_reader_ignores_pre_construction_store_poisoning(self):
+        writer = self.book()
+        self.reserve(writer)
+        writer.mark_unknown(
+            command_id="cmd-unknown-prebound-reader",
+            idempotency_key="idem-unknown-prebound-reader",
+            reservation_id="r1",
+        )
+        self.create_unknown_attempt()
+        reconciliation = self.record_reconciliation_resolution()
+        evidence = self.publish_resolution_evidence(
+            artifact_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            reconciliation_event=reconciliation,
+        )
+
+        redirected = Path(self.temp.name) / "redirected-before-construction"
+        object.__setattr__(self.artifacts, "root", redirected)
+        object.__setattr__(
+            self.artifacts,
+            "_decode_manifest_bytes",
+            lambda *_args, **_kwargs: {"forged": True},
+        )
+        object.__setattr__(
+            self.artifacts,
+            "_read_verified_object_bytes",
+            lambda _manifest: b"forged resolution",
+        )
+
+        restarted = DurableReservationBook(
+            JournalStore(self.path),
+            environment="PAPER",
+            account_id="paper-account",
+            resolution_artifact_store=self.artifacts,
+        )
+        restarted.mark_terminal(
+            command_id="cmd-terminal-prebound-reader",
+            idempotency_key="idem-terminal-prebound-reader",
+            reservation_id="r1",
+            outcome="PROVEN_ABSENT",
+            provider="SIMULATED",
+            attempt_id="attempt-r1",
+            resolution_evidence=evidence,
+        )
+        self.assertEqual(restarted.get("r1").state, "PROVEN_ABSENT")
 
     def test_terminal_release_requires_existing_durable_attempt(self):
         book = self.book()

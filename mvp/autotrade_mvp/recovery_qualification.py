@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from hashlib import sha256
 import json
+from pathlib import Path
 import re
 from types import MappingProxyType
 from typing import Mapping, Sequence
@@ -487,6 +488,7 @@ def qualify_recovery_release(
     policy: RecoveryQualificationPolicy,
     evidence: Sequence[RecoveryScenarioEvidence],
     evidence_store: ArtifactStore | None = None,
+    evidence_root: str | Path | None = None,
     qualification_receipt: SignedQualificationAttestation | None = None,
     qualification_policy: QualificationTrustPolicy | None = None,
     expected_policy_id: str | None = None,
@@ -548,6 +550,7 @@ def qualify_recovery_release(
     accepted: AcceptedQualificationAttestation | None = None
     trust_inputs = (
         evidence_store,
+        evidence_root,
         qualification_receipt,
         qualification_policy,
         expected_policy_id,
@@ -565,6 +568,7 @@ def qualify_recovery_release(
                 qualification_receipt,
                 policy=qualification_policy,
                 evidence_store=evidence_store,
+                evidence_root=evidence_root,
                 expected_policy_id=expected_policy_id,
                 expected_policy_version=expected_policy_version,
                 expected_source_sha=policy.source_sha,

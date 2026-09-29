@@ -8,7 +8,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
+from decimal import (
+    Decimal,
+    DecimalException,
+    InvalidOperation,
+    ROUND_HALF_EVEN,
+    localcontext,
+)
 from fractions import Fraction
 from hashlib import sha256
 import json
@@ -51,7 +57,13 @@ def _decimal(value: Decimal | int | str, field: str) -> Decimal:
 
 _ABLATION_REPORT_QUANTUM = Decimal("1e-50")
 _ABLATION_REPORT_PRECISION = 384
+_ABLATION_REPORT_FAILURE_POLICY = (
+    "report-unavailable-preserve-exact-decision-v1"
+)
 _ABLATION_DECISION_RULE = "exact-rational-d2-sample-variance-v1"
+_REPORTING_AVAILABLE = "AVAILABLE"
+_REPORTING_UNAVAILABLE = "UNAVAILABLE"
+_REPORTING_NOT_APPLICABLE = "NOT_APPLICABLE"
 
 
 def _bounded(value: Fraction) -> Fraction:
@@ -408,9 +420,10 @@ class AblationSummary:
     full_deadline_misses: int
     ablated_deadline_misses: int
     mean_utility_delta: Decimal | None
-    mean_cost_delta: Decimal
-    mean_latency_delta_ms: Decimal
+    mean_cost_delta: Decimal | None
+    mean_latency_delta_ms: Decimal | None
     status: str
+    reporting_status: str
 
 
 @dataclass(frozen=True)
@@ -490,6 +503,48 @@ class AblationEvaluation:
     status: str
     reason: str
     decision_exact: ExactAblationDecision | None = None
+    reporting_status: str = _REPORTING_NOT_APPLICABLE
+
+    def __post_init__(self) -> None:
+        if self.reporting_status not in {
+            _REPORTING_AVAILABLE,
+            _REPORTING_UNAVAILABLE,
+            _REPORTING_NOT_APPLICABLE,
+        }:
+            raise ValueError("reporting_status is not canonical")
+        reports = (
+            self.mean_net_incremental_value,
+            self.sample_stddev,
+            self.lower_bound,
+        )
+        if self.status in {"PASS", "FAIL"}:
+            if self.decision_exact is None:
+                raise ValueError("terminal evaluation requires exact decision material")
+            if self.reporting_status == _REPORTING_AVAILABLE:
+                if any(value is None for value in reports):
+                    raise ValueError(
+                        "available reporting projection requires all report values"
+                    )
+            elif self.reporting_status == _REPORTING_UNAVAILABLE:
+                if any(value is not None for value in reports):
+                    raise ValueError(
+                        "unavailable reporting projection cannot carry report values"
+                    )
+            else:
+                raise ValueError(
+                    "terminal evaluation requires explicit reporting availability"
+                )
+        elif self.status == "INCONCLUSIVE":
+            if self.decision_exact is not None:
+                raise ValueError(
+                    "inconclusive evaluation cannot carry terminal exact decision"
+                )
+            if self.reporting_status != _REPORTING_NOT_APPLICABLE:
+                raise ValueError(
+                    "inconclusive evaluation reporting must be not applicable"
+                )
+        else:
+            raise ValueError("ablation evaluation status is not canonical")
 
 
 def _validate_pairs(target_component: str, pairs: Iterable[AblationPair]) -> list[AblationPair]:
@@ -636,18 +691,31 @@ def summarize_ablation(target_component: str, pairs: Iterable[AblationPair]) -> 
     selected = _validate_pairs(target_component, pairs)
     comparable = [pair for pair in selected if pair.utility_comparable]
 
-    utility_fractions = [_pair_utility_fraction(pair) for pair in comparable]
-    cost_fractions = [_pair_cost_fraction(pair) for pair in selected]
-    latency_fractions = [
-        _bounded(Fraction(pair.latency_delta_ms, 1))
-        for pair in selected
-    ]
-
-    mean_utility_fraction = _mean_fraction(utility_fractions)
-    mean_cost_fraction = _mean_fraction(cost_fractions) or Fraction(0, 1)
-    mean_latency_fraction = (
-        _mean_fraction(latency_fractions) or Fraction(0, 1)
-    )
+    mean_utility_report: Decimal | None = None
+    mean_cost_report: Decimal | None = None
+    mean_latency_report: Decimal | None = None
+    reporting_status = _REPORTING_AVAILABLE
+    try:
+        utility_fractions = [_pair_utility_fraction(pair) for pair in comparable]
+        cost_fractions = [_pair_cost_fraction(pair) for pair in selected]
+        latency_fractions = [
+            _bounded(Fraction(pair.latency_delta_ms, 1))
+            for pair in selected
+        ]
+        mean_utility_fraction = _mean_fraction(utility_fractions)
+        mean_cost_fraction = _mean_fraction(cost_fractions) or Fraction(0, 1)
+        mean_latency_fraction = (
+            _mean_fraction(latency_fractions) or Fraction(0, 1)
+        )
+        mean_utility_report = (
+            None
+            if mean_utility_fraction is None
+            else _report_fraction(mean_utility_fraction)
+        )
+        mean_cost_report = _report_fraction(mean_cost_fraction)
+        mean_latency_report = _report_fraction(mean_latency_fraction)
+    except (DecimalException, ExactDecimalError):
+        reporting_status = _REPORTING_UNAVAILABLE
 
     return AblationSummary(
         target_component=target_component,
@@ -660,14 +728,11 @@ def summarize_ablation(target_component: str, pairs: Iterable[AblationPair]) -> 
         ),
         full_deadline_misses=sum(not pair.full.met_deadline for pair in selected),
         ablated_deadline_misses=sum(not pair.ablated.met_deadline for pair in selected),
-        mean_utility_delta=(
-            None
-            if mean_utility_fraction is None
-            else _report_fraction(mean_utility_fraction)
-        ),
-        mean_cost_delta=_report_fraction(mean_cost_fraction),
-        mean_latency_delta_ms=_report_fraction(mean_latency_fraction),
-        status="DESCRIPTIVE_ONLY" if utility_fractions else "INCONCLUSIVE",
+        mean_utility_delta=mean_utility_report,
+        mean_cost_delta=mean_cost_report,
+        mean_latency_delta_ms=mean_latency_report,
+        status="DESCRIPTIVE_ONLY" if comparable else "INCONCLUSIVE",
+        reporting_status=reporting_status,
     )
 
 
@@ -742,14 +807,6 @@ def evaluate_incremental_value(
             required=required,
             multiplier=multiplier,
         )
-        mean_report = _report_fraction(decision.mean)
-        stddev_report = _report_sqrt(decision.sample_variance)
-        lower_report = _report_lower_bound(
-            decision.mean,
-            decision.sample_variance,
-            decision.uncertainty_multiplier,
-            decision.pair_count,
-        )
     except ExactDecimalError:
         return AblationEvaluation(
             target_component=target,
@@ -763,6 +820,25 @@ def evaluate_incremental_value(
             reason="exact_numeric_resource_envelope_exceeded",
         )
 
+    reporting_status = _REPORTING_AVAILABLE
+    mean_report: Decimal | None = None
+    stddev_report: Decimal | None = None
+    lower_report: Decimal | None = None
+    try:
+        mean_report = _report_fraction(decision.mean)
+        stddev_report = _report_sqrt(decision.sample_variance)
+        lower_report = _report_lower_bound(
+            decision.mean,
+            decision.sample_variance,
+            decision.uncertainty_multiplier,
+            decision.pair_count,
+        )
+    except (DecimalException, ExactDecimalError):
+        reporting_status = _REPORTING_UNAVAILABLE
+        mean_report = None
+        stddev_report = None
+        lower_report = None
+
     return AblationEvaluation(
         target_component=target,
         pair_count=len(concrete),
@@ -774,6 +850,7 @@ def evaluate_incremental_value(
         status=decision.status,
         reason="matched_causal_ablation_net_of_cost_exact_rational",
         decision_exact=decision,
+        reporting_status=reporting_status,
     )
 
 
@@ -903,6 +980,7 @@ class AblationEvidenceBundle:
             or policy.get("uncertainty_multiplier") != _canonical_decimal_text(multiplier)
             or policy.get("decision_rule") != _ABLATION_DECISION_RULE
             or policy.get("reporting_projection") != {
+                "failure_policy": _ABLATION_REPORT_FAILURE_POLICY,
                 "precision": _ABLATION_REPORT_PRECISION,
                 "quantum": _canonical_decimal_text(_ABLATION_REPORT_QUANTUM),
             }
@@ -990,6 +1068,7 @@ def _evaluation_payload(item: AblationEvaluation) -> dict[str, object]:
         ),
         "pair_count": item.pair_count,
         "reason": item.reason,
+        "reporting_status": item.reporting_status,
         "required_lower_bound": _canonical_decimal_text(item.required_lower_bound),
         "sample_stddev": _canonical_decimal_text(item.sample_stddev),
         "status": item.status,
@@ -1484,6 +1563,7 @@ def evaluate_qualified_incremental_value(
         status=base.status,
         reason="qualified_registered_canonical_ablation_net_of_cost",
         decision_exact=base.decision_exact,
+        reporting_status=base.reporting_status,
     )
 
 
@@ -1525,6 +1605,7 @@ def build_ablation_evidence_bundle(
             "decision_rule": _ABLATION_DECISION_RULE,
             "minimum_pairs": minimum_pairs,
             "reporting_projection": {
+                "failure_policy": _ABLATION_REPORT_FAILURE_POLICY,
                 "precision": _ABLATION_REPORT_PRECISION,
                 "quantum": _canonical_decimal_text(_ABLATION_REPORT_QUANTUM),
             },

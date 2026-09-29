@@ -900,6 +900,71 @@ class AblationTests(unittest.TestCase):
                 components=("base",),
             )
 
+    def test_reporting_overflow_does_not_suppress_exact_terminal_decision(self):
+        cases = [
+            pair("report-overflow-a", "0"),
+            pair("report-overflow-b", "1E255"),
+        ]
+        result = evaluate_incremental_value(
+            "agent",
+            cases,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+            uncertainty_multiplier=Decimal("1E255"),
+        )
+        self.assertEqual(result.status, "FAIL")
+        self.assertIsNotNone(result.decision_exact)
+        self.assertEqual(result.reporting_status, "UNAVAILABLE")
+        self.assertIsNone(result.mean_net_incremental_value)
+        self.assertIsNone(result.sample_stddev)
+        self.assertIsNone(result.lower_bound)
+
+        locked = build_ablation_evidence_bundle(
+            "agent",
+            cases,
+            source_revision="c" * 40,
+            protocol_digest=FINGERPRINT_C,
+            dataset_digest=FINGERPRINT_D,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+            uncertainty_multiplier=Decimal("1E255"),
+        )
+        decoded = json.loads(locked.payload)
+        self.assertEqual(decoded["evaluation"]["status"], "FAIL")
+        self.assertEqual(
+            decoded["evaluation"]["reporting_status"],
+            "UNAVAILABLE",
+        )
+        self.assertIsNone(decoded["evaluation"]["lower_bound"])
+        self.assertTrue(verify_ablation_evidence_bundle(locked, cases))
+
+    def test_descriptive_summary_reporting_overflow_is_explicit_not_exception(self):
+        huge_elapsed = 10 ** 400
+        matched = AblationPair(
+            "agent",
+            outcome(
+                case_id="summary-overflow",
+                variant="FULL",
+                utility="1",
+                cost="0",
+                elapsed=huge_elapsed,
+                components=("base", "agent"),
+            ),
+            outcome(
+                case_id="summary-overflow",
+                variant="ABLATED",
+                utility="0",
+                cost="0",
+                elapsed=1,
+                components=("base",),
+            ),
+        )
+        summary = summarize_ablation("agent", [matched])
+        self.assertEqual(summary.reporting_status, "UNAVAILABLE")
+        self.assertIsNone(summary.mean_utility_delta)
+        self.assertIsNone(summary.mean_cost_delta)
+        self.assertIsNone(summary.mean_latency_delta_ms)
+
     def test_locked_bundle_v2_contains_and_authenticates_exact_decision_material(self):
         cases = [
             pair("exact-lock-a", "0"),
@@ -925,6 +990,7 @@ class AblationTests(unittest.TestCase):
         self.assertEqual(
             policy["reporting_projection"],
             {
+                "failure_policy": "report-unavailable-preserve-exact-decision-v1",
                 "precision": 384,
                 "quantum": "0.00000000000000000000000000000000000000000000000001",
             },

@@ -257,6 +257,59 @@ class DurableReconciliationAuthorityTests(unittest.TestCase):
             self.assertTrue(restarted.provider_reconciled)
             self.assertEqual(restarted.state, HostState.READY)
 
+    def test_legacy_bybit_unknown_without_provider_domain_stays_opaque(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            first = RecoveryController(
+                owner_store=store,
+                owner_scope="PAPER:legacy-bybit-account",
+            )
+            owner_one = first.start("host-a")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="legacy-bybit-account",
+                owner_token=owner_one.owner_id,
+                owner_epoch=owner_one.epoch,
+            )
+
+            def transport(_client_id, _request, final_guard):
+                final_guard()
+                raise TimeoutError("provider outcome is ambiguous")
+
+            outcome = dispatcher.dispatch(
+                attempt_id="legacy-bybit-unknown",
+                intent_id="legacy-bybit-intent",
+                intent_hash="sha256:legacy",
+                provider="BYBIT",
+                request={"symbol": "BTCUSDT"},
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda _intent_hash, _now: (True, "allowed"),
+                transport_send=transport,
+                sender_check=lambda _owner, _epoch: None,
+                submission_scope={},
+            )
+            self.assertEqual(outcome.status, "UNKNOWN")
+
+            restarted = RecoveryController(
+                owner_store=JournalStore(path),
+                owner_scope="PAPER:legacy-bybit-account",
+            )
+            restarted.start("host-b")
+            opaque = [
+                item
+                for item in restarted.unresolved_attempts
+                if item.startswith("legacy_submission_domain:")
+            ]
+            self.assertEqual(len(opaque), 1)
+            self.assertIn(
+                "legacy_submission_provider_environment_unrecoverable",
+                restarted.reason_codes,
+            )
+            self.assertFalse(restarted.provider_reconciled)
+            self.assertEqual(restarted.state, HostState.RECOVERING)
+
     def test_mixed_domain_recovered_unknowns_are_resolved_all_or_nothing(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

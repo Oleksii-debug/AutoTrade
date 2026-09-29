@@ -16,10 +16,10 @@ from decimal import Decimal, InvalidOperation
 from typing import Mapping
 from uuid import UUID, NAMESPACE_URL, uuid5
 
-from research.autotrade_research.artifacts.store import (
+from research.autotrade_research.artifacts import (
     ArtifactIntegrityError,
     ArtifactStore,
-    read_trusted_authenticated_snapshot,
+    trusted_authenticated_reader,
 )
 from research.autotrade_research.io.strict_json import strict_json_loads
 
@@ -200,6 +200,11 @@ class DurableReservationBook:
                 "resolution_artifact_store must be the canonical ArtifactStore or None"
             )
         self.resolution_artifact_store = resolution_artifact_store
+        self._resolution_artifact_reader = (
+            None
+            if resolution_artifact_store is None
+            else trusted_authenticated_reader(resolution_artifact_store)
+        )
         self.scope_id = _journal_identity(
             self.environment,
             self.account_id,
@@ -754,15 +759,12 @@ class DurableReservationBook:
         artifact_id, digest, evidence = _immutable_evidence_ref(
             resolution_evidence
         )
-        if self.resolution_artifact_store is None:
+        if self._resolution_artifact_reader is None:
             raise ReservationConflict(
                 "terminal release requires the trusted resolution artifact store"
             )
         try:
-            manifest, raw = read_trusted_authenticated_snapshot(
-                self.resolution_artifact_store,
-                artifact_id,
-            )
+            manifest, raw = self._resolution_artifact_reader(artifact_id)
             manifest_hash = manifest.get("manifest_hash")
             if (
                 not isinstance(manifest_hash, str)

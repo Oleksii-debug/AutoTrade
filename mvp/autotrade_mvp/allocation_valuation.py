@@ -1,9 +1,9 @@
 """Exact valuation normalization for WP-32 portfolio proposals.
 
-This module is deliberately proposal-only.  It reuses the canonical FX
+This module is deliberately proposal-only. It reuses the canonical FX
 valuation semantics and the existing linear contract notional formula, and it
 fails closed for payoff families that require a richer canonical payoff
-boundary.  It never grants trading authority or sends provider commands.
+boundary. It never grants trading authority or sends provider commands.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Mapping
 
-from .exact_decimal import exact_abs, exact_sum
+from .exact_decimal import ExactDecimalError, exact_abs, exact_sum
 from .fx_valuation import FxQuote, FxValuationError, value_amount
 from .perpetuals import PerpetualError, linear_notional
 
@@ -53,6 +53,12 @@ def _positive(value, *, name: str, allow_zero: bool = False) -> Decimal:
             f"{name} must be {'non-negative' if allow_zero else 'positive'}"
         )
     return result
+
+
+def _positive_int(value, *, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise AllocationValuationError(f"{name} must be a positive integer")
+    return value
 
 
 def _text(value, *, name: str) -> str:
@@ -107,6 +113,38 @@ def _optional_decimal_equal(actual, expected, *, name: str) -> None:
         raise AllocationValuationError(f"{name} mismatch")
 
 
+def _validate_optional_rate_identity(
+    valuation: Mapping[str, object],
+    *,
+    symbol: str,
+    numerator: int,
+    denominator: int,
+    required: bool,
+) -> None:
+    raw_numerator = valuation.get("fx_rate_numerator")
+    raw_denominator = valuation.get("fx_rate_denominator")
+    if raw_numerator is None and raw_denominator is None:
+        if required:
+            raise AllocationValuationError(
+                f"{symbol} inverse FX valuation requires exact rate numerator/denominator"
+            )
+        return
+    if raw_numerator is None or raw_denominator is None:
+        raise AllocationValuationError(
+            f"{symbol} FX rate numerator/denominator must be supplied together"
+        )
+    if _positive_int(
+        raw_numerator,
+        name=f"{symbol} valuation fx_rate_numerator",
+    ) != numerator or _positive_int(
+        raw_denominator,
+        name=f"{symbol} valuation fx_rate_denominator",
+    ) != denominator:
+        raise AllocationValuationError(
+            f"{symbol} valuation exact FX rate identity mismatch"
+        )
+
+
 @dataclass(frozen=True)
 class AllocationValuation:
     """One candidate normalized into the portfolio base currency."""
@@ -120,7 +158,11 @@ class AllocationValuation:
     settlement_currency: str
     portfolio_base_currency: str
     unit_base_notional: Decimal
-    fx_rate: Decimal
+    fx_rate: Decimal | None
+    fx_rate_numerator: int
+    fx_rate_denominator: int
+    fx_rounding_policy_id: str | None
+    fx_rounding_quantum: Decimal | None
     fx_source_id: str
     fx_evidence_sha256: str | None
     payoff_identity: str
@@ -157,7 +199,7 @@ def normalize_allocation_valuation(
     """Validate and normalize one exact linear candidate into base currency.
 
     Inverse futures/perpetuals and options are deliberately rejected here until
-    their canonical nonlinear payoff evidence is supplied to WP-32.  They must
+    their canonical nonlinear payoff evidence is supplied to WP-32. They must
     never fall through to a linear quantity*price approximation.
     """
 
@@ -293,11 +335,21 @@ def normalize_allocation_valuation(
         valuation.get("fx_source_id"),
         name=f"{symbol_text} valuation fx_source_id",
     )
-    expected_fx_rate = _positive(
-        valuation.get("fx_rate"),
-        name=f"{symbol_text} valuation fx_rate",
+    raw_expected_fx_rate = valuation.get("fx_rate")
+    expected_fx_rate = (
+        None
+        if raw_expected_fx_rate is None
+        else _positive(
+            raw_expected_fx_rate,
+            name=f"{symbol_text} valuation fx_rate",
+        )
     )
     fx_evidence_sha256: str | None
+    fx_rounding_policy_id: str | None
+    fx_rounding_quantum: Decimal | None
+    rate_numerator: int
+    rate_denominator: int
+
     if quote_currency == base_currency:
         if fx_quote_payload not in (None, {}):
             raise AllocationValuationError(
@@ -307,9 +359,26 @@ def normalize_allocation_valuation(
             raise AllocationValuationError(
                 f"{symbol_text} identity FX conversion must use rate 1 and IDENTITY source"
             )
+        _validate_optional_rate_identity(
+            valuation,
+            symbol=symbol_text,
+            numerator=1,
+            denominator=1,
+            required=False,
+        )
+        if valuation.get("fx_rounding_policy_id") is not None or valuation.get(
+            "fx_rounding_quantum"
+        ) is not None:
+            raise AllocationValuationError(
+                f"{symbol_text} identity FX conversion must not carry rounding policy"
+            )
         fx_evidence_sha256 = None
         converted = source_unit_notional
         rate_used = Decimal("1")
+        rate_numerator = 1
+        rate_denominator = 1
+        fx_rounding_policy_id = None
+        fx_rounding_quantum = None
     else:
         quote_payload = _mapping(
             fx_quote_payload,
@@ -382,13 +451,30 @@ def normalize_allocation_valuation(
             raise AllocationValuationError(
                 f"{symbol_text} FX valuation is not allocatable: {fx_value.status}"
             )
-        if fx_value.rate_used is None or fx_value.source_id is None:
+        if (
+            fx_value.source_id is None
+            or fx_value.rate_numerator is None
+            or fx_value.rate_denominator is None
+        ):
             raise AllocationValuationError(
                 f"{symbol_text} FX valuation lacks exact conversion identity"
             )
         rate_used = fx_value.rate_used
-        converted = fx_value.converted_amount
-        if expected_fx_rate != rate_used:
+        rate_numerator = fx_value.rate_numerator
+        rate_denominator = fx_value.rate_denominator
+        _validate_optional_rate_identity(
+            valuation,
+            symbol=symbol_text,
+            numerator=rate_numerator,
+            denominator=rate_denominator,
+            required=rate_used is None,
+        )
+        if rate_used is None:
+            if expected_fx_rate is not None:
+                raise AllocationValuationError(
+                    f"{symbol_text} inverse FX valuation must not fabricate a Decimal fx_rate"
+                )
+        elif expected_fx_rate != rate_used:
             raise AllocationValuationError(
                 f"{symbol_text} valuation fx_rate does not match canonical FX conversion"
             )
@@ -403,8 +489,26 @@ def normalize_allocation_valuation(
             raise AllocationValuationError(
                 f"{symbol_text} valuation FX evidence digest mismatch"
             )
+        fx_rounding_policy_id = fx_value.rounding_policy_id
+        fx_rounding_quantum = fx_value.rounding_quantum
+        if valuation.get("fx_rounding_policy_id") != fx_rounding_policy_id:
+            if valuation.get("fx_rounding_policy_id") is not None or fx_rounding_policy_id is not None:
+                raise AllocationValuationError(
+                    f"{symbol_text} valuation FX rounding policy identity mismatch"
+                )
+        _optional_decimal_equal(
+            valuation.get("fx_rounding_quantum"),
+            fx_rounding_quantum,
+            name=f"{symbol_text} valuation fx_rounding_quantum",
+        )
+        converted = fx_value.converted_amount
 
-    unit_base_notional = exact_abs(converted)
+    try:
+        unit_base_notional = exact_abs(converted)
+    except ExactDecimalError as error:
+        raise AllocationValuationError(
+            f"{symbol_text} base notional exceeds the exact-decimal resource envelope"
+        ) from error
     if _positive(
         valuation.get("unit_base_notional"),
         name=f"{symbol_text} valuation unit_base_notional",
@@ -497,7 +601,12 @@ def normalize_allocation_valuation(
         )
         for key in _COST_COMPONENTS
     }
-    total_cost_rate = exact_sum(components.values())
+    try:
+        total_cost_rate = exact_sum(components.values())
+    except ExactDecimalError as error:
+        raise AllocationValuationError(
+            f"{symbol_text} cost aggregation exceeds the exact-decimal resource envelope"
+        ) from error
     if total_cost_rate != _positive(
         expected_cost_rate,
         name=f"{symbol_text} expected cost_rate",
@@ -522,6 +631,10 @@ def normalize_allocation_valuation(
         portfolio_base_currency=base_currency,
         unit_base_notional=unit_base_notional,
         fx_rate=rate_used,
+        fx_rate_numerator=rate_numerator,
+        fx_rate_denominator=rate_denominator,
+        fx_rounding_policy_id=fx_rounding_policy_id,
+        fx_rounding_quantum=fx_rounding_quantum,
         fx_source_id=fx_source_id,
         fx_evidence_sha256=fx_evidence_sha256,
         payoff_identity=payoff_identity,

@@ -31,7 +31,11 @@ from autotrade_numeric.exact_decimal import (
 from autotrade_research.artifacts import ArtifactStore, trusted_authenticated_reader
 from autotrade_research.io.strict_json import strict_json_loads
 from autotrade_research.memory.episodes import ExperienceMemory
-from autotrade_research.science.registry import ScientificRegistry
+from autotrade_research.science.registry import (
+    ProtocolViolation,
+    RegisteredAblationDecisionPolicy,
+    ScientificRegistry,
+)
 
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -508,6 +512,7 @@ class AblationEvaluation:
     qualification_population_digest: str | None = None
     qualification_trial_log_digest: str | None = None
     qualification_stopping_rule_digest: str | None = None
+    qualification_decision_policy_digest: str | None = None
 
     def __post_init__(self) -> None:
         if self.reporting_status not in {
@@ -553,6 +558,7 @@ class AblationEvaluation:
             self.qualification_population_digest,
             self.qualification_trial_log_digest,
             self.qualification_stopping_rule_digest,
+            self.qualification_decision_policy_digest,
         )
         if any(value is not None for value in qualification_digests):
             if any(value is None for value in qualification_digests):
@@ -563,6 +569,7 @@ class AblationEvaluation:
                 "qualification_population_digest",
                 "qualification_trial_log_digest",
                 "qualification_stopping_rule_digest",
+                "qualification_decision_policy_digest",
             ):
                 object.__setattr__(
                     self,
@@ -1109,6 +1116,7 @@ def _evaluation_payload(item: AblationEvaluation) -> dict[str, object]:
             item.mean_net_incremental_value
         ),
         "pair_count": item.pair_count,
+        "qualification_decision_policy_digest": item.qualification_decision_policy_digest,
         "qualification_population_digest": item.qualification_population_digest,
         "qualification_stopping_rule_digest": item.qualification_stopping_rule_digest,
         "qualification_trial_log_digest": item.qualification_trial_log_digest,
@@ -1351,6 +1359,19 @@ class AblationQualificationAuthority:
         self.task = task
         self.instrument_family = instrument_family
 
+    def registered_decision_policy(self) -> RegisteredAblationDecisionPolicy:
+        """Resolve the terminal decision rule from protocol-hash-bound registry state."""
+
+        policy = ScientificRegistry.ablation_decision_policy(
+            self.scientific_registry,
+            self.protocol_id,
+        )
+        if policy.protocol_hash != self.protocol_hash:
+            raise ValueError(
+                "registered ablation decision policy does not match qualification binding"
+            )
+        return policy
+
     def _load_outcome(
         self,
         reference: AblationOutcomeArtifactRef,
@@ -1456,7 +1477,10 @@ class AblationQualificationAuthority:
         outcome_refs: Iterable[AblationOutcomeArtifactRef],
     ) -> tuple[RegisteredAblationPopulation, tuple[CanonicalAblationOutcomeEvidence, ...]]:
         selected = tuple(pairs)
-        registration = self.scientific_registry.protocol_registration(self.protocol_id)
+        registration = ScientificRegistry.protocol_registration(
+            self.scientific_registry,
+            self.protocol_id,
+        )
         if registration.protocol_hash != self.protocol_hash:
             raise ValueError("registered protocol hash does not match qualification binding")
         try:
@@ -1473,7 +1497,10 @@ class AblationQualificationAuthority:
             instrument_family=self.instrument_family,
         )
         snapshot.verify_integrity()
-        completeness = self.scientific_registry.completeness(self.protocol_id)
+        completeness = ScientificRegistry.completeness(
+            self.scientific_registry,
+            self.protocol_id,
+        )
         population = RegisteredAblationPopulation(
             protocol_digest=self.protocol_hash,
             population_digest=snapshot.root_hash,
@@ -1558,7 +1585,15 @@ def evaluate_qualified_incremental_value(
     """
 
     selected_input = tuple(pairs)
+    target = (
+        target_component.strip()
+        if isinstance(target_component, str)
+        else target_component
+    )
+    selected = _validate_pairs(target, selected_input)
     trusted = authority is not None
+    registered_policy: RegisteredAblationDecisionPolicy | None = None
+
     if trusted:
         if type(authority) is not AblationQualificationAuthority:
             raise TypeError(
@@ -1568,12 +1603,44 @@ def evaluate_qualified_incremental_value(
             raise ValueError(
                 "authority-backed qualification does not accept caller-authored population/outcomes"
             )
+
+        # Terminal policy is selected before outcome artifacts are resolved.
+        # Caller-supplied thresholds remain diagnostic API compatibility only
+        # and have no authority in this branch.
+        try:
+            registered_policy = (
+                AblationQualificationAuthority.registered_decision_policy(
+                    authority
+                )
+            )
+            required = _decimal(
+                registered_policy.required_lower_bound,
+                "registered required_lower_bound",
+            )
+            multiplier = _decimal(
+                registered_policy.uncertainty_multiplier,
+                "registered uncertainty_multiplier",
+            )
+        except ProtocolViolation:
+            return _qualified_inconclusive(
+                target_component=target,
+                required_lower_bound=Decimal("0"),
+                uncertainty_multiplier=Decimal("0"),
+                reason="registered_ablation_decision_policy_unavailable",
+            )
+        if registered_policy.decision_rule != _ABLATION_DECISION_RULE:
+            return _qualified_inconclusive(
+                target_component=target,
+                required_lower_bound=required,
+                uncertainty_multiplier=multiplier,
+                reason="registered_ablation_decision_rule_unsupported",
+            )
+        minimum_pairs = registered_policy.minimum_pairs
+
         # Do not grant terminal qualification through subclass virtual dispatch.
-        # Exact-instance internal dependency hardening remains a separate concern,
-        # but a caller-defined authority subclass cannot replace resolve().
         population, trusted_outcomes = AblationQualificationAuthority.resolve(
             authority,
-            selected_input,
+            selected,
             outcome_refs=tuple(outcome_refs),
         )
         canonical_outcomes = trusted_outcomes
@@ -1584,13 +1651,16 @@ def evaluate_qualified_incremental_value(
             raise TypeError(
                 "population must be RegisteredAblationPopulation for diagnostic evaluation"
             )
-
-    required = _decimal(required_lower_bound, "required_lower_bound")
-    multiplier = _decimal(uncertainty_multiplier, "uncertainty_multiplier")
-    if multiplier < 0:
-        raise ValueError("uncertainty_multiplier must be non-negative")
-    target = target_component.strip() if isinstance(target_component, str) else target_component
-    selected = _validate_pairs(target, selected_input)
+        if (
+            not isinstance(minimum_pairs, int)
+            or isinstance(minimum_pairs, bool)
+            or minimum_pairs < 2
+        ):
+            raise ValueError("minimum_pairs must be an integer >= 2")
+        required = _decimal(required_lower_bound, "required_lower_bound")
+        multiplier = _decimal(uncertainty_multiplier, "uncertainty_multiplier")
+        if multiplier < 0:
+            raise ValueError("uncertainty_multiplier must be non-negative")
 
     def inconclusive(reason: str) -> AblationEvaluation:
         return _qualified_inconclusive(
@@ -1701,6 +1771,9 @@ def evaluate_qualified_incremental_value(
         qualification_population_digest=population.population_digest,
         qualification_trial_log_digest=population.trial_log_digest,
         qualification_stopping_rule_digest=population.stopping_rule_digest,
+        qualification_decision_policy_digest=(
+            None if registered_policy is None else registered_policy.policy_digest
+        ),
     )
 
 

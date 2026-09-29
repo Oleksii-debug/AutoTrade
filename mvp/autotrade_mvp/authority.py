@@ -620,6 +620,66 @@ def _provider_domain(
         raise ValueError(f"{name} {error}") from error
 
 
+def _dispatch_provider_domain(
+    submission_scope: Mapping[str, Any] | None,
+    *,
+    account_id: str,
+    environment: str,
+) -> tuple[str | None, str | None]:
+    """Read provider-domain identity only from the canonical submission scope."""
+
+    if submission_scope is None:
+        return None, None
+    if not isinstance(submission_scope, Mapping):
+        raise ValueError("submission_scope must be a mapping")
+    try:
+        scope = json.loads(canonical_json(dict(submission_scope)))
+    except (TypeError, ValueError) as error:
+        raise ValueError("submission_scope must be canonical JSON") from error
+    raw_provider = scope.get("provider_id")
+    alternate_provider = scope.get("provider")
+    if raw_provider is not None and alternate_provider is not None:
+        primary = _text(raw_provider, name="submission_scope provider_id").upper()
+        alternate = _text(
+            alternate_provider, name="submission_scope provider"
+        ).upper()
+        if primary != alternate:
+            raise ValueError("submission_scope provider identities disagree")
+        provider = primary
+    elif raw_provider is not None:
+        provider = _text(
+            raw_provider, name="submission_scope provider_id"
+        ).upper()
+    elif alternate_provider is not None:
+        provider = _text(
+            alternate_provider, name="submission_scope provider"
+        ).upper()
+    else:
+        if scope.get("provider_environment") is not None:
+            raise ValueError(
+                "submission_scope provider_environment requires provider identity"
+            )
+        return None, None
+
+    account = _text(account_id, name="account_id")
+    runtime_environment = _text(environment, name="environment").upper()
+    if scope.get("account_id") is not None and _text(
+        scope["account_id"], name="submission_scope account_id"
+    ) != account:
+        raise ValueError("submission_scope account_id mismatch")
+    if scope.get("environment") is not None and _text(
+        scope["environment"], name="submission_scope environment"
+    ).upper() != runtime_environment:
+        raise ValueError("submission_scope environment mismatch")
+    provider_environment = _provider_domain(
+        provider_id=provider,
+        environment=runtime_environment,
+        provider_environment=scope.get("provider_environment"),
+        name="submission_scope",
+    )
+    return provider, provider_environment
+
+
 @dataclass(frozen=True)
 class RiskAuthorityRequest:
     """Scope presented to the service-owned authoritative risk resolver.
@@ -3733,6 +3793,7 @@ class AuthorityService:
         action: str,
         now: str,
         capability_snapshot_id: str | None = None,
+        submission_scope: Mapping[str, Any] | None = None,
     ) -> tuple[bool, str]:
         record = self._admissions.get(_text(admission_id, name="admission_id"))
         if record is None:
@@ -3757,6 +3818,27 @@ class AuthorityService:
         )
         if scope != recorded_scope:
             return False, "admission_scope_changed"
+        try:
+            dispatch_provider, dispatch_provider_environment = (
+                _dispatch_provider_domain(
+                    submission_scope,
+                    account_id=scope[0],
+                    environment=scope[1],
+                )
+            )
+        except ValueError:
+            return False, "provider_domain_invalid"
+        if record.provider_id is not None or record.provider_environment is not None:
+            if (
+                dispatch_provider is None
+                or dispatch_provider_environment is None
+            ):
+                return False, "provider_domain_required"
+            if (
+                dispatch_provider != record.provider_id
+                or dispatch_provider_environment != record.provider_environment
+            ):
+                return False, "provider_domain_changed"
         if (
             self.is_new_exposure_blocked(record.account_id, record.environment)
             and not record.risk_reducing
@@ -3956,8 +4038,9 @@ class AuthorityService:
         instrument_version: int,
         action: str,
         capability_snapshot_id: str | None = None,
+        submission_scope: Mapping[str, Any] | None = None,
     ) -> Callable[[str, str], tuple[bool, str]]:
-        """Bind one admitted versioned scope to the dispatcher's final barrier."""
+        """Bind admitted scope and immutable submission domain to final send."""
         aid = _text(admission_id, name="admission_id")
         account = _text(account_id, name="account_id")
         env = _text(environment, name="environment").upper()
@@ -3968,6 +4051,27 @@ class AuthorityService:
             if capability_snapshot_id is None
             else _text(capability_snapshot_id, name="capability_snapshot_id")
         )
+        if submission_scope is None:
+            frozen_submission_scope = None
+        else:
+            if not isinstance(submission_scope, Mapping):
+                raise ValueError("submission_scope must be a mapping")
+            try:
+                canonical_submission_scope = json.loads(
+                    canonical_json(dict(submission_scope))
+                )
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    "submission_scope must be canonical JSON"
+                ) from error
+            _dispatch_provider_domain(
+                canonical_submission_scope,
+                account_id=account,
+                environment=env,
+            )
+            frozen_submission_scope = MappingProxyType(
+                canonical_submission_scope
+            )
 
         def check(intent_hash: str, now: str) -> tuple[bool, str]:
             return self.dispatch_allowed(
@@ -3980,6 +4084,7 @@ class AuthorityService:
                 action=normalized_action,
                 now=now,
                 capability_snapshot_id=capability,
+                submission_scope=frozen_submission_scope,
             )
 
         return check

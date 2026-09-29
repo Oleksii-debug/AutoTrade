@@ -197,6 +197,12 @@ def _dispatch(authority, record, *, now=NOW):
         action=record.action,
         now=now,
         capability_snapshot_id=record.capability_snapshot_id,
+        submission_scope={
+            "provider": record.provider_id,
+            "account_id": record.account_id,
+            "environment": record.environment,
+            "provider_environment": record.provider_environment,
+        },
     )
 
 
@@ -365,6 +371,65 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
             self.assertEqual(replay.provider_id, "BYBIT")
             self.assertEqual(replay.provider_environment, "TESTNET")
             self.assertEqual(replay, record)
+
+            testnet_scope = {
+                "provider": "BYBIT",
+                "account_id": ACCOUNT_ID,
+                "environment": ENVIRONMENT,
+                "provider_environment": "TESTNET",
+            }
+            testnet_guard = authority.dispatch_guard(
+                record.admission_id,
+                account_id=record.account_id,
+                environment=record.environment,
+                instrument_id=record.instrument_version.instrument_id,
+                instrument_version=record.instrument_version.version,
+                action=record.action,
+                capability_snapshot_id=record.capability_snapshot_id,
+                submission_scope=testnet_scope,
+            )
+            self.assertEqual(
+                testnet_guard(record.intent_hash, NOW),
+                (True, "allowed"),
+            )
+            testnet_scope["provider_environment"] = "DEMO"
+            self.assertEqual(
+                testnet_guard(record.intent_hash, NOW),
+                (True, "allowed"),
+            )
+            demo_guard = authority.dispatch_guard(
+                record.admission_id,
+                account_id=record.account_id,
+                environment=record.environment,
+                instrument_id=record.instrument_version.instrument_id,
+                instrument_version=record.instrument_version.version,
+                action=record.action,
+                capability_snapshot_id=record.capability_snapshot_id,
+                submission_scope={
+                    "provider": "BYBIT",
+                    "account_id": ACCOUNT_ID,
+                    "environment": ENVIRONMENT,
+                    "provider_environment": "DEMO",
+                },
+            )
+            self.assertEqual(
+                demo_guard(record.intent_hash, NOW),
+                (False, "provider_domain_changed"),
+            )
+            self.assertEqual(
+                authority.dispatch_allowed(
+                    record.admission_id,
+                    intent_hash=record.intent_hash,
+                    account_id=record.account_id,
+                    environment=record.environment,
+                    instrument_id=record.instrument_version.instrument_id,
+                    instrument_version=record.instrument_version.version,
+                    action=record.action,
+                    now=NOW,
+                    capability_snapshot_id=record.capability_snapshot_id,
+                ),
+                (False, "provider_domain_required"),
+            )
 
             with self.assertRaisesRegex(
                 AuthorityConflict,

@@ -193,18 +193,18 @@ class QualificationAttestationTests(unittest.TestCase):
             store = ArtifactStore(directory)
             publish(store)
             calls = []
-            canonical_read = ArtifactStore.read_authenticated_snapshot
+            read_snapshot = (
+                qualification_attestation_module.trusted_authenticated_reader(
+                    Path(directory),
+                    publication_store=store,
+                )
+            )
 
-            def counted_read(instance, artifact_id):
+            def counted_read(artifact_id):
                 calls.append(artifact_id)
-                return canonical_read(instance, artifact_id)
+                return read_snapshot(artifact_id)
 
             with (
-                patch.object(
-                    ArtifactStore,
-                    "read_authenticated_snapshot",
-                    new=counted_read,
-                ),
                 patch.object(
                     ArtifactStore,
                     "load_manifest",
@@ -216,14 +216,8 @@ class QualificationAttestationTests(unittest.TestCase):
                     side_effect=AssertionError("legacy byte lookup used"),
                 ),
             ):
-                read_snapshot = (
-                    qualification_attestation_module.trusted_authenticated_reader(
-                        Path(directory),
-                        publication_store=store,
-                    )
-                )
                 qualification_attestation_module._resolve_evidence(
-                    read_snapshot,
+                    counted_read,
                     ref,
                 )
 

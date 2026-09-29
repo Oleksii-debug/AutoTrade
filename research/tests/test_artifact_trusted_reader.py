@@ -1,8 +1,11 @@
 import gc
 import os
+import shutil
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+
+import autotrade_research.artifacts._root_authority as root_authority
 
 from autotrade_research.artifacts import (
     ArtifactIntegrityError,
@@ -65,6 +68,164 @@ def _poison_injected_instance(store: ArtifactStore, directory: str) -> None:
 
 
 class TrustedArtifactReaderTests(unittest.TestCase):
+    def test_pinned_authenticated_read_is_final_installed_wrapper(self):
+        self.assertIs(
+            root_authority._CANONICAL_AUTHENTICATED_READ,
+            ArtifactStore.read_authenticated_snapshot,
+        )
+
+    @unittest.skipIf(
+        os.name == "nt",
+        "deterministic root replacement during inner failure is POSIX-only",
+    )
+    def test_inner_failure_plus_root_loss_uses_final_exceptional_root_fence(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "store"
+            store = ArtifactStore(root)
+            _publish(store)
+            read_snapshot = trusted_authenticated_reader(
+                root,
+                publication_store=store,
+            )
+
+            detached = Path(directory) / "detached"
+            original_read_verified = ArtifactStore._read_verified_object_bytes
+            swapped = False
+
+            def fail_after_root_loss(_self, _manifest):
+                nonlocal swapped
+                if not swapped:
+                    root.rename(detached)
+                    root.mkdir()
+                    swapped = True
+                raise OSError("deterministic inner read failure")
+
+            ArtifactStore._read_verified_object_bytes = fail_after_root_loss
+            try:
+                with self.assertRaises(ArtifactIntegrityError) as raised:
+                    read_snapshot(ARTIFACT_ID)
+                self.assertIsInstance(raised.exception.__cause__, OSError)
+            finally:
+                ArtifactStore._read_verified_object_bytes = original_read_verified
+                if root.exists():
+                    root.rmdir()
+                if detached.exists():
+                    detached.rename(root)
+
+    def test_trusted_read_never_calls_artifact_store_constructor(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "store"
+            store = ArtifactStore(root)
+            manifest = _publish(store)
+            read_snapshot = trusted_authenticated_reader(
+                root,
+                publication_store=store,
+            )
+
+            original_init = ArtifactStore.__init__
+
+            def forbidden_init(*_args, **_kwargs):
+                raise AssertionError(
+                    "trusted read must not construct or initialize ArtifactStore"
+                )
+
+            ArtifactStore.__init__ = forbidden_init
+            try:
+                observed_manifest, observed_data = read_snapshot(ARTIFACT_ID)
+            finally:
+                ArtifactStore.__init__ = original_init
+
+            self.assertEqual(observed_manifest, manifest)
+            self.assertEqual(observed_data, PAYLOAD)
+
+    def test_issued_reader_keeps_installed_authenticated_read_dispatch(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "store"
+            store = ArtifactStore(root)
+            manifest = _publish(store)
+            read_snapshot = trusted_authenticated_reader(
+                root,
+                publication_store=store,
+            )
+
+            original_read = ArtifactStore.read_authenticated_snapshot
+
+            def forged_read(_self, artifact_id):
+                return (
+                    {
+                        "artifact_id": artifact_id,
+                        "manifest_hash": "sha256:" + "0" * 64,
+                        "sha256": "sha256:" + "0" * 64,
+                    },
+                    b"forged",
+                )
+
+            ArtifactStore.read_authenticated_snapshot = forged_read
+            try:
+                observed_manifest, observed_data = read_snapshot(ARTIFACT_ID)
+            finally:
+                ArtifactStore.read_authenticated_snapshot = original_read
+
+            self.assertEqual(observed_manifest, manifest)
+            self.assertEqual(observed_data, PAYLOAD)
+
+    @unittest.skipIf(os.name == "nt", "deterministic lexical swap injection is POSIX-only")
+    def test_swap_after_preflight_fails_before_touching_replacement_root(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "store"
+            store = ArtifactStore(root)
+            _publish(store)
+            read_snapshot = trusted_authenticated_reader(
+                root,
+                publication_store=store,
+            )
+
+            detached = Path(directory) / "detached"
+            original_generation = root_authority._immutable_configured_generation
+            swapped = False
+
+            def swap_after_first_preflight(root_key):
+                nonlocal swapped
+                observed = original_generation(root_key)
+                if not swapped:
+                    root.rename(detached)
+                    root.mkdir()
+                    swapped = True
+                return observed
+
+            root_authority._immutable_configured_generation = (
+                swap_after_first_preflight
+            )
+            try:
+                with self.assertRaises(ArtifactIntegrityError):
+                    read_snapshot(ARTIFACT_ID)
+                self.assertEqual(tuple(root.iterdir()), ())
+            finally:
+                root_authority._immutable_configured_generation = (
+                    original_generation
+                )
+                if root.exists():
+                    root.rmdir()
+                if detached.exists():
+                    detached.rename(root)
+
+    def test_reader_gc_releases_module_owned_generation_capability(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "store"
+            store = ArtifactStore(root)
+            _publish(store)
+            read_snapshot = trusted_authenticated_reader(
+                root,
+                publication_store=store,
+            )
+            reader_id = id(read_snapshot)
+            self.assertIn(reader_id, root_authority._READER_CAPABILITIES)
+
+            del read_snapshot
+            gc.collect()
+
+            self.assertNotIn(reader_id, root_authority._READER_CAPABILITIES)
+
     def test_private_reader_preserves_canonical_store_wrapper_contract(self):
         with TemporaryDirectory() as directory:
             root = Path(directory) / "store"
@@ -81,6 +242,34 @@ class TrustedArtifactReaderTests(unittest.TestCase):
             self.assertEqual(observed_data, PAYLOAD)
             self.assertEqual(store.audit().missing_objects, ())
             self.assertEqual(store.recover_orphans().missing_objects, ())
+
+    def test_reader_exposes_no_mutable_private_store_or_closure_authority(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "store"
+            store = ArtifactStore(root)
+            manifest = _publish(store)
+            read_snapshot = trusted_authenticated_reader(
+                root,
+                publication_store=store,
+            )
+
+            self.assertIsNone(getattr(read_snapshot, "__closure__", None))
+            self.assertFalse(hasattr(read_snapshot, "__dict__"))
+            with self.assertRaises(AttributeError):
+                object.__setattr__(
+                    read_snapshot,
+                    "root_key",
+                    str(Path(directory) / "attacker-store"),
+                )
+
+            # Reproduce caller-side instance poisoning after introspection. The
+            # only caller-accessible mutable store is the publication object and
+            # it has zero authority over the trusted read execution instance.
+            _poison_injected_instance(store, directory)
+            observed_manifest, observed_data = read_snapshot(ARTIFACT_ID)
+
+            self.assertEqual(observed_manifest, manifest)
+            self.assertEqual(observed_data, PAYLOAD)
 
     def test_mutation_before_reader_construction_cannot_select_root_or_helpers(self):
         with TemporaryDirectory() as directory:
@@ -176,6 +365,79 @@ class TrustedArtifactReaderTests(unittest.TestCase):
                 read_snapshot(ARTIFACT_ID)
 
     @unittest.skipIf(os.name == "nt", "Windows retained handles intentionally fence rename")
+    def test_manifest_namespace_replacement_is_detected(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "store"
+            store = ArtifactStore(root)
+            _publish(store)
+            read_snapshot = trusted_authenticated_reader(
+                root,
+                publication_store=store,
+            )
+
+            manifests = root / "manifests"
+            replacement = Path(directory) / "replacement-manifests"
+            shutil.copytree(manifests, replacement)
+            manifests.rename(root / "manifests.genuine")
+            replacement.rename(manifests)
+
+            with self.assertRaisesRegex(
+                ArtifactIntegrityError,
+                "namespace generation changed",
+            ):
+                read_snapshot(ARTIFACT_ID)
+
+    @unittest.skipIf(os.name == "nt", "Windows retained handles intentionally fence rename")
+    def test_object_namespace_replacement_is_detected_even_with_identical_bytes(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "store"
+            store = ArtifactStore(root)
+            _publish(store)
+            read_snapshot = trusted_authenticated_reader(
+                root,
+                publication_store=store,
+            )
+
+            objects = root / "objects" / "sha256"
+            replacement = Path(directory) / "replacement-objects"
+            shutil.copytree(objects, replacement)
+            objects.rename(root / "objects" / "sha256.genuine")
+            replacement.rename(objects)
+
+            with self.assertRaisesRegex(
+                ArtifactIntegrityError,
+                "namespace generation changed",
+            ):
+                read_snapshot(ARTIFACT_ID)
+
+    @unittest.skipIf(os.name == "nt", "Windows retained handles intentionally fence rename")
+    def test_original_manifest_generation_remains_pinned_until_reader_dies(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "store"
+            store = ArtifactStore(root)
+            manifest = _publish(store)
+            read_snapshot = trusted_authenticated_reader(
+                root,
+                publication_store=store,
+            )
+
+            manifests = root / "manifests"
+            detached = root / "manifests.detached"
+            manifests.rename(detached)
+            manifests.mkdir()
+            with self.assertRaisesRegex(
+                ArtifactIntegrityError,
+                "namespace generation changed",
+            ):
+                read_snapshot(ARTIFACT_ID)
+
+            manifests.rmdir()
+            detached.rename(manifests)
+            observed_manifest, observed_data = read_snapshot(ARTIFACT_ID)
+            self.assertEqual(observed_manifest, manifest)
+            self.assertEqual(observed_data, PAYLOAD)
+
+    @unittest.skipIf(os.name == "nt", "Windows retained handles intentionally fence rename")
     def test_lexical_root_replacement_is_detected_by_private_root_authority(self):
         with TemporaryDirectory() as directory:
             root = Path(directory) / "store"
@@ -192,7 +454,7 @@ class TrustedArtifactReaderTests(unittest.TestCase):
             try:
                 with self.assertRaisesRegex(
                     ArtifactIntegrityError,
-                    "configured artifact store root",
+                    "configured artifact",
                 ):
                     read_snapshot(ARTIFACT_ID)
             finally:

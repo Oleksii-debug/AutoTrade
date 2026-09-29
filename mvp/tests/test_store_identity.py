@@ -8,6 +8,7 @@ from pathlib import Path
 
 from autotrade_mvp.store_identity import (
     connection_main_identity,
+    establish_database_anchor,
     freeze_database_path,
     observe_database_identity,
     require_database_identity,
@@ -46,6 +47,21 @@ class StoreIdentityTests(unittest.TestCase):
                 observe_database_identity(target),
             )
 
+    def test_initial_anchor_atomically_creates_and_binds_new_store_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite"
+            self.assertFalse(path.exists())
+
+            anchor = establish_database_anchor(path)
+
+            self.assertTrue(path.exists())
+            self.assertEqual(anchor, observe_database_identity(path))
+            self.assertEqual(anchor.canonical_path, str(path.resolve()))
+            self.assertEqual(path.stat().st_nlink, 1)
+
+            # Re-observing an already established path must return the same authority.
+            self.assertEqual(establish_database_anchor(path), anchor)
+
     def test_hard_link_aliases_fail_closed_until_ambiguity_is_removed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -61,6 +77,8 @@ class StoreIdentityTests(unittest.TestCase):
                 observe_database_identity(original)
             with self.assertRaisesRegex(RuntimeError, "exactly one hard-link"):
                 observe_database_identity(alias)
+            with self.assertRaisesRegex(RuntimeError, "exactly one hard-link"):
+                establish_database_anchor(original)
 
             alias.unlink()
             identity = observe_database_identity(original)

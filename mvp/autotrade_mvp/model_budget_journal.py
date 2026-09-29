@@ -644,11 +644,56 @@ class DurableModelBudget:
 
     def release(self, request_id: str) -> bool:
         request_id = _text(request_id, name="request_id")
+        request = {"request_id": request_id}
+        idempotency_key = _idempotency_key(
+            budget_id=self.budget_id,
+            action="release",
+            identity=request_id,
+        )
+        existing = self.journal.get_event(
+            _event_id(self.budget_id, idempotency_key)
+        )
+        if existing is not None:
+            payload = existing.get("payload")
+            if (
+                existing.get("event_type") != "ModelCostReleased"
+                or existing.get("aggregate_type") != _AGGREGATE_TYPE
+                or existing.get("aggregate_id") != self.budget_id
+                or not isinstance(payload, dict)
+                or payload.get("request_id") != request_id
+            ):
+                raise ValueError(
+                    "model budget release identity conflicts with durable event"
+                )
+            released_text = payload.get("released")
+            try:
+                released = Decimal(released_text)
+            except (ValueError, TypeError) as error:
+                raise ValueError(
+                    "durable model budget release evidence is inconsistent"
+                ) from error
+            if (
+                not released.is_finite()
+                or released <= 0
+                or str(released) != released_text
+            ):
+                raise ValueError(
+                    "durable model budget release evidence is inconsistent"
+                )
+            return self._commit(
+                action="release",
+                identity=request_id,
+                request=request,
+                event_type="ModelCostReleased",
+                payload=payload,
+                result={"released": released_text},
+                validate=lambda _ledger: None,
+            )
+
         ledger = self._replay()
         released = ledger.release(request_id)
         if released == 0:
             return False
-        request = {"request_id": request_id}
 
         def validate(candidate: BudgetLedger) -> None:
             candidate_released = candidate.release(request_id)

@@ -19,6 +19,52 @@ from .allocation_valuation import (
     AllocationValuationError,
     normalize_allocation_valuation,
 )
+from .exact_decimal import (
+    ExactDecimalError,
+    exact_abs as _shared_exact_abs,
+    exact_add as _shared_exact_add,
+    exact_multiply as _shared_exact_multiply,
+    exact_subtract as _shared_exact_subtract,
+    exact_sum as _shared_exact_sum,
+)
+
+
+_EXACT_ARITHMETIC_ERROR = "allocation exact arithmetic exceeds resource envelope"
+
+
+def _exact_abs(value: Decimal) -> Decimal:
+    try:
+        return _shared_exact_abs(value)
+    except ExactDecimalError as error:
+        raise ValueError(_EXACT_ARITHMETIC_ERROR) from error
+
+
+def _exact_add(left: Decimal, right: Decimal) -> Decimal:
+    try:
+        return _shared_exact_add(left, right)
+    except ExactDecimalError as error:
+        raise ValueError(_EXACT_ARITHMETIC_ERROR) from error
+
+
+def _exact_subtract(left: Decimal, right: Decimal) -> Decimal:
+    try:
+        return _shared_exact_subtract(left, right)
+    except ExactDecimalError as error:
+        raise ValueError(_EXACT_ARITHMETIC_ERROR) from error
+
+
+def _exact_multiply(*values: Decimal) -> Decimal:
+    try:
+        return _shared_exact_multiply(*values)
+    except ExactDecimalError as error:
+        raise ValueError(_EXACT_ARITHMETIC_ERROR) from error
+
+
+def _exact_sum(values) -> Decimal:
+    try:
+        return _shared_exact_sum(values)
+    except ExactDecimalError as error:
+        raise ValueError(_EXACT_ARITHMETIC_ERROR) from error
 
 
 def _decimal(value, *, name: str) -> Decimal:
@@ -623,7 +669,10 @@ def _evaluate(
     capital_required = Decimal("0")
 
     for candidate in candidates:
-        current_notional = candidate.current_quantity * candidate.price
+        current_notional = _exact_multiply(
+            candidate.current_quantity,
+            candidate.price,
+        )
         # Exact ratios avoid losing a lot at recurring transition scales (e.g.
         # 1/3) or when subtracting a small delta from a large current holding.
         raw_delta_notional = (
@@ -642,10 +691,14 @@ def _evaluate(
         # increment is executable and cannot overshoot a liquidity cap after
         # target rounding.
         lot_notional = Fraction(candidate.price) * Fraction(candidate.lot_size)
-        delta_quantity = (
-            Decimal(int(raw_delta_notional / lot_notional)) * candidate.lot_size
+        delta_quantity = _exact_multiply(
+            Decimal(int(raw_delta_notional / lot_notional)),
+            candidate.lot_size,
         )
-        executable_delta_notional = delta_quantity * candidate.price
+        executable_delta_notional = _exact_multiply(
+            delta_quantity,
+            candidate.price,
+        )
         if (
             executable_delta_notional != 0
             and abs(executable_delta_notional) < candidate.min_notional
@@ -653,31 +706,46 @@ def _evaluate(
             delta_quantity = Decimal("0")
             executable_delta_notional = Decimal("0")
 
-        quantity = candidate.current_quantity + delta_quantity
-        notional = current_notional + executable_delta_notional
-        turnover = abs(executable_delta_notional)
+        quantity = _exact_add(candidate.current_quantity, delta_quantity)
+        notional = _exact_add(current_notional, executable_delta_notional)
+        turnover = _exact_abs(executable_delta_notional)
         if candidate.turnover_cost_rate is None:
-            proportional_cost = abs(notional) * candidate.cost_rate
+            proportional_cost = _exact_multiply(
+                _exact_abs(notional),
+                candidate.cost_rate,
+            )
             cost = (
                 max(proportional_cost, candidate.fee_floor)
                 if notional != 0
                 else Decimal("0")
             )
         else:
-            holding_cost = abs(notional) * candidate.holding_cost_rate
+            holding_cost = _exact_multiply(
+                _exact_abs(notional),
+                candidate.holding_cost_rate,
+            )
             execution_cost = (
                 max(
-                    turnover * candidate.turnover_cost_rate,
+                    _exact_multiply(
+                        turnover,
+                        candidate.turnover_cost_rate,
+                    ),
                     candidate.fee_floor,
                 )
                 if turnover != 0
                 else Decimal("0")
             )
-            cost = holding_cost + execution_cost
+            cost = _exact_add(holding_cost, execution_cost)
         notionals[candidate.symbol] = notional
-        total_cost += cost
-        total_turnover += turnover
-        capital_required += abs(notional) * candidate.capital_requirement_rate
+        total_cost = _exact_add(total_cost, cost)
+        total_turnover = _exact_add(total_turnover, turnover)
+        capital_required = _exact_add(
+            capital_required,
+            _exact_multiply(
+                _exact_abs(notional),
+                candidate.capital_requirement_rate,
+            ),
+        )
         targets.append(
             AllocationTarget(
                 symbol=candidate.symbol,
@@ -688,24 +756,24 @@ def _evaluate(
             )
         )
 
-    gross = sum((abs(value) for value in notionals.values()), Decimal("0"))
-    net = abs(sum(notionals.values(), Decimal("0")))
-    cash_required = capital_required + total_cost
+    gross = _exact_sum(_exact_abs(value) for value in notionals.values())
+    net = _exact_abs(_exact_sum(notionals.values()))
+    cash_required = _exact_add(capital_required, total_cost)
 
     worst_stress_loss = Decimal("0")
     for scenario in stress_scenarios.values():
-        pnl = sum(
-            (
-                notional * scenario[symbol]
-                for symbol, notional in notionals.items()
-                if notional != 0
-            ),
-            Decimal("0"),
+        pnl = _exact_sum(
+            _exact_multiply(notional, scenario[symbol])
+            for symbol, notional in notionals.items()
+            if notional != 0
         )
-        worst_stress_loss = max(worst_stress_loss, -pnl)
+        worst_stress_loss = max(
+            worst_stress_loss,
+            _exact_subtract(Decimal("0"), pnl),
+        )
 
     symbol_ok = all(
-        abs(value) <= policy.max_symbol_notional
+        _exact_abs(value) <= policy.max_symbol_notional
         for value in notionals.values()
     )
     turnover_ok = (
@@ -719,7 +787,8 @@ def _evaluate(
         and net <= policy.max_net_notional
         and total_cost <= policy.max_total_cost
         and worst_stress_loss <= policy.max_stress_loss
-        and cash_required + policy.minimum_cash_reserve <= policy.cash_available
+        and _exact_add(cash_required, policy.minimum_cash_reserve)
+        <= policy.cash_available
     )
 
     return AllocationResult(
@@ -764,7 +833,10 @@ def _cash_fallback(
     total_holding_cost = Decimal("0")
     capital_required = Decimal("0")
     for candidate in candidates:
-        notional = candidate.current_quantity * candidate.price
+        notional = _exact_multiply(
+            candidate.current_quantity,
+            candidate.price,
+        )
         if candidate.current_quantity == 0:
             holding_cost = Decimal("0")
         else:
@@ -772,9 +844,18 @@ def _cash_fallback(
                 raise ValueError(
                     "non-zero current position lacks explicit holding cost rate"
                 )
-            holding_cost = abs(notional) * candidate.holding_cost_rate
-        total_holding_cost += holding_cost
-        capital_required += abs(notional) * candidate.capital_requirement_rate
+            holding_cost = _exact_multiply(
+                _exact_abs(notional),
+                candidate.holding_cost_rate,
+            )
+        total_holding_cost = _exact_add(total_holding_cost, holding_cost)
+        capital_required = _exact_add(
+            capital_required,
+            _exact_multiply(
+                _exact_abs(notional),
+                candidate.capital_requirement_rate,
+            ),
+        )
         current_notionals.append(notional)
         targets.append(
             AllocationTarget(
@@ -802,7 +883,7 @@ def _cash_fallback(
     if stress_is_qualified and policy.require_adverse_stress_evidence:
         stress_is_qualified = all(
             any(
-                scenario[candidate.symbol] * notional < 0
+                _exact_multiply(scenario[candidate.symbol], notional) < 0
                 for scenario in scenarios
             )
             for candidate, notional in zip(candidates, current_notionals)
@@ -817,28 +898,27 @@ def _cash_fallback(
     else:
         worst_stress_loss = Decimal("0")
         for scenario in scenarios:
-            pnl = sum(
-                (
-                    notional * scenario[candidate.symbol]
-                    for candidate, notional in zip(candidates, current_notionals)
-                    if notional != 0
-                ),
-                Decimal("0"),
+            pnl = _exact_sum(
+                _exact_multiply(notional, scenario[candidate.symbol])
+                for candidate, notional in zip(candidates, current_notionals)
+                if notional != 0
             )
-            worst_stress_loss = max(worst_stress_loss, -pnl)
+            worst_stress_loss = max(
+                worst_stress_loss,
+                _exact_subtract(Decimal("0"), pnl),
+            )
 
     return AllocationResult(
         status="NO_INCREASE_FALLBACK",
         scale=Decimal("0"),
         targets=tuple(targets),
-        gross_notional=sum(
-            (abs(value) for value in current_notionals),
-            Decimal("0"),
+        gross_notional=_exact_sum(
+            _exact_abs(value) for value in current_notionals
         ),
-        net_notional=abs(sum(current_notionals, Decimal("0"))),
+        net_notional=_exact_abs(_exact_sum(current_notionals)),
         estimated_cost=total_holding_cost,
         worst_stress_loss=worst_stress_loss,
-        cash_required=capital_required + total_holding_cost,
+        cash_required=_exact_add(capital_required, total_holding_cost),
         turnover_notional=Decimal("0"),
         reason=reason,
     )
@@ -862,8 +942,10 @@ def _execution_state_scales(
     ranges: list[tuple[Fraction, Fraction, int, int]] = []
     count = 0
     for candidate in candidates:
-        current = candidate.current_quantity * candidate.price
-        change = abs(Fraction(candidate.desired_notional) - Fraction(current))
+        current = (
+            Fraction(candidate.current_quantity) * Fraction(candidate.price)
+        )
+        change = abs(Fraction(candidate.desired_notional) - current)
         if change == 0:
             continue
         lot = Fraction(candidate.price) * Fraction(candidate.lot_size)
@@ -980,7 +1062,10 @@ def allocate_targets(
             for candidate in candidates
             for notional in (
                 candidate.desired_notional,
-                candidate.current_quantity * candidate.price,
+                _exact_multiply(
+                    candidate.current_quantity,
+                    candidate.price,
+                ),
             )
             if notional != 0
         }
@@ -1014,7 +1099,10 @@ def allocate_targets(
 
     requested_change = any(
         candidate.desired_notional
-        != candidate.current_quantity * candidate.price
+        != _exact_multiply(
+            candidate.current_quantity,
+            candidate.price,
+        )
         for candidate in candidates
     )
     requested = _evaluate(candidates, policy, normalized_stress, Decimal("1"))
@@ -1105,15 +1193,22 @@ def _expected_net_utility(
             if aligned
             else -objective.objective_rate
         )
-        gross_objective += abs(target.notional) * directional_rate
+        gross_objective = _exact_add(
+            gross_objective,
+            _exact_multiply(_exact_abs(target.notional), directional_rate),
+        )
     if result.worst_stress_loss is None:
         raise ValueError(
             "objective utility requires qualified worst_stress_loss evidence"
         )
-    stress_penalty = (
-        result.worst_stress_loss * policy.stress_loss_penalty_rate
+    stress_penalty = _exact_multiply(
+        result.worst_stress_loss,
+        policy.stress_loss_penalty_rate,
     )
-    return gross_objective - result.estimated_cost - stress_penalty
+    return _exact_subtract(
+        _exact_subtract(gross_objective, result.estimated_cost),
+        stress_penalty,
+    )
 
 
 def allocate_objective_targets(
@@ -1255,7 +1350,10 @@ def allocate_objective_targets(
             else replace(
                 item.candidate,
                 desired_notional=(
-                    item.candidate.current_quantity * item.candidate.price
+                    _exact_multiply(
+                        item.candidate.current_quantity,
+                        item.candidate.price,
+                    )
                 ),
             )
             for item in candidates

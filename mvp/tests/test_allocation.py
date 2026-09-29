@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 import unittest
 
 from mvp.autotrade_mvp.allocation import (
@@ -1298,7 +1298,7 @@ class AllocationTests(unittest.TestCase):
             desired="1010",
             price="10",
             lot="1",
-            capital_requirement="0",
+            capital_requirement="0.001",
             fee_floor="5",
             current_quantity="100",
             turnover_cost_rate="0.001",
@@ -1390,8 +1390,8 @@ class AllocationTests(unittest.TestCase):
             )
 
         flat = reversal("100")
-        self.assertEqual(flat.allocation.status, "ALLOCATED")
-        self.assertEqual(flat.allocation.targets[0].notional, Decimal("0"))
+        self.assertEqual(flat.allocation.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(flat.allocation.targets[0].notional, Decimal("100"))
         self.assertEqual(flat.expected_net_utility, Decimal("0"))
         self.assertEqual(flat.selected_symbols, ())
 
@@ -1436,6 +1436,76 @@ class AllocationTests(unittest.TestCase):
         targets = {item.symbol: item.notional for item in result.allocation.targets}
         self.assertEqual(targets, {"AAA": Decimal("10"), "BBB": Decimal("10")})
 
+
+    def test_financial_authority_is_independent_of_ambient_decimal_context(self):
+        candidate = ObjectiveCandidate.create(
+            symbol="EXACT",
+            desired_notional="100000000000000000000.02",
+            price="1",
+            lot_size="0.01",
+            expected_return_rate="0.000000000000000001",
+            current_quantity="100000000000000000000.01",
+            turnover_cost_rate="0",
+            holding_cost_rate="0",
+            capital_requirement_rate="0.000000000000000001",
+        )
+        policy = self.policy(
+            cash_available="1000",
+            max_gross_notional="200000000000000000000",
+            max_net_notional="200000000000000000000",
+            max_symbol_notional="200000000000000000000",
+            max_total_cost="1000",
+            max_turnover_notional="1",
+        )
+
+        def snapshot():
+            result = allocate_objective_targets([candidate], policy)
+            target = result.allocation.targets[0]
+            return (
+                result.allocation.status,
+                target.quantity,
+                target.notional,
+                target.turnover_notional,
+                result.allocation.gross_notional,
+                result.allocation.net_notional,
+                result.allocation.estimated_cost,
+                result.allocation.cash_required,
+                result.selected_symbols,
+                result.expected_net_utility,
+            )
+
+        baseline = snapshot()
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    self.assertEqual(snapshot(), baseline)
+
+        self.assertEqual(baseline[0], "ALLOCATED")
+        self.assertEqual(baseline[2], Decimal("100000000000000000000.02"))
+        self.assertEqual(baseline[3], Decimal("0.01"))
+
+    def test_exact_arithmetic_resource_overflow_uses_allocation_error_contract(self):
+        candidate = self.candidate(
+            desired="1E+300",
+            price="1",
+            current_quantity="1E+300",
+            turnover_cost_rate="0",
+            holding_cost_rate="0",
+        )
+        policy = self.policy(
+            cash_available="1E+301",
+            max_gross_notional="1E+301",
+            max_net_notional="1E+301",
+            max_symbol_notional="1E+301",
+            max_total_cost="1E+301",
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "allocation exact arithmetic exceeds resource envelope",
+        ):
+            allocate_targets([candidate], policy)
 
     def test_allocation_policy_digest_binds_execution_search_budget(self):
         from mvp.autotrade_mvp.allocation import _allocation_policy_digest

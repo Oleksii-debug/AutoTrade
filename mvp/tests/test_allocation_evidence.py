@@ -555,8 +555,6 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
             revalidate_evidence_bound_allocation(
                 **common,
                 current_policy_version="risk-policy:13",
-                current_policy=self.policy(),
-                current_max_candidate_sets=64,
                 current_reconciliation_run_id="reconciliation:acct:1:v5",
                 current_reservation_state_digest="3" * 64,
             )
@@ -564,8 +562,6 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
             revalidate_evidence_bound_allocation(
                 **common,
                 current_policy_version="risk-policy:12",
-                current_policy=self.policy(),
-                current_max_candidate_sets=64,
                 current_reconciliation_run_id="reconciliation:acct:1:v6",
                 current_reservation_state_digest="3" * 64,
             )
@@ -573,8 +569,6 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
             revalidate_evidence_bound_allocation(
                 **common,
                 current_policy_version="risk-policy:12",
-                current_policy=self.policy(),
-                current_max_candidate_sets=64,
                 current_reconciliation_run_id="reconciliation:acct:1:v5",
                 current_reservation_state_digest="4" * 64,
             )

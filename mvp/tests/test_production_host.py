@@ -50,7 +50,7 @@ class ProductionHostConfigTests(unittest.TestCase):
 
     def test_canonical_runtime_identity_is_retained(self):
         with TemporaryDirectory() as directory:
-            path = Path(directory).resolve() / "journal.sqlite3"
+            path = Path(directory).resolve() / "state" / ".." / "journal.sqlite3"
             config = ProductionHostConfig(
                 journal_path=path,
                 account_id="paper-account",
@@ -60,7 +60,7 @@ class ProductionHostConfigTests(unittest.TestCase):
                 bind_port=8765,
                 public_origin="http://127.0.0.1:8765",
             )
-            self.assertEqual(config.journal_path, path)
+            self.assertEqual(config.journal_path, path.resolve(strict=False))
             self.assertEqual(config.account_id, "paper-account")
             self.assertEqual(config.environment, "PAPER")
             self.assertEqual(config.public_origin, "http://127.0.0.1:8765")
@@ -86,7 +86,7 @@ class ProductionHostCompositionTests(unittest.TestCase):
             snapshot_provider = Mock(name="snapshot_provider")
             journal = object()
             application = object()
-            server = object()
+            server = Mock()
 
             journal_factory = Mock(return_value=journal)
             application_factory = Mock(return_value=application)
@@ -112,42 +112,158 @@ class ProductionHostCompositionTests(unittest.TestCase):
                     snapshot_provider=snapshot_provider,
                 )
 
-            journal_factory.assert_called_once_with(config.journal_path)
-            application_factory.assert_called_once_with(
-                journal,
-                security_boundary=security,
+            try:
+                journal_factory.assert_called_once_with(config.journal_path)
+                application_factory.assert_called_once_with(
+                    journal,
+                    security_boundary=security,
+                    account_id="paper-account",
+                    environment="PAPER",
+                    host_id="host-a",
+                    public_origin="http://127.0.0.1:8765",
+                    principal_resolver=principal_resolver,
+                    snapshot_provider=snapshot_provider,
+                    now=None,
+                )
+                server_factory.assert_called_once_with(
+                    ("127.0.0.1", 8765),
+                    application,
+                    tls_context=None,
+                )
+                self.assertIs(runtime.journal, journal)
+                self.assertIs(runtime.application, application)
+                self.assertIs(runtime.server, server)
+            finally:
+                runtime.close()
+
+    def test_same_durable_instance_is_process_fenced_until_close(self):
+        class DummySecurityBoundary:
+            pass
+
+        with TemporaryDirectory() as directory:
+            config = ProductionHostConfig(
+                journal_path=Path(directory).resolve() / "journal.sqlite3",
                 account_id="paper-account",
                 environment="PAPER",
                 host_id="host-a",
+                bind_host="127.0.0.1",
+                bind_port=8765,
                 public_origin="http://127.0.0.1:8765",
-                principal_resolver=principal_resolver,
-                snapshot_provider=snapshot_provider,
-                now=None,
             )
-            server_factory.assert_called_once_with(
-                ("127.0.0.1", 8765),
-                application,
-                tls_context=None,
+            server_factory = Mock(side_effect=lambda *args, **kwargs: Mock())
+            with (
+                patch.object(production_host, "SecurityBoundary", DummySecurityBoundary),
+                patch.object(
+                    production_host,
+                    "AuthenticatedHostServer",
+                    server_factory,
+                ),
+            ):
+                first = build_production_host(
+                    config,
+                    security_boundary=DummySecurityBoundary(),
+                    principal_resolver=lambda headers, origin: None,
+                    snapshot_provider=lambda state, principal: {},
+                )
+                try:
+                    with self.assertRaisesRegex(RuntimeError, "already owned"):
+                        build_production_host(
+                            config,
+                            security_boundary=DummySecurityBoundary(),
+                            principal_resolver=lambda headers, origin: None,
+                            snapshot_provider=lambda state, principal: {},
+                        )
+                finally:
+                    first.close()
+
+                successor = build_production_host(
+                    config,
+                    security_boundary=DummySecurityBoundary(),
+                    principal_resolver=lambda headers, origin: None,
+                    snapshot_provider=lambda state, principal: {},
+                )
+                successor.close()
+
+    def test_construction_failure_releases_instance_fence(self):
+        class DummySecurityBoundary:
+            pass
+
+        with TemporaryDirectory() as directory:
+            config = ProductionHostConfig(
+                journal_path=Path(directory).resolve() / "journal.sqlite3",
+                account_id="paper-account",
+                environment="PAPER",
+                host_id="host-a",
+                bind_host="127.0.0.1",
+                bind_port=8765,
+                public_origin="http://127.0.0.1:8765",
             )
-            self.assertIs(runtime.journal, journal)
-            self.assertIs(runtime.application, application)
-            self.assertIs(runtime.server, server)
+            with (
+                patch.object(production_host, "SecurityBoundary", DummySecurityBoundary),
+                patch.object(
+                    production_host,
+                    "AuthenticatedHostServer",
+                    side_effect=OSError("listener failed"),
+                ),
+            ):
+                with self.assertRaisesRegex(OSError, "listener failed"):
+                    build_production_host(
+                        config,
+                        security_boundary=DummySecurityBoundary(),
+                        principal_resolver=lambda headers, origin: None,
+                        snapshot_provider=lambda state, principal: {},
+                    )
+
+            with (
+                patch.object(production_host, "SecurityBoundary", DummySecurityBoundary),
+                patch.object(
+                    production_host,
+                    "AuthenticatedHostServer",
+                    return_value=Mock(),
+                ),
+            ):
+                runtime = build_production_host(
+                    config,
+                    security_boundary=DummySecurityBoundary(),
+                    principal_resolver=lambda headers, origin: None,
+                    snapshot_provider=lambda state, principal: {},
+                )
+                runtime.close()
 
     def test_pre_serve_shutdown_is_idempotent_and_never_waits_for_serve_loop(self):
         server = Mock()
+        fence = Mock()
         runtime = ProductionHostRuntime(
             config=Mock(),
             journal=Mock(),
             application=Mock(),
             server=server,
+            instance_fence=fence,
         )
         runtime.close()
         runtime.close()
         server.shutdown.assert_not_called()
         server.server_close.assert_called_once_with()
+        fence.release.assert_called_once_with()
         self.assertTrue(runtime.closed)
         with self.assertRaisesRegex(RuntimeError, "runtime is closed"):
             runtime.serve_forever()
+
+    def test_fence_is_released_after_listener_close(self):
+        ordering = []
+        server = Mock()
+        fence = Mock()
+        server.server_close.side_effect = lambda: ordering.append("listener-closed")
+        fence.release.side_effect = lambda: ordering.append("fence-released")
+        runtime = ProductionHostRuntime(
+            config=Mock(),
+            journal=Mock(),
+            application=Mock(),
+            server=server,
+            instance_fence=fence,
+        )
+        runtime.close()
+        self.assertEqual(ordering, ["listener-closed", "fence-released"])
 
     def test_https_requires_tls_and_tls_requires_https(self):
         class DummySecurityBoundary:

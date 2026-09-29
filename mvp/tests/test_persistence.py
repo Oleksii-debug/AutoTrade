@@ -2703,7 +2703,7 @@ class JournalStoreTests(unittest.TestCase):
                     state_version=1,
                 )
 
-    def test_record_command_replay_rejects_changed_command_id(self):
+    def test_record_command_retry_allows_regenerated_command_id(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
             store = JournalStore(path)
@@ -2719,18 +2719,8 @@ class JournalStoreTests(unittest.TestCase):
                 state_version=0,
             )
             reopened = JournalStore(path)
-            with self.assertRaisesRegex(ValueError, "different command_id"):
-                reopened.record_command(
-                    command_id="cmd-forged-retry",
-                    actor="alice",
-                    environment="PAPER",
-                    idempotency_key="stable-key",
-                    request=request,
-                    result={"status": "MUST_NOT_REPLACE"},
-                    state_version=1,
-                )
             saved, inserted = reopened.record_command(
-                command_id="cmd-original",
+                command_id="cmd-regenerated-retry",
                 actor="alice",
                 environment="PAPER",
                 idempotency_key="stable-key",
@@ -2740,8 +2730,20 @@ class JournalStoreTests(unittest.TestCase):
             )
             self.assertFalse(inserted)
             self.assertEqual(saved, result)
+            with self.assertRaisesRegex(
+                ValueError, "command_id already exists with another idempotency key"
+            ):
+                reopened.record_command(
+                    command_id="cmd-original",
+                    actor="alice",
+                    environment="PAPER",
+                    idempotency_key="different-key",
+                    request=request,
+                    result=result,
+                    state_version=1,
+                )
 
-    def test_commit_command_replay_rejects_changed_command_id(self):
+    def test_commit_command_retry_allows_regenerated_command_id(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
             store = JournalStore(path)
@@ -2760,14 +2762,22 @@ class JournalStoreTests(unittest.TestCase):
             }
             store.commit_command(**args)
             reopened = JournalStore(path)
-            with self.assertRaisesRegex(ValueError, "different command_id"):
-                reopened.commit_command(
-                    **{**args, "command_id": "cmd-forged-retry"}
-                )
-            saved, inserted, appended = reopened.commit_command(**args)
+            saved, inserted, appended = reopened.commit_command(
+                **{**args, "command_id": "cmd-regenerated-retry"}
+            )
             self.assertFalse(inserted)
             self.assertEqual(saved, result)
             self.assertEqual(appended, ())
+            with self.assertRaisesRegex(
+                ValueError, "command_id already exists with another idempotency key"
+            ):
+                reopened.commit_command(
+                    **{
+                        **args,
+                        "idempotency_key": "different-key",
+                        "expected_journal_sequence": reopened.current_journal_sequence(),
+                    }
+                )
 
     def test_record_and_commit_command_effect_kinds_cannot_alias(self):
         with TemporaryDirectory() as directory:

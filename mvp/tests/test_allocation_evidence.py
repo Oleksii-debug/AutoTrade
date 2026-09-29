@@ -316,8 +316,14 @@ class EvidenceBoundAllocationTests(unittest.TestCase):
 
         valuation = resolved["valuation:aaa:v1"]
         valuation_payload = dict(valuation.payload)
+        quote_payload = dict(valuation_payload["fx_quote"])
+        quote_payload.update({
+            "bid": "1.2000000001",
+            "ask": "1.2000000001",
+        })
         valuation_payload.update({
             "fx_rate": "1.2000000001",
+            "fx_quote": quote_payload,
             "unit_base_notional": "12.000000001",
             "desired_notional_base": "120.00000001",
             "min_notional_base": "12.000000001",

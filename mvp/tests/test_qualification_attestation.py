@@ -1773,6 +1773,52 @@ class QualificationAttestationTests(unittest.TestCase):
                     expected_release_artifact_sha256=RELEASE_A_SHA,
                 )
 
+        signed_value = attestation(trust_root)
+        signed_receipt = SignedQualificationAttestation(
+            signed_value,
+            sign(signed_value),
+        )
+        object.__setattr__(
+            signed_value,
+            "package_id",
+            LyingText(signed_value.package_id),
+        )
+        trust_policy = policy(trust_root)
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            with self.assertRaisesRegex(
+                QualificationTrustError,
+                "package_id",
+            ):
+                verify(signed_receipt, store, trust_policy)
+
+            with (
+                patch(
+                    "mvp.autotrade_mvp.qualification_attestation."
+                    "load_canonical_qualification_trust_policy",
+                    return_value=trust_policy,
+                ),
+                self.assertRaisesRegex(
+                    QualificationTrustError,
+                    "package_id",
+                ),
+            ):
+                verify_canonical_qualification_attestation(
+                    signed_receipt,
+                    evidence_store=store,
+                    evidence_root=Path(directory),
+                    expected_source_sha=SOURCE,
+                    expected_domain="RELEASE",
+                    expected_gate="FREEZE",
+                    expected_package_id="WP-54",
+                    expected_protocol_id="release-freeze-v1",
+                    expected_protocol_version="1.0.0",
+                    expected_requirement_id="release-candidate-freeze",
+                    expected_release_artifact_id=RELEASE_A,
+                    expected_release_artifact_sha256=RELEASE_A_SHA,
+                )
+
     def test_evidence_reference_subclass_is_rejected_at_attestation_boundary(self):
         trust_root = root()
         original_ref = evidence_ref()

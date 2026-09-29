@@ -735,13 +735,6 @@ def assess_bounded_real_qualification(
         reasons.append("independent_evidence_trust_unavailable")
     else:
         required_scope = f"envelope/{envelope.envelope_digest}"
-        signed_requirements = frozenset(
-            qualification_receipt.attestation.requirement_ids
-        )
-        signed_refs = frozenset(
-            (ref.artifact_id, ref.sha256, ref.evidence_kind)
-            for ref in qualification_receipt.attestation.evidence_refs
-        )
         expected_refs = frozenset(
             (ref.artifact_id, ref.sha256, ref.evidence_kind)
             for _, ref in all_refs
@@ -769,9 +762,14 @@ def assess_bounded_real_qualification(
                 reasons.append("independent_evidence_attestation_failed")
             elif accepted.result != "PASS":
                 reasons.append("independent_evidence_attestation_inconclusive")
-            if required_scope not in signed_requirements:
+            accepted_requirements = frozenset(accepted.requirement_ids)
+            accepted_refs = frozenset(
+                (ref.artifact_id, ref.sha256, ref.evidence_kind)
+                for ref in accepted.evidence_refs
+            )
+            if required_scope not in accepted_requirements:
                 reasons.append("independent_evidence_scope_mismatch")
-            if signed_refs != expected_refs:
+            if accepted_refs != expected_refs:
                 reasons.append("independent_evidence_set_mismatch")
 
     if observations.observed_fill_count < 1:

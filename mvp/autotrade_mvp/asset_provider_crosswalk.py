@@ -326,18 +326,6 @@ def qualify_asset_provider_crosswalk(
             )
             for item in evidence_items
         }
-        observed_refs = {
-            (
-                ref.artifact_id,
-                ref.sha256,
-                ref.source_sha,
-                ref.media_type,
-                ref.evidence_kind,
-            )
-            for ref in qualification_receipt.attestation.evidence_refs
-        }
-        if observed_refs != expected_refs:
-            reasons.append("independent_evidence_set_mismatch")
         try:
             accepted = verify_canonical_qualification_attestation(
                 qualification_receipt,
@@ -358,6 +346,18 @@ def qualify_asset_provider_crosswalk(
                 reasons.append(
                     "independent_evidence_result_" + accepted.result.lower()
                 )
+            accepted_refs = {
+                (
+                    ref.artifact_id,
+                    ref.sha256,
+                    ref.source_sha,
+                    ref.media_type,
+                    ref.evidence_kind,
+                )
+                for ref in accepted.evidence_refs
+            }
+            if accepted_refs != expected_refs:
+                reasons.append("independent_evidence_set_mismatch")
 
     missing = tuple(sorted(expected_set - set(by_key)))
     invalid_keys = tuple(sorted(invalid))

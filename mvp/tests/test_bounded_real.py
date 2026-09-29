@@ -1,7 +1,10 @@
 import hashlib
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
+
+import mvp.autotrade_mvp.bounded_real as bounded_real_module
 
 from research.autotrade_research.artifacts.store import (
     ArtifactIntegrityError,
@@ -368,6 +371,56 @@ class BoundedRealQualificationTests(unittest.TestCase):
                 expected_policy_id=trust_policy.policy_id,
                 expected_policy_version=trust_policy.policy_version,
             )
+        self.assertFalse(result.complete)
+        self.assertIn(
+            "independent_evidence_set_mismatch",
+            result.reason_codes,
+        )
+
+    def test_terminal_coverage_uses_accepted_snapshot_after_receipt_rebound(self):
+        bounded = envelope()
+        prerequisite_items = prerequisites()
+        observed = observations()
+        refs = _all_refs(prerequisite_items, observed)
+        forged_receipt, trust_policy = _signed_bounded_receipt(bounded, refs)
+        legitimate_receipt, _ = _signed_bounded_receipt(bounded, refs[:-1])
+
+        rebound = SignedQualificationAttestation(
+            forged_receipt.attestation,
+            legitimate_receipt.signature,
+        )
+        real_verify = bounded_real_module.verify_qualification_attestation
+
+        def swap_then_verify(receipt, **kwargs):
+            object.__setattr__(
+                receipt,
+                "attestation",
+                legitimate_receipt.attestation,
+            )
+            return real_verify(receipt, **kwargs)
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            _populate_bundle(store, prerequisite_items, observed)
+            with patch.object(
+                bounded_real_module,
+                "verify_qualification_attestation",
+                side_effect=swap_then_verify,
+            ):
+                result = assess_bounded_real_qualification(
+                    envelope=bounded,
+                    prerequisite_evidence=prerequisite_items,
+                    observations=observed,
+                    evidence_verifier=artifact_store_evidence_verifier(
+                        store,
+                        evidence_root=directory,
+                    ),
+                    qualification_receipt=rebound,
+                    qualification_policy=trust_policy,
+                    expected_policy_id=trust_policy.policy_id,
+                    expected_policy_version=trust_policy.policy_version,
+                )
+
         self.assertFalse(result.complete)
         self.assertIn(
             "independent_evidence_set_mismatch",

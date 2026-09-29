@@ -67,7 +67,6 @@ _QUALIFICATION_PROTOCOL = "release-freeze-v1"
 _QUALIFICATION_PROTOCOL_VERSION = "1.0.0"
 _QUALIFICATION_REQUIREMENT = "release-candidate-freeze"
 _QUALIFICATION_SUBJECT_REQUIREMENT_PREFIX = "release-candidate-subject-sha256:"
-_FROZEN_DECISION_TOKEN = object()
 
 
 def _text(value: str, *, name: str) -> str:
@@ -383,9 +382,14 @@ class ReleaseCandidateDecision:
     qualification_attestation_digest: str | None = None
     qualification_policy_id: str | None = None
     qualification_trust_root_id: str | None = None
-    _freeze_token: InitVar[object | None] = None
+    _verification_store: InitVar[ArtifactStore | None] = None
+    _verification_root: InitVar[str | Path | None] = None
 
-    def __post_init__(self, _freeze_token: object | None) -> None:
+    def __post_init__(
+        self,
+        _verification_store: ArtifactStore | None,
+        _verification_root: str | Path | None,
+    ) -> None:
         if self.status not in {"FROZEN", "BLOCKED"}:
             raise ReleaseCandidateError("unsupported release-candidate status")
         if not isinstance(self.reasons, tuple) or any(
@@ -602,9 +606,62 @@ class ReleaseCandidateDecision:
                     "frozen release candidate qualification receipt "
                     "does not cover exact artifact set"
                 )
-            if _freeze_token is not _FROZEN_DECISION_TOKEN:
+            if (
+                type(_verification_store) is not ArtifactStore
+                or _verification_root is None
+            ):
                 raise ReleaseCandidateError(
-                    "frozen release candidate requires verified factory authority"
+                    "frozen release candidate requires canonical qualification "
+                    "verification context"
+                )
+            windows_package = next(
+                item
+                for item in reconstructed_candidate.artifacts
+                if item.role == "WINDOWS_PACKAGE"
+            )
+            try:
+                accepted = verify_canonical_qualification_attestation(
+                    receipt,
+                    evidence_store=_verification_store,
+                    evidence_root=_verification_root,
+                    expected_source_sha=manifest_source_sha,
+                    expected_domain=_QUALIFICATION_DOMAIN,
+                    expected_gate=_QUALIFICATION_GATE,
+                    expected_package_id=_QUALIFICATION_PACKAGE,
+                    expected_protocol_id=_QUALIFICATION_PROTOCOL,
+                    expected_protocol_version=_QUALIFICATION_PROTOCOL_VERSION,
+                    expected_requirement_id=_QUALIFICATION_REQUIREMENT,
+                    expected_release_artifact_id=windows_package.artifact_id,
+                    expected_release_artifact_sha256=(
+                        windows_package.artifact_sha256
+                    ),
+                )
+            except (QualificationTrustError, TypeError, ValueError) as error:
+                raise ReleaseCandidateError(
+                    "frozen release candidate qualification receipt is not "
+                    "canonically verified"
+                ) from error
+            if accepted.result != "PASS":
+                raise ReleaseCandidateError(
+                    "frozen release candidate qualification result is not PASS"
+                )
+            if not _qualification_covers_exact_candidate(
+                accepted,
+                reconstructed_candidate,
+            ):
+                raise ReleaseCandidateError(
+                    "frozen release candidate canonically verified qualification "
+                    "does not cover exact artifact set"
+                )
+            if (
+                accepted.attestation_id != self.qualification_attestation_id
+                or accepted.attestation_digest
+                != self.qualification_attestation_digest
+                or accepted.policy_id != self.qualification_policy_id
+                or accepted.trust_root_id != self.qualification_trust_root_id
+            ):
+                raise ReleaseCandidateError(
+                    "frozen release candidate canonical qualification identity mismatch"
                 )
         else:
             if not self.reasons:
@@ -765,12 +822,11 @@ def _frozen_receipt_structurally_covers_exact_candidate(
     receipt: SignedQualificationAttestation,
     candidate: ReleaseCandidateInput,
 ) -> bool:
-    """Validate frozen-manifest self-consistency without re-granting trust.
+    """Validate frozen-manifest self-consistency before trust verification.
 
-    ReleaseCandidateDecision has no policy/evidence-store inputs with which to
-    repeat signature verification. The factory token proves the object came
-    from the verified freeze path; this check only ensures the embedded,
-    canonically parsed receipt still describes the reconstructed manifest.
+    This check is deliberately structural. ReleaseCandidateDecision separately
+    re-runs the canonical exact-source signature/evidence verifier before a
+    FROZEN value can exist.
     """
 
     return _qualification_claims_cover_exact_candidate(
@@ -942,5 +998,6 @@ def freeze_release_candidate(
         qualification_attestation_digest=accepted.attestation_digest,
         qualification_policy_id=accepted.policy_id,
         qualification_trust_root_id=accepted.trust_root_id,
-        _freeze_token=_FROZEN_DECISION_TOKEN,
+        _verification_store=evidence_store,
+        _verification_root=evidence_root,
     )

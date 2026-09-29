@@ -1151,6 +1151,7 @@ def verify_qualification_attestation(
     *,
     policy: QualificationTrustPolicy,
     evidence_store: ArtifactStore,
+    evidence_root: str | Path,
     expected_policy_id: str,
     expected_policy_version: str,
     expected_source_sha: str,
@@ -1176,8 +1177,11 @@ def verify_qualification_attestation(
             "evidence_store must be the canonical ArtifactStore"
         )
     try:
-        evidence_reader = trusted_authenticated_reader(evidence_store)
-    except (ArtifactIntegrityError, OSError) as error:
+        evidence_reader = trusted_authenticated_reader(
+            evidence_root,
+            publication_store=evidence_store,
+        )
+    except (ArtifactIntegrityError, OSError, TypeError, ValueError) as error:
         raise QualificationTrustError(
             "evidence artifact authority cannot be bound"
         ) from error

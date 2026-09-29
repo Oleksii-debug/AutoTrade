@@ -3,6 +3,7 @@ from hashlib import sha256
 import json
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
@@ -15,6 +16,7 @@ from mvp.autotrade_mvp.qualification_attestation import (
     QualificationTrustPolicy,
     SignedQualificationAttestation,
     TrustRoot,
+    verify_qualification_attestation,
 )
 from mvp.autotrade_mvp.release_candidate import (
     ReleaseArtifactEvidence,
@@ -219,28 +221,44 @@ def freeze_with_integrity_store(
                 evidence_root=directory,
             )
         trust_root = _trust_root()
-        trust_policy = (
+        canonical_policy = QualificationTrustPolicy(
+            policy_version="2026.09",
+            roots=(trust_root,),
+        )
+        caller_policy = (
             policy_override
             if policy_override is not None
-            else QualificationTrustPolicy(
-                policy_version="2026.09",
-                roots=(trust_root,),
-            )
+            else canonical_policy
         )
         receipt = (
             receipt_override
             if receipt_override is not None
             else _qualification(candidate, trust_root)
         )
-        return freeze_release_candidate(
-            candidate,
-            evidence_store=store,
-            evidence_root=directory,
-            qualification_receipt=receipt,
-            qualification_policy=trust_policy,
-            expected_policy_id=trust_policy.policy_id,
-            expected_policy_version=trust_policy.policy_version,
-        )
+
+        def canonical_verify(receipt_arg, **kwargs):
+            return verify_qualification_attestation(
+                receipt_arg,
+                policy=canonical_policy,
+                expected_policy_id=canonical_policy.policy_id,
+                expected_policy_version=canonical_policy.policy_version,
+                **kwargs,
+            )
+
+        with patch.object(
+            release_candidate_module,
+            "verify_canonical_qualification_attestation",
+            side_effect=canonical_verify,
+        ):
+            return freeze_release_candidate(
+                candidate,
+                evidence_store=store,
+                evidence_root=directory,
+                qualification_receipt=receipt,
+                qualification_policy=caller_policy,
+                expected_policy_id=caller_policy.policy_id,
+                expected_policy_version=caller_policy.policy_version,
+            )
 
 class ReleaseCandidateFreezeTests(unittest.TestCase):
     def candidate(self, **overrides):
@@ -276,6 +294,30 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
             manifest["qualification"]["policy_id"],
             decision.qualification_policy_id,
         )
+
+    def test_caller_selected_trust_policy_cannot_freeze_release(self):
+        candidate = self.candidate()
+        canonical_root = _trust_root()
+        hostile_root = TrustRoot(
+            producer_id="candidate.self",
+            verifier_id=canonical_root.verifier_id,
+            public_modulus_hex=canonical_root.public_modulus_hex,
+            public_exponent=canonical_root.public_exponent,
+            allowed_scopes=canonical_root.allowed_scopes,
+            valid_from=canonical_root.valid_from,
+        )
+        hostile_policy = QualificationTrustPolicy(
+            policy_version="2026.09",
+            roots=(hostile_root,),
+        )
+        hostile_receipt = _qualification(candidate, hostile_root)
+        decision = freeze_with_integrity_store(
+            candidate,
+            receipt_override=hostile_receipt,
+            policy_override=hostile_policy,
+        )
+        self.assertEqual(decision.status, "BLOCKED")
+        self.assertIn("independent_evidence_trust_invalid", decision.reasons)
 
     def test_attestation_must_cover_exact_candidate_artifact_set(self):
         candidate = self.candidate()

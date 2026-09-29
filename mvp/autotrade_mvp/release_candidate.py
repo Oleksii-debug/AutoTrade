@@ -28,7 +28,7 @@ from .qualification_attestation import (
     QualificationTrustPolicy,
     SignedQualificationAttestation,
     parse_signed_qualification_attestation,
-    verify_qualification_attestation,
+    verify_canonical_qualification_attestation,
 )
 
 
@@ -842,15 +842,14 @@ def freeze_release_candidate(
     for role in sorted(_REQUIRED_ROLES - set(by_role)):
         reasons.append(f"missing_required_artifact:{role}")
 
+    # Legacy policy/pin arguments remain compatibility-only inputs. They never
+    # select terminal release trust; exact-source canonical policy does.
     trust_inputs_present = all(
         value is not None
         for value in (
             evidence_store,
             evidence_root,
             qualification_receipt,
-            qualification_policy,
-            expected_policy_id,
-            expected_policy_version,
         )
     )
     if not trust_inputs_present:
@@ -861,13 +860,10 @@ def freeze_release_candidate(
             reasons.append("independent_evidence_trust_invalid")
         else:
             try:
-                accepted = verify_qualification_attestation(
+                accepted = verify_canonical_qualification_attestation(
                     qualification_receipt,
-                    policy=qualification_policy,
                     evidence_store=evidence_store,
                     evidence_root=evidence_root,
-                    expected_policy_id=expected_policy_id,
-                    expected_policy_version=expected_policy_version,
                     expected_source_sha=candidate.source_sha,
                     expected_domain=_QUALIFICATION_DOMAIN,
                     expected_gate=_QUALIFICATION_GATE,
@@ -878,7 +874,7 @@ def freeze_release_candidate(
                     expected_release_artifact_id=windows_package.artifact_id,
                     expected_release_artifact_sha256=windows_package.artifact_sha256,
                 )
-            except QualificationTrustError:
+            except (QualificationTrustError, TypeError, ValueError):
                 reasons.append("independent_evidence_trust_invalid")
             else:
                 if accepted.result != "PASS":

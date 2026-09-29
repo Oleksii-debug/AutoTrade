@@ -28,7 +28,7 @@ from .qualification_attestation import (
     QualificationTrustError,
     QualificationTrustPolicy,
     SignedQualificationAttestation,
-    verify_qualification_attestation,
+    verify_canonical_qualification_attestation,
 )
 
 
@@ -40,6 +40,10 @@ _QUALIFICATION_DOMAIN = "RECOVERY"
 _QUALIFICATION_GATE = "RELEASE"
 _QUALIFICATION_PACKAGE = "WP-59"
 _QUALIFICATION_REQUIREMENT = "recovery-release-qualification"
+_RECOVERY_POLICY_REQUIREMENT_PREFIX = "recovery-decision-policy/sha256:"
+_RECOVERY_POLICY_REQUIREMENT_RE = re.compile(
+    r"^recovery-decision-policy/sha256:[0-9a-f]{64}$"
+)
 
 
 class RecoveryScenario(StrEnum):
@@ -296,6 +300,39 @@ class RecoveryQualificationPolicy:
         )
 
 
+def recovery_policy_subject_requirement(
+    policy: RecoveryQualificationPolicy,
+) -> str:
+    """Bind terminal recovery criteria before outcome evaluation."""
+
+    if type(policy) is not RecoveryQualificationPolicy:
+        raise TypeError("policy must be the canonical RecoveryQualificationPolicy")
+    scenarios = sorted(RecoveryScenario, key=lambda item: item.value)
+    payload = {
+        "source_sha": policy.source_sha,
+        "release_artifact_id": policy.release_artifact_id,
+        "release_artifact_sha256": policy.release_artifact_sha256,
+        "evidence_schema_version": policy.evidence_schema_version,
+        "protocol_id": policy.protocol_id,
+        "max_downtime_ms": {
+            scenario.value: policy.max_downtime_ms[scenario]
+            for scenario in scenarios
+        },
+        "required_tests": {
+            scenario.value: sorted(policy.required_tests[scenario])
+            for scenario in scenarios
+        },
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return _RECOVERY_POLICY_REQUIREMENT_PREFIX + sha256(encoded).hexdigest()
+
+
 def recovery_evidence_receipt_metadata(
     item: RecoveryScenarioEvidence,
 ) -> dict[str, object]:
@@ -398,6 +435,7 @@ class RecoveryQualificationDecision:
     qualification_attestation_digest: str | None = None
     qualification_policy_id: str | None = None
     qualification_trust_root_id: str | None = None
+    recovery_policy_requirement: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -466,6 +504,24 @@ class RecoveryQualificationDecision:
             "measured_downtime_ms",
             MappingProxyType(measured),
         )
+        if self.recovery_policy_requirement is not None:
+            if (
+                type(self.recovery_policy_requirement) is not str
+                or _RECOVERY_POLICY_REQUIREMENT_RE.fullmatch(
+                    self.recovery_policy_requirement
+                )
+                is None
+            ):
+                raise ValueError(
+                    "recovery_policy_requirement must bind the exact decision policy"
+                )
+        if (
+            self.status is RecoveryEvidenceStatus.PASS
+            and self.recovery_policy_requirement is None
+        ):
+            raise ValueError(
+                "PASS recovery decision requires exact recovery policy identity"
+            )
 
     @property
     def authorizes_trading(self) -> bool:
@@ -480,6 +536,8 @@ class RecoveryQualificationDecision:
             and self.release_artifact_sha256 == policy.release_artifact_sha256
             and self.evidence_schema_version == policy.evidence_schema_version
             and self.protocol_id == policy.protocol_id
+            and self.recovery_policy_requirement
+            == recovery_policy_subject_requirement(policy)
         )
 
 
@@ -496,8 +554,9 @@ def qualify_recovery_release(
 ) -> RecoveryQualificationDecision:
     """Evaluate recovery evidence without performing recovery itself."""
 
-    if not isinstance(policy, RecoveryQualificationPolicy):
-        raise TypeError("policy must be RecoveryQualificationPolicy")
+    if type(policy) is not RecoveryQualificationPolicy:
+        raise TypeError("policy must be the canonical RecoveryQualificationPolicy")
+    policy_requirement = recovery_policy_subject_requirement(policy)
     if isinstance(evidence, (str, bytes)) or not isinstance(evidence, Sequence):
         raise TypeError("evidence must be a sequence")
     if evidence_store is not None and type(evidence_store) is not ArtifactStore:
@@ -565,29 +624,20 @@ def qualify_recovery_release(
         inconclusive = True
 
     accepted: AcceptedQualificationAttestation | None = None
-    trust_inputs = (
-        evidence_store,
-        evidence_root,
-        qualification_receipt,
-        qualification_policy,
-        expected_policy_id,
-        expected_policy_version,
-    )
-    if all(value is None for value in trust_inputs[1:]):
+    # Caller-supplied qualification policy/pins are compatibility-only. Terminal
+    # recovery trust is selected from the exact-source canonical trust policy.
+    if qualification_receipt is None:
         blockers.append("independent_evidence_trust_unavailable")
         inconclusive = True
-    elif any(value is None for value in trust_inputs):
+    elif evidence_store is None or evidence_root is None:
         blockers.append("independent_evidence_trust_incomplete")
         inconclusive = True
     else:
         try:
-            accepted = verify_qualification_attestation(
+            accepted = verify_canonical_qualification_attestation(
                 qualification_receipt,
-                policy=qualification_policy,
                 evidence_store=evidence_store,
                 evidence_root=evidence_root,
-                expected_policy_id=expected_policy_id,
-                expected_policy_version=expected_policy_version,
                 expected_source_sha=policy.source_sha,
                 expected_domain=_QUALIFICATION_DOMAIN,
                 expected_gate=_QUALIFICATION_GATE,
@@ -618,6 +668,9 @@ def qualify_recovery_release(
                 inconclusive = True
             elif signed_refs != expected_refs:
                 blockers.append("independent_evidence_set_mismatch")
+                hard_failure = True
+            if policy_requirement not in accepted.requirement_ids:
+                blockers.append("independent_recovery_policy_mismatch")
                 hard_failure = True
 
     for scenario in sorted(by_scenario, key=lambda item: item.value):
@@ -751,4 +804,5 @@ def qualify_recovery_release(
         qualification_trust_root_id=(
             None if accepted is None else accepted.trust_root_id
         ),
+        recovery_policy_requirement=policy_requirement,
     )

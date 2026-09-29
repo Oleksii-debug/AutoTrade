@@ -222,6 +222,21 @@ class ReconciliationJournalTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 ValueError,
+                "BORROW capacity lacks exact provider_environment evidence",
+            ):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=availability_checkpoint["event_id"],
+                    provider_id=provider_id,
+                    account_id=account_id,
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    resources=("BORROW:BTCUSDT",),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds="60",
+                )
+            with self.assertRaisesRegex(
+                ValueError,
                 "requires explicit provider_environment",
             ):
                 load_account_resource_availability_evidence(

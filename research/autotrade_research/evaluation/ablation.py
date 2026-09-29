@@ -731,15 +731,22 @@ def summarize_ablation(target_component: str, pairs: Iterable[AblationPair]) -> 
         mean_latency_fraction = (
             _mean_fraction(latency_fractions) or Fraction(0, 1)
         )
-        mean_utility_report = (
+        projected_utility_report = (
             None
             if mean_utility_fraction is None
             else _report_fraction(mean_utility_fraction)
         )
-        mean_cost_report = _report_fraction(mean_cost_fraction)
-        mean_latency_report = _report_fraction(mean_latency_fraction)
+        projected_cost_report = _report_fraction(mean_cost_fraction)
+        projected_latency_report = _report_fraction(mean_latency_fraction)
     except (DecimalException, ExactDecimalError):
         reporting_status = _REPORTING_UNAVAILABLE
+    else:
+        # Reporting is one diagnostic projection, not three independently
+        # authoritative fields. Publish it atomically only after every Decimal
+        # projection succeeds so UNAVAILABLE can never carry a partial report.
+        mean_utility_report = projected_utility_report
+        mean_cost_report = projected_cost_report
+        mean_latency_report = projected_latency_report
 
     return AblationSummary(
         target_component=target_component,

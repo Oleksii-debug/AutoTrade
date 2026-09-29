@@ -4,6 +4,9 @@ import unittest
 
 from mvp.autotrade_mvp.exact_decimal import (
     ExactDecimalError,
+    MAX_INTEGER_DIGITS,
+    MAX_SCALE,
+    MAX_SIGNIFICANT_DIGITS,
     as_fraction,
     canonical_decimal_text,
     exact_abs,
@@ -106,6 +109,64 @@ class ExactDecimalTests(unittest.TestCase):
                 canonical_decimal_text(value),
                 "12345678901234567890.12345",
             )
+
+    def test_resource_envelope_accepts_exact_boundaries(self):
+        significant_boundary = Decimal(
+            (0, tuple(9 for _ in range(MAX_SIGNIFICANT_DIGITS)), 0)
+        )
+        integer_boundary = Decimal((0, (1,), MAX_INTEGER_DIGITS - 1))
+        scale_boundary = Decimal((0, (1,), -MAX_SCALE))
+
+        self.assertEqual(exact_abs(significant_boundary), significant_boundary)
+        self.assertEqual(
+            as_fraction(integer_boundary),
+            Fraction(10 ** (MAX_INTEGER_DIGITS - 1), 1),
+        )
+        self.assertEqual(
+            as_fraction(scale_boundary),
+            Fraction(1, 10**MAX_SCALE),
+        )
+
+    def test_resource_envelope_rejects_one_unit_over_and_extreme_values(self):
+        excessive_significance = Decimal(
+            (0, tuple(9 for _ in range(MAX_SIGNIFICANT_DIGITS + 1)), 0)
+        )
+        excessive_integer = Decimal((0, (1,), MAX_INTEGER_DIGITS))
+        excessive_scale = Decimal((0, (1,), -(MAX_SCALE + 1)))
+        bad_values = (
+            excessive_significance,
+            excessive_integer,
+            excessive_scale,
+        )
+        for precision in (6, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    for value in bad_values:
+                        with self.assertRaises(ExactDecimalError):
+                            exact_abs(value)
+                    with self.assertRaises(ExactDecimalError):
+                        round_fraction_to_quantum(
+                            Fraction(1, 3),
+                            excessive_scale,
+                            mode="FLOOR",
+                        )
+
+    def test_large_integer_reconstruction_never_depends_on_int_string_limit(self):
+        # This coefficient is beyond CPython's default int-to-string safety
+        # threshold. The public helper must reject it via integer-only bounds.
+        with self.assertRaisesRegex(ExactDecimalError, "resource envelope"):
+            terminating_decimal(Fraction(10**5000, 1))
+
+    def test_exact_outputs_crossing_envelope_fail_closed(self):
+        boundary = Decimal(
+            (0, tuple(9 for _ in range(MAX_SIGNIFICANT_DIGITS)), 0)
+        )
+        with self.assertRaisesRegex(ExactDecimalError, "significant digits"):
+            exact_add(boundary, Decimal("1"))
+        with self.assertRaisesRegex(ExactDecimalError, "significant digits"):
+            exact_multiply(boundary, Decimal("10"))
 
 
 if __name__ == "__main__":

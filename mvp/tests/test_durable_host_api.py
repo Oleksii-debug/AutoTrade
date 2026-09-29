@@ -1,4 +1,5 @@
 from tempfile import TemporaryDirectory
+import sqlite3
 import unittest
 from unittest.mock import patch
 
@@ -9,7 +10,7 @@ from mvp.autotrade_mvp.authority import (
 )
 from mvp.autotrade_mvp.durable_host_api import JournalBackedHostCommandStore
 from mvp.autotrade_mvp.host_api import EventGap, HostCommandStore
-from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
 
 
 class JournalBackedHostApiTests(unittest.TestCase):
@@ -318,6 +319,75 @@ class JournalBackedHostApiTests(unittest.TestCase):
         self.assertEqual(retried, accepted)
         self.assertEqual(restarted.cursor, 1)
         self.assertEqual(len(restarted.events_after(0)), 1)
+
+    def test_exact_retry_after_state_advances_returns_original_accepted_result(self):
+        first = self.store()
+        command = self.command()
+        accepted = first.submit(command)
+        running = first.update_operation(
+            accepted.operation_id,
+            "RUNNING",
+            remaining_uncertainty=("provider_response_pending",),
+        )
+        self.assertEqual(running.state_version, "2")
+        before_sequence = JournalStore(self.path).current_journal_sequence()
+
+        restarted = self.store()
+        retried = restarted.submit(command)
+
+        self.assertEqual(retried, accepted)
+        self.assertEqual(retried.state_version, "1")
+        self.assertEqual(restarted.state_version, 2)
+        self.assertEqual(
+            JournalStore(self.path).current_journal_sequence(),
+            before_sequence,
+        )
+        self.assertEqual(len(restarted.events_after(0)), 2)
+
+    def test_exact_retry_rejects_resealed_result_inconsistent_with_accepted_event(self):
+        first = self.store()
+        command = self.command()
+        accepted = first.submit(command)
+        forged = first._result_dict(accepted)
+        forged["status"] = "CONFLICT"
+        forged["reason_codes"] = ["forged_result"]
+
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                """
+                UPDATE command_dedupe
+                SET result_json = ?, result_hash = ?
+                """,
+                (
+                    canonical_json(forged),
+                    payload_digest(forged),
+                ),
+            )
+            connection.commit()
+
+        restarted = self.store()
+        with self.assertRaisesRegex(
+            ValueError,
+            "result conflicts with durable accepted event",
+        ):
+            restarted.submit(command)
+
+    def test_exact_retry_does_not_lazily_promote_orphan_accepted_event(self):
+        first = self.store()
+        command = self.command()
+        first.submit(command)
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("DELETE FROM command_dedupe")
+            connection.commit()
+
+        restarted = self.store()
+        before_sequence = JournalStore(self.path).current_journal_sequence()
+        with self.assertRaisesRegex(ValueError, "event_id already exists"):
+            restarted.submit(command)
+        self.assertEqual(
+            JournalStore(self.path).current_journal_sequence(),
+            before_sequence,
+        )
 
     def test_changed_payload_under_same_idempotency_key_conflicts_after_restart(self):
         first = self.store()

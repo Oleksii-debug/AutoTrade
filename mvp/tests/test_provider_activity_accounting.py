@@ -3,6 +3,7 @@ from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_activity_accounting import (
@@ -279,16 +280,33 @@ class ProviderActivityAccountingTests(unittest.TestCase):
             )
             self.assertTrue(inserted)
 
-            second, replay_inserted = book_paper_activity(
+            with patch.object(
                 store,
-                provider_id="IBKR",
-                account_id="acct-repoll",
-                activity=evidence,
-                amount="100.00",
-                observed_at="2026-09-24T18:12:00Z",
-            )
+                "commit_command",
+                wraps=store.commit_command,
+            ) as commit_command:
+                second, replay_inserted = book_paper_activity(
+                    store,
+                    provider_id="IBKR",
+                    account_id="acct-repoll",
+                    activity=evidence,
+                    amount="100.00",
+                    observed_at="2026-09-24T18:12:00Z",
+                )
             self.assertFalse(replay_inserted)
             self.assertEqual(first, second)
+            replay_events = commit_command.call_args.kwargs["events"]
+            self.assertEqual(len(replay_events), 2)
+            for replay_envelope, _topic in replay_events:
+                self.assertEqual(
+                    replay_envelope["committed_at"],
+                    "2026-09-24T18:02:00Z",
+                )
+                self.assertEqual(
+                    replay_envelope["payload"]["observed_at"],
+                    "2026-09-24T18:02:00Z",
+                )
+                self.assertEqual(replay_envelope["aggregate_version"], "1")
             self.assertEqual(
                 len(
                     store.load_events(

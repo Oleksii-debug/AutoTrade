@@ -594,7 +594,7 @@ class ReleaseCandidateDecision:
                 artifacts=tuple(parsed_artifacts),
                 unresolved_blockers=(),
             )
-            if not _qualification_covers_exact_candidate(
+            if not _frozen_receipt_structurally_covers_exact_candidate(
                 receipt,
                 reconstructed_candidate,
             ):
@@ -711,10 +711,18 @@ def _stored_evidence_is_verified(
     return True
 
 
-def _qualification_covers_exact_candidate(
-    accepted: AcceptedQualificationAttestation,
+def _qualification_claims_cover_exact_candidate(
+    evidence_refs,
+    requirement_ids: tuple[str, ...],
     candidate: ReleaseCandidateInput,
 ) -> bool:
+    """Compare canonical qualification claims to one reconstructed candidate.
+
+    This helper is structural only. Authority-bearing live freeze decisions must
+    pass claims from AcceptedQualificationAttestation, never directly from an
+    unverified signed receipt.
+    """
+
     expected = {
         (
             artifact.artifact_id,
@@ -733,13 +741,42 @@ def _qualification_covers_exact_candidate(
             ref.media_type,
             ref.evidence_kind,
         )
-        for ref in accepted.evidence_refs
+        for ref in evidence_refs
     }
     if observed != expected:
         return False
-    return (
-        release_candidate_subject_requirement(candidate)
-        in accepted.requirement_ids
+    return release_candidate_subject_requirement(candidate) in requirement_ids
+
+
+def _qualification_covers_exact_candidate(
+    accepted: AcceptedQualificationAttestation,
+    candidate: ReleaseCandidateInput,
+) -> bool:
+    """Authority-bearing coverage check for a freshly accepted attestation."""
+
+    return _qualification_claims_cover_exact_candidate(
+        accepted.evidence_refs,
+        accepted.requirement_ids,
+        candidate,
+    )
+
+
+def _frozen_receipt_structurally_covers_exact_candidate(
+    receipt: SignedQualificationAttestation,
+    candidate: ReleaseCandidateInput,
+) -> bool:
+    """Validate frozen-manifest self-consistency without re-granting trust.
+
+    ReleaseCandidateDecision has no policy/evidence-store inputs with which to
+    repeat signature verification. The factory token proves the object came
+    from the verified freeze path; this check only ensures the embedded,
+    canonically parsed receipt still describes the reconstructed manifest.
+    """
+
+    return _qualification_claims_cover_exact_candidate(
+        receipt.attestation.evidence_refs,
+        tuple(receipt.attestation.requirement_ids),
+        candidate,
     )
 
 

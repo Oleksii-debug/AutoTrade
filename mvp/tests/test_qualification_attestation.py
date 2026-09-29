@@ -1715,6 +1715,64 @@ class QualificationAttestationTests(unittest.TestCase):
             ):
                 verify(receipt, store, policy(trust_root))
 
+    def test_hostile_scalar_subclasses_are_rejected_before_signed_comparisons(self):
+        trust_root = root()
+
+        class LyingText(str):
+            __hash__ = str.__hash__
+
+            def __eq__(self, _other):
+                return True
+
+            def __ne__(self, _other):
+                return False
+
+        with self.assertRaisesRegex(QualificationTrustError, "package_id"):
+            attestation(
+                trust_root,
+                package_id=LyingText("WP-60"),
+            )
+
+        with self.assertRaisesRegex(
+            QualificationTrustError,
+            "public_modulus_hex",
+        ):
+            TrustRoot(
+                producer_id=trust_root.producer_id,
+                verifier_id=trust_root.verifier_id,
+                public_modulus_hex=LyingText(trust_root.public_modulus_hex),
+                public_exponent=trust_root.public_exponent,
+                allowed_scopes=trust_root.allowed_scopes,
+                valid_from=trust_root.valid_from,
+            )
+
+        value = attestation(trust_root)
+        receipt = SignedQualificationAttestation(value, sign(value))
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            with self.assertRaisesRegex(
+                QualificationTrustError,
+                "expected_package_id",
+            ):
+                verify_qualification_attestation(
+                    receipt,
+                    policy=policy(trust_root),
+                    evidence_store=store,
+                    evidence_root=Path(directory),
+                    expected_policy_id=policy(trust_root).policy_id,
+                    expected_policy_version=policy(trust_root).policy_version,
+                    expected_source_sha=SOURCE,
+                    expected_domain="RELEASE",
+                    expected_gate="FREEZE",
+                    expected_package_id=LyingText("WP-60"),
+                    expected_protocol_id="release-freeze-v1",
+                    expected_protocol_version="1.0.0",
+                    expected_requirement_id="release-candidate-freeze",
+                    expected_release_artifact_id=RELEASE_A,
+                    expected_release_artifact_sha256=RELEASE_A_SHA,
+                )
+
     def test_evidence_reference_subclass_is_rejected_at_attestation_boundary(self):
         trust_root = root()
         original_ref = evidence_ref()

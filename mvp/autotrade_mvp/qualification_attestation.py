@@ -196,7 +196,7 @@ def _strict_list(value: object, *, name: str) -> list[object]:
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or value != value.strip() or not value:
+    if type(value) is not str or value != value.strip() or not value:
         raise QualificationTrustError(f"{name} must be a canonical non-empty string")
     return value
 
@@ -221,7 +221,7 @@ def _uuid(value: str, *, name: str) -> str:
 
 
 def _git_sha(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or _GIT_SHA.fullmatch(value) is None:
+    if type(value) is not str or _GIT_SHA.fullmatch(value) is None:
         raise QualificationTrustError(
             f"{name} must be a lowercase 40-character Git SHA"
         )
@@ -229,7 +229,7 @@ def _git_sha(value: str, *, name: str) -> str:
 
 
 def _digest(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+    if type(value) is not str or _SHA256.fullmatch(value) is None:
         raise QualificationTrustError(f"{name} must be sha256:<64 lowercase hex>")
     return value
 
@@ -336,7 +336,7 @@ class TrustRoot:
         object.__setattr__(self, "verification_method", method)
         modulus_hex = self.public_modulus_hex
         if (
-            not isinstance(modulus_hex, str)
+            type(modulus_hex) is not str
             or modulus_hex != modulus_hex.lower()
             or not modulus_hex
             or len(modulus_hex) % 2
@@ -351,8 +351,7 @@ class TrustRoot:
             raise QualificationTrustError("RSA trust root must be 2048-4096 bits")
         exponent = self.public_exponent
         if (
-            isinstance(exponent, bool)
-            or not isinstance(exponent, int)
+            type(exponent) is not int
             or exponent < 3
             or exponent >= 2**32
             or exponent % 2 == 0

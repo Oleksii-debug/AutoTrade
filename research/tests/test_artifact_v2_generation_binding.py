@@ -12,11 +12,8 @@ from autotrade_research.artifacts.store import ArtifactIntegrityError, ArtifactS
 
 
 class ArtifactV2GenerationBindingTests(unittest.TestCase):
-    def _published(self, directory, *, export_authorizer=None):
-        store = ArtifactStore(
-            Path(directory) / "store",
-            export_authorizer=export_authorizer,
-        )
+    def _published(self, directory):
+        store = ArtifactStore(Path(directory) / "store")
         artifact_id = str(uuid4())
         payload = b"generation-bound-evidence"
         manifest = store.publish_bytes(
@@ -126,10 +123,8 @@ class ArtifactV2GenerationBindingTests(unittest.TestCase):
 
     def test_export_rejects_same_bytes_prefix_swap_after_generation_open(self):
         with TemporaryDirectory() as directory:
-            store, artifact_id, payload, object_path = self._published(
-                directory,
-                export_authorizer=lambda *_args: True,
-            )
+            store, artifact_id, payload, object_path = self._published(directory)
+            store._export_authorizer = lambda *_args: True
             detached = None
             swapped = False
             target = Path(directory) / "export.bin"

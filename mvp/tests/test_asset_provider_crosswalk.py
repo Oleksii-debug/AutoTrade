@@ -263,7 +263,7 @@ class AssetProviderCrosswalkTests(unittest.TestCase):
             legitimate = signed_for(evidence[:-1])
             rebound = SignedQualificationAttestation(
                 forged.attestation,
-                legitimate.signature,
+                legitimate.signature_b64,
             )
             real_verify = (
                 crosswalk_module.verify_canonical_qualification_attestation

@@ -1298,6 +1298,7 @@ class AllocationTests(unittest.TestCase):
             desired="1010",
             price="10",
             lot="1",
+            cost="0.021",
             capital_requirement="0.001",
             fee_floor="5",
             current_quantity="100",

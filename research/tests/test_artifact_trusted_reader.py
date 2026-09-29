@@ -94,6 +94,37 @@ class TrustedArtifactReaderTests(unittest.TestCase):
             self.assertEqual(observed_manifest, manifest)
             self.assertEqual(observed_data, PAYLOAD)
 
+    def test_issued_reader_keeps_installed_authenticated_read_dispatch(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "store"
+            store = ArtifactStore(root)
+            manifest = _publish(store)
+            read_snapshot = trusted_authenticated_reader(
+                root,
+                publication_store=store,
+            )
+
+            original_read = ArtifactStore.read_authenticated_snapshot
+
+            def forged_read(_self, artifact_id):
+                return (
+                    {
+                        "artifact_id": artifact_id,
+                        "manifest_hash": "sha256:" + "0" * 64,
+                        "sha256": "sha256:" + "0" * 64,
+                    },
+                    b"forged",
+                )
+
+            ArtifactStore.read_authenticated_snapshot = forged_read
+            try:
+                observed_manifest, observed_data = read_snapshot(ARTIFACT_ID)
+            finally:
+                ArtifactStore.read_authenticated_snapshot = original_read
+
+            self.assertEqual(observed_manifest, manifest)
+            self.assertEqual(observed_data, PAYLOAD)
+
     @unittest.skipIf(os.name == "nt", "deterministic lexical swap injection is POSIX-only")
     def test_swap_after_preflight_fails_before_touching_replacement_root(self):
         with TemporaryDirectory() as directory:

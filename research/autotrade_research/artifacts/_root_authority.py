@@ -287,9 +287,15 @@ def _assert_expected_generation(
         )
 
 
+# Process-TCB state. The canonical runtime architecture isolates arbitrary Python
+# from financial authority and treats installed, qualified implementation code as
+# trusted process code. This registry is therefore protected from untrusted data,
+# caller-owned ArtifactStore instances and filesystem substitution, but it is not
+# presented as a sandbox against arbitrary mutation of this module's own globals.
 _READER_CAPABILITY_LOCK = threading.RLock()
 _READER_CAPABILITIES: dict[int, tuple[str, tuple[int, ...]]] = {}
 _READER_PIN_NAMES = ("root", "manifests", "objects", "staging")
+_CANONICAL_AUTHENTICATED_READ = None
 
 
 def _duplicate_windows_handle(handle: int) -> int:
@@ -579,7 +585,11 @@ class _TrustedAuthenticatedReader(str):
                 configured_generation,
                 expected_generation,
             )
-            canonical_read = _store.ArtifactStore.read_authenticated_snapshot
+            canonical_read = _CANONICAL_AUTHENTICATED_READ
+            if canonical_read is None:
+                raise _store.ArtifactIntegrityError(
+                    "trusted artifact read implementation is not installed"
+                )
             return canonical_read(private_store, artifact_id)
         finally:
             _close_generation_pins(execution_pins)
@@ -602,6 +612,13 @@ def trusted_authenticated_reader(
     from the still-open pins, then builds an exact no-init execution view from
     duplicated pins. No ArtifactStore constructor or filesystem mutation occurs
     between authority checks and authenticated snapshot execution.
+
+    Trust boundary: installed AutoTrade module code and its module globals are part
+    of the qualified process TCB. Arbitrary same-process code that can rewrite this
+    module or ArtifactStore implementation is a process compromise and is excluded
+    by the canonical worker/host isolation contract; it is not modeled as hostile
+    input that Python object hiding can contain. Caller-owned store objects,
+    evidence bytes and filesystem namespaces remain untrusted and fail closed.
     """
 
     root = _canonical_authoritative_root(authoritative_root)
@@ -791,8 +808,14 @@ def _root_fenced_mutation(method):
 
 
 def install_root_authority() -> None:
+    global _CANONICAL_AUTHENTICATED_READ
+
     artifact_store = _store.ArtifactStore
     if getattr(artifact_store, "_root_authority_installed", False):
+        if _CANONICAL_AUTHENTICATED_READ is None:
+            _CANONICAL_AUTHENTICATED_READ = (
+                artifact_store.read_authenticated_snapshot
+            )
         return
 
     previous_init = artifact_store.__init__
@@ -805,6 +828,13 @@ def install_root_authority() -> None:
     artifact_store.__init__ = root_authority_init
     artifact_store.load_manifest = _root_fenced_read(artifact_store.load_manifest)
     artifact_store.read_authenticated_snapshot = _root_fenced_read(
+        artifact_store.read_authenticated_snapshot
+    )
+    # Pin the installed authenticated implementation once. Later mutation of the
+    # public class attribute cannot silently redirect an already-issued reader.
+    # Mutation of this module-global itself is a process-TCB violation covered by
+    # the runtime isolation/package-integrity contract, not a Python sandbox goal.
+    _CANONICAL_AUTHENTICATED_READ = (
         artifact_store.read_authenticated_snapshot
     )
     # read_bytes is intentionally not fenced a second time: its canonical

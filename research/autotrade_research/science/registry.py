@@ -6,6 +6,7 @@ from contextlib import contextmanager
 
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
 import re
@@ -69,6 +70,79 @@ def _canonical(payload: Any) -> str:
 
 def _hash(payload: Any) -> str:
     return "sha256:" + sha256(_canonical(payload).encode("utf-8")).hexdigest()
+
+
+_ABLATION_DECISION_POLICY_FIELDS = {
+    "schema_version",
+    "minimum_pairs",
+    "required_lower_bound",
+    "uncertainty_multiplier",
+    "decision_rule",
+}
+
+
+def _canonical_policy_decimal(
+    value: Any,
+    name: str,
+    *,
+    non_negative: bool = False,
+) -> str:
+    if type(value) is not str or not value or value != value.strip():
+        raise ProtocolViolation(f"{name} must be canonical decimal text")
+    try:
+        number = Decimal(value)
+    except (InvalidOperation, ValueError) as error:
+        raise ProtocolViolation(f"{name} must be finite canonical decimal text") from error
+    if not number.is_finite():
+        raise ProtocolViolation(f"{name} must be finite canonical decimal text")
+    if non_negative and number < 0:
+        raise ProtocolViolation(f"{name} must be non-negative")
+    rendered = format(number, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    if rendered in {"", "-0"}:
+        rendered = "0"
+    if rendered != value:
+        raise ProtocolViolation(f"{name} must be canonical decimal text")
+    return rendered
+
+
+def _validated_ablation_decision_policy(payload: Any) -> dict[str, Any]:
+    if type(payload) is not dict or set(payload) != _ABLATION_DECISION_POLICY_FIELDS:
+        raise ProtocolViolation(
+            "ablation_decision_policy must contain exactly schema_version, "
+            "minimum_pairs, required_lower_bound, uncertainty_multiplier and decision_rule"
+        )
+    if type(payload["schema_version"]) is not str or payload["schema_version"] != "1.0.0":
+        raise ProtocolViolation(
+            "ablation_decision_policy.schema_version must be 1.0.0"
+        )
+    minimum_pairs = payload["minimum_pairs"]
+    if type(minimum_pairs) is not int or minimum_pairs < 2:
+        raise ProtocolViolation(
+            "ablation_decision_policy.minimum_pairs must be an integer >= 2"
+        )
+    required = _canonical_policy_decimal(
+        payload["required_lower_bound"],
+        "ablation_decision_policy.required_lower_bound",
+    )
+    multiplier = _canonical_policy_decimal(
+        payload["uncertainty_multiplier"],
+        "ablation_decision_policy.uncertainty_multiplier",
+        non_negative=True,
+    )
+    decision_rule = payload["decision_rule"]
+    if type(decision_rule) is not str or not decision_rule or decision_rule != decision_rule.strip():
+        raise ProtocolViolation(
+            "ablation_decision_policy.decision_rule must be canonical non-empty text"
+        )
+    return {
+        "schema_version": "1.0.0",
+        "minimum_pairs": minimum_pairs,
+        "required_lower_bound": required,
+        "uncertainty_multiplier": multiplier,
+        "decision_rule": decision_rule,
+    }
 
 
 def _now() -> str:
@@ -255,6 +329,18 @@ class ProtocolRegistration:
 
 
 @dataclass(frozen=True)
+class RegisteredAblationDecisionPolicy:
+    protocol_id: str
+    protocol_hash: str
+    policy_digest: str
+    schema_version: str
+    minimum_pairs: int
+    required_lower_bound: str
+    uncertainty_multiplier: str
+    decision_rule: str
+
+
+@dataclass(frozen=True)
 class LockedEvaluationEvidence:
     evaluation_id: str
     protocol_id: str
@@ -418,6 +504,8 @@ class ScientificRegistry:
             raise ProtocolViolation("required protocol fields cannot be empty: " + ", ".join(empty))
         if not isinstance(payload.get("trial_budget"), int) or isinstance(payload.get("trial_budget"), bool) or payload["trial_budget"] < 1:
             raise ProtocolViolation("trial_budget must be a positive integer")
+        if "ablation_decision_policy" in payload:
+            _validated_ablation_decision_policy(payload["ablation_decision_policy"])
         _validate_causal_periods(payload)
         identifier = _id(protocol_id)
         canonical = _canonical(payload)
@@ -462,6 +550,48 @@ class ScientificRegistry:
             protocol_id=protocol,
             protocol_hash=row["protocol_hash"],
             created_at=row["created_at"],
+        )
+
+    def ablation_decision_policy(
+        self,
+        protocol_id: str,
+    ) -> RegisteredAblationDecisionPolicy:
+        """Return the protocol-hash-bound terminal ablation policy projection."""
+
+        protocol = _id(protocol_id)
+        with self._connect() as con:
+            row = con.execute(
+                "SELECT protocol_hash,payload_json FROM protocols WHERE protocol_id=?",
+                (protocol,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(protocol)
+        try:
+            payload = json.loads(row["payload_json"])
+        except json.JSONDecodeError as error:
+            raise ProtocolViolation("registered protocol payload is corrupt") from error
+        if (
+            type(payload) is not dict
+            or _canonical(payload) != row["payload_json"]
+            or _hash(payload) != row["protocol_hash"]
+        ):
+            raise ProtocolViolation("registered protocol integrity mismatch")
+        if "ablation_decision_policy" not in payload:
+            raise ProtocolViolation(
+                "registered protocol lacks ablation_decision_policy"
+            )
+        policy = _validated_ablation_decision_policy(
+            payload["ablation_decision_policy"]
+        )
+        return RegisteredAblationDecisionPolicy(
+            protocol_id=protocol,
+            protocol_hash=row["protocol_hash"],
+            policy_digest=_hash(policy),
+            schema_version=policy["schema_version"],
+            minimum_pairs=policy["minimum_pairs"],
+            required_lower_bound=policy["required_lower_bound"],
+            uncertainty_multiplier=policy["uncertainty_multiplier"],
+            decision_rule=policy["decision_rule"],
         )
 
     def record_trial(

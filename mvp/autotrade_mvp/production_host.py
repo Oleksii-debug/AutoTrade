@@ -8,10 +8,11 @@ not create a second journal, API server, authentication authority or trading pat
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import ssl
 from threading import Lock
-from typing import Callable
+from typing import BinaryIO, Callable
 from urllib.parse import urlsplit
 
 from .host_network import (
@@ -43,6 +44,10 @@ class ProductionHostConfig:
         journal_path = Path(self.journal_path)
         if not journal_path.is_absolute():
             raise ValueError("production journal_path must be absolute")
+        # One canonical filesystem identity is required for process fencing. Without
+        # this, equivalent paths containing '..' or symlinked parents could derive
+        # different fence paths for the same durable journal.
+        journal_path = journal_path.resolve(strict=False)
         if not self.account_id or self.account_id != self.account_id.strip():
             raise ValueError("account_id must be canonical non-empty text")
         if self.environment not in _ALLOWED_ENVIRONMENTS:
@@ -71,8 +76,78 @@ class ProductionHostConfig:
         object.__setattr__(self, "public_origin", canonical_origin)
 
 
+class _InstanceFence:
+    """Process-lifetime exclusive ownership of one durable host journal.
+
+    The lock file is intentionally persistent. Ownership is the OS lock on the open
+    descriptor, not lock-file existence, so a killed process cannot leave a stale
+    sentinel that permanently bricks restart. The fence identity is derived only
+    from the canonical journal path and is acquired before JournalStore recovery.
+    """
+
+    def __init__(self, *, path: Path, handle: BinaryIO) -> None:
+        self.path = path
+        self._handle = handle
+        self._released = False
+        self._release_lock = Lock()
+
+    @classmethod
+    def acquire(cls, journal_path: Path) -> "_InstanceFence":
+        if not journal_path.is_absolute():
+            raise ValueError("instance-fence journal path must be absolute")
+        fence_path = Path(str(journal_path) + ".host.lock")
+        fence_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = fence_path.open("a+b")
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    handle.write(b"\0")
+                    handle.flush()
+                handle.seek(0)
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                except OSError as exc:
+                    raise RuntimeError(
+                        "production host instance is already owned"
+                    ) from exc
+            else:
+                import fcntl
+
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError as exc:
+                    raise RuntimeError(
+                        "production host instance is already owned"
+                    ) from exc
+        except BaseException:
+            handle.close()
+            raise
+        return cls(path=fence_path, handle=handle)
+
+    def release(self) -> None:
+        with self._release_lock:
+            if self._released:
+                return
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    self._handle.seek(0)
+                    msvcrt.locking(self._handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                self._released = True
+                self._handle.close()
+
+
 class ProductionHostRuntime:
-    """Own one canonical host listener from construction through shutdown."""
+    """Own one canonical host listener and instance fence through shutdown."""
 
     def __init__(
         self,
@@ -81,11 +156,13 @@ class ProductionHostRuntime:
         journal: JournalStore,
         application: AuthenticatedHostApplication,
         server: AuthenticatedHostServer,
+        instance_fence: _InstanceFence,
     ) -> None:
         self.config = config
         self.journal = journal
         self.application = application
         self.server = server
+        self._instance_fence = instance_fence
         self._closed = False
         self._serving = False
         self._lifecycle_lock = Lock()
@@ -124,7 +201,13 @@ class ProductionHostRuntime:
             if serving:
                 self.server.shutdown()
         finally:
-            self.server.server_close()
+            try:
+                self.server.server_close()
+            finally:
+                # Release durable-state ownership only after the listener is closed,
+                # so a successor cannot become authoritative while this host can
+                # still accept traffic.
+                self._instance_fence.release()
 
     def __enter__(self) -> "ProductionHostRuntime":
         if self._closed:
@@ -166,26 +249,32 @@ def build_production_host(
     if tls_context is not None and scheme != "https":
         raise ValueError("TLS listener requires HTTPS public_origin")
 
-    journal = JournalStore(config.journal_path)
-    application = AuthenticatedHostApplication(
-        journal,
-        security_boundary=security_boundary,
-        account_id=config.account_id,
-        environment=config.environment,
-        host_id=config.host_id,
-        public_origin=config.public_origin,
-        principal_resolver=principal_resolver,
-        snapshot_provider=snapshot_provider,
-        now=now,
-    )
-    server = AuthenticatedHostServer(
-        (config.bind_host, config.bind_port),
-        application,
-        tls_context=tls_context,
-    )
+    instance_fence = _InstanceFence.acquire(config.journal_path)
+    try:
+        journal = JournalStore(config.journal_path)
+        application = AuthenticatedHostApplication(
+            journal,
+            security_boundary=security_boundary,
+            account_id=config.account_id,
+            environment=config.environment,
+            host_id=config.host_id,
+            public_origin=config.public_origin,
+            principal_resolver=principal_resolver,
+            snapshot_provider=snapshot_provider,
+            now=now,
+        )
+        server = AuthenticatedHostServer(
+            (config.bind_host, config.bind_port),
+            application,
+            tls_context=tls_context,
+        )
+    except BaseException:
+        instance_fence.release()
+        raise
     return ProductionHostRuntime(
         config=config,
         journal=journal,
         application=application,
         server=server,
+        instance_fence=instance_fence,
     )

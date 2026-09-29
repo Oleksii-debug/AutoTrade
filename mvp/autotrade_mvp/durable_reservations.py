@@ -756,7 +756,9 @@ class DurableReservationBook:
                 "terminal release requires the trusted resolution artifact store"
             )
         try:
-            manifest = self.resolution_artifact_store.load_manifest(artifact_id)
+            manifest, raw = self.resolution_artifact_store.read_authenticated_snapshot(
+                artifact_id
+            )
             manifest_hash = manifest.get("manifest_hash")
             if (
                 not isinstance(manifest_hash, str)
@@ -774,7 +776,6 @@ class DurableReservationBook:
                 raise ArtifactIntegrityError(
                     "resolution evidence has an unsupported media type"
                 )
-            raw = self.resolution_artifact_store.read_bytes(artifact_id)
             text = raw.decode("utf-8")
             receipt = strict_json_loads(text)
         except (

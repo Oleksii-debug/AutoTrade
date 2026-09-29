@@ -551,6 +551,7 @@ class ProviderFillBindingEnvironmentTests(unittest.TestCase):
                 provider_id="BYBIT",
                 account_id="bybit-account",
                 environment="PAPER",
+                provider_environment="TESTNET",
                 evidence_artifact_store=ArtifactStore(root / "settlement-evidence"),
             )
             binding = PreparedProviderFillCorrectionBinding(

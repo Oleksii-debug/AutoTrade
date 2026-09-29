@@ -1,4 +1,5 @@
 from hashlib import sha256
+from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from uuid import NAMESPACE_URL, uuid5
@@ -130,6 +131,7 @@ def qualify(value):
             qualification_receipt=receipt,
             qualification_policy=trust_policy,
             evidence_store=store,
+            evidence_root=Path(directory),
             expected_policy_id=trust_policy.policy_id,
             expected_policy_version=trust_policy.policy_version,
         )
@@ -237,6 +239,7 @@ class ScientificQualificationTests(unittest.TestCase):
                 qualification_receipt=receipt,
                 qualification_policy=trust_policy,
                 evidence_store=store,
+            evidence_root=Path(directory),
                 expected_policy_id=trust_policy.policy_id,
                 expected_policy_version=trust_policy.policy_version,
             )

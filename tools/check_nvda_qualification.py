@@ -534,6 +534,7 @@ def main() -> int:
                     receipt=receipt,
                     policy=policy,
                     evidence_store=evidence_store,
+                    evidence_root=evidence_root,
                     expected_policy_id=policy_id,
                     expected_policy_version=policy_version,
                 )

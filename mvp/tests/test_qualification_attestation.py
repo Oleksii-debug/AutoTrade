@@ -236,7 +236,8 @@ class QualificationAttestationTests(unittest.TestCase):
             manifest = publish(store)
             read_snapshot = (
                 qualification_attestation_module.trusted_authenticated_reader(
-                    store
+                    Path(directory),
+                    publication_store=store,
                 )
             )
             digest = manifest["sha256"].removeprefix("sha256:")

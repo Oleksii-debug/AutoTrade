@@ -253,6 +253,7 @@ def verified_completion_fixture(directory):
     )
     context = WholeProductEvidenceContext(
         evidence_store=store,
+        evidence_root=Path(directory),
         policy=trust_policy,
         expected_policy_id=trust_policy.policy_id,
         expected_policy_version=trust_policy.policy_version,

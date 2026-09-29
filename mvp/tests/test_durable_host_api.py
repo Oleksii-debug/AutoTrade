@@ -352,7 +352,8 @@ class JournalBackedHostApiTests(unittest.TestCase):
         forged["status"] = "CONFLICT"
         forged["reason_codes"] = ["forged_result"]
 
-        with sqlite3.connect(self.path) as connection:
+        connection = sqlite3.connect(self.path)
+        try:
             connection.execute(
                 """
                 UPDATE command_dedupe
@@ -364,6 +365,8 @@ class JournalBackedHostApiTests(unittest.TestCase):
                 ),
             )
             connection.commit()
+        finally:
+            connection.close()
 
         restarted = self.store()
         with self.assertRaisesRegex(
@@ -455,9 +458,12 @@ class JournalBackedHostApiTests(unittest.TestCase):
         first = self.store()
         command = self.command()
         first.submit(command)
-        with sqlite3.connect(self.path) as connection:
+        connection = sqlite3.connect(self.path)
+        try:
             connection.execute("DELETE FROM command_dedupe")
             connection.commit()
+        finally:
+            connection.close()
 
         restarted = self.store()
         before_sequence = JournalStore(self.path).current_journal_sequence()

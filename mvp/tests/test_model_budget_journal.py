@@ -500,7 +500,8 @@ class DurableModelBudgetTests(unittest.TestCase):
                 "request_id": "req-1",
                 "amount": "0.4",
             }
-            with sqlite3.connect(journal.path) as connection:
+            connection = sqlite3.connect(journal.path)
+            try:
                 connection.execute(
                     """
                     UPDATE command_dedupe
@@ -512,6 +513,8 @@ class DurableModelBudgetTests(unittest.TestCase):
                     ),
                 )
                 connection.commit()
+            finally:
+                connection.close()
 
             _, restarted = open_budget(directory)
             with self.assertRaisesRegex(
@@ -605,9 +608,12 @@ class DurableModelBudgetTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             journal, budget = open_budget(directory)
             self.assertTrue(budget.reserve("req-1", "0.4"))
-            with sqlite3.connect(journal.path) as connection:
+            connection = sqlite3.connect(journal.path)
+            try:
                 connection.execute("DELETE FROM command_dedupe")
                 connection.commit()
+            finally:
+                connection.close()
 
             _, restarted = open_budget(directory)
             before = restarted.journal.current_journal_sequence()

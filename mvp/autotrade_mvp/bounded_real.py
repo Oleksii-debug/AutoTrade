@@ -700,13 +700,21 @@ def assess_bounded_real_qualification(
     accepted: AcceptedQualificationAttestation | None = None
     if evidence_verifier is None:
         reasons.append("trusted_immutable_evidence_verifier_required")
-    elif not isinstance(evidence_verifier, ArtifactStoreEvidenceVerifier):
+    elif type(evidence_verifier) is not ArtifactStoreEvidenceVerifier:
         reasons.append("untrusted_immutable_evidence_verifier")
     else:
-        verifier_identity = evidence_verifier.identity
+        # Terminal metadata verification must not dispatch through caller-owned
+        # subclass/instance method overrides. Use the exact canonical class
+        # implementation and descriptor accessors.
+        verifier_identity = ArtifactStoreEvidenceVerifier.identity.fget(
+            evidence_verifier
+        )
         for label, ref in all_refs:
             try:
-                verification = evidence_verifier.verify(ref)
+                verification = ArtifactStoreEvidenceVerifier.verify(
+                    evidence_verifier,
+                    ref,
+                )
             except Exception:
                 verification = EvidenceVerification(
                     valid=False,
@@ -731,7 +739,7 @@ def assess_bounded_real_qualification(
         reasons.append("independent_evidence_trust_unavailable")
     elif any(value is None for value in trust_inputs):
         reasons.append("independent_evidence_trust_incomplete")
-    elif not isinstance(evidence_verifier, ArtifactStoreEvidenceVerifier):
+    elif type(evidence_verifier) is not ArtifactStoreEvidenceVerifier:
         reasons.append("independent_evidence_trust_unavailable")
     else:
         required_scope = f"envelope/{envelope.envelope_digest}"
@@ -743,8 +751,12 @@ def assess_bounded_real_qualification(
             accepted = verify_qualification_attestation(
                 qualification_receipt,
                 policy=qualification_policy,
-                evidence_store=evidence_verifier.store,
-                evidence_root=evidence_verifier.evidence_root,
+                evidence_store=ArtifactStoreEvidenceVerifier.store.fget(
+                    evidence_verifier
+                ),
+                evidence_root=ArtifactStoreEvidenceVerifier.evidence_root.fget(
+                    evidence_verifier
+                ),
                 expected_policy_id=expected_policy_id,
                 expected_policy_version=expected_policy_version,
                 expected_source_sha=envelope.source_sha,

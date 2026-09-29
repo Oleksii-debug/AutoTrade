@@ -925,12 +925,7 @@ def _signed_qualification_attestation_snapshot(
 def qualification_trust_policy_payload(
     policy: QualificationTrustPolicy,
 ) -> dict[str, object]:
-    if not isinstance(policy, QualificationTrustPolicy):
-        raise TypeError("policy must be QualificationTrustPolicy")
-    return {
-        "policy_version": policy.policy_version,
-        "roots": [root.canonical() for root in policy.roots],
-    }
+    return _qualification_trust_policy_payload_exact(policy)
 
 
 def parse_qualification_trust_policy(
@@ -989,7 +984,7 @@ def parse_qualification_trust_policy(
             revoked_at=root_payload["revoked_at"],
             verification_method=root_payload["verification_method"],
         )
-        if root_payload["root_id"] != root.root_id:
+        if root_payload["root_id"] != _trust_root_id_exact(root):
             raise QualificationTrustError(
                 f"qualification trust root[{index}] root_id mismatch"
             )
@@ -1290,7 +1285,7 @@ def parse_signed_qualification_attestation(
         schema_version=attestation_payload["schema_version"],
         verification_method=attestation_payload["verification_method"],
     )
-    if attestation.canonical_payload() != dict(attestation_payload):
+    if _qualification_attestation_payload_exact(attestation) != dict(attestation_payload):
         raise QualificationTrustError(
             "qualification attestation is not in canonical serialized form"
         )
@@ -1415,14 +1410,8 @@ def verify_qualification_attestation(
     expected_release_artifact_id: str | None = None,
     expected_release_artifact_sha256: str | None = None,
 ) -> AcceptedQualificationAttestation:
-    if not isinstance(receipt, SignedQualificationAttestation):
-        raise TypeError(
-            "receipt must be SignedQualificationAttestation"
-        )
-    if not isinstance(policy, QualificationTrustPolicy):
-        raise TypeError(
-            "policy must be QualificationTrustPolicy"
-        )
+    receipt = _signed_qualification_attestation_snapshot(receipt)
+    policy = _qualification_trust_policy_snapshot(policy)
     if type(evidence_store) is not ArtifactStore:
         raise TypeError(
             "evidence_store must be the canonical ArtifactStore"
@@ -1435,7 +1424,8 @@ def verify_qualification_attestation(
         expected_policy_version,
         name="expected_policy_version",
     )
-    if policy.policy_id != expected_policy_id:
+    observed_policy_id = _qualification_trust_policy_id_exact(policy)
+    if observed_policy_id != expected_policy_id:
         raise QualificationTrustError(
             "qualification trust policy identity is not the pinned policy"
         )
@@ -1520,7 +1510,10 @@ def verify_qualification_attestation(
             "attestation is bound to a different release artifact"
         )
 
-    root = policy.root(attestation.trust_root_id)
+    root = _qualification_policy_root_exact(
+        policy,
+        attestation.trust_root_id,
+    )
     if attestation.producer_id != root.producer_id:
         raise QualificationTrustError(
             "attestation producer is not authorized by trust root"
@@ -1561,7 +1554,7 @@ def verify_qualification_attestation(
         receipt.signature_b64, validate=True
     )
     _verify_rsa_pkcs1v15_sha256(
-        payload=attestation.canonical_bytes(),
+        payload=_qualification_attestation_bytes_exact(attestation),
         signature=signature,
         root=root,
     )
@@ -1570,10 +1563,10 @@ def verify_qualification_attestation(
 
     return AcceptedQualificationAttestation(
         attestation_id=attestation.attestation_id,
-        attestation_digest=attestation.content_digest,
-        policy_id=policy.policy_id,
+        attestation_digest=_qualification_attestation_digest_exact(attestation),
+        policy_id=observed_policy_id,
         policy_version=policy.policy_version,
-        trust_root_id=root.root_id,
+        trust_root_id=_trust_root_id_exact(root),
         result=attestation.result,
         source_sha=attestation.source_sha,
         domain=attestation.domain,

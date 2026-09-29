@@ -334,6 +334,36 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                 "2026-09-24T18:02:00Z",
             )
 
+    def test_command_without_provider_cash_effects_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            evidence = activity(
+                provider_id="IBKR",
+                account_id="acct-command-only",
+                activity_id="dep-command-only",
+            )
+
+            def command_without_effects(**kwargs):
+                return kwargs["result"], False, ()
+
+            with patch.object(
+                store,
+                "commit_command",
+                side_effect=command_without_effects,
+            ):
+                with self.assertRaisesRegex(
+                    AccountingConflict,
+                    "durable command exists without its financial effects",
+                ):
+                    book_paper_activity(
+                        store,
+                        provider_id="IBKR",
+                        account_id="acct-command-only",
+                        activity=evidence,
+                        amount="100",
+                        observed_at="2026-09-24T18:02:00Z",
+                    )
+
     def test_repoll_rejects_durable_command_result_effect_mismatch(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

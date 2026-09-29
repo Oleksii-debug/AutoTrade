@@ -1912,6 +1912,39 @@ class AblationTests(unittest.TestCase):
             trial_state = science.completeness(registration.protocol_id)
             self.assertEqual(trial_state["remaining_trial_budget"], 0)
 
+            # The issued authority is a sealed token. Caller-visible source
+            # objects can be rebound after construction without changing the
+            # module-owned exact registry/memory/reader state.
+            with self.assertRaises(AttributeError):
+                object.__setattr__(
+                    authority,
+                    "_load_outcome",
+                    lambda *_args, **_kwargs: (),
+                )
+            with self.assertRaises(AttributeError):
+                object.__setattr__(
+                    authority,
+                    "_read_artifact_snapshot",
+                    lambda *_args, **_kwargs: ({}, b"forged"),
+                )
+            with self.assertRaises(AttributeError):
+                object.__setattr__(authority, "scientific_registry", science)
+            with self.assertRaises(AttributeError):
+                object.__setattr__(authority, "experience_memory", memory)
+
+            memory.coverage_population_snapshot = (
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("caller ExperienceMemory method must not execute")
+                )
+            )
+            memory.path = root / "attacker-memory.sqlite3"
+            science.protocol_registration = (
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("caller ScientificRegistry method must not execute")
+                )
+            )
+            science.path = root / "attacker-science.sqlite3"
+
             result = evaluate_qualified_incremental_value(
                 "agent",
                 cases,

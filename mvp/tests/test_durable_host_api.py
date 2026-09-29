@@ -399,6 +399,36 @@ class JournalBackedHostApiTests(unittest.TestCase):
         self.assertIn("idempotency_key_conflict", conflict.reason_codes)
         self.assertEqual(restarted.state_version, 1)
 
+    def test_changed_action_or_actor_on_accepted_retry_remains_conflict(self):
+        first = self.store()
+        command = self.command()
+        first.submit(command)
+
+        restarted = self.store()
+        changed_action = restarted.submit(
+            self.command(
+                action="CANCEL_OPEN_ORDERS",
+            )
+        )
+        self.assertEqual(changed_action.status, "CONFLICT")
+        self.assertIn(
+            "idempotency_key_conflict",
+            changed_action.reason_codes,
+        )
+
+        changed_actor = restarted.submit(
+            self.command(
+                actor="bob",
+                session="session-b",
+            )
+        )
+        self.assertEqual(changed_actor.status, "CONFLICT")
+        self.assertIn(
+            "command_id_conflict",
+            changed_actor.reason_codes,
+        )
+        self.assertEqual(restarted.state_version, 1)
+
     def test_same_command_id_under_new_key_conflicts_after_restart(self):
         first = self.store()
         first.submit(self.command(key="key-a"))

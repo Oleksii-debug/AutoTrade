@@ -349,7 +349,7 @@ def qualify_supply_chain(
                     (
                         "advisory_exception:" + item.component_id,
                         _store_artifact_matches(
-                            evidence_store,
+                            trusted_read,
                             artifact_id=item.advisory_exception_id,
                             artifact_hash=item.advisory_exception_hash,
                             media_type=_ADVISORY_EXCEPTION_MEDIA_TYPE,

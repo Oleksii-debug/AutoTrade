@@ -95,6 +95,28 @@ def _command_id(aggregate_id: str, idempotency_key: str) -> str:
     )
 
 
+def _rehydrate_committed_event(event: Mapping[str, Any]) -> dict[str, Any]:
+    """Restore the exact canonical envelope accepted by commit_command.
+
+    Journal reads expose aggregate_version as an integer and add the derived
+    journal_sequence.  Neither representation is part of the immutable event
+    envelope hashed into an EVENT_BATCH effect.
+    """
+
+    if not isinstance(event, Mapping):
+        raise TypeError("durable event must be a mapping")
+    version = event.get("aggregate_version")
+    if type(version) is not int or version <= 0:
+        raise ValueError("durable event aggregate_version must be positive")
+    envelope = {
+        key: value
+        for key, value in event.items()
+        if key != "journal_sequence"
+    }
+    envelope["aggregate_version"] = str(version)
+    return envelope
+
+
 def _idempotency_key(*, budget_id: str, action: str, identity: str) -> str:
     return "model-budget:" + action + ":" + _identity_digest(
         "idempotency",
@@ -308,11 +330,12 @@ class DurableModelBudget:
                 raise ValueError(
                     "model budget idempotency identity conflicts with durable event"
                 )
-            # Do not let the event-id fast path bypass canonical command scope.
-            # Exact retries must still prove the same actor/environment/key. For
-            # pre-scoped event history this also creates the command dedupe row
-            # lazily after the exact event payload has been verified.
-            self.journal.record_command(
+            # Replay the original immutable EVENT_BATCH rather than changing
+            # the command's durable effect kind to RESULT_ONLY after restart.
+            # Existing events without matching command/effect authority are
+            # corruption and must not be lazily promoted.
+            original_envelope = _rehydrate_committed_event(existing)
+            saved_result, inserted, _ = self.journal.commit_command(
                 command_id=command_id,
                 actor=_COMMAND_ACTOR,
                 environment=self.environment,
@@ -320,7 +343,16 @@ class DurableModelBudget:
                 request=request,
                 result=result,
                 state_version=int(existing["aggregate_version"]),
+                events=[(original_envelope, None)],
             )
+            if inserted:
+                raise ValueError(
+                    "existing model budget event unexpectedly inserted on replay"
+                )
+            if saved_result != result:
+                raise ValueError(
+                    "model budget command result conflicts with durable event"
+                )
             return False
 
         # Validate on a fresh durable projection so rejected operations never

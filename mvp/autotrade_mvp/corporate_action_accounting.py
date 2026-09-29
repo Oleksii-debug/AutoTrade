@@ -19,10 +19,12 @@ from uuid import NAMESPACE_URL, uuid5
 
 from .accounting import (
     AccountingConflict,
+    EconomicBook,
     JournalTransaction,
     Posting,
     _canonical_equity_split_terms,
     book_equity_split_adjustment,
+    project_equity_position,
     reverse_transaction,
     transaction_digest,
     validate_transaction,
@@ -226,14 +228,16 @@ def _canonical_entitlement_position_proof(
     accepted: AuthoritativeCorporateAction,
     *,
     activation_cut: datetime,
-    expected_pre_action_quantity: Decimal,
     excluded_order_key: str,
-) -> dict[str, object]:
-    """Prove the pre-action quantity from causal durable position history.
+) -> tuple[dict[str, object], EquityState]:
+    """Derive one causal durable pre-action state for the pure calculator.
 
-    The pure CorporateActionBook remains a calculator, not a position authority.
-    Only POSITION postings already durable and causally knowable at the provider
-    observation may authorize the quantity used for dividend economics.
+    CorporateActionBook owns transition semantics and retained event chronology,
+    but it is not a mutable position or basis authority. Quantity, FIFO open
+    basis and unsettled corporate-action cash therefore come from the canonical
+    durable economic journal at one causal cut. Exact retry/correction excludes
+    the action lineage being rebuilt so it reconstructs the same pre-action
+    state instead of feeding its own durable effect back into the calculator.
     """
 
     version = corporate_book.instrument_version
@@ -249,26 +253,27 @@ def _canonical_entitlement_position_proof(
         raise AccountingConflict(
             "corporate-action entitlement requires exact economic effective cut"
         )
-
     if (
         not isinstance(activation_cut, datetime)
         or activation_cut.tzinfo is None
         or activation_cut.utcoffset() is None
     ):
         raise TypeError("activation_cut must be timezone-aware")
+    if not isinstance(excluded_order_key, str) or not excluded_order_key.strip():
+        raise ValueError("excluded_order_key is required")
+
     observed_cut = activation_cut.astimezone(timezone.utc)
+    current_order_key = excluded_order_key.strip()
     symbol = version.provider_symbol
+    settlement_currency = version.settlement_currency.upper()
     position_account = f"POSITION:{symbol}"
-    quantity = Decimal("0")
+    unsettled_account = f"UNSETTLED_CASH:{settlement_currency}"
+    causal_position_transactions: list[JournalTransaction] = []
+    unsettled_cash = Decimal("0")
     contributors: list[dict[str, str]] = []
 
     economic_book.refresh()
-    if not isinstance(excluded_order_key, str) or not excluded_order_key.strip():
-        raise ValueError("excluded_order_key is required")
-    current_order_key = excluded_order_key.strip()
     for transaction in economic_book.transactions:
-        # Exact retry of a position-changing action must reconstruct the
-        # pre-action entitlement cut, not count its own already-durable effect.
         if transaction.economic_order_key == current_order_key:
             continue
         position_postings = tuple(
@@ -277,14 +282,20 @@ def _canonical_entitlement_position_proof(
             if posting.ledger_account == position_account
             and posting.asset_or_currency == symbol
         )
-        if not position_postings:
+        unsettled_postings = tuple(
+            posting
+            for posting in transaction.postings
+            if posting.ledger_account == unsettled_account
+            and posting.asset_or_currency == settlement_currency
+        )
+        if not position_postings and not unsettled_postings:
             continue
         if (
             transaction.economic_effective_at is None
             or transaction.observed_at is None
         ):
             raise AccountingConflict(
-                "canonical position history lacks causal entitlement timestamps"
+                "canonical pre-action financial history lacks causal timestamps"
             )
         try:
             effective = datetime.fromisoformat(
@@ -295,17 +306,20 @@ def _canonical_entitlement_position_proof(
             ).astimezone(timezone.utc)
         except ValueError as error:
             raise AccountingConflict(
-                "canonical position history contains invalid entitlement timestamps"
+                "canonical pre-action financial history contains invalid timestamps"
             ) from error
         if effective == event.effective_at and observed <= observed_cut:
             raise AccountingConflict(
-                "same-effective-time position and corporate action lack qualified causal order"
+                "same-effective-time financial state and corporate action lack qualified causal order"
             )
         if effective < event.effective_at and observed <= observed_cut:
-            quantity += sum(
-                (posting.signed_amount for posting in position_postings),
-                Decimal("0"),
-            )
+            if position_postings:
+                causal_position_transactions.append(transaction)
+            if unsettled_postings:
+                unsettled_cash += sum(
+                    (posting.signed_amount for posting in unsettled_postings),
+                    Decimal("0"),
+                )
             contributors.append(
                 {
                     "transaction_id": transaction.transaction_id,
@@ -313,17 +327,41 @@ def _canonical_entitlement_position_proof(
                 }
             )
 
-    expected_quantity = Decimal(expected_pre_action_quantity)
-    if quantity != expected_quantity:
+    projection = project_equity_position(
+        EconomicBook(causal_position_transactions),
+        instrument=symbol,
+        settlement_currency=settlement_currency,
+    )
+    if projection.quantity < 0:
+        if event.kind == "SPLIT":
+            raise AccountingConflict(
+                "equity split with short/borrow/recall state requires atomic borrow authority"
+            )
         raise AccountingConflict(
-            "corporate-action pre-action quantity does not match canonical durable position at entitlement cut"
+            "short corporate-action entitlement requires canonical borrow authority"
+        )
+    if (
+        corporate_book.state.borrowed_quantity != 0
+        or corporate_book.state.recalled_quantity != 0
+    ):
+        raise AccountingConflict(
+            "corporate-action pre-action state requires canonical borrow authority"
         )
 
+    pre_action_state = EquityState.create(
+        symbol=symbol,
+        quantity=projection.quantity,
+        total_basis=projection.open_cost_basis,
+        settled_cash=corporate_book.state.settled_cash,
+        unsettled_cash=unsettled_cash,
+        currency=settlement_currency,
+        borrowed_quantity=Decimal("0"),
+        accrued_financing=corporate_book.state.accrued_financing,
+        recalled_quantity=Decimal("0"),
+    )
     proof: dict[str, object] = {
-        "schema_version": "1.0.0",
-        "instrument_version": (
-            f"{version.instrument_id}@{version.version}"
-        ),
+        "schema_version": "2.0.0",
+        "instrument_version": f"{version.instrument_id}@{version.version}",
         "provider_symbol": symbol,
         "economic_effective_cut": event.effective_at.isoformat().replace(
             "+00:00", "Z"
@@ -331,11 +369,23 @@ def _canonical_entitlement_position_proof(
         "causal_observed_cut": observed_cut.isoformat().replace(
             "+00:00", "Z"
         ),
-        "quantity": str(quantity),
+        "quantity": str(projection.quantity),
+        "open_cost_basis": str(projection.open_cost_basis),
+        "realized_pnl": str(projection.realized_pnl),
+        "unsettled_cash": str(unsettled_cash),
+        "projection_policy_version": projection.policy_version,
+        "lots": [
+            {
+                "transaction_id": lot.transaction_id,
+                "quantity": str(lot.quantity),
+                "unit_price": str(lot.unit_price),
+            }
+            for lot in projection.lots
+        ],
         "contributing_transactions": contributors,
     }
     proof["digest"] = payload_digest(proof)
-    return proof
+    return proof, pre_action_state
 
 
 def _candidate_book(
@@ -385,6 +435,27 @@ def _candidate_book(
         for retained, transition in candidate.checkpoint("candidate").records
         if retained.event_id == event.event_id
     )
+    return candidate, transition
+
+
+def _authoritative_candidate_book(
+    book: CorporateActionBook,
+    accepted: AuthoritativeCorporateAction,
+    *,
+    pre_action_state: EquityState,
+) -> tuple[CorporateActionBook, Transition]:
+    """Validate retained corporate chronology, then calculate from durable state."""
+
+    # Retained pure history still owns event identity, correction-target and
+    # chronology validation. Its mutable state is deliberately not financial
+    # authority, so the transition itself is rebuilt from the durable projection.
+    _candidate_book(book, accepted)
+    candidate = CorporateActionBook(
+        pre_action_state,
+        instrument_version=book.instrument_version,
+        registry=book.registry,
+    )
+    transition = candidate.apply(accepted.event)
     return candidate, transition
 
 
@@ -791,21 +862,24 @@ def commit_authoritative_corporate_action(
             economically_active=False,
         )
 
-    # The position proof and the final commit must share one durable read cut.
-    # An action with no economic postings has no aggregate-version fence of
-    # its own, so a concurrent fill must still invalidate the activation.
+    # The durable pre-action projection and final commit share one journal cut.
+    # A zero-effect action has no economic aggregate-version fence of its own,
+    # so any concurrent financial mutation must still invalidate activation.
     journal_read_cut = store.current_journal_sequence()
-    candidate, transition = _candidate_book(corporate_book, accepted)
-    entitlement_position = _canonical_entitlement_position_proof(
+    entitlement_position, pre_action_state = _canonical_entitlement_position_proof(
         economic_book,
         corporate_book,
         accepted,
         activation_cut=activation_cut,
-        expected_pre_action_quantity=transition.before.quantity,
         excluded_order_key=_order_key(
             accepted.corrects_external_event_id
             or accepted.external_event_id
         ),
+    )
+    candidate, transition = _authoritative_candidate_book(
+        corporate_book,
+        accepted,
+        pre_action_state=pre_action_state,
     )
     if store.current_journal_sequence() != journal_read_cut:
         raise AccountingConflict(

@@ -1,14 +1,17 @@
 from hashlib import sha256
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
 
+import mvp.autotrade_mvp.recovery_qualification as recovery_qualification_module
 from mvp.autotrade_mvp.qualification_attestation import (
     EvidenceArtifactRef,
     QualificationScope,
     SignedQualificationAttestation,
+    verify_qualification_attestation,
 )
 from mvp.autotrade_mvp.recovery_qualification import (
     RecoveryEvidenceStatus,
@@ -18,6 +21,7 @@ from mvp.autotrade_mvp.recovery_qualification import (
     RecoveryScenarioEvidence,
     qualify_recovery_release,
     recovery_evidence_receipt_metadata,
+    recovery_policy_subject_requirement,
 )
 from mvp.tests.test_qualification_attestation import (
     attestation,
@@ -145,6 +149,7 @@ def qualify(
     omit_release_artifact=False,
     trusted=False,
     omit_attestation_scenarios=(),
+    attested_policy=None,
 ):
     with TemporaryDirectory() as directory:
         store = ArtifactStore(directory)
@@ -176,11 +181,13 @@ def qualify(
             digest = manifest["sha256"].removeprefix("sha256:")
             (store.objects / digest[:2] / digest).write_bytes(b"corrupt")
         trust_kwargs = {}
+        canonical_policy = None
         if trusted:
             trust_root = attestation_root(
                 scopes=(QualificationScope("RECOVERY", "RELEASE"),)
             )
-            trust_policy = attestation_policy(trust_root)
+            canonical_policy = attestation_policy(trust_root)
+            bound_policy = policy if attested_policy is None else attested_policy
             attested_refs = tuple(
                 EvidenceArtifactRef(
                     artifact_id=item.evidence_artifact_id,
@@ -200,7 +207,10 @@ def qualify(
                 package_id="WP-59",
                 protocol_id=policy.protocol_id,
                 protocol_version=policy.evidence_schema_version,
-                requirement_ids=("recovery-release-qualification",),
+                requirement_ids=(
+                    "recovery-release-qualification",
+                    recovery_policy_subject_requirement(bound_policy),
+                ),
                 evidence_refs=attested_refs,
                 release_artifact_id=policy.release_artifact_id,
                 release_artifact_sha256=policy.release_artifact_sha256,
@@ -210,17 +220,34 @@ def qualify(
                 "qualification_receipt": SignedQualificationAttestation(
                     signed, sign(signed)
                 ),
-                "qualification_policy": trust_policy,
-                "expected_policy_id": trust_policy.policy_id,
-                "expected_policy_version": trust_policy.policy_version,
+                "qualification_policy": canonical_policy,
+                "expected_policy_id": canonical_policy.policy_id,
+                "expected_policy_version": canonical_policy.policy_version,
             }
-        return qualify_recovery_release(
-            policy=policy,
-            evidence=evidence,
-            evidence_store=store,
-            evidence_root=directory,
-            **trust_kwargs,
-        )
+
+        def canonical_verify(receipt_arg, **kwargs):
+            if canonical_policy is None:
+                raise AssertionError("canonical verifier used without trusted fixture")
+            return verify_qualification_attestation(
+                receipt_arg,
+                policy=canonical_policy,
+                expected_policy_id=canonical_policy.policy_id,
+                expected_policy_version=canonical_policy.policy_version,
+                **kwargs,
+            )
+
+        with patch.object(
+            recovery_qualification_module,
+            "verify_canonical_qualification_attestation",
+            side_effect=canonical_verify,
+        ):
+            return qualify_recovery_release(
+                policy=policy,
+                evidence=evidence,
+                evidence_store=store,
+                evidence_root=directory,
+                **trust_kwargs,
+            )
 
 
 class RecoveryReleaseQualificationTests(unittest.TestCase):
@@ -322,6 +349,22 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
             decision.qualification_trust_root_id.startswith("sha256:")
         )
         self.assertFalse(decision.authorizes_trading)
+
+    def test_signed_recovery_policy_cannot_be_loosened_after_outcome(self):
+        original_policy = policy()
+        loosened_policy = policy(
+            limits={scenario: 120_000 for scenario in RecoveryScenario},
+        )
+        decision = qualify(
+            policy=loosened_policy,
+            evidence=complete_evidence(),
+            trusted=True,
+            attested_policy=original_policy,
+        )
+        self.assertEqual(decision.status, RecoveryEvidenceStatus.FAIL)
+        self.assertIn("independent_recovery_policy_mismatch", decision.blockers)
+        self.assertFalse(decision.matches_policy(original_policy))
+        self.assertTrue(decision.matches_policy(loosened_policy))
 
     def test_signed_attestation_must_cover_exact_scenario_evidence_set(self):
         decision = qualify(
@@ -587,6 +630,7 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
                 evidence_schema_version=EVIDENCE_SCHEMA,
                 protocol_id=PROTOCOL_ID,
                 evidence_set_sha256=DECISION_EVIDENCE_SET_SHA,
+                recovery_policy_requirement=recovery_policy_subject_requirement(policy()),
                 blockers=(),
                 measured_downtime_ms={RecoveryScenario.POWER_LOSS: 10},
             )
@@ -601,6 +645,7 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
                 evidence_schema_version=EVIDENCE_SCHEMA,
                 protocol_id=PROTOCOL_ID,
                 evidence_set_sha256=DECISION_EVIDENCE_SET_SHA,
+                recovery_policy_requirement=recovery_policy_subject_requirement(policy()),
                 blockers=("forged:blocker",),
                 measured_downtime_ms={scenario: 10 for scenario in RecoveryScenario},
             )
@@ -615,6 +660,7 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
                 evidence_schema_version=EVIDENCE_SCHEMA,
                 protocol_id=PROTOCOL_ID,
                 evidence_set_sha256=DECISION_EVIDENCE_SET_SHA,
+                recovery_policy_requirement=recovery_policy_subject_requirement(policy()),
                 blockers=(),
                 measured_downtime_ms={},
             )
@@ -641,6 +687,10 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
         self.assertEqual(decision.protocol_id, current_policy.protocol_id)
         self.assertRegex(decision.evidence_set_sha256, r"^sha256:[0-9a-f]{64}$")
         self.assertTrue(decision.matches_policy(current_policy))
+        changed_thresholds = policy(
+            limits={RecoveryScenario.POWER_LOSS: 120_000},
+        )
+        self.assertFalse(decision.matches_policy(changed_thresholds))
 
         other_release = policy(
             artifact_id=str(
@@ -672,6 +722,7 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
             evidence_schema_version=EVIDENCE_SCHEMA,
             protocol_id=PROTOCOL_ID,
             evidence_set_sha256=DECISION_EVIDENCE_SET_SHA,
+            recovery_policy_requirement=recovery_policy_subject_requirement(policy()),
             blockers=(),
             measured_downtime_ms=measured,
         )
@@ -689,6 +740,7 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
                 evidence_schema_version=EVIDENCE_SCHEMA,
                 protocol_id=PROTOCOL_ID,
                 evidence_set_sha256=DECISION_EVIDENCE_SET_SHA,
+                recovery_policy_requirement=recovery_policy_subject_requirement(policy()),
                 blockers=(),
                 measured_downtime_ms={
                     scenario: (True if scenario is RecoveryScenario.POWER_LOSS else 10)

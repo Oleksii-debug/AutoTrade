@@ -686,10 +686,7 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 )
 
             self.assertEqual(calls, [])
-            self.assertEqual(
-                journal.load_events("provider_nonce", allocator.aggregate_id),
-                [],
-            )
+            self.assertEqual(journal.current_journal_sequence(), 0)
 
     def test_durable_nonce_survives_restart_and_clock_regression(self):
         fixed = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)

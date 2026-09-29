@@ -1,4 +1,5 @@
 from hashlib import sha256
+from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from uuid import NAMESPACE_URL, uuid5
@@ -130,6 +131,7 @@ def qualify(value):
             qualification_receipt=receipt,
             qualification_policy=trust_policy,
             evidence_store=store,
+            evidence_root=Path(directory),
             expected_policy_id=trust_policy.policy_id,
             expected_policy_version=trust_policy.policy_version,
         )
@@ -237,6 +239,7 @@ class ScientificQualificationTests(unittest.TestCase):
                 qualification_receipt=receipt,
                 qualification_policy=trust_policy,
                 evidence_store=store,
+                evidence_root=Path(directory),
                 expected_policy_id=trust_policy.policy_id,
                 expected_policy_version=trust_policy.policy_version,
             )
@@ -256,6 +259,30 @@ class ScientificQualificationTests(unittest.TestCase):
         )
         self.assertTrue(result.qualification_policy_id.startswith("sha256:"))
         self.assertTrue(result.qualification_trust_root_id.startswith("sha256:"))
+
+    def test_publication_store_cannot_select_different_science_root(self):
+        value = evidence()
+        receipt, trust_policy = _signed_science_receipt(value)
+        with (
+            TemporaryDirectory() as authoritative_directory,
+            TemporaryDirectory() as attacker_directory,
+        ):
+            attacker_store = ArtifactStore(attacker_directory)
+            result = qualify_scientific_learning(
+                value,
+                qualification_receipt=receipt,
+                qualification_policy=trust_policy,
+                evidence_store=attacker_store,
+                evidence_root=Path(authoritative_directory),
+                expected_policy_id=trust_policy.policy_id,
+                expected_policy_version=trust_policy.policy_version,
+            )
+        self.assertEqual(result.status, "FAIL")
+        self.assertFalse(result.economic_claim_accepted)
+        self.assertIn(
+            "SCIENCE.INDEPENDENT_ATTESTATION_INVALID",
+            result.reason_codes,
+        )
 
     def test_leakage_sentinel_failure_is_hard_fail_even_if_other_gates_pass(self):
         result = qualify(evidence(complete_gates(leakage="FAIL")))

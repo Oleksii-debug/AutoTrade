@@ -1,11 +1,15 @@
 import base64
 from hashlib import sha256
 import json
+from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from uuid import NAMESPACE_URL, uuid5
 
-from research.autotrade_research.artifacts.store import ArtifactStore
+from research.autotrade_research.artifacts.store import (
+    ArtifactIntegrityError,
+    ArtifactStore,
+)
 
 from mvp.autotrade_mvp.qualification_attestation import (
     EvidenceArtifactRef,
@@ -114,6 +118,7 @@ def _sign(attestation):
 
 def frozen_release(
     store,
+    evidence_root,
     trust_root,
     trust_policy,
     release_id: str,
@@ -213,6 +218,7 @@ def frozen_release(
     decision = freeze_release_candidate(
         candidate,
         evidence_store=store,
+        evidence_root=evidence_root,
         qualification_receipt=receipt,
         qualification_policy=trust_policy,
         expected_policy_id=trust_policy.policy_id,
@@ -274,7 +280,8 @@ def rehashed_plan(plan: WindowsUpdatePlan, mutate) -> WindowsUpdatePlan:
 class WindowsUpdatePlanTests(unittest.TestCase):
     def setUp(self):
         self._tempdir = TemporaryDirectory()
-        self.store = ArtifactStore(self._tempdir.name)
+        self.evidence_root = self._tempdir.name
+        self.store = ArtifactStore(self.evidence_root)
         self.trust_root = _trust_root()
         self.trust_policy = QualificationTrustPolicy(
             policy_version="2026.09",
@@ -282,12 +289,14 @@ class WindowsUpdatePlanTests(unittest.TestCase):
         )
         self.trust = WindowsUpdateTrustContext(
             evidence_store=self.store,
+            evidence_root=self.evidence_root,
             qualification_policy=self.trust_policy,
             expected_policy_id=self.trust_policy.policy_id,
             expected_policy_version=self.trust_policy.policy_version,
         )
         self.current = frozen_release(
             self.store,
+            self.evidence_root,
             self.trust_root,
             self.trust_policy,
             "autotrade-1.0.0",
@@ -296,6 +305,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
         )
         self.candidate = frozen_release(
             self.store,
+            self.evidence_root,
             self.trust_root,
             self.trust_policy,
             "autotrade-1.1.0",
@@ -312,6 +322,37 @@ class WindowsUpdatePlanTests(unittest.TestCase):
 
     def tearDown(self):
         self._tempdir.cleanup()
+
+    def test_trust_context_rejects_mismatched_independent_root(self):
+        with TemporaryDirectory() as other_root:
+            with self.assertRaises(ArtifactIntegrityError):
+                WindowsUpdateTrustContext(
+                    evidence_store=self.store,
+                    evidence_root=other_root,
+                    qualification_policy=self.trust_policy,
+                    expected_policy_id=self.trust_policy.policy_id,
+                    expected_policy_version=self.trust_policy.policy_version,
+                )
+
+    def test_release_revalidation_ignores_post_context_store_poisoning(self):
+        redirected = Path(self._tempdir.name) / "redirected-after-context"
+        object.__setattr__(self.store, "root", redirected)
+        object.__setattr__(
+            self.store,
+            "read_authenticated_snapshot",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("caller store must not execute trusted reads")
+            ),
+        )
+        plan = build_windows_update_plan(
+            current_release=self.current,
+            candidate_release=self.candidate,
+            current_journal_schema_version=1,
+            candidate_journal_schema_version=1,
+            backup_evidence=self.backup,
+            trust=self.trust,
+        )
+        self.assertEqual(plan.status, "PLAN_READY")
 
     def test_same_schema_update_is_deterministic_and_never_grants_authority(self):
         first = build_windows_update_plan(
@@ -939,6 +980,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
         )
         other_candidate = frozen_release(
             self.store,
+            self.evidence_root,
             self.trust_root,
             self.trust_policy,
             "autotrade-1.2.0",
@@ -1040,6 +1082,7 @@ class WindowsUpdatePlanTests(unittest.TestCase):
 
         other_candidate = frozen_release(
             self.store,
+            self.evidence_root,
             self.trust_root,
             self.trust_policy,
             "autotrade-1.2.0",

@@ -11,7 +11,9 @@ from mvp.autotrade_mvp.economics import (
     investment_pnl_excluding_external_flows,
     linear_funding_cashflow,
     linear_futures_mark_pnl,
+    project_split_decimal,
 )
+from mvp.autotrade_mvp.exact_decimal import ExactDecimalError
 
 
 class EconomicOracleExactnessTests(unittest.TestCase):
@@ -48,12 +50,61 @@ class EconomicOracleExactnessTests(unittest.TestCase):
         long_result = apply_split("10", "100", numerator="2", denominator="1")
         short_result = apply_split("-10", "100", numerator="2", denominator="1")
 
-        self.assertEqual(long_result.quantity, Decimal("20"))
-        self.assertEqual(short_result.quantity, Decimal("-20"))
-        self.assertEqual(long_result.total_basis, Decimal("1000"))
-        self.assertEqual(short_result.total_basis, Decimal("1000"))
-        self.assertEqual(long_result.unit_basis, Decimal("50"))
-        self.assertEqual(short_result.unit_basis, Decimal("50"))
+        self.assertEqual(long_result.quantity, Fraction(20, 1))
+        self.assertEqual(short_result.quantity, Fraction(-20, 1))
+        self.assertEqual(long_result.total_basis, Fraction(1000, 1))
+        self.assertEqual(short_result.total_basis, Fraction(1000, 1))
+        self.assertEqual(long_result.unit_basis, Fraction(50, 1))
+        self.assertEqual(short_result.unit_basis, Fraction(50, 1))
+
+        long_decimal = project_split_decimal(long_result)
+        short_decimal = project_split_decimal(short_result)
+        self.assertEqual(long_decimal.quantity, Decimal("20"))
+        self.assertEqual(short_decimal.quantity, Decimal("-20"))
+        self.assertEqual(long_decimal.unit_basis, Decimal("50"))
+        self.assertEqual(short_decimal.unit_basis, Decimal("50"))
+
+    def test_nonterminating_split_remains_exact_for_long_and_short(self):
+        observed = []
+        for precision in (3, 6, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    long_result = apply_split(
+                        "1",
+                        "300",
+                        numerator="1",
+                        denominator="3",
+                    )
+                    short_result = apply_split(
+                        "-1",
+                        "300",
+                        numerator="1",
+                        denominator="3",
+                    )
+                    observed.append((long_result, short_result))
+
+        self.assertTrue(all(item == observed[0] for item in observed))
+        long_result, short_result = observed[0]
+        self.assertEqual(long_result.quantity, Fraction(1, 3))
+        self.assertEqual(short_result.quantity, Fraction(-1, 3))
+        self.assertEqual(long_result.unit_basis, Fraction(900, 1))
+        self.assertEqual(short_result.unit_basis, Fraction(900, 1))
+        self.assertEqual(long_result.total_basis, Fraction(300, 1))
+        self.assertEqual(short_result.total_basis, Fraction(300, 1))
+        self.assertEqual(
+            abs(long_result.quantity) * long_result.unit_basis,
+            long_result.total_basis,
+        )
+        self.assertEqual(
+            abs(short_result.quantity) * short_result.unit_basis,
+            short_result.total_basis,
+        )
+        with self.assertRaisesRegex(ExactDecimalError, "non-terminating"):
+            project_split_decimal(long_result)
+        with self.assertRaisesRegex(ExactDecimalError, "non-terminating"):
+            project_split_decimal(short_result)
 
     def test_exact_decimal_inputs_preserve_expected_reference_result(self):
         result = cash_round_trip(

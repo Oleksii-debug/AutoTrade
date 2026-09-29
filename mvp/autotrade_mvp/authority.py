@@ -20,6 +20,7 @@ from .allocation import (
 )
 from .durable_reservations import DurableReservationBook
 from .persistence import JournalStore, canonical_json, payload_digest
+from .provider_core import ProviderCoreError, normalize_provider_environment
 from .reconciliation_journal import load_account_resource_availability_evidence
 from .securities_borrow import (
     BorrowAvailabilityEvidence,
@@ -609,37 +610,14 @@ def _provider_domain(
     provider_environment: str | None,
     name: str,
 ) -> str:
-    provider = _text(provider_id, name=f"{name} provider_id").upper()
-    runtime_environment = _text(
-        environment, name=f"{name} environment"
-    ).upper()
-    normalized = (
-        runtime_environment
-        if provider_environment is None
-        else _text(
-            provider_environment,
-            name=f"{name} provider_environment",
-        ).upper()
-    )
-    if provider == "BYBIT":
-        if provider_environment is None:
-            raise ValueError(
-                f"{name} BYBIT requires explicit provider_environment"
-            )
-        if normalized not in {"MAINNET", "TESTNET", "DEMO"}:
-            raise ValueError(
-                f"{name} BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
-            )
-        if (
-            runtime_environment == "LIVE" and normalized != "MAINNET"
-        ) or (
-            runtime_environment == "PAPER"
-            and normalized not in {"TESTNET", "DEMO"}
-        ):
-            raise ValueError(
-                f"{name} BYBIT provider_environment does not match runtime environment"
-            )
-    return normalized
+    try:
+        return normalize_provider_environment(
+            provider_id=provider_id,
+            environment=environment,
+            provider_environment=provider_environment,
+        )
+    except ProviderCoreError as error:
+        raise ValueError(f"{name} {error}") from error
 
 
 @dataclass(frozen=True)

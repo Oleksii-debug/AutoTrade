@@ -155,6 +155,14 @@ def _scope_id(scope: SettlementAccountScope) -> str:
     return str(uuid5(NAMESPACE_URL, "settlement-book:" + material))
 
 
+def _legacy_runtime_only_scope_id(scope: SettlementAccountScope) -> str:
+    """Historical aggregate identity before exact provider-domain binding."""
+    material = canonical_json(
+        [scope.provider_id, scope.account_id, scope.environment, "settlement-book"]
+    )
+    return str(uuid5(NAMESPACE_URL, "settlement-book:" + material))
+
+
 def _event_id(scope: SettlementAccountScope, kind: str, identity: object) -> str:
     material = canonical_json(
         [*_scope_identity_parts(scope), kind, identity]
@@ -486,6 +494,20 @@ class DurableSettlementBook:
             provider_environment=provider_environment,
         )
         self.scope_id = _scope_id(self.scope)
+        if (
+            self.scope.provider_id == "BYBIT"
+            and self.scope.environment == "PAPER"
+            and self.scope.provider_environment != self.scope.environment
+        ):
+            legacy_scope_id = _legacy_runtime_only_scope_id(self.scope)
+            if (
+                legacy_scope_id != self.scope_id
+                and self.store.load_events(_AGGREGATE_TYPE, legacy_scope_id)
+            ):
+                raise SettlementConflict(
+                    "legacy BYBIT/PAPER settlement history lacks "
+                    "provider_environment; migration/reconciliation is required"
+                )
         self._book = SettlementBook()
         self._reload()
 

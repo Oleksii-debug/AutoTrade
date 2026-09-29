@@ -48,6 +48,70 @@ def _text(value: str, name: str) -> str:
     return value.strip()
 
 
+_RUNTIME_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
+_BYBIT_PROVIDER_ENVIRONMENTS = frozenset({"MAINNET", "TESTNET", "DEMO"})
+
+
+def normalize_provider_environment(
+    *,
+    provider_id: str,
+    environment: str,
+    provider_environment: str | None,
+) -> str:
+    """Return one canonical provider-domain identity for authority consumers.
+
+    Runtime environment and provider environment stay separate. BYBIT retains
+    exact MAINNET/TESTNET/DEMO identity. Providers without a separately
+    qualified exact-domain policy may only use the runtime environment as their
+    provider environment, preventing caller-authored endpoint authority.
+    """
+
+    provider = _text(provider_id, "provider_id").upper()
+    runtime_environment = _text(environment, "environment").upper()
+    if runtime_environment not in _RUNTIME_ENVIRONMENTS:
+        raise ProviderCoreError(
+            "environment must be REPLAY, SIMULATION, PAPER, or LIVE"
+        )
+
+    if provider == "BYBIT":
+        if provider_environment is None:
+            raise ProviderCoreError(
+                "BYBIT requires explicit provider_environment"
+            )
+        normalized = _text(provider_environment, "provider_environment").upper()
+        if normalized not in _BYBIT_PROVIDER_ENVIRONMENTS:
+            raise ProviderCoreError(
+                "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
+            )
+        if (
+            runtime_environment == "LIVE" and normalized != "MAINNET"
+        ) or (
+            runtime_environment == "PAPER"
+            and normalized not in {"TESTNET", "DEMO"}
+        ):
+            raise ProviderCoreError(
+                "BYBIT provider_environment does not match runtime environment"
+            )
+        return normalized
+
+    normalized = (
+        runtime_environment
+        if provider_environment is None
+        else _text(provider_environment, "provider_environment").upper()
+    )
+    if len(normalized) > 64 or any(
+        character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+        for character in normalized
+    ):
+        raise ProviderCoreError("provider_environment is not canonical")
+    if normalized != runtime_environment:
+        raise ProviderCoreError(
+            "provider_environment must equal runtime environment "
+            "until an exact provider-domain policy is qualified"
+        )
+    return normalized
+
+
 def _decimal(value, name: str, *, non_negative: bool = False) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise ProviderCoreError(f"{name} must use exact decimal input")
@@ -371,7 +435,11 @@ class ProviderResponseObservation:
         object.__setattr__(
             self,
             "provider_environment",
-            _text(self.provider_environment, "provider_environment").upper(),
+            normalize_provider_environment(
+                provider_id=self.query_binding.provider_id,
+                environment=self.query_binding.environment,
+                provider_environment=self.provider_environment,
+            ),
         )
         if (
             isinstance(self.http_status, bool)
@@ -445,17 +513,20 @@ class ProviderResponseObservation:
             account_id=account_id,
             environment=environment,
         )
-        if (
-            provider_environment is not None
-            and _text(
-                provider_environment,
-                "provider_environment",
-            ).upper()
-            != self.provider_environment
-        ):
-            raise ProviderCoreError(
-                "provider-read provenance provider-environment mismatch"
+        if provider_environment is not None:
+            expected_provider_environment = normalize_provider_environment(
+                provider_id=provider_id,
+                environment=(
+                    self.query_binding.environment
+                    if environment is None
+                    else environment
+                ),
+                provider_environment=provider_environment,
             )
+            if expected_provider_environment != self.provider_environment:
+                raise ProviderCoreError(
+                    "provider-read provenance provider-environment mismatch"
+                )
 
 
 def observe_authenticated_json_response(
@@ -479,30 +550,11 @@ def observe_authenticated_json_response(
         )
     payload = _decode_exact_json(response_bytes)
     observed = _utc_text(observed_at, "observed_at")
-    if provider_environment is None and query_binding.provider_id == "BYBIT":
-        raise ProviderCoreError(
-            "BYBIT authenticated provider read requires explicit provider_environment"
-        )
-    provider_env = (
-        query_binding.environment
-        if provider_environment is None
-        else _text(provider_environment, "provider_environment").upper()
+    provider_env = normalize_provider_environment(
+        provider_id=query_binding.provider_id,
+        environment=query_binding.environment,
+        provider_environment=provider_environment,
     )
-    if query_binding.provider_id == "BYBIT":
-        if provider_env not in {"MAINNET", "TESTNET", "DEMO"}:
-            raise ProviderCoreError(
-                "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
-            )
-        if (
-            query_binding.environment == "LIVE"
-            and provider_env != "MAINNET"
-        ) or (
-            query_binding.environment == "PAPER"
-            and provider_env not in {"TESTNET", "DEMO"}
-        ):
-            raise ProviderCoreError(
-                "BYBIT provider_environment does not match runtime environment"
-            )
     response_digest = "sha256:" + sha256(response_bytes).hexdigest()
     identity_material = (
         query_binding.query_digest
@@ -642,10 +694,11 @@ class ProviderSubmissionObservation:
         ):
             raise ProviderCoreError("provider-write provenance environment mismatch")
         if provider_environment is not None:
-            expected_provider_environment = _text(
-                provider_environment,
-                "provider_environment",
-            ).upper()
+            expected_provider_environment = normalize_provider_environment(
+                provider_id=provider_id,
+                environment=self.environment if environment is None else environment,
+                provider_environment=provider_environment,
+            )
             actual_provider_environment = _thaw_json(
                 self.response_binding.submission_scope
             ).get("provider_environment")
@@ -719,30 +772,12 @@ def observe_submission_json_response(
         "capability_snapshot_ids": list(capabilities),
         "instrument_versions": list(instruments),
     }
-    if provider == "BYBIT" and provider_environment is None:
-        raise ProviderCoreError(
-            "BYBIT durable submission requires explicit provider_environment"
-        )
-    if provider_environment is not None:
-        provider_env = _text(
-            provider_environment,
-            "provider_environment",
-        ).upper()
-        if provider == "BYBIT":
-            if provider_env not in {"MAINNET", "TESTNET", "DEMO"}:
-                raise ProviderCoreError(
-                    "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
-                )
-            runtime_environment = response_binding.environment.upper()
-            if (
-                runtime_environment == "LIVE" and provider_env != "MAINNET"
-            ) or (
-                runtime_environment == "PAPER"
-                and provider_env not in {"TESTNET", "DEMO"}
-            ):
-                raise ProviderCoreError(
-                    "BYBIT provider_environment does not match runtime environment"
-                )
+    provider_env = normalize_provider_environment(
+        provider_id=provider,
+        environment=response_binding.environment,
+        provider_environment=provider_environment,
+    )
+    if provider == "BYBIT" or provider_environment is not None:
         expected_scope["provider_environment"] = provider_env
     actual_scope = _thaw_json(response_binding.submission_scope)
     if actual_scope != expected_scope:

@@ -8,6 +8,7 @@ from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
+from .provider_core import normalize_provider_environment
 from .securities_borrow import BorrowAvailabilityEvidence
 
 
@@ -51,35 +52,11 @@ def _provider_environment(
     environment: str,
     provider_environment: str | None,
 ) -> str:
-    provider = _text(provider_id, name="provider_id").upper()
-    runtime_environment = _environment(environment)
-    if provider == "BYBIT" and provider_environment is None:
-        raise ValueError(
-            "BYBIT provider evidence requires explicit provider_environment"
-        )
-    normalized = (
-        runtime_environment
-        if provider_environment is None
-        else _text(
-            provider_environment,
-            name="provider_environment",
-        ).upper()
+    return normalize_provider_environment(
+        provider_id=provider_id,
+        environment=environment,
+        provider_environment=provider_environment,
     )
-    if provider == "BYBIT":
-        if normalized not in {"MAINNET", "TESTNET", "DEMO"}:
-            raise ValueError(
-                "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
-            )
-        if (
-            runtime_environment == "LIVE" and normalized != "MAINNET"
-        ) or (
-            runtime_environment == "PAPER"
-            and normalized not in {"TESTNET", "DEMO"}
-        ):
-            raise ValueError(
-                "BYBIT provider_environment does not match runtime environment"
-            )
-    return normalized
 
 
 def _instant(value: str, *, name: str) -> datetime:

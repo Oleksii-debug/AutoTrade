@@ -15,6 +15,7 @@ from research.autotrade_research.artifacts.store import ArtifactStore
 
 from .dispatch import submission_attempt_aggregate_id
 from .persistence import JournalStore, canonical_json, payload_digest
+from .provider_core import normalize_provider_environment
 from .reconciliation import ReconciliationResult, UnknownSubmission
 from .securities_borrow import (
     BorrowAvailabilityEvidence,
@@ -63,34 +64,21 @@ def _provider_environment(
     provider_id: str | None = None,
 ) -> str:
     runtime_environment = _text(environment, name="environment").upper()
-    provider = (
-        None
-        if provider_id is None
-        else _text(provider_id, name="provider_id").upper()
-    )
-    if provider == "BYBIT" and value is None:
-        raise ValueError("BYBIT scope requires explicit provider_environment")
-    provider_environment = (
-        runtime_environment
-        if value is None
-        else _text(value, name="provider_environment").upper()
-    )
-    if provider == "BYBIT":
-        if provider_environment not in {"MAINNET", "TESTNET", "DEMO"}:
+    if provider_id is None:
+        if value is None:
+            return runtime_environment
+        normalized = _text(value, name="provider_environment").upper()
+        if normalized != runtime_environment:
             raise ValueError(
-                "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
+                "provider_id is required when provider_environment differs "
+                "from runtime environment"
             )
-        if (
-            runtime_environment == "LIVE"
-            and provider_environment != "MAINNET"
-        ) or (
-            runtime_environment == "PAPER"
-            and provider_environment not in {"TESTNET", "DEMO"}
-        ):
-            raise ValueError(
-                "BYBIT provider_environment does not match runtime environment"
-            )
-    return provider_environment
+        return normalized
+    return normalize_provider_environment(
+        provider_id=provider_id,
+        environment=runtime_environment,
+        provider_environment=value,
+    )
 
 
 def _reconciliation_aggregate_id(

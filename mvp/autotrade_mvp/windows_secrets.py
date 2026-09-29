@@ -19,6 +19,8 @@ import tempfile
 from typing import Protocol
 from uuid import uuid4
 
+from .provider_core import ProviderCoreError, normalize_provider_environment
+
 
 class SecretVaultError(ValueError):
     pass
@@ -45,39 +47,16 @@ def _provider_environment(
     fallback_environment: str,
     provider: str,
 ) -> str:
-    runtime_environment = _text(
-        fallback_environment, name="environment"
-    ).upper()
-    provider_id = _text(provider, name="provider").upper()
-    normalized = (
-        runtime_environment
-        if value is None
-        else _text(value, name="provider_environment").upper()
-    )
-    if len(normalized) > 64 or any(
-        character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
-        for character in normalized
-    ):
-        raise SecretVaultError("provider_environment is not canonical")
-    if provider_id == "BYBIT":
-        if value is None:
-            raise SecretVaultError(
-                "BYBIT credential scope requires explicit provider_environment"
-            )
-        if normalized not in {"MAINNET", "TESTNET", "DEMO"}:
-            raise SecretVaultError(
-                "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
-            )
-        if (
-            runtime_environment == "LIVE" and normalized != "MAINNET"
-        ) or (
-            runtime_environment == "PAPER"
-            and normalized not in {"TESTNET", "DEMO"}
-        ):
-            raise SecretVaultError(
-                "BYBIT provider_environment does not match runtime environment"
-            )
-    return normalized
+    try:
+        return normalize_provider_environment(
+            provider_id=_text(provider, name="provider"),
+            environment=_text(fallback_environment, name="environment"),
+            provider_environment=(
+                None if value is None else _text(value, name="provider_environment")
+            ),
+        )
+    except ProviderCoreError as error:
+        raise SecretVaultError(str(error)) from error
 
 
 def _scope_entropy(

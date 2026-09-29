@@ -40,6 +40,7 @@ from .fill_accounting import (
     build_provider_fill_financial_plan,
 )
 from .persistence import JournalStore, canonical_json, payload_digest
+from .provider_core import ProviderCoreError, normalize_provider_environment
 from .reconciliation import ProviderActivityEvidence, ProviderFillEvidence
 from .settlement import SettlementObligation
 
@@ -108,30 +109,15 @@ def _economic_provider_environment(
     environment: str,
     provider_environment: str | None,
 ) -> str:
-    """Normalize exact provider environment without collapsing distinct endpoints."""
-
-    provider = _text(provider_id, name="provider_id").upper()
-    runtime_environment = _environment(environment)
-    if provider == "BYBIT" and provider_environment is None:
-        raise AccountingConflict(
-            "BYBIT economic scope requires explicit provider_environment"
+    """Normalize exact provider environment through the shared authority."""
+    try:
+        return normalize_provider_environment(
+            provider_id=provider_id,
+            environment=environment,
+            provider_environment=provider_environment,
         )
-    exact = (
-        runtime_environment
-        if provider_environment is None
-        else _text(provider_environment, name="provider_environment").upper()
-    )
-    if provider == "BYBIT":
-        if exact not in {"MAINNET", "TESTNET", "DEMO"}:
-            raise AccountingConflict(
-                "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
-            )
-        expected_runtime = "LIVE" if exact == "MAINNET" else "PAPER"
-        if runtime_environment != expected_runtime:
-            raise AccountingConflict(
-                "BYBIT provider_environment does not match runtime environment"
-            )
-    return exact
+    except ProviderCoreError as error:
+        raise AccountingConflict(str(error)) from error
 
 
 def _economic_scope_parts(

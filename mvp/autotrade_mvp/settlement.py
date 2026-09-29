@@ -14,6 +14,7 @@ from typing import Iterable, Mapping
 
 from .accounting import EconomicBook, JournalTransaction, ScopedEconomicBook, _canonical_equity_fill_terms
 from .persistence import payload_digest
+from .provider_core import normalize_provider_environment
 
 
 class SettlementConflict(ValueError):
@@ -58,33 +59,11 @@ class SettlementAccountScope:
         object.__setattr__(self, "provider_id", provider)
         object.__setattr__(self, "account_id", _text(self.account_id, name="account_id"))
         environment = _text(self.environment, name="environment").upper()
-        if environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
-            raise ValueError("unsupported environment")
-        provider_environment = (
-            environment
-            if self.provider_environment is None
-            else _text(
-                self.provider_environment, name="provider_environment"
-            ).upper()
+        provider_environment = normalize_provider_environment(
+            provider_id=provider,
+            environment=environment,
+            provider_environment=self.provider_environment,
         )
-        if provider == "BYBIT":
-            if self.provider_environment is None:
-                raise ValueError(
-                    "BYBIT settlement scope requires explicit provider_environment"
-                )
-            if provider_environment not in {"MAINNET", "TESTNET", "DEMO"}:
-                raise ValueError(
-                    "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
-                )
-            if (
-                environment == "LIVE" and provider_environment != "MAINNET"
-            ) or (
-                environment == "PAPER"
-                and provider_environment not in {"TESTNET", "DEMO"}
-            ):
-                raise ValueError(
-                    "BYBIT provider_environment does not match runtime environment"
-                )
         object.__setattr__(self, "environment", environment)
         object.__setattr__(
             self, "provider_environment", provider_environment

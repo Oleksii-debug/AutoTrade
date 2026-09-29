@@ -368,7 +368,7 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 AuthorityConflict,
-                "another financial command",
+                "scope changed for an existing financial command",
             ):
                 _admit(
                     authority,

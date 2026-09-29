@@ -21,6 +21,7 @@ from mvp.autotrade_mvp.provider_core import (
     QuotaBucket,
     WriteOutcome,
     classify_write_outcome,
+    normalize_provider_environment,
     observe_submission_json_response,
     provider_definition,
 )
@@ -40,6 +41,73 @@ class _NoOffsetTZ(tzinfo):
 
 
 class ProviderCoreTests(unittest.TestCase):
+
+    def test_provider_environment_authority_is_canonical(self):
+        self.assertEqual(
+            normalize_provider_environment(
+                provider_id="BYBIT", environment="PAPER",
+                provider_environment="TESTNET",
+            ),
+            "TESTNET",
+        )
+        self.assertEqual(
+            normalize_provider_environment(
+                provider_id="BYBIT", environment="PAPER",
+                provider_environment="DEMO",
+            ),
+            "DEMO",
+        )
+        self.assertEqual(
+            normalize_provider_environment(
+                provider_id="BYBIT", environment="LIVE",
+                provider_environment="MAINNET",
+            ),
+            "MAINNET",
+        )
+        self.assertEqual(
+            normalize_provider_environment(
+                provider_id="KRAKEN", environment="PAPER",
+                provider_environment=None,
+            ),
+            "PAPER",
+        )
+        self.assertEqual(
+            normalize_provider_environment(
+                provider_id="TEST_PROVIDER", environment="SIMULATION",
+                provider_environment="SIMULATION",
+            ),
+            "SIMULATION",
+        )
+        for environment, provider_environment in (
+            ("PAPER", "MAINNET"),
+            ("LIVE", "TESTNET"),
+            ("LIVE", "DEMO"),
+        ):
+            with self.subTest(
+                environment=environment,
+                provider_environment=provider_environment,
+            ), self.assertRaisesRegex(
+                ProviderCoreError, "does not match runtime environment"
+            ):
+                normalize_provider_environment(
+                    provider_id="BYBIT",
+                    environment=environment,
+                    provider_environment=provider_environment,
+                )
+        with self.assertRaisesRegex(
+            ProviderCoreError, "requires explicit provider_environment"
+        ):
+            normalize_provider_environment(
+                provider_id="BYBIT", environment="PAPER",
+                provider_environment=None,
+            )
+        with self.assertRaisesRegex(
+            ProviderCoreError, "must equal runtime environment"
+        ):
+            normalize_provider_environment(
+                provider_id="KRAKEN", environment="PAPER",
+                provider_environment="DEMO",
+            )
 
     def _durable_submission_binding(
         self,

@@ -1486,6 +1486,169 @@ class QualificationAttestationTests(unittest.TestCase):
                 requirement_ids=("same", "same"),
             )
 
+    def test_attestation_subclass_cannot_supply_signed_semantics(self):
+        trust_root = root()
+        original = attestation(trust_root)
+
+        class ForgedAttestation(QualificationAttestation):
+            def canonical_bytes(self):
+                return original.canonical_bytes()
+
+        forged = ForgedAttestation(
+            **{
+                **original.__dict__,
+                "package_id": "WP-60",
+            }
+        )
+        with self.assertRaisesRegex(TypeError, "canonical QualificationAttestation"):
+            SignedQualificationAttestation(
+                forged,
+                sign(original),
+            )
+
+        receipt = SignedQualificationAttestation(
+            original,
+            sign(original),
+        )
+        object.__setattr__(receipt, "attestation", forged)
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            with self.assertRaisesRegex(
+                TypeError,
+                "canonical QualificationAttestation",
+            ):
+                verify(
+                    receipt,
+                    store,
+                    policy(trust_root),
+                    expected_package_id="WP-60",
+                )
+
+    def test_exact_attestation_instance_method_shadow_cannot_reuse_other_signature(self):
+        trust_root = root()
+        original = attestation(trust_root)
+        changed = attestation(
+            trust_root,
+            attestation_id=original.attestation_id,
+            result="INCONCLUSIVE",
+            unresolved_limits=("independent review incomplete",),
+        )
+        object.__setattr__(
+            changed,
+            "canonical_bytes",
+            lambda: original.canonical_bytes(),
+        )
+        object.__setattr__(
+            changed,
+            "canonical_payload",
+            lambda: original.canonical_payload(),
+        )
+        receipt = SignedQualificationAttestation(
+            changed,
+            sign(original),
+        )
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            with self.assertRaisesRegex(
+                QualificationTrustError,
+                "signature",
+            ):
+                verify(receipt, store, policy(trust_root))
+
+    def test_evidence_reference_subclass_is_rejected_at_attestation_boundary(self):
+        trust_root = root()
+        original_ref = evidence_ref()
+
+        class ForgedEvidenceRef(EvidenceArtifactRef):
+            def canonical(self):
+                return original_ref.canonical()
+
+        forged_ref = ForgedEvidenceRef(
+            artifact_id=original_ref.artifact_id,
+            sha256=original_ref.sha256,
+            media_type=original_ref.media_type,
+            evidence_kind=original_ref.evidence_kind,
+            source_sha=original_ref.source_sha,
+        )
+        with self.assertRaisesRegex(
+            QualificationTrustError,
+            "evidence_refs",
+        ):
+            attestation(
+                trust_root,
+                evidence_refs=(forged_ref,),
+            )
+
+    def test_policy_root_and_scope_subclasses_are_rejected(self):
+        base_scope = QualificationScope("RELEASE", "FREEZE")
+
+        class ForgedScope(QualificationScope):
+            def canonical(self):
+                return base_scope.canonical()
+
+        with self.assertRaisesRegex(
+            QualificationTrustError,
+            "allowed_scopes",
+        ):
+            TrustRoot(
+                producer_id="qualifier.release.service",
+                verifier_id="autotrade.trust.verifier",
+                public_modulus_hex=format(_RSA_N, "x"),
+                public_exponent=65537,
+                allowed_scopes=(ForgedScope("RELEASE", "FREEZE"),),
+                valid_from="2026-09-01T00:00:00Z",
+            )
+
+        base_root = root()
+
+        class ForgedRoot(TrustRoot):
+            def canonical(self):
+                return base_root.canonical()
+
+        forged_root = ForgedRoot(
+            producer_id=base_root.producer_id,
+            verifier_id=base_root.verifier_id,
+            public_modulus_hex=base_root.public_modulus_hex,
+            public_exponent=base_root.public_exponent,
+            allowed_scopes=base_root.allowed_scopes,
+            valid_from=base_root.valid_from,
+            valid_until=base_root.valid_until,
+            revoked_at=base_root.revoked_at,
+            verification_method=base_root.verification_method,
+        )
+        with self.assertRaisesRegex(
+            QualificationTrustError,
+            "roots",
+        ):
+            QualificationTrustPolicy(
+                policy_version="2026.09",
+                roots=(forged_root,),
+            )
+
+    def test_exact_policy_instance_root_method_shadow_has_no_authority(self):
+        trust_root = root()
+        trust_policy = policy(trust_root)
+        value = attestation(trust_root)
+        receipt = SignedQualificationAttestation(value, sign(value))
+        object.__setattr__(
+            trust_policy,
+            "root",
+            lambda _root_id: root(
+                scopes=(QualificationScope("RECOVERY", "RESTORE"),)
+            ),
+        )
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            accepted = verify(receipt, store, trust_policy)
+
+        self.assertEqual(accepted.result, "PASS")
+        self.assertEqual(accepted.trust_root_id, trust_root.root_id)
+
     def test_altered_signed_payload_fails_signature(self):
         trust_root = root()
         original = attestation(trust_root)

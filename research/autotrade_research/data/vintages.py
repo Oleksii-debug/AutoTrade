@@ -469,7 +469,9 @@ class HistoricalVintageRegistry:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _path(self, dataset_id: str, version: int) -> Path:
-        return self.root / _uuid(dataset_id, "dataset_id") / f"{version}.json"
+        canonical_id = _uuid(dataset_id, "dataset_id")
+        canonical_version = _sequence(version, "version")
+        return self.root / canonical_id / f"{canonical_version}.json"
 
     def commit(self, manifest: Mapping[str, Any]) -> str:
         normalized = _validate_manifest(manifest)
@@ -492,14 +494,22 @@ class HistoricalVintageRegistry:
         return digest
 
     def load(self, dataset_id: str, version: int) -> dict[str, Any]:
-        path = self._path(dataset_id, version)
+        canonical_id = _uuid(dataset_id, "dataset_id")
+        canonical_version = _sequence(version, "version")
+        path = self._path(canonical_id, canonical_version)
         if not path.is_file():
             raise FileNotFoundError(path)
         try:
             value = strict_json_loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, ValueError) as error:
             raise HistoricalDataError("dataset manifest is unreadable") from error
-        return _validate_manifest(value)
+        manifest = _validate_manifest(value)
+        if (
+            manifest["dataset_id"] != canonical_id
+            or _sequence(manifest["version"], "version") != canonical_version
+        ):
+            raise HistoricalConflict("dataset manifest identity differs from requested path")
+        return manifest
 
     def digest(self, dataset_id: str, version: int) -> str:
         manifest = self.load(dataset_id, version)

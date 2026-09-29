@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import stat
 import sys
+import threading
+import weakref
 from typing import Iterator
 
 from . import _namespace_guard as _guard
@@ -20,6 +22,200 @@ _WAIT_OBJECT_0 = 0x00000000
 _WAIT_ABANDONED = 0x00000080
 _WAIT_TIMEOUT = 0x00000102
 _HOST_FSTAT = os.fstat
+_TRUSTED_ROOT_BINDINGS = weakref.WeakKeyDictionary()
+_TRUSTED_ROOT_BINDINGS_LOCK = threading.RLock()
+
+
+class _TrustedRootBinding:
+    __slots__ = ("root_key", "posix_fd", "windows_handle")
+
+    def __init__(
+        self,
+        root_key: str,
+        *,
+        posix_fd: int | None = None,
+        windows_handle: int | None = None,
+    ) -> None:
+        self.root_key = root_key
+        self.posix_fd = posix_fd
+        self.windows_handle = windows_handle
+
+
+def _close_trusted_root_binding(binding: _TrustedRootBinding) -> None:
+    if binding.posix_fd is not None:
+        _guard._close_fd(binding.posix_fd)
+    if binding.windows_handle is not None:
+        _guard._close_windows_handle(binding.windows_handle)
+
+
+def _capture_trusted_root_binding(
+    self,
+    *,
+    root_key: str,
+) -> _TrustedRootBinding:
+    if sys.platform == "win32":
+        retained = getattr(self, "_namespace_root_handle", None)
+        if not retained:
+            raise _store.ArtifactIntegrityError(
+                "retained artifact store root handle is unavailable"
+            )
+        expected = _guard._windows_handle_information(
+            retained,
+            subject="retained artifact store root",
+        )
+        independent = _guard._open_windows_root_directory(Path(root_key))
+        try:
+            observed = _guard._windows_handle_information(
+                independent,
+                subject="trusted artifact store root",
+            )
+            if not _retained._same_windows_identity(expected, observed):
+                raise _store.ArtifactIntegrityError(
+                    "trusted artifact store root changed during authority capture"
+                )
+        except Exception:
+            _guard._close_windows_handle(independent)
+            raise
+        return _TrustedRootBinding(
+            root_key,
+            windows_handle=independent,
+        )
+
+    retained_fd = getattr(self, "_namespace_root_fd", None)
+    if retained_fd is None:
+        raise _store.ArtifactIntegrityError(
+            "retained artifact store root descriptor is unavailable"
+        )
+    try:
+        duplicate = os.dup(retained_fd)
+        os.set_inheritable(duplicate, False)
+        expected = _HOST_FSTAT(retained_fd)
+        observed = _HOST_FSTAT(duplicate)
+    except OSError as error:
+        raise _store.ArtifactIntegrityError(
+            "trusted artifact store root descriptor cannot be retained"
+        ) from error
+    if (
+        expected.st_dev != observed.st_dev
+        or expected.st_ino != observed.st_ino
+        or not stat.S_ISDIR(observed.st_mode)
+    ):
+        _guard._close_fd(duplicate)
+        raise _store.ArtifactIntegrityError(
+            "trusted artifact store root descriptor identity mismatch"
+        )
+    return _TrustedRootBinding(root_key, posix_fd=duplicate)
+
+
+def _register_trusted_root_binding(
+    self,
+    *,
+    root_key: str,
+) -> None:
+    binding = _capture_trusted_root_binding(self, root_key=root_key)
+    try:
+        with _TRUSTED_ROOT_BINDINGS_LOCK:
+            if self in _TRUSTED_ROOT_BINDINGS:
+                raise _store.ArtifactIntegrityError(
+                    "ArtifactStore authority cannot be reinitialized"
+                )
+            _TRUSTED_ROOT_BINDINGS[self] = binding
+        weakref.finalize(self, _close_trusted_root_binding, binding)
+    except Exception:
+        _close_trusted_root_binding(binding)
+        raise
+
+
+def _trusted_root_binding(store: object) -> _TrustedRootBinding:
+    if type(store) is not _store.ArtifactStore:
+        raise TypeError(
+            "trusted artifact reader requires the canonical ArtifactStore"
+        )
+    with _TRUSTED_ROOT_BINDINGS_LOCK:
+        binding = _TRUSTED_ROOT_BINDINGS.get(store)
+    if binding is None:
+        raise _store.ArtifactIntegrityError(
+            "ArtifactStore lacks canonical root-authority binding"
+        )
+    return binding
+
+
+def _assert_trusted_root_binding(binding: _TrustedRootBinding) -> None:
+    if sys.platform == "win32":
+        retained = binding.windows_handle
+        if not retained:
+            raise _store.ArtifactIntegrityError(
+                "trusted artifact root handle is unavailable"
+            )
+        expected = _guard._windows_handle_information(
+            retained,
+            subject="trusted retained artifact store root",
+        )
+        try:
+            current_handle = _guard._open_windows_root_directory(
+                Path(binding.root_key)
+            )
+        except (OSError, _store.ArtifactIntegrityError) as error:
+            raise _store.ArtifactIntegrityError(
+                "trusted artifact store root is no longer canonical"
+            ) from error
+        try:
+            current = _guard._windows_handle_information(
+                current_handle,
+                subject="trusted configured artifact store root",
+            )
+            if not _retained._same_windows_identity(expected, current):
+                raise _store.ArtifactIntegrityError(
+                    "trusted artifact store root changed after initialization"
+                )
+        finally:
+            _guard._close_windows_handle(current_handle)
+        return
+
+    retained_fd = binding.posix_fd
+    if retained_fd is None:
+        raise _store.ArtifactIntegrityError(
+            "trusted artifact root descriptor is unavailable"
+        )
+    try:
+        expected = _HOST_FSTAT(retained_fd)
+        current = os.stat(binding.root_key, follow_symlinks=False)
+    except OSError as error:
+        raise _store.ArtifactIntegrityError(
+            "trusted artifact store root is no longer canonical"
+        ) from error
+    if (
+        stat.S_ISLNK(current.st_mode)
+        or not stat.S_ISDIR(current.st_mode)
+        or expected.st_dev != current.st_dev
+        or expected.st_ino != current.st_ino
+    ):
+        raise _store.ArtifactIntegrityError(
+            "trusted artifact store root changed after initialization"
+        )
+
+
+def trusted_authenticated_reader(store: object):
+    """Create a private canonical reader from externally retained root authority.
+
+    The injected store is used only as an identity token for the root binding
+    captured during canonical construction. Its mutable instance attributes and
+    methods are never used to choose the trusted root or execute evidence reads.
+    """
+
+    binding = _trusted_root_binding(store)
+    _assert_trusted_root_binding(binding)
+    private_store = _store.ArtifactStore(Path(binding.root_key))
+    _assert_trusted_root_binding(binding)
+    canonical_read = _store.ArtifactStore.read_authenticated_snapshot
+
+    def read_snapshot(artifact_id: str):
+        _assert_trusted_root_binding(binding)
+        result = canonical_read(private_store, artifact_id)
+        _assert_trusted_root_binding(binding)
+        return result
+
+    return read_snapshot
 
 
 def _configured_root_key(path: Path) -> str:
@@ -257,9 +453,16 @@ def install_root_authority() -> None:
     previous_init = artifact_store.__init__
 
     def root_authority_init(self, *args, **kwargs):
+        with _TRUSTED_ROOT_BINDINGS_LOCK:
+            if self in _TRUSTED_ROOT_BINDINGS:
+                raise _store.ArtifactIntegrityError(
+                    "ArtifactStore authority cannot be reinitialized"
+                )
         previous_init(self, *args, **kwargs)
-        self._configured_artifact_root_key = _configured_root_key(self.root)
+        root_key = _configured_root_key(self.root)
+        self._configured_artifact_root_key = root_key
         _assert_root_continuity(self)
+        _register_trusted_root_binding(self, root_key=root_key)
 
     artifact_store.__init__ = root_authority_init
     artifact_store.load_manifest = _root_fenced_read(artifact_store.load_manifest)

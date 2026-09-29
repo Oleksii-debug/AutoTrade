@@ -317,6 +317,47 @@ class FxValuationTests(unittest.TestCase):
         self.assertEqual(result.source_amount, Decimal("0"))
         self.assertEqual(result.status, "CERTAIN")
 
+    def test_inverse_rate_projection_overflow_does_not_veto_exact_final_amount(self):
+        quote = eurusd(bid="1e-256", ask="1e-256")
+        observed = []
+        for precision in (6, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    result = value_amount(
+                        "1e-256",
+                        source_currency="USD",
+                        reporting_currency="EUR",
+                        quote=quote,
+                        as_of=NOW,
+                        max_age=timedelta(minutes=1),
+                    )
+                    observed.append(result)
+
+        self.assertTrue(all(row.converted_amount == Decimal("1") for row in observed))
+        self.assertTrue(all(row.rate_used is None for row in observed))
+        self.assertTrue(all(row.rate_numerator == 10**256 for row in observed))
+        self.assertTrue(all(row.rate_denominator == 1 for row in observed))
+        self.assertTrue(all(row.rounding_policy_id is None for row in observed))
+        self.assertTrue(all(row.rounding_quantum is None for row in observed))
+
+    def test_inverse_optional_rate_fallback_cannot_mask_final_amount_overflow(self):
+        quote = eurusd(bid="1e-256", ask="1e-256")
+        with self.assertRaisesRegex(FxValuationError, "resource envelope"):
+            value_amount(
+                "1",
+                source_currency="USD",
+                reporting_currency="EUR",
+                quote=quote,
+                as_of=NOW,
+                max_age=timedelta(minutes=1),
+                rounding_policy=FxRoundingPolicy(
+                    reporting_currency="EUR",
+                    quantum="0.01",
+                ),
+            )
+
     def test_duplicate_normalized_currency_codes_cannot_double_count_capital(self):
         with self.assertRaisesRegex(
             FxValuationError,

@@ -121,7 +121,13 @@ def _publish(
     )
 
 
-def qualify(value, *, omit_artifact_ids=(), corrupt_artifact_id=None):
+def qualify(
+    value,
+    *,
+    omit_artifact_ids=(),
+    corrupt_artifact_id=None,
+    authoritative_root=False,
+):
     with TemporaryDirectory() as directory:
         store = ArtifactStore(directory)
         entries = [
@@ -208,7 +214,11 @@ def qualify(value, *, omit_artifact_ids=(), corrupt_artifact_id=None):
             digest = manifest["sha256"].removeprefix("sha256:")
             (store.objects / digest[:2] / digest).write_bytes(b"corrupt")
 
-        return qualify_supply_chain(value, evidence_store=store)
+        return qualify_supply_chain(
+            value,
+            evidence_store=store,
+            evidence_root=directory if authoritative_root else None,
+        )
 
 
 
@@ -521,14 +531,22 @@ class SupplyChainQualificationTests(unittest.TestCase):
 
     def test_missing_or_corrupt_exact_artifact_fails_closed(self):
         value = evidence()
-        missing = qualify(value, omit_artifact_ids={value.sbom_artifact_id})
+        missing = qualify(
+            value,
+            omit_artifact_ids={value.sbom_artifact_id},
+            authoritative_root=True,
+        )
         self.assertEqual(missing.status, "INCONCLUSIVE")
         self.assertIn(
             "SUPPLY_CHAIN.IMMUTABLE_ARTIFACT_UNVERIFIED:sbom",
             missing.reason_codes,
         )
 
-        corrupt = qualify(value, corrupt_artifact_id=value.sbom_artifact_id)
+        corrupt = qualify(
+            value,
+            corrupt_artifact_id=value.sbom_artifact_id,
+            authoritative_root=True,
+        )
         self.assertEqual(corrupt.status, "INCONCLUSIVE")
         self.assertIn(
             "SUPPLY_CHAIN.IMMUTABLE_ARTIFACT_UNVERIFIED:sbom",
@@ -540,7 +558,7 @@ class SupplyChainQualificationTests(unittest.TestCase):
         self.assertEqual(result.status, "INCONCLUSIVE")
         self.assertFalse(result.release_authority)
         self.assertIn(
-            ("immutable_evidence_bundle", "PASS"),
+            ("immutable_evidence_bundle", "INCONCLUSIVE"),
             result.checks,
         )
         self.assertIn(

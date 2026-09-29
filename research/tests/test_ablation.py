@@ -1516,6 +1516,61 @@ class AblationTests(unittest.TestCase):
         self.assertEqual(result.status, "INCONCLUSIVE")
         self.assertEqual(result.reason, "canonical_outcome_economic_mismatch")
 
+    def test_terminal_qualification_rejects_authority_subclass_dispatch(self):
+        class ForgedAuthority(AblationQualificationAuthority):
+            def resolve(self, pairs, *, outcome_refs):
+                raise AssertionError("subclass resolve must never execute")
+
+        forged = object.__new__(ForgedAuthority)
+        with self.assertRaisesRegex(
+            TypeError,
+            "canonical AblationQualificationAuthority",
+        ):
+            evaluate_qualified_incremental_value(
+                "agent",
+                (),
+                authority=forged,
+                minimum_pairs=2,
+                required_lower_bound=Decimal("0"),
+            )
+
+    def test_qualification_authority_rejects_registry_and_memory_subclasses(self):
+        class ForgedScientificRegistry(ScientificRegistry):
+            pass
+
+        class ForgedExperienceMemory(ExperienceMemory):
+            pass
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            exact_science = ScientificRegistry(root / "science.sqlite3")
+            exact_memory = ExperienceMemory(root / "memory.sqlite3")
+            artifacts = ArtifactStore(root / "artifacts")
+            forged_science = ForgedScientificRegistry(root / "forged-science.sqlite3")
+            forged_memory = ForgedExperienceMemory(root / "forged-memory.sqlite3")
+            common = {
+                "artifact_store": artifacts,
+                "evidence_root": root / "artifacts",
+                "protocol_id": "11111111-1111-4111-8111-111111111111",
+                "protocol_hash": "sha256:" + ("1" * 64),
+                "source_revision": "9" * 40,
+                "causal_cutoff": CUT,
+                "granted_permissions": {"RESEARCH"},
+            }
+
+            with self.assertRaisesRegex(TypeError, "canonical ScientificRegistry"):
+                AblationQualificationAuthority(
+                    scientific_registry=forged_science,
+                    experience_memory=exact_memory,
+                    **common,
+                )
+            with self.assertRaisesRegex(TypeError, "canonical ExperienceMemory"):
+                AblationQualificationAuthority(
+                    scientific_registry=exact_science,
+                    experience_memory=forged_memory,
+                    **common,
+                )
+
     def test_qualification_authority_rejects_foreign_publication_store_root(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

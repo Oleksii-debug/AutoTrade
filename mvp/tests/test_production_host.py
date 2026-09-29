@@ -24,19 +24,9 @@ class ProductionHostConfigTests(unittest.TestCase):
                 public_origin="http://127.0.0.1:8765",
             )
 
-    def test_listener_identity_must_match_public_origin(self):
+    def test_listener_port_must_match_public_origin(self):
         with TemporaryDirectory() as directory:
             path = Path(directory).resolve() / "journal.sqlite3"
-            with self.assertRaisesRegex(ValueError, "host must match bind_host"):
-                ProductionHostConfig(
-                    journal_path=path,
-                    account_id="paper-account",
-                    environment="PAPER",
-                    host_id="host-a",
-                    bind_host="127.0.0.1",
-                    bind_port=8765,
-                    public_origin="http://localhost:8765",
-                )
             with self.assertRaisesRegex(ValueError, "port must match bind_port"):
                 ProductionHostConfig(
                     journal_path=path,
@@ -47,6 +37,20 @@ class ProductionHostConfigTests(unittest.TestCase):
                     bind_port=8765,
                     public_origin="http://127.0.0.1:8766",
                 )
+
+    def test_tls_listener_bind_and_authenticated_public_host_are_distinct(self):
+        with TemporaryDirectory() as directory:
+            config = ProductionHostConfig(
+                journal_path=Path(directory).resolve() / "journal.sqlite3",
+                account_id="paper-account",
+                environment="PAPER",
+                host_id="host-a",
+                bind_host="0.0.0.0",
+                bind_port=443,
+                public_origin="https://trade.example.com",
+            )
+            self.assertEqual(config.bind_host, "0.0.0.0")
+            self.assertEqual(config.public_origin, "https://trade.example.com")
 
     def test_canonical_runtime_identity_is_retained(self):
         with TemporaryDirectory() as directory:
@@ -276,9 +280,9 @@ class ProductionHostCompositionTests(unittest.TestCase):
                 account_id="paper-account",
                 environment="PAPER",
                 host_id="host-a",
-                bind_host="example.com",
+                bind_host="0.0.0.0",
                 bind_port=443,
-                public_origin="https://example.com",
+                public_origin="https://trade.example.com",
             )
             with patch.object(production_host, "SecurityBoundary", DummySecurityBoundary):
                 with self.assertRaisesRegex(ValueError, "requires tls_context"):

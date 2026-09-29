@@ -2530,6 +2530,12 @@ class AuthorityTests(unittest.TestCase):
                 instrument_version=1,
                 action="ORDER.SUBMIT",
                 now="2026-09-24T18:01:15Z",
+                submission_scope={
+                    "provider_id": admitted.provider_id,
+                    "provider_environment": admitted.provider_environment,
+                    "account_id": admitted.account_id,
+                    "environment": admitted.environment,
+                },
             )
             self.assertEqual(
                 authority.dispatch_allowed(admitted.admission_id, **common),
@@ -2610,6 +2616,12 @@ class AuthorityTests(unittest.TestCase):
                     action="ORDER.SUBMIT",
                     now="2026-09-24T18:01:15Z",
                     capability_snapshot_id=PUBLIC_CAPABILITY_SNAPSHOT_ID,
+                    submission_scope={
+                    "provider_id": admitted.provider_id,
+                    "provider_environment": admitted.provider_environment,
+                    "account_id": admitted.account_id,
+                    "environment": admitted.environment,
+                },
                 ),
                 (False, "reservation_state_changed"),
             )

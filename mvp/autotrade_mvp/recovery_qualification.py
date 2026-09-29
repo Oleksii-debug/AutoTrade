@@ -17,6 +17,7 @@ from types import MappingProxyType
 from typing import Mapping, Sequence
 from uuid import UUID
 
+from research.autotrade_research.artifacts import trusted_authenticated_reader
 from research.autotrade_research.artifacts.store import (
     ArtifactIntegrityError,
     ArtifactStore,
@@ -334,7 +335,7 @@ def recovery_evidence_receipt_metadata(
 
 
 def _store_artifact_matches(
-    store: ArtifactStore,
+    read_snapshot,
     *,
     artifact_id: str,
     artifact_sha256: str,
@@ -344,7 +345,7 @@ def _store_artifact_matches(
 ) -> bool:
     """Verify stored bytes and declared bindings, not independent producer trust."""
     try:
-        manifest = store.load_manifest(artifact_id)
+        manifest, _raw = read_snapshot(artifact_id)
         if not isinstance(manifest.get("manifest_hash"), str):
             return False
         if manifest.get("sha256") != artifact_sha256:
@@ -355,7 +356,6 @@ def _store_artifact_matches(
             return False
         if manifest.get("metadata") != metadata:
             return False
-        store.read_bytes(artifact_id)
     except (
         ArtifactIntegrityError,
         FileNotFoundError,
@@ -500,8 +500,8 @@ def qualify_recovery_release(
         raise TypeError("policy must be RecoveryQualificationPolicy")
     if isinstance(evidence, (str, bytes)) or not isinstance(evidence, Sequence):
         raise TypeError("evidence must be a sequence")
-    if evidence_store is not None and not isinstance(evidence_store, ArtifactStore):
-        raise TypeError("evidence_store must be ArtifactStore")
+    if evidence_store is not None and type(evidence_store) is not ArtifactStore:
+        raise TypeError("evidence_store must be the canonical ArtifactStore")
     if qualification_receipt is not None and not isinstance(
         qualification_receipt, SignedQualificationAttestation
     ):
@@ -515,6 +515,21 @@ def qualify_recovery_release(
     blockers: list[str] = []
     hard_failure = False
     inconclusive = False
+    trusted_read = None
+    if evidence_store is not None and evidence_root is not None:
+        try:
+            trusted_read = trusted_authenticated_reader(
+                evidence_root,
+                publication_store=evidence_store,
+            )
+        except (
+            ArtifactIntegrityError,
+            FileNotFoundError,
+            OSError,
+            TypeError,
+            ValueError,
+        ):
+            trusted_read = None
 
     for item in evidence:
         if not isinstance(item, RecoveryScenarioEvidence):
@@ -531,9 +546,9 @@ def qualify_recovery_release(
         inconclusive = True
 
     release_artifact_verified = False
-    if evidence_store is not None:
+    if trusted_read is not None:
         release_artifact_verified = _store_artifact_matches(
-            evidence_store,
+            trusted_read,
             artifact_id=policy.release_artifact_id,
             artifact_sha256=policy.release_artifact_sha256,
             media_type=_RELEASE_ARTIFACT_MEDIA_TYPE,
@@ -608,9 +623,9 @@ def qualify_recovery_release(
         prefix = scenario.value.lower()
 
         integrity_verified = False
-        if evidence_store is not None:
+        if trusted_read is not None:
             integrity_verified = _store_artifact_matches(
-                evidence_store,
+                trusted_read,
                 artifact_id=item.evidence_artifact_id,
                 artifact_sha256=item.evidence_artifact_sha256,
                 media_type=_RECOVERY_EVIDENCE_MEDIA_TYPE,

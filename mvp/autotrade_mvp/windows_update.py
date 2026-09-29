@@ -11,9 +11,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+import os
+from pathlib import Path
 import re
 from typing import Any
 
+from research.autotrade_research.artifacts import trusted_authenticated_reader
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 from .qualification_attestation import (
@@ -39,13 +42,23 @@ class WindowsUpdateTrustContext:
     """Pinned trust inputs required to consume a frozen release downstream."""
 
     evidence_store: ArtifactStore
+    evidence_root: str | Path
     qualification_policy: QualificationTrustPolicy
     expected_policy_id: str
     expected_policy_version: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.evidence_store, ArtifactStore):
-            raise TypeError("evidence_store must be ArtifactStore")
+        if type(self.evidence_store) is not ArtifactStore:
+            raise TypeError("evidence_store must be the canonical ArtifactStore")
+        if not isinstance(self.evidence_root, (str, Path)):
+            raise TypeError("evidence_root must be a string or Path")
+        if isinstance(self.evidence_root, str) and not self.evidence_root.strip():
+            raise WindowsUpdateError("evidence_root must be non-empty")
+        evidence_root = Path(os.path.abspath(os.fspath(self.evidence_root)))
+        trusted_authenticated_reader(
+            evidence_root,
+            publication_store=self.evidence_store,
+        )
         if not isinstance(self.qualification_policy, QualificationTrustPolicy):
             raise TypeError(
                 "qualification_policy must be QualificationTrustPolicy"
@@ -66,6 +79,7 @@ class WindowsUpdateTrustContext:
             raise WindowsUpdateError(
                 "expected_policy_version does not match pinned qualification policy"
             )
+        object.__setattr__(self, "evidence_root", evidence_root)
         object.__setattr__(self, "expected_policy_id", policy_id)
         object.__setattr__(self, "expected_policy_version", policy_version)
 
@@ -422,6 +436,7 @@ def _release_manifest(
     refrozen = freeze_release_candidate(
         reconstructed,
         evidence_store=trust.evidence_store,
+        evidence_root=trust.evidence_root,
         qualification_receipt=receipt,
         qualification_policy=trust.qualification_policy,
         expected_policy_id=trust.expected_policy_id,

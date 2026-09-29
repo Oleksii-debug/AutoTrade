@@ -16,6 +16,7 @@ import re
 from typing import Sequence
 from uuid import UUID
 
+from research.autotrade_research.artifacts import trusted_authenticated_reader
 from research.autotrade_research.artifacts.store import (
     ArtifactIntegrityError,
     ArtifactStore,
@@ -673,7 +674,7 @@ def _canonical_manifest(
 
 
 def _stored_evidence_is_verified(
-    store: ArtifactStore,
+    read_snapshot,
     artifact: ReleaseArtifactEvidence,
 ) -> bool:
     """Verify exact stored bytes and declared release-evidence bindings.
@@ -683,7 +684,7 @@ def _stored_evidence_is_verified(
     """
 
     try:
-        manifest = store.load_manifest(artifact.artifact_id)
+        manifest, _raw = read_snapshot(artifact.artifact_id)
         if not isinstance(manifest.get("manifest_hash"), str):
             return False
         if manifest.get("sha256") != artifact.artifact_sha256:
@@ -700,7 +701,6 @@ def _stored_evidence_is_verified(
             "evidence_status": artifact.evidence_status,
         }:
             return False
-        store.read_bytes(artifact.artifact_id)
     except (
         ArtifactIntegrityError,
         FileNotFoundError,
@@ -765,8 +765,8 @@ def freeze_release_candidate(
 
     if not isinstance(candidate, ReleaseCandidateInput):
         raise TypeError("candidate must be ReleaseCandidateInput")
-    if evidence_store is not None and not isinstance(evidence_store, ArtifactStore):
-        raise TypeError("evidence_store must be ArtifactStore")
+    if evidence_store is not None and type(evidence_store) is not ArtifactStore:
+        raise TypeError("evidence_store must be the canonical ArtifactStore")
     if qualification_receipt is not None and not isinstance(
         qualification_receipt, SignedQualificationAttestation
     ):
@@ -782,6 +782,21 @@ def freeze_release_candidate(
 
     reasons: list[str] = []
     accepted: AcceptedQualificationAttestation | None = None
+    trusted_read = None
+    if evidence_store is not None and evidence_root is not None:
+        try:
+            trusted_read = trusted_authenticated_reader(
+                evidence_root,
+                publication_store=evidence_store,
+            )
+        except (
+            ArtifactIntegrityError,
+            FileNotFoundError,
+            OSError,
+            TypeError,
+            ValueError,
+        ):
+            trusted_read = None
     if evidence_store is None:
         reasons.append("evidence_store_missing")
     by_role = {artifact.role: artifact for artifact in candidate.artifacts}
@@ -846,8 +861,8 @@ def freeze_release_candidate(
             reasons.append(f"evidence_inconclusive:{artifact.role}")
 
         if (
-            evidence_store is not None
-            and not _stored_evidence_is_verified(evidence_store, artifact)
+            trusted_read is None
+            or not _stored_evidence_is_verified(trusted_read, artifact)
         ):
             reasons.append(
                 f"evidence_integrity_unverified:{artifact.role}"

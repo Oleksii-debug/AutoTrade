@@ -12,10 +12,12 @@ from dataclasses import dataclass
 from enum import StrEnum
 from hashlib import sha256
 import json
+from pathlib import Path
 import re
 from typing import Iterable, Mapping
 from uuid import UUID
 
+from research.autotrade_research.artifacts import trusted_authenticated_reader
 from research.autotrade_research.artifacts.store import ArtifactIntegrityError, ArtifactStore
 
 from .provider_core import PROVIDERS, provider_definition
@@ -175,10 +177,9 @@ def lifecycle_evidence_bytes(item: LifecycleEvidence) -> bytes:
     ).encode("utf-8")
 
 
-def _stored_evidence_matches(store: ArtifactStore, item: LifecycleEvidence) -> bool:
+def _stored_evidence_matches(read_snapshot, item: LifecycleEvidence) -> bool:
     try:
-        manifest = store.load_manifest(item.artifact_id)
-        data = store.read_bytes(item.artifact_id)
+        manifest, data = read_snapshot(item.artifact_id)
         if manifest.get("sha256") != item.artifact_sha256:
             return False
         if "sha256:" + sha256(data).hexdigest() != item.artifact_sha256:
@@ -243,13 +244,29 @@ def qualify_asset_provider_crosswalk(
     exact_source_sha: str,
     exact_adapter_shas: Mapping[tuple[str, str], str],
     evidence_store: ArtifactStore | None = None,
+    evidence_root: str | Path | None = None,
     qualification_receipt: SignedQualificationAttestation | None = None,
 ) -> CrosswalkVerdict:
     """Fail closed unless every advertised combination has exact complete evidence."""
 
     source_sha = _sha(exact_source_sha, "exact_source_sha")
-    if evidence_store is not None and not isinstance(evidence_store, ArtifactStore):
-        raise TypeError("evidence_store must be ArtifactStore")
+    if evidence_store is not None and type(evidence_store) is not ArtifactStore:
+        raise TypeError("evidence_store must be the canonical ArtifactStore")
+    trusted_read = None
+    if evidence_store is not None and evidence_root is not None:
+        try:
+            trusted_read = trusted_authenticated_reader(
+                evidence_root,
+                publication_store=evidence_store,
+            )
+        except (
+            ArtifactIntegrityError,
+            FileNotFoundError,
+            OSError,
+            TypeError,
+            ValueError,
+        ):
+            trusted_read = None
     expected = advertised_lifecycle_keys()
     expected_set = set(expected)
 
@@ -266,7 +283,7 @@ def qualify_asset_provider_crosswalk(
         if item.key in by_key:
             raise CrosswalkError("duplicate lifecycle evidence key")
         by_key[item.key] = item
-        if evidence_store is None or not _stored_evidence_matches(evidence_store, item):
+        if trusted_read is None or not _stored_evidence_matches(trusted_read, item):
             invalid.add(item.key)
 
         expected_adapter = exact_adapter_shas.get(
@@ -288,9 +305,13 @@ def qualify_asset_provider_crosswalk(
 
     if evidence_store is None:
         reasons.append("immutable_evidence_store_unavailable")
+    elif evidence_root is None:
+        reasons.append("immutable_evidence_root_unavailable")
+    elif trusted_read is None:
+        reasons.append("immutable_evidence_root_invalid")
     if qualification_receipt is None:
         reasons.append("independent_evidence_trust_unavailable")
-    elif evidence_store is None:
+    elif evidence_store is None or evidence_root is None:
         reasons.append("independent_evidence_trust_incomplete")
     else:
         expected_refs = {
@@ -319,6 +340,7 @@ def qualify_asset_provider_crosswalk(
             accepted = verify_canonical_qualification_attestation(
                 qualification_receipt,
                 evidence_store=evidence_store,
+                evidence_root=evidence_root,
                 expected_source_sha=source_sha,
                 expected_domain=_QUALIFICATION_DOMAIN,
                 expected_gate=_QUALIFICATION_GATE,

@@ -5,7 +5,7 @@
   "$defs": {
     "Id": {"type": "string", "format": "uuid"},
     "Digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$(?![\\s\\S])"},
-    "UtcInstant": {"type": "string", "format": "date-time", "pattern": "Z$"},
+    "UtcInstant": {"type": "string", "format": "date-time", "pattern": "Z(?![\\s\\S])"},
     "Sequence": {"type": "string", "pattern": "^(0|[1-9][0-9]*)$(?![\\s\\S])"},
     "Decimal": {"type": "string", "pattern": "^(?:0|[1-9][0-9]*(?:\\.[0-9]*[1-9])?|0\\.[0-9]*[1-9]|-(?:[1-9][0-9]*(?:\\.[0-9]*[1-9])?|0\\.[0-9]*[1-9]))$(?![\\s\\S])"},
     "CurrencyId": {"type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[A-Za-z0-9._:-]+$(?![\\s\\S])"},

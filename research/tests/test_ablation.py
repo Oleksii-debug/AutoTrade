@@ -917,6 +917,18 @@ class AblationTests(unittest.TestCase):
         )
         decoded = json.loads(locked.payload)
         self.assertEqual(decoded["schema_version"], "2.0.0")
+        policy = decoded["evaluation_policy"]
+        self.assertEqual(
+            policy["decision_rule"],
+            "exact-rational-d2-sample-variance-v1",
+        )
+        self.assertEqual(
+            policy["reporting_projection"],
+            {
+                "precision": 384,
+                "quantum": "0.00000000000000000000000000000000000000000000000001",
+            },
+        )
         decision = decoded["evaluation"]["decision_exact"]
         self.assertEqual(decision["lhs"], {"denominator": "1", "numerator": "1"})
         self.assertEqual(decision["rhs"], {"denominator": "1", "numerator": "1"})

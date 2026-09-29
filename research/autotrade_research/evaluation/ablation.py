@@ -504,6 +504,9 @@ class AblationEvaluation:
     reason: str
     decision_exact: ExactAblationDecision | None = None
     reporting_status: str = _REPORTING_NOT_APPLICABLE
+    qualification_population_digest: str | None = None
+    qualification_trial_log_digest: str | None = None
+    qualification_stopping_rule_digest: str | None = None
 
     def __post_init__(self) -> None:
         if self.reporting_status not in {
@@ -545,6 +548,26 @@ class AblationEvaluation:
                 )
         else:
             raise ValueError("ablation evaluation status is not canonical")
+        qualification_digests = (
+            self.qualification_population_digest,
+            self.qualification_trial_log_digest,
+            self.qualification_stopping_rule_digest,
+        )
+        if any(value is not None for value in qualification_digests):
+            if any(value is None for value in qualification_digests):
+                raise ValueError(
+                    "qualification evidence digests must be supplied together"
+                )
+            for name in (
+                "qualification_population_digest",
+                "qualification_trial_log_digest",
+                "qualification_stopping_rule_digest",
+            ):
+                object.__setattr__(
+                    self,
+                    name,
+                    _digest(getattr(self, name), name),
+                )
 
 
 def _validate_pairs(target_component: str, pairs: Iterable[AblationPair]) -> list[AblationPair]:
@@ -1067,6 +1090,9 @@ def _evaluation_payload(item: AblationEvaluation) -> dict[str, object]:
             item.mean_net_incremental_value
         ),
         "pair_count": item.pair_count,
+        "qualification_population_digest": item.qualification_population_digest,
+        "qualification_stopping_rule_digest": item.qualification_stopping_rule_digest,
+        "qualification_trial_log_digest": item.qualification_trial_log_digest,
         "reason": item.reason,
         "reporting_status": item.reporting_status,
         "required_lower_bound": _canonical_decimal_text(item.required_lower_bound),
@@ -1176,10 +1202,14 @@ class RegisteredAblationPopulation:
     protocol_digest: str
     population_digest: str
     stopping_rule_digest: str
+    trial_log_digest: str
     source_revision: str
     registered_at_utc: datetime
     evaluation_cutoff_utc: datetime
     population_unit_ids: tuple[str, ...]
+    trial_budget: int
+    recorded_trials: int
+    remaining_trial_budget: int
     complete: bool = True
 
     def __post_init__(self) -> None:
@@ -1187,6 +1217,7 @@ class RegisteredAblationPopulation:
             "protocol_digest",
             "population_digest",
             "stopping_rule_digest",
+            "trial_log_digest",
         ):
             object.__setattr__(self, name, _digest(getattr(self, name), name))
         if not isinstance(self.source_revision, str) or _GIT_SHA.fullmatch(self.source_revision) is None:
@@ -1211,8 +1242,28 @@ class RegisteredAblationPopulation:
         if len(set(normalized)) != len(normalized):
             raise ValueError("population_unit_ids must be unique")
         object.__setattr__(self, "population_unit_ids", normalized)
+        for name in (
+            "trial_budget",
+            "recorded_trials",
+            "remaining_trial_budget",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if self.trial_budget < 1:
+            raise ValueError("trial_budget must be positive")
+        if self.recorded_trials > self.trial_budget:
+            raise ValueError("recorded_trials cannot exceed trial_budget")
+        if self.remaining_trial_budget != self.trial_budget - self.recorded_trials:
+            raise ValueError(
+                "remaining_trial_budget must equal trial_budget - recorded_trials"
+            )
         if type(self.complete) is not bool:
             raise TypeError("complete must be a boolean")
+        if self.complete != (self.remaining_trial_budget == 0):
+            raise ValueError(
+                "complete must exactly reflect registered trial-budget exhaustion"
+            )
 
 
 class AblationQualificationAuthority:
@@ -1372,13 +1423,17 @@ class AblationQualificationAuthority:
             protocol_digest=self.protocol_hash,
             population_digest=snapshot.root_hash,
             stopping_rule_digest=completeness["stopping_rules_hash"],
+            trial_log_digest=completeness["trial_log_hash"],
             source_revision=self.source_revision,
             registered_at_utc=registered_at,
             evaluation_cutoff_utc=self.causal_cutoff,
             population_unit_ids=tuple(
                 sorted(row["episode_id"] for row in snapshot.rows)
             ),
-            complete=True,
+            trial_budget=completeness["trial_budget"],
+            recorded_trials=completeness["recorded_trials"],
+            remaining_trial_budget=completeness["remaining_trial_budget"],
+            complete=completeness["remaining_trial_budget"] == 0,
         )
         outcomes = tuple(
             self._load_outcome(reference, population_root=snapshot.root_hash)
@@ -1392,11 +1447,15 @@ class AblationQualificationAuthority:
                     protocol_digest=population.protocol_digest,
                     population_digest=population.population_digest,
                     stopping_rule_digest=population.stopping_rule_digest,
+                    trial_log_digest=population.trial_log_digest,
                     source_revision=population.source_revision,
                     registered_at_utc=registered_at,
                     evaluation_cutoff_utc=population.evaluation_cutoff_utc,
                     population_unit_ids=population.population_unit_ids,
-                    complete=True,
+                    trial_budget=population.trial_budget,
+                    recorded_trials=population.recorded_trials,
+                    remaining_trial_budget=population.remaining_trial_budget,
+                    complete=population.complete,
                 )
         return population, outcomes
 
@@ -1480,6 +1539,8 @@ def evaluate_qualified_incremental_value(
             reason=reason,
         )
 
+    if population.remaining_trial_budget > 0:
+        return inconclusive("registered_trial_budget_not_exhausted")
     if not population.complete:
         return inconclusive("incomplete_registered_population")
 
@@ -1564,6 +1625,9 @@ def evaluate_qualified_incremental_value(
         reason="qualified_registered_canonical_ablation_net_of_cost",
         decision_exact=base.decision_exact,
         reporting_status=base.reporting_status,
+        qualification_population_digest=population.population_digest,
+        qualification_trial_log_digest=population.trial_log_digest,
+        qualification_stopping_rule_digest=population.stopping_rule_digest,
     )
 
 

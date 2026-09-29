@@ -183,6 +183,7 @@ def registered_population(pairs, *, source_revision="9" * 40, registered_at=None
         protocol_digest=FINGERPRINT_A,
         population_digest=FINGERPRINT_D,
         stopping_rule_digest=FINGERPRINT_C,
+        trial_log_digest=FINGERPRINT_B,
         source_revision=source_revision,
         registered_at_utc=(
             CUT - timedelta(days=1) if registered_at is None else registered_at
@@ -193,6 +194,9 @@ def registered_population(pairs, *, source_revision="9" * 40, registered_at=None
             else evaluation_cutoff
         ),
         population_unit_ids=units,
+        trial_budget=1,
+        recorded_trials=1 if complete else 0,
+        remaining_trial_budget=0 if complete else 1,
         complete=complete,
     )
 
@@ -1606,6 +1610,36 @@ class AblationTests(unittest.TestCase):
                 task="ablation-qualification",
                 instrument_family="EQUITY",
             )
+            before_trials = evaluate_qualified_incremental_value(
+                "agent",
+                cases,
+                authority=authority,
+                outcome_refs=refs,
+                minimum_pairs=2,
+                required_lower_bound=Decimal("0"),
+            )
+            self.assertEqual(before_trials.status, "INCONCLUSIVE")
+            self.assertEqual(
+                before_trials.reason,
+                "registered_trial_budget_not_exhausted",
+            )
+            self.assertEqual(science.completeness(registration.protocol_id)["recorded_trials"], 0)
+
+            science.record_trial(
+                registration.protocol_id,
+                status="COMPLETED",
+                payload={"case_id": cases[0].full.case_id, "variant": "MATCHED"},
+                trial_id="55555555-5555-4555-8555-555555555555",
+            )
+            science.record_trial(
+                registration.protocol_id,
+                status="COMPLETED",
+                payload={"case_id": cases[1].full.case_id, "variant": "MATCHED"},
+                trial_id="66666666-6666-4666-8666-666666666666",
+            )
+            trial_state = science.completeness(registration.protocol_id)
+            self.assertEqual(trial_state["remaining_trial_budget"], 0)
+
             result = evaluate_qualified_incremental_value(
                 "agent",
                 cases,
@@ -1618,6 +1652,18 @@ class AblationTests(unittest.TestCase):
             self.assertEqual(
                 result.reason,
                 "qualified_registered_canonical_ablation_net_of_cost",
+            )
+            self.assertEqual(
+                result.qualification_population_digest,
+                population.root_hash,
+            )
+            self.assertEqual(
+                result.qualification_trial_log_digest,
+                trial_state["trial_log_hash"],
+            )
+            self.assertEqual(
+                result.qualification_stopping_rule_digest,
+                trial_state["stopping_rules_hash"],
             )
 
             forged = canonical_evidence(cases[0]) + canonical_evidence(cases[1])

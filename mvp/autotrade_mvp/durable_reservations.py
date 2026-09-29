@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Mapping
 from uuid import UUID, NAMESPACE_URL, uuid5
 
@@ -186,6 +187,7 @@ class DurableReservationBook:
         environment: str,
         account_id: str,
         resolution_artifact_store: ArtifactStore | None = None,
+        resolution_artifact_root: str | Path | None = None,
     ):
         if not isinstance(store, JournalStore):
             raise TypeError("store must be JournalStore")
@@ -199,11 +201,18 @@ class DurableReservationBook:
             raise TypeError(
                 "resolution_artifact_store must be the canonical ArtifactStore or None"
             )
+        if resolution_artifact_store is not None and resolution_artifact_root is None:
+            raise TypeError(
+                "resolution_artifact_root is required when a publication store is supplied"
+            )
         self.resolution_artifact_store = resolution_artifact_store
         self._resolution_artifact_reader = (
             None
-            if resolution_artifact_store is None
-            else trusted_authenticated_reader(resolution_artifact_store)
+            if resolution_artifact_root is None
+            else trusted_authenticated_reader(
+                resolution_artifact_root,
+                publication_store=resolution_artifact_store,
+            )
         )
         self.scope_id = _journal_identity(
             self.environment,

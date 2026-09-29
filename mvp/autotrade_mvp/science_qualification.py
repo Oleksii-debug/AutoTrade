@@ -185,6 +185,100 @@ class ScientificQualificationInput:
             raise ValueError("duplicate qualification gate")
 
 
+def _exact_text(value: object, name: str) -> str:
+    """Admit only non-polymorphic built-in strings to terminal science state."""
+
+    if type(value) is not str:
+        raise TypeError(f"{name} must be exact str")
+    return value
+
+
+def _exact_gate_snapshot(gate: QualificationGate) -> QualificationGate:
+    """Detach one caller gate into an exact, non-polymorphic local value."""
+
+    if type(gate) is not QualificationGate:
+        raise TypeError("gates must contain exact QualificationGate values")
+    evidence_hashes = object.__getattribute__(gate, "evidence_hashes")
+    reason_codes = object.__getattribute__(gate, "reason_codes")
+    if type(evidence_hashes) is not tuple or any(
+        type(item) is not str for item in evidence_hashes
+    ):
+        raise TypeError("gate evidence hashes must be an exact tuple of exact strings")
+    if type(reason_codes) is not tuple or any(
+        type(item) is not str for item in reason_codes
+    ):
+        raise TypeError("gate reason codes must be an exact tuple of exact strings")
+    return QualificationGate(
+        _exact_text(object.__getattribute__(gate, "gate_id"), "gate_id"),
+        _exact_text(object.__getattribute__(gate, "status"), "gate status"),
+        evidence_hashes,
+        _exact_text(
+            object.__getattribute__(gate, "candidate_hash"),
+            "gate candidate_hash",
+        ),
+        _exact_text(
+            object.__getattribute__(gate, "frozen_protocol_hash"),
+            "gate frozen_protocol_hash",
+        ),
+        _exact_text(
+            object.__getattribute__(gate, "input_snapshot_hash"),
+            "gate input_snapshot_hash",
+        ),
+        reason_codes,
+    )
+
+
+def _exact_scientific_input_snapshot(
+    evidence: ScientificQualificationInput,
+) -> ScientificQualificationInput:
+    """Freeze caller science input once before any trust callback or decision read."""
+
+    if type(evidence) is not ScientificQualificationInput:
+        raise TypeError("evidence must be exact ScientificQualificationInput")
+    gates = object.__getattribute__(evidence, "gates")
+    if type(gates) is not tuple:
+        raise TypeError("gates must be an exact tuple")
+    exact_gates = tuple(_exact_gate_snapshot(gate) for gate in gates)
+
+    holdout_used = object.__getattribute__(evidence, "holdout_used_for_tuning")
+    future_used = object.__getattribute__(evidence, "future_information_used_for_routing")
+    if type(holdout_used) is not bool:
+        raise TypeError("holdout_used_for_tuning must be exact boolean")
+    if type(future_used) is not bool:
+        raise TypeError("future_information_used_for_routing must be exact boolean")
+
+    population = object.__getattribute__(evidence, "population_coverage_hash")
+    if population is not None:
+        population = _exact_text(population, "population_coverage_hash")
+    source_sha = object.__getattribute__(evidence, "source_sha")
+    if source_sha is not None:
+        source_sha = _exact_text(source_sha, "source_sha")
+
+    return ScientificQualificationInput(
+        _exact_text(
+            object.__getattribute__(evidence, "candidate_hash"),
+            "candidate_hash",
+        ),
+        _exact_text(
+            object.__getattribute__(evidence, "frozen_protocol_hash"),
+            "frozen_protocol_hash",
+        ),
+        _exact_text(
+            object.__getattribute__(evidence, "input_snapshot_hash"),
+            "input_snapshot_hash",
+        ),
+        exact_gates,
+        _exact_text(
+            object.__getattribute__(evidence, "economic_claim"),
+            "economic_claim",
+        ),
+        holdout_used,
+        future_used,
+        population,
+        source_sha,
+    )
+
+
 @dataclass(frozen=True)
 class ScientificQualificationResult:
     qualification_id: str
@@ -250,8 +344,7 @@ def qualify_scientific_learning(
     additionally requires ``trusted_source_sha`` from the qualification runner;
     the evidence payload cannot nominate its own trusted source revision.
     """
-    if not isinstance(evidence, ScientificQualificationInput):
-        raise TypeError("evidence must be ScientificQualificationInput")
+    evidence = _exact_scientific_input_snapshot(evidence)
     by_id = {gate.gate_id: gate for gate in evidence.gates}
     checks: list[tuple[str, str]] = []
     reasons: list[str] = []

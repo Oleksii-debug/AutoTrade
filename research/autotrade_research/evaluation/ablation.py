@@ -20,7 +20,9 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import re
-from typing import Iterable
+import threading
+from typing import Callable, Iterable
+import weakref
 
 from autotrade_numeric.exact_decimal import (
     ExactDecimalError,
@@ -1307,7 +1309,40 @@ class RegisteredAblationPopulation:
             )
 
 
-class AblationQualificationAuthority:
+@dataclass(frozen=True)
+class _AblationQualificationState:
+    scientific_registry: ScientificRegistry
+    experience_memory: ExperienceMemory
+    read_artifact_snapshot: Callable[[str], tuple[dict[str, object], bytes]]
+    protocol_id: str
+    protocol_hash: str
+    source_revision: str
+    causal_cutoff: datetime
+    granted_permissions: frozenset[str]
+    task: str | None
+    instrument_family: str | None
+
+
+_ABLATION_AUTHORITY_LOCK = threading.RLock()
+_ABLATION_AUTHORITY_STATE: dict[int, _AblationQualificationState] = {}
+
+
+def _release_ablation_authority(authority_id: int) -> None:
+    with _ABLATION_AUTHORITY_LOCK:
+        _ABLATION_AUTHORITY_STATE.pop(authority_id, None)
+
+
+def _ablation_authority_state(authority: object) -> _AblationQualificationState:
+    if type(authority) is not AblationQualificationAuthority:
+        raise TypeError("qualification authority type is invalid")
+    with _ABLATION_AUTHORITY_LOCK:
+        state = _ABLATION_AUTHORITY_STATE.get(id(authority))
+    if state is None:
+        raise ValueError("qualification authority state is unavailable")
+    return state
+
+
+class AblationQualificationAuthority(str):
     """Resolve qualification evidence only through canonical persistent authorities.
 
     The authority never publishes evidence. It consumes an append-only scientific
@@ -1316,8 +1351,10 @@ class AblationQualificationAuthority:
     canonical ArtifactStore.
     """
 
-    def __init__(
-        self,
+    __slots__ = ("__weakref__",)
+
+    def __new__(
+        cls,
         *,
         scientific_registry: ScientificRegistry,
         experience_memory: ExperienceMemory,
@@ -1330,7 +1367,9 @@ class AblationQualificationAuthority:
         granted_permissions: set[str],
         task: str | None = None,
         instrument_family: str | None = None,
-    ) -> None:
+    ):
+        if cls is not AblationQualificationAuthority:
+            raise TypeError("qualification authority type is sealed")
         if type(scientific_registry) is not ScientificRegistry:
             raise TypeError("scientific_registry must be the canonical ScientificRegistry")
         if type(experience_memory) is not ExperienceMemory:
@@ -1341,32 +1380,80 @@ class AblationQualificationAuthority:
             raise ValueError("protocol_id is required")
         if not isinstance(protocol_hash, str):
             raise TypeError("protocol_hash must be text")
-        if not isinstance(source_revision, str) or _GIT_SHA.fullmatch(source_revision) is None:
-            raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
+        if (
+            not isinstance(source_revision, str)
+            or _GIT_SHA.fullmatch(source_revision) is None
+        ):
+            raise ValueError(
+                "source_revision must be an exact 40-character lowercase git SHA"
+            )
         if not isinstance(granted_permissions, set) or not granted_permissions:
             raise ValueError("granted_permissions must be a non-empty set")
-        self.scientific_registry = scientific_registry
-        self.experience_memory = experience_memory
-        self._read_artifact_snapshot = trusted_authenticated_reader(
+
+        # Snapshot caller-owned persistent handles into private exact instances.
+        # Later rebinding of the supplied registry/memory objects cannot change
+        # which database paths or methods terminal evaluation uses.
+        private_science = ScientificRegistry(Path(scientific_registry.path))
+        correction_resolver = object.__getattribute__(
+            experience_memory,
+            "_correction_evidence_resolver",
+        )
+        private_memory = ExperienceMemory(
+            Path(experience_memory.path),
+            correction_evidence_resolver=correction_resolver,
+        )
+        read_snapshot = trusted_authenticated_reader(
             evidence_root,
             publication_store=artifact_store,
         )
-        self.protocol_id = protocol_id.strip()
-        self.protocol_hash = _digest(protocol_hash, "protocol_hash")
-        self.source_revision = source_revision
-        self.causal_cutoff = _utc(causal_cutoff, "causal_cutoff")
-        self.granted_permissions = set(granted_permissions)
-        self.task = task
-        self.instrument_family = instrument_family
+        state = _AblationQualificationState(
+            scientific_registry=private_science,
+            experience_memory=private_memory,
+            read_artifact_snapshot=read_snapshot,
+            protocol_id=protocol_id.strip(),
+            protocol_hash=_digest(protocol_hash, "protocol_hash"),
+            source_revision=source_revision,
+            causal_cutoff=_utc(causal_cutoff, "causal_cutoff"),
+            granted_permissions=frozenset(granted_permissions),
+            task=task,
+            instrument_family=instrument_family,
+        )
+
+        authority = str.__new__(
+            cls,
+            "autotrade-ablation-qualification-authority",
+        )
+        authority_id = id(authority)
+        try:
+            with _ABLATION_AUTHORITY_LOCK:
+                if authority_id in _ABLATION_AUTHORITY_STATE:
+                    raise ValueError("qualification authority identity collision")
+                _ABLATION_AUTHORITY_STATE[authority_id] = state
+            weakref.finalize(
+                authority,
+                _release_ablation_authority,
+                authority_id,
+            )
+            return authority
+        except BaseException:
+            with _ABLATION_AUTHORITY_LOCK:
+                _ABLATION_AUTHORITY_STATE.pop(authority_id, None)
+            raise
+
+    def __init__(self, **_kwargs) -> None:
+        # State is installed atomically by __new__; no caller-visible instance
+        # fields are populated.
+        pass
 
     def registered_decision_policy(self) -> RegisteredAblationDecisionPolicy:
-        """Resolve the terminal decision rule from protocol-hash-bound registry state."""
+        """Resolve the terminal rule only from module-owned authority state."""
 
+        state = _ablation_authority_state(self)
         policy = ScientificRegistry.ablation_decision_policy(
-            self.scientific_registry,
-            self.protocol_id,
+            state.scientific_registry,
+            state.protocol_id,
         )
-        if policy.protocol_hash != self.protocol_hash:
+        if policy.protocol_hash != state.protocol_hash:
             raise ValueError(
                 "registered ablation decision policy does not match qualification binding"
             )
@@ -1378,9 +1465,10 @@ class AblationQualificationAuthority:
         *,
         population_root: str,
     ) -> CanonicalAblationOutcomeEvidence:
+        state = _ablation_authority_state(self)
         if not isinstance(reference, AblationOutcomeArtifactRef):
             raise TypeError("outcome_refs must contain AblationOutcomeArtifactRef")
-        manifest, data = self._read_artifact_snapshot(reference.artifact_id)
+        manifest, data = state.read_artifact_snapshot(reference.artifact_id)
         if manifest.get("sha256") != reference.sha256:
             raise ValueError("ablation outcome artifact digest mismatch")
         if manifest.get("media_type") != _ABLATION_OUTCOME_MEDIA_TYPE:
@@ -1440,10 +1528,10 @@ class AblationQualificationAuthority:
         if canonical != text:
             raise ValueError("ablation outcome artifact JSON must be canonical")
         if (
-            payload.get("protocol_id") != self.protocol_id
-            or payload.get("protocol_hash") != self.protocol_hash
+            payload.get("protocol_id") != state.protocol_id
+            or payload.get("protocol_hash") != state.protocol_hash
             or payload.get("population_root") != population_root
-            or payload.get("source_revision") != self.source_revision
+            or payload.get("source_revision") != state.source_revision
         ):
             raise ValueError("ablation outcome artifact authority binding mismatch")
         superseded_raw = payload.get("superseded_at_utc")
@@ -1476,12 +1564,13 @@ class AblationQualificationAuthority:
         *,
         outcome_refs: Iterable[AblationOutcomeArtifactRef],
     ) -> tuple[RegisteredAblationPopulation, tuple[CanonicalAblationOutcomeEvidence, ...]]:
+        state = _ablation_authority_state(self)
         selected = tuple(pairs)
         registration = ScientificRegistry.protocol_registration(
-            self.scientific_registry,
-            self.protocol_id,
+            state.scientific_registry,
+            state.protocol_id,
         )
-        if registration.protocol_hash != self.protocol_hash:
+        if registration.protocol_hash != state.protocol_hash:
             raise ValueError("registered protocol hash does not match qualification binding")
         try:
             registered_raw = datetime.fromisoformat(registration.created_at)
@@ -1490,25 +1579,26 @@ class AblationQualificationAuthority:
         registered_at = _utc(registered_raw, "protocol registered_at")
         if registered_at.isoformat() != registration.created_at:
             raise ValueError("protocol registered_at is not canonical")
-        snapshot = self.experience_memory.coverage_population_snapshot(
-            causal_cutoff=self.causal_cutoff,
-            granted_permissions=set(self.granted_permissions),
-            task=self.task,
-            instrument_family=self.instrument_family,
+        snapshot = ExperienceMemory.coverage_population_snapshot(
+            state.experience_memory,
+            causal_cutoff=state.causal_cutoff,
+            granted_permissions=set(state.granted_permissions),
+            task=state.task,
+            instrument_family=state.instrument_family,
         )
         snapshot.verify_integrity()
         completeness = ScientificRegistry.completeness(
-            self.scientific_registry,
-            self.protocol_id,
+            state.scientific_registry,
+            state.protocol_id,
         )
         population = RegisteredAblationPopulation(
-            protocol_digest=self.protocol_hash,
+            protocol_digest=state.protocol_hash,
             population_digest=snapshot.root_hash,
             stopping_rule_digest=completeness["stopping_rules_hash"],
             trial_log_digest=completeness["trial_log_hash"],
-            source_revision=self.source_revision,
+            source_revision=state.source_revision,
             registered_at_utc=registered_at,
-            evaluation_cutoff_utc=self.causal_cutoff,
+            evaluation_cutoff_utc=state.causal_cutoff,
             population_unit_ids=tuple(
                 sorted(row["episode_id"] for row in snapshot.rows)
             ),
@@ -1518,7 +1608,11 @@ class AblationQualificationAuthority:
             complete=completeness["remaining_trial_budget"] == 0,
         )
         outcomes = tuple(
-            self._load_outcome(reference, population_root=snapshot.root_hash)
+            AblationQualificationAuthority._load_outcome(
+                self,
+                reference,
+                population_root=snapshot.root_hash,
+            )
             for reference in outcome_refs
         )
         if selected:

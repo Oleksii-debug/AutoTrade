@@ -6,6 +6,7 @@ from mvp.autotrade_mvp.exact_decimal import (
     ExactDecimalError,
     as_fraction,
     canonical_decimal_text,
+    exact_abs,
     exact_add,
     exact_multiply,
     exact_sum,
@@ -18,12 +19,17 @@ class ExactDecimalTests(unittest.TestCase):
     def test_finite_arithmetic_is_independent_of_ambient_context(self):
         expected_sum = Decimal("1234567890123456789012345679")
         expected_product = Decimal("1234567890123456789012345678.123456789")
+        expected_abs = Decimal("12345678901234567890.123456789")
         for precision in (6, 10, 28, 80):
             for rounding in (ROUND_FLOOR, ROUND_CEILING):
                 with self.subTest(precision=precision, rounding=rounding):
                     with localcontext() as context:
                         context.prec = precision
                         context.rounding = rounding
+                        self.assertEqual(
+                            exact_abs(Decimal("-12345678901234567890.123456789")),
+                            expected_abs,
+                        )
                         self.assertEqual(
                             exact_add(
                                 Decimal("1234567890123456789012345678.1"),

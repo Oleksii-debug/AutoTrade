@@ -312,6 +312,45 @@ def _verify_borrow_checkpoint_evidence(
         verify_provider_borrow_evidence(evidence, artifact_store)
 
 
+def _verify_reconciliation_result_scope(
+    result: ReconciliationResult,
+) -> None:
+    """Reject caller-constructed reconciliation results with split provider scope."""
+
+    if not isinstance(result, ReconciliationResult):
+        raise TypeError("result must be ReconciliationResult")
+    provider, account, environment = _scope(
+        provider_id=result.provider_id,
+        account_id=result.account_id,
+        environment=result.environment,
+    )
+    provider_environment = _provider_environment(
+        result.provider_environment,
+        environment=environment,
+        provider_id=provider,
+    )
+    if (
+        result.provider_id != provider
+        or result.account_id != account
+        or result.environment != environment
+        or result.provider_environment != provider_environment
+    ):
+        raise ValueError("reconciliation result scope is not canonical")
+
+    availability = result.resource_availability
+    if availability is None:
+        return
+    if (
+        availability.provider_id != provider
+        or availability.account_id != account
+        or availability.environment != environment
+        or availability.provider_environment != provider_environment
+    ):
+        raise ValueError(
+            "resource availability provider scope does not match reconciliation"
+        )
+
+
 def record_reconciliation_checkpoint(
     store: JournalStore,
     *,
@@ -326,6 +365,7 @@ def record_reconciliation_checkpoint(
 
     if not isinstance(store, JournalStore):
         raise TypeError("store must be JournalStore")
+    _verify_reconciliation_result_scope(result)
     _verify_borrow_checkpoint_evidence(result, evidence_artifact_store)
     rid = _text(reconciliation_id, name="reconciliation_id")
     host = _text(host_id, name="host_id")
@@ -810,7 +850,19 @@ def load_account_resource_availability_evidence(
         (delta.days * 86400 + delta.seconds) * 1_000_000
         + delta.microseconds
     )
-    age_seconds = Decimal(age_microseconds) / Decimal(1_000_000)
+    # Timedelta has exact microsecond resolution. Build the corresponding
+    # finite decimal text directly instead of dividing under the process-global
+    # Decimal context, so freshness cannot change with precision/rounding.
+    age_whole_seconds, age_fraction_microseconds = divmod(
+        age_microseconds, 1_000_000
+    )
+    age_seconds_text = str(age_whole_seconds)
+    if age_fraction_microseconds:
+        age_seconds_text += (
+            "."
+            + f"{age_fraction_microseconds:06d}".rstrip("0")
+        )
+    age_seconds = Decimal(age_seconds_text)
     if age_seconds > max_age:
         raise ValueError("availability checkpoint is stale")
 
@@ -824,10 +876,21 @@ def load_account_resource_availability_evidence(
         account_id=account_id,
         environment=environment,
     )
+    provider_scope = _provider_environment(
+        provider_environment,
+        environment=scope,
+        provider_id=provider,
+    )
+    resource_provider_scope = _provider_environment(
+        resource_evidence.get("provider_environment"),
+        environment=scope,
+        provider_id=provider,
+    )
     if (
         resource_evidence.get("provider_id") != provider
         or resource_evidence.get("account_id") != account
         or resource_evidence.get("environment") != scope
+        or resource_provider_scope != provider_scope
     ):
         raise ValueError("resource availability evidence scope mismatch")
 
@@ -932,6 +995,13 @@ def load_account_resource_availability_evidence(
                 or settlement_scope.get("environment") != scope
             ):
                 continue
+            settlement_provider_scope = _provider_environment(
+                settlement_scope.get("provider_environment"),
+                environment=scope,
+                provider_id=provider,
+            )
+            if settlement_provider_scope != provider_scope:
+                continue
             if settlement_sequence >= checkpoint_sequence:
                 raise ValueError(
                     "availability checkpoint predates settlement financial truth"
@@ -967,6 +1037,15 @@ def load_account_resource_availability_evidence(
                 or lifecycle_payload.get("account_id") != account
                 or lifecycle_payload.get("environment") != scope
             ):
+                continue
+            # Legacy BYBIT/PAPER lifecycle facts do not carry TESTNET-vs-DEMO
+            # identity. They are intentionally opaque rather than cross-assigned.
+            lifecycle_provider_scope = _provider_environment(
+                lifecycle_payload.get("provider_environment"),
+                environment=scope,
+                provider_id=provider,
+            )
+            if lifecycle_provider_scope != provider_scope:
                 continue
             if lifecycle_sequence >= checkpoint_sequence:
                 raise ValueError(

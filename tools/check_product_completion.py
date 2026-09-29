@@ -8,7 +8,7 @@ same source revision.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -29,7 +29,7 @@ from mvp.autotrade_mvp.qualification_attestation import (
     parse_signed_qualification_attestation,
     verify_qualification_attestation,
 )
-from research.autotrade_research.artifacts.store import ArtifactStore
+from research.autotrade_research.artifacts import ArtifactStore, trusted_authenticated_reader
 from tools.check_nvda_qualification import (
     NvdaQualificationError,
     validate_release_artifact_binding,
@@ -99,6 +99,11 @@ class WholeProductEvidenceContext:
     nvda_receipt: SignedQualificationAttestation | None = None
     nvda_requirements_json: str | None = None
     nvda_release_artifact: Path | None = None
+    _read_authenticated_snapshot: Any = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.evidence_store, ArtifactStore):
@@ -147,6 +152,14 @@ class WholeProductEvidenceContext:
             Path,
         ):
             raise TypeError("nvda_release_artifact must be a Path")
+        object.__setattr__(
+            self,
+            "_read_authenticated_snapshot",
+            trusted_authenticated_reader(
+                self.evidence_root,
+                publication_store=self.evidence_store,
+            ),
+        )
 
 
 class ProductCompletionError(ValueError):
@@ -267,7 +280,7 @@ def _terminal_nvda_status(
         return False
 
     try:
-        raw_evidence = evidence_context.evidence_store.read_bytes(
+        _manifest, raw_evidence = evidence_context._read_authenticated_snapshot(
             matching_refs[0].artifact_id
         )
         if (

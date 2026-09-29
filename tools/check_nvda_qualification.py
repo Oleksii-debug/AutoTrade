@@ -18,11 +18,9 @@ if str(ROOT) not in sys.path:
 
 from mvp.autotrade_mvp.qualification_attestation import (
     QualificationTrustError,
-    QualificationTrustPolicy,
     SignedQualificationAttestation,
-    parse_qualification_trust_policy,
     parse_signed_qualification_attestation,
-    verify_qualification_attestation,
+    verify_canonical_qualification_attestation,
 )
 from research.autotrade_research.artifacts.store import ArtifactStore
 
@@ -327,10 +325,7 @@ def validate_trusted_nvda_qualification(
     evidence_sha256: str,
     release_artifact_sha256: str,
     receipt: SignedQualificationAttestation,
-    policy: QualificationTrustPolicy,
     evidence_store: ArtifactStore,
-    expected_policy_id: str,
-    expected_policy_version: str,
 ) -> dict[str, object]:
     result = validate_evidence(evidence, requirements)
     if SHA256.fullmatch(evidence_sha256) is None:
@@ -382,12 +377,9 @@ def validate_trusted_nvda_qualification(
     accepted = None
     for requirement_id in requirement_ids:
         try:
-            current = verify_qualification_attestation(
+            current = verify_canonical_qualification_attestation(
                 receipt,
-                policy=policy,
                 evidence_store=evidence_store,
-                expected_policy_id=expected_policy_id,
-                expected_policy_version=expected_policy_version,
                 expected_source_sha=result["source_sha"],
                 expected_domain=NVDA_DOMAIN,
                 expected_gate=NVDA_GATE,
@@ -436,16 +428,13 @@ def validate_trusted_nvda_qualification(
 def _load_trust_inputs(args):
     values = (
         args.attestation,
-        args.qualification_policy,
         args.evidence_store,
-        args.expected_policy_id,
-        args.expected_policy_version,
     )
     if any(value is not None for value in values) and not all(
         value is not None for value in values
     ):
         raise NvdaQualificationError(
-            "signed NVDA trust inputs must be supplied together"
+            "signed NVDA attestation and evidence store must be supplied together"
         )
     if not all(value is not None for value in values):
         return None
@@ -457,19 +446,13 @@ def _load_trust_inputs(args):
         receipt = parse_signed_qualification_attestation(
             _load(args.attestation, name="signed NVDA attestation")
         )
-        policy = parse_qualification_trust_policy(
-            _load(args.qualification_policy, name="qualification trust policy")
-        )
     except (QualificationTrustError, TypeError, ValueError) as error:
         raise NvdaQualificationError(
             "signed NVDA trust inputs are invalid"
         ) from error
     return (
         receipt,
-        policy,
         ArtifactStore(args.evidence_store),
-        args.expected_policy_id,
-        args.expected_policy_version,
     )
 
 
@@ -481,10 +464,7 @@ def main() -> int:
     parser.add_argument("--status", type=Path, default=DEFAULT_STATUS)
     parser.add_argument("--check-status", action="store_true")
     parser.add_argument("--attestation", type=Path)
-    parser.add_argument("--qualification-policy", type=Path)
     parser.add_argument("--evidence-store", type=Path)
-    parser.add_argument("--expected-policy-id")
-    parser.add_argument("--expected-policy-version")
     args = parser.parse_args()
     try:
         requirements = _load(args.requirements, name="requirements")
@@ -522,17 +502,14 @@ def main() -> int:
                     evidence,
                     args.release_artifact,
                 )
-                receipt, policy, evidence_store, policy_id, policy_version = trust
+                receipt, evidence_store = trust
                 result = validate_trusted_nvda_qualification(
                     evidence,
                     requirements,
                     evidence_sha256=evidence_digest(evidence_path),
                     release_artifact_sha256=actual_artifact_sha,
                     receipt=receipt,
-                    policy=policy,
                     evidence_store=evidence_store,
-                    expected_policy_id=policy_id,
-                    expected_policy_version=policy_version,
                 )
                 for field in (
                     "source_sha",
@@ -575,17 +552,14 @@ def main() -> int:
             print(json.dumps(result, sort_keys=True))
             return 3
 
-        receipt, policy, evidence_store, policy_id, policy_version = trust
+        receipt, evidence_store = trust
         result = validate_trusted_nvda_qualification(
             evidence,
             requirements,
             evidence_sha256=raw_evidence_sha,
             release_artifact_sha256=actual_artifact_sha,
             receipt=receipt,
-            policy=policy,
             evidence_store=evidence_store,
-            expected_policy_id=policy_id,
-            expected_policy_version=policy_version,
         )
         print(json.dumps(result, sort_keys=True))
         return 0

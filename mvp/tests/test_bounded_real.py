@@ -3,7 +3,10 @@ from tempfile import TemporaryDirectory
 import unittest
 from uuid import NAMESPACE_URL, uuid5
 
-from research.autotrade_research.artifacts.store import ArtifactStore
+from research.autotrade_research.artifacts.store import (
+    ArtifactIntegrityError,
+    ArtifactStore,
+)
 
 from mvp.autotrade_mvp.bounded_real import (
     BoundedRealEnvelope,
@@ -279,6 +282,15 @@ class _ArtifactStoreStub:
 
 
 class BoundedRealQualificationTests(unittest.TestCase):
+    def test_verifier_rejects_publication_store_from_another_root(self):
+        with TemporaryDirectory() as authoritative_root, TemporaryDirectory() as other_root:
+            store = ArtifactStore(other_root)
+            with self.assertRaises(ArtifactIntegrityError):
+                artifact_store_evidence_verifier(
+                    store,
+                    evidence_root=authoritative_root,
+                )
+
     def test_self_published_complete_store_is_not_terminal_trust(self):
         bounded = envelope()
         prerequisite_items = prerequisites()
@@ -290,7 +302,7 @@ class BoundedRealQualificationTests(unittest.TestCase):
                 envelope=bounded,
                 prerequisite_evidence=prerequisite_items,
                 observations=observed,
-                evidence_verifier=artifact_store_evidence_verifier(store),
+                evidence_verifier=artifact_store_evidence_verifier(store, evidence_root=directory),
             )
         self.assertFalse(result.complete)
         self.assertIn(
@@ -319,7 +331,7 @@ class BoundedRealQualificationTests(unittest.TestCase):
                 envelope=bounded,
                 prerequisite_evidence=prerequisite_items,
                 observations=observed,
-                evidence_verifier=artifact_store_evidence_verifier(store),
+                evidence_verifier=artifact_store_evidence_verifier(store, evidence_root=directory),
                 qualification_receipt=receipt,
                 qualification_policy=trust_policy,
                 expected_policy_id=trust_policy.policy_id,
@@ -350,7 +362,7 @@ class BoundedRealQualificationTests(unittest.TestCase):
                 envelope=bounded,
                 prerequisite_evidence=prerequisite_items,
                 observations=observed,
-                evidence_verifier=artifact_store_evidence_verifier(store),
+                evidence_verifier=artifact_store_evidence_verifier(store, evidence_root=directory),
                 qualification_receipt=receipt,
                 qualification_policy=trust_policy,
                 expected_policy_id=trust_policy.policy_id,
@@ -513,7 +525,7 @@ class BoundedRealQualificationTests(unittest.TestCase):
                 envelope=envelope(),
                 prerequisite_evidence=prerequisite_items,
                 observations=observed,
-                evidence_verifier=artifact_store_evidence_verifier(store),
+                evidence_verifier=artifact_store_evidence_verifier(store, evidence_root=directory),
             )
         self.assertTrue(
             any(
@@ -531,7 +543,7 @@ class BoundedRealQualificationTests(unittest.TestCase):
                 envelope=envelope(),
                 prerequisite_evidence=prerequisite_items,
                 observations=observed,
-                evidence_verifier=artifact_store_evidence_verifier(store),
+                evidence_verifier=artifact_store_evidence_verifier(store, evidence_root=directory),
             )
         self.assertTrue(
             any(
@@ -595,7 +607,7 @@ class BoundedRealQualificationTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)
             _publish_ref(store, good_ref, payload=payload)
-            verifier = artifact_store_evidence_verifier(store)
+            verifier = artifact_store_evidence_verifier(store, evidence_root=directory)
             good = verifier.verify(good_ref)
             self.assertTrue(good.valid)
             self.assertFalse(good.conflicted)
@@ -614,12 +626,15 @@ class BoundedRealQualificationTests(unittest.TestCase):
                 wrong_ref,
                 metadata_overrides={"account_id": "wrong-account"},
             )
-            wrong_scope = artifact_store_evidence_verifier(store).verify(wrong_ref)
+            wrong_scope = artifact_store_evidence_verifier(store, evidence_root=directory).verify(wrong_ref)
             self.assertFalse(wrong_scope.valid)
             self.assertTrue(wrong_scope.conflicted)
 
         with self.assertRaisesRegex(TypeError, "canonical ArtifactStore"):
-            artifact_store_evidence_verifier(_ArtifactStoreStub(good_ref, payload=payload))
+            artifact_store_evidence_verifier(
+                _ArtifactStoreStub(good_ref, payload=payload),
+                evidence_root="unused",
+            )
 
     def test_evidence_is_bound_to_exact_bounded_real_envelope_content(self):
         original = envelope()

@@ -9,6 +9,7 @@ from unittest.mock import patch
 from types import SimpleNamespace
 import zipfile
 
+import tools.check_nvda_qualification as nvda_module
 from tools.check_nvda_qualification import (
     NvdaQualificationError,
     _workflow_requirement_digest,
@@ -167,6 +168,7 @@ class NvdaQualificationGateTests(unittest.TestCase):
                 receipt=receipt,
                 policy=SimpleNamespace(),
                 evidence_store=SimpleNamespace(),
+                evidence_root=ROOT,
                 expected_policy_id="sha256:" + "4" * 64,
                 expected_policy_version="2026.09",
             )
@@ -191,6 +193,7 @@ class NvdaQualificationGateTests(unittest.TestCase):
                 receipt=bad_receipt,
                 policy=SimpleNamespace(),
                 evidence_store=SimpleNamespace(),
+                evidence_root=ROOT,
                 expected_policy_id="sha256:" + "4" * 64,
                 expected_policy_version="2026.09",
             )
@@ -212,6 +215,7 @@ class NvdaQualificationGateTests(unittest.TestCase):
                 receipt=wrong_release_receipt,
                 policy=SimpleNamespace(),
                 evidence_store=SimpleNamespace(),
+                evidence_root=ROOT,
                 expected_policy_id="sha256:" + "4" * 64,
                 expected_policy_version="2026.09",
             )
@@ -440,6 +444,78 @@ class NvdaQualificationGateTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 2)
             self.assertIn("requires --release-artifact", result.stderr)
+
+    def test_check_status_threads_configured_evidence_root(self):
+        with TemporaryDirectory() as directory:
+            fake_root = Path(directory)
+            qualification_directory = fake_root / "qualification" / "nvda"
+            qualification_directory.mkdir(parents=True)
+            evidence_path = qualification_directory / "evidence.json"
+            evidence_path.write_text("{}", encoding="utf-8")
+            release = fake_root / "AutoTrade-release.zip"
+            release.write_bytes(b"fixture")
+            evidence_root = fake_root / "trusted-artifacts"
+            policy_id = "sha256:" + "4" * 64
+            status = {
+                "schema_version": "1.0.0",
+                "qualified": True,
+                "reason": "QUALIFIED_SIGNED_REAL_NVDA_RELEASE",
+                "source_sha": "a" * 40,
+                "artifact_sha256": "sha256:" + "b" * 64,
+                "evidence_file": "qualification/nvda/evidence.json",
+                "evidence_sha256": "sha256:" + "c" * 64,
+                "release_artifact_id": "11111111-1111-4111-8111-111111111111",
+                "attestation_id": "22222222-2222-4222-8222-222222222222",
+                "attestation_digest": "sha256:" + "d" * 64,
+                "policy_id": policy_id,
+                "trust_root_id": "sha256:" + "e" * 64,
+            }
+            status_path = fake_root / "status.json"
+            status_path.write_text(json.dumps(status), encoding="utf-8")
+            trust = (
+                SimpleNamespace(),
+                SimpleNamespace(),
+                SimpleNamespace(),
+                evidence_root,
+                policy_id,
+                "2026.09",
+            )
+            with (
+                patch.object(nvda_module, "ROOT", fake_root),
+                patch.object(nvda_module, "_load_trust_inputs", return_value=trust),
+                patch.object(
+                    nvda_module,
+                    "validate_release_artifact_binding",
+                    return_value=status["artifact_sha256"],
+                ),
+                patch.object(
+                    nvda_module,
+                    "evidence_digest",
+                    return_value=status["evidence_sha256"],
+                ),
+                patch.object(
+                    nvda_module,
+                    "validate_trusted_nvda_qualification",
+                    return_value=dict(status),
+                ) as validate,
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "check_nvda_qualification.py",
+                        "--check-status",
+                        "--status",
+                        str(status_path),
+                        "--release-artifact",
+                        str(release),
+                    ],
+                ),
+            ):
+                self.assertEqual(nvda_module.main(), 0)
+            self.assertEqual(
+                validate.call_args.kwargs["evidence_root"],
+                evidence_root,
+            )
 
     def test_qualification_cli_binds_evidence_to_actual_release_artifact(self):
         with TemporaryDirectory() as directory:

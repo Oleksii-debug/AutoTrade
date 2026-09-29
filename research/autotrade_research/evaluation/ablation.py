@@ -1082,6 +1082,17 @@ def _outcome_payload(item: AblationOutcome) -> dict[str, object]:
     }
 
 
+def _canonical_object_digest(payload: object) -> str:
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    return "sha256:" + sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _evaluation_payload(item: AblationEvaluation) -> dict[str, object]:
     return {
         "decision_exact": _exact_decision_payload(item.decision_exact),
@@ -1135,7 +1146,11 @@ def _parse_utc_text(value: object, field: str) -> datetime:
         parsed = datetime.fromisoformat(value[:-1] + "+00:00")
     except ValueError as error:
         raise ValueError(f"{field} must be canonical UTC text") from error
-    canonical = parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    canonical = (
+        parsed.astimezone(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
     if canonical != value:
         raise ValueError(f"{field} must be canonical UTC text")
     return parsed.astimezone(timezone.utc)
@@ -1155,6 +1170,7 @@ class CanonicalAblationOutcomeEvidence:
     utility_evidence_digest: str
     cost_evidence_digest: str
     evidence_digest: str
+    causal_outcome_digest: str | None = None
     superseded_at_utc: datetime | None = None
 
     def __post_init__(self) -> None:
@@ -1186,6 +1202,15 @@ class CanonicalAblationOutcomeEvidence:
             "evidence_digest",
         ):
             object.__setattr__(self, name, _digest(getattr(self, name), name))
+        if self.causal_outcome_digest is not None:
+            object.__setattr__(
+                self,
+                "causal_outcome_digest",
+                _digest(
+                    self.causal_outcome_digest,
+                    "causal_outcome_digest",
+                ),
+            )
         if self.superseded_at_utc is not None:
             superseded = _utc(self.superseded_at_utc, "superseded_at_utc")
             if superseded <= self.outcome_available_utc:
@@ -1338,12 +1363,7 @@ class AblationQualificationAuthority:
             raise ValueError("ablation outcome artifact JSON is invalid") from error
         required = {
             "schema_version",
-            "case_id",
-            "variant",
-            "population_unit_id",
-            "utility",
-            "cost",
-            "outcome_available_utc",
+            "outcome",
             "source_revision",
             "protocol_id",
             "protocol_hash",
@@ -1354,8 +1374,31 @@ class AblationQualificationAuthority:
         }
         if not isinstance(payload, dict) or set(payload) != required:
             raise ValueError("ablation outcome artifact schema is not canonical")
-        if payload.get("schema_version") != 1:
+        if payload.get("schema_version") != 2:
             raise ValueError("ablation outcome artifact schema version is unsupported")
+        outcome_payload = payload.get("outcome")
+        expected_outcome_keys = {
+            "case_id",
+            "components",
+            "cost",
+            "deadline_ms",
+            "decision_utc",
+            "elapsed_ms",
+            "input_cutoff_utc",
+            "input_evidence",
+            "input_fingerprint",
+            "outcome_available_utc",
+            "population_unit_id",
+            "utility",
+            "variant",
+        }
+        if (
+            not isinstance(outcome_payload, dict)
+            or set(outcome_payload) != expected_outcome_keys
+        ):
+            raise ValueError(
+                "ablation outcome causal payload schema is not canonical"
+            )
         canonical = json.dumps(
             payload,
             sort_keys=True,
@@ -1378,19 +1421,20 @@ class AblationQualificationAuthority:
             else _parse_utc_text(superseded_raw, "superseded_at_utc")
         )
         return CanonicalAblationOutcomeEvidence(
-            case_id=payload.get("case_id"),
-            variant=payload.get("variant"),
-            population_unit_id=payload.get("population_unit_id"),
-            utility=payload.get("utility"),
-            cost=payload.get("cost"),
+            case_id=outcome_payload.get("case_id"),
+            variant=outcome_payload.get("variant"),
+            population_unit_id=outcome_payload.get("population_unit_id"),
+            utility=outcome_payload.get("utility"),
+            cost=outcome_payload.get("cost"),
             outcome_available_utc=_parse_utc_text(
-                payload.get("outcome_available_utc"),
+                outcome_payload.get("outcome_available_utc"),
                 "outcome_available_utc",
             ),
             source_revision=payload.get("source_revision"),
             utility_evidence_digest=payload.get("utility_evidence_digest"),
             cost_evidence_digest=payload.get("cost_evidence_digest"),
             evidence_digest=reference.sha256,
+            causal_outcome_digest=_canonical_object_digest(outcome_payload),
             superseded_at_utc=superseded,
         )
 
@@ -1552,6 +1596,13 @@ def evaluate_qualified_incremental_value(
         earliest_cutoff = min(pair.full.input_cutoff_utc for pair in selected)
         if population.registered_at_utc > earliest_cutoff:
             return inconclusive("post_hoc_population_or_protocol_registration")
+        if any(
+            item.input_cutoff_utc > population.evaluation_cutoff_utc
+            or item.decision_utc > population.evaluation_cutoff_utc
+            for pair in selected
+            for item in (pair.full, pair.ablated)
+        ):
+            return inconclusive("causal_pair_after_registered_evaluation_cutoff")
 
     evidence_index: dict[tuple[str, str], CanonicalAblationOutcomeEvidence] = {}
     for evidence in canonical_outcomes:
@@ -1575,6 +1626,11 @@ def evaluate_qualified_incremental_value(
                 or evidence.source_revision != population.source_revision
             ):
                 return inconclusive("canonical_outcome_identity_mismatch")
+            if trusted and (
+                evidence.causal_outcome_digest
+                != _canonical_object_digest(_outcome_payload(item))
+            ):
+                return inconclusive("canonical_outcome_causal_binding_mismatch")
             if (
                 evidence.utility != item.utility
                 or evidence.cost != item.cost

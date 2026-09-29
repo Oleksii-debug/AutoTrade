@@ -35,6 +35,51 @@ FINGERPRINT_D = "sha256:" + ("d" * 64)
 _DEFAULT_INPUT_EVIDENCE = object()
 
 
+def canonical_utc_text(value):
+    return (
+        value.astimezone(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def canonical_decimal_text(value):
+    rendered = format(value, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return "0" if rendered in {"", "-0"} else rendered
+
+
+def canonical_outcome_payload(item):
+    return {
+        "case_id": item.case_id,
+        "components": sorted(item.components),
+        "cost": canonical_decimal_text(item.cost),
+        "deadline_ms": item.deadline_ms,
+        "decision_utc": canonical_utc_text(item.decision_utc),
+        "elapsed_ms": item.elapsed_ms,
+        "input_cutoff_utc": canonical_utc_text(item.input_cutoff_utc),
+        "input_evidence": [
+            {
+                "available_utc": canonical_utc_text(evidence.available_utc),
+                "component_id": evidence.component_id,
+                "content_digest": evidence.content_digest,
+                "evidence_id": evidence.evidence_id,
+                "syndication_group": evidence.syndication_group,
+            }
+            for evidence in sorted(
+                item.input_evidence,
+                key=lambda evidence: evidence.evidence_id,
+            )
+        ],
+        "input_fingerprint": item.input_fingerprint,
+        "outcome_available_utc": canonical_utc_text(item.outcome_available_utc),
+        "population_unit_id": item.population_unit_id,
+        "utility": canonical_decimal_text(item.utility),
+        "variant": item.variant,
+    }
+
+
 class _NoOffsetTZ(tzinfo):
     def utcoffset(self, dt):
         return None
@@ -1564,13 +1609,8 @@ class AblationTests(unittest.TestCase):
                         UUID(int=0x44444444444440008000000000000000 + artifact_index)
                     )
                     payload = {
-                        "schema_version": 1,
-                        "case_id": item.case_id,
-                        "variant": item.variant,
-                        "population_unit_id": item.population_unit_id,
-                        "utility": str(item.utility),
-                        "cost": str(item.cost),
-                        "outcome_available_utc": item.outcome_available_utc.isoformat().replace("+00:00", "Z"),
+                        "schema_version": 2,
+                        "outcome": canonical_outcome_payload(item),
                         "source_revision": source_revision,
                         "protocol_id": registration.protocol_id,
                         "protocol_hash": registration.protocol_hash,
@@ -1664,6 +1704,47 @@ class AblationTests(unittest.TestCase):
             self.assertEqual(
                 result.qualification_stopping_rule_digest,
                 trial_state["stopping_rules_hash"],
+            )
+
+            forged_first = AblationPair(
+                "agent",
+                replace(cases[0].full, input_fingerprint=FINGERPRINT_C),
+                replace(cases[0].ablated, input_fingerprint=FINGERPRINT_C),
+            )
+            forged_causal = evaluate_qualified_incremental_value(
+                "agent",
+                [forged_first, cases[1]],
+                authority=authority,
+                outcome_refs=refs,
+                minimum_pairs=2,
+                required_lower_bound=Decimal("0"),
+            )
+            self.assertEqual(forged_causal.status, "INCONCLUSIVE")
+            self.assertEqual(
+                forged_causal.reason,
+                "canonical_outcome_causal_binding_mismatch",
+            )
+
+            late_cutoff = evaluation_cutoff + timedelta(seconds=1)
+            late_first = pair(
+                "qualified-authority-a",
+                "2",
+                population_unit=units[0],
+                fingerprint=cases[0].full.input_fingerprint,
+                cutoff=late_cutoff,
+            )
+            late_causal = evaluate_qualified_incremental_value(
+                "agent",
+                [late_first, cases[1]],
+                authority=authority,
+                outcome_refs=refs,
+                minimum_pairs=2,
+                required_lower_bound=Decimal("0"),
+            )
+            self.assertEqual(late_causal.status, "INCONCLUSIVE")
+            self.assertEqual(
+                late_causal.reason,
+                "causal_pair_after_registered_evaluation_cutoff",
             )
 
             forged = canonical_evidence(cases[0]) + canonical_evidence(cases[1])

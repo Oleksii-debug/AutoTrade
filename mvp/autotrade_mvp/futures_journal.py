@@ -25,6 +25,7 @@ from .accounting import (
     canonical_transaction,
     posting,
 )
+from .exact_decimal import ExactDecimalError, canonical_decimal_text
 from .futures import (
     FuturesError,
     FuturesSettlementEvidence,
@@ -53,10 +54,12 @@ _SETTLEMENT_EVIDENCE_SCHEMA_VERSION = 1
 def _decimal_text(value: Decimal) -> str:
     if not isinstance(value, Decimal) or not value.is_finite():
         raise FuturesError("durable decimal value must be finite Decimal")
-    if value == 0:
-        return "0"
-    text = format(value.normalize(), "f")
-    return text.rstrip("0").rstrip(".") if "." in text else text
+    try:
+        return canonical_decimal_text(value)
+    except ExactDecimalError as error:
+        raise FuturesError(
+            "durable decimal value exceeds the supported exact-decimal resource envelope"
+        ) from error
 
 
 def _fraction_payload(value: Fraction) -> dict[str, int]:

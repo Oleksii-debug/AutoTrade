@@ -29,7 +29,11 @@ from mvp.autotrade_mvp.qualification_attestation import (
     parse_signed_qualification_attestation,
     verify_qualification_attestation,
 )
-from research.autotrade_research.artifacts import ArtifactStore, trusted_authenticated_reader
+from research.autotrade_research.artifacts import (
+    ArtifactIntegrityError,
+    ArtifactStore,
+    trusted_authenticated_reader,
+)
 from tools.check_nvda_qualification import (
     NvdaQualificationError,
     validate_release_artifact_binding,
@@ -317,6 +321,7 @@ def _terminal_nvda_status(
             expected_policy_version=evidence_context.expected_policy_version,
         )
     except (
+        ArtifactIntegrityError,
         FileNotFoundError,
         NvdaQualificationError,
         QualificationTrustError,

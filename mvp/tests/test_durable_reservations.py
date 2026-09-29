@@ -962,6 +962,7 @@ class DurableReservationBookTests(unittest.TestCase):
             environment="PAPER",
             account_id="paper-account",
             resolution_artifact_store=self.artifacts,
+            resolution_artifact_root=self.artifact_root,
         )
         restarted.mark_terminal(
             command_id="cmd-terminal-prebound-reader",
@@ -1219,6 +1220,7 @@ class DurableReservationBookTests(unittest.TestCase):
             environment="PAPER",
             account_id="paper-account",
             resolution_artifact_store=self.artifacts,
+            resolution_artifact_root=self.artifact_root,
         )
         self.assertEqual(restarted.version, 1)
         self.assertEqual(restarted.total_reserved("CASH:USD"), Decimal("70"))

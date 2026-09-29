@@ -90,6 +90,101 @@ def _assert_root_continuity(self) -> None:
         )
 
 
+def _canonical_authoritative_root(root: str | Path) -> Path:
+    if not isinstance(root, (str, Path)):
+        raise TypeError("trusted artifact root must be a string or Path")
+    if isinstance(root, str) and not root.strip():
+        raise ValueError("trusted artifact root must be non-empty")
+    return Path(os.path.abspath(os.fspath(root)))
+
+
+def _assert_same_root_generation(
+    publication_store: object,
+    private_store: object,
+) -> None:
+    if type(publication_store) is not _store.ArtifactStore:
+        raise TypeError(
+            "publication_store must be the canonical ArtifactStore"
+        )
+    if type(private_store) is not _store.ArtifactStore:
+        raise TypeError("private trusted reader must use canonical ArtifactStore")
+
+    if sys.platform == "win32":
+        publication_handle = getattr(
+            publication_store,
+            "_namespace_root_handle",
+            None,
+        )
+        private_handle = getattr(private_store, "_namespace_root_handle", None)
+        if not publication_handle or not private_handle:
+            raise _store.ArtifactIntegrityError(
+                "artifact root generation handles are unavailable"
+            )
+        publication_identity = _guard._windows_handle_information(
+            publication_handle,
+            subject="publication artifact store root",
+        )
+        private_identity = _guard._windows_handle_information(
+            private_handle,
+            subject="trusted artifact store root",
+        )
+        if not _retained._same_windows_identity(
+            publication_identity,
+            private_identity,
+        ):
+            raise _store.ArtifactIntegrityError(
+                "publication store does not match trusted artifact root"
+            )
+        return
+
+    publication_fd = getattr(publication_store, "_namespace_root_fd", None)
+    private_fd = getattr(private_store, "_namespace_root_fd", None)
+    if publication_fd is None or private_fd is None:
+        raise _store.ArtifactIntegrityError(
+            "artifact root generation descriptors are unavailable"
+        )
+    try:
+        publication_identity = _HOST_FSTAT(publication_fd)
+        private_identity = _HOST_FSTAT(private_fd)
+    except OSError as error:
+        raise _store.ArtifactIntegrityError(
+            "artifact root generation cannot be inspected"
+        ) from error
+    if (
+        publication_identity.st_dev != private_identity.st_dev
+        or publication_identity.st_ino != private_identity.st_ino
+    ):
+        raise _store.ArtifactIntegrityError(
+            "publication store does not match trusted artifact root"
+        )
+
+
+def trusted_authenticated_reader(
+    authoritative_root: str | Path,
+    *,
+    publication_store: object | None = None,
+):
+    """Build a private reader from an independently selected artifact root.
+
+    The root value is the trust input. A publication/convenience ArtifactStore,
+    when supplied, is used only to prove that its retained root generation is
+    the same generation selected by that independent root. Its mutable path
+    attributes and helper methods never select or execute trusted reads.
+    """
+
+    root = _canonical_authoritative_root(authoritative_root)
+    private_store = _store.ArtifactStore(root)
+    if publication_store is not None:
+        _assert_same_root_generation(publication_store, private_store)
+
+    canonical_read = _store.ArtifactStore.read_authenticated_snapshot
+
+    def read_snapshot(artifact_id: str):
+        return canonical_read(private_store, artifact_id)
+
+    return read_snapshot
+
+
 def _windows_path_mutex_name(self) -> str:
     key = getattr(self, "_configured_artifact_root_key", None)
     if not isinstance(key, str) or not key:

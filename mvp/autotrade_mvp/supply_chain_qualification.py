@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+from pathlib import Path
 from uuid import UUID
 
 from research.autotrade_research.artifacts.store import (
@@ -240,6 +241,7 @@ def qualify_supply_chain(
     evidence: SupplyChainEvidence,
     *,
     evidence_store: ArtifactStore | None = None,
+    evidence_root: str | Path | None = None,
     trust_receipt: SignedQualificationAttestation | None = None,
 ) -> SupplyChainQualification:
     if not isinstance(evidence, SupplyChainEvidence):
@@ -394,17 +396,18 @@ def qualify_supply_chain(
             _INCONCLUSIVE,
             "SUPPLY_CHAIN.TRUST_ANCHOR_UNAVAILABLE",
         )
-    elif evidence_store is None:
+    elif evidence_store is None or evidence_root is None:
         record(
             "independent_evidence_trust",
             _INCONCLUSIVE,
-            "SUPPLY_CHAIN.TRUST_EVIDENCE_STORE_MISSING",
+            "SUPPLY_CHAIN.TRUST_EVIDENCE_ROOT_INCOMPLETE",
         )
     else:
         try:
             accepted_trust = verify_canonical_qualification_attestation(
                 trust_receipt,
                 evidence_store=evidence_store,
+                evidence_root=evidence_root,
                 expected_source_sha=evidence.release_commit_sha,
                 expected_domain="SUPPLY_CHAIN",
                 expected_gate="RELEASE",

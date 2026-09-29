@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import InitVar, dataclass
 from hashlib import sha256
 import json
+from pathlib import Path
 import re
 from typing import Sequence
 from uuid import UUID
@@ -747,6 +748,7 @@ def freeze_release_candidate(
     candidate: ReleaseCandidateInput,
     *,
     evidence_store: ArtifactStore | None = None,
+    evidence_root: str | Path | None = None,
     qualification_receipt: SignedQualificationAttestation | None = None,
     qualification_policy: QualificationTrustPolicy | None = None,
     expected_policy_id: str | None = None,
@@ -791,6 +793,7 @@ def freeze_release_candidate(
         value is not None
         for value in (
             evidence_store,
+            evidence_root,
             qualification_receipt,
             qualification_policy,
             expected_policy_id,
@@ -813,6 +816,7 @@ def freeze_release_candidate(
                     qualification_receipt,
                     policy=qualification_policy,
                     evidence_store=evidence_store,
+                    evidence_root=evidence_root,
                     expected_policy_id=expected_policy_id,
                     expected_policy_version=expected_policy_version,
                     expected_source_sha=candidate.source_sha,

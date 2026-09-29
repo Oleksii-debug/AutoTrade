@@ -19,6 +19,7 @@ from uuid import UUID, NAMESPACE_URL, uuid5
 from research.autotrade_research.artifacts.store import (
     ArtifactIntegrityError,
     ArtifactStore,
+    read_trusted_authenticated_snapshot,
 )
 from research.autotrade_research.io.strict_json import strict_json_loads
 
@@ -193,9 +194,11 @@ class DurableReservationBook:
         self.account_id = _text(account_id, name="account_id")
         if (
             resolution_artifact_store is not None
-            and not isinstance(resolution_artifact_store, ArtifactStore)
+            and type(resolution_artifact_store) is not ArtifactStore
         ):
-            raise TypeError("resolution_artifact_store must be ArtifactStore or None")
+            raise TypeError(
+                "resolution_artifact_store must be the canonical ArtifactStore or None"
+            )
         self.resolution_artifact_store = resolution_artifact_store
         self.scope_id = _journal_identity(
             self.environment,
@@ -756,8 +759,9 @@ class DurableReservationBook:
                 "terminal release requires the trusted resolution artifact store"
             )
         try:
-            manifest, raw = self.resolution_artifact_store.read_authenticated_snapshot(
-                artifact_id
+            manifest, raw = read_trusted_authenticated_snapshot(
+                self.resolution_artifact_store,
+                artifact_id,
             )
             manifest_hash = manifest.get("manifest_hash")
             if (

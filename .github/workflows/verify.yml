@@ -19,7 +19,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    # Windows consistently needs more time for the retained runtime-load/recovery suite;
+    # keep Ubuntu's tighter hang budget while preserving the complete Windows verification.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 20 || 10 }}
     env:
       AUTOTRADE_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       AUTOTRADE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}

@@ -2639,7 +2639,7 @@ def book_external_provider_cash_activity(
         "payload_hash": payload_digest(economic_payload),
     }
 
-    _, inserted, _ = store.commit_command(
+    saved_result, inserted, _ = store.commit_command(
         command_id=command_identity,
         actor="provider-activity-accounting",
         environment=scope,
@@ -2652,7 +2652,15 @@ def book_external_provider_cash_activity(
             (economic_envelope, "autotrade.economic.events"),
         ],
     )
-    return transaction, inserted
+    if saved_result != result:
+        raise AccountingConflict(
+            "provider cash durable command result conflicts with its financial effect"
+        )
+    if not inserted:
+        raise AccountingConflict(
+            "provider cash durable command exists without its financial effects"
+        )
+    return transaction, True
 
 
 def load_provider_account_economic_book(

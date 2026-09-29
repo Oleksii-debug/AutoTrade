@@ -847,6 +847,61 @@ class DurableReservationBookTests(unittest.TestCase):
                 resolution_artifact_store=lambda reference: True,
             )
 
+    def test_terminal_release_rejects_artifact_store_subclass_authority(self):
+        class ForgedArtifactStore(ArtifactStore):
+            def read_authenticated_snapshot(self, artifact_id):
+                raise AssertionError("subclass evidence authority must not be called")
+
+        forged = ForgedArtifactStore(Path(self.temp.name) / "forged-artifacts")
+        with self.assertRaisesRegex(TypeError, "canonical ArtifactStore"):
+            DurableReservationBook(
+                self.store,
+                environment="PAPER",
+                account_id="paper-account",
+                resolution_artifact_store=forged,
+            )
+
+    def test_terminal_release_store_cannot_be_redirected_after_construction(self):
+        book = self.book()
+        original_root = self.artifacts.root
+
+        with self.assertRaisesRegex(
+            AttributeError,
+            "immutable after construction",
+        ):
+            self.artifacts._read_verified_object_bytes = (
+                lambda manifest: b"forged resolution"
+            )
+        with self.assertRaisesRegex(
+            AttributeError,
+            "immutable after construction",
+        ):
+            self.artifacts.root = Path(self.temp.name) / "redirected-artifacts"
+
+        self.assertEqual(self.artifacts.root, original_root)
+        self.reserve(book)
+        book.mark_unknown(
+            command_id="cmd-unknown-sealed-store",
+            idempotency_key="idem-unknown-sealed-store",
+            reservation_id="r1",
+        )
+        self.create_unknown_attempt()
+        reconciliation = self.record_reconciliation_resolution()
+        evidence = self.publish_resolution_evidence(
+            artifact_id="99999999-9999-4999-8999-999999999999",
+            reconciliation_event=reconciliation,
+        )
+        book.mark_terminal(
+            command_id="cmd-terminal-sealed-store",
+            idempotency_key="idem-terminal-sealed-store",
+            reservation_id="r1",
+            outcome="PROVEN_ABSENT",
+            provider="SIMULATED",
+            attempt_id="attempt-r1",
+            resolution_evidence=evidence,
+        )
+        self.assertEqual(book.get("r1").state, "PROVEN_ABSENT")
+
     def test_terminal_release_requires_existing_durable_attempt(self):
         book = self.book()
         self.reserve(book)

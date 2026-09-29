@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import sqlite3
 
@@ -30,6 +31,18 @@ def freeze_database_path(path: str | Path) -> Path:
     return candidate.resolve(strict=False)
 
 
+def _identity_from_stat(canonical: Path, stat: os.stat_result) -> JournalStoreIdentity:
+    if int(stat.st_nlink) != 1:
+        raise RuntimeError(
+            "journal backing file must have exactly one hard-link pathname"
+        )
+    return JournalStoreIdentity(
+        canonical_path=str(canonical),
+        filesystem_device=int(stat.st_dev),
+        filesystem_inode=int(stat.st_ino),
+    )
+
+
 def observe_database_identity(path: str | Path) -> JournalStoreIdentity:
     """Observe one existing database file and reject unsafe hard-link aliases.
 
@@ -41,16 +54,39 @@ def observe_database_identity(path: str | Path) -> JournalStoreIdentity:
     """
 
     canonical = Path(path).resolve(strict=True)
-    stat = canonical.stat()
-    if int(stat.st_nlink) != 1:
-        raise RuntimeError(
-            "journal backing file must have exactly one hard-link pathname"
-        )
-    return JournalStoreIdentity(
-        canonical_path=str(canonical),
-        filesystem_device=int(stat.st_dev),
-        filesystem_inode=int(stat.st_ino),
-    )
+    return _identity_from_stat(canonical, canonical.stat())
+
+
+def establish_database_anchor(path: str | Path) -> JournalStoreIdentity:
+    """Establish a pre-open backing-file identity for the first SQLite open.
+
+    For a new journal, create the empty backing pathname atomically with
+    ``O_EXCL`` and capture its filesystem identity before SQLite opens it. For an
+    existing journal, capture the current identity first. The caller must compare
+    SQLite's opened-main identity to this anchor before enabling WAL or mutating
+    journal state. This closes the simple first-open A->B pathname replacement
+    race without pretending Python's sqlite3 exposes an atomic OS handle identity.
+    """
+
+    canonical = Path(path).resolve(strict=False)
+    try:
+        return observe_database_identity(canonical)
+    except FileNotFoundError:
+        pass
+
+    flags = os.O_CREAT | os.O_EXCL | os.O_RDWR
+    try:
+        fd = os.open(canonical, flags, 0o600)
+    except FileExistsError:
+        return observe_database_identity(canonical)
+    try:
+        anchor = _identity_from_stat(canonical, os.fstat(fd))
+    finally:
+        os.close(fd)
+
+    # Detect replacement/hard-linking between creation and descriptor close.
+    require_database_identity(canonical, anchor)
+    return anchor
 
 
 def require_database_identity(

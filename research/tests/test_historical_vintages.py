@@ -504,6 +504,23 @@ class HistoricalVintageTests(unittest.TestCase):
             self.assertEqual(registry.load(dataset_id, 1)["content_hashes"], [digest("first")])
             self.assertEqual(registry.load(dataset_id, 2)["content_hashes"], [digest("second")])
 
+    def test_registry_rejects_manifest_misfiled_under_another_identity(self):
+        with TemporaryDirectory() as directory:
+            registry = HistoricalVintageRegistry(Path(directory))
+            first_id, second_id = str(uuid4()), str(uuid4())
+            registry.commit(self._manifest(first_id, 1, "first"))
+            registry.commit(self._manifest(second_id, 1, "second"))
+            first_path = Path(directory) / first_id / "1.json"
+            second_path = Path(directory) / second_id / "1.json"
+            first_path.write_bytes(second_path.read_bytes())
+
+            with self.assertRaisesRegex(HistoricalConflict, "manifest identity"):
+                registry.load(first_id, 1)
+            with self.assertRaisesRegex(HistoricalConflict, "manifest identity"):
+                registry.digest(first_id, 1)
+            with self.assertRaisesRegex(HistoricalDataError, "version"):
+                registry.load(first_id, f"../{second_id}/1")
+
     def test_concurrent_conflicting_writers_cannot_replace_same_vintage(self):
         with TemporaryDirectory() as directory:
             registry = HistoricalVintageRegistry(Path(directory))

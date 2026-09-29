@@ -1,4 +1,5 @@
 from decimal import Decimal
+from fractions import Fraction
 import unittest
 
 import autotrade_numeric.exact_decimal as shared
@@ -13,6 +14,25 @@ class ExactDecimalSharedFacadeTests(unittest.TestCase):
         self.assertEqual(
             facade.as_fraction(Decimal("1.25")),
             shared.as_fraction(Decimal("1.25")),
+        )
+
+    def test_zero_rounding_preserves_explicit_reporting_quantum_scale(self):
+        rounded = shared.round_fraction_to_quantum(
+            Fraction(0, 1),
+            Decimal("0.00000001"),
+            mode="HALF_EVEN",
+        )
+
+        self.assertEqual(str(rounded), "0E-8")
+        self.assertEqual(rounded.as_tuple().exponent, -8)
+        self.assertEqual(shared.canonical_decimal_text(rounded), "0")
+        self.assertEqual(
+            facade.round_fraction_to_quantum(
+                Fraction(0, 1),
+                Decimal("0.00000001"),
+                mode="HALF_EVEN",
+            ),
+            rounded,
         )
 
 

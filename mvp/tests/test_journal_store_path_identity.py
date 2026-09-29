@@ -96,6 +96,40 @@ class JournalStorePathIdentityRegressionTests(unittest.TestCase):
 
             self.assertEqual(store.store_identity, original_identity)
 
+    def test_deleted_backing_file_is_not_silently_recreated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite"
+            store = JournalStore(path)
+            identity = store.store_identity
+            path.unlink()
+
+            with self.assertRaises(RuntimeError):
+                store.current_journal_sequence()
+
+            self.assertFalse(path.exists())
+            self.assertEqual(store.store_identity, identity)
+
+    def test_replacement_while_connection_is_open_is_detected_on_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "journal.sqlite"
+            store = JournalStore(path)
+            original_identity = store.store_identity
+
+            replacement = root / "replacement.sqlite"
+            JournalStore(replacement)
+
+            with self.assertRaises(RuntimeError):
+                with store._connect():
+                    try:
+                        replacement.replace(path)
+                    except OSError:
+                        self.skipTest(
+                            "platform forbids replacing an open SQLite database path"
+                        )
+
+            self.assertEqual(store.store_identity, original_identity)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,8 +2,8 @@
 
 The module values already-known cash or collateral balances. It has no network
 or trading authority and deliberately supports only direct/inverse one-hop
-quotes. Missing, stale or future evidence produces an uncertain valuation
-instead of inventing a conversion rate.
+quotes. Missing, stale, future or unroundable evidence produces an uncertain
+valuation instead of inventing a conversion rate.
 """
 
 from __future__ import annotations
@@ -11,8 +11,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from hashlib import sha256
 import re
 from typing import Mapping
+
+from .exact_decimal import (
+    ExactDecimalError,
+    as_fraction,
+    canonical_decimal_text,
+    exact_sum,
+    round_fraction_to_quantum,
+    terminating_decimal,
+)
 
 
 class FxValuationError(ValueError):
@@ -61,6 +71,40 @@ def _age_limit(value: timedelta) -> timedelta:
     if not isinstance(value, timedelta) or value < timedelta(0):
         raise FxValuationError("max_age must be a non-negative timedelta")
     return value
+
+
+@dataclass(frozen=True)
+class FxRoundingPolicy:
+    """Explicit conservative final-amount boundary for non-terminating FX math."""
+
+    reporting_currency: str
+    quantum: Decimal
+    version: str = "1"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "reporting_currency",
+            _currency(self.reporting_currency, "reporting_currency"),
+        )
+        quantum = _decimal(self.quantum, "quantum")
+        if quantum <= 0:
+            raise FxValuationError("FX rounding quantum must be positive")
+        object.__setattr__(self, "quantum", quantum)
+        object.__setattr__(self, "version", _text(self.version, "version"))
+
+    @property
+    def policy_id(self) -> str:
+        payload = "|".join(
+            (
+                "FX_CONSERVATIVE_FINAL_AMOUNT",
+                self.version,
+                self.reporting_currency,
+                canonical_decimal_text(self.quantum),
+                "FLOOR",
+            )
+        ).encode("utf-8")
+        return "fx-rounding:sha256:" + sha256(payload).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -120,6 +164,10 @@ class FxValuation:
     evidence_sha256: str | None
     haircut: Decimal
     reason: str
+    rate_numerator: int | None = None
+    rate_denominator: int | None = None
+    rounding_policy_id: str | None = None
+    rounding_quantum: Decimal | None = None
 
     @property
     def allocatable(self) -> bool:
@@ -139,6 +187,39 @@ class PortfolioFxValuation:
         return self.status == "CERTAIN" and self.total is not None
 
 
+def _unavailable(
+    *,
+    source_amount: Decimal,
+    source: str,
+    reporting: str,
+    status: str,
+    side: str,
+    available_at: datetime | None,
+    source_id: str | None,
+    evidence_sha256: str | None,
+    haircut: Decimal,
+    reason: str,
+    rate_numerator: int | None = None,
+    rate_denominator: int | None = None,
+) -> FxValuation:
+    return FxValuation(
+        source_amount=source_amount,
+        source_currency=source,
+        reporting_currency=reporting,
+        converted_amount=None,
+        rate_used=None,
+        side=side,
+        status=status,
+        available_at=available_at,
+        source_id=source_id,
+        evidence_sha256=evidence_sha256,
+        haircut=haircut,
+        reason=reason,
+        rate_numerator=rate_numerator,
+        rate_denominator=rate_denominator,
+    )
+
+
 def value_amount(
     amount,
     *,
@@ -148,8 +229,16 @@ def value_amount(
     as_of: datetime,
     max_age: timedelta,
     haircut=Decimal("0"),
+    rounding_policy: FxRoundingPolicy | None = None,
 ) -> FxValuation:
-    """Conservatively value one signed balance at an evidenced point in time."""
+    """Conservatively value one signed balance at an evidenced point in time.
+
+    Direct finite-decimal arithmetic is exact. Inverse rates remain exact
+    rational identities. If the final reporting amount has a non-terminating
+    base-10 expansion, a versioned reporting-currency quantum is required and
+    the result is rounded toward negative infinity: assets cannot be overstated
+    and liabilities cannot be understated.
+    """
 
     source_amount = _decimal(amount, "amount")
     source = _currency(source_currency, "source_currency")
@@ -159,6 +248,11 @@ def value_amount(
     haircut_value = _decimal(haircut, "haircut")
     if haircut_value < 0 or haircut_value >= 1:
         raise FxValuationError("haircut must be in [0, 1)")
+    if rounding_policy is not None:
+        if not isinstance(rounding_policy, FxRoundingPolicy):
+            raise FxValuationError("rounding_policy must be FxRoundingPolicy or None")
+        if rounding_policy.reporting_currency != reporting:
+            raise FxValuationError("FX rounding policy reporting currency mismatch")
 
     if source == reporting:
         return FxValuation(
@@ -174,6 +268,8 @@ def value_amount(
             evidence_sha256=None,
             haircut=Decimal("0"),
             reason="no FX conversion required",
+            rate_numerator=1,
+            rate_denominator=1,
         )
 
     if source_amount == 0:
@@ -193,14 +289,12 @@ def value_amount(
         )
 
     if quote is None:
-        return FxValuation(
+        return _unavailable(
             source_amount=source_amount,
-            source_currency=source,
-            reporting_currency=reporting,
-            converted_amount=None,
-            rate_used=None,
-            side="UNAVAILABLE",
+            source=source,
+            reporting=reporting,
             status="MISSING",
+            side="UNAVAILABLE",
             available_at=None,
             source_id=None,
             evidence_sha256=None,
@@ -211,14 +305,12 @@ def value_amount(
         raise FxValuationError("quote must be FxQuote or None")
 
     if quote.available_at > point:
-        return FxValuation(
+        return _unavailable(
             source_amount=source_amount,
-            source_currency=source,
-            reporting_currency=reporting,
-            converted_amount=None,
-            rate_used=None,
-            side="UNAVAILABLE",
+            source=source,
+            reporting=reporting,
             status="FUTURE_EVIDENCE",
+            side="UNAVAILABLE",
             available_at=quote.available_at,
             source_id=quote.source_id,
             evidence_sha256=quote.evidence_sha256,
@@ -226,14 +318,12 @@ def value_amount(
             reason="FX quote was not available at valuation time",
         )
     if point - quote.available_at > age_limit:
-        return FxValuation(
+        return _unavailable(
             source_amount=source_amount,
-            source_currency=source,
-            reporting_currency=reporting,
-            converted_amount=None,
-            rate_used=None,
-            side="UNAVAILABLE",
+            source=source,
+            reporting=reporting,
             status="STALE",
+            side="UNAVAILABLE",
             available_at=quote.available_at,
             source_id=quote.source_id,
             evidence_sha256=quote.evidence_sha256,
@@ -241,36 +331,69 @@ def value_amount(
             reason="FX quote exceeds maximum permitted age",
         )
 
+    rate_used: Decimal | None
     if quote.base_currency == source and quote.quote_currency == reporting:
         if source_amount > 0:
-            rate = quote.bid
+            quoted_rate = quote.bid
             side = "BID"
         else:
-            rate = quote.ask
+            quoted_rate = quote.ask
             side = "ASK_FOR_LIABILITY"
-        converted = source_amount * rate
+        rate_fraction = as_fraction(quoted_rate)
+        rate_used = quoted_rate
     elif quote.quote_currency == source and quote.base_currency == reporting:
         if source_amount > 0:
-            rate = Decimal("1") / quote.ask
+            quoted_rate = quote.ask
             side = "INVERSE_ASK"
         else:
-            rate = Decimal("1") / quote.bid
+            quoted_rate = quote.bid
             side = "INVERSE_BID_FOR_LIABILITY"
-        converted = source_amount * rate
+        rate_fraction = 1 / as_fraction(quoted_rate)
+        rate_used = None
     else:
         raise FxValuationError("quote does not connect source and reporting currencies")
 
-    if converted > 0:
-        converted *= Decimal("1") - haircut_value
-    elif converted < 0:
-        converted *= Decimal("1") + haircut_value
+    converted_fraction = as_fraction(source_amount) * rate_fraction
+    if converted_fraction > 0:
+        converted_fraction *= 1 - as_fraction(haircut_value)
+    elif converted_fraction < 0:
+        converted_fraction *= 1 + as_fraction(haircut_value)
+
+    applied_policy: FxRoundingPolicy | None = None
+    try:
+        converted = terminating_decimal(converted_fraction)
+    except ExactDecimalError:
+        if rounding_policy is None:
+            return _unavailable(
+                source_amount=source_amount,
+                source=source,
+                reporting=reporting,
+                status="ROUNDING_POLICY_REQUIRED",
+                side=side,
+                available_at=quote.available_at,
+                source_id=quote.source_id,
+                evidence_sha256=quote.evidence_sha256,
+                haircut=haircut_value,
+                reason=(
+                    "exact FX result has a non-terminating decimal expansion; "
+                    "an explicit reporting-currency rounding policy is required"
+                ),
+                rate_numerator=rate_fraction.numerator,
+                rate_denominator=rate_fraction.denominator,
+            )
+        converted = round_fraction_to_quantum(
+            converted_fraction,
+            rounding_policy.quantum,
+            mode="FLOOR",
+        )
+        applied_policy = rounding_policy
 
     return FxValuation(
         source_amount=source_amount,
         source_currency=source,
         reporting_currency=reporting,
         converted_amount=converted,
-        rate_used=rate,
+        rate_used=rate_used,
         side=side,
         status="CERTAIN",
         available_at=quote.available_at,
@@ -278,6 +401,14 @@ def value_amount(
         evidence_sha256=quote.evidence_sha256,
         haircut=haircut_value,
         reason="fresh evidenced conservative FX valuation",
+        rate_numerator=rate_fraction.numerator,
+        rate_denominator=rate_fraction.denominator,
+        rounding_policy_id=(
+            applied_policy.policy_id if applied_policy is not None else None
+        ),
+        rounding_quantum=(
+            applied_policy.quantum if applied_policy is not None else None
+        ),
     )
 
 
@@ -289,6 +420,7 @@ def value_cash_balances(
     as_of: datetime,
     max_age: timedelta,
     haircut=Decimal("0"),
+    rounding_policy: FxRoundingPolicy | None = None,
 ) -> PortfolioFxValuation:
     """Value separated currency balances without ever summing unlike units first."""
 
@@ -317,6 +449,7 @@ def value_cash_balances(
             as_of=as_of,
             max_age=max_age,
             haircut=haircut,
+            rounding_policy=rounding_policy,
         )
         components.append(component)
 
@@ -334,9 +467,10 @@ def value_cash_balances(
             reasons=uncertain,
         )
 
-    total = sum(
-        (row.converted_amount for row in components if row.converted_amount is not None),
-        Decimal("0"),
+    total = exact_sum(
+        row.converted_amount
+        for row in components
+        if row.converted_amount is not None
     )
     return PortfolioFxValuation(
         reporting_currency=reporting,

@@ -42,6 +42,8 @@ class AllocationValuationBoundaryTests(unittest.TestCase):
         portfolio_base_currency="USD",
         unit_base_notional="10",
         fx_rate="1",
+        fx_rate_numerator=None,
+        fx_rate_denominator=None,
         fx_source_id="IDENTITY",
         fx_quote=None,
         fx_evidence_sha256=None,
@@ -83,6 +85,10 @@ class AllocationValuationBoundaryTests(unittest.TestCase):
                 "fx": "fx:identity:test:v1",
             },
         }
+        if fx_rate_numerator is not None:
+            payload["fx_rate_numerator"] = fx_rate_numerator
+        if fx_rate_denominator is not None:
+            payload["fx_rate_denominator"] = fx_rate_denominator
         if fx_quote is not None:
             payload["fx_quote"] = fx_quote
         if fx_evidence_sha256 is not None:
@@ -108,6 +114,7 @@ class AllocationValuationBoundaryTests(unittest.TestCase):
         result = self.normalize(self.market(), self.valuation())
         self.assertEqual(result.unit_base_notional, 10)
         self.assertEqual(result.fx_rate, 1)
+        self.assertEqual((result.fx_rate_numerator, result.fx_rate_denominator), (1, 1))
         self.assertEqual(result.fx_source_id, "IDENTITY")
         self.assertEqual(result.portfolio_base_currency, "USD")
 
@@ -173,6 +180,7 @@ class AllocationValuationBoundaryTests(unittest.TestCase):
             ),
         )
         self.assertEqual(result.unit_base_notional, 11)
+        self.assertEqual((result.fx_rate_numerator, result.fx_rate_denominator), (11, 10))
         self.assertEqual(result.fx_evidence_sha256, digest)
 
         missing = self.valuation(
@@ -197,6 +205,94 @@ class AllocationValuationBoundaryTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(AllocationValuationError, "not allocatable: STALE"):
             self.normalize(self.market(quote_currency="EUR"), stale)
+
+    def test_inverse_fx_exact_identity_survives_allocation_without_fabricated_decimal_rate(self):
+        digest = "sha256:" + "b" * 64
+        quote = {
+            "base_currency": "EUR",
+            "quote_currency": "USD",
+            "bid": "1.1000",
+            "ask": "1.1002",
+            "available_at": "2026-09-25T18:29:30Z",
+            "source_id": "fx:eurusd:venue:v8",
+            "evidence_sha256": digest,
+            "max_age_seconds": 60,
+            "haircut": "0",
+        }
+        observed = []
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    result = self.normalize(
+                        self.market(quote_currency="USD"),
+                        self.valuation(
+                            quote_currency="USD",
+                            portfolio_base_currency="EUR",
+                            source_price="110.02",
+                            unit_base_notional="100",
+                            fx_rate=None,
+                            fx_rate_numerator=5000,
+                            fx_rate_denominator=5501,
+                            fx_source_id="fx:eurusd:venue:v8",
+                            fx_quote=quote,
+                            fx_evidence_sha256=digest,
+                            cost_evidence_refs={
+                                "execution": "execution:test:v1",
+                                "financing": "financing:none:test:v1",
+                                "funding": "funding:none:test:v1",
+                                "borrow": "borrow:none:test:v1",
+                                "fx": "fx:eurusd:venue:v8",
+                            },
+                        ),
+                        source_price="110.02",
+                        base="EUR",
+                    )
+                    observed.append(
+                        (
+                            result.unit_base_notional,
+                            result.fx_rate,
+                            result.fx_rate_numerator,
+                            result.fx_rate_denominator,
+                            result.fx_source_id,
+                            result.fx_evidence_sha256,
+                        )
+                    )
+        expected = (Decimal("100"), None, 5000, 5501, "fx:eurusd:venue:v8", digest)
+        self.assertTrue(all(value == expected for value in observed))
+
+    def test_inverse_fx_rejects_caller_fabricated_rational_identity(self):
+        digest = "sha256:" + "b" * 64
+        quote = {
+            "base_currency": "EUR",
+            "quote_currency": "USD",
+            "bid": "1.1000",
+            "ask": "1.1002",
+            "available_at": "2026-09-25T18:29:30Z",
+            "source_id": "fx:eurusd:venue:v8",
+            "evidence_sha256": digest,
+            "max_age_seconds": 60,
+            "haircut": "0",
+        }
+        with self.assertRaisesRegex(AllocationValuationError, "exact FX rate identity mismatch"):
+            self.normalize(
+                self.market(quote_currency="USD"),
+                self.valuation(
+                    quote_currency="USD",
+                    portfolio_base_currency="EUR",
+                    source_price="110.02",
+                    unit_base_notional="100",
+                    fx_rate=None,
+                    fx_rate_numerator=1,
+                    fx_rate_denominator=1,
+                    fx_source_id="fx:eurusd:venue:v8",
+                    fx_quote=quote,
+                    fx_evidence_sha256=digest,
+                ),
+                source_price="110.02",
+                base="EUR",
+            )
 
     def test_linear_future_includes_exact_contract_multiplier(self):
         market = self.market(asset_class="FUTURE", multiplier="50")

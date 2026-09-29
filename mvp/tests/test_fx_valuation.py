@@ -90,6 +90,21 @@ class FxValuationTests(unittest.TestCase):
         self.assertEqual(result.rate_used, Decimal("0.5"))
         self.assertEqual((result.rate_numerator, result.rate_denominator), (1, 2))
 
+    def test_inverse_rate_projection_cannot_veto_bounded_final_conversion(self):
+        quote_value = str(2**257)
+        result = value_amount(
+            quote_value,
+            source_currency="USD",
+            reporting_currency="EUR",
+            quote=eurusd(bid=quote_value, ask=quote_value),
+            as_of=NOW,
+            max_age=timedelta(minutes=1),
+        )
+        self.assertEqual(result.converted_amount, Decimal("1"))
+        self.assertIsNone(result.rate_used)
+        self.assertEqual(result.rate_numerator, 1)
+        self.assertEqual(result.rate_denominator, 2**257)
+
     def test_nonterminating_inverse_requires_explicit_reporting_quantum(self):
         no_policy = value_amount(
             "1",
@@ -271,6 +286,22 @@ class FxValuationTests(unittest.TestCase):
                 quote=eurusd(bid="10", ask="10"),
                 as_of=NOW,
                 max_age=timedelta(minutes=1),
+            )
+
+    def test_rounding_policy_cannot_reclassify_terminating_resource_overflow(self):
+        boundary = "9" * 256
+        with self.assertRaisesRegex(FxValuationError, "resource envelope"):
+            value_amount(
+                boundary,
+                source_currency="EUR",
+                reporting_currency="USD",
+                quote=eurusd(bid="10", ask="10"),
+                as_of=NOW,
+                max_age=timedelta(minutes=1),
+                rounding_policy=FxRoundingPolicy(
+                    reporting_currency="USD",
+                    quantum="0.01",
+                ),
             )
 
     def test_extreme_zero_exponent_is_canonicalized_before_fx_identity(self):

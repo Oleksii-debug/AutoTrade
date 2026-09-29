@@ -121,6 +121,21 @@ def _has_terminating_decimal(value: Fraction) -> bool:
     return denominator == 1
 
 
+def _optional_terminating_decimal(value: Fraction) -> Decimal | None:
+    """Project compatibility rate only when projection itself fits the envelope.
+
+    Exact rational rate identity is authoritative. A compatibility Decimal rate
+    must never veto an otherwise bounded final FX conversion.
+    """
+
+    if not _has_terminating_decimal(value):
+        return None
+    try:
+        return _exact_terminating_decimal(value)
+    except ExactDecimalError:
+        return None
+
+
 @dataclass(frozen=True)
 class FxRoundingPolicy:
     """Explicit conservative final-amount boundary for non-terminating FX math."""
@@ -398,11 +413,7 @@ def value_amount(
             side = "INVERSE_BID_FOR_LIABILITY"
         quoted_fraction = _as_fraction(quoted_rate, name="FX quoted rate")
         rate_fraction = Fraction(1, 1) / quoted_fraction
-        rate_used = (
-            _terminating_decimal(rate_fraction, name="inverse FX rate")
-            if _has_terminating_decimal(rate_fraction)
-            else None
-        )
+        rate_used = _optional_terminating_decimal(rate_fraction)
     else:
         raise FxValuationError("quote does not connect source and reporting currencies")
 

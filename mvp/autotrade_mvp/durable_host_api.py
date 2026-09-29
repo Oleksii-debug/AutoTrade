@@ -377,7 +377,7 @@ class JournalBackedHostCommandStore:
                     "durable host accepted event predates action-payload binding"
                 )
             contract_action, _, _, _ = contract
-            if contract_action != action:
+            if contract_action != durable_action:
                 raise ValueError(
                     "durable host accepted action contract is inconsistent"
                 )
@@ -521,6 +521,11 @@ class JournalBackedHostCommandStore:
                 reason_codes=(self._conflict_reason(error),),
             )
 
+        expected_result = self._result_dict(result)
+        if not inserted and stored != expected_result:
+            raise ValueError(
+                "host command result conflicts with durable accepted event"
+            )
         returned = self._command_result(stored)
         if inserted:
             return returned

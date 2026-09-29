@@ -16,6 +16,7 @@ from uuid import UUID
 from research.autotrade_research.artifacts.store import (
     ArtifactIntegrityError,
     ArtifactStore,
+    read_trusted_authenticated_snapshot,
 )
 
 
@@ -1105,7 +1106,10 @@ def _resolve_evidence(
     store: ArtifactStore, ref: EvidenceArtifactRef
 ) -> None:
     try:
-        manifest, data = store.read_authenticated_snapshot(ref.artifact_id)
+        manifest, data = read_trusted_authenticated_snapshot(
+            store,
+            ref.artifact_id,
+        )
         if "manifest_hash" not in manifest:
             raise QualificationTrustError(
                 "evidence manifest lacks integrity binding"
@@ -1169,8 +1173,10 @@ def verify_qualification_attestation(
         raise TypeError(
             "policy must be QualificationTrustPolicy"
         )
-    if not isinstance(evidence_store, ArtifactStore):
-        raise TypeError("evidence_store must be ArtifactStore")
+    if type(evidence_store) is not ArtifactStore:
+        raise TypeError(
+            "evidence_store must be the canonical ArtifactStore"
+        )
 
     expected_policy_id = _digest(
         expected_policy_id, name="expected_policy_id"

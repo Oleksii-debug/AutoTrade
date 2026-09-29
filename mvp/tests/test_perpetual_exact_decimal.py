@@ -289,6 +289,32 @@ class PerpetualExactDecimalTests(unittest.TestCase):
             Decimal("0"),
         )
 
+    def test_inverse_stress_rejects_reachable_1025_digit_denominator(self):
+        contract = PerpetualContract(
+            instrument_id="XBTUSD-PERP",
+            settlement_currency="BTC",
+            collateral_currency="BTC",
+            multiplier="1e-256",
+            payoff="INVERSE",
+            face_currency="USD",
+            price_quote_currency="USD",
+            price_base_currency="BTC",
+        )
+        mark = str(10**256 - 3)
+        move = "0." + ("9" * 256)
+        for precision in (6, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    with self.assertRaisesRegex(PerpetualError, "resource envelope"):
+                        inverse_stressed_loss_exact(
+                            contract=contract,
+                            signed_contracts="-1e-256",
+                            mark_price=mark,
+                            adverse_move_fraction=move,
+                        )
+
     def test_inverse_exact_paths_share_bounded_rational_authority(self):
         contract = PerpetualContract(
             instrument_id="XBTUSD-PERP",

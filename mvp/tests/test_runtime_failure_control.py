@@ -227,7 +227,7 @@ class DurableReconciliationAuthorityTests(unittest.TestCase):
                 )
             self.assertIn("bybit-unknown-1", restarted.unresolved_attempts)
             self.assertFalse(restarted.provider_reconciled)
-            self.assertEqual(restarted.state, HostState.RECOVERING)
+            self.assertEqual(restarted.state, HostState.DEGRADED)
 
             testnet_result = replace(
                 reconciliation(
@@ -308,7 +308,7 @@ class DurableReconciliationAuthorityTests(unittest.TestCase):
                 restarted.reason_codes,
             )
             self.assertFalse(restarted.provider_reconciled)
-            self.assertEqual(restarted.state, HostState.RECOVERING)
+            self.assertEqual(restarted.state, HostState.DEGRADED)
 
     def test_mixed_domain_recovered_unknowns_are_resolved_all_or_nothing(self):
         with TemporaryDirectory() as directory:
@@ -416,7 +416,7 @@ class DurableReconciliationAuthorityTests(unittest.TestCase):
                 )
             )
             self.assertFalse(restarted.provider_reconciled)
-            self.assertEqual(restarted.state, HostState.RECOVERING)
+            self.assertEqual(restarted.state, HostState.DEGRADED)
 
     def test_invalid_checkpoint_identity_cannot_mutate_controller_ready(self):
         with TemporaryDirectory() as directory:

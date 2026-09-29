@@ -784,6 +784,195 @@ class AblationTests(unittest.TestCase):
         self.assertEqual(low_precision, high_precision)
         self.assertEqual(low_summary, high_summary)
 
+    def test_huge_exact_negative_delta_cannot_round_into_pass(self):
+        cases = [
+            pair(
+                "huge-negative-a",
+                "1E100",
+                "1E100",
+                full_cost="2",
+                ablated_cost="1",
+            ),
+            pair(
+                "huge-negative-b",
+                "1E100",
+                "1E100",
+                full_cost="2",
+                ablated_cost="1",
+            ),
+        ]
+        result = evaluate_incremental_value(
+            "agent",
+            cases,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        self.assertEqual(result.status, "FAIL")
+        self.assertEqual(result.mean_net_incremental_value, Decimal("-1"))
+        self.assertIsNotNone(result.decision_exact)
+        self.assertEqual(result.decision_exact.mean.numerator, -1)
+        self.assertEqual(result.decision_exact.mean.denominator, 1)
+
+    def test_huge_exact_positive_delta_remains_positive(self):
+        cases = [
+            pair(
+                "huge-positive-a",
+                "1E100",
+                "1E100",
+                full_cost="1",
+                ablated_cost="2",
+            ),
+            pair(
+                "huge-positive-b",
+                "1E100",
+                "1E100",
+                full_cost="1",
+                ablated_cost="2",
+            ),
+        ]
+        result = evaluate_incremental_value(
+            "agent",
+            cases,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.mean_net_incremental_value, Decimal("1"))
+        self.assertEqual(result.decision_exact.mean.numerator, 1)
+
+    def test_exact_uncertainty_boundary_is_inclusive_and_one_quantum_below_fails(self):
+        cases = [
+            pair("exact-boundary-a", "0"),
+            pair("exact-boundary-b", "2"),
+        ]
+        boundary = evaluate_incremental_value(
+            "agent",
+            cases,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+            uncertainty_multiplier=Decimal("1"),
+        )
+        below = evaluate_incremental_value(
+            "agent",
+            cases,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("1e-50"),
+            uncertainty_multiplier=Decimal("1"),
+        )
+        self.assertEqual(boundary.status, "PASS")
+        self.assertEqual(boundary.decision_exact.lhs, boundary.decision_exact.rhs)
+        self.assertEqual(below.status, "FAIL")
+        self.assertLess(below.decision_exact.lhs, below.decision_exact.rhs)
+
+    def test_nonterminating_mean_has_exact_rational_decision_material(self):
+        cases = [
+            pair("third-a", "0"),
+            pair("third-b", "0"),
+            pair("third-c", "1"),
+        ]
+        with localcontext() as context:
+            context.prec = 6
+            first = evaluate_incremental_value(
+                "agent",
+                cases,
+                minimum_pairs=3,
+                required_lower_bound=Decimal("-1"),
+            )
+        with localcontext() as context:
+            context.prec = 80
+            second = evaluate_incremental_value(
+                "agent",
+                cases,
+                minimum_pairs=3,
+                required_lower_bound=Decimal("-1"),
+            )
+        self.assertEqual(first, second)
+        self.assertEqual(first.decision_exact.mean.numerator, 1)
+        self.assertEqual(first.decision_exact.mean.denominator, 3)
+
+    def test_ablation_decimal_inputs_fail_closed_outside_shared_envelope(self):
+        with self.assertRaisesRegex(ValueError, "shared exact numeric resource envelope"):
+            outcome(
+                variant="FULL",
+                utility="1E257",
+                cost="0",
+                elapsed=10,
+                components=("base",),
+            )
+
+    def test_locked_bundle_v2_contains_and_authenticates_exact_decision_material(self):
+        cases = [
+            pair("exact-lock-a", "0"),
+            pair("exact-lock-b", "2"),
+        ]
+        locked = build_ablation_evidence_bundle(
+            "agent",
+            cases,
+            source_revision="6" * 40,
+            protocol_digest=FINGERPRINT_C,
+            dataset_digest=FINGERPRINT_D,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+            uncertainty_multiplier=Decimal("1"),
+        )
+        decoded = json.loads(locked.payload)
+        self.assertEqual(decoded["schema_version"], "2.0.0")
+        decision = decoded["evaluation"]["decision_exact"]
+        self.assertEqual(decision["lhs"], {"denominator": "1", "numerator": "1"})
+        self.assertEqual(decision["rhs"], {"denominator": "1", "numerator": "1"})
+        self.assertTrue(verify_ablation_evidence_bundle(locked, cases))
+
+        decision["rhs"]["numerator"] = "2"
+        tampered_payload = json.dumps(
+            decoded,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        tampered_digest = "sha256:" + sha256(
+            tampered_payload.encode("utf-8")
+        ).hexdigest()
+        with self.assertRaisesRegex(
+            ValueError,
+            "payload evaluation does not match bundle evaluation",
+        ):
+            replace(
+                locked,
+                payload=tampered_payload,
+                content_digest=tampered_digest,
+            )
+
+    def test_v1_bundle_metadata_cannot_be_reinterpreted_as_exact_authority(self):
+        cases = [pair("legacy-a", "1"), pair("legacy-b", "1")]
+        locked = build_ablation_evidence_bundle(
+            "agent",
+            cases,
+            source_revision="a" * 40,
+            protocol_digest=FINGERPRINT_C,
+            dataset_digest=FINGERPRINT_D,
+            minimum_pairs=2,
+            required_lower_bound=Decimal("0"),
+        )
+        decoded = json.loads(locked.payload)
+        decoded["schema_version"] = "1.0.0"
+        legacy_payload = json.dumps(
+            decoded,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        legacy_digest = "sha256:" + sha256(
+            legacy_payload.encode("utf-8")
+        ).hexdigest()
+        with self.assertRaisesRegex(ValueError, "payload metadata"):
+            replace(
+                locked,
+                payload=legacy_payload,
+                content_digest=legacy_digest,
+            )
+
     def test_uncertain_mixed_result_fails_lower_bound(self):
         result = evaluate_incremental_value(
             "agent",

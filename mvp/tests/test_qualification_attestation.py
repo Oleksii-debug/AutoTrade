@@ -9,7 +9,10 @@ import unittest
 from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
-from research.autotrade_research.artifacts.store import ArtifactStore
+from research.autotrade_research.artifacts import (
+    ArtifactStore,
+    trusted_authenticated_reader,
+)
 
 import mvp.autotrade_mvp.qualification_attestation as qualification_attestation_module
 from mvp.autotrade_mvp.qualification_attestation import (
@@ -255,6 +258,59 @@ class QualificationAttestationTests(unittest.TestCase):
                     read_snapshot,
                     ref,
                 )
+
+    def test_verifier_ignores_exact_instance_poisoning_before_private_reader_binding(self):
+        trust_root = root()
+        trust_policy = policy(trust_root)
+        value = attestation(trust_root)
+        receipt = SignedQualificationAttestation(value, sign(value))
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "store")
+            publish(store)
+            redirected = Path(directory) / "attacker-store"
+            object.__setattr__(store, "root", redirected)
+            object.__setattr__(store, "objects", redirected / "objects" / "sha256")
+            object.__setattr__(store, "manifests", redirected / "manifests")
+            object.__setattr__(
+                store,
+                "_read_verified_object_bytes",
+                lambda _manifest: b"forged evidence",
+            )
+            object.__setattr__(
+                store,
+                "_manifest_path",
+                lambda _artifact_id: redirected / "forged.json",
+            )
+
+            accepted = verify(receipt, store, trust_policy)
+
+        self.assertEqual(accepted.result, "PASS")
+        self.assertEqual(accepted.attestation_id, value.attestation_id)
+
+    def test_verifier_rejects_artifact_store_subclass_even_with_forged_snapshot(self):
+        class ForgedArtifactStore(ArtifactStore):
+            def read_authenticated_snapshot(self, artifact_id):
+                return (
+                    {
+                        "artifact_id": artifact_id,
+                        "manifest_hash": "sha256:" + "0" * 64,
+                        "sha256": EVIDENCE_SHA,
+                        "media_type": "application/vnd.autotrade.qualification-evidence",
+                        "source_refs": [f"git:{SOURCE}"],
+                        "metadata": {"evidence_kind": "QUALIFICATION_RUN"},
+                    },
+                    EVIDENCE,
+                )
+
+        trust_root = root()
+        trust_policy = policy(trust_root)
+        value = attestation(trust_root)
+        receipt = SignedQualificationAttestation(value, sign(value))
+        with TemporaryDirectory() as directory:
+            store = ForgedArtifactStore(directory)
+            with self.assertRaisesRegex(TypeError, "canonical ArtifactStore"):
+                verify(receipt, store, trust_policy)
 
     def test_trusted_git_environment_drops_caller_loader_and_config_authority(self):
         hostile = {

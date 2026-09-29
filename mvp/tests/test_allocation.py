@@ -1508,6 +1508,89 @@ class AllocationTests(unittest.TestCase):
         ):
             allocate_targets([candidate], policy)
 
+    def test_split_cost_contract_is_independent_of_ambient_decimal_context(self):
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    candidate = self.candidate(
+                        cost="0.0200000001",
+                        turnover_cost_rate="0.0000000001",
+                        holding_cost_rate="0.02",
+                    )
+                    self.assertEqual(
+                        candidate.cost_rate,
+                        Decimal("0.0200000001"),
+                    )
+
+    def test_objective_subset_ranking_is_independent_of_ambient_decimal_context(self):
+        retained = ObjectiveCandidate.create(
+            symbol="HELD",
+            desired_notional="100000000000000000000.01",
+            price="1",
+            lot_size="0.01",
+            expected_return_rate="0",
+            current_quantity="100000000000000000000.01",
+            turnover_cost_rate="0",
+            holding_cost_rate="0",
+            capital_requirement_rate="0.000000000000000001",
+        )
+        low = ObjectiveCandidate.create(
+            symbol="AAA",
+            desired_notional="0.01",
+            price="1",
+            lot_size="0.01",
+            expected_return_rate="0.0000001",
+            capital_requirement_rate="0.001",
+        )
+        high = ObjectiveCandidate.create(
+            symbol="ZZZ",
+            desired_notional="0.01",
+            price="1",
+            lot_size="0.01",
+            expected_return_rate="0.0000001000000001",
+            capital_requirement_rate="0.001",
+        )
+        policy = self.policy(
+            cash_available="1000",
+            max_gross_notional="100000000000000000001",
+            max_net_notional="100000000000000000001",
+            max_symbol_notional="100000000000000000001",
+            max_total_cost="1000",
+            max_turnover_notional="0.01",
+        )
+
+        def snapshot():
+            result = allocate_objective_targets(
+                [retained, low, high],
+                policy,
+            )
+            return (
+                result.allocation.status,
+                result.selected_symbols,
+                result.expected_net_utility,
+                tuple(
+                    (target.symbol, target.notional)
+                    for target in result.allocation.targets
+                ),
+                result.allocation.cash_required,
+            )
+
+        baseline = snapshot()
+        self.assertEqual(baseline[0], "ALLOCATED")
+        self.assertEqual(baseline[1], ("ZZZ",))
+        self.assertEqual(
+            baseline[2],
+            Decimal("0.000000001000000001"),
+        )
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    self.assertEqual(snapshot(), baseline)
+
     def test_allocation_policy_digest_binds_execution_search_budget(self):
         from mvp.autotrade_mvp.allocation import _allocation_policy_digest
 

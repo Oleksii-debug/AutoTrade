@@ -257,7 +257,10 @@ class AllocationCandidate:
                     allow_zero=True,
                 ),
             )
-            if self.turnover_cost_rate + self.holding_cost_rate != self.cost_rate:
+            if _exact_add(
+                self.turnover_cost_rate,
+                self.holding_cost_rate,
+            ) != self.cost_rate:
                 raise ValueError(
                     "turnover and holding cost rates must sum to cost_rate"
                 )
@@ -404,7 +407,10 @@ class ObjectiveCandidate:
 
     @property
     def objective_rate(self) -> Decimal:
-        return self.expected_return_rate - self.risk_penalty_rate
+        return _exact_subtract(
+            self.expected_return_rate,
+            self.risk_penalty_rate,
+        )
 
 
 @dataclass(frozen=True)

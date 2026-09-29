@@ -15,6 +15,8 @@ from hashlib import sha256
 import json
 from typing import Literal
 
+from .exact_decimal import as_fraction, exact_add, exact_multiply, exact_sum, terminating_decimal
+
 
 class PerpetualError(ValueError):
     pass
@@ -47,15 +49,11 @@ def _utc(value: datetime, name: str) -> datetime:
 
 
 def _fraction(value: Decimal) -> Fraction:
-    sign, digits, exponent = value.as_tuple()
-    integer = 0
-    for digit in digits:
-        integer = integer * 10 + digit
-    if sign:
-        integer = -integer
-    if exponent >= 0:
-        return Fraction(integer * (10**exponent), 1)
-    return Fraction(integer, 10 ** (-exponent))
+    return as_fraction(value)
+
+
+def _finite(value: Fraction) -> Decimal:
+    return terminating_decimal(value)
 
 
 @dataclass(frozen=True)
@@ -196,7 +194,7 @@ class CollateralQuote:
             raise PerpetualError("collateral quote cannot come from the future")
         if point - self.observed_at > self.max_age:
             raise PerpetualError("collateral quote is stale")
-        return _decimal(amount, "amount") * self.rate
+        return exact_multiply(_decimal(amount, "amount"), self.rate)
 
 
 @dataclass(frozen=True)
@@ -310,7 +308,7 @@ def linear_notional(
     contracts = _decimal(signed_contracts, "signed_contracts")
     contract_multiplier = _decimal(multiplier, "multiplier", positive=True)
     mark = _decimal(price, "price", positive=True)
-    return contracts * contract_multiplier * mark
+    return exact_multiply(contracts, contract_multiplier, mark)
 
 
 def inverse_perpetual_pnl_exact(
@@ -382,12 +380,15 @@ def inverse_stressed_loss_exact(
     move = _decimal(adverse_move_fraction, "adverse_move_fraction", positive=True)
     if move >= 1:
         raise PerpetualError("adverse_move_fraction must be below one")
-    exit_price = mark * (Decimal("1") - move if contracts > 0 else Decimal("1") + move)
-    pnl = inverse_perpetual_pnl_exact(
-        contract=contract,
-        signed_contracts=contracts,
-        entry_price=mark,
-        exit_price=exit_price,
+    contracts_f = _fraction(contracts)
+    face_f = _fraction(contract.multiplier)
+    mark_f = _fraction(mark)
+    move_f = _fraction(move)
+    exit_f = mark_f * (
+        Fraction(1, 1) - move_f if contracts > 0 else Fraction(1, 1) + move_f
+    )
+    pnl = contracts_f * face_f * (
+        Fraction(1, 1) / mark_f - Fraction(1, 1) / exit_f
     )
     return -pnl if pnl < 0 else Fraction(0, 1)
 
@@ -413,8 +414,8 @@ def funding_cashflow(
         multiplier=contract.multiplier,
         price=basis,
     )
-    raw = notional * rate
-    cashflow = -raw if convention.positive_rate_effect == "LONG_PAYS" else raw
+    raw = exact_multiply(notional, rate)
+    cashflow = exact_multiply(raw, Decimal("-1")) if convention.positive_rate_effect == "LONG_PAYS" else raw
     return contract.settlement_currency, cashflow
 
 
@@ -432,7 +433,12 @@ def stressed_loss(
     move = _decimal(adverse_move_fraction, "adverse_move_fraction", positive=True)
     if move >= 1:
         raise PerpetualError("adverse_move_fraction must be below one")
-    return abs(position) * contract.multiplier * mark * move
+    return _finite(
+        abs(_fraction(position))
+        * _fraction(contract.multiplier)
+        * _fraction(mark)
+        * _fraction(move)
+    )
 
 
 def require_new_risk_capacity(
@@ -453,7 +459,7 @@ def require_new_risk_capacity(
     buffer = _decimal(reserve_buffer, "reserve_buffer")
     if buffer < 0:
         raise PerpetualError("reserve_buffer cannot be negative")
-    required = margin.maintenance_requirement + loss + buffer
+    required = exact_sum((margin.maintenance_requirement, loss, buffer))
     if margin.equity <= required:
         raise PerpetualError("insufficient fresh margin for new risk")
 
@@ -515,7 +521,7 @@ class FundingLedger:
 
         self._events[identifier] = (fingerprint, period, unit, value)
         self._periods[period_key] = (fingerprint, unit, value)
-        self._balances[unit] = self._balances.get(unit, Decimal("0")) + value
+        self._balances[unit] = exact_add(self._balances.get(unit, Decimal("0")), value)
         return value
 
     def balance(self, currency: str) -> Decimal:

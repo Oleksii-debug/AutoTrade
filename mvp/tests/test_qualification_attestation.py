@@ -210,7 +210,15 @@ class QualificationAttestationTests(unittest.TestCase):
                     side_effect=AssertionError("legacy byte lookup used"),
                 ),
             ):
-                qualification_attestation_module._resolve_evidence(store, ref)
+                read_snapshot = (
+                    qualification_attestation_module.trusted_authenticated_reader(
+                        store
+                    )
+                )
+                qualification_attestation_module._resolve_evidence(
+                    read_snapshot,
+                    ref,
+                )
 
             self.assertEqual(calls, [ref.artifact_id])
 
@@ -219,6 +227,11 @@ class QualificationAttestationTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)
             manifest = publish(store)
+            read_snapshot = (
+                qualification_attestation_module.trusted_authenticated_reader(
+                    store
+                )
+            )
             digest = manifest["sha256"].removeprefix("sha256:")
             (store.objects / digest[:2] / digest).unlink()
 
@@ -238,7 +251,10 @@ class QualificationAttestationTests(unittest.TestCase):
                     "cannot be resolved with integrity",
                 ),
             ):
-                qualification_attestation_module._resolve_evidence(store, ref)
+                qualification_attestation_module._resolve_evidence(
+                    read_snapshot,
+                    ref,
+                )
 
     def test_trusted_git_environment_drops_caller_loader_and_config_authority(self):
         hostile = {

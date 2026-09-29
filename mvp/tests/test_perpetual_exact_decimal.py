@@ -248,7 +248,10 @@ class PerpetualExactDecimalTests(unittest.TestCase):
             amount="-1",
         )
         self.assertEqual(applied, Decimal("-1"))
-        self.assertEqual(ledger.balance("USDT"), Decimal(boundary) - Decimal("1"))
+        self.assertEqual(
+            ledger.balance("USDT"),
+            Decimal(("9" * 255) + "8"),
+        )
         self.assertEqual(
             ledger.apply(
                 event_id="candidate",

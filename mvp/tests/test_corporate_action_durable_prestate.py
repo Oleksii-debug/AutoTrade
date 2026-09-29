@@ -1,5 +1,6 @@
 from datetime import timedelta
 from decimal import Decimal
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -7,6 +8,11 @@ import unittest
 from mvp.autotrade_mvp.accounting import EconomicBook, book_equity_fill, project_equity_position
 from mvp.autotrade_mvp.corporate_action_accounting import commit_authoritative_corporate_action
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.provider_core import (
+    Surface,
+    observe_authenticated_json_response,
+    prepare_authenticated_read_query,
+)
 from mvp.tests.test_corporate_action_accounting import (
     READ_NOW,
     economic_book,
@@ -15,6 +21,8 @@ from mvp.tests.test_corporate_action_accounting import (
     resolve_action,
     sealed_action,
 )
+from mvp.tests.test_corporate_action_evidence import ENDPOINT, INSTRUMENT_ID
+from mvp.tests.test_provider_transport import verified_read_capability
 
 
 def ordinary_fill(*, suffix: str, side: str, quantity: str, price: str, offset: int):
@@ -37,19 +45,39 @@ def ordinary_fill(*, suffix: str, side: str, quantity: str, price: str, offset: 
 
 
 def later_split():
-    # Put the second action on the next UTC day so retained corporate-event
-    # chronology does not depend on a fabricated same-day source sequence.
-    return resolve_action(
-        sealed_action(
-            external_event_id="corp-later-split",
-            revision="2",
-            kind="SPLIT",
-            numerator="2",
-            denominator="1",
-            effective_offset=86401,
-            observed_offset=86402,
-        )
+    binding = prepare_authenticated_read_query(
+        capability=verified_read_capability(),
+        surface=Surface.ACTIVITIES,
+        endpoint=ENDPOINT,
+        query={"symbol": "BTCUSDT"},
+        at=READ_NOW,
+        permission_scope="ORDER.READ",
     )
+    payload = {
+        "external_event_id": "corp-later-split",
+        "provider_revision": "2",
+        "instrument_id": INSTRUMENT_ID,
+        "instrument_version": 1,
+        "effective_at": (READ_NOW + timedelta(seconds=30)).isoformat().replace(
+            "+00:00", "Z"
+        ),
+        "kind": "SPLIT",
+        "source_sequence": 8,
+        "complete": True,
+        "numerator": "2",
+        "denominator": "1",
+    }
+    source = observe_authenticated_json_response(
+        query_binding=binding,
+        http_status=200,
+        response_bytes=json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+        observed_at=READ_NOW + timedelta(seconds=31),
+    )
+    return resolve_action(source)
 
 
 class DurableCorporateActionPrestateTests(unittest.TestCase):

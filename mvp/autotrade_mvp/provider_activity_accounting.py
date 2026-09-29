@@ -2570,7 +2570,7 @@ def book_external_provider_cash_activity(
             envelope["aggregate_version"] = str(version)
             return envelope
 
-        _, replay_inserted, _ = store.commit_command(
+        saved_result, replay_inserted, _ = store.commit_command(
             command_id=command_identity,
             actor="provider-activity-accounting",
             environment=scope,
@@ -2589,6 +2589,10 @@ def book_external_provider_cash_activity(
         if replay_inserted:
             raise AccountingConflict(
                 "provider cash effects exist without their durable command authority"
+            )
+        if saved_result != result:
+            raise AccountingConflict(
+                "provider cash durable command result conflicts with its financial effect"
             )
         return transaction, False
 

@@ -218,7 +218,8 @@ class QualificationAttestationTests(unittest.TestCase):
             ):
                 read_snapshot = (
                     qualification_attestation_module.trusted_authenticated_reader(
-                        store
+                        Path(directory),
+                        publication_store=store,
                     )
                 )
                 qualification_attestation_module._resolve_evidence(

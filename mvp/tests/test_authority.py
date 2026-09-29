@@ -263,6 +263,7 @@ def public_authoritative_risk_snapshot(
         account_id=request.account_id,
         environment=request.environment,
         provider_id=request.provider_id,
+        provider_environment=request.provider_environment,
         instrument_version=request.instrument_version,
         capability_snapshot_id=request.capability_snapshot_id,
         reconciliation_checkpoint_event_id=(
@@ -2490,6 +2491,8 @@ class AuthorityTests(unittest.TestCase):
                     reservation_requirements={"CASH:USD": "100"},
                     reservation_available={"CASH:USD": "1000"},
                     journal_sequence_cut=store.current_journal_sequence(),
+                    provider_id="TEST_PROVIDER",
+                    provider_environment="PAPER",
                     now="2026-09-24T18:01:00Z",
                 )
 

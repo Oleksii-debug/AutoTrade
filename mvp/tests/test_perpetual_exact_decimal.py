@@ -13,6 +13,8 @@ from mvp.autotrade_mvp.perpetuals import (
     PerpetualContract,
     PerpetualError,
     funding_cashflow,
+    inverse_funding_cashflow_exact,
+    inverse_perpetual_pnl_exact,
     inverse_stressed_loss_exact,
     linear_notional,
     require_liquidation_headroom,
@@ -285,6 +287,53 @@ class PerpetualExactDecimalTests(unittest.TestCase):
                 amount=Decimal("0"),
             ),
             Decimal("0"),
+        )
+
+    def test_inverse_exact_paths_share_bounded_rational_authority(self):
+        contract = PerpetualContract(
+            instrument_id="XBTUSD-PERP",
+            settlement_currency="BTC",
+            collateral_currency="BTC",
+            multiplier="100",
+            payoff="INVERSE",
+            face_currency="USD",
+            price_quote_currency="USD",
+            price_base_currency="BTC",
+        )
+        snapshot = MarketSnapshot(
+            mark_price="10000",
+            index_price="10000",
+            observed_at=NOW,
+            max_age=timedelta(seconds=5),
+            max_mark_index_deviation="0.01",
+        )
+        self.assertEqual(
+            inverse_perpetual_pnl_exact(
+                contract=contract,
+                signed_contracts="1",
+                entry_price="10000",
+                exit_price="11000",
+            ),
+            Fraction(1, 1100),
+        )
+        currency, funding = inverse_funding_cashflow_exact(
+            contract=contract,
+            signed_contracts="1",
+            funding_rate="0.001",
+            snapshot=snapshot,
+            convention=FundingConvention("LONG_PAYS", "MARK"),
+            at=NOW,
+        )
+        self.assertEqual(currency, "BTC")
+        self.assertEqual(funding, Fraction(-1, 100000))
+        self.assertEqual(
+            inverse_stressed_loss_exact(
+                contract=contract,
+                signed_contracts="1",
+                mark_price="10000",
+                adverse_move_fraction="0.1",
+            ),
+            Fraction(1, 900),
         )
 
 

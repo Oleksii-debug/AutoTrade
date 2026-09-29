@@ -169,6 +169,12 @@ class EconomicOracleExactnessTests(unittest.TestCase):
             Decimal("0.00090909091"),
         )
 
+    def test_inverse_reference_uses_bounded_rational_authority(self):
+        from mvp.autotrade_mvp.exact_decimal import bounded_fraction
+
+        with self.assertRaisesRegex(ExactDecimalError, "resource envelope"):
+            bounded_fraction(Fraction(10**1024, 3))
+
 
 if __name__ == "__main__":
     unittest.main()

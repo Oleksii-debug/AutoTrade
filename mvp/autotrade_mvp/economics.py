@@ -17,6 +17,7 @@ from typing import Any
 
 from .exact_decimal import (
     as_fraction,
+    bounded_fraction,
     exact_sum,
     round_fraction_to_quantum,
     terminating_decimal,
@@ -152,14 +153,11 @@ def inverse_futures_pnl_exact(
     value = _positive(contract_value, name="contract_value")
     entry = _positive(entry_price, name="entry_price")
     exit_value = _positive(exit_price, name="exit_price")
-    return (
-        as_fraction(qty)
-        * as_fraction(value)
-        * (
-            Fraction(1, 1) / as_fraction(entry)
-            - Fraction(1, 1) / as_fraction(exit_value)
-        )
-    )
+    notional = bounded_fraction(as_fraction(qty) * as_fraction(value))
+    entry_inverse = bounded_fraction(Fraction(1, 1) / as_fraction(entry))
+    exit_inverse = bounded_fraction(Fraction(1, 1) / as_fraction(exit_value))
+    reciprocal_delta = bounded_fraction(entry_inverse - exit_inverse)
+    return bounded_fraction(notional * reciprocal_delta)
 
 
 INVERSE_REFERENCE_QUANTUM = Decimal("0.00000000000000000000000000000000000000000000000001")

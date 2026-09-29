@@ -18,6 +18,7 @@ from typing import Literal
 from .exact_decimal import (
     ExactDecimalError,
     as_fraction as _exact_as_fraction,
+    bounded_fraction as _exact_bounded_fraction,
     canonical_decimal_text as _exact_canonical_decimal_text,
     exact_add as _exact_add,
     exact_multiply as _exact_multiply,
@@ -41,6 +42,10 @@ def _translate_exact(operation, *args, **kwargs):
 
 def as_fraction(value: Decimal) -> Fraction:
     return _translate_exact(_exact_as_fraction, value)
+
+
+def bounded_fraction(value: Fraction) -> Fraction:
+    return _translate_exact(_exact_bounded_fraction, value)
 
 
 def exact_add(left: Decimal, right: Decimal) -> Decimal:
@@ -383,11 +388,11 @@ def inverse_perpetual_pnl_exact(
     face = _decimal(contract.multiplier, "multiplier", positive=True)
     entry = _decimal(entry_price, "entry_price", positive=True)
     exit_value = _decimal(exit_price, "exit_price", positive=True)
-    return (
-        _fraction(contracts)
-        * _fraction(face)
-        * (Fraction(1, 1) / _fraction(entry) - Fraction(1, 1) / _fraction(exit_value))
-    )
+    notional = bounded_fraction(_fraction(contracts) * _fraction(face))
+    entry_inverse = bounded_fraction(Fraction(1, 1) / _fraction(entry))
+    exit_inverse = bounded_fraction(Fraction(1, 1) / _fraction(exit_value))
+    reciprocal_delta = bounded_fraction(entry_inverse - exit_inverse)
+    return bounded_fraction(notional * reciprocal_delta)
 
 
 def inverse_funding_cashflow_exact(
@@ -406,13 +411,14 @@ def inverse_funding_cashflow_exact(
     contracts = _decimal(signed_contracts, "signed_contracts")
     rate = _decimal(funding_rate, "funding_rate")
     basis = snapshot.mark_price if convention.price_basis == "MARK" else snapshot.index_price
-    position_value = (
-        _fraction(contracts)
-        * _fraction(contract.multiplier)
-        / _fraction(basis)
+    position_numerator = bounded_fraction(
+        _fraction(contracts) * _fraction(contract.multiplier)
     )
-    raw = position_value * _fraction(rate)
-    cashflow = -raw if convention.positive_rate_effect == "LONG_PAYS" else raw
+    position_value = bounded_fraction(position_numerator / _fraction(basis))
+    raw = bounded_fraction(position_value * _fraction(rate))
+    cashflow = bounded_fraction(
+        -raw if convention.positive_rate_effect == "LONG_PAYS" else raw
+    )
     return contract.settlement_currency, cashflow
 
 
@@ -437,13 +443,16 @@ def inverse_stressed_loss_exact(
     face_f = _fraction(contract.multiplier)
     mark_f = _fraction(mark)
     move_f = _fraction(move)
-    exit_f = mark_f * (
+    move_factor = bounded_fraction(
         Fraction(1, 1) - move_f if contracts > 0 else Fraction(1, 1) + move_f
     )
-    pnl = contracts_f * face_f * (
-        Fraction(1, 1) / mark_f - Fraction(1, 1) / exit_f
-    )
-    return -pnl if pnl < 0 else Fraction(0, 1)
+    exit_f = bounded_fraction(mark_f * move_factor)
+    mark_inverse = bounded_fraction(Fraction(1, 1) / mark_f)
+    exit_inverse = bounded_fraction(Fraction(1, 1) / exit_f)
+    reciprocal_delta = bounded_fraction(mark_inverse - exit_inverse)
+    notional = bounded_fraction(contracts_f * face_f)
+    pnl = bounded_fraction(notional * reciprocal_delta)
+    return bounded_fraction(-pnl if pnl < 0 else Fraction(0, 1))
 
 
 def funding_cashflow(

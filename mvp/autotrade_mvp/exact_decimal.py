@@ -88,6 +88,13 @@ def _validate_fraction_intermediate(
         raise ExactDecimalError("rational denominator exceeds resource envelope")
 
 
+def bounded_fraction(value: Fraction) -> Fraction:
+    """Return an exact rational only if it satisfies the shared resource envelope."""
+
+    _validate_fraction_intermediate(value)
+    return value
+
+
 def as_fraction(value: Decimal) -> Fraction:
     """Return the exact rational value of one bounded finite Decimal."""
 

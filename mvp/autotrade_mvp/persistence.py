@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from pathlib import Path
 import sqlite3
+import sys
 
 # Keep the established persistence implementation byte-for-byte behind this
 # compatibility facade. JournalStore alone adds filesystem authority fencing;
@@ -13,8 +14,10 @@ from ._persistence_impl import JournalStore as _JournalStoreImpl
 from .store_identity import (
     JournalStoreIdentity,
     connection_main_identity,
+    connection_main_path,
     establish_database_anchor,
     freeze_database_path,
+    guard_windows_database_authority,
     require_database_identity,
 )
 
@@ -32,11 +35,10 @@ def __dir__() -> list[str]:
 class JournalStore(_JournalStoreImpl):
     """JournalStore with immutable canonical backing-file authority.
 
-    The configured path is resolved exactly once at construction. The first
-    SQLite open is anchored to a pre-open filesystem identity, and every later
-    open verifies the same identity before and after use so deletion,
-    replacement, CWD drift, hard-link ambiguity, or path rebinding can never
-    silently redirect an existing store object to another journal.
+    POSIX retains canonical path/device/inode rebinding checks. On the supported
+    Windows product runtime every SQLite open is additionally enclosed by native
+    ancestor-namespace and final-file handles held without FILE_SHARE_DELETE,
+    and store identity comes from that opened file handle.
     """
 
     def __init__(self, path: str | Path):
@@ -48,15 +50,7 @@ class JournalStore(_JournalStoreImpl):
 
     @classmethod
     def _migration_statements(cls, version: int) -> tuple[str, ...]:
-        """Preserve migration authority while invalidating all v7 checkpoints.
-
-        Schema v8 changed checkpoint digest identity/cut bindings. Both aggregate
-        and global checkpoint tables are rebuildable derived state, so neither
-        v7 representation may cross that boundary. Keep this facade override
-        tolerant of the retained implementation eventually carrying the same
-        deletion, avoiding duplicate statements while public JournalStore owns
-        the hardened persistence authority.
-        """
+        """Preserve migration authority while invalidating all v7 checkpoints."""
 
         statements = super()._migration_statements(version)
         if version != 8:
@@ -74,17 +68,64 @@ class JournalStore(_JournalStoreImpl):
         return identity
 
     @contextmanager
+    def _connect_windows(self):
+        expected = self._store_identity
+        with guard_windows_database_authority(
+            self.path,
+            create=expected is None,
+        ) as guarded:
+            if expected is not None and guarded != expected:
+                raise RuntimeError("journal backing file identity changed")
+
+            connection = sqlite3.connect(
+                self.path,
+                timeout=30,
+                isolation_level=None,
+            )
+            try:
+                connection.row_factory = sqlite3.Row
+                opened_path = connection_main_path(connection)
+                if opened_path != self.path:
+                    raise RuntimeError(
+                        "SQLite main database path does not match canonical journal authority"
+                    )
+                if expected is None:
+                    self._store_identity = guarded
+                    expected = guarded
+
+                connection.execute("PRAGMA foreign_keys=ON")
+                connection.execute("PRAGMA journal_mode=WAL")
+                connection.execute("PRAGMA synchronous=FULL")
+                yield connection
+            finally:
+                try:
+                    opened_path = connection_main_path(connection)
+                    if opened_path != self.path:
+                        raise RuntimeError(
+                            "SQLite main database path changed while connection was active"
+                        )
+                finally:
+                    connection.close()
+
+    @contextmanager
     def _connect(self):
+        if sys.platform == "win32":
+            with self._connect_windows() as connection:
+                yield connection
+            return
+
         expected = self._store_identity
         first_open_anchor: JournalStoreIdentity | None = None
         if expected is None:
             first_open_anchor = establish_database_anchor(self.path)
         else:
-            # This check occurs before sqlite3.connect so a deleted/replaced
-            # path cannot be silently recreated/adopted by an old store object.
             require_database_identity(self.path, expected)
 
-        connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)
+        connection = sqlite3.connect(
+            self.path,
+            timeout=30,
+            isolation_level=None,
+        )
         try:
             connection.row_factory = sqlite3.Row
             opened = connection_main_identity(connection)

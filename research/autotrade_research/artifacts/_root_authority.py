@@ -86,12 +86,15 @@ def _capture_trusted_root_binding(
         raise _store.ArtifactIntegrityError(
             "retained artifact store root descriptor is unavailable"
         )
+    duplicate: int | None = None
     try:
         duplicate = os.dup(retained_fd)
         os.set_inheritable(duplicate, False)
         expected = _HOST_FSTAT(retained_fd)
         observed = _HOST_FSTAT(duplicate)
     except OSError as error:
+        if duplicate is not None:
+            _guard._close_fd(duplicate)
         raise _store.ArtifactIntegrityError(
             "trusted artifact store root descriptor cannot be retained"
         ) from error

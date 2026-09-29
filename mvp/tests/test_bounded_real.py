@@ -213,6 +213,14 @@ def _all_refs(prerequisite_items, observed):
     )
 
 
+def _canonical_policy_fixture(trust_policy):
+    return patch(
+        "mvp.autotrade_mvp.qualification_attestation."
+        "load_canonical_qualification_trust_policy",
+        return_value=trust_policy,
+    )
+
+
 def _signed_bounded_receipt(bounded, refs):
     trust_root = attestation_root(
         scopes=(QualificationScope("BOUNDED_REAL", "QUALIFICATION"),)
@@ -331,17 +339,15 @@ class BoundedRealQualificationTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)
             _populate_bundle(store, prerequisite_items, observed)
-            result = assess_bounded_real_qualification(
-                envelope=bounded,
-                prerequisite_evidence=prerequisite_items,
-                observations=observed,
-                evidence_store=store,
-                evidence_root=directory,
-                qualification_receipt=receipt,
-                qualification_policy=trust_policy,
-                expected_policy_id=trust_policy.policy_id,
-                expected_policy_version=trust_policy.policy_version,
-            )
+            with _canonical_policy_fixture(trust_policy):
+                result = assess_bounded_real_qualification(
+                    envelope=bounded,
+                    prerequisite_evidence=prerequisite_items,
+                    observations=observed,
+                    evidence_store=store,
+                    evidence_root=directory,
+                    qualification_receipt=receipt,
+                )
         self.assertTrue(result.complete)
         self.assertEqual(result.reason_codes, ())
         self.assertFalse(result.authorizes_trading)
@@ -353,6 +359,42 @@ class BoundedRealQualificationTests(unittest.TestCase):
         self.assertTrue(
             result.qualification_trust_root_id.startswith("sha256:")
         )
+
+    def test_caller_self_signed_policy_cannot_select_terminal_trust_root(self):
+        bounded = envelope()
+        prerequisite_items = prerequisites()
+        observed = observations()
+        refs = _all_refs(prerequisite_items, observed)
+        attacker_receipt, attacker_policy = _signed_bounded_receipt(bounded, refs)
+
+        canonical_root = attestation_root(
+            scopes=(QualificationScope("RELEASE", "FREEZE"),)
+        )
+        canonical_policy = attestation_policy(canonical_root)
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            _populate_bundle(store, prerequisite_items, observed)
+            with _canonical_policy_fixture(canonical_policy):
+                result = assess_bounded_real_qualification(
+                    envelope=bounded,
+                    prerequisite_evidence=prerequisite_items,
+                    observations=observed,
+                    evidence_store=store,
+                    evidence_root=directory,
+                    qualification_receipt=attacker_receipt,
+                    qualification_policy=attacker_policy,
+                    expected_policy_id=attacker_policy.policy_id,
+                    expected_policy_version=attacker_policy.policy_version,
+                )
+
+        self.assertFalse(result.complete)
+        self.assertIn(
+            "independent_evidence_trust_invalid",
+            result.reason_codes,
+        )
+        self.assertIsNone(result.qualification_policy_id)
+        self.assertIsNone(result.qualification_trust_root_id)
 
     def test_verifier_subclass_cannot_waive_bounded_manifest_scope(self):
         class ForgedVerifier(ArtifactStoreEvidenceVerifier):
@@ -380,18 +422,16 @@ class BoundedRealQualificationTests(unittest.TestCase):
                 exclude=(bad_ref.artifact_id,),
             )
             forged = ForgedVerifier(store, evidence_root=directory)
-            result = assess_bounded_real_qualification(
-                envelope=bounded,
-                prerequisite_evidence=prerequisite_items,
-                observations=observed,
-                evidence_verifier=forged,
-                evidence_store=store,
-                evidence_root=directory,
-                qualification_receipt=receipt,
-                qualification_policy=trust_policy,
-                expected_policy_id=trust_policy.policy_id,
-                expected_policy_version=trust_policy.policy_version,
-            )
+            with _canonical_policy_fixture(trust_policy):
+                result = assess_bounded_real_qualification(
+                    envelope=bounded,
+                    prerequisite_evidence=prerequisite_items,
+                    observations=observed,
+                    evidence_verifier=forged,
+                    evidence_store=store,
+                    evidence_root=directory,
+                    qualification_receipt=receipt,
+                )
 
         self.assertFalse(result.complete)
         self.assertIn(
@@ -445,18 +485,16 @@ class BoundedRealQualificationTests(unittest.TestCase):
                 verifier._evidence_root = attacker_directory
                 verifier._store_identity = "sha256:" + ("0" * 64)
                 verifier.verify = lambda _ref: EvidenceVerification(valid=True)
-                result = assess_bounded_real_qualification(
-                    envelope=bounded,
-                    prerequisite_evidence=prerequisite_items,
-                    observations=observed,
-                    evidence_verifier=verifier,
-                    evidence_store=store,
-                    evidence_root=directory,
-                    qualification_receipt=receipt,
-                    qualification_policy=trust_policy,
-                    expected_policy_id=trust_policy.policy_id,
-                    expected_policy_version=trust_policy.policy_version,
-                )
+                with _canonical_policy_fixture(trust_policy):
+                    result = assess_bounded_real_qualification(
+                        envelope=bounded,
+                        prerequisite_evidence=prerequisite_items,
+                        observations=observed,
+                        evidence_verifier=verifier,
+                        evidence_store=store,
+                        evidence_root=directory,
+                        qualification_receipt=receipt,
+                    )
 
         self.assertFalse(result.complete)
         self.assertIn(
@@ -473,17 +511,15 @@ class BoundedRealQualificationTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)
             _populate_bundle(store, prerequisite_items, observed)
-            result = assess_bounded_real_qualification(
-                envelope=bounded,
-                prerequisite_evidence=prerequisite_items,
-                observations=observed,
-                evidence_store=store,
-                evidence_root=directory,
-                qualification_receipt=receipt,
-                qualification_policy=trust_policy,
-                expected_policy_id=trust_policy.policy_id,
-                expected_policy_version=trust_policy.policy_version,
-            )
+            with _canonical_policy_fixture(trust_policy):
+                result = assess_bounded_real_qualification(
+                    envelope=bounded,
+                    prerequisite_evidence=prerequisite_items,
+                    observations=observed,
+                    evidence_store=store,
+                    evidence_root=directory,
+                    qualification_receipt=receipt,
+                )
         self.assertFalse(result.complete)
         self.assertIn(
             "independent_evidence_set_mismatch",
@@ -502,7 +538,7 @@ class BoundedRealQualificationTests(unittest.TestCase):
             forged_receipt.attestation,
             legitimate_receipt.signature,
         )
-        real_verify = bounded_real_module.verify_qualification_attestation
+        real_verify = bounded_real_module.verify_canonical_qualification_attestation
 
         def swap_then_verify(receipt, **kwargs):
             object.__setattr__(
@@ -515,10 +551,13 @@ class BoundedRealQualificationTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)
             _populate_bundle(store, prerequisite_items, observed)
-            with patch.object(
-                bounded_real_module,
-                "verify_qualification_attestation",
-                side_effect=swap_then_verify,
+            with (
+                _canonical_policy_fixture(trust_policy),
+                patch.object(
+                    bounded_real_module,
+                    "verify_canonical_qualification_attestation",
+                    side_effect=swap_then_verify,
+                ),
             ):
                 result = assess_bounded_real_qualification(
                     envelope=bounded,
@@ -527,9 +566,6 @@ class BoundedRealQualificationTests(unittest.TestCase):
                     evidence_store=store,
                     evidence_root=directory,
                     qualification_receipt=rebound,
-                    qualification_policy=trust_policy,
-                    expected_policy_id=trust_policy.policy_id,
-                    expected_policy_version=trust_policy.policy_version,
                 )
 
         self.assertFalse(result.complete)
@@ -557,9 +593,6 @@ class BoundedRealQualificationTests(unittest.TestCase):
                 observations=observed,
                 evidence_verifier=caller_verifier,
                 qualification_receipt=receipt,
-                qualification_policy=trust_policy,
-                expected_policy_id=trust_policy.policy_id,
-                expected_policy_version=trust_policy.policy_version,
             )
 
         self.assertFalse(result.complete)

@@ -46,6 +46,26 @@ class JournalStore(_JournalStoreImpl):
         if self._store_identity is None:
             raise RuntimeError("journal store identity was not established")
 
+    @classmethod
+    def _migration_statements(cls, version: int) -> tuple[str, ...]:
+        """Preserve migration authority while invalidating all v7 checkpoints.
+
+        Schema v8 changed checkpoint digest identity/cut bindings. Both aggregate
+        and global checkpoint tables are rebuildable derived state, so neither
+        v7 representation may cross that boundary. Keep this facade override
+        tolerant of the retained implementation eventually carrying the same
+        deletion, avoiding duplicate statements while public JournalStore owns
+        the hardened persistence authority.
+        """
+
+        statements = super()._migration_statements(version)
+        if version != 8:
+            return statements
+        global_invalidation = "DELETE FROM global_projection_checkpoints"
+        if global_invalidation in statements:
+            return statements
+        return (*statements, global_invalidation)
+
     @property
     def store_identity(self) -> JournalStoreIdentity:
         identity = self._store_identity

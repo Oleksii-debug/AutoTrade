@@ -68,6 +68,50 @@ def _poison_injected_instance(store: ArtifactStore, directory: str) -> None:
 
 
 class TrustedArtifactReaderTests(unittest.TestCase):
+    def test_pinned_authenticated_read_is_final_installed_wrapper(self):
+        self.assertIs(
+            root_authority._CANONICAL_AUTHENTICATED_READ,
+            ArtifactStore.read_authenticated_snapshot,
+        )
+
+    @unittest.skipIf(
+        os.name == "nt",
+        "deterministic root replacement during inner failure is POSIX-only",
+    )
+    def test_inner_failure_plus_root_loss_uses_final_exceptional_root_fence(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "store"
+            store = ArtifactStore(root)
+            _publish(store)
+            read_snapshot = trusted_authenticated_reader(
+                root,
+                publication_store=store,
+            )
+
+            detached = Path(directory) / "detached"
+            original_read_verified = ArtifactStore._read_verified_object_bytes
+            swapped = False
+
+            def fail_after_root_loss(_self, _manifest):
+                nonlocal swapped
+                if not swapped:
+                    root.rename(detached)
+                    root.mkdir()
+                    swapped = True
+                raise OSError("deterministic inner read failure")
+
+            ArtifactStore._read_verified_object_bytes = fail_after_root_loss
+            try:
+                with self.assertRaises(ArtifactIntegrityError) as raised:
+                    read_snapshot(ARTIFACT_ID)
+                self.assertIsInstance(raised.exception.__cause__, OSError)
+            finally:
+                ArtifactStore._read_verified_object_bytes = original_read_verified
+                if root.exists():
+                    root.rmdir()
+                if detached.exists():
+                    detached.rename(root)
+
     def test_trusted_read_never_calls_artifact_store_constructor(self):
         with TemporaryDirectory() as directory:
             root = Path(directory) / "store"

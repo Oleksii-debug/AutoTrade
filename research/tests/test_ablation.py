@@ -1635,6 +1635,76 @@ class AblationTests(unittest.TestCase):
                 "retention_tolerances": {"negative_results": "retain"},
                 "promotion_rule": "qualified-only",
             }
+            for suffix, hostile_decimal in (
+                ("1", "1E+100000000"),
+                ("2", "1E-100000000"),
+            ):
+                hostile = {
+                    **protocol_payload,
+                    "ablation_decision_policy": {
+                        **protocol_payload["ablation_decision_policy"],
+                        "required_lower_bound": hostile_decimal,
+                    },
+                }
+                with self.assertRaisesRegex(
+                    ProtocolViolation,
+                    "bounded canonical decimal resource envelope",
+                ):
+                    science.register_protocol(
+                        hostile,
+                        protocol_id=f"99999999-9999-4999-8999-99999999999{suffix}",
+                    )
+
+            max_integer = "9" * 256
+            max_scale = "0." + ("0" * 255) + "1"
+            for identifier, boundary in (
+                ("90000000-0000-4000-8000-000000000001", max_integer),
+                ("90000000-0000-4000-8000-000000000002", max_scale),
+            ):
+                admitted = {
+                    **protocol_payload,
+                    "minimum_practical_effect": boundary,
+                    "ablation_decision_policy": {
+                        **protocol_payload["ablation_decision_policy"],
+                        "required_lower_bound": boundary,
+                    },
+                }
+                science.register_protocol(admitted, protocol_id=identifier)
+
+            for identifier, over_limit in (
+                ("90000000-0000-4000-8000-000000000003", "9" * 257),
+                ("90000000-0000-4000-8000-000000000004", "0." + ("0" * 256) + "1"),
+            ):
+                rejected = {
+                    **protocol_payload,
+                    "minimum_practical_effect": over_limit,
+                    "ablation_decision_policy": {
+                        **protocol_payload["ablation_decision_policy"],
+                        "required_lower_bound": over_limit,
+                    },
+                }
+                with self.assertRaisesRegex(
+                    ProtocolViolation,
+                    "bounded canonical decimal resource envelope",
+                ):
+                    science.register_protocol(rejected, protocol_id=identifier)
+
+            contradictory = {
+                **protocol_payload,
+                "ablation_decision_policy": {
+                    **protocol_payload["ablation_decision_policy"],
+                    "required_lower_bound": "1",
+                },
+            }
+            with self.assertRaisesRegex(
+                ProtocolViolation,
+                "required_lower_bound must equal minimum_practical_effect",
+            ):
+                science.register_protocol(
+                    contradictory,
+                    protocol_id="90000000-0000-4000-8000-000000000005",
+                )
+
             registration = science.register_protocol(
                 protocol_payload,
                 protocol_id="11111111-1111-4111-8111-111111111111",
@@ -1654,7 +1724,7 @@ class AblationTests(unittest.TestCase):
             changed_policy_payload = dict(protocol_payload)
             changed_policy_payload["ablation_decision_policy"] = {
                 **protocol_payload["ablation_decision_policy"],
-                "required_lower_bound": "1",
+                "uncertainty_multiplier": "3",
             }
             changed_registration = science.register_protocol(
                 changed_policy_payload,

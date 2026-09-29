@@ -268,6 +268,11 @@ def _invoke_authority_check(
             submission_scope,
             submission_scope_hash,
         )
+    if any(
+        key in submission_scope
+        for key in ("provider", "provider_id", "provider_environment")
+    ):
+        return False, "prepared_scope_authority_required"
     return authority_check(intent_hash, now)
 
 

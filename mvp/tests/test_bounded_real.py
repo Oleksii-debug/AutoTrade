@@ -335,7 +335,8 @@ class BoundedRealQualificationTests(unittest.TestCase):
                 envelope=bounded,
                 prerequisite_evidence=prerequisite_items,
                 observations=observed,
-                evidence_verifier=artifact_store_evidence_verifier(store, evidence_root=directory),
+                evidence_store=store,
+                evidence_root=directory,
                 qualification_receipt=receipt,
                 qualification_policy=trust_policy,
                 expected_policy_id=trust_policy.policy_id,
@@ -384,6 +385,8 @@ class BoundedRealQualificationTests(unittest.TestCase):
                 prerequisite_evidence=prerequisite_items,
                 observations=observed,
                 evidence_verifier=forged,
+                evidence_store=store,
+                evidence_root=directory,
                 qualification_receipt=receipt,
                 qualification_policy=trust_policy,
                 expected_policy_id=trust_policy.policy_id,
@@ -392,7 +395,7 @@ class BoundedRealQualificationTests(unittest.TestCase):
 
         self.assertFalse(result.complete)
         self.assertIn(
-            "untrusted_immutable_evidence_verifier",
+            "immutable_evidence_conflicted:PREREQUISITE:RELEASE_CANDIDATE",
             result.reason_codes,
         )
 
@@ -427,6 +430,8 @@ class BoundedRealQualificationTests(unittest.TestCase):
                 prerequisite_evidence=prerequisite_items,
                 observations=observed,
                 evidence_verifier=verifier,
+                evidence_store=store,
+                evidence_root=directory,
                 qualification_receipt=receipt,
                 qualification_policy=trust_policy,
                 expected_policy_id=trust_policy.policy_id,
@@ -452,7 +457,8 @@ class BoundedRealQualificationTests(unittest.TestCase):
                 envelope=bounded,
                 prerequisite_evidence=prerequisite_items,
                 observations=observed,
-                evidence_verifier=artifact_store_evidence_verifier(store, evidence_root=directory),
+                evidence_store=store,
+                evidence_root=directory,
                 qualification_receipt=receipt,
                 qualification_policy=trust_policy,
                 expected_policy_id=trust_policy.policy_id,
@@ -498,10 +504,8 @@ class BoundedRealQualificationTests(unittest.TestCase):
                     envelope=bounded,
                     prerequisite_evidence=prerequisite_items,
                     observations=observed,
-                    evidence_verifier=artifact_store_evidence_verifier(
-                        store,
-                        evidence_root=directory,
-                    ),
+                    evidence_store=store,
+                    evidence_root=directory,
                     qualification_receipt=rebound,
                     qualification_policy=trust_policy,
                     expected_policy_id=trust_policy.policy_id,
@@ -511,6 +515,40 @@ class BoundedRealQualificationTests(unittest.TestCase):
         self.assertFalse(result.complete)
         self.assertIn(
             "independent_evidence_set_mismatch",
+            result.reason_codes,
+        )
+
+    def test_caller_owned_exact_verifier_is_diagnostic_only_for_terminal_signed_path(self):
+        bounded = envelope()
+        prerequisite_items = prerequisites()
+        observed = observations()
+        refs = _all_refs(prerequisite_items, observed)
+        receipt, trust_policy = _signed_bounded_receipt(bounded, refs)
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            _populate_bundle(store, prerequisite_items, observed)
+            caller_verifier = artifact_store_evidence_verifier(
+                store,
+                evidence_root=directory,
+            )
+            result = assess_bounded_real_qualification(
+                envelope=bounded,
+                prerequisite_evidence=prerequisite_items,
+                observations=observed,
+                evidence_verifier=caller_verifier,
+                qualification_receipt=receipt,
+                qualification_policy=trust_policy,
+                expected_policy_id=trust_policy.policy_id,
+                expected_policy_version=trust_policy.policy_version,
+            )
+
+        self.assertFalse(result.complete)
+        self.assertIn(
+            "caller_immutable_evidence_verifier_non_terminal",
+            result.reason_codes,
+        )
+        self.assertIn(
+            "independent_evidence_trust_unavailable",
             result.reason_codes,
         )
 

@@ -176,6 +176,28 @@ class DurableFinancingRestartConservationTests(unittest.TestCase):
         with self.assertRaisesRegex(FinancingConflict, "duplicate economic postings"):
             restarted.latest(CHARGE_ID)
 
+    def test_restart_rejects_expected_transaction_in_noncanonical_batch(self) -> None:
+        event = self._event()
+        aggregate_id, delta = self._append_financing_only(event)
+        expected = self.financing._economic_transaction(
+            aggregate_id=aggregate_id,
+            event_id="restart-financing-event-r1",
+            event=event,
+            economic_delta=delta,
+        )
+        unrelated = book_financing_delta(
+            transaction_id="unrelated-economic-in-same-batch",
+            cause_event_id="other-provider-event",
+            unit="BTC",
+            source_account="BORROW_LIABILITY:BTC",
+            economic_delta="0.01",
+        )
+        self.economic.append_batch((expected, unrelated))
+        _, restarted = self._reopened()
+
+        with self.assertRaisesRegex(FinancingConflict, "canonical economic batch"):
+            restarted.latest(CHARGE_ID)
+
     def test_live_read_refreshes_economic_projection_before_conservation_check(self) -> None:
         event = self._event()
         aggregate_id, delta = self._append_financing_only(event)

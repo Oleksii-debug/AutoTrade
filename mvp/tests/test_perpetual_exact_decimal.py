@@ -7,6 +7,7 @@ from mvp.autotrade_mvp.perpetuals import (
     CollateralQuote,
     FundingConvention,
     FundingLedger,
+    LiquidationSnapshot,
     MarginSnapshot,
     MarketSnapshot,
     PerpetualContract,
@@ -14,6 +15,7 @@ from mvp.autotrade_mvp.perpetuals import (
     funding_cashflow,
     inverse_stressed_loss_exact,
     linear_notional,
+    require_liquidation_headroom,
     require_new_risk_capacity,
     stressed_loss,
 )
@@ -174,6 +176,113 @@ class PerpetualExactDecimalTests(unittest.TestCase):
                 )
         self.assertTrue(all(value == observed[0] for value in observed))
         self.assertEqual(observed[0], Fraction(1, 900))
+
+    def test_liquidation_headroom_returns_exact_fraction_under_hostile_contexts(self):
+        snapshot = MarketSnapshot(
+            mark_price="3",
+            index_price="3",
+            observed_at=NOW,
+            max_age=timedelta(seconds=5),
+            max_mark_index_deviation="0.01",
+        )
+        liquidation = LiquidationSnapshot(
+            side="LONG",
+            liquidation_price="2",
+            tier_id="tier-1",
+            evidence_ref="liq-evidence",
+            observed_at=NOW,
+            max_age=timedelta(seconds=5),
+        )
+        observed = []
+        for precision in (3, 6, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    observed.append(
+                        require_liquidation_headroom(
+                            liquidation=liquidation,
+                            market=snapshot,
+                            minimum_headroom_fraction="0.3",
+                            at=NOW,
+                        )
+                    )
+        self.assertTrue(all(value == Fraction(1, 3) for value in observed))
+
+    def test_resource_envelope_failures_use_perpetual_error(self):
+        oversized = "9" * 256
+        with self.assertRaisesRegex(PerpetualError, "resource envelope"):
+            linear_notional(
+                signed_contracts=oversized,
+                multiplier="10",
+                price="1",
+            )
+
+    def test_funding_overflow_does_not_publish_partial_event_or_period(self):
+        ledger = FundingLedger()
+        boundary = "9" * 256
+        ledger.apply(
+            event_id="boundary",
+            funding_period_id="p-boundary",
+            instrument_id="BTC-PERP",
+            currency="USDT",
+            amount=boundary,
+        )
+        self.assertEqual(ledger.balance("USDT"), Decimal(boundary))
+
+        with self.assertRaisesRegex(PerpetualError, "resource envelope"):
+            ledger.apply(
+                event_id="candidate",
+                funding_period_id="p-candidate",
+                instrument_id="BTC-PERP",
+                currency="USDT",
+                amount="1",
+            )
+        self.assertEqual(ledger.balance("USDT"), Decimal(boundary))
+
+        applied = ledger.apply(
+            event_id="candidate",
+            funding_period_id="p-candidate",
+            instrument_id="BTC-PERP",
+            currency="USDT",
+            amount="-1",
+        )
+        self.assertEqual(applied, Decimal("-1"))
+        self.assertEqual(ledger.balance("USDT"), Decimal(boundary) - Decimal("1"))
+        self.assertEqual(
+            ledger.apply(
+                event_id="candidate",
+                funding_period_id="p-candidate",
+                instrument_id="BTC-PERP",
+                currency="USDT",
+                amount="-1",
+            ),
+            Decimal("-1"),
+        )
+
+    def test_extreme_zero_exponent_is_canonicalized_before_fingerprint(self):
+        ledger = FundingLedger()
+        self.assertEqual(
+            ledger.apply(
+                event_id="zero",
+                funding_period_id="p-zero",
+                instrument_id="BTC-PERP",
+                currency="USDT",
+                amount=Decimal("0E-1000000"),
+            ),
+            Decimal("0"),
+        )
+        self.assertEqual(ledger.balance("USDT"), Decimal("0"))
+        self.assertEqual(
+            ledger.apply(
+                event_id="zero",
+                funding_period_id="p-zero",
+                instrument_id="BTC-PERP",
+                currency="USDT",
+                amount=Decimal("0"),
+            ),
+            Decimal("0"),
+        )
 
 
 if __name__ == "__main__":

@@ -21,12 +21,19 @@ class JournalStoreIdentity:
 
 
 def freeze_database_path(path: str | Path) -> Path:
-    """Freeze caller path text to one absolute canonical filesystem location."""
+    """Freeze caller path text to one absolute canonical filesystem location.
+
+    Relative input is bound to one construction-time CWD before any filesystem
+    operation. A concurrent process-wide chdir during parent creation can
+    therefore never retarget the durable journal authority.
+    """
 
     candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
     # Parent creation is part of the existing JournalStore construction contract.
-    # Do it before resolve() so existing symlink components are canonicalized while
-    # a previously missing parent tree is still created relative to construction CWD.
+    # The candidate is already absolute, so any later CWD change cannot retarget
+    # which durable authority is created or selected.
     candidate.parent.mkdir(parents=True, exist_ok=True)
     return candidate.resolve(strict=False)
 

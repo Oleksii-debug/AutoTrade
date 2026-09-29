@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 from hashlib import sha256
+from io import BytesIO
 import json
 from pathlib import Path
 import re
@@ -38,19 +39,47 @@ NVDA_PROTOCOL_ID = "real-nvda-keyboard-v1"
 NVDA_PROTOCOL_VERSION = "1.0.0"
 NVDA_EVIDENCE_KIND = "NVDA_REAL_RUN"
 SIGNED_ATTESTATION_REQUIRED = "SIGNED_QUALIFICATION_ATTESTATION_REQUIRED"
+_MAX_RELEASE_BUNDLE_BYTES = 1024 * 1024 * 1024
+_MAX_RELEASE_MANIFEST_BYTES = 1024 * 1024
 
 
 class NvdaQualificationError(ValueError):
     pass
 
 
-def _load(path: Path, *, name: str) -> dict[str, object]:
+def _read_file_bytes(path: Path, *, name: str) -> bytes:
+    """Read one immutable process-local snapshot of an authority input."""
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+        if not path.is_file():
+            raise NvdaQualificationError(f"{name} must be a readable file")
+        payload = path.read_bytes()
+    except OSError as error:
+        raise NvdaQualificationError(f"{name} cannot be read") from error
+    return payload
+
+
+def _parse_json_snapshot(payload: bytes, *, name: str) -> dict[str, object]:
+    try:
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise NvdaQualificationError(f"{name} is missing or invalid") from error
     if not isinstance(value, dict):
         raise NvdaQualificationError(f"{name} must be an object")
+    return value
+
+
+def _load_json_snapshot(
+    path: Path,
+    *,
+    name: str,
+) -> tuple[dict[str, object], bytes, str]:
+    payload = _read_file_bytes(path, name=name)
+    value = _parse_json_snapshot(payload, name=name)
+    return value, payload, "sha256:" + sha256(payload).hexdigest()
+
+
+def _load(path: Path, *, name: str) -> dict[str, object]:
+    value, _, _ = _load_json_snapshot(path, name=name)
     return value
 
 
@@ -111,7 +140,9 @@ def validate_evidence(
     required_environment = requirements.get("required_environment")
     if not isinstance(required_environment, dict):
         raise NvdaQualificationError("requirements.required_environment must be an object")
-    required_os = _required_text(required_environment.get("os_family"), name="requirements.os_family")
+    required_os = _required_text(
+        required_environment.get("os_family"), name="requirements.os_family"
+    )
     required_at = _required_text(
         required_environment.get("assistive_technology"),
         name="requirements.assistive_technology",
@@ -133,7 +164,9 @@ def validate_evidence(
             f"qualification must use required assistive technology: {required_at}"
         )
     if evidence.get("release_artifact") is not True:
-        raise NvdaQualificationError("qualification must run against the delivered release artifact")
+        raise NvdaQualificationError(
+            "qualification must run against the delivered release artifact"
+        )
 
     observations = evidence.get("workflows")
     if not isinstance(observations, list):
@@ -158,7 +191,9 @@ def validate_evidence(
             raise NvdaQualificationError(
                 f"{workflow_id}.requirement_sha256 must be an immutable sha256 digest"
             )
-        evidence_ref = _required_text(item.get("evidence_ref"), name=f"{workflow_id}.evidence_ref")
+        evidence_ref = _required_text(
+            item.get("evidence_ref"), name=f"{workflow_id}.evidence_ref"
+        )
         if SHA256.fullmatch(evidence_ref) is None:
             raise NvdaQualificationError(
                 f"{workflow_id}.evidence_ref must be an immutable sha256 digest"
@@ -202,7 +237,9 @@ def validate_evidence(
         raise NvdaQualificationError("observed_at must be an ISO timestamp") from error
     if observed_instant.tzinfo is None:
         raise NvdaQualificationError("observed_at must include timezone")
-    observed_at = observed_instant.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    observed_at = (
+        observed_instant.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    )
     return {
         "schema_version": "1.0.0",
         "evidence_complete": True,
@@ -220,41 +257,35 @@ def validate_evidence(
 
 
 def evidence_digest(path: Path) -> str:
-    try:
-        payload = path.read_bytes()
-    except OSError as error:
-        raise NvdaQualificationError("evidence file cannot be read") from error
+    payload = _read_file_bytes(path, name="evidence file")
     return "sha256:" + sha256(payload).hexdigest()
 
 
 def release_artifact_digest(path: Path) -> str:
-    try:
-        if not path.is_file():
-            raise NvdaQualificationError("release artifact must be a readable file")
-        payload = path.read_bytes()
-    except OSError as error:
-        raise NvdaQualificationError("release artifact cannot be read") from error
+    payload = _read_file_bytes(path, name="release artifact")
     return "sha256:" + sha256(payload).hexdigest()
 
 
-def _release_bundle_source_sha(release_artifact: Path) -> str:
+def _release_bundle_source_sha_from_bytes(payload: bytes) -> str:
+    if len(payload) > _MAX_RELEASE_BUNDLE_BYTES:
+        raise NvdaQualificationError("release artifact is unreasonably large")
     try:
-        with zipfile.ZipFile(release_artifact, "r") as archive:
+        with zipfile.ZipFile(BytesIO(payload), "r") as archive:
             manifest_names = [
-                name for name in archive.namelist()
-                if name == "bundle-manifest.json"
+                name for name in archive.namelist() if name == "bundle-manifest.json"
             ]
             if len(manifest_names) != 1:
                 raise NvdaQualificationError(
                     "release artifact must contain exactly one bundle-manifest.json"
                 )
             info = archive.getinfo("bundle-manifest.json")
-            if info.file_size > 1024 * 1024:
-                raise NvdaQualificationError("release bundle manifest is unreasonably large")
-            try:
-                manifest = json.loads(
-                    archive.read(info).decode("utf-8")
+            if info.file_size > _MAX_RELEASE_MANIFEST_BYTES:
+                raise NvdaQualificationError(
+                    "release bundle manifest is unreasonably large"
                 )
+            try:
+                manifest_payload = archive.read(info)
+                manifest = json.loads(manifest_payload.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as error:
                 raise NvdaQualificationError(
                     "release bundle manifest is invalid"
@@ -269,7 +300,9 @@ def _release_bundle_source_sha(release_artifact: Path) -> str:
     if manifest.get("product") != "AutoTrade":
         raise NvdaQualificationError("release bundle product must be AutoTrade")
     if manifest.get("mode") != "release":
-        raise NvdaQualificationError("NVDA qualification requires a release-mode bundle")
+        raise NvdaQualificationError(
+            "NVDA qualification requires a release-mode bundle"
+        )
     if manifest.get("release_eligible") is not True:
         raise NvdaQualificationError(
             "NVDA qualification requires a release-eligible bundle"
@@ -285,6 +318,11 @@ def _release_bundle_source_sha(release_artifact: Path) -> str:
     return source_sha
 
 
+def _release_bundle_source_sha(release_artifact: Path) -> str:
+    payload = _read_file_bytes(release_artifact, name="release artifact")
+    return _release_bundle_source_sha_from_bytes(payload)
+
+
 def validate_release_artifact_binding(
     evidence: dict[str, object],
     release_artifact: Path,
@@ -297,12 +335,13 @@ def validate_release_artifact_binding(
         raise NvdaQualificationError(
             "artifact_sha256 must be canonical sha256:<64 lowercase hex>"
         )
-    actual = release_artifact_digest(release_artifact)
+    payload = _read_file_bytes(release_artifact, name="release artifact")
+    actual = "sha256:" + sha256(payload).hexdigest()
     if declared != actual:
         raise NvdaQualificationError(
             "release artifact SHA-256 does not match NVDA evidence"
         )
-    artifact_source_sha = _release_bundle_source_sha(release_artifact)
+    artifact_source_sha = _release_bundle_source_sha_from_bytes(payload)
     evidence_source_sha = _required_text(
         evidence.get("source_sha"),
         name="source_sha",
@@ -426,10 +465,7 @@ def validate_trusted_nvda_qualification(
 
 
 def _load_trust_inputs(args):
-    values = (
-        args.attestation,
-        args.evidence_store,
-    )
+    values = (args.attestation, args.evidence_store)
     if any(value is not None for value in values) and not all(
         value is not None for value in values
     ):
@@ -447,13 +483,13 @@ def _load_trust_inputs(args):
             _load(args.attestation, name="signed NVDA attestation")
         )
     except (QualificationTrustError, TypeError, ValueError) as error:
-        raise NvdaQualificationError(
-            "signed NVDA trust inputs are invalid"
-        ) from error
-    return (
-        receipt,
-        ArtifactStore(args.evidence_store),
-    )
+        raise NvdaQualificationError("signed NVDA trust inputs are invalid") from error
+    return receipt, ArtifactStore(args.evidence_store)
+
+
+def _load_evidence_once(path: Path) -> tuple[dict[str, object], str]:
+    evidence, _, digest = _load_json_snapshot(path, name="evidence")
+    return evidence, digest
 
 
 def main() -> int:
@@ -497,7 +533,7 @@ def main() -> int:
                     raise NvdaQualificationError(
                         "qualified status requires signed qualification trust inputs"
                     )
-                evidence = _load(evidence_path, name="evidence")
+                evidence, raw_evidence_sha = _load_evidence_once(evidence_path)
                 actual_artifact_sha = validate_release_artifact_binding(
                     evidence,
                     args.release_artifact,
@@ -506,7 +542,7 @@ def main() -> int:
                 result = validate_trusted_nvda_qualification(
                     evidence,
                     requirements,
-                    evidence_sha256=evidence_digest(evidence_path),
+                    evidence_sha256=raw_evidence_sha,
                     release_artifact_sha256=actual_artifact_sha,
                     receipt=receipt,
                     evidence_store=evidence_store,
@@ -534,18 +570,19 @@ def main() -> int:
             return 0
 
         if args.evidence is None:
-            raise NvdaQualificationError("--evidence is required unless --check-status is used")
+            raise NvdaQualificationError(
+                "--evidence is required unless --check-status is used"
+            )
         if args.release_artifact is None:
             raise NvdaQualificationError(
                 "--release-artifact is required for real NVDA qualification"
             )
-        evidence = _load(args.evidence, name="evidence")
+        evidence, raw_evidence_sha = _load_evidence_once(args.evidence)
         result = validate_evidence(evidence, requirements)
         actual_artifact_sha = validate_release_artifact_binding(
             evidence,
             args.release_artifact,
         )
-        raw_evidence_sha = evidence_digest(args.evidence)
         result["artifact_sha256"] = actual_artifact_sha
         result["evidence_sha256"] = raw_evidence_sha
         if trust is None:

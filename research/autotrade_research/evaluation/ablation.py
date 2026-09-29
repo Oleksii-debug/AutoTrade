@@ -425,6 +425,57 @@ class ExactAblationDecision:
     rhs: Fraction
     status: str
 
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.pair_count, int)
+            or isinstance(self.pair_count, bool)
+            or self.pair_count < 2
+        ):
+            raise ValueError("exact decision pair_count must be an integer >= 2")
+        for field_name in (
+            "mean",
+            "sample_variance",
+            "threshold_delta",
+            "uncertainty_multiplier",
+            "lhs",
+            "rhs",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, Fraction):
+                raise TypeError(f"{field_name} must be Fraction")
+            validate_fraction(value)
+        if self.sample_variance < 0:
+            raise ValueError("sample_variance must be non-negative")
+        if self.uncertainty_multiplier < 0:
+            raise ValueError("uncertainty_multiplier must be non-negative")
+        expected_lhs = _fraction_multiply(
+            self.threshold_delta,
+            self.threshold_delta,
+        )
+        expected_rhs = _fraction_multiply(
+            _fraction_multiply(
+                self.uncertainty_multiplier,
+                self.uncertainty_multiplier,
+            ),
+            _fraction_divide(
+                self.sample_variance,
+                Fraction(self.pair_count, 1),
+            ),
+        )
+        if self.lhs != expected_lhs or self.rhs != expected_rhs:
+            raise ValueError("exact decision comparison operands are inconsistent")
+        expected_status = (
+            "FAIL"
+            if self.threshold_delta < 0
+            else (
+                "PASS"
+                if self.uncertainty_multiplier == 0 or self.lhs >= self.rhs
+                else "FAIL"
+            )
+        )
+        if self.status != expected_status:
+            raise ValueError("exact decision status is inconsistent with operands")
+
 
 @dataclass(frozen=True)
 class AblationEvaluation:
@@ -786,6 +837,28 @@ class AblationEvidenceBundle:
             raise ValueError("evaluation uncertainty_multiplier must match the bundle")
         if self.evaluation.pair_count > self.pair_count:
             raise ValueError("evaluation pair_count cannot exceed locked pair_count")
+        decision = self.evaluation.decision_exact
+        if self.evaluation.status in {"PASS", "FAIL"}:
+            if decision is None:
+                raise ValueError("terminal evaluation requires exact decision material")
+            if decision.pair_count != self.evaluation.pair_count:
+                raise ValueError("exact decision pair_count must match evaluation")
+            if decision.status != self.evaluation.status:
+                raise ValueError("exact decision status must match evaluation")
+            if decision.uncertainty_multiplier != as_fraction(multiplier):
+                raise ValueError(
+                    "exact decision uncertainty multiplier must match evaluation"
+                )
+            expected_delta = _fraction_subtract(
+                decision.mean,
+                as_fraction(required),
+            )
+            if decision.threshold_delta != expected_delta:
+                raise ValueError(
+                    "exact decision threshold delta must match evaluation policy"
+                )
+        elif decision is not None:
+            raise ValueError("inconclusive evaluation cannot carry terminal exact decision")
         if not isinstance(self.payload, str) or not self.payload:
             raise ValueError("payload must be non-empty canonical JSON")
         object.__setattr__(

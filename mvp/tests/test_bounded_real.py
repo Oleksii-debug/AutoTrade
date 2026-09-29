@@ -536,7 +536,7 @@ class BoundedRealQualificationTests(unittest.TestCase):
 
         rebound = SignedQualificationAttestation(
             forged_receipt.attestation,
-            legitimate_receipt.signature,
+            legitimate_receipt.signature_b64,
         )
         real_verify = bounded_real_module.verify_canonical_qualification_attestation
 

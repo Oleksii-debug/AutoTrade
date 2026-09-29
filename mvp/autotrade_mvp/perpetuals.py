@@ -110,6 +110,24 @@ def _finite(value: Fraction) -> Decimal:
     return terminating_decimal(value)
 
 
+def _fadd(left: Fraction, right: Fraction) -> Fraction:
+    return bounded_fraction(left + right)
+
+
+def _fsub(left: Fraction, right: Fraction) -> Fraction:
+    return bounded_fraction(left - right)
+
+
+def _fmul(left: Fraction, right: Fraction) -> Fraction:
+    return bounded_fraction(left * right)
+
+
+def _fdiv(left: Fraction, right: Fraction) -> Fraction:
+    if right == 0:
+        raise ZeroDivisionError("exact rational divisor must be non-zero")
+    return bounded_fraction(left / right)
+
+
 @dataclass(frozen=True)
 class PerpetualContract:
     instrument_id: str
@@ -218,8 +236,11 @@ class MarketSnapshot:
             raise PerpetualError("market snapshot cannot come from the future")
         if point - self.observed_at > self.max_age:
             raise PerpetualError("market snapshot is stale")
-        distance = abs(_fraction(self.mark_price) - _fraction(self.index_price))
-        permitted = _fraction(self.max_mark_index_deviation) * _fraction(self.index_price)
+        distance = abs(_fsub(_fraction(self.mark_price), _fraction(self.index_price)))
+        permitted = _fmul(
+            _fraction(self.max_mark_index_deviation),
+            _fraction(self.index_price),
+        )
         if distance > permitted:
             raise PerpetualError("mark/index deviation exceeds configured bound")
 
@@ -318,10 +339,10 @@ class LiquidationSnapshot:
         if self.side == "LONG":
             if self.liquidation_price >= mark:
                 raise PerpetualError("long liquidation boundary must be below current mark")
-            return (mark_fraction - liquidation_fraction) / mark_fraction
+            return _fdiv(_fsub(mark_fraction, liquidation_fraction), mark_fraction)
         if self.liquidation_price <= mark:
             raise PerpetualError("short liquidation boundary must be above current mark")
-        return (liquidation_fraction - mark_fraction) / mark_fraction
+        return _fdiv(_fsub(liquidation_fraction, mark_fraction), mark_fraction)
 
 
 def require_liquidation_headroom(
@@ -346,12 +367,12 @@ def require_liquidation_headroom(
     if liquidation.side == "LONG":
         if liquidation.liquidation_price >= mark:
             raise PerpetualError("long liquidation boundary must be below current mark")
-        distance = _fraction(mark) - _fraction(liquidation.liquidation_price)
+        distance = _fsub(_fraction(mark), _fraction(liquidation.liquidation_price))
     else:
         if liquidation.liquidation_price <= mark:
             raise PerpetualError("short liquidation boundary must be above current mark")
-        distance = _fraction(liquidation.liquidation_price) - _fraction(mark)
-    required_distance = _fraction(minimum) * _fraction(mark)
+        distance = _fsub(_fraction(liquidation.liquidation_price), _fraction(mark))
+    required_distance = _fmul(_fraction(minimum), _fraction(mark))
     if distance < required_distance:
         raise PerpetualError("liquidation headroom is below configured minimum")
     return liquidation.headroom_fraction(mark)
@@ -495,12 +516,10 @@ def stressed_loss(
     move = _decimal(adverse_move_fraction, "adverse_move_fraction", positive=True)
     if move >= 1:
         raise PerpetualError("adverse_move_fraction must be below one")
-    return _finite(
-        abs(_fraction(position))
-        * _fraction(contract.multiplier)
-        * _fraction(mark)
-        * _fraction(move)
-    )
+    loss = _fmul(abs(_fraction(position)), _fraction(contract.multiplier))
+    loss = _fmul(loss, _fraction(mark))
+    loss = _fmul(loss, _fraction(move))
+    return _finite(loss)
 
 
 def require_new_risk_capacity(

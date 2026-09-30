@@ -76,6 +76,32 @@ def _canonical_json(value) -> str:
     )
 
 
+def _read_strict_strategy_json(value: str) -> object:
+    # Shared parser for restored strategy state and its registered run receipt.
+    # Duplicate evidence keys, exotic numbers and costly integers cannot
+    # acquire authority through Python's permissive default JSON decoder.
+    def unique_keys(pairs):
+        result = {}
+        for key, item in pairs:
+            if key in result:
+                raise ValueError("strategy evidence contains duplicate JSON keys")
+            result[key] = item
+        return result
+
+    def deny_noninteger_numeric(_token):
+        raise ValueError("strategy evidence contains forbidden JSON numeric token")
+
+    if type(value) is not str:
+        raise TypeError("strategy JSON must be an exact string")
+    return json.loads(
+        value,
+        object_pairs_hook=unique_keys,
+        parse_int=parse_bounded_json_integer_token,
+        parse_float=deny_noninteger_numeric,
+        parse_constant=deny_noninteger_numeric,
+    )
+
+
 @dataclass(frozen=True)
 class StrategyDescriptor:
     """Immutable identity for one deterministic strategy configuration."""
@@ -513,8 +539,8 @@ class RegisteredStrategyRunReceipt:
     @classmethod
     def from_json(cls, value: str) -> "RegisteredStrategyRunReceipt":
         try:
-            payload = json.loads(value)
-        except (TypeError, json.JSONDecodeError) as error:
+            payload = _read_strict_strategy_json(value)
+        except (TypeError, ValueError) as error:
             raise ValueError("registered run receipt is invalid JSON") from error
         expected = {
             "schema_version", "strategy_snapshot", "instrument_version", "symbol",
@@ -1311,27 +1337,8 @@ class ReturnThresholdBaseline:
 
     @classmethod
     def restore(cls, snapshot: str) -> "ReturnThresholdBaseline":
-        def unique_keys(pairs):
-            result = {}
-            for key, value in pairs:
-                if key in result:
-                    raise ValueError("strategy snapshot contains duplicate JSON keys")
-                result[key] = value
-            return result
-
-        def deny_noninteger_numeric(_text):
-            # Prices, threshold and quantity have canonical string authority;
-            # unexpected float/nonfinite JSON tokens cannot be reconstructed.
-            raise ValueError("strategy snapshot contains forbidden JSON numeric token")
-
         try:
-            payload = json.loads(
-                snapshot,
-                object_pairs_hook=unique_keys,
-                parse_int=parse_bounded_json_integer_token,
-                parse_float=deny_noninteger_numeric,
-                parse_constant=deny_noninteger_numeric,
-            )
+            payload = _read_strict_strategy_json(snapshot)
         except (TypeError, ValueError) as error:
             raise ValueError("strategy snapshot is invalid") from error
         if (

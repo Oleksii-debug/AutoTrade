@@ -1751,6 +1751,36 @@ class DeterministicStrategyTests(unittest.TestCase):
         self.assertEqual(restored.fingerprint, receipt.fingerprint)
         self.assertEqual(proposal.economic_edge_claim, "UNPROVEN")
 
+    def test_registered_receipt_json_rejects_duplicate_evidence_and_unbounded_numbers(self):
+        _proposal, receipt = run_registered_baseline(
+            ReturnThresholdBaseline(
+                lookback=2, threshold="0.01", proposal_quantity="2",
+                descriptor=self.descriptor(),
+            ),
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA", instrument_version="instrument:aaa@7",
+        )
+        raw = receipt.to_json()
+        self.assertIn('"model_calls":0', raw)
+        self.assertIn('"symbol":"AAA"', raw)
+        invalid = (
+            raw.replace('"symbol":"AAA"', '"symbol":"AAA","symbol":"AAA"', 1),
+            raw.replace('"model_calls":0', '"model_calls":0,"model_calls":0', 1),
+            raw.replace('"model_calls":0', '"model_calls":NaN', 1),
+            raw.replace('"model_calls":0', '"model_calls":0.0', 1),
+            raw.replace('"model_calls":0', '"model_calls":' + "9" * 257, 1),
+        )
+        for index, serialized in enumerate(invalid):
+            with self.subTest(index=index), self.assertRaisesRegex(
+                ValueError, "invalid JSON"
+            ):
+                RegisteredStrategyRunReceipt.from_json(serialized)
+        self.assertEqual(
+            RegisteredStrategyRunReceipt.from_json(raw).fingerprint,
+            receipt.fingerprint,
+        )
+
     def test_forged_registered_looking_proposal_without_receipt_cannot_bind(self):
         descriptor = self.descriptor()
         proposal, _receipt = run_registered_baseline(

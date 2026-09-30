@@ -132,6 +132,7 @@ def _publish(
             "account_id": account_id,
             "entity_id": "entity-1",
             "environment": "PAPER",
+            "provider_environment": "PAPER",
             "instrument_version": "instrument-v1",
             "observed_at": observed_at,
             "issuer_ref": _issuer_ref(source),

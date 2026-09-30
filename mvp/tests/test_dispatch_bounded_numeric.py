@@ -112,6 +112,17 @@ class DispatchBoundedNumericTransportTests(unittest.TestCase):
             del store.__dict__["append_event"]
 
             other = JournalStore(directory + "/other.sqlite3")
+            original_path = store.path
+            original_identity = store.store_identity
+            store.path = other.path
+            store._store_identity = other.store_identity
+            with self.assertRaisesRegex(
+                PermissionError, "submission journal authority changed"
+            ):
+                dispatcher._events("mutated-generation")
+            store.path = original_path
+            store._store_identity = original_identity
+
             dispatcher.store = other
             with self.assertRaisesRegex(
                 PermissionError, "submission journal authority changed"

@@ -1265,6 +1265,201 @@ class DeterministicStrategyTests(unittest.TestCase):
         )
 
 
+    def test_registered_exact_threshold_receipt_is_ambient_context_invariant(self):
+        # Equal registered observations must not mint different decisions/receipts
+        # when the caller changes the process-global Decimal context.
+        cases = (
+            (("100", "101.0000000000000001"), "BUY"),
+            (("100", "98.9999999999999999"), "SELL"),
+        )
+        from decimal import ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN, localcontext
+        for values, action in cases:
+            outcomes = []
+            for precision in (6, 10, 28, 80):
+                for rounding in (ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN):
+                    with localcontext() as context:
+                        context.prec, context.rounding = precision, rounding
+                        proposal, receipt = run_registered_baseline(
+                            ReturnThresholdBaseline(
+                                lookback=2, threshold="0.01", proposal_quantity="1",
+                                descriptor=self.descriptor(),
+                            ),
+                            [obs(0, values[0]), obs(1, values[1])],
+                            decision_time=BASE + timedelta(minutes=1),
+                            symbol="AAA", instrument_version="instrument:aaa@7",
+                        )
+                        self.assertEqual(proposal.action, action)
+                        self.assertEqual(verify_registered_strategy_run(proposal, receipt), receipt.fingerprint)
+                        outcomes.append((proposal, receipt.fingerprint))
+            self.assertEqual(outcomes, [outcomes[0]] * len(outcomes))
+
+    def test_registered_runner_rejects_polymorphic_strategy_and_descriptor(self):
+        class HostileStrategy(ReturnThresholdBaseline):
+            def snapshot(self):
+                raise AssertionError("virtual registered-run snapshot")
+
+        with self.assertRaisesRegex(TypeError, "ReturnThresholdBaseline"):
+            run_registered_baseline(
+                HostileStrategy(lookback=2, threshold="0.01", proposal_quantity="1",
+                                descriptor=self.descriptor()),
+                [obs(0, "100"), obs(1, "102")],
+                decision_time=BASE + timedelta(minutes=1),
+                symbol="AAA", instrument_version="instrument:aaa@7",
+            )
+
+        class HostileDescriptor(StrategyDescriptor):
+            def __getattribute__(self, name):
+                if name == "fingerprint" and getattr(self, "_armed", False):
+                    raise AssertionError("virtual descriptor fingerprint")
+                return super().__getattribute__(name)
+
+        descriptor = HostileDescriptor(**self.descriptor().__dict__)
+        strategy = ReturnThresholdBaseline(
+            lookback=2, threshold="0.01", proposal_quantity="1",
+            descriptor=descriptor,
+        )
+        object.__setattr__(descriptor, "_armed", True)
+        with self.assertRaisesRegex(TypeError, "canonical StrategyDescriptor"):
+            run_registered_baseline(
+                strategy, [obs(0, "100"), obs(1, "102")],
+                decision_time=BASE + timedelta(minutes=1),
+                symbol="AAA", instrument_version="instrument:aaa@7",
+            )
+
+    def test_registered_run_rejects_observation_subclass_and_tuple_subclass(self):
+        class HostileObservation(CausalObservation):
+            def __getattribute__(self, name):
+                if name in ("event_id", "available_at") and getattr(self, "_armed", False):
+                    raise AssertionError("virtual observation identity")
+                return super().__getattribute__(name)
+
+        raw = obs(0, "100")
+        hostile = HostileObservation(**raw.__dict__)
+        object.__setattr__(hostile, "_armed", True)
+        normal = ReturnThresholdBaseline(
+            lookback=2, threshold="0.01", proposal_quantity="1",
+            descriptor=self.descriptor(),
+        )
+        with self.assertRaisesRegex(TypeError, "CausalObservation"):
+            run_registered_baseline(
+                normal, [hostile, obs(1, "102")],
+                decision_time=BASE + timedelta(minutes=1),
+                symbol="AAA", instrument_version="instrument:aaa@7",
+            )
+        proposal, receipt = run_registered_baseline(
+            normal, [raw, obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA", instrument_version="instrument:aaa@7",
+        )
+        with self.assertRaisesRegex(TypeError, "CausalObservation"):
+            RegisteredStrategyRunReceipt(
+                strategy_snapshot=receipt.strategy_snapshot,
+                instrument_version=receipt.instrument_version,
+                symbol=receipt.symbol, decision_time=receipt.decision_time,
+                observations=(hostile, obs(1, "102")), proposal=proposal,
+            )
+
+        class HostileTuple(tuple):
+            def __iter__(self):
+                raise AssertionError("virtual observation ordering")
+        with self.assertRaisesRegex(ValueError, "observations must be a tuple"):
+            RegisteredStrategyRunReceipt(
+                strategy_snapshot=receipt.strategy_snapshot,
+                instrument_version=receipt.instrument_version,
+                symbol=receipt.symbol, decision_time=receipt.decision_time,
+                observations=HostileTuple(receipt.observations), proposal=proposal,
+            )
+
+    def test_registered_verifier_and_economic_join_refuse_subclass_getters(self):
+        class HostileProposal(DeterministicProposal):
+            def __getattribute__(self, name):
+                if name in ("symbol", "information_cutoff") and getattr(self, "_armed", False):
+                    raise AssertionError("virtual proposal getter")
+                return super().__getattribute__(name)
+        class HostileReceipt(RegisteredStrategyRunReceipt):
+            def __getattribute__(self, name):
+                if name == "proposal" and getattr(self, "_armed", False):
+                    raise AssertionError("virtual receipt getter")
+                return super().__getattribute__(name)
+        class HostileBinding(StrategyEconomicsBinding):
+            def __getattribute__(self, name):
+                if name == "status" and getattr(self, "_armed", False):
+                    raise AssertionError("virtual economics getter")
+                return super().__getattribute__(name)
+
+        proposal, receipt = run_registered_baseline(
+            ReturnThresholdBaseline(
+                lookback=2, threshold="0.01", proposal_quantity="1",
+                descriptor=self.descriptor(),
+            ),
+            [obs(0, "100"), obs(1, "102")],
+            decision_time=BASE + timedelta(minutes=1),
+            symbol="AAA", instrument_version="instrument:aaa@7",
+        )
+        forged_proposal = HostileProposal(**proposal.__dict__)
+        object.__setattr__(forged_proposal, "_armed", True)
+        with self.assertRaisesRegex(TypeError, "DeterministicProposal"):
+            verify_registered_strategy_run(forged_proposal, receipt)
+        with self.assertRaisesRegex(TypeError, "DeterministicProposal"):
+            RegisteredStrategyRunReceipt(
+                strategy_snapshot=receipt.strategy_snapshot,
+                instrument_version=receipt.instrument_version,
+                symbol=receipt.symbol, decision_time=receipt.decision_time,
+                observations=receipt.observations, proposal=forged_proposal,
+            )
+        forged_receipt = HostileReceipt(**receipt.__dict__)
+        object.__setattr__(forged_receipt, "_armed", True)
+        with self.assertRaisesRegex(TypeError, "RegisteredStrategyRunReceipt"):
+            verify_registered_strategy_run(proposal, forged_receipt)
+        economics = economics_binding(
+            proposal, instrument_version="instrument:aaa@7",
+            registered_run_receipt=receipt,
+        )
+        with self.assertRaisesRegex(TypeError, "DeterministicProposal"):
+            bind_strategy_economics(
+                forged_proposal, economics, instrument_version="instrument:aaa@7",
+                registered_run_receipt=receipt,
+            )
+        forged_economics = HostileBinding(**economics.__dict__)
+        object.__setattr__(forged_economics, "_armed", True)
+        with self.assertRaisesRegex(TypeError, "StrategyEconomicsBinding"):
+            bind_strategy_economics(
+                proposal, forged_economics, instrument_version="instrument:aaa@7",
+                registered_run_receipt=receipt,
+            )
+        with self.assertRaisesRegex(TypeError, "StrategyEconomicsBinding"):
+            to_decision_proposal(
+                proposal,
+                proposal_id="00000000-0000-0000-0000-000000000001",
+                instrument_version="instrument:aaa@7",
+                economics_binding=forged_economics,
+                exit_policy_ref="exit:1", compute_cost_currency="USD",
+                registered_run_receipt=receipt,
+            )
+
+    def test_registered_numeric_inputs_reject_hostile_decimal_and_str_subclasses(self):
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                raise AssertionError("virtual Decimal.is_finite")
+        class HostileText(str):
+            def __len__(self):
+                raise AssertionError("virtual str.__len__")
+        with self.assertRaises(TypeError):
+            CausalObservation.create(
+                event_id="hostile", symbol="AAA", available_at=BASE,
+                price=HostileDecimal("100"),
+            )
+        with self.assertRaises(TypeError):
+            ReturnThresholdBaseline(
+                lookback=2, threshold=HostileText("0.01"),
+                proposal_quantity="1", descriptor=self.descriptor(),
+            )
+        with self.assertRaises(ValueError):
+            ReturnThresholdBaseline(
+                lookback=2, threshold="1e99999",
+                proposal_quantity="1", descriptor=self.descriptor(),
+            )
+
     def test_registered_run_receipt_replays_and_roundtrips(self):
         descriptor = self.descriptor()
         proposal, receipt = run_registered_baseline(

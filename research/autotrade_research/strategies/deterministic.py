@@ -108,22 +108,22 @@ class StrategyDescriptor:
             object.__setattr__(self, name, _text(getattr(self, name), name=name))
         for name in ("version", "minimum_history", "horizon_seconds"):
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            if type(value) is not int or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
         for name in ("market_requirements", "supported_regimes"):
             value = getattr(self, name)
-            if isinstance(value, (str, bytes)) or not isinstance(value, tuple):
+            if type(value) is not tuple:
                 raise ValueError(f"{name} must be a tuple")
             normalized = tuple(_text(item, name=f"{name} item") for item in value)
             if not normalized or len(set(normalized)) != len(normalized):
                 raise ValueError(f"{name} must contain unique non-empty values")
             object.__setattr__(self, name, normalized)
-        if not isinstance(self.parameter_bounds, tuple) or not self.parameter_bounds:
+        if type(self.parameter_bounds) is not tuple or not self.parameter_bounds:
             raise ValueError("parameter_bounds must be a non-empty tuple")
         normalized_bounds = []
         names = set()
         for item in self.parameter_bounds:
-            if not isinstance(item, tuple) or len(item) != 3:
+            if type(item) is not tuple or len(item) != 3:
                 raise ValueError("parameter bound must be (name, minimum, maximum)")
             parameter = _text(item[0], name="parameter name")
             minimum = _decimal(item[1], name=f"{parameter} minimum")
@@ -239,10 +239,7 @@ class DeterministicProposal:
         if action in {"BUY", "SELL"} and quantity <= 0:
             raise ValueError("BUY/SELL proposal quantity must be positive")
         decision_time = _time(self.decision_time, name="decision_time")
-        if (
-            isinstance(self.evidence_event_ids, (str, bytes))
-            or not isinstance(self.evidence_event_ids, tuple)
-        ):
+        if type(self.evidence_event_ids) is not tuple:
             raise ValueError("evidence_event_ids must be a tuple")
         evidence = tuple(
             _text(value, name="evidence_event_id")
@@ -250,7 +247,7 @@ class DeterministicProposal:
         )
         if len(set(evidence)) != len(evidence):
             raise ValueError("evidence_event_ids contains duplicates")
-        if isinstance(self.model_calls, bool) or not isinstance(self.model_calls, int):
+        if type(self.model_calls) is not int:
             raise ValueError("model_calls must be integer zero")
         if self.model_calls != 0:
             raise ValueError("deterministic proposal cannot contain model calls")
@@ -277,8 +274,7 @@ class DeterministicProposal:
             object.__setattr__(self, "expiry", _time(self.expiry, name="expiry"))
         if self.horizon_seconds is not None:
             if (
-                isinstance(self.horizon_seconds, bool)
-                or not isinstance(self.horizon_seconds, int)
+                type(self.horizon_seconds) is not int
                 or self.horizon_seconds <= 0
             ):
                 raise ValueError("horizon_seconds must be a positive integer")
@@ -646,8 +642,7 @@ class StrategyEconomicsBinding:
                 "economics evidence is not causally available at information_cutoff"
             )
         if (
-            isinstance(self.horizon_seconds, bool)
-            or not isinstance(self.horizon_seconds, int)
+            type(self.horizon_seconds) is not int
             or self.horizon_seconds <= 0
         ):
             raise ValueError("horizon_seconds must be a positive integer")
@@ -660,9 +655,7 @@ class StrategyEconomicsBinding:
         object.__setattr__(self, "expiry", expiry)
         object.__setattr__(self, "available_at", available)
 
-        if isinstance(self.input_manifest_refs, (str, bytes)) or not isinstance(
-            self.input_manifest_refs, tuple
-        ):
+        if type(self.input_manifest_refs) is not tuple:
             raise ValueError("input_manifest_refs must be a tuple")
         manifests = tuple(
             _digest(value, name="input_manifest_ref")
@@ -717,9 +710,7 @@ class StrategyEconomicsBinding:
         object.__setattr__(self, "max_feasible_quantity", capacity)
         object.__setattr__(self, "lot_size", lot_size)
 
-        if isinstance(self.required_evidence_dimensions, (str, bytes)) or not isinstance(
-            self.required_evidence_dimensions, tuple
-        ):
+        if type(self.required_evidence_dimensions) is not tuple:
             raise ValueError("required_evidence_dimensions must be a tuple")
         required = tuple(
             _text(value, name="required_evidence_dimension").upper()
@@ -729,12 +720,12 @@ class StrategyEconomicsBinding:
             raise ValueError("required_evidence_dimensions contains duplicates")
         object.__setattr__(self, "required_evidence_dimensions", required)
 
-        if not isinstance(self.dimension_evidence, tuple):
+        if type(self.dimension_evidence) is not tuple:
             raise ValueError("dimension_evidence must be a tuple")
         evidence: list[tuple[str, str]] = []
         evidence_names: set[str] = set()
         for item in self.dimension_evidence:
-            if not isinstance(item, tuple) or len(item) != 2:
+            if type(item) is not tuple or len(item) != 2:
                 raise ValueError(
                     "dimension_evidence entries must be (dimension, sha256)"
                 )
@@ -1090,10 +1081,7 @@ class NoTradeBaseline:
     ) -> DeterministicProposal:
         name = _text(symbol, name="symbol")
         cutoff = _time(decision_time, name="decision_time")
-        if isinstance(evidence_event_ids, (str, bytes)) or not isinstance(
-            evidence_event_ids,
-            tuple,
-        ):
+        if type(evidence_event_ids) is not tuple:
             raise ValueError("evidence_event_ids must be a tuple")
         evidence = tuple(
             _text(value, name="evidence_event_id")
@@ -1132,7 +1120,7 @@ class ReturnThresholdBaseline:
         proposal_quantity,
         descriptor: StrategyDescriptor | None = None,
     ):
-        if not isinstance(lookback, int) or isinstance(lookback, bool) or lookback < 2:
+        if type(lookback) is not int or lookback < 2:
             raise ValueError("lookback must be an integer >= 2")
         self.lookback = lookback
         self.threshold = _decimal(threshold, name="threshold")
@@ -1182,7 +1170,7 @@ class ReturnThresholdBaseline:
         ).hexdigest()
 
     def ingest(self, observation: CausalObservation, *, simulation_time: datetime) -> bool:
-        if not isinstance(observation, CausalObservation):
+        if type(observation) is not CausalObservation:
             raise TypeError("observation must be CausalObservation")
         cutoff = _time(simulation_time, name="simulation_time")
         if observation.available_at > cutoff:

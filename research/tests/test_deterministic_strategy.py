@@ -1464,6 +1464,76 @@ class DeterministicStrategyTests(unittest.TestCase):
                 proposal_quantity="1", descriptor=self.descriptor(),
             )
 
+    def test_registered_value_graph_rejects_scalar_and_tuple_subclasses_before_callbacks(self):
+        touched = []
+
+        class CallerInt(int):
+            def __le__(self, other):
+                touched.append("int comparison")
+                raise AssertionError("caller integer comparison")
+
+            def __str__(self):
+                touched.append("int rendering")
+                raise AssertionError("caller integer rendering")
+
+        class CallerTuple(tuple):
+            def __iter__(self):
+                touched.append("tuple iteration")
+                raise AssertionError("caller tuple iteration")
+
+            def __len__(self):
+                touched.append("tuple length")
+                raise AssertionError("caller tuple length")
+
+        for field in ("version", "minimum_history", "horizon_seconds"):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                self.descriptor(**{field: CallerInt(2)})
+        with self.assertRaisesRegex(ValueError, "parameter_bounds"):
+            self.descriptor(parameter_bounds=CallerTuple((("threshold", "0", "1"),)))
+        with self.assertRaisesRegex(ValueError, "parameter bound"):
+            self.descriptor(parameter_bounds=(CallerTuple(("threshold", "0", "1")),))
+        with self.assertRaisesRegex(ValueError, "market_requirements"):
+            self.descriptor(market_requirements=CallerTuple(("CAUSAL_PRICE",)))
+        for attribute, value in (
+            ("model_calls", CallerInt(0)),
+            ("evidence_event_ids", CallerTuple(("x",))),
+            ("horizon_seconds", CallerInt(3600)),
+        ):
+            fields = dict(
+                symbol="AAA", action="HOLD", quantity="0", decision_time=BASE,
+                evidence_event_ids=(), model_calls=0,
+                economic_edge_claim="UNPROVEN", reason="no risk",
+                information_cutoff=BASE, horizon_seconds=3600,
+                expiry=BASE + timedelta(seconds=3600),
+            )
+            fields[attribute] = value
+            with self.subTest(attribute=attribute), self.assertRaises(ValueError):
+                DeterministicProposal(**fields)
+        with self.assertRaisesRegex(ValueError, "lookback"):
+            ReturnThresholdBaseline(
+                lookback=CallerInt(2), threshold="0.01",
+                proposal_quantity="1",
+            )
+        self.assertEqual(touched, [])
+
+    def test_strategy_ingest_rejects_observation_subclass_without_identity_reads(self):
+        class CallerObservation(CausalObservation):
+            def __getattribute__(self, name):
+                if name in {"event_id", "available_at"} and getattr(self, "_armed", False):
+                    raise AssertionError("caller observation getter")
+                return super().__getattribute__(name)
+
+        pristine = obs(0, "100")
+        caller = CallerObservation(**pristine.__dict__)
+        object.__setattr__(caller, "_armed", True)
+        strategy = ReturnThresholdBaseline(
+            lookback=2, threshold="0.01", proposal_quantity="1",
+        )
+        with self.assertRaisesRegex(TypeError, "CausalObservation"):
+            strategy.ingest(caller, simulation_time=BASE)
+        self.assertEqual(strategy._observations_by_id, {})
+        self.assertEqual(strategy._history, {})
+
     def test_causal_time_rejects_nested_timezone_callbacks_before_observation(self):
         called = []
 

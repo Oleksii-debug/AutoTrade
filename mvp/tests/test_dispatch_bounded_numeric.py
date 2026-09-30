@@ -69,6 +69,38 @@ class DispatchBoundedNumericTransportTests(unittest.TestCase):
                 Decimal("65000.10").as_tuple(),
             )
             self.assertIs(type(recovered.payload["integer"]), int)
+            aggregate_id = submission_attempt_aggregate_id(
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="numeric-response-a1",
+            )
+            terminal = store.load_events("submission_attempt", aggregate_id)[-1]
+            self.assertEqual(terminal["event_type"], "SubmissionSent")
+            self.assertNotIn("response", terminal["payload"])
+            self.assertEqual(
+                terminal["payload"]["response_sha256"],
+                "sha256:" + sha256(raw).hexdigest(),
+            )
+            # Exact replay is reconstructed from the SHA-bound bytes. A
+            # duplicate attempt never sends again and must preserve Decimal
+            # coefficient/trailing-zero identity across restart.
+            def forbidden_send(*_args):
+                self.fail("terminal exact submission was blindly retried")
+            repeated = dispatcher.dispatch(
+                attempt_id="numeric-response-a1",
+                intent_id="numeric-intent-a1",
+                intent_hash="numeric-intent-hash",
+                provider="BYBIT",
+                request={"symbol":"BTCUSD","qty":"1"},
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda _hash, _now:(True,"allowed"),
+                transport_send=forbidden_send,
+            )
+            self.assertEqual(repeated.status, "SENT")
+            self.assertEqual(
+                repeated.response["price"].as_tuple(),
+                Decimal("65000.10").as_tuple(),
+            )
 
     def test_resource_excess_cannot_construct_a_decimal_before_rejection(self):
         invalid = (

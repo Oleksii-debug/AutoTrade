@@ -9,11 +9,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Iterable, Mapping
 
 from .exact_decimal import (
     ExactDecimalError,
+    parse_bounded_exact_decimal,
     as_fraction,
     bounded_fraction,
     exact_abs,
@@ -31,12 +32,12 @@ def _decimal(value, *, name: str) -> Decimal:
             f"{name} must use exact built-in Decimal, string or integer input"
         )
     try:
-        result = value if type(value) is Decimal else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise ValueError(f"{name} must be a finite decimal") from error
-    if not Decimal.is_finite(result):
-        raise ValueError(f"{name} must be a finite decimal")
+        # Use one installed neutral admission BEFORE Decimal construction.
+        result = parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise ValueError(f"{name} must be a finite bounded decimal") from error
     try:
+        # Independent downstream exact-rational budget remains authoritative.
         as_fraction(result)
     except ExactDecimalError as error:
         raise ValueError(f"{name} exceeds exact decimal resource envelope") from error

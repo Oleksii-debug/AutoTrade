@@ -1,5 +1,9 @@
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 import unittest
+from unittest.mock import patch
+
+from autotrade_numeric import exact_decimal as neutral_decimal
+from mvp.autotrade_mvp import accounting as accounting_module
 
 from mvp.autotrade_mvp.accounting import (
     AccountingConflict,
@@ -910,6 +914,34 @@ class AccountingSemanticGraphAuthorityTests(unittest.TestCase):
 
 
 
+
+    def test_shared_bounded_ingress_rejects_numeric_bombs_before_constructor(self):
+        # A post-Decimal envelope check is not sufficient financial ingress.
+        for token in ("1e999999999", "9" * 257, "0." + "0" * 256 + "1", 10 ** 300):
+            with self.subTest(value=str(token)[:20]):
+                with patch.object(
+                    neutral_decimal, "Decimal",
+                    side_effect=AssertionError("unbounded Decimal construction"),
+                ) as constructor:
+                    with self.assertRaises(ValueError):
+                        accounting_module._decimal(token, name="quantity")
+                    constructor.assert_not_called()
+
+    def test_shared_bounded_ingress_accepts_boundary_values(self):
+        from autotrade_numeric import MAX_INTEGER_DIGITS, MAX_SCALE
+        for token in (
+            "1e" + str(MAX_INTEGER_DIGITS - 1),
+            "1e-" + str(MAX_SCALE),
+        ):
+            with self.subTest(token=token):
+                self.assertEqual(
+                    accounting_module._decimal(token, name="quantity"), Decimal(token),
+                )
+        class CallerText(str):
+            def __len__(self):
+                raise AssertionError("caller virtual len")
+        with self.assertRaises(TypeError):
+            accounting_module._decimal(CallerText("12"), name="quantity")
 
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@ import os
 from threading import Lock
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Protocol
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import (
     HTTPRedirectHandler,
@@ -946,8 +946,7 @@ class TradingWireResponse:
 
     def __post_init__(self) -> None:
         if (
-            isinstance(self.http_status, bool)
-            or not isinstance(self.http_status, int)
+            type(self.http_status) is not int
             or self.http_status < 100
             or self.http_status > 599
         ):
@@ -965,8 +964,7 @@ class AuthenticatedReadWireResponse:
 
     def __post_init__(self) -> None:
         if (
-            isinstance(self.http_status, bool)
-            or not isinstance(self.http_status, int)
+            type(self.http_status) is not int
             or self.http_status < 100
             or self.http_status > 599
         ):
@@ -1042,6 +1040,10 @@ class UrllibJsonWireClient:
         # Mutating the client during I/O cannot widen this send's read envelope.
         response_budget = self._response_budget()
         http_status: int | None = None
+        http_error_status: int | None = None
+        http_error_invalid_status = False
+        http_error_read_failed = False
+        transport_unavailable = False
         try:
             with self._opener.open(
                 outbound,
@@ -1053,28 +1055,49 @@ class UrllibJsonWireClient:
                     max_bytes=response_budget,
                 )
         except HTTPError as error:
-            # Redirects are prohibited for both reads and writes. For reads,
-            # preserve non-redirect HTTP status as a typed outcome so an error
-            # body can never be promoted to successful provider state.
-            if 300 <= int(error.code) < 400:
-                raise ProviderTransportError(
-                    "provider redirect is prohibited"
-                ) from error
-            raw = self._bounded_body(
-                error.read(response_budget + 1),
-                max_bytes=response_budget,
-            )
-            if type(raw) is not bytes or not raw:
-                raise ProviderTransportError(
-                    "provider returned an empty HTTP error response"
-                ) from error
+            # An HTTPError retains its request URL and sometimes provider
+            # headers, including signed read-query/credential material.
+            # Read at most one bounded body here, but NEVER raise or construct
+            # typed responses while the secret-bearing exception is active:
+            # implicit __context__/explicit __cause__ would expose it later.
+            try:
+                observed_status = error.code
+                if type(observed_status) is int and 100 <= observed_status <= 599:
+                    http_error_status = observed_status
+                else:
+                    http_error_invalid_status = True
+            except Exception:
+                http_error_invalid_status = True
+            if http_error_status is not None and not 300 <= http_error_status < 400:
+                try:
+                    raw = error.read(response_budget + 1)
+                except Exception:
+                    http_error_read_failed = True
+        except URLError:
+            # urllib's transport exception can retain request metadata too.
+            # The guarded caller already handles uncertainty after SEND.
+            transport_unavailable = True
+
+        # Only primitive, detached status/bytes/flags cross the exception
+        # boundary. New failures are generated OUTSIDE urllib exception scope,
+        # so their public context chain cannot contain the signed HTTPError.
+        if transport_unavailable:
+            raise ProviderTransportError("provider HTTP transport response unavailable")
+        if http_error_invalid_status:
+            raise ProviderTransportError("provider HTTP error status invalid")
+        if http_error_status is not None:
+            if 300 <= http_error_status < 400:
+                raise ProviderTransportError("provider redirect is prohibited")
+            if http_error_read_failed:
+                raise ProviderTransportError("provider HTTP error body unavailable")
+            raw = self._bounded_body(raw, max_bytes=response_budget)
             if is_authenticated_read:
                 return AuthenticatedReadWireResponse(
-                    http_status=int(error.code),
+                    http_status=http_error_status,
                     body=raw,
                 )
             return TradingWireResponse(
-                http_status=int(error.code),
+                http_status=http_error_status,
                 body=raw,
             )
         if type(raw) is not bytes or not raw:
@@ -1108,14 +1131,20 @@ def _exact_trading_response(
     Raw bytes remain accepted for injected legacy/test wire clients. Production
     UrllibJsonWireClient always returns TradingWireResponse for guarded writes.
     """
-    if isinstance(value, TradingWireResponse):
+    if type(value) is TradingWireResponse:
+        # Frozen dataclasses can still be built without __init__ or modified
+        # through object.__setattr__. Revalidate the nested HTTP status at
+        # the actual post-SEND authority boundary, before virtual comparisons.
+        status = value.http_status
+        if type(status) is not int or not 100 <= status <= 599:
+            raise ProviderTransportError("invalid trading HTTP response status")
         try:
             raw = require_provider_response_bytes(value.body, max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES)
         except (TypeError, ValueError) as error:
             raise ProviderTransportError("invalid or oversized trading response") from error
         return ExactJsonTransportResponse(
             raw,
-            http_status=value.http_status,
+            http_status=status,
         )
     if type(value) is bytes:
         try:
@@ -1126,6 +1155,38 @@ def _exact_trading_response(
     raise ProviderTransportError(
         "trading wire client returned an unsupported response contract"
     )
+
+
+def _binance_exact_trading_response(
+    value: object,
+) -> ExactJsonTransportResponse:
+    """Conservatively classify Binance Spot order-send execution uncertainty.
+
+    Binance documents that 5xx does NOT mean the matching engine rejected the
+    order. It also identifies -1007 as execution-status-unknown. Preserve the
+    exact status and response bytes for reconciliation; NEVER blindly retry
+    after GuardedDispatcher's irreversible send barrier. Validated ordinary
+    4xx denials and successful responses retain their existing semantics.
+    This classification is no substitute for qualified provider-origin truth.
+    """
+    exact = _exact_trading_response(value)
+    status = exact.http_status
+    parsed = exact.payload
+    if status is not None and 500 <= status <= 599:
+        return ExactJsonTransportResponse(
+            exact.response_bytes,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="binance_spot_http_5xx_execution_unknown",
+        )
+    if type(parsed) is dict and type(parsed.get("code")) is int and parsed["code"] == -1007:
+        return ExactJsonTransportResponse(
+            exact.response_bytes,
+            http_status=status,
+            requires_reconciliation=True,
+            ambiguity_reason="binance_spot_backend_timeout_execution_unknown",
+        )
+    return exact
 
 
 def _whitebit_exact_trading_response(
@@ -3469,12 +3530,10 @@ class BybitV5HttpTransport:
             instrument_version=instrument_version,
         )
         final_guard()
-        raw = self.wire_client.send(signed)
-        if not isinstance(raw, bytes):
-            raise ProviderTransportError(
-                "Bybit order wire client must return exact response bytes"
-            )
-        return ExactJsonTransportResponse(raw)
+        # Shared production urllib returns typed status+body, while legacy
+        # injected diagnostic wire clients may return exact raw bytes.
+        wire_response = self.wire_client.send(signed)
+        return _exact_trading_response(wire_response)
 
 
 class BybitV5AuthenticatedReadSigner:
@@ -4075,7 +4134,7 @@ class BinanceSpotHttpTransport:
         # GuardedDispatcher records UNKNOWN and requires reconciliation.
         final_guard()
         wire_response = self.wire_client.send(signed)
-        return _exact_trading_response(wire_response)
+        return _binance_exact_trading_response(wire_response)
 
 
 class BinanceSpotAuthenticatedReadSigner:

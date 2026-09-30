@@ -212,6 +212,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                     generation=int(second["generation"]),
                     output_refs=[accepted],
                     artifact_store=artifacts,
+                    artifact_root=Path(directory) / "artifacts",
                     now=self.now + timedelta(seconds=12),
                 )
             )
@@ -371,6 +372,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                     verdict="PROVEN_NOT_RUN",
                     evidence_ref=evidence,
                     artifact_store=artifact_store,
+                    artifact_root=Path(directory) / "external-resolution-artifacts",
                     now=self.now + timedelta(seconds=12),
                 )
             )
@@ -437,6 +439,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                     verdict="PROVEN_SUCCEEDED",
                     evidence_ref=evidence,
                     artifact_store=artifact_store,
+                    artifact_root=Path(directory) / "external-resolution-artifacts",
                     output_refs=outputs,
                     now=resolved_at,
                 )
@@ -511,6 +514,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                     verdict="PROVEN_NOT_RUN",
                     evidence_ref=first_evidence,
                     artifact_store=first_artifact_store,
+                    artifact_root=Path(directory) / "external-resolution-artifacts",
                     now=self.now + timedelta(seconds=12),
                 )
             )
@@ -561,6 +565,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                     verdict="PROVEN_NOT_RUN",
                     evidence_ref=second_evidence,
                     artifact_store=second_artifact_store,
+                    artifact_root=Path(directory) / "external-resolution-artifacts",
                     now=self.now + timedelta(seconds=26),
                 )
             )
@@ -623,6 +628,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                     verdict="PROVEN_NOT_RUN",
                     evidence_ref=evidence_ref,
                     artifact_store=artifact_store,
+                    artifact_root=Path(directory) / "external-resolution-artifacts",
                     now=self.now + timedelta(seconds=12),
                 )
             self.assertEqual(store.get(job["job_id"])["state"], "WAITING_EXTERNAL")
@@ -661,6 +667,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                     verdict="PROVEN_SUCCEEDED",
                     evidence_ref=evidence_ref,
                     artifact_store=artifact_store,
+                    artifact_root=Path(directory) / "external-resolution-artifacts",
                     output_refs=[nonexistent_output],
                     now=self.now + timedelta(seconds=12),
                 )
@@ -713,6 +720,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                     verdict="PROVEN_SUCCEEDED",
                     evidence_ref=evidence,
                     artifact_store=artifacts,
+                    artifact_root=Path(directory) / "artifacts",
                     output_refs=[output_b],
                     now=self.now + timedelta(seconds=12),
                 )
@@ -762,6 +770,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                     verdict="PROVEN_SUCCEEDED",
                     evidence_ref=evidence,
                     artifact_store=artifacts,
+                    artifact_root=Path(directory) / "artifacts",
                     output_refs=[output_b, output_a],
                     now=self.now + timedelta(seconds=12),
                 )
@@ -787,6 +796,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                     verdict="PROVEN_SUCCEEDED",
                     evidence_ref=evidence,
                     artifact_store=artifacts,
+                    artifact_root=Path(directory) / "artifacts",
                     output_refs=[output_a, output_a],
                     now=self.now + timedelta(seconds=12),
                 )
@@ -871,6 +881,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                 checkpoint_ref=first_ref,
                 resource_usage={"wall_seconds": 20, "memory_bytes": 512},
                 artifact_store=artifacts,
+                    artifact_root=Path(directory) / "artifacts",
                 now=self.now + timedelta(seconds=1),
             )
             self.assertEqual(updated["checkpoint_ref"], first_ref)
@@ -889,6 +900,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                     checkpoint_ref=second_ref,
                     resource_usage={"wall_seconds": 61, "memory_bytes": 512},
                     artifact_store=artifacts,
+                    artifact_root=Path(directory) / "artifacts",
                     now=self.now + timedelta(seconds=2),
                 )
 
@@ -906,6 +918,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                     checkpoint_ref="artifact:mutable-checkpoint",
                     resource_usage={"wall_seconds": 1},
                     artifact_store=ArtifactStore(Path(directory) / "artifacts"),
+                    artifact_root=Path(directory) / "artifacts",
                     now=self.now + timedelta(seconds=1),
                 )
             after = store.get(job["job_id"])
@@ -932,6 +945,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                     checkpoint_ref=nonexistent,
                     resource_usage={"wall_seconds": 1},
                     artifact_store=artifacts,
+                    artifact_root=Path(directory) / "artifacts",
                     now=self.now + timedelta(seconds=1),
                 )
 
@@ -950,6 +964,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                     checkpoint_ref=wrong_generation,
                     resource_usage={"wall_seconds": 1},
                     artifact_store=artifacts,
+                    artifact_root=Path(directory) / "artifacts",
                     now=self.now + timedelta(seconds=1),
                 )
             self.assertNotIn("checkpoint_ref", store.get(job["job_id"]))
@@ -968,6 +983,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                 worker_id="worker-a",
                 generation=generation,
                 artifact_store=artifacts,
+                    artifact_root=Path(directory) / "artifacts",
                 data=b"checkpoint-state",
                 media_type="application/octet-stream",
                 rights={"storage": True, "export": False},
@@ -982,6 +998,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                 worker_id="worker-a",
                 generation=generation,
                 artifact_store=artifacts,
+                    artifact_root=Path(directory) / "artifacts",
                 data=b"checkpoint-state-v2",
                 media_type="application/octet-stream",
                 rights={"storage": True, "export": False},
@@ -1030,6 +1047,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                 checkpoint_ref=first_ref,
                 resource_usage={"wall_seconds": 20, "memory_bytes": 512},
                 artifact_store=artifacts,
+                    artifact_root=Path(directory) / "artifacts",
                 now=self.now + timedelta(seconds=1),
             )
             self.assertEqual(first["resource_usage"]["wall_seconds"], 20.0)
@@ -1049,6 +1067,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                 checkpoint_ref=second_ref,
                 resource_usage={"memory_bytes": 768},
                 artifact_store=artifacts,
+                    artifact_root=Path(directory) / "artifacts",
                 now=self.now + timedelta(seconds=2),
             )
             self.assertEqual(second["resource_usage"]["wall_seconds"], 20.0)
@@ -1069,6 +1088,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                     checkpoint_ref=regression_ref,
                     resource_usage={"wall_seconds": 19},
                     artifact_store=artifacts,
+                    artifact_root=Path(directory) / "artifacts",
                     now=self.now + timedelta(seconds=3),
                 )
             current = store.get(job["job_id"])
@@ -1103,6 +1123,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                     generation=generation,
                     output_refs=[first_result],
                     artifact_store=artifacts,
+                    artifact_root=Path(directory) / "artifacts",
                     now=self.now + timedelta(seconds=1),
                 )
             )
@@ -1113,6 +1134,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                     generation=generation,
                     output_refs=[first_result],
                     artifact_store=artifacts,
+                    artifact_root=Path(directory) / "artifacts",
                     now=self.now + timedelta(seconds=2),
                 )
             )
@@ -1123,6 +1145,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                     generation=generation,
                     output_refs=[second_result],
                     artifact_store=artifacts,
+                    artifact_root=Path(directory) / "artifacts",
                     now=self.now + timedelta(seconds=3),
                 )
 
@@ -1183,6 +1206,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                     generation=generation,
                     output_refs=[second, first],
                     artifact_store=artifacts,
+                    artifact_root=Path(directory) / "artifacts",
                     now=self.now + timedelta(seconds=1),
                 )
             )
@@ -1194,6 +1218,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                     generation=generation,
                     output_refs=expected,
                     artifact_store=artifacts,
+                    artifact_root=Path(directory) / "artifacts",
                     now=self.now + timedelta(seconds=2),
                 )
             )
@@ -1235,6 +1260,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                         worker_id="worker-a",
                         generation=generation,
                         artifact_store=artifacts,
+                    artifact_root=Path(directory) / "artifacts",
                         data=b"candidate-result",
                         media_type="application/octet-stream",
                         rights=rights,
@@ -1249,6 +1275,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                 worker_id="worker-a",
                 generation=generation,
                 artifact_store=artifacts,
+                    artifact_root=Path(directory) / "artifacts",
                 data=b"candidate-result",
                 media_type="application/octet-stream",
                 rights=rights,
@@ -1278,6 +1305,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                         worker_id="worker-a",
                         generation=generation,
                         artifact_store=artifacts,
+                    artifact_root=Path(directory) / "artifacts",
                         data=b"first-result",
                         media_type="application/octet-stream",
                         rights=rights,
@@ -1290,6 +1318,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                     worker_id="worker-a",
                     generation=generation,
                     artifact_store=artifacts,
+                    artifact_root=Path(directory) / "artifacts",
                     data=b"different-result",
                     media_type="application/octet-stream",
                     rights=rights,

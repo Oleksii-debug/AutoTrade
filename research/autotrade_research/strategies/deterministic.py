@@ -1554,8 +1554,6 @@ def to_decision_proposal(
 
     if type(proposal) is not DeterministicProposal:
         raise TypeError("proposal must be DeterministicProposal")
-    if type(economics_binding) is not StrategyEconomicsBinding:
-        raise TypeError("economics_binding must be canonical StrategyEconomicsBinding")
     if (
         proposal.information_cutoff is None
         or proposal.horizon_seconds is None
@@ -1565,6 +1563,8 @@ def to_decision_proposal(
         or proposal.strategy_configuration_fingerprint is None
     ):
         raise ValueError("proposal lacks registered strategy/horizon metadata")
+    if type(economics_binding) is not StrategyEconomicsBinding:
+        raise TypeError("economics_binding must be canonical StrategyEconomicsBinding")
     try:
         normalized_proposal_id = str(UUID(_text(proposal_id, name="proposal_id")))
     except (ValueError, AttributeError) as error:

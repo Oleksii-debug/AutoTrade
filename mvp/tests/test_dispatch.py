@@ -1119,7 +1119,7 @@ class DispatchTests(unittest.TestCase):
                     ["SubmissionPrepared", "SubmissionBlocked"],
                 )
 
-    def test_owner_transfer_during_provider_wait_blocks_stale_sender(self):
+    def test_legacy_takeover_booleans_during_provider_wait_fail_before_wire(self):
         with TemporaryDirectory() as directory:
             store = self.store(directory)
             recovery = RecoveryController(
@@ -1136,14 +1136,16 @@ class DispatchTests(unittest.TestCase):
                 owner_epoch=owner.epoch,
             )
             outbound = 0
+            guard_reached = False
 
             def transport(_client_id, _request, final_guard):
-                nonlocal outbound
+                nonlocal outbound, guard_reached
                 recovery.transfer_owner(
                     new_owner_id="host-b",
                     old_sender_fenced=True,
                     reconciled=True,
                 )
+                guard_reached = True
                 final_guard()
                 outbound += 1
                 return {"provider_order_id": "must-not-happen"}
@@ -1160,8 +1162,11 @@ class DispatchTests(unittest.TestCase):
                 sender_check=recovery.validate_sender,
             )
             self.assertEqual(result.status, "BLOCKED")
-            self.assertEqual(result.reason, "sender_fence_rejected:PermissionError")
+            self.assertEqual(result.reason, "transport_failed_before_send")
+            self.assertFalse(guard_reached)
             self.assertEqual(outbound, 0)
+            self.assertEqual(recovery.owner, owner)
+            self.assertEqual(recovery.durable_owner_chain(), (owner,))
 
     def test_paper_send_succeeds_only_with_current_durable_sender(self):
         with TemporaryDirectory() as directory:

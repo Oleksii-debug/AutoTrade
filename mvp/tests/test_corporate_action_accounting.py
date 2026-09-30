@@ -1135,26 +1135,36 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
             economics = economic_book(store)
             accepted = resolve_action(sealed_action())
 
-            with self.assertRaisesRegex(
-                AccountingConflict,
-                "canonical durable position",
-            ):
-                commit_authoritative_corporate_action(
-                    store=store,
-                    evidence_store=durable_evidence,
-                    economic_book=economics,
-                    corporate_book=pure_book(quantity="9"),
-                    accepted=accepted,
-                )
-
-            self.assertEqual(
-                store.load_events(
-                    "corporate_action_evidence",
-                    durable_evidence.aggregate_id,
-                ),
-                [],
+            result = commit_authoritative_corporate_action(
+                store=store,
+                evidence_store=durable_evidence,
+                economic_book=economics,
+                corporate_book=pure_book(quantity="9"),
+                accepted=accepted,
             )
-            self.assertEqual(len(economics.transactions), 1)
+
+            self.assertTrue(result.inserted)
+            self.assertEqual(result.transition.before.quantity, Decimal("10"))
+            self.assertEqual(result.transition.before.total_basis, Decimal("1000"))
+            self.assertEqual(result.next_state.unsettled_cash, Decimal("12.50"))
+            self.assertEqual(
+                economics.balance("UNSETTLED_CASH:USDT", "USDT"),
+                Decimal("12.50"),
+            )
+            self.assertEqual(
+                economics.balance("CORPORATE_ACTION_INCOME:USDT", "USDT"),
+                Decimal("-12.50"),
+            )
+            self.assertEqual(
+                len(
+                    store.load_events(
+                        "corporate_action_evidence",
+                        durable_evidence.aggregate_id,
+                    )
+                ),
+                1,
+            )
+            self.assertEqual(len(economics.transactions), 2)
 
 
 

@@ -539,5 +539,124 @@ class DispatchOrderProjectionIntegrationTests(unittest.TestCase):
             self.assertIsNone(snap.submission_attempt_id)
 
 
+    def test_partial_exact_submission_markers_never_project_legacy_ack(self):
+        variants = ("text-only", "hash-only", "encoding-only", "wrong-encoding", "mixed")
+        for variant in variants:
+            with self.subTest(variant=variant), TemporaryDirectory() as directory:
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment="SIMULATION",
+                    account_id=ACCOUNT,
+                    owner_token="sim-owner",
+                )
+                intent_id = "intent-partial-exact-" + variant
+                attempt_id = "attempt-partial-exact-" + variant
+                client_order_id = stable_client_order_id(
+                    "simulated", intent_id,
+                    environment="SIMULATION", account_id=ACCOUNT,
+                )
+                orders = projection(store)
+                orders.create_order(
+                    event_key="intent-created:" + variant,
+                    client_order_id=client_order_id,
+                    instrument=INSTRUMENT,
+                    side="BUY",
+                    requested_quantity="1",
+                    committed_at=NOW,
+                )
+                response = {
+                    "attempt_id": attempt_id,
+                    "client_order_id": client_order_id,
+                    "provider_order_id": "provider-" + variant,
+                    "outcome": "ACKNOWLEDGED",
+                }
+                raw = json.dumps(
+                    response,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                ).encode("utf-8")
+                dispatched = dispatcher.dispatch(
+                    attempt_id=attempt_id,
+                    intent_id=intent_id,
+                    intent_hash="sha256:" + "d" * 64,
+                    provider="simulated",
+                    request={
+                        "attempt_id": attempt_id,
+                        "instrument_version": INSTRUMENT,
+                        "side": "BUY",
+                        "quantity": "1",
+                        "price": "100",
+                        "now": NOW,
+                    },
+                    now=NOW,
+                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    transport_send=lambda _cid, _request, guard: (
+                        guard() or ExactJsonTransportResponse(raw)
+                    ),
+                )
+                self.assertEqual(dispatched.status, "SENT")
+                aggregate_id = submission_attempt_aggregate_id(
+                    environment="SIMULATION",
+                    account_id=ACCOUNT,
+                    attempt_id=attempt_id,
+                )
+                original_load_events = store.load_events
+                exact_events = original_load_events("submission_attempt", aggregate_id)
+                exact_payload = dict(exact_events[-1]["payload"])
+
+                if variant == "text-only":
+                    replacement = {
+                        "client_order_id": client_order_id,
+                        "response_text": exact_payload["response_text"],
+                    }
+                elif variant == "hash-only":
+                    replacement = {
+                        "client_order_id": client_order_id,
+                        "response_sha256": exact_payload["response_sha256"],
+                    }
+                elif variant == "encoding-only":
+                    replacement = {
+                        "client_order_id": client_order_id,
+                        "response_encoding": "utf-8-json",
+                    }
+                elif variant == "wrong-encoding":
+                    replacement = dict(exact_payload)
+                    replacement["response_encoding"] = "json"
+                else:
+                    replacement = {
+                        "client_order_id": client_order_id,
+                        "response_text": exact_payload["response_text"],
+                        "response": response,
+                    }
+
+                def partial_exact_source(aggregate_type, selected_id, *args, **kwargs):
+                    events = original_load_events(
+                        aggregate_type, selected_id, *args, **kwargs
+                    )
+                    if aggregate_type != "submission_attempt" or selected_id != aggregate_id:
+                        return events
+                    altered = list(events)
+                    terminal = dict(altered[-1])
+                    terminal["payload"] = replacement
+                    altered[-1] = terminal
+                    return altered
+
+                with patch.object(
+                    store, "load_events", side_effect=partial_exact_source
+                ):
+                    with self.assertRaisesRegex(
+                        OrderProjectionConflict,
+                        "exact submission response evidence is (invalid|unavailable)",
+                    ):
+                        orders.sync_submission_attempt(attempt_id=attempt_id)
+                snapshot = orders.order(client_order_id).snapshot()
+                self.assertEqual(snapshot.state, "SEND_STARTED")
+                self.assertEqual(snapshot.filled_quantity, Decimal("0"))
+
+
+
 if __name__ == "__main__":
     unittest.main()

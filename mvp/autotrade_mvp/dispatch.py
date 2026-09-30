@@ -26,6 +26,13 @@ SenderCheck = Callable[[str, int], None]
 TransportSend = Callable[[str, Mapping[str, Any], Callable[[], None]], Any]
 
 _SUBMISSION_RESPONSE_BINDING_TOKEN = object()
+_EXACT_RESPONSE_MARKERS = frozenset(
+    {"response_encoding", "response_text", "response_sha256"}
+)
+
+
+def _has_exact_response_markers(payload: Mapping[str, Any]) -> bool:
+    return any(marker in payload for marker in _EXACT_RESPONSE_MARKERS)
 
 
 def _decode_exact_json_bytes(raw: bytes) -> Any:
@@ -562,14 +569,21 @@ class GuardedDispatcher:
     def _outcome_from_terminal(event: dict[str, Any], client_order_id: str) -> DispatchOutcome:
         payload = event["payload"]
         if event["event_type"] == "SubmissionSent":
-            if payload.get("response_encoding") == "utf-8-json":
-                # Raw SHA-bound bytes, never a binary-float diagnostic mirror,
-                # are the only replayable numeric authority. Replay returns
-                # UNKNOWN rather than inventing success if a historical exact
-                # journal row has missing, corrupt or now-invalid raw evidence.
+            if _has_exact_response_markers(payload):
+                # Any reserved exact marker commits the row to the SHA-bound
+                # evidence contract. Partial/mislabeled exact rows must never
+                # fall through to the historical response mirror.
+                if payload.get("response_encoding") != "utf-8-json":
+                    return DispatchOutcome(
+                        "UNKNOWN", client_order_id, None, "exact_response_invalid"
+                    )
                 response_text = payload.get("response_text")
                 response_hash = payload.get("response_sha256")
-                if type(response_text) is not str or type(response_hash) is not str:
+                if (
+                    type(response_text) is not str
+                    or not response_text
+                    or type(response_hash) is not str
+                ):
                     return DispatchOutcome(
                         "UNKNOWN", client_order_id, None, "exact_response_unavailable"
                     )
@@ -585,6 +599,7 @@ class GuardedDispatcher:
                 return DispatchOutcome(
                     "SENT", client_order_id, exact_payload, "sent_confirmed"
                 )
+            # Only marker-free historical rows may use the legacy mirror.
             return DispatchOutcome(
                 "SENT", client_order_id, payload.get("response"), "sent_confirmed"
             )

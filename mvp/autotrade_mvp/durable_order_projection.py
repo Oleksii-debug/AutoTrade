@@ -19,7 +19,11 @@ from research.autotrade_research.artifacts.store import (
     ArtifactStore,
 )
 
-from .dispatch import _decode_exact_json_bytes, submission_attempt_aggregate_id
+from .dispatch import (
+    _decode_exact_json_bytes,
+    _has_exact_response_markers,
+    submission_attempt_aggregate_id,
+)
 from .order_projection import (
     OrderBookProjection,
     OrderProjectionConflict,
@@ -821,12 +825,18 @@ class DurableOrderBookProjection:
                 # not a lossy float/Decimal-incompatible JSON response mirror.
                 # Reconstruct the exact typed response at the projection
                 # boundary and check the digest before any ACK state mutation.
-                if isinstance(payload, dict) and (
-                    payload.get("response_encoding") == "utf-8-json"
-                ):
+                if isinstance(payload, dict) and _has_exact_response_markers(payload):
+                    if payload.get("response_encoding") != "utf-8-json":
+                        raise OrderProjectionConflict(
+                            "exact submission response evidence is invalid"
+                        )
                     raw_text = payload.get("response_text")
                     expected_hash = payload.get("response_sha256")
-                    if type(raw_text) is not str or type(expected_hash) is not str:
+                    if (
+                        type(raw_text) is not str
+                        or not raw_text
+                        or type(expected_hash) is not str
+                    ):
                         raise OrderProjectionConflict(
                             "exact submission response evidence is unavailable"
                         )
@@ -840,8 +850,8 @@ class DurableOrderBookProjection:
                             "exact submission response evidence is invalid"
                         ) from error
                 else:
-                    # Historical non-exact events retain their legacy JSON
-                    # object mirror; no authority is invented from its shape.
+                    # Only a marker-free historical row may use its legacy
+                    # response mirror; partial exact evidence is fail-closed.
                     response = (
                         payload.get("response")
                         if isinstance(payload, dict)

@@ -348,5 +348,84 @@ class DispatchBoundedNumericTransportTests(unittest.TestCase):
                 ExactJsonTransportResponse(raw)
 
 
+    def test_partial_exact_terminal_markers_never_fall_back_to_legacy_or_resend(self):
+        raw = b'{"provider_order_id":"p-1","status":"ACK"}'
+        with TemporaryDirectory() as directory:
+            store = JournalStore(directory + "/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store, environment="SIMULATION", account_id="acct", owner_token="owner"
+            )
+            sends = []
+
+            def send(_cid, _request, guard):
+                guard()
+                sends.append(raw)
+                return ExactJsonTransportResponse(raw)
+
+            args = {
+                "attempt_id": "partial-exact-marker-a1",
+                "intent_id": "partial-exact-marker-intent",
+                "intent_hash": "partial-exact-marker-hash",
+                "provider": "BYBIT",
+                "request": {"symbol": "BTCUSD", "qty": "1"},
+                "now": "2026-09-24T18:00:00Z",
+                "authority_check": lambda _hash, _now: (True, "allowed"),
+            }
+            first = dispatcher.dispatch(**args, transport_send=send)
+            self.assertEqual(first.status, "SENT")
+            self.assertEqual(len(sends), 1)
+            original_events = dispatcher._events(args["attempt_id"])
+            exact = dict(original_events[-1]["payload"])
+            legacy = {"legacy": "must-not-authorize"}
+
+            variants = []
+            for keep in (
+                {"response_text"},
+                {"response_sha256"},
+                {"response_encoding"},
+            ):
+                payload = {
+                    key: value
+                    for key, value in exact.items()
+                    if key == "client_order_id" or key in keep
+                }
+                variants.append(payload)
+            wrong = dict(exact)
+            wrong["response_encoding"] = "json"
+            variants.append(wrong)
+            mixed = {
+                "client_order_id": exact["client_order_id"],
+                "response_text": exact["response_text"],
+                "response": legacy,
+            }
+            variants.append(mixed)
+
+            for counter, payload in enumerate(variants):
+                with self.subTest(counter=counter):
+                    altered = [dict(item) for item in original_events]
+                    terminal = dict(altered[-1])
+                    terminal["payload"] = payload
+                    altered[-1] = terminal
+                    with patch.object(dispatcher, "_events", return_value=altered):
+                        recovered = dispatcher.dispatch(
+                            **args,
+                            transport_send=lambda *_: self.fail("blind provider retry"),
+                        )
+                    self.assertEqual(recovered.status, "UNKNOWN")
+                    self.assertIsNone(recovered.response)
+                    self.assertEqual(len(sends), 1)
+
+            marker_free = {
+                "event_type": "SubmissionSent",
+                "payload": {"response": legacy},
+            }
+            recovered_legacy = GuardedDispatcher._outcome_from_terminal(
+                marker_free, exact["client_order_id"]
+            )
+            self.assertEqual(recovered_legacy.status, "SENT")
+            self.assertEqual(recovered_legacy.response, legacy)
+
+
+
 if __name__ == "__main__":
     unittest.main()

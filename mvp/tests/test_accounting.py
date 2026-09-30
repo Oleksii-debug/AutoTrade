@@ -808,6 +808,109 @@ class AccountingExactAuthorityTests(unittest.TestCase):
 
 
 
+class AccountingSemanticGraphAuthorityTests(unittest.TestCase):
+    def test_transaction_subclass_is_rejected_before_attribute_dispatch(self):
+        touched = []
+
+        class HostileTransaction(JournalTransaction):
+            def __getattribute__(self, name):
+                if name not in {"__class__"}:
+                    touched.append(name)
+                    raise AssertionError("hostile transaction attribute dispatch")
+                return super().__getattribute__(name)
+
+        hostile = object.__new__(HostileTransaction)
+        book = EconomicBook()
+        before = book.transactions
+
+        with self.assertRaisesRegex(TypeError, "exact JournalTransaction"):
+            book.append(hostile)
+
+        self.assertEqual(touched, [])
+        self.assertEqual(book.transactions, before)
+
+    def test_posting_subclass_is_rejected_before_attribute_dispatch(self):
+        touched = []
+
+        class HostilePosting(Posting):
+            def __getattribute__(self, name):
+                if name not in {"__class__"}:
+                    touched.append(name)
+                    raise AssertionError("hostile posting attribute dispatch")
+                return super().__getattribute__(name)
+
+        hostile = object.__new__(HostilePosting)
+        transaction = JournalTransaction(
+            transaction_id="hostile-posting",
+            cause_event_id="hostile-posting-cause",
+            postings=(hostile, posting("OFFSET", "USD", "0")),
+        )
+        book = EconomicBook()
+        before = book.transactions
+
+        with self.assertRaisesRegex(TypeError, "exact Posting"):
+            book.append(transaction)
+
+        self.assertEqual(touched, [])
+        self.assertEqual(book.transactions, before)
+
+    def test_string_subclass_is_rejected_before_virtual_strip(self):
+        touched = []
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                touched.append("strip")
+                raise AssertionError("hostile string strip dispatch")
+
+        transaction = JournalTransaction(
+            transaction_id=HostileText("hostile-text"),
+            cause_event_id="hostile-text-cause",
+            postings=(
+                posting("A", "USD", "1"),
+                posting("B", "USD", "-1"),
+            ),
+        )
+        book = EconomicBook()
+        before = book.transactions
+
+        with self.assertRaisesRegex(ValueError, "transaction_id"):
+            book.append(transaction)
+
+        self.assertEqual(touched, [])
+        self.assertEqual(book.transactions, before)
+
+    def test_decimal_subclass_is_rejected_before_virtual_decimal_dispatch(self):
+        touched = []
+
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                touched.append("is_finite")
+                raise AssertionError("hostile Decimal dispatch")
+
+            def as_tuple(self):
+                touched.append("as_tuple")
+                raise AssertionError("hostile Decimal dispatch")
+
+        transaction = JournalTransaction(
+            transaction_id="hostile-decimal",
+            cause_event_id="hostile-decimal-cause",
+            postings=(
+                Posting("A", "USD", HostileDecimal("1")),
+                posting("B", "USD", "-1"),
+            ),
+        )
+        book = EconomicBook()
+        before = book.transactions
+
+        with self.assertRaisesRegex(TypeError, "exact built-in Decimal"):
+            book.append(transaction)
+
+        self.assertEqual(touched, [])
+        self.assertEqual(book.transactions, before)
+
+
+
+
 
 if __name__ == "__main__":
     unittest.main()

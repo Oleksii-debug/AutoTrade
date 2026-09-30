@@ -371,6 +371,30 @@ def recovery_evidence_receipt_metadata(
     }
 
 
+def recovery_evidence_receipt_payload(
+    item: RecoveryScenarioEvidence,
+) -> dict[str, object]:
+    """Canonical bytes whose digest binds every recovery qualification fact."""
+
+    payload = dict(recovery_evidence_receipt_metadata(item))
+    # The content digest cannot include itself; every other decision-relevant fact
+    # remains inside the immutable receipt bytes.
+    payload.pop("evidence_artifact_sha256")
+    return payload
+
+
+def recovery_evidence_receipt_bytes(
+    item: RecoveryScenarioEvidence,
+) -> bytes:
+    return json.dumps(
+        recovery_evidence_receipt_payload(item),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
 def _store_artifact_matches(
     read_snapshot,
     *,
@@ -379,10 +403,11 @@ def _store_artifact_matches(
     media_type: str,
     source_sha: str,
     metadata: dict[str, object],
+    expected_bytes: bytes | None = None,
 ) -> bool:
     """Verify stored bytes and declared bindings, not independent producer trust."""
     try:
-        manifest, _raw = read_snapshot(artifact_id)
+        manifest, raw = read_snapshot(artifact_id)
         if not isinstance(manifest.get("manifest_hash"), str):
             return False
         if manifest.get("sha256") != artifact_sha256:
@@ -392,6 +417,10 @@ def _store_artifact_matches(
         if manifest.get("source_refs") != [f"git:{source_sha}"]:
             return False
         if manifest.get("metadata") != metadata:
+            return False
+        if "sha256:" + sha256(raw).hexdigest() != artifact_sha256:
+            return False
+        if expected_bytes is not None and raw != expected_bytes:
             return False
     except (
         ArtifactIntegrityError,
@@ -686,6 +715,7 @@ def qualify_recovery_release(
                 media_type=_RECOVERY_EVIDENCE_MEDIA_TYPE,
                 source_sha=item.source_sha,
                 metadata=recovery_evidence_receipt_metadata(item),
+                expected_bytes=recovery_evidence_receipt_bytes(item),
             )
         if not integrity_verified:
             blockers.append(f"{prefix}:evidence_integrity_unverified")

@@ -698,7 +698,11 @@ def observe_submission_json_response(
         capability_snapshot_ids=capabilities,
         instrument_versions=instruments,
         evidence_ref=evidence_ref,
-        payload=response_binding.payload,
+        # Never consume SubmissionResponseBinding.payload here: dispatch's
+        # transport-only JSON preview is not the exact numeric authority.
+        # Reparse the SHA-bound durable bytes through the neutral bounded
+        # numeric callbacks before constructing an authenticated observation.
+        payload=_decode_exact_json(response_binding.response_bytes),
         _observation_token=_SUBMISSION_OBSERVED_RESPONSE_TOKEN,
     )
 

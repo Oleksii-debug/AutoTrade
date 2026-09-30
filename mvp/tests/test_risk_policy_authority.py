@@ -126,6 +126,44 @@ class DurableRiskPolicyRegistryTests(unittest.TestCase):
             store._store_identity = original_identity
             self.assertEqual(store.current_journal_sequence(), 0)
 
+    def test_risk_registry_detaches_store_identity_from_in_place_mutation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            identity = store.store_identity
+            original_source = identity.identity_source
+            object.__setattr__(identity, "identity_source", "forged-source")
+            with self.assertRaisesRegex(
+                RiskPolicyAuthorityError,
+                "journal authority changed",
+            ):
+                registry.register(
+                    scope=scope(),
+                    policy_id="core-risk",
+                    version=1,
+                    policy=policy(),
+                    committed_at=NOW,
+                )
+            object.__setattr__(identity, "identity_source", original_source)
+            self.assertEqual(store.current_journal_sequence(), 0)
+
+    def test_risk_registry_rejects_polymorphic_backing_state_before_callbacks(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            touched = []
+
+            class ForgedIdentity:
+                @property
+                def canonical_path(self):
+                    touched.append("identity-callback")
+                    raise AssertionError("caller identity callback must not execute")
+
+            store._store_identity = ForgedIdentity()
+            with self.assertRaisesRegex(TypeError, "identity must be exact"):
+                registry.resolve_current(scope())
+            self.assertEqual(touched, [])
+
     def test_registration_is_content_addressed_idempotent_and_conflicts_on_reuse(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

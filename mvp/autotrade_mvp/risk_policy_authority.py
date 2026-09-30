@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, fields
 from datetime import datetime, timezone
 from hashlib import sha256
+from pathlib import Path
 import re
 from typing import Mapping
 
@@ -26,6 +27,7 @@ from .exact_decimal import (
 )
 from .persistence import JournalStore, canonical_json, payload_digest
 from .risk import RISK_ENVIRONMENTS, RiskPolicy
+from .store_identity import JournalStoreIdentity
 
 
 class RiskPolicyAuthorityError(ValueError):
@@ -43,10 +45,30 @@ _ACTIVATION_EVENT_ID_RE = re.compile(r"^risk-policy-activate(?:-v2)?:[0-9a-f]{64
 _ACTIVATION_REQUEST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
+def _journal_store_identity_snapshot(identity: object) -> tuple[object, ...]:
+    """Detach physical store identity from frozen-dataclass alias mutation."""
+    if type(identity) is not JournalStoreIdentity:
+        raise TypeError("canonical JournalStore identity must be exact JournalStoreIdentity")
+    canonical_path = identity.canonical_path
+    identity_source = identity.identity_source
+    if type(canonical_path) is not str or type(identity_source) is not str:
+        raise TypeError("canonical JournalStore identity text must be exact strings")
+    numbers = (
+        identity.filesystem_device,
+        identity.filesystem_inode,
+        identity.windows_volume_serial,
+        identity.windows_file_index_high,
+        identity.windows_file_index_low,
+    )
+    if any(value is not None and type(value) is not int for value in numbers):
+        raise TypeError("canonical JournalStore identity numbers must be exact integers")
+    return (canonical_path, *numbers, identity_source)
+
+
 def _canonical_journal_authority_snapshot(
     store: JournalStore,
-) -> tuple[object, object]:
-    """Seal one exact JournalStore instance and physical backing generation."""
+) -> tuple[str, tuple[object, ...]]:
+    """Seal one exact JournalStore instance and detached physical generation."""
     if type(store) is not JournalStore:
         raise TypeError("store must be exact JournalStore")
     state = vars(store)
@@ -60,12 +82,16 @@ def _canonical_journal_authority_snapshot(
     if "path" not in state or "_store_identity" not in state:
         raise TypeError("canonical JournalStore backing state is unavailable")
     path = state["path"]
+    if type(path) is not type(Path()):
+        raise TypeError("canonical JournalStore path must be an exact platform Path")
+    canonical_path = str(path)
     identity = JournalStore.store_identity.__get__(store, JournalStore)
-    if getattr(identity, "canonical_path", None) != str(path):
+    identity_snapshot = _journal_store_identity_snapshot(identity)
+    if identity_snapshot[0] != canonical_path:
         raise RiskPolicyAuthorityError(
             "canonical JournalStore backing identity changed"
         )
-    return path, identity
+    return canonical_path, identity_snapshot
 
 _DECIMAL_FIELDS = (
     "max_abs_position",

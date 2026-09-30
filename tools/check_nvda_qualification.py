@@ -114,6 +114,50 @@ def _canonical_nvda_requirements(
     )
 
 
+def _signed_nvda_requirement_ids(
+    canonical_requirements: dict[str, object],
+    requirements_requirement_id: str,
+) -> tuple[str, ...]:
+    workflows = canonical_requirements.get("workflows")
+    if not isinstance(workflows, list) or not workflows:
+        raise NvdaQualificationError("requirements contain no workflows")
+    if any(type(item) is not dict for item in workflows):
+        raise NvdaQualificationError("requirements.workflow must be an object")
+    workflow_ids = tuple(
+        sorted(
+            _required_text(item.get("id"), name="requirements.workflow.id")
+            for item in workflows
+        )
+    )
+    if len(workflow_ids) != len(set(workflow_ids)):
+        raise NvdaQualificationError("requirements.workflow ids must be unique")
+    requirement_ids = tuple(
+        sorted((*workflow_ids, requirements_requirement_id))
+    )
+    if len(requirement_ids) != len(set(requirement_ids)):
+        raise NvdaQualificationError("NVDA signed requirement ids must be unique")
+    return requirement_ids
+
+
+def canonical_nvda_requirement_ids(
+    *,
+    source_sha: str,
+    supplied_requirements: dict[str, object],
+) -> tuple[str, ...]:
+    """Return the one exact-source signed requirement set used by terminal consumers."""
+
+    canonical, _digest, requirements_requirement_id = (
+        _canonical_nvda_requirements(
+            source_sha=source_sha,
+            supplied_requirements=supplied_requirements,
+        )
+    )
+    return _signed_nvda_requirement_ids(
+        canonical,
+        requirements_requirement_id,
+    )
+
+
 def _required_text(value: object, *, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise NvdaQualificationError(f"{name} is required")
@@ -425,19 +469,9 @@ def validate_trusted_nvda_qualification(
         raise NvdaQualificationError("evidence_sha256 must be canonical")
     if SHA256.fullmatch(release_artifact_sha256) is None:
         raise NvdaQualificationError("release artifact digest must be canonical")
-    required = canonical_requirements.get("workflows")
-    if not isinstance(required, list) or not required:
-        raise NvdaQualificationError("requirements contain no workflows")
-    if any(not isinstance(item, dict) for item in required):
-        raise NvdaQualificationError("requirements.workflow must be an object")
-    workflow_requirement_ids = tuple(
-        sorted(
-            _required_text(item.get("id"), name="requirements.workflow.id")
-            for item in required
-        )
-    )
-    requirement_ids = tuple(
-        sorted((*workflow_requirement_ids, requirements_requirement_id))
+    requirement_ids = _signed_nvda_requirement_ids(
+        canonical_requirements,
+        requirements_requirement_id,
     )
     release_artifact_id = _required_text(
         result.get("release_artifact_id"),

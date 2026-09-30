@@ -14,10 +14,11 @@ can prove the external/local inference boundary was not crossed.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from hashlib import sha256
+import json
 import re
 from typing import Callable, Iterable, Mapping
 from uuid import uuid4
@@ -31,6 +32,7 @@ from .model_gateway import (
     RoutingPolicy,
 )
 from .persistence import canonical_json, payload_digest
+from .exact_decimal import exact_add, parse_bounded_exact_decimal
 
 
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -46,7 +48,7 @@ class ModelCallNotSent(ModelCallError):
 
 
 def _canonical_text(value: object, *, name: str) -> str:
-    if not isinstance(value, str) or not value:
+    if type(value) is not str or not value:
         raise ValueError(f"{name} is required")
     if value != value.strip():
         raise ValueError(f"{name} must be canonical text")
@@ -75,11 +77,9 @@ def _utc_text(value: object, *, name: str) -> str:
 
 
 def _exact_decimal(value: object, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise ValueError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
+        result = parse_bounded_exact_decimal(value)
+    except (TypeError, ValueError) as error:
         raise ValueError(f"{name} must be a finite exact decimal") from error
     if not result.is_finite() or result < 0:
         raise ValueError(f"{name} must be a finite non-negative exact decimal")
@@ -250,7 +250,7 @@ class PricingEvidenceSnapshot:
         if isinstance(self.quotes, (str, bytes)):
             raise TypeError("pricing quotes must be a collection")
         quotes = tuple(self.quotes)
-        if not quotes or any(not isinstance(item, PricingQuote) for item in quotes):
+        if not quotes or any(type(item) is not PricingQuote for item in quotes):
             raise ValueError("pricing evidence requires PricingQuote values")
         if len({item.key for item in quotes}) != len(quotes):
             raise ValueError("pricing evidence quote identities must be unique")
@@ -478,7 +478,7 @@ class DurableModelCallOrchestrator:
         started_lease_seconds: int = 60,
         owner_token: str | None = None,
     ) -> None:
-        if not isinstance(budget, DurableModelBudget):
+        if type(budget) is not DurableModelBudget:
             raise TypeError("budget must be DurableModelBudget")
         if not callable(clock):
             raise TypeError("clock must be callable")
@@ -514,7 +514,7 @@ class DurableModelCallOrchestrator:
         return _utc_text(self.clock(), name="clock")
 
     def attempt_id(self, spec: ModelCallSpec) -> str:
-        if not isinstance(spec, ModelCallSpec):
+        if type(spec) is not ModelCallSpec:
             raise TypeError("spec must be ModelCallSpec")
         material = {
             "budget_id": self.budget.budget_id,
@@ -600,6 +600,51 @@ class DurableModelCallOrchestrator:
                 raise
             return False
 
+    @staticmethod
+    def _request_identity(request: ModelRequest) -> dict[str, object]:
+        if type(request) is not ModelRequest:
+            raise TypeError("request must be ModelRequest")
+        deadline = request.deadline_utc.astimezone(timezone.utc).isoformat().replace(
+            "+00:00",
+            "Z",
+        )
+        return {
+            "request_id": request.request_id,
+            "allowed_model_ids": list(request.allowed_model_ids),
+            "privacy_remote_allowed": request.privacy_remote_allowed,
+            "budget_remaining": str(request.budget_remaining),
+            "deadline_utc": deadline,
+            "cancelled": request.cancelled,
+        }
+
+    def _durable_route_input(
+        self,
+        request_id: str,
+    ) -> Mapping[str, object]:
+        matches: list[Mapping[str, object]] = []
+        for event in self.journal.load_events(
+            "model_budget",
+            self.budget.budget_id,
+        ):
+            if event.get("event_type") != "ModelRouteReserved":
+                continue
+            payload = event.get("payload")
+            if not isinstance(payload, Mapping):
+                continue
+            if payload.get("request_id") != request_id:
+                continue
+            routing_input = payload.get("routing_input")
+            if not isinstance(routing_input, Mapping):
+                raise ModelCallError(
+                    "durable route evidence is malformed"
+                )
+            matches.append(routing_input)
+        if len(matches) != 1:
+            raise ModelCallError(
+                "request must have exactly one durable route reservation"
+            )
+        return matches[0]
+
     def _reservation_context(
         self,
         spec: ModelCallSpec,
@@ -633,10 +678,20 @@ class DurableModelCallOrchestrator:
             raise ModelCallError(
                 "pricing evidence could not be resolved before route admission"
             ) from error
-        if not isinstance(snapshot, PricingEvidenceSnapshot):
+        if type(snapshot) is not PricingEvidenceSnapshot:
             raise ModelCallError(
                 "pricing evidence resolver did not return PricingEvidenceSnapshot"
             )
+        if type(snapshot.quotes) is not tuple or any(type(quote) is not PricingQuote for quote in snapshot.quotes):
+            raise ModelCallError("pricing evidence quote graph is invalid")
+        try:
+            values = {field.name: getattr(snapshot, field.name) for field in fields(PricingEvidenceSnapshot)}
+            values["quotes"] = tuple(PricingQuote(**{
+                field.name: getattr(quote, field.name) for field in fields(PricingQuote)
+            }) for quote in snapshot.quotes)
+            snapshot = PricingEvidenceSnapshot(**values)
+        except (TypeError, ValueError) as error:
+            raise ModelCallError("pricing evidence value graph is invalid") from error
         if snapshot.evidence_id != spec.pricing_evidence_id:
             raise ModelCallError("pricing evidence identity does not match call spec")
         if snapshot.as_of != spec.pricing_as_of:
@@ -705,11 +760,13 @@ class DurableModelCallOrchestrator:
         decision: RouteDecision,
         descriptor: ModelDescriptor,
         pricing: PricingEvidenceSnapshot,
+        request: ModelRequest,
     ) -> dict[str, object]:
         context = self._reservation_context(spec, pricing)
         return {
             "attempt_id": attempt_id,
             "request_id": attempt_id,
+            "request_identity_digest": payload_digest(self._request_identity(request)),
             "budget_id": self.budget.budget_id,
             "environment": self.budget.environment,
             "job_id": spec.job_id,
@@ -971,24 +1028,27 @@ class DurableModelCallOrchestrator:
         observation: ModelCallObservation,
         binding: ModelCallBinding,
     ) -> ModelObservationEvidence:
+        expected = self._observation_digest(observation, binding)
         try:
             evidence = self.observation_evidence_resolver(observation, binding)
         except Exception as error:
             raise ModelCallError(
                 "model usage/response evidence could not be authenticated"
             ) from error
-        if not isinstance(evidence, ModelObservationEvidence):
+        if type(evidence) is not ModelObservationEvidence:
             raise ModelCallError(
                 "observation evidence resolver did not return ModelObservationEvidence"
             )
         if evidence.attempt_id != binding.attempt_id:
             raise ModelCallError("observation evidence attempt identity mismatch")
-        expected = self._observation_digest(observation, binding)
-        if evidence.observation_digest != expected:
+        if (evidence.observation_digest != expected
+                or self._observation_digest(observation, binding) != expected):
             raise ModelCallError(
                 "observation evidence does not bind exact usage/response fields"
             )
-        return evidence
+        return ModelObservationEvidence(**{
+            field.name: getattr(evidence, field.name) for field in fields(ModelObservationEvidence)
+        })
 
     def _validate_fallback_lineage(
         self,
@@ -1173,6 +1233,18 @@ class DurableModelCallOrchestrator:
             )
         raise ModelCallError("fallback parent terminal outcome is unsupported")
 
+    def _temporal_reason(self, prepared: Mapping[str, object], request: ModelRequest) -> str | None:
+        now = datetime.fromisoformat(self._now().replace("Z", "+00:00"))
+        as_of = datetime.fromisoformat(_utc_text(prepared.get("pricing_as_of"), name="pricing_as_of").replace("Z", "+00:00"))
+        expiry = datetime.fromisoformat(_utc_text(prepared.get("pricing_valid_until"), name="pricing_valid_until").replace("Z", "+00:00"))
+        if now < as_of:
+            return "clock_before_pricing_authority_at_call_boundary"
+        if now > expiry:
+            return "pricing_evidence_expired_before_call_boundary"
+        if now >= request.deadline_utc:
+            return "request_deadline_expired_before_call_boundary"
+        return None
+
     def execute(
         self,
         *,
@@ -1185,10 +1257,16 @@ class DurableModelCallOrchestrator:
         now_utc: datetime | None = None,
         cancel_requested: CancelCheck | None = None,
     ) -> ModelCallOutcome:
-        if not isinstance(spec, ModelCallSpec):
+        if type(spec) is not ModelCallSpec:
             raise TypeError("spec must be ModelCallSpec")
-        if not isinstance(request, ModelRequest):
+        if type(policy) is not RoutingPolicy:
+            raise TypeError("policy must be RoutingPolicy")
+        if type(request) is not ModelRequest:
             raise TypeError("request must be ModelRequest")
+        # Retain original scalar authority even if the caller later mutates its
+        # DTO during a cancellation, pricing or inference callback.
+        request = ModelRequest(**{field.name: getattr(request, field.name) for field in fields(ModelRequest)})
+        policy = RoutingPolicy(**{field.name: getattr(policy, field.name) for field in fields(RoutingPolicy)})
         if not callable(call):
             raise TypeError("call must be callable")
         if not callable(validate_result):
@@ -1204,17 +1282,20 @@ class DurableModelCallOrchestrator:
 
         self._validate_fallback_lineage(spec, policy, request)
         existing = self._events(attempt_id)
-        if existing and existing[-1].get("event_type") in {
-            "ModelCallNotSent",
-            "ModelCallUnknown",
-            "ModelCallObserved",
-        }:
+        if any(event.get("event_type") in {
+            "ModelCallNotSent", "ModelCallUnknown", "ModelCallObserved",
+        } for event in existing):
             return self._recover_existing(
                 attempt_id=attempt_id,
                 decision=None,
             )
 
         materialized = tuple(descriptors)
+        if any(type(item) is not ModelDescriptor for item in materialized):
+            raise TypeError("descriptors must be exact ModelDescriptor values")
+        materialized = tuple(ModelDescriptor(**{
+            field.name: getattr(item, field.name) for field in fields(ModelDescriptor)
+        }) for item in materialized)
         first = existing[0] if existing else None
         pricing: PricingEvidenceSnapshot | None = None
 
@@ -1231,6 +1312,7 @@ class DurableModelCallOrchestrator:
             expected_spec = {
                 "attempt_id": attempt_id,
                 "request_id": attempt_id,
+                "request_identity_digest": payload_digest(self._request_identity(request)),
                 "budget_id": self.budget.budget_id,
                 "environment": self.budget.environment,
                 "job_id": spec.job_id,
@@ -1250,6 +1332,17 @@ class DurableModelCallOrchestrator:
                 raise ModelCallError(
                     "model-call identity conflicts with durable prepared attempt"
                 )
+            routing_input = self._durable_route_input(attempt_id)
+            current_policy = {
+                "mode": policy.mode.value,
+                "allowed_model_ids": list(policy.allowed_model_ids),
+                "fixed_model_id": policy.fixed_model_id,
+                "allow_remote": policy.allow_remote,
+                "maximum_cost": str(policy.maximum_cost),
+                "maximum_latency_ms": policy.maximum_latency_ms,
+            }
+            if routing_input.get("policy") != current_policy:
+                raise ModelCallError("routing policy conflicts with durable prepared authority")
             pricing_evidence_digest = _digest(
                 prepared_payload.get("pricing_evidence_digest"),
                 name="pricing_evidence_digest",
@@ -1307,6 +1400,7 @@ class DurableModelCallOrchestrator:
                 decision=decision,
                 descriptor=descriptor,
                 pricing=pricing,
+                request=request,
             )
             pricing_evidence_digest = pricing.evidence_digest
             self._append(
@@ -1317,10 +1411,13 @@ class DurableModelCallOrchestrator:
             )
 
         cancelled = cancel_requested or (lambda: False)
-        if cancelled():
+        # The cancellation callback may consume time; check time afterwards.
+        cancelled_before_start = cancelled()
+        temporal_reason = self._temporal_reason(prepared_payload, request)
+        if cancelled_before_start or temporal_reason is not None:
             payload = {
                 "attempt_id": attempt_id,
-                "reason": "cancelled_before_call_boundary",
+                "reason": "cancelled_before_call_boundary" if cancelled_before_start else temporal_reason,
                 "released": str(decision.reserved_cost),
             }
             self._append(
@@ -1357,6 +1454,16 @@ class DurableModelCallOrchestrator:
                 decision=decision,
             )
 
+        final_reason = self._temporal_reason(prepared_payload, request)
+        if final_reason is not None:
+            self._append(
+                attempt_id=attempt_id, event_type="ModelCallNotSent", version=3,
+                payload={"attempt_id": attempt_id, "reason": final_reason,
+                         "released": str(decision.reserved_cost)},
+            )
+            self.budget.release(attempt_id)
+            return self._outcome_from_terminal(self._events(attempt_id)[-1], route=decision)
+
         binding = self._binding(
             attempt_id=attempt_id,
             spec=spec,
@@ -1366,10 +1473,10 @@ class DurableModelCallOrchestrator:
         )
         try:
             observation = call(binding, cancelled)
-        except ModelCallNotSent as error:
+        except ModelCallNotSent:
             payload = {
                 "attempt_id": attempt_id,
-                "reason": "adapter_proved_not_sent:" + str(error),
+                "reason": "adapter_proved_not_sent",
                 "released": str(decision.reserved_cost),
             }
             self._append(
@@ -1406,7 +1513,7 @@ class DurableModelCallOrchestrator:
                 route=decision,
             )
 
-        if not isinstance(observation, ModelCallObservation):
+        if type(observation) is not ModelCallObservation:
             payload = {
                 "attempt_id": attempt_id,
                 "reason": "adapter_returned_invalid_observation",
@@ -1427,6 +1534,21 @@ class DurableModelCallOrchestrator:
                 self._events(attempt_id)[-1],
                 route=decision,
             )
+
+        # Detach the complete accepted observation graph from adapter ownership.
+        # Revalidate scalars at use time, including objects modified after DTO construction.
+        try:
+            values = {field.name: getattr(observation, field.name) for field in fields(ModelCallObservation)}
+            values["output"] = json.loads(canonical_json(values["output"]))
+            observation = ModelCallObservation(**values)
+        except (TypeError, ValueError, RecursionError):
+            self._append(
+                attempt_id=attempt_id, event_type="ModelCallUnknown", version=3,
+                payload={"attempt_id": attempt_id, "reason": "adapter_returned_invalid_observation",
+                         "estimated_unbilled": str(decision.reserved_cost)},
+            )
+            self.budget.settle(attempt_id, incurred="0", estimated_unbilled=decision.reserved_cost)
+            return self._outcome_from_terminal(self._events(attempt_id)[-1], route=decision)
 
         if (
             observation.provider_id != decision.provider_id
@@ -1481,14 +1603,17 @@ class DurableModelCallOrchestrator:
                 route=decision,
             )
 
-        total = observation.incurred_cost + observation.estimated_unbilled
-        if total > decision.reserved_cost:
+        try:
+            total = exact_add(observation.incurred_cost, observation.estimated_unbilled)
+        except ValueError:
+            total = None
+        if total is None or total > decision.reserved_cost:
             # Do not pretend an over-ceiling observation is safely settled.
             # Preserve the full declared reservation as uncertain and retain the
             # observed overrun in durable diagnostic evidence for qualification.
             payload = {
                 "attempt_id": attempt_id,
-                "reason": "observed_cost_exceeds_reserved_ceiling",
+                "reason": "observed_cost_resource_envelope_exceeded" if total is None else "observed_cost_exceeds_reserved_ceiling",
                 "estimated_unbilled": str(decision.reserved_cost),
                 "observed_incurred_cost": str(observation.incurred_cost),
                 "observed_estimated_unbilled": str(
@@ -1511,12 +1636,10 @@ class DurableModelCallOrchestrator:
                 route=decision,
             )
 
-        try:
-            schema_valid = validate_result(observation.output)
-        except Exception:
-            schema_valid = False
-        if type(schema_valid) is not bool:
-            schema_valid = False
+        # Freeze the authenticated result before invoking caller-owned validation.
+        # Validators receive a detached JSON graph; mutating their input cannot
+        # rewrite retained response identity or the advisory output we return.
+        result_json = canonical_json(observation.output)
         result_digest = payload_digest(observation.output)
         observed_payload = {
             "attempt_id": attempt_id,
@@ -1539,8 +1662,15 @@ class DurableModelCallOrchestrator:
             "estimated_unbilled": str(observation.estimated_unbilled),
             "result_digest": result_digest,
             "result_schema_id": spec.result_schema_id,
-            "schema_valid": schema_valid,
+            "schema_valid": None,
         }
+        try:
+            schema_valid = validate_result(json.loads(result_json))
+        except Exception:
+            schema_valid = False
+        if type(schema_valid) is not bool:
+            schema_valid = False
+        observed_payload["schema_valid"] = schema_valid
         self._append(
             attempt_id=attempt_id,
             event_type="ModelCallObserved",
@@ -1549,8 +1679,8 @@ class DurableModelCallOrchestrator:
         )
         self.budget.settle(
             attempt_id,
-            incurred=observation.incurred_cost,
-            estimated_unbilled=observation.estimated_unbilled,
+            incurred=observed_payload["incurred_cost"],
+            estimated_unbilled=observed_payload["estimated_unbilled"],
         )
         return ModelCallOutcome(
             "OBSERVED_VALID" if schema_valid else "OBSERVED_INVALID",
@@ -1558,7 +1688,7 @@ class DurableModelCallOrchestrator:
             decision,
             "observed_response",
             result_digest=result_digest,
-            output=observation.output if schema_valid else None,
+            output=json.loads(result_json) if schema_valid else None,
             schema_valid=schema_valid,
         )
 
@@ -1655,6 +1785,27 @@ class DurableModelCallOrchestrator:
             route=None,
         )
 
+    def reconcile_billing(
+        self,
+        *,
+        attempt_id: str,
+        billing_id: str,
+        billed: object,
+    ) -> bool:
+        """Reconcile authenticated provider billing for OBSERVED or UNKNOWN calls.
+
+        UNKNOWN attempts retain their full reservation as estimated-unbilled.
+        Provider-authenticated invoice evidence may later convert part of that
+        uncertainty into incurred cost without re-entering the inference boundary.
+        """
+
+        return self._reconcile_billing(
+            attempt_id=attempt_id,
+            billing_id=billing_id,
+            billed=billed,
+            observed_only=False,
+        )
+
     def reconcile_observed_billing(
         self,
         *,
@@ -1662,55 +1813,110 @@ class DurableModelCallOrchestrator:
         billing_id: str,
         billed: object,
     ) -> bool:
+        """Backward-compatible observed-call-only reconciliation boundary."""
+
+        return self._reconcile_billing(
+            attempt_id=attempt_id,
+            billing_id=billing_id,
+            billed=billed,
+            observed_only=True,
+        )
+
+    def _reconcile_billing(
+        self,
+        *,
+        attempt_id: str,
+        billing_id: str,
+        billed: object,
+        observed_only: bool,
+    ) -> bool:
         attempt = _canonical_text(attempt_id, name="attempt_id")
         billing = _canonical_text(billing_id, name="billing_id")
         normalized = _exact_decimal(billed, name="billed")
+        if type(observed_only) is not bool:
+            raise TypeError("observed_only must be boolean")
+
         events = self._events(attempt)
-        observed = next(
+        terminal = next(
             (
                 event
                 for event in reversed(events)
-                if event.get("event_type") == "ModelCallObserved"
+                if event.get("event_type")
+                in {"ModelCallObserved", "ModelCallUnknown", "ModelCallNotSent"}
             ),
             None,
         )
-        if observed is None:
+        if terminal is None:
+            raise ModelCallError(
+                "billing reconciliation requires a terminal model call"
+            )
+
+        terminal_type = terminal.get("event_type")
+        if terminal_type == "ModelCallNotSent":
+            raise ModelCallError(
+                "billing reconciliation is forbidden for a proven NOT_SENT call"
+            )
+        if observed_only and terminal_type != "ModelCallObserved":
             raise ModelCallError(
                 "billing reconciliation requires an observed model call"
             )
-        payload = observed.get("payload")
-        if not isinstance(payload, Mapping):
-            raise ModelCallError("durable observed model-call payload is invalid")
-        if payload.get("billing_id") != billing:
-            raise ModelCallError(
-                "billing identity does not match the observed model call"
+
+        terminal_payload = terminal.get("payload")
+        if not isinstance(terminal_payload, Mapping):
+            raise ModelCallError("durable terminal model-call payload is invalid")
+
+        if terminal_type == "ModelCallObserved":
+            scope_payload = terminal_payload
+            if scope_payload.get("billing_id") != billing:
+                raise ModelCallError(
+                    "billing identity does not match the observed model call"
+                )
+            scope_name = "observed model call"
+        else:
+            prepared = next(
+                (
+                    event
+                    for event in events
+                    if event.get("event_type") == "ModelCallPrepared"
+                ),
+                None,
             )
+            if prepared is None or not isinstance(prepared.get("payload"), Mapping):
+                raise ModelCallError(
+                    "UNKNOWN billing reconciliation lacks durable prepared scope"
+                )
+            scope_payload = prepared["payload"]
+            scope_name = "UNKNOWN model call"
+
         try:
             evidence = self.billing_evidence_resolver(
                 attempt,
                 billing,
                 normalized,
-                payload,
+                scope_payload,
             )
         except Exception as error:
             raise ModelCallError(
                 "billing evidence could not be authenticated"
             ) from error
-        if not isinstance(evidence, BillingEvidence):
+        if type(evidence) is not BillingEvidence:
             raise ModelCallError(
                 "billing evidence resolver did not return BillingEvidence"
             )
+        evidence = BillingEvidence(**{
+            field.name: getattr(evidence, field.name) for field in fields(BillingEvidence)
+        })
         if (
             evidence.attempt_id != attempt
             or evidence.billing_id != billing
             or evidence.billed != normalized
-            or evidence.provider_id != payload.get("provider_id")
-            or evidence.model_id != payload.get("model_id")
-            or evidence.revision != payload.get("revision")
-            or evidence.cost_currency != payload.get("cost_currency")
+            or evidence.provider_id != scope_payload.get("provider_id")
+            or evidence.model_id != scope_payload.get("model_id")
+            or evidence.revision != scope_payload.get("revision")
+            or evidence.cost_currency != scope_payload.get("cost_currency")
         ):
             raise ModelCallError(
-                "billing evidence scope does not match the observed model call"
+                f"billing evidence scope does not match the {scope_name}"
             )
 
         evidence_payload = {
@@ -1751,4 +1957,3 @@ class DurableModelCallOrchestrator:
             request_id=attempt,
             billed=normalized,
         )
-

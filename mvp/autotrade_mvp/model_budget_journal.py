@@ -23,6 +23,7 @@ from mvp.autotrade_mvp.model_gateway import (
     route_model,
 )
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
+from .exact_decimal import parse_bounded_exact_decimal
 
 
 _AGGREGATE_TYPE = "model_budget"
@@ -235,7 +236,9 @@ class DurableModelBudget:
         raise ValueError(f"unsupported durable model budget event: {event_type}")
 
     def _replay(self) -> BudgetLedger:
-        events = self._events()
+        return self._replay_events(self._events())
+
+    def _replay_events(self, events: list[dict[str, Any]]) -> BudgetLedger:
         if not events or events[0]["event_type"] != "ModelBudgetInitialized":
             raise ValueError("durable model budget initialization is missing")
         initialization = events[0].get("payload")
@@ -271,7 +274,7 @@ class DurableModelBudget:
             event_type = event.get("event_type")
             if event_type in {"ModelCostReserved", "ModelRouteReserved"}:
                 try:
-                    amount = Decimal(payload["amount"])
+                    amount = parse_bounded_exact_decimal(payload["amount"])
                 except (KeyError, ValueError, TypeError) as error:
                     raise ValueError(
                         "durable model reservation amount is invalid"
@@ -337,9 +340,13 @@ class DurableModelBudget:
                 )
             return False
 
-        ledger = self._replay()
+        frozen_events = self._events()
+        ledger = self._replay_events(frozen_events)
         validate(ledger)
-        version = len(self._events()) + 1
+        # Validation and aggregate CAS must describe one immutable journal cut.
+        # Rereading the version after validation could accept a stale budget
+        # projection under a newer version and permanently overbook the ceiling.
+        version = len(frozen_events) + 1
         envelope = self._envelope(
             event_type=event_type,
             version=version,
@@ -365,9 +372,10 @@ class DurableModelBudget:
         except ValueError as error:
             if "aggregate_version must be" not in str(error):
                 raise
-            ledger = self._replay()
+            frozen_events = self._events()
+            ledger = self._replay_events(frozen_events)
             validate(ledger)
-            version = len(self._events()) + 1
+            version = len(frozen_events) + 1
             envelope = self._envelope(
                 event_type=event_type,
                 version=version,
@@ -442,7 +450,7 @@ class DurableModelBudget:
     def _decision_from_route_payload(payload: dict[str, Any]) -> RouteDecision:
         try:
             status = RouteStatus(payload["route_status"])
-            amount = Decimal(payload["amount"])
+            amount = parse_bounded_exact_decimal(payload["amount"])
         except (KeyError, ValueError, TypeError) as error:
             raise ValueError("durable model route payload is invalid") from error
         if status is not RouteStatus.ADMITTED:
@@ -645,7 +653,7 @@ class DurableModelBudget:
                 )
             released_text = payload.get("released")
             try:
-                released = Decimal(released_text)
+                released = parse_bounded_exact_decimal(released_text)
             except (ValueError, TypeError) as error:
                 raise ValueError(
                     "durable model budget release evidence is inconsistent"

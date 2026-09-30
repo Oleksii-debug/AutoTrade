@@ -60,7 +60,8 @@ class FundingTests(unittest.TestCase):
     def test_final_cash_flow_is_context_invariant_under_hostile_decimal_contexts(self):
         notional = Decimal("1234567890123456789012345678.1")
         rate = Decimal("0.0001")
-        expected = Decimal("123456789012345678901234.56781")
+        expected_credit = Decimal("123456789012345678901234.56781")
+        expected_debit = Decimal("-123456789012345678901234.56781")
         for precision in (6, 10, 28, 80):
             for rounding in (ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN):
                 with self.subTest(precision=precision, rounding=rounding):
@@ -77,8 +78,8 @@ class FundingTests(unittest.TestCase):
                             rate=rate,
                             sign_convention="POSITIVE_LONG_RECEIVES",
                         )
-                    self.assertEqual(debit, -expected)
-                    self.assertEqual(credit, expected)
+                    self.assertEqual(debit, expected_debit)
+                    self.assertEqual(credit, expected_credit)
 
     def test_indicated_rate_never_creates_economic_posting(self):
         book = FundingRevisionBook()

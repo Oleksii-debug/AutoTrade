@@ -37,6 +37,7 @@ _DEPENDENCY_LOCK_MEDIA_TYPE = "application/vnd.autotrade.dependency-lock"
 _COMPONENT_MEDIA_TYPE = "application/vnd.autotrade.distributed-component"
 _RIGHTS_MEDIA_TYPE = "application/vnd.autotrade.rights-evidence"
 _ADVISORY_EXCEPTION_MEDIA_TYPE = "application/vnd.autotrade.advisory-exception"
+_QUALIFICATION_SUBJECT_REQUIREMENT_PREFIX = "supply-chain-subject-sha256:"
 
 
 def _artifact_id(value: str, name: str) -> str:
@@ -348,6 +349,80 @@ def _snapshot_supply_chain_evidence(
     return SupplyChainEvidence(**values)
 
 
+def supply_chain_subject_requirement(evidence: SupplyChainEvidence) -> str:
+    """Bind signed WP-64 review authority to the exact detached semantic subject."""
+
+    if type(evidence) is not SupplyChainEvidence:
+        raise TypeError("evidence must be exact SupplyChainEvidence")
+    subject = {
+        "release_commit_sha": evidence.release_commit_sha,
+        "built_from_commit_sha": evidence.built_from_commit_sha,
+        "sbom": {
+            "artifact_id": evidence.sbom_artifact_id,
+            "sha256": evidence.sbom_hash,
+            "reviewed_for_release_sha": evidence.sbom_reviewed_for_release_sha,
+        },
+        "provenance": {
+            "artifact_id": evidence.provenance_artifact_id,
+            "sha256": evidence.provenance_hash,
+            "reviewed_for_release_sha": evidence.provenance_reviewed_for_release_sha,
+        },
+        "dependency_lock": {
+            "artifact_id": evidence.dependency_lock_artifact_id,
+            "sha256": evidence.dependency_lock_hash,
+            "reviewed_for_release_sha": evidence.dependency_lock_reviewed_for_release_sha,
+        },
+        "distributed_component_ids": sorted(evidence.distributed_component_ids),
+        "sbom_component_ids": sorted(evidence.sbom_component_ids),
+        "components": [
+            {
+                "component_id": item.component_id,
+                "artifact_id": item.artifact_id,
+                "version": item.version,
+                "declared_artifact_hash": item.declared_artifact_hash,
+                "observed_artifact_hash": item.observed_artifact_hash,
+                "source_revision": item.source_revision,
+                "license_status": item.license_status,
+                "distribution_rights": item.distribution_rights,
+                "advisory_status": item.advisory_status,
+                "advisory_exception_id": item.advisory_exception_id,
+                "advisory_exception_hash": item.advisory_exception_hash,
+                "notice_required": item.notice_required,
+                "notice_present": item.notice_present,
+                "reviewed_for_release_sha": item.reviewed_for_release_sha,
+            }
+            for item in sorted(
+                evidence.components,
+                key=lambda value: value.component_id,
+            )
+        ],
+        "model_data_rights": [
+            {
+                "artifact_id": item.artifact_id,
+                "artifact_hash": item.artifact_hash,
+                "use_scope": item.use_scope,
+                "rights_status": item.rights_status,
+                "reviewed_for_release_sha": item.reviewed_for_release_sha,
+            }
+            for item in sorted(
+                evidence.model_data_rights,
+                key=lambda value: value.artifact_id,
+            )
+        ],
+    }
+    canonical = json.dumps(
+        subject,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return (
+        _QUALIFICATION_SUBJECT_REQUIREMENT_PREFIX
+        + sha256(canonical).hexdigest()
+    )
+
+
 @dataclass(frozen=True)
 class SupplyChainQualification:
     qualification_id: str
@@ -399,6 +474,7 @@ def qualify_supply_chain(
     trust_receipt: SignedQualificationAttestation | None = None,
 ) -> SupplyChainQualification:
     evidence = _snapshot_supply_chain_evidence(evidence)
+    subject_requirement = supply_chain_subject_requirement(evidence)
     if evidence_store is not None and type(evidence_store) is not ArtifactStore:
         raise TypeError(
             "evidence_store must be ArtifactStore (canonical exact type required)"
@@ -574,7 +650,7 @@ def qualify_supply_chain(
         )
     else:
         try:
-            accepted_trust = verify_canonical_qualification_attestation(
+            accepted_review = verify_canonical_qualification_attestation(
                 trust_receipt,
                 evidence_store=evidence_store,
                 evidence_root=evidence_root,
@@ -585,6 +661,31 @@ def qualify_supply_chain(
                 expected_protocol_id="supply-chain-review-v1",
                 expected_protocol_version="1.0.0",
                 expected_requirement_id="independent-supply-chain-review",
+            )
+            accepted_subject = verify_canonical_qualification_attestation(
+                trust_receipt,
+                evidence_store=evidence_store,
+                evidence_root=evidence_root,
+                expected_source_sha=evidence.release_commit_sha,
+                expected_domain="SUPPLY_CHAIN",
+                expected_gate="RELEASE",
+                expected_package_id="WP-64",
+                expected_protocol_id="supply-chain-review-v1",
+                expected_protocol_version="1.0.0",
+                expected_requirement_id=subject_requirement,
+            )
+            accepted_trust = accepted_review
+            review_identity = (
+                accepted_review.attestation_id,
+                accepted_review.attestation_digest,
+                accepted_review.policy_id,
+                accepted_review.trust_root_id,
+            )
+            subject_identity = (
+                accepted_subject.attestation_id,
+                accepted_subject.attestation_digest,
+                accepted_subject.policy_id,
+                accepted_subject.trust_root_id,
             )
 
             expected_refs = {
@@ -646,7 +747,16 @@ def qualify_supply_chain(
                 )
                 for ref in accepted_trust.evidence_refs
             }
-            if attested_refs != expected_refs:
+            if (
+                review_identity != subject_identity
+                or subject_requirement not in accepted_review.requirement_ids
+            ):
+                record(
+                    "independent_evidence_trust",
+                    _FAIL,
+                    "SUPPLY_CHAIN.TRUST_SUBJECT_MISMATCH",
+                )
+            elif attested_refs != expected_refs:
                 record(
                     "independent_evidence_trust",
                     _FAIL,
@@ -672,7 +782,7 @@ def qualify_supply_chain(
                 _INCONCLUSIVE,
                 "SUPPLY_CHAIN.TRUST_ANCHOR_UNAVAILABLE",
             )
-        except QualificationTrustError:
+        except (QualificationTrustError, TypeError, ValueError):
             record(
                 "independent_evidence_trust",
                 _FAIL,

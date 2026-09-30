@@ -12,7 +12,12 @@ from decimal import Decimal, InvalidOperation
 from typing import Iterable, Literal
 
 from .accounting import JournalTransaction, posting, validate_transaction
-from .exact_decimal import ExactDecimalError, exact_multiply, exact_subtract
+from .exact_decimal import (
+    ExactDecimalError,
+    as_fraction,
+    exact_multiply,
+    exact_subtract,
+)
 
 
 class FundingError(ValueError):
@@ -26,25 +31,49 @@ class FundingConflict(FundingError):
 def _decimal(value: Decimal | str | int, name: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise FundingError(f"{name} must use exact decimal input")
+    if isinstance(value, Decimal) and type(value) is not Decimal:
+        raise FundingError(f"{name} must use an exact built-in Decimal")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
+        result = value if type(value) is Decimal else Decimal(value)
     except (InvalidOperation, TypeError, ValueError) as error:
         raise FundingError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
+    if not Decimal.is_finite(result):
         raise FundingError(f"{name} must be a finite decimal")
+    try:
+        as_fraction(result)
+    except ExactDecimalError as error:
+        raise FundingError(
+            f"{name} exceeds exact arithmetic resource envelope"
+        ) from error
     return result
 
 
 def _text(value: str, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    # Authority-bearing strings are retained by FundingEvent and later compared
+    # for revision identity. Reject str subclasses before strip/upper/equality
+    # can dispatch through caller-controlled methods.
+    if type(value) is not str or not value.strip():
         raise FundingError(f"{name} is required")
     return value.strip()
 
 
 def _utc(value: datetime, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
+    # Funding chronology is durable identity. Accept one canonical datetime
+    # implementation rather than retaining a polymorphic datetime subclass.
+    if type(value) is not datetime or value.tzinfo is None:
         raise FundingError(f"{name} must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    return datetime.astimezone(value, timezone.utc)
+
+
+def _sign_convention(
+    value: Literal["POSITIVE_LONG_PAYS", "POSITIVE_LONG_RECEIVES"],
+) -> Literal["POSITIVE_LONG_PAYS", "POSITIVE_LONG_RECEIVES"]:
+    if type(value) is not str or value not in {
+        "POSITIVE_LONG_PAYS",
+        "POSITIVE_LONG_RECEIVES",
+    }:
+        raise FundingError("unsupported funding sign convention")
+    return value
 
 
 def canonical_funding_cash_flow(
@@ -61,14 +90,10 @@ def canonical_funding_cash_flow(
 
     notional = _decimal(signed_notional, "signed_notional")
     funding_rate = _decimal(rate, "rate")
-    if sign_convention not in {
-        "POSITIVE_LONG_PAYS",
-        "POSITIVE_LONG_RECEIVES",
-    }:
-        raise FundingError("unsupported funding sign convention")
+    convention = _sign_convention(sign_convention)
     try:
         cash_flow = exact_multiply(notional, funding_rate)
-        if sign_convention == "POSITIVE_LONG_PAYS":
+        if convention == "POSITIVE_LONG_PAYS":
             return exact_subtract(Decimal("0"), cash_flow)
         return cash_flow
     except ExactDecimalError as error:
@@ -92,9 +117,9 @@ class FundingEvent:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "funding_id", _text(self.funding_id, "funding_id"))
-        if isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision < 1:
+        if type(self.revision) is not int or self.revision < 1:
             raise FundingError("revision must be a positive integer")
-        if self.kind not in {"INDICATED", "FINAL"}:
+        if type(self.kind) is not str or self.kind not in {"INDICATED", "FINAL"}:
             raise FundingError("kind must be INDICATED or FINAL")
         object.__setattr__(self, "effective_at", _utc(self.effective_at, "effective_at"))
         object.__setattr__(self, "available_at", _utc(self.available_at, "available_at"))
@@ -109,8 +134,11 @@ class FundingEvent:
             _decimal(self.signed_notional, "signed_notional"),
         )
         object.__setattr__(self, "rate", _decimal(self.rate, "rate"))
-        if self.sign_convention not in {"POSITIVE_LONG_PAYS", "POSITIVE_LONG_RECEIVES"}:
-            raise FundingError("unsupported funding sign convention")
+        object.__setattr__(
+            self,
+            "sign_convention",
+            _sign_convention(self.sign_convention),
+        )
         object.__setattr__(self, "evidence_ref", _text(self.evidence_ref, "evidence_ref"))
         if self.kind == "FINAL" and self.available_at < self.effective_at:
             raise FundingError("final funding cannot be available before its effective instant")
@@ -154,8 +182,11 @@ class FundingRevisionBook:
         return self._latest.get(_text(funding_id, "funding_id"))
 
     def record(self, event: FundingEvent) -> FundingUpdate:
-        if not isinstance(event, FundingEvent):
-            raise TypeError("event must be FundingEvent")
+        # FundingEvent is subclassable and economic_cash_flow is a virtual
+        # property. Terminal revision admission therefore accepts only the exact
+        # canonical snapshot type before any semantic/economic member is read.
+        if type(event) is not FundingEvent:
+            raise TypeError("event must be exact FundingEvent")
         previous = self._latest.get(event.funding_id)
         if previous is not None:
             if event.revision < previous.revision:
@@ -184,7 +215,17 @@ class FundingRevisionBook:
         # A later indicated estimate must not erase a previously evidenced final charge.
         if previous is not None and previous.kind == "FINAL" and event.kind == "INDICATED":
             raise FundingConflict("an indicated revision cannot supersede a final funding charge")
-        new_final = event.economic_cash_flow if event.kind == "FINAL" else old_final
+        if event.kind == "FINAL":
+            # Recompute from the accepted scalar snapshot rather than invoking
+            # the overridable convenience property. This keeps one deterministic
+            # source for financial authority even if callers inspect the property.
+            new_final = canonical_funding_cash_flow(
+                signed_notional=event.signed_notional,
+                rate=event.rate,
+                sign_convention=event.sign_convention,
+            )
+        else:
+            new_final = old_final
         try:
             delta = exact_subtract(new_final, old_final)
         except ExactDecimalError as error:

@@ -102,6 +102,82 @@ class DispatchBoundedNumericTransportTests(unittest.TestCase):
                 Decimal("65000.10").as_tuple(),
             )
 
+    def test_exact_subclass_after_send_stays_unknown_and_never_retries(self):
+        called = []
+        raw = b'{"price":12.3400}'
+        class HostileResponse(ExactJsonTransportResponse):
+            @property
+            def response_text(self):
+                called.append("text")
+                raise AssertionError("subtype getter")
+            @property
+            def response_sha256(self):
+                called.append("digest")
+                raise AssertionError("subtype getter")
+            @property
+            def payload(self):
+                called.append("payload")
+                raise AssertionError("subtype getter")
+        hostile = HostileResponse(raw)
+        with TemporaryDirectory() as directory:
+            store = JournalStore(directory + "/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store, environment="SIMULATION", account_id="acct", owner_token="owner"
+            )
+            outbound = []
+            def send(_cid, _request, guard):
+                guard()
+                outbound.append(raw)
+                return hostile
+            args = {
+                "attempt_id": "hostile-after-send",
+                "intent_id": "hostile-after-send-intent",
+                "intent_hash": "hostile-after-send-hash",
+                "provider": "BYBIT",
+                "request": {"symbol": "BTCUSD", "qty": "1"},
+                "now": "2026-09-24T18:00:00Z",
+                "authority_check": lambda _hash, _now: (True, "allowed"),
+            }
+            result = dispatcher.dispatch(**args, transport_send=send)
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(called, [])
+            self.assertEqual(len(outbound), 1)
+            aggregate_id = submission_attempt_aggregate_id(
+                environment="SIMULATION", account_id="acct",
+                attempt_id="hostile-after-send",
+            )
+            events = store.load_events("submission_attempt", aggregate_id)
+            self.assertEqual(
+                [e["event_type"] for e in events],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
+            )
+            retry = dispatcher.dispatch(
+                **args,
+                transport_send=lambda *_: self.fail("blind retry"),
+            )
+            self.assertEqual(retry.status, "UNKNOWN")
+            self.assertEqual(len(outbound), 1)
+
+    def test_exact_response_metadata_subclasses_never_dispatch_callbacks(self):
+        touched = []
+        class HostileStatus(int):
+            def __lt__(self, value):
+                touched.append("compare")
+                raise AssertionError("virtual int comparison")
+        class HostileReason(str):
+            def strip(self):
+                touched.append("strip")
+                raise AssertionError("virtual str strip")
+        raw = b'{"price":12.34}'
+        with self.assertRaises(ValueError):
+            ExactJsonTransportResponse(raw, http_status=HostileStatus(200))
+        with self.assertRaises(ValueError):
+            ExactJsonTransportResponse(
+                raw, requires_reconciliation=True,
+                ambiguity_reason=HostileReason("needs reconciliation"),
+            )
+        self.assertEqual(touched, [])
+
     def test_resource_excess_cannot_construct_a_decimal_before_rejection(self):
         invalid = (
             b'{"price":1e256}',

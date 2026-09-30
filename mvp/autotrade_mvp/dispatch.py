@@ -90,8 +90,7 @@ class ExactJsonTransportResponse:
         raw = self.response_bytes
         _decode_exact_json_bytes(raw)
         if self.http_status is not None and (
-            isinstance(self.http_status, bool)
-            or not isinstance(self.http_status, int)
+            type(self.http_status) is not int
             or self.http_status < 100
             or self.http_status > 599
         ):
@@ -100,7 +99,7 @@ class ExactJsonTransportResponse:
             raise TypeError("requires_reconciliation must be boolean")
         if self.requires_reconciliation:
             if (
-                not isinstance(self.ambiguity_reason, str)
+                type(self.ambiguity_reason) is not str
                 or not self.ambiguity_reason.strip()
             ):
                 raise ValueError(
@@ -180,8 +179,7 @@ class SubmissionResponseBinding:
             raise ValueError("durable provider response digest mismatch")
         _decode_exact_json_bytes(self.response_bytes)
         if self.http_status is not None and (
-            isinstance(self.http_status, bool)
-            or not isinstance(self.http_status, int)
+            type(self.http_status) is not int
             or self.http_status < 100
             or self.http_status > 599
         ):
@@ -986,7 +984,7 @@ class GuardedDispatcher:
         terminal_requires_reconciliation = False
         terminal_reason = "sent_confirmed"
         try:
-            if isinstance(response, ExactJsonTransportResponse):
+            if type(response) is ExactJsonTransportResponse:
                 # The exact raw bytes + digest are the durable source.
                 # The prior "response" JSON mirror could silently round
                 # decimals to float; persisting Decimal objects directly is
@@ -1009,6 +1007,10 @@ class GuardedDispatcher:
                     )
                     sent_payload["reason"] = terminal_reason
                     sent_payload["retry_disposition"] = "RECONCILE_FIRST"
+            elif isinstance(response, ExactJsonTransportResponse):
+                # Caller-polymorphic post-SEND response getters are not evidence.
+                # A durable UNKNOWN retains the no-blind-retry property.
+                raise TypeError("exact provider response subtype is forbidden")
             else:
                 sent_payload = {
                     "client_order_id": client_order_id,

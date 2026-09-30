@@ -185,6 +185,7 @@ def freeze_with_integrity_store(
     with_attestation=False,
     receipt_override=None,
     policy_override=None,
+    before_canonical_verify=None,
 ):
     with TemporaryDirectory() as directory:
         store = ArtifactStore(directory)
@@ -237,6 +238,8 @@ def freeze_with_integrity_store(
         )
 
         def canonical_verify(receipt_arg, **kwargs):
+            if before_canonical_verify is not None:
+                before_canonical_verify()
             return verify_qualification_attestation(
                 receipt_arg,
                 policy=canonical_policy,
@@ -294,6 +297,87 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
             manifest["qualification"]["policy_id"],
             decision.qualification_policy_id,
         )
+
+
+    def test_freeze_uses_one_exact_detached_candidate_graph_across_callbacks(self):
+        phase = {"mutated": False}
+
+        class HostileArtifact(ReleaseArtifactEvidence):
+            def __getattribute__(self, name):
+                if phase["mutated"]:
+                    if name == "evidence_status":
+                        return "FAIL"
+                    if name == "signature_status":
+                        return "INVALID"
+                return super().__getattribute__(name)
+
+        class HostileCandidate(ReleaseCandidateInput):
+            def __getattribute__(self, name):
+                if phase["mutated"]:
+                    if name == "source_sha":
+                        return OTHER_SOURCE
+                    if name == "unresolved_blockers":
+                        return ("late-caller-blocker",)
+                return super().__getattribute__(name)
+
+        base = self.candidate()
+        first = base.artifacts[0]
+        hostile_artifact = HostileArtifact(
+            role=first.role,
+            artifact_id=first.artifact_id,
+            artifact_sha256=first.artifact_sha256,
+            source_sha=first.source_sha,
+            signature_status=first.signature_status,
+            evidence_status=first.evidence_status,
+        )
+        hostile_artifacts = (hostile_artifact,) + base.artifacts[1:]
+        hostile_candidate = HostileCandidate(
+            release_id=base.release_id,
+            source_sha=base.source_sha,
+            baseline_hash=base.baseline_hash,
+            schema_contract_hash=base.schema_contract_hash,
+            artifacts=hostile_artifacts,
+            unresolved_blockers=base.unresolved_blockers,
+        )
+
+        decision = freeze_with_integrity_store(
+            hostile_candidate,
+            with_attestation=True,
+            before_canonical_verify=lambda: phase.__setitem__("mutated", True),
+        )
+
+        self.assertTrue(phase["mutated"])
+        self.assertEqual(decision.status, "FROZEN")
+        manifest = json.loads(decision.manifest_json)
+        self.assertEqual(manifest["source_sha"], SOURCE)
+        by_role = {item["role"]: item for item in manifest["artifacts"]}
+        self.assertEqual(by_role[first.role]["evidence_status"], "PASS")
+        self.assertEqual(by_role[first.role]["signature_status"], first.signature_status)
+        self.assertNotIn("late-caller-blocker", decision.reasons)
+
+    def test_freeze_rejects_nonexact_terminal_container_views_before_callbacks(self):
+        class HostileCandidate(ReleaseCandidateInput):
+            def __getattribute__(self, name):
+                value = super().__getattribute__(name)
+                if name == "artifacts":
+                    return list(value)
+                return value
+
+        base = self.candidate()
+        hostile_candidate = HostileCandidate(
+            release_id=base.release_id,
+            source_sha=base.source_sha,
+            baseline_hash=base.baseline_hash,
+            schema_contract_hash=base.schema_contract_hash,
+            artifacts=base.artifacts,
+            unresolved_blockers=base.unresolved_blockers,
+        )
+
+        with self.assertRaisesRegex(
+            ReleaseCandidateError,
+            "candidate.artifacts must be an exact tuple",
+        ):
+            freeze_release_candidate(hostile_candidate)
 
     def test_caller_selected_trust_policy_cannot_freeze_release(self):
         candidate = self.candidate()

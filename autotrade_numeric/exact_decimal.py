@@ -16,10 +16,12 @@ from __future__ import annotations
 
 from decimal import Decimal
 from fractions import Fraction
+import re
 from typing import Iterable, Literal
 
 from ._generated_common_scalars import is_valid_common_scalar
 from ._generated_decimal_limits import (
+    MAX_DECIMAL_TEXT_LENGTH,
     MAX_INTEGER_DIGITS,
     MAX_SCALE,
     MAX_SIGNIFICANT_DIGITS,
@@ -99,6 +101,157 @@ def parse_canonical_decimal_text(value: object) -> Decimal:
     result = Decimal(value)
     _validate_decimal_envelope(result)
     return result
+
+
+# Provider/domain presentation admission is intentionally distinct from the
+# stricter canonical Decimal wire grammar. No Decimal construction, fixed
+# expansion, hashing or financial mutation precedes this bounded preflight.
+_BOUNDED_PRESENTATION = re.compile(
+    r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\Z",
+    re.ASCII,
+)
+_JSON_NUMBER = re.compile(
+    r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?\Z",
+    re.ASCII,
+)
+_JSON_INTEGER = re.compile(r"-?(?:0|[1-9][0-9]*)\Z", re.ASCII)
+
+
+def _bounded_exponent(
+    text: str,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    """Parse only enough exponent digits to decide bounded admission.
+
+    'text' has already passed the ASCII presentation grammar. Saturation
+    prevents constructing an oversized integer even if wire limits grow.
+    """
+    if not text:
+        return 0
+    negative = text[0] == "-"
+    digits = text[1:] if text[0] in "+-" else text
+    saturation = max(abs(minimum), abs(maximum)) + 1
+    magnitude = 0
+    for digit in digits:
+        if magnitude <= saturation:
+            magnitude = min(saturation + 1, magnitude * 10 + ord(digit) - 48)
+    value = -magnitude if negative else magnitude
+    if value < minimum or value > maximum:
+        raise ExactDecimalError("decimal exponent exceeds resource envelope")
+    return value
+
+
+def _preflight_bounded_presentation(value: str, *, allow_exponent: bool) -> bool:
+    """Return true for a validated zero token; otherwise validate geometry.
+
+    This is a text-only check over exact builtin strings. The coefficient's
+    *leading* zeros are insignificant; its written trailing zeros must remain
+    significant, matching Decimal.as_tuple() and provider presentation.
+    """
+    if (
+        len(value) > MAX_DECIMAL_TEXT_LENGTH
+        or _BOUNDED_PRESENTATION.fullmatch(value) is None
+    ):
+        raise ExactDecimalError("invalid or oversized decimal presentation")
+    unsigned = value[1:] if value.startswith(("-", "+")) else value
+    e_position = unsigned.find("e")
+    if e_position < 0:
+        e_position = unsigned.find("E")
+    if e_position >= 0 and not allow_exponent:
+        raise ExactDecimalError("decimal exponent is not permitted")
+    mantissa = unsigned if e_position < 0 else unsigned[:e_position]
+    exponent_text = "" if e_position < 0 else unsigned[e_position + 1:]
+    integer_part, dot, fractional_part = mantissa.partition(".")
+    coefficient = (integer_part + fractional_part).lstrip("0")
+    if not coefficient:
+        # Canonicalize any grammar/length-safe zero immediately; never expand
+        # an extreme zero exponent later with Decimal or format(..., 'f').
+        return True
+    significant_digits = len(coefficient)
+    if significant_digits > MAX_SIGNIFICANT_DIGITS:
+        raise ExactDecimalError("decimal exceeds maximum significant digits")
+    fractional_length = len(fractional_part) if dot else 0
+    minimum_exp = fractional_length - MAX_SCALE
+    maximum_exp = fractional_length + MAX_INTEGER_DIGITS - significant_digits
+    exponent = _bounded_exponent(
+        exponent_text,
+        minimum=minimum_exp,
+        maximum=maximum_exp,
+    )
+    tuple_exponent = exponent - fractional_length
+    if (
+        max(-tuple_exponent, 0) > MAX_SCALE
+        or max(significant_digits + tuple_exponent, 0) > MAX_INTEGER_DIGITS
+    ):
+        raise ExactDecimalError("decimal exceeds resource envelope")
+    return False
+
+
+def parse_bounded_exact_decimal(
+    value: object,
+    *,
+    allow_exponent: bool = True,
+) -> Decimal:
+    """Admit exact provider/domain Decimal presentation before construction.
+
+    Only exact built-in Decimal, int and str may supply financial quantity.
+    Wire canonical admission remains parse_canonical_decimal_text(); this
+    permissive boundary does not authorize arbitrary provider evidence.
+    """
+    if type(allow_exponent) is not bool:
+        raise TypeError("allow_exponent must be bool")
+    if type(value) is Decimal:
+        _validate_decimal_envelope(value)
+        if not any(Decimal.as_tuple(value).digits):
+            return Decimal("0")
+        return value
+    if type(value) is int:
+        if value == 0:
+            return Decimal("0")
+        if _integer_digit_count(
+            value,
+            limit=min(MAX_SIGNIFICANT_DIGITS, MAX_INTEGER_DIGITS),
+        ) > min(MAX_SIGNIFICANT_DIGITS, MAX_INTEGER_DIGITS):
+            raise ExactDecimalError("integer exceeds decimal resource envelope")
+        result = Decimal(value)
+        _validate_decimal_envelope(result)
+        return result
+    if type(value) is not str:
+        raise ExactDecimalError("value must be exact str, int or finite Decimal")
+    if _preflight_bounded_presentation(value, allow_exponent=allow_exponent):
+        return Decimal("0")
+    result = Decimal(value)
+    _validate_decimal_envelope(result)
+    return result
+
+
+def parse_bounded_json_number_token(text: str) -> Decimal:
+    """Strict JSON numeric token callback for json.loads(parse_float=...)."""
+    if (
+        type(text) is not str
+        or len(text) > MAX_DECIMAL_TEXT_LENGTH
+        or _JSON_NUMBER.fullmatch(text) is None
+    ):
+        raise ExactDecimalError("invalid or oversized JSON numeric token")
+    return parse_bounded_exact_decimal(text)
+
+
+def parse_bounded_json_integer_token(text: str) -> int:
+    """Strict JSON integer callback that preserves integer/Decimal identity."""
+    if (
+        type(text) is not str
+        or len(text) > MAX_DECIMAL_TEXT_LENGTH
+        or _JSON_INTEGER.fullmatch(text) is None
+    ):
+        raise ExactDecimalError("invalid or oversized JSON integer token")
+    if text in ("0", "-0"):
+        return 0
+    digits = len(text) - (1 if text.startswith("-") else 0)
+    if digits > min(MAX_SIGNIFICANT_DIGITS, MAX_INTEGER_DIGITS):
+        raise ExactDecimalError("JSON integer exceeds decimal resource envelope")
+    return int(text)
 
 
 def _validate_fraction_intermediate(

@@ -208,9 +208,14 @@ def _publish_supply_artifact(
     return artifact_id, digest
 
 
-def _supply_chain_fixture(candidate, store):
-    windows = next(
-        item for item in candidate.artifacts if item.role == "WINDOWS_PACKAGE"
+def _supply_chain_fixture(candidate, store, *, release_artifact=None):
+    windows = (
+        release_artifact
+        if release_artifact is not None
+        else next(
+            item for item in candidate.artifacts
+            if item.role == "WINDOWS_PACKAGE"
+        )
     )
     sbom_id, sbom_hash = _publish_supply_artifact(
         store,
@@ -388,6 +393,7 @@ def freeze_with_integrity_store(
     before_canonical_verify=None,
     supply_chain_evidence_override=None,
     supply_chain_receipt_override=None,
+    supply_chain_release_artifact_override=None,
 ):
     with TemporaryDirectory() as directory:
         store = ArtifactStore(directory)
@@ -427,7 +433,11 @@ def freeze_with_integrity_store(
         supply_chain_evidence = (
             supply_chain_evidence_override
             if supply_chain_evidence_override is not None
-            else _supply_chain_fixture(candidate, store)
+            else _supply_chain_fixture(
+                candidate,
+                store,
+                release_artifact=supply_chain_release_artifact_override,
+            )
         )
         supply_chain_receipt = (
             supply_chain_receipt_override
@@ -639,6 +649,46 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
         )
         self.assertEqual(decision.status, "BLOCKED")
         self.assertIn("qualification_evidence_set_mismatch", decision.reasons)
+
+    def test_wp64_review_for_package_a_cannot_freeze_package_b(self):
+        candidate_a = self.candidate()
+        windows_a = next(
+            item for item in candidate_a.artifacts
+            if item.role == "WINDOWS_PACKAGE"
+        )
+        windows_b = artifact("WINDOWS_PACKAGE", digest_char="e")
+        candidate_b = self.candidate(
+            artifacts=tuple(
+                windows_b if item.role == "WINDOWS_PACKAGE" else item
+                for item in candidate_a.artifacts
+            )
+        )
+
+        wrong = freeze_with_integrity_store(
+            candidate_b,
+            with_attestation=True,
+            supply_chain_release_artifact_override=windows_a,
+        )
+        self.assertEqual(wrong.status, "BLOCKED")
+        self.assertIn(
+            "supply_chain_release_artifact_mismatch",
+            wrong.reasons,
+        )
+
+        correct = freeze_with_integrity_store(
+            candidate_b,
+            with_attestation=True,
+        )
+        self.assertEqual(correct.status, "FROZEN")
+        manifest = json.loads(correct.manifest_json)
+        self.assertEqual(
+            manifest["supply_chain"]["release_artifact_id"],
+            windows_b.artifact_id,
+        )
+        self.assertEqual(
+            manifest["supply_chain"]["release_artifact_sha256"],
+            windows_b.artifact_sha256,
+        )
 
     def test_attestation_for_different_release_package_cannot_freeze(self):
         candidate = self.candidate()

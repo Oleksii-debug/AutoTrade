@@ -1077,7 +1077,7 @@ class CorporateActionExactArithmeticTests(unittest.TestCase):
             settled_cash="12345678901234567890.123456789",
             unsettled_cash="0.00000000000000000009",
         )
-        expected_settled = Decimal("12345678901234567890.123456799")
+        expected_settled = Decimal("12345678901234567890.12345678900000000001")
         expected_unsettled = Decimal("0.00000000000000000008")
 
         for precision in self._PRECISIONS:

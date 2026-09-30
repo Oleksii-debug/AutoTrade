@@ -23,7 +23,13 @@ PreparedAuthorityCheck = Callable[
 
 @dataclass(frozen=True)
 class PreparedSubmissionAuthorityCheck:
-    """Authority callback that consumes the exact dispatcher-prepared scope."""
+    """Calling-convention marker for an authority that consumes prepared scope.
+
+    This wrapper is not itself an authority credential. Product financial
+    authority is supplied by AuthorityService.dispatch_guard(); the marker only
+    lets GuardedDispatcher pass the exact prepared scope and digest to that
+    canonical guard while retaining legacy two-argument seams elsewhere.
+    """
 
     callback: PreparedAuthorityCheck
 
@@ -268,11 +274,6 @@ def _invoke_authority_check(
             submission_scope,
             submission_scope_hash,
         )
-    if any(
-        key in submission_scope
-        for key in ("provider", "provider_id", "provider_environment")
-    ):
-        return False, "prepared_scope_authority_required"
     return authority_check(intent_hash, now)
 
 

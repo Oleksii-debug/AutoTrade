@@ -181,6 +181,61 @@ class ProviderCoreTests(unittest.TestCase):
                         instrument_versions=("BTCUSD:v1",),
                     )
 
+    def test_json_structural_bound_precedes_recursive_materialization(self):
+        # _freeze_json permits 65 nested empty containers (root depth 0).
+        at_limit = b"[" * 65 + b"]" * 65
+        result = provider_core_module._decode_exact_json(at_limit)
+        for _ in range(65):
+            self.assertIs(type(result), tuple)
+            result = result[0] if result else None
+        self.assertIsNone(result)
+
+        # Brackets in strings, including escaped quotes, are not structure.
+        text_payload = {
+            "note": "[" * 300 + "]" * 300,
+            "escaped": chr(92) + '"' + "[[{",
+        }
+        decoded = provider_core_module._decode_exact_json(
+            json.dumps(text_payload).encode("utf-8")
+        )
+        self.assertEqual(decoded["note"], text_payload["note"])
+        self.assertEqual(decoded["escaped"], text_payload["escaped"])
+
+        # 66 nested arrays are valid JSON but beyond the installed budget.
+        too_deep = b"[" * 66 + b"]" * 66
+        with patch.object(
+            provider_core_module.json,
+            "loads",
+            side_effect=AssertionError("recursive parser was reached"),
+        ):
+            with self.assertRaisesRegex(
+                ProviderCoreError, "maximum JSON depth"
+            ):
+                provider_core_module._decode_exact_json(too_deep)
+        # A document exceeding CPython recursion is also rejected before
+        # recursive parser invocation, even on retained/replayed bytes.
+        much_deeper = b"[" * 4000 + b"]" * 4000
+        with self.assertRaisesRegex(
+            ProviderCoreError, "maximum JSON depth"
+        ) as rejected:
+            provider_core_module._decode_exact_json(much_deeper)
+        self.assertIsNone(rejected.exception.__cause__)
+        self.assertIsNone(rejected.exception.__context__)
+
+    def test_json_decoder_recursion_error_is_redacted(self):
+        marker = "AUTOTRADE_SYNTHETIC_UNTRUSTED_PARSER_MARKER"
+        with patch.object(
+            provider_core_module.json, "loads",
+            side_effect=RecursionError(marker),
+        ):
+            with self.assertRaisesRegex(
+                ProviderCoreError, "maximum JSON depth"
+            ) as rejected:
+                provider_core_module._decode_exact_json(b'{"safe":1}')
+        self.assertNotIn(marker, str(rejected.exception))
+        self.assertIsNone(rejected.exception.__cause__)
+        self.assertIsNone(rejected.exception.__context__)
+
     def test_provider_raw_json_keeps_duplicate_and_nonfinite_fences(self):
         for invalid in (
             b'{"price":1.25,"price":1.50}',
@@ -428,6 +483,40 @@ class ProviderCoreTests(unittest.TestCase):
             bucket.acquire("15", purpose="RESEARCH")
         bucket.acquire("20", purpose="RECOVERY")
         self.assertEqual(bucket.available(), Decimal("10"))
+
+    def test_quota_purpose_rejects_polymorphic_recovery_impersonation(self):
+        callbacks = []
+
+        class Impostor(str):
+            def __hash__(self):
+                callbacks.append("hash")
+                return hash("RECOVERY")
+
+            def __eq__(self, other):
+                callbacks.append("eq")
+                return True
+
+            def __ne__(self, other):
+                callbacks.append("ne")
+                return False
+
+        bucket = QuotaBucket(capacity="1", recovery_reserve="0.25")
+        for purpose in (Impostor("TRADING"), object()):
+            with self.subTest(purpose_type=type(purpose).__name__):
+                with self.assertRaisesRegex(
+                    ProviderCoreError, "unknown quota purpose"
+                ):
+                    bucket.acquire("0.9", purpose=purpose)
+                self.assertEqual(callbacks, [])
+                self.assertEqual(bucket.used, Decimal("0"))
+                self.assertEqual(bucket.available(), Decimal("1"))
+        with self.assertRaisesRegex(
+            ProviderCoreError, "recovery quota reserve"
+        ):
+            bucket.acquire("0.9", purpose="TRADING")
+        self.assertEqual(bucket.used, Decimal("0"))
+        bucket.acquire("0.9", purpose="RECOVERY")
+        self.assertEqual(bucket.used, Decimal("0.9"))
 
     def test_quota_recovery_reserve_is_context_independent_and_exact(self):
         tiny = Decimal("1e-30")

@@ -140,6 +140,36 @@ def _freeze_json(value: object, *, depth: int = 0) -> object:
     raise ProviderCoreError("provider response contains unsupported JSON value")
 
 
+def _require_bounded_json_nesting(text: str) -> None:
+    """Enforce _freeze_json's existing depth contract before JSON parsing.
+
+    Root container depth is zero in _freeze_json. A 65th empty nested
+    container can be valid at depth 64; a 66th cannot. This check is
+    structural only; transport byte limits remain at the wire boundary.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for character in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+        elif character == '"':
+            in_string = True
+        elif character in "[{":
+            depth += 1
+            if depth > 65:
+                raise ProviderCoreError(
+                    "provider response exceeds maximum JSON depth"
+                )
+        elif character in "]}":
+            depth -= 1
+
+
 def _decode_exact_json(raw: bytes) -> object:
     if type(raw) is not bytes or not raw:
         raise ProviderCoreError("provider response bytes must be non-empty bytes")
@@ -163,6 +193,8 @@ def _decode_exact_json(raw: bytes) -> object:
             "provider response must be exact UTF-8 JSON bytes"
         )
 
+    _require_bounded_json_nesting(text)
+
     parse_failure = None
     try:
         decoded = json.loads(
@@ -182,9 +214,15 @@ def _decode_exact_json(raw: bytes) -> object:
         parse_failure = "numeric"
     except json.JSONDecodeError:
         parse_failure = "json"
+    except RecursionError:
+        parse_failure = "depth"
 
     # Translate after leaving the parser handler. Merely suppressing display
     # chaining would still leave raw parser state reachable via __context__.
+    if parse_failure == "depth":
+        raise ProviderCoreError(
+            "provider response exceeds maximum JSON depth"
+        )
     if parse_failure == "numeric":
         raise ProviderCoreError(
             "provider response contains invalid or oversized exact JSON number"
@@ -890,9 +928,12 @@ class QuotaBucket:
             raise ProviderCoreError("provider quota exceeds exact arithmetic envelope") from error
 
     def acquire(self, cost, *, purpose: Literal["RECOVERY", "TRADING", "RESEARCH"]) -> None:
-        amount = _decimal(cost, "quota cost", non_negative=True)
-        if purpose not in {"RECOVERY", "TRADING", "RESEARCH"}:
+        # Financial-purpose identity must not dispatch polymorphic equality.
+        if type(purpose) is not str or purpose not in {
+            "RECOVERY", "TRADING", "RESEARCH"
+        }:
             raise ProviderCoreError("unknown quota purpose")
+        amount = _decimal(cost, "quota cost", non_negative=True)
         if amount == 0:
             return
         # Resource authority must not depend on ambient Decimal precision.

@@ -10,6 +10,8 @@ from mvp.autotrade_mvp.capabilities import (
     EvidenceVerification,
     derive_capability_snapshot,
 )
+
+from mvp.tests.capability_test_support import fresh_test_admission
 from mvp.autotrade_mvp.kraken_futures import (
     KrakenFuturesPreparedRequest,
     build_order_payload,
@@ -66,11 +68,13 @@ def futures_read_capability(*, account_id="paper-1"):
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-    return derive_capability_snapshot(
-        snapshot_id=str(uuid4()),
-        claims=claims,
-        observed_at=observed_at,
-        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    return fresh_test_admission(
+        derive_capability_snapshot(
+            snapshot_id=str(uuid4()),
+            claims=claims,
+            observed_at=observed_at,
+            evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+        )
     )
 
 
@@ -126,11 +130,13 @@ def futures_write_capability(
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-    return derive_capability_snapshot(
-        snapshot_id=str(uuid4()),
-        claims=claims,
-        observed_at=NOW_DT,
-        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    return fresh_test_admission(
+        derive_capability_snapshot(
+            snapshot_id=str(uuid4()),
+            claims=claims,
+            observed_at=NOW_DT,
+            evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+        )
     )
 
 

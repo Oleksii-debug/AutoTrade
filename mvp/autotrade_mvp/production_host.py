@@ -31,6 +31,7 @@ from .security import SecurityBoundary, _authenticated_origin
 
 _ALLOWED_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 _COMMAND_PATH = "/api/v1/commands"
+_HEALTH_PATH = "/api/v1/health"
 _SHUTTING_DOWN_BODY = b'{"error":"HOST_SHUTTING_DOWN"}'
 _MAX_SERVE_POLL_SECONDS = 0.5
 _MAX_CONFIG_BYTES = 64 * 1024
@@ -269,6 +270,15 @@ class _CommandAdmissionGate:
         self._accepting = True
         self._active = 0
 
+    @staticmethod
+    def _shutting_down_response() -> TransportResponse:
+        return TransportResponse(
+            status=503,
+            content_type="application/json; charset=utf-8",
+            body=_SHUTTING_DOWN_BODY,
+            headers=(("Cache-Control", "no-store"),),
+        )
+
     def dispatch(
         self,
         *,
@@ -277,22 +287,29 @@ class _CommandAdmissionGate:
         headers,
         body: bytes = b"",
     ) -> TransportResponse:
-        is_command = method == "POST" and urlsplit(target).path == _COMMAND_PATH
+        path = urlsplit(target).path
+        is_command = method == "POST" and path == _COMMAND_PATH
+        is_health = method == "GET" and path == _HEALTH_PATH
         if not is_command:
-            return self._dispatch(
+            response = self._dispatch(
                 method=method,
                 target=target,
                 headers=headers,
                 body=body,
             )
+            if not is_health or response.status != 200:
+                return response
+            # Linearize readiness after the underlying health projection.  The
+            # gate lock is the same cut used by stop_accepting(), so a response
+            # can report READY only if it linearized before shutdown admission
+            # closed. A request finishing after the cut gets a non-ready 503.
+            with self._condition:
+                if self._accepting:
+                    return response
+            return self._shutting_down_response()
         with self._condition:
             if not self._accepting:
-                return TransportResponse(
-                    status=503,
-                    content_type="application/json; charset=utf-8",
-                    body=_SHUTTING_DOWN_BODY,
-                    headers=(("Cache-Control", "no-store"),),
-                )
+                return self._shutting_down_response()
             self._active += 1
         try:
             return self._dispatch(

@@ -838,26 +838,11 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "canonical sha256"):
             policy(artifact=ARTIFACT_SHA + " ")
 
-    def test_decision_copies_measured_mapping_and_rejects_boolean_downtime(self):
-        measured = {scenario: 10 for scenario in RecoveryScenario}
-        decision = RecoveryQualificationDecision(
-            status=RecoveryEvidenceStatus.PASS,
-            source_sha=SOURCE_SHA,
-            release_artifact_id=RELEASE_ARTIFACT_ID,
-            release_artifact_sha256=ARTIFACT_SHA,
-            evidence_schema_version=EVIDENCE_SCHEMA,
-            protocol_id=PROTOCOL_ID,
-            evidence_set_sha256=DECISION_EVIDENCE_SET_SHA,
-            recovery_policy_requirement=recovery_policy_subject_requirement(policy()),
-            blockers=(),
-            measured_downtime_ms=measured,
-        )
-        measured[RecoveryScenario.POWER_LOSS] = 999
-        self.assertEqual(
-            decision.measured_downtime_ms[RecoveryScenario.POWER_LOSS],
-            10,
-        )
-        with self.assertRaisesRegex(ValueError, "non-negative integer"):
+    def test_direct_pass_decision_requires_independently_verifiable_trust(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires accepted qualification trust",
+        ):
             RecoveryQualificationDecision(
                 status=RecoveryEvidenceStatus.PASS,
                 source_sha=SOURCE_SHA,
@@ -868,6 +853,41 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
                 evidence_set_sha256=DECISION_EVIDENCE_SET_SHA,
                 recovery_policy_requirement=recovery_policy_subject_requirement(policy()),
                 blockers=(),
+                measured_downtime_ms={
+                    scenario: 10 for scenario in RecoveryScenario
+                },
+            )
+
+    def test_decision_copies_measured_mapping_and_rejects_boolean_downtime(self):
+        measured = {scenario: 10 for scenario in RecoveryScenario}
+        decision = RecoveryQualificationDecision(
+            status=RecoveryEvidenceStatus.INCONCLUSIVE,
+            source_sha=SOURCE_SHA,
+            release_artifact_id=RELEASE_ARTIFACT_ID,
+            release_artifact_sha256=ARTIFACT_SHA,
+            evidence_schema_version=EVIDENCE_SCHEMA,
+            protocol_id=PROTOCOL_ID,
+            evidence_set_sha256=DECISION_EVIDENCE_SET_SHA,
+            recovery_policy_requirement=recovery_policy_subject_requirement(policy()),
+            blockers=("fixture:inconclusive",),
+            measured_downtime_ms=measured,
+        )
+        measured[RecoveryScenario.POWER_LOSS] = 999
+        self.assertEqual(
+            decision.measured_downtime_ms[RecoveryScenario.POWER_LOSS],
+            10,
+        )
+        with self.assertRaisesRegex(ValueError, "non-negative integer"):
+            RecoveryQualificationDecision(
+                status=RecoveryEvidenceStatus.INCONCLUSIVE,
+                source_sha=SOURCE_SHA,
+                release_artifact_id=RELEASE_ARTIFACT_ID,
+                release_artifact_sha256=ARTIFACT_SHA,
+                evidence_schema_version=EVIDENCE_SCHEMA,
+                protocol_id=PROTOCOL_ID,
+                evidence_set_sha256=DECISION_EVIDENCE_SET_SHA,
+                recovery_policy_requirement=recovery_policy_subject_requirement(policy()),
+                blockers=("fixture:inconclusive",),
                 measured_downtime_ms={
                     scenario: (True if scenario is RecoveryScenario.POWER_LOSS else 10)
                     for scenario in RecoveryScenario

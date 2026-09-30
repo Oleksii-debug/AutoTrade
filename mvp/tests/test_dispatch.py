@@ -6,14 +6,32 @@ from mvp.autotrade_mvp.dispatch import (
     DispatchBlocked,
     ExactJsonTransportResponse,
     GuardedDispatcher,
+    PreparedSubmissionAuthorityCheck,
     SubmissionResponseBinding,
     load_submission_response_binding,
     stable_client_order_id,
 )
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
 from mvp.tests.test_reconciliation_journal import reconciliation
 from mvp.autotrade_mvp.recovery import RecoveryController
+
+
+def prepared_allow_all():
+    return PreparedSubmissionAuthorityCheck(
+        lambda _intent, _now, _scope, _scope_hash: (True, "allowed")
+    )
+
+
+def financial_submission_scope(*, provider, environment, account_id, request):
+    return {
+        "provider": provider,
+        "provider_environment": "MAINNET",
+        "account_id": account_id,
+        "environment": environment,
+        "prepared_request_sha256": payload_digest(dict(request)),
+    }
+
 
 
 class SimulatedProcessDeath(BaseException):
@@ -154,9 +172,6 @@ class DispatchTests(unittest.TestCase):
             store = self.store(directory)
             sends = []
 
-            def authority(intent_hash, now):
-                return True, "allowed"
-
             def transport(client_id, request, final_guard):
                 final_guard()
                 sends.append(client_id)
@@ -169,16 +184,23 @@ class DispatchTests(unittest.TestCase):
                 store, environment="LIVE", account_id="acct", owner_token="live-owner"
             )
             for dispatcher in (paper, live):
+                request = {}
                 outcome = dispatcher.dispatch(
                     attempt_id="same-attempt",
                     intent_id="same-intent",
                     intent_hash="hash",
                     provider="provider",
-                    request={},
+                    request=request,
                     now="2026-09-24T18:00:00Z",
-                    authority_check=authority,
+                    authority_check=prepared_allow_all(),
                     transport_send=transport,
                     sender_check=lambda _owner, _epoch: None,
+                    submission_scope=financial_submission_scope(
+                        provider="provider",
+                        environment=dispatcher.environment,
+                        account_id="acct",
+                        request=request,
+                    ),
                 )
                 self.assertEqual(outcome.status, "SENT")
 
@@ -1088,15 +1110,22 @@ class DispatchTests(unittest.TestCase):
                     outbound += 1
                     return {"provider_order_id": "must-not-happen"}
 
+                request = {}
                 result = dispatcher.dispatch(
                     attempt_id="fence-required",
                     intent_id="i1",
                     intent_hash="h1",
                     provider="sim",
-                    request={},
+                    request=request,
                     now="2026-09-24T18:00:00Z",
-                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    authority_check=prepared_allow_all(),
                     transport_send=transport,
+                    submission_scope=financial_submission_scope(
+                        provider="sim",
+                        environment=environment,
+                        account_id="acct",
+                        request=request,
+                    ),
                 )
                 self.assertEqual(result.status, "BLOCKED")
                 self.assertEqual(result.reason, "sender_fence_required")
@@ -1139,16 +1168,23 @@ class DispatchTests(unittest.TestCase):
                 outbound += 1
                 return {"provider_order_id": "must-not-happen"}
 
+            request = {}
             result = dispatcher.dispatch(
                 attempt_id="fenced-a1",
                 intent_id="i1",
                 intent_hash="h1",
                 provider="sim",
-                request={},
+                request=request,
                 now="2026-09-24T18:00:00Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=prepared_allow_all(),
                 transport_send=transport,
                 sender_check=recovery.validate_sender,
+                submission_scope=financial_submission_scope(
+                    provider="sim",
+                    environment="PAPER",
+                    account_id="acct",
+                    request=request,
+                ),
             )
             self.assertEqual(result.status, "BLOCKED")
             self.assertEqual(result.reason, "sender_fence_rejected:PermissionError")
@@ -1178,16 +1214,23 @@ class DispatchTests(unittest.TestCase):
                 outbound += 1
                 return {"provider_order_id": "p-1"}
 
+            request = {}
             result = dispatcher.dispatch(
                 attempt_id="paper-current-owner",
                 intent_id="i1",
                 intent_hash="h1",
                 provider="sim",
-                request={},
+                request=request,
                 now="2026-09-24T18:00:00Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=prepared_allow_all(),
                 transport_send=transport,
                 sender_check=recovery.validate_sender,
+                submission_scope=financial_submission_scope(
+                    provider="sim",
+                    environment="PAPER",
+                    account_id="acct",
+                    request=request,
+                ),
             )
             self.assertEqual(result.status, "SENT")
             self.assertEqual(outbound, 1)

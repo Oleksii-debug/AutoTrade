@@ -49,7 +49,7 @@ class ProducerFixture:
             correction_evidence_resolver=lambda ref: self.correction_times[ref],
         )
         self.artifacts = ArtifactStore(self.root / "artifacts")
-        self.jobs = ResearchJobStore(self.root / "jobs.sqlite3")
+        self.jobs = ResearchJobStore(\n            self.root / "jobs.sqlite3",\n            authoritative_artifact_root=self.root / "artifacts",\n        )
         self._episode_counter = 0
         self._physical_evidence_refs = {}
 

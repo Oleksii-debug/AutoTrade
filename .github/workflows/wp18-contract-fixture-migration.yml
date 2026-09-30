@@ -24,25 +24,25 @@ jobs:
 
           replacements = {
               'tests/Contracts/test_alpaca_adapter_contracts.py': [
-                  ('environment="PAPER",\n            account_id="contract-account",', 'environment="SIMULATION",\n            account_id="contract-account",'),
+                  ('''dispatcher = GuardedDispatcher(\n            store,\n            environment="PAPER",\n            account_id="contract-account",\n            owner_token="contract-owner",\n        )''', '''dispatcher = GuardedDispatcher(\n            store,\n            environment="SIMULATION",\n            account_id="contract-account",\n            owner_token="contract-owner",\n        )'''),
                   ('"environment": "PAPER",\n            "provider_environment": "PAPER",', '"environment": "SIMULATION",\n            "provider_environment": "PAPER",'),
-                  ('store,\n            environment="PAPER",\n            account_id="contract-account",\n            attempt_id=attempt_id,', 'store,\n            environment="SIMULATION",\n            account_id="contract-account",\n            attempt_id=attempt_id,'),
+                  ('''binding = load_submission_response_binding(\n            store,\n            environment="PAPER",\n            account_id="contract-account",\n            attempt_id=attempt_id,\n        )''', '''binding = load_submission_response_binding(\n            store,\n            environment="SIMULATION",\n            account_id="contract-account",\n            attempt_id=attempt_id,\n        )'''),
               ],
               'tests/Contracts/test_bybit_v5_contracts.py': [
-                  ('environment="LIVE",\n            account_id="contract-account",', 'environment="SIMULATION",\n            account_id="contract-account",'),
+                  ('''dispatcher = GuardedDispatcher(\n            store,\n            environment="LIVE",\n            account_id="contract-account",\n            owner_token="contract-owner",\n        )''', '''dispatcher = GuardedDispatcher(\n            store,\n            environment="SIMULATION",\n            account_id="contract-account",\n            owner_token="contract-owner",\n        )'''),
                   ('"environment": "LIVE",\n            "endpoint": prepared.endpoint,', '"environment": "SIMULATION",\n            "endpoint": prepared.endpoint,'),
                   ('prepared_scope.get("environment") != "LIVE"', 'prepared_scope.get("environment") != "SIMULATION"'),
-                  ('store,\n            environment="LIVE",\n            account_id="contract-account",\n            attempt_id=attempt_id,', 'store,\n            environment="SIMULATION",\n            account_id="contract-account",\n            attempt_id=attempt_id,'),
+                  ('''binding = load_submission_response_binding(\n            store,\n            environment="LIVE",\n            account_id="contract-account",\n            attempt_id=attempt_id,\n        )''', '''binding = load_submission_response_binding(\n            store,\n            environment="SIMULATION",\n            account_id="contract-account",\n            attempt_id=attempt_id,\n        )'''),
               ],
               'tests/Contracts/test_kraken_futures_contracts.py': [
-                  ('environment="PAPER",\n            account_id="contract-account",', 'environment="SIMULATION",\n            account_id="contract-account",'),
+                  ('''dispatcher = GuardedDispatcher(\n            store,\n            environment="PAPER",\n            account_id="contract-account",\n            owner_token="owner",\n        )''', '''dispatcher = GuardedDispatcher(\n            store,\n            environment="SIMULATION",\n            account_id="contract-account",\n            owner_token="owner",\n        )'''),
                   ('"environment": "PAPER",\n            "provider_environment": "DEMO",', '"environment": "SIMULATION",\n            "provider_environment": "DEMO",'),
-                  ('store,\n            environment="PAPER",\n            account_id="contract-account",\n            attempt_id=attempt,', 'store,\n            environment="SIMULATION",\n            account_id="contract-account",\n            attempt_id=attempt,'),
+                  ('''binding = load_submission_response_binding(\n            store,\n            environment="PAPER",\n            account_id="contract-account",\n            attempt_id=attempt,\n        )''', '''binding = load_submission_response_binding(\n            store,\n            environment="SIMULATION",\n            account_id="contract-account",\n            attempt_id=attempt,\n        )'''),
               ],
               'tests/Contracts/test_kraken_spot_contracts.py': [
-                  ('environment=prepared_request.environment,\n                account_id=prepared_request.account_id,', 'environment="SIMULATION",\n                account_id=prepared_request.account_id,'),
+                  ('''dispatcher = GuardedDispatcher(\n                store,\n                environment=prepared_request.environment,\n                account_id=prepared_request.account_id,\n                owner_token="contract-owner",\n            )''', '''dispatcher = GuardedDispatcher(\n                store,\n                environment="SIMULATION",\n                account_id=prepared_request.account_id,\n                owner_token="contract-owner",\n            )'''),
                   ('"environment": prepared_request.environment,\n                "provider_environment": prepared_request.environment,', '"environment": "SIMULATION",\n                "provider_environment": prepared_request.environment,'),
-                  ('store,\n                environment=prepared_request.environment,\n                account_id=prepared_request.account_id,\n                attempt_id=attempt_id,', 'store,\n                environment="SIMULATION",\n                account_id=prepared_request.account_id,\n                attempt_id=attempt_id,'),
+                  ('''binding = load_submission_response_binding(\n                store,\n                environment=prepared_request.environment,\n                account_id=prepared_request.account_id,\n                attempt_id=attempt_id,\n            )''', '''binding = load_submission_response_binding(\n                store,\n                environment="SIMULATION",\n                account_id=prepared_request.account_id,\n                attempt_id=attempt_id,\n            )'''),
               ],
           }
 

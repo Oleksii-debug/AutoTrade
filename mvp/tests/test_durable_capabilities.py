@@ -142,6 +142,59 @@ class DurableCapabilityRegistryTests(unittest.TestCase):
                 )
             )
 
+    def test_identical_fresh_reverification_rearms_without_duplicate_event(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            first = DurableCapabilityRegistry(JournalStore(path))
+            original = verified(
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                NOW,
+            )
+            self.assertTrue(first.add(original))
+            before = first.store.load_events_by_aggregate_type("capability_history")
+            self.assertEqual(len(before), 1)
+
+            restarted = DurableCapabilityRegistry(JournalStore(path))
+            with self.assertRaisesRegex(
+                CapabilityError,
+                "fresh current-process verification",
+            ):
+                restarted.require_verified(
+                    provider_id="simulated",
+                    account_id="paper-account",
+                    entity_id="entity-1",
+                    environment="PAPER",
+                    instrument_version="instrument-v1",
+                    at=NOW + timedelta(seconds=1),
+                )
+
+            freshly_reverified = verified(
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                NOW,
+            )
+            self.assertEqual(freshly_reverified, original)
+            self.assertFalse(restarted.add(freshly_reverified))
+            after = restarted.store.load_events_by_aggregate_type("capability_history")
+            self.assertEqual(len(after), 1)
+
+            admitted = restarted.require_verified(
+                provider_id="simulated",
+                account_id="paper-account",
+                entity_id="entity-1",
+                environment="PAPER",
+                instrument_version="instrument-v1",
+                at=NOW + timedelta(seconds=1),
+            )
+            self.assertEqual(admitted, freshly_reverified)
+            self.assertTrue(
+                admitted.admits(
+                    at=NOW + timedelta(seconds=1),
+                    order_type="LIMIT",
+                    time_in_force="DAY",
+                    permission_scope="ORDER.WRITE",
+                )
+            )
+
     def test_newer_unknown_refresh_persists_and_supersedes_verified_history(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

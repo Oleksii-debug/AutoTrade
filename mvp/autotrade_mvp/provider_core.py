@@ -18,8 +18,18 @@ from types import MappingProxyType
 from typing import Iterable, Literal, Mapping
 import re
 
+from autotrade_numeric.exact_decimal import (
+    ExactDecimalError,
+    exact_add,
+    exact_subtract,
+    parse_bounded_exact_decimal,
+    parse_bounded_json_integer_token,
+    parse_bounded_json_number_token,
+)
+
 from .capabilities import CapabilitySnapshot
 from .dispatch import SubmissionResponseBinding
+from .provider_response_limits import require_provider_json_depth
 
 
 class ProviderCoreError(ValueError):
@@ -49,14 +59,13 @@ def _text(value: str, name: str) -> str:
 
 
 def _decimal(value, name: str, *, non_negative: bool = False) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise ProviderCoreError(f"{name} must use exact decimal input")
+    # The single installed neutral exact-number TCB admits provider/domain
+    # presentation before Decimal construction or financial use. Do not grow a
+    # second adapter-local resource policy or coerce polymorphic authority.
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise ProviderCoreError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ProviderCoreError(f"{name} must be a finite decimal")
+        result = parse_bounded_exact_decimal(value)
+    except (ExactDecimalError, TypeError) as error:
+        raise ProviderCoreError(f"{name} must be a bounded finite decimal") from error
     if non_negative and result < 0:
         raise ProviderCoreError(f"{name} cannot be negative")
     return result
@@ -136,34 +145,73 @@ def _decode_exact_json(raw: bytes) -> object:
     if type(raw) is not bytes or not raw:
         raise ProviderCoreError("provider response bytes must be non-empty bytes")
 
+    # Consume one shared #652 byte/depth resource budget before recursive
+    # JSON materialization; avoid retaining the raw helper error context.
+    resource_failure = False
+    try:
+        require_provider_json_depth(raw)
+    except ValueError:
+        resource_failure = True
+    if resource_failure:
+        raise ProviderCoreError(
+            "provider response exceeds maximum JSON depth or resource budget"
+        )
+
     def no_duplicate_keys(pairs):
         result = {}
         for key, value in pairs:
             if key in result:
                 raise ProviderCoreError(
-                    f"provider response contains duplicate JSON key: {key}"
+                    "provider response contains duplicate JSON keys"
                 )
             result[key] = value
         return result
 
     try:
         text = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        text = None
+    if text is None:
+        raise ProviderCoreError(
+            "provider response must be exact UTF-8 JSON bytes"
+        )
+
+    parse_failure = None
+    try:
         decoded = json.loads(
             text,
             object_pairs_hook=no_duplicate_keys,
-            parse_float=Decimal,
-            parse_constant=lambda value: (_ for _ in ()).throw(
+            parse_float=parse_bounded_json_number_token,
+            parse_int=parse_bounded_json_integer_token,
+            parse_constant=lambda _value: (_ for _ in ()).throw(
                 ProviderCoreError(
-                    f"provider response contains non-finite JSON constant: {value}"
+                    "provider response contains non-finite JSON constant"
                 )
             ),
         )
     except ProviderCoreError:
         raise
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+    except ExactDecimalError:
+        parse_failure = "numeric"
+    except json.JSONDecodeError:
+        parse_failure = "json"
+    except RecursionError:
+        parse_failure = "depth"
+
+    # Translate after leaving the parser handler. Merely suppressing display
+    # chaining would still leave raw parser state reachable via __context__.
+    if parse_failure == "depth":
+        raise ProviderCoreError(
+            "provider response exceeds maximum JSON depth"
+        )
+    if parse_failure == "numeric":
+        raise ProviderCoreError(
+            "provider response contains invalid or oversized exact JSON number"
+        )
+    if parse_failure == "json":
         raise ProviderCoreError(
             "provider response must be exact UTF-8 JSON bytes"
-        ) from error
+        )
     return _freeze_json(decoded)
 
 
@@ -685,7 +733,11 @@ def observe_submission_json_response(
         capability_snapshot_ids=capabilities,
         instrument_versions=instruments,
         evidence_ref=evidence_ref,
-        payload=response_binding.payload,
+        # Never consume SubmissionResponseBinding.payload here: dispatch's
+        # transport-only JSON preview is not the exact numeric authority.
+        # Reparse the SHA-bound durable bytes through the neutral bounded
+        # numeric callbacks before constructing an authenticated observation.
+        payload=_decode_exact_json(response_binding.response_bytes),
         _observation_token=_SUBMISSION_OBSERVED_RESPONSE_TOKEN,
     )
 
@@ -851,26 +903,42 @@ class QuotaBucket:
             raise ProviderCoreError("used quota cannot exceed capacity")
 
     def available(self) -> Decimal:
-        return self.capacity - self.used
+        try:
+            return exact_subtract(self.capacity, self.used)
+        except ExactDecimalError as error:
+            raise ProviderCoreError("provider quota exceeds exact arithmetic envelope") from error
 
     def acquire(self, cost, *, purpose: Literal["RECOVERY", "TRADING", "RESEARCH"]) -> None:
-        amount = _decimal(cost, "quota cost", non_negative=True)
-        if purpose not in {"RECOVERY", "TRADING", "RESEARCH"}:
+        # Financial-purpose identity must not dispatch polymorphic equality.
+        if type(purpose) is not str or purpose not in {
+            "RECOVERY", "TRADING", "RESEARCH"
+        }:
             raise ProviderCoreError("unknown quota purpose")
+        amount = _decimal(cost, "quota cost", non_negative=True)
         if amount == 0:
             return
-        remaining = self.available()
-        if amount > remaining:
-            raise ProviderCoreError("provider quota exhausted")
-        if purpose != "RECOVERY" and remaining - amount < self.recovery_reserve:
+        # Resource authority must not depend on ambient Decimal precision.
+        # Calculate and validate the entire next state before mutating used.
+        try:
+            next_used = exact_add(self.used, amount)
+            if next_used > self.capacity:
+                raise ProviderCoreError("provider quota exhausted")
+            after = exact_subtract(self.capacity, next_used)
+        except ExactDecimalError as error:
+            raise ProviderCoreError("provider quota exceeds exact arithmetic envelope") from error
+        if purpose != "RECOVERY" and after < self.recovery_reserve:
             raise ProviderCoreError("recovery quota reserve is protected")
-        self.used += amount
+        self.used = next_used
 
     def release(self, cost) -> None:
         amount = _decimal(cost, "quota cost", non_negative=True)
         if amount > self.used:
             raise ProviderCoreError("cannot release more quota than was acquired")
-        self.used -= amount
+        try:
+            next_used = exact_subtract(self.used, amount)
+        except ExactDecimalError as error:
+            raise ProviderCoreError("provider quota exceeds exact arithmetic envelope") from error
+        self.used = next_used
 
     def reset(self) -> None:
         self.used = Decimal("0")

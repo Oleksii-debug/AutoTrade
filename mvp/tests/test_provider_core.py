@@ -1,9 +1,14 @@
 from datetime import datetime, timedelta, timezone, tzinfo
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 from hashlib import sha256
 import json
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
+
+import autotrade_numeric.exact_decimal as neutral_numeric
+import mvp.autotrade_mvp.dispatch as legacy_dispatch
+import mvp.autotrade_mvp.provider_core as provider_core_module
 
 from mvp.autotrade_mvp.dispatch import (
     ExactJsonTransportResponse,
@@ -40,6 +45,265 @@ class _NoOffsetTZ(tzinfo):
 
 
 class ProviderCoreTests(unittest.TestCase):
+    def test_raw_provider_json_keeps_exact_decimals_and_int_identity(self):
+        payload = provider_core_module._decode_exact_json(
+            b'{"price":65000.10,"fee":0.0100,"negative":-12,'
+            b'"negative_zero":-0,"sequence":12345678901234567890}'
+        )
+        self.assertEqual(
+            payload["price"].as_tuple(), Decimal("65000.10").as_tuple()
+        )
+        self.assertEqual(
+            payload["fee"].as_tuple(), Decimal("0.0100").as_tuple()
+        )
+        self.assertIs(type(payload["sequence"]), int)
+        self.assertEqual(payload["sequence"], 12345678901234567890)
+        self.assertEqual(payload["negative"], -12)
+        self.assertEqual(payload["negative_zero"], 0)
+
+    def test_raw_oversized_provider_tokens_reject_before_decimal_constructor(self):
+        invalid_raw = (
+            b'{"price":1e256}',
+            b'{"price":1e-257}',
+            b'{"price":' + b'9' * 257 + b'}',
+            b'{"price":0.' + b'0' * 256 + b'1}',
+            b'{"sequence":' + b'9' * 257 + b'}',
+        )
+        for raw in invalid_raw:
+            with self.subTest(length=len(raw), prefix=raw[:20]):
+                with patch.object(
+                    neutral_numeric,
+                    "Decimal",
+                    side_effect=AssertionError("Decimal constructed before token check"),
+                ):
+                    with self.assertRaisesRegex(
+                        ProviderCoreError, "invalid or oversized exact JSON number"
+                    ) as rejected:
+                        provider_core_module._decode_exact_json(raw)
+                # No provider token is retained in the error's chain.
+                # Diagnostic redaction intentionally removes the old parser
+                # exception cause while preserving constructor-spy denial.
+                self.assertIsNone(rejected.exception.__cause__)
+                self.assertIsNone(rejected.exception.__context__)
+                self.assertNotIn("999999", str(rejected.exception))
+
+    def test_direct_provider_numeric_fields_share_single_bounded_policy(self):
+        accepted = provider_core_module._decimal("65000.10", "price")
+        self.assertEqual(
+            accepted.as_tuple(), Decimal("65000.10").as_tuple()
+        )
+        self.assertEqual(
+            provider_core_module._decimal("0e-99999999", "quantity"),
+            Decimal("0"),
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "cannot be negative"):
+            provider_core_module._decimal("-1", "quantity", non_negative=True)
+        for value in (
+            "1e256", "1e-257", "9" * 257, float("inf"), True,
+            Decimal("Infinity"),
+        ):
+            with self.subTest(value_type=type(value).__name__):
+                with self.assertRaises(ProviderCoreError):
+                    provider_core_module._decimal(value, "price")
+        class HostileDecimal(Decimal):
+            def as_tuple(self):
+                raise AssertionError("provider must not dispatch Decimal subclass")
+        class HostileString(str):
+            def __len__(self):
+                raise AssertionError("provider must not dispatch string subclass")
+        for value in (HostileDecimal("1.25"), HostileString("1.25")):
+            with self.subTest(hostile_type=type(value).__name__):
+                with self.assertRaises(ProviderCoreError):
+                    provider_core_module._decimal(value, "price")
+
+    def test_submission_observation_reparses_sha_bound_exact_response_bytes(self):
+        # Dispatch's transport-only JSON preview may pass through default
+        # json.loads floats. The financial observation must use untouched raw
+        # journal bytes, keeping scale/trailing-zero identity from Decimal.
+        with TemporaryDirectory() as directory:
+            binding, request_sha = self._durable_submission_binding(
+                directory,
+                raw=(
+                    b'{"orderId":"provider-1","price":65000.10,'
+                    b'"fee":0.0100,"sequence":12345678901234567890}'
+                ),
+            )
+            observation = observe_submission_json_response(
+                response_binding=binding,
+                provider_id="BYBIT",
+                endpoint="/v5/order/create",
+                prepared_request_sha256=request_sha,
+                capability_snapshot_ids=("cap-1",),
+                instrument_versions=("BTCUSD:v1",),
+            )
+            self.assertEqual(
+                observation.payload["price"].as_tuple(),
+                Decimal("65000.10").as_tuple(),
+            )
+            self.assertEqual(
+                observation.payload["fee"].as_tuple(),
+                Decimal("0.0100").as_tuple(),
+            )
+            self.assertIs(type(observation.payload["sequence"]), int)
+            self.assertEqual(observation.response_sha256, binding.response_sha256)
+
+    def test_invalid_response_cannot_become_authenticated_submission_observation(self):
+        with TemporaryDirectory() as directory:
+            # Simulate a previously accepted response created by the
+            # historical transport-only JSON preview (stdlib floats). New
+            # dispatch hardening (#1137) intentionally stops such records
+            # *before* they can be newly persisted. The provider observation
+            # must still reject a legacy SHA-bound raw response on replay.
+            legacy_raw = b'{"orderId":"provider-1","price":1e256}'
+            with patch.object(
+                legacy_dispatch,
+                "_decode_exact_json_bytes",
+                side_effect=lambda raw: json.loads(raw.decode("utf-8")),
+            ):
+                binding, request_sha = self._durable_submission_binding(
+                    directory, raw=legacy_raw
+                )
+            self.assertEqual(binding.response_bytes, legacy_raw)
+            with patch.object(
+                neutral_numeric,
+                "Decimal",
+                side_effect=AssertionError("premature Decimal construction"),
+            ):
+                with self.assertRaisesRegex(
+                    ProviderCoreError, "invalid or oversized exact JSON number"
+                ):
+                    observe_submission_json_response(
+                        response_binding=binding,
+                        provider_id="BYBIT",
+                        endpoint="/v5/order/create",
+                        prepared_request_sha256=request_sha,
+                        capability_snapshot_ids=("cap-1",),
+                        instrument_versions=("BTCUSD:v1",),
+                    )
+
+    def test_oversized_raw_bytes_fail_before_utf8_decode_or_json_materialization(self):
+        # A leading invalid UTF-8 byte distinguishes resource-first rejection
+        # from a pre-budget raw.decode() allocation/error. The payload is exact
+        # bytes and exceeds the one shared hard ceiling by precisely one byte.
+        from mvp.autotrade_mvp.provider_response_limits import HARD_MAX_PROVIDER_RESPONSE_BYTES
+
+        raw = b"\xff" + b"x" * HARD_MAX_PROVIDER_RESPONSE_BYTES
+        with (
+            patch.object(
+                provider_core_module.json,
+                "loads",
+                side_effect=AssertionError("JSON materialized before byte preflight"),
+            ),
+            patch.object(
+                provider_core_module,
+                "parse_bounded_json_number_token",
+                side_effect=AssertionError("Decimal parsed before byte preflight"),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ProviderCoreError, "resource budget"
+            ) as rejected:
+                provider_core_module._decode_exact_json(raw)
+        self.assertIsNone(rejected.exception.__cause__)
+        self.assertIsNone(rejected.exception.__context__)
+
+    def test_json_structural_bound_precedes_recursive_materialization(self):
+        # _freeze_json permits 65 nested empty containers (root depth 0).
+        at_limit = b"[" * 65 + b"]" * 65
+        result = provider_core_module._decode_exact_json(at_limit)
+        for _ in range(65):
+            self.assertIs(type(result), tuple)
+            result = result[0] if result else None
+        self.assertIsNone(result)
+
+        # Brackets in strings, including escaped quotes, are not structure.
+        text_payload = {
+            "note": "[" * 300 + "]" * 300,
+            "escaped": chr(92) + '"' + "[[{",
+        }
+        decoded = provider_core_module._decode_exact_json(
+            json.dumps(text_payload).encode("utf-8")
+        )
+        self.assertEqual(decoded["note"], text_payload["note"])
+        self.assertEqual(decoded["escaped"], text_payload["escaped"])
+
+        # 66 nested arrays are valid JSON but beyond the installed budget.
+        too_deep = b"[" * 66 + b"]" * 66
+        with patch.object(
+            provider_core_module.json,
+            "loads",
+            side_effect=AssertionError("recursive parser was reached"),
+        ):
+            with self.assertRaisesRegex(
+                ProviderCoreError, "maximum JSON depth"
+            ):
+                provider_core_module._decode_exact_json(too_deep)
+            # A scalar at child depth 65 is inadmissible even when the
+            # 65-nested empty-container document above is valid.
+            with self.assertRaisesRegex(
+                ProviderCoreError, "maximum JSON depth"
+            ):
+                provider_core_module._decode_exact_json(
+                    b"[" * 65 + b"0" + b"]" * 65
+                )
+        # A document exceeding CPython recursion is also rejected before
+        # recursive parser invocation, even on retained/replayed bytes.
+        much_deeper = b"[" * 4000 + b"]" * 4000
+        with self.assertRaisesRegex(
+            ProviderCoreError, "maximum JSON depth"
+        ) as rejected:
+            provider_core_module._decode_exact_json(much_deeper)
+        self.assertIsNone(rejected.exception.__cause__)
+        self.assertIsNone(rejected.exception.__context__)
+
+    def test_json_decoder_recursion_error_is_redacted(self):
+        marker = "AUTOTRADE_SYNTHETIC_UNTRUSTED_PARSER_MARKER"
+        with patch.object(
+            provider_core_module.json, "loads",
+            side_effect=RecursionError(marker),
+        ):
+            with self.assertRaisesRegex(
+                ProviderCoreError, "maximum JSON depth"
+            ) as rejected:
+                provider_core_module._decode_exact_json(b'{"safe":1}')
+        self.assertNotIn(marker, str(rejected.exception))
+        self.assertIsNone(rejected.exception.__cause__)
+        self.assertIsNone(rejected.exception.__context__)
+
+    def test_provider_raw_json_keeps_duplicate_and_nonfinite_fences(self):
+        for invalid in (
+            b'{"price":1.25,"price":1.50}',
+            b'{"price":NaN}',
+            b'{"price":Infinity}',
+            b'{"price":-Infinity}',
+            b'{"price":1e256,"price":2}',
+        ):
+            with self.subTest(raw=invalid):
+                with self.assertRaises(ProviderCoreError):
+                    provider_core_module._decode_exact_json(invalid)
+
+
+    def test_provider_decode_diagnostics_do_not_retain_untrusted_raw_material(self):
+        marker = "AUTOTRADE_SYNTHETIC_SECRET_MARKER_8c07"
+        hostile = (
+            ('{"' + marker + '":1,"' + marker + '":2}').encode("utf-8"),
+            ('{"' + marker + '":"bad",').encode("utf-8"),
+            ('{"' + marker + '":"bad-').encode("utf-8") + b"\xff" + b'"}',
+        )
+        for raw in hostile:
+            with self.subTest(raw_prefix=raw[:20]):
+                with self.assertRaises(ProviderCoreError) as caught:
+                    provider_core_module._decode_exact_json(raw)
+                current = caught.exception
+                visited = set()
+                while current is not None and id(current) not in visited:
+                    visited.add(id(current))
+                    self.assertNotIn(marker, str(current))
+                    self.assertNotIn(marker, repr(current))
+                    current = current.__cause__ or current.__context__
+                self.assertIsNone(caught.exception.__cause__)
+                self.assertIsNone(caught.exception.__context__)
+
 
     def _durable_submission_binding(
         self,
@@ -253,6 +517,76 @@ class ProviderCoreTests(unittest.TestCase):
             bucket.acquire("15", purpose="RESEARCH")
         bucket.acquire("20", purpose="RECOVERY")
         self.assertEqual(bucket.available(), Decimal("10"))
+
+    def test_quota_purpose_rejects_polymorphic_recovery_impersonation(self):
+        callbacks = []
+
+        class Impostor(str):
+            def __hash__(self):
+                callbacks.append("hash")
+                return hash("RECOVERY")
+
+            def __eq__(self, other):
+                callbacks.append("eq")
+                return True
+
+            def __ne__(self, other):
+                callbacks.append("ne")
+                return False
+
+        bucket = QuotaBucket(capacity="1", recovery_reserve="0.25")
+        for purpose in (Impostor("TRADING"), object()):
+            with self.subTest(purpose_type=type(purpose).__name__):
+                with self.assertRaisesRegex(
+                    ProviderCoreError, "unknown quota purpose"
+                ):
+                    bucket.acquire("0.9", purpose=purpose)
+                self.assertEqual(callbacks, [])
+                self.assertEqual(bucket.used, Decimal("0"))
+                self.assertEqual(bucket.available(), Decimal("1"))
+        with self.assertRaisesRegex(
+            ProviderCoreError, "recovery quota reserve"
+        ):
+            bucket.acquire("0.9", purpose="TRADING")
+        self.assertEqual(bucket.used, Decimal("0"))
+        bucket.acquire("0.9", purpose="RECOVERY")
+        self.assertEqual(bucket.used, Decimal("0.9"))
+
+    def test_quota_recovery_reserve_is_context_independent_and_exact(self):
+        tiny = Decimal("1e-30")
+        capacity = Decimal("1.000000000000000000000000000001")
+        for rounding in (ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN):
+            with self.subTest(rounding=rounding), localcontext() as context:
+                context.prec = 6
+                context.rounding = rounding
+                bucket = QuotaBucket(
+                    capacity=capacity, recovery_reserve=tiny
+                )
+                bucket.acquire("1", purpose="TRADING")
+                self.assertEqual(bucket.used, Decimal("1"))
+                self.assertEqual(bucket.available(), tiny)
+                # No ambient rounding may erase the tiny recovery reserve.
+                with self.assertRaisesRegex(ProviderCoreError, "reserve"):
+                    bucket.acquire(tiny, purpose="RESEARCH")
+                self.assertEqual(bucket.used, Decimal("1"))
+                bucket.acquire(tiny, purpose="RECOVERY")
+                self.assertEqual(bucket.used, capacity)
+                self.assertEqual(bucket.available(), Decimal("0"))
+                bucket.release(tiny)
+                self.assertEqual(bucket.used, Decimal("1"))
+                self.assertEqual(bucket.available(), tiny)
+
+    def test_quota_insufficient_capacity_fails_without_partial_mutation(self):
+        with localcontext() as context:
+            context.prec = 6
+            context.rounding = ROUND_FLOOR
+            bucket = QuotaBucket(capacity="1", recovery_reserve="1e-30")
+            with self.assertRaisesRegex(ProviderCoreError, "reserve"):
+                bucket.acquire("1", purpose="TRADING")
+            self.assertEqual(bucket.used, Decimal("0"))
+            with self.assertRaisesRegex(ProviderCoreError, "exhausted"):
+                bucket.acquire("2", purpose="RECOVERY")
+            self.assertEqual(bucket.used, Decimal("0"))
 
     def test_clock_skew_blocks_authenticated_send(self):
         guard = ClockGuard(timedelta(seconds=2))

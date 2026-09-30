@@ -765,6 +765,8 @@ class CapabilityRegistry:
         self._by_identity: dict[tuple[str, str, str, str, str], list[CapabilitySnapshot]] = {}
 
     def add(self, snapshot: CapabilitySnapshot) -> None:
+        if type(snapshot) is not CapabilitySnapshot:
+            raise TypeError("registry accepts only exact CapabilitySnapshot values")
         existing = self._by_id.get(snapshot.snapshot_id)
         if existing is not None:
             if existing != snapshot:
@@ -803,8 +805,12 @@ class CapabilityRegistry:
     def require_verified(self, **kwargs) -> CapabilitySnapshot:
         snapshot = self.latest(**kwargs)
         point = _instant(kwargs["at"], "at")
+        if type(snapshot) is not CapabilitySnapshot:
+            raise CapabilityError("capability snapshot is not canonical")
         if snapshot.status != "VERIFIED":
             raise CapabilityError(f"capability status is {snapshot.status}")
         if point >= snapshot.expires_at:
             raise CapabilityError("capability snapshot is expired")
+        if not getattr(snapshot, "_can_admit", False):
+            raise CapabilityError("capability snapshot lacks fresh admission authority")
         return snapshot

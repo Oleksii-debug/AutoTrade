@@ -31,6 +31,7 @@ from mvp.autotrade_mvp.capabilities import (
 from mvp.autotrade_mvp.dispatch import (
     ExactJsonTransportResponse,
     GuardedDispatcher,
+    PreparedSubmissionAuthorityCheck,
     load_submission_response_binding,
     stable_client_order_id,
 )
@@ -532,13 +533,19 @@ class AlpacaAdapterTests(unittest.TestCase):
                 provider="ALPACA",
                 request=prepared.body,
                 now="2026-09-24T20:00:00Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=PreparedSubmissionAuthorityCheck(
+                    lambda _hash, _now, _scope, _scope_hash: (True, "allowed")
+                ),
                 transport_send=lambda _cid, _request, guard: (
                     guard(),
                     ExactJsonTransportResponse(raw),
                 )[1],
                 sender_check=lambda _owner, _epoch: None,
                 submission_scope={
+                    "provider": "ALPACA",
+                    "account_id": "paper-account",
+                    "environment": "PAPER",
+                    "provider_environment": "PAPER",
                     "endpoint": prepared.endpoint,
                     "prepared_request_sha256": prepared.body_sha256,
                     "capability_snapshot_ids": list(
@@ -561,6 +568,7 @@ class AlpacaAdapterTests(unittest.TestCase):
                 prepared_request_sha256=prepared.body_sha256,
                 capability_snapshot_ids=prepared.capability_snapshot_ids,
                 instrument_versions=prepared.instrument_versions,
+                provider_environment="PAPER",
             )
         return attempt, prepared, observation
 

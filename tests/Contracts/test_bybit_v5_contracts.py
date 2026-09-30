@@ -41,6 +41,7 @@ def write_capability():
             account_id="contract-account",
             entity_id="contract-order",
             environment="LIVE",
+            provider_environment="MAINNET",
             instrument_version="BTCUSDT@v1",
             observed_at=observed,
             expires_at=NOW + timedelta(hours=1),

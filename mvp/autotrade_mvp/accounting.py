@@ -870,7 +870,9 @@ def _canonical_equity_split_terms(
         raise AccountingConflict("Split projection ratio identity is malformed")
     num_text, den_text = parts
     if (
-        not num_text.isascii()
+        len(num_text) > MAX_INTEGER_DIGITS
+        or len(den_text) > MAX_INTEGER_DIGITS
+        or not num_text.isascii()
         or not den_text.isascii()
         or not num_text.isdigit()
         or not den_text.isdigit()
@@ -878,8 +880,6 @@ def _canonical_equity_split_terms(
         or den_text == "0"
         or (len(num_text) > 1 and num_text.startswith("0"))
         or (len(den_text) > 1 and den_text.startswith("0"))
-        or len(num_text) > MAX_INTEGER_DIGITS
-        or len(den_text) > MAX_INTEGER_DIGITS
     ):
         raise AccountingConflict("Split projection ratio identity is not canonical")
     numerator = _decimal(num_text, name="split numerator")

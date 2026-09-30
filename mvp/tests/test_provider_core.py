@@ -80,10 +80,11 @@ class ProviderCoreTests(unittest.TestCase):
                         ProviderCoreError, "invalid or oversized exact JSON number"
                     ) as rejected:
                         provider_core_module._decode_exact_json(raw)
-                self.assertIsInstance(
-                    rejected.exception.__cause__,
-                    neutral_numeric.ExactDecimalError,
-                )
+                # No provider token is retained in the error's chain.
+                # Diagnostic redaction intentionally removes the old parser
+                # exception cause while preserving constructor-spy denial.
+                self.assertIsNone(rejected.exception.__cause__)
+                self.assertIsNone(rejected.exception.__context__)
                 self.assertNotIn("999999", str(rejected.exception))
 
     def test_direct_provider_numeric_fields_share_single_bounded_policy(self):

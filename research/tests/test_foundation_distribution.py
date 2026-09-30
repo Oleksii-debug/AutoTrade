@@ -15,7 +15,7 @@ def _isolated_import(*, installed: Path, script: str):
     environment.pop("PYTHONPATH", None)
     environment["AUTOTRADE_INSTALLED_SITE"] = str(installed)
     return subprocess.run(
-        [sys.executable, "-I", "-c", script],
+        [sys.executable, "-I", "-S", "-c", script],
         cwd=installed.parent,
         env=environment,
         capture_output=True,
@@ -93,6 +93,7 @@ raise AssertionError(ResourceLock)
 """,
             )
             self.assertNotEqual(inverse.returncode, 0)
+            self.assertIn("ModuleNotFoundError", inverse.stderr)
             self.assertIn("autotrade_foundation", inverse.stderr)
 
 

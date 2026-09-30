@@ -1,8 +1,15 @@
 from hashlib import sha256
 import json
+from decimal import (
+    Decimal,
+    ROUND_CEILING,
+    ROUND_FLOOR,
+    ROUND_HALF_EVEN,
+    localcontext,
+)
 from tempfile import TemporaryDirectory
 import unittest
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher, stable_client_order_id
 from mvp.autotrade_mvp.persistence import JournalStore
@@ -817,6 +824,698 @@ class SimulatedProviderTests(unittest.TestCase):
             )
             self.assertEqual(replay.status, "UNKNOWN")
             self.assertEqual(provider.outbound_request_count, 1)
+
+
+    def test_restart_state_preserves_partial_fill_cancel_and_idempotency(self):
+        provider = SimulatedProvider(initial_cash="1000", fee_rate="0.001")
+        original_attempt = str(uuid4())
+        provider.submit_order(
+            attempt_id=original_attempt,
+            client_order_id="restart-order",
+            instrument_version="ABC@1",
+            side="BUY",
+            quantity="3",
+            price="100",
+            now="2026-09-28T18:00:00Z",
+            fill_immediately=False,
+        )
+        provider.record_fill(
+            client_order_id="restart-order",
+            provider_execution_id="restart-fill-1",
+            quantity="1",
+            now="2026-09-28T18:00:01Z",
+        )
+        cancel = provider.cancel_order(
+            client_order_id="restart-order",
+            now="2026-09-28T18:00:02Z",
+            race_execution_id="restart-fill-2",
+            race_fill_quantity="0.5",
+            race_fill_price="101",
+        )
+        self.assertEqual(cancel["outcome"], "ACKNOWLEDGED")
+
+        state = provider.export_state()
+        restored = SimulatedProvider.from_state(state)
+        self.assertEqual(restored.export_state(), state)
+        self.assertEqual(restored.cash, provider.cash)
+        self.assertEqual(restored.positions, provider.positions)
+        self.assertEqual(restored.activity_fills(), provider.activity_fills())
+        self.assertEqual(
+            restored.query_order(
+                client_order_id="restart-order",
+                coverage_start="2026-09-28T17:00:00Z",
+                coverage_end="2026-09-28T19:00:00Z",
+                pagination_complete=True,
+                now="2026-09-28T19:00:00Z",
+            )["order"]["status"],
+            "CANCELLED",
+        )
+
+        retry = restored.submit_order(
+            attempt_id=original_attempt,
+            client_order_id="restart-order",
+            instrument_version="ABC@1",
+            side="BUY",
+            quantity="3",
+            price="100",
+            now="2026-09-28T20:00:00Z",
+            fill_immediately=False,
+        )
+        self.assertEqual(retry["provider_received_at"], "2026-09-28T18:00:00Z")
+        self.assertEqual(len(restored.activity_fills()), 2)
+        with self.assertRaisesRegex(
+            SimulatedProviderConflict,
+            "cancelled simulated order",
+        ):
+            restored.record_fill(
+                client_order_id="restart-order",
+                provider_execution_id="restart-fill-too-late",
+                quantity="0.5",
+                now="2026-09-28T20:00:01Z",
+            )
+
+    def test_restart_state_preserves_distinct_retry_attempt_identity(self):
+        provider = SimulatedProvider()
+        first_attempt = str(uuid4())
+        second_attempt = str(uuid4())
+        provider.submit_order(
+            attempt_id=first_attempt,
+            client_order_id="retry-state",
+            instrument_version="ABC@1",
+            side="SELL",
+            quantity="2",
+            price="50",
+            now="2026-09-28T18:00:00Z",
+            fill_immediately=False,
+        )
+        provider.submit_order(
+            attempt_id=second_attempt,
+            client_order_id="retry-state",
+            instrument_version="ABC@1",
+            side="SELL",
+            quantity="2",
+            price="50",
+            now="2026-09-28T18:00:05Z",
+            fill_immediately=False,
+        )
+
+        restored = SimulatedProvider.from_state(provider.export_state())
+        replay = restored.submit_order(
+            attempt_id=second_attempt,
+            client_order_id="retry-state",
+            instrument_version="ABC@1",
+            side="SELL",
+            quantity="2",
+            price="50",
+            now="2026-09-28T21:00:00Z",
+            fill_immediately=False,
+        )
+        self.assertEqual(replay["attempt_id"], second_attempt)
+        self.assertEqual(replay["provider_received_at"], "2026-09-28T18:00:05Z")
+        self.assertEqual(restored.activity_fills(), ())
+
+    def test_restart_state_detects_digest_tamper_before_restore(self):
+        provider = SimulatedProvider()
+        provider.submit_order(
+            attempt_id=str(uuid4()),
+            client_order_id="tamper-state",
+            instrument_version="ABC@1",
+            side="BUY",
+            quantity="1",
+            price="10",
+            now="2026-09-28T18:00:00Z",
+        )
+        state = provider.export_state()
+        state["cash"] = "999999"
+        with self.assertRaisesRegex(
+            SimulatedProviderConflict,
+            "state digest mismatch",
+        ):
+            SimulatedProvider.from_state(state)
+
+    def test_restart_state_rejects_recomputed_digest_with_false_financial_state(self):
+        provider = SimulatedProvider(initial_cash="1000", fee_rate="0.001")
+        provider.submit_order(
+            attempt_id=str(uuid4()),
+            client_order_id="semantic-tamper",
+            instrument_version="ABC@1",
+            side="BUY",
+            quantity="1",
+            price="100",
+            now="2026-09-28T18:00:00Z",
+        )
+        state = provider.export_state()
+        state["cash"] = "1000"
+        body = {
+            key: value
+            for key, value in state.items()
+            if key != "state_digest"
+        }
+        encoded = json.dumps(
+            body,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        state["state_digest"] = "sha256:" + sha256(encoded).hexdigest()
+        with self.assertRaisesRegex(
+            SimulatedProviderConflict,
+            "cash does not match replayed",
+        ):
+            SimulatedProvider.from_state(state)
+
+    def test_restart_state_rejects_fill_after_acknowledged_cancel(self):
+        provider = SimulatedProvider()
+        provider.submit_order(
+            attempt_id=str(uuid4()),
+            client_order_id="cancel-tamper",
+            instrument_version="ABC@1",
+            side="BUY",
+            quantity="2",
+            price="100",
+            now="2026-09-28T18:00:00Z",
+            fill_immediately=False,
+        )
+        provider.cancel_order(
+            client_order_id="cancel-tamper",
+            now="2026-09-28T18:00:01Z",
+        )
+        state = provider.export_state()
+        # Inject a canonical-looking later fill and recompute the outer digest.
+        order = provider.orders["cancel-tamper"]
+        late_provider = SimulatedProvider()
+        late_provider.orders["cancel-tamper"] = order
+        late_provider._attempts[order.attempt_id] = order
+        late_fill = late_provider.record_fill(
+            client_order_id="cancel-tamper",
+            provider_execution_id="late-after-cancel",
+            quantity="1",
+            now="2026-09-28T18:00:02Z",
+        )
+        state["fills"].append(late_fill)
+        state["cash"] = late_provider.export_state()["cash"]
+        state["positions"] = late_provider.export_state()["positions"]
+        body = {
+            key: value
+            for key, value in state.items()
+            if key != "state_digest"
+        }
+        encoded = json.dumps(
+            body,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        state["state_digest"] = "sha256:" + sha256(encoded).hexdigest()
+        with self.assertRaisesRegex(
+            SimulatedProviderConflict,
+            "fill occurs after acknowledged cancellation",
+        ):
+            SimulatedProvider.from_state(state)
+
+
+    def test_restart_state_preserves_cancel_retry_contract(self):
+        provider = SimulatedProvider()
+        provider.submit_order(
+            attempt_id=str(uuid4()),
+            client_order_id="cancel-restart-retry",
+            instrument_version="ABC@1",
+            side="SELL",
+            quantity="2",
+            price="25",
+            now="2026-09-28T18:00:00Z",
+            fill_immediately=False,
+        )
+        first = provider.cancel_order(
+            client_order_id="cancel-restart-retry",
+            now="2026-09-28T18:00:01Z",
+            race_execution_id="cancel-restart-fill",
+            race_fill_quantity="0.5",
+        )
+        restored = SimulatedProvider.from_state(provider.export_state())
+        same = restored.cancel_order(
+            client_order_id="cancel-restart-retry",
+            now="2026-09-28T20:00:00Z",
+            race_execution_id="cancel-restart-fill",
+            race_fill_quantity="0.5",
+            race_fill_price="25",
+        )
+        self.assertEqual(same, first)
+        with self.assertRaisesRegex(
+            SimulatedProviderConflict,
+            "changed deterministic race semantics",
+        ):
+            restored.cancel_order(
+                client_order_id="cancel-restart-retry",
+                now="2026-09-28T20:00:01Z",
+            )
+
+    def test_restart_state_preserves_response_lost_transport_fault_and_remote_truth(self):
+        client_order_id = "restart-lost-response"
+        provider = SimulatedProvider(
+            transport_faults={
+                client_order_id: "AFTER_ACCEPT_RESPONSE_LOST",
+            }
+        )
+        attempt_id = str(uuid4())
+        with self.assertRaises(TimeoutError):
+            provider.transport_send(
+                client_order_id,
+                {
+                    "attempt_id": attempt_id,
+                    "instrument_version": "ABC@1",
+                    "side": "BUY",
+                    "quantity": "1",
+                    "price": "100",
+                    "now": "2026-09-28T18:00:00Z",
+                },
+                lambda: None,
+            )
+        self.assertEqual(provider.outbound_request_count, 1)
+        restored = SimulatedProvider.from_state(provider.export_state())
+        self.assertEqual(restored.outbound_request_count, 1)
+        self.assertEqual(len(restored.activity_fills()), 1)
+        found = restored.query_order(
+            client_order_id=client_order_id,
+            coverage_start="2026-09-28T17:00:00Z",
+            coverage_end="2026-09-28T19:00:00Z",
+            pagination_complete=True,
+            now="2026-09-28T19:00:00Z",
+        )
+        self.assertEqual(found["verdict"], "FOUND")
+        self.assertEqual(found["order"]["status"], "FILLED")
+        with self.assertRaises(TimeoutError):
+            restored.transport_send(
+                client_order_id,
+                {
+                    "attempt_id": attempt_id,
+                    "instrument_version": "ABC@1",
+                    "side": "BUY",
+                    "quantity": "1",
+                    "price": "100",
+                    "now": "2026-09-28T20:00:00Z",
+                },
+                lambda: None,
+            )
+        self.assertEqual(restored.outbound_request_count, 2)
+        self.assertEqual(len(restored.activity_fills()), 1)
+
+
+    def test_restart_state_rejects_recomputed_cancel_request_race_rewrite(self):
+        provider = SimulatedProvider()
+        provider.submit_order(
+            attempt_id=str(uuid4()),
+            client_order_id="cancel-request-tamper",
+            instrument_version="ABC@1",
+            side="BUY",
+            quantity="2",
+            price="100",
+            now="2026-09-28T18:00:00Z",
+            fill_immediately=False,
+        )
+        provider.cancel_order(
+            client_order_id="cancel-request-tamper",
+            now="2026-09-28T18:00:01Z",
+            race_execution_id="race-canonical",
+            race_fill_quantity="0.5",
+        )
+        state = provider.export_state()
+        state["cancellation_requests"]["cancel-request-tamper"] = {
+            "race_execution_id": "race-canonical",
+            "race_fill_quantity": "0.75",
+            "race_fill_price": "100",
+        }
+        body = {
+            key: value
+            for key, value in state.items()
+            if key != "state_digest"
+        }
+        encoded = json.dumps(
+            body,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        state["state_digest"] = "sha256:" + sha256(encoded).hexdigest()
+        with self.assertRaisesRegex(
+            SimulatedProviderConflict,
+            "cancel race economics",
+        ):
+            SimulatedProvider.from_state(state)
+
+
+
+    def test_restart_state_rejects_unknown_schema_fields_even_with_recomputed_digest(self):
+        provider = SimulatedProvider(initial_cash="1000")
+        state = provider.export_state()
+
+        mutated = dict(state)
+        mutated["unexpected_authority"] = {"enabled": True}
+        body = {key: value for key, value in mutated.items() if key != "state_digest"}
+        mutated["state_digest"] = "sha256:" + sha256(
+            json.dumps(
+                body,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        with self.assertRaisesRegex(
+            ValueError,
+            "simulated provider state fields mismatch",
+        ):
+            SimulatedProvider.from_state(mutated)
+
+        mutated = provider.export_state()
+        mutated["config"] = dict(mutated["config"])
+        mutated["config"]["unexpected"] = "ignored-before-repair"
+        body = {key: value for key, value in mutated.items() if key != "state_digest"}
+        mutated["state_digest"] = "sha256:" + sha256(
+            json.dumps(
+                body,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        with self.assertRaisesRegex(
+            ValueError,
+            "simulated provider state config fields mismatch",
+        ):
+            SimulatedProvider.from_state(mutated)
+
+    def test_restart_state_rejects_rehashed_unknown_cancel_result_fields(self):
+        for outcome in ("ACKNOWLEDGED", "REJECTED"):
+            with self.subTest(outcome=outcome):
+                provider = SimulatedProvider()
+                client_order_id = f"cancel-schema-{outcome.lower()}"
+                provider.submit_order(
+                    attempt_id=str(uuid4()),
+                    client_order_id=client_order_id,
+                    instrument_version="ABC@1",
+                    side="BUY",
+                    quantity="1",
+                    price="100",
+                    now="2026-09-30T18:00:00Z",
+                    fill_immediately=outcome == "REJECTED",
+                )
+                result = provider.cancel_order(
+                    client_order_id=client_order_id,
+                    now="2026-09-30T18:00:01Z",
+                )
+                self.assertEqual(result["outcome"], outcome)
+
+                state = provider.export_state()
+                persisted = state["cancel_results"][client_order_id]
+                persisted["future_authority"] = True
+                sealed = {
+                    key: value
+                    for key, value in persisted.items()
+                    if key != "evidence"
+                }
+                persisted["evidence"][0]["sha256"] = (
+                    "sha256:"
+                    + sha256(
+                        json.dumps(
+                            sealed,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                            allow_nan=False,
+                        ).encode("utf-8")
+                    ).hexdigest()
+                )
+                body = {
+                    key: value
+                    for key, value in state.items()
+                    if key != "state_digest"
+                }
+                state["state_digest"] = (
+                    "sha256:"
+                    + sha256(
+                        json.dumps(
+                            body,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                            allow_nan=False,
+                        ).encode("utf-8")
+                    ).hexdigest()
+                )
+                with self.assertRaisesRegex(
+                    SimulatedProviderConflict,
+                    "cancel result has unsupported or missing fields",
+                ):
+                    SimulatedProvider.from_state(state)
+
+    def test_restart_state_rejects_rehashed_cancel_quantity_lie(self):
+        provider = SimulatedProvider()
+        provider.submit_order(
+            attempt_id=str(uuid4()),
+            client_order_id="cancel-quantity-tamper",
+            instrument_version="ABC@1",
+            side="BUY",
+            quantity="2",
+            price="100",
+            now="2026-09-28T18:00:00Z",
+            fill_immediately=False,
+        )
+        provider.record_fill(
+            client_order_id="cancel-quantity-tamper",
+            provider_execution_id="cancel-quantity-fill",
+            quantity="0.5",
+            now="2026-09-28T18:00:01Z",
+        )
+        provider.cancel_order(
+            client_order_id="cancel-quantity-tamper",
+            now="2026-09-28T18:00:02Z",
+        )
+        state = provider.export_state()
+        result = state["cancel_results"]["cancel-quantity-tamper"]
+        result["filled_quantity"] = "1"
+        result["remaining_quantity"] = "1"
+        sealed = {
+            key: value
+            for key, value in result.items()
+            if key != "evidence"
+        }
+        result["evidence"][0]["sha256"] = (
+            "sha256:"
+            + sha256(
+                json.dumps(
+                    sealed,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+        body = {
+            key: value
+            for key, value in state.items()
+            if key != "state_digest"
+        }
+        state["state_digest"] = (
+            "sha256:"
+            + sha256(
+                json.dumps(
+                    body,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+        with self.assertRaisesRegex(
+            SimulatedProviderConflict,
+            "cancel result quantities",
+        ):
+            SimulatedProvider.from_state(state)
+
+
+    def test_restart_state_rejects_rehashed_unknown_schema_field(self):
+        provider = SimulatedProvider()
+        state = provider.export_state()
+        state["future_authority"] = {"enabled": True}
+        body = {
+            key: value
+            for key, value in state.items()
+            if key != "state_digest"
+        }
+        state["state_digest"] = (
+            "sha256:"
+            + sha256(
+                json.dumps(
+                    body,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+        with self.assertRaisesRegex(
+            SimulatedProviderConflict,
+            "unsupported or missing fields",
+        ):
+            SimulatedProvider.from_state(state)
+
+
+    def test_restart_implicit_fill_and_financial_state_are_decimal_context_invariant(self):
+        contexts = (
+            (1, ROUND_FLOOR),
+            (2, ROUND_CEILING),
+            (6, ROUND_HALF_EVEN),
+            (10, ROUND_FLOOR),
+            (28, ROUND_CEILING),
+            (80, ROUND_HALF_EVEN),
+        )
+        observed = []
+        for precision, rounding in contexts:
+            with self.subTest(precision=precision, rounding=rounding):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    provider = SimulatedProvider(
+                        initial_cash="1000",
+                        fee_rate="0.001",
+                    )
+                    provider.submit_order(
+                        attempt_id="00000000-0000-0000-0000-000000000001",
+                        client_order_id="context-invariant-fill",
+                        instrument_version="ABC@1",
+                        side="BUY",
+                        quantity="1",
+                        price="103",
+                        now="2026-09-30T18:00:00Z",
+                    )
+                    state = provider.export_state()
+                    restored = SimulatedProvider.from_state(state)
+                    restored_state = restored.export_state()
+                    snapshot = restored.account_snapshot(
+                        now="2026-09-30T18:01:00Z"
+                    )
+                self.assertEqual(restored_state, state)
+                self.assertEqual(state["cash"], "896.897")
+                self.assertEqual(
+                    state["fills"][0]["fees"][0]["amount"],
+                    "0.103",
+                )
+                self.assertEqual(snapshot["balances"][0]["total"], "896.897")
+                self.assertEqual(
+                    snapshot["positions"][0]["quantity"]["value"],
+                    "1",
+                )
+                observed.append((state, snapshot))
+        self.assertTrue(all(item == observed[0] for item in observed[1:]))
+
+    def test_exact_resource_failure_precedes_immediate_fill_provider_mutation(self):
+        provider = SimulatedProvider(initial_cash="1000", fee_rate="0.001")
+        before = provider.export_state()
+        maximum = "9" * 256
+        with self.assertRaises(ValueError):
+            provider.submit_order(
+                attempt_id="00000000-0000-0000-0000-000000000002",
+                client_order_id="overflow-preflight",
+                instrument_version="ABC@1",
+                side="BUY",
+                quantity=maximum,
+                price=maximum,
+                now="2026-09-30T18:00:00Z",
+            )
+        self.assertEqual(provider.export_state(), before)
+
+    def test_decimal_subclass_is_rejected_before_virtual_financial_methods(self):
+        calls = []
+
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                calls.append("is_finite")
+                raise AssertionError("hostile Decimal method executed")
+
+            def as_tuple(self):
+                calls.append("as_tuple")
+                raise AssertionError("hostile Decimal method executed")
+
+            def normalize(self, *args, **kwargs):
+                calls.append("normalize")
+                raise AssertionError("hostile Decimal method executed")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "initial_cash must be a finite decimal",
+        ):
+            SimulatedProvider(initial_cash=HostileDecimal("1000"))
+        self.assertEqual(calls, [])
+
+        provider = SimulatedProvider()
+        before = provider.export_state()
+        with self.assertRaisesRegex(
+            ValueError,
+            "quantity must be a finite decimal",
+        ):
+            provider.submit_order(
+                attempt_id="00000000-0000-0000-0000-000000000003",
+                client_order_id="hostile-decimal",
+                instrument_version="ABC@1",
+                side="BUY",
+                quantity=HostileDecimal("1"),
+                price="10",
+                now="2026-09-30T18:00:00Z",
+            )
+        self.assertEqual(calls, [])
+        self.assertEqual(provider.export_state(), before)
+
+
+    def test_restart_preserves_explicit_deterministic_looking_execution_identity(self):
+        provider = SimulatedProvider()
+        provider.submit_order(
+            attempt_id="00000000-0000-0000-0000-000000000004",
+            client_order_id="explicit-looks-implicit",
+            instrument_version="ABC@1",
+            side="BUY",
+            quantity="1",
+            price="10",
+            now="2026-09-30T18:00:00Z",
+            fill_immediately=False,
+        )
+        order = provider.orders["explicit-looks-implicit"]
+        execution_id = (
+            "exec-"
+            + sha256(order.provider_order_id.encode("utf-8")).hexdigest()[:24]
+        )
+        fill = provider.record_fill(
+            client_order_id="explicit-looks-implicit",
+            provider_execution_id=execution_id,
+            quantity="1",
+            price="10",
+            now="2026-09-30T18:00:01Z",
+        )
+        implicit_fill_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                "https://sim.autotrade.local/fill/" + order.provider_order_id,
+            )
+        )
+        explicit_fill_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                "https://sim.autotrade.local/fill/" + execution_id,
+            )
+        )
+        self.assertNotEqual(fill["fill_id"], implicit_fill_id)
+        self.assertEqual(fill["fill_id"], explicit_fill_id)
+        state = provider.export_state()
+        restored = SimulatedProvider.from_state(state)
+        self.assertEqual(restored.export_state(), state)
+        self.assertEqual(restored.activity_fills()[0], fill)
 
 
 if __name__ == "__main__":

@@ -16,9 +16,13 @@ import re
 from typing import FrozenSet, Iterable
 from uuid import UUID
 
-from research.autotrade_research.artifacts import trusted_authenticated_reader
+from research.autotrade_research.artifacts import (
+    ArtifactIntegrityError,
+    trusted_authenticated_reader,
+)
 from research.autotrade_research.artifacts.store import ArtifactStore
 
+from .exact_decimal import ExactDecimalError, canonical_decimal_text
 from .qualification_attestation import (
     AcceptedQualificationAttestation,
     QualificationTrustError,
@@ -78,6 +82,17 @@ def _digest(value: str) -> str:
     return result
 
 
+def _bounded_real_decimal_text(value: Decimal) -> str:
+    """Render risk-limit identity through the shared context-free authority."""
+
+    try:
+        return canonical_decimal_text(value)
+    except ExactDecimalError as error:
+        raise ValueError(
+            "bounded-real risk limit exceeds exact decimal resource envelope"
+        ) from error
+
+
 def _decimal(value, *, name: str, allow_zero: bool = False) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise TypeError(f"{name} must use Decimal, string or integer input")
@@ -87,6 +102,7 @@ def _decimal(value, *, name: str, allow_zero: bool = False) -> Decimal:
         raise ValueError(f"{name} must be a finite decimal") from error
     if not result.is_finite():
         raise ValueError(f"{name} must be a finite decimal")
+    _bounded_real_decimal_text(result)
     if result < 0 or (result == 0 and not allow_zero):
         raise ValueError(
             f"{name} must be {'non-negative' if allow_zero else 'positive'}"
@@ -122,16 +138,6 @@ def _actions(values: Iterable[str]) -> FrozenSet[str]:
 _BOUNDED_REAL_ENVELOPE_SCHEMA_VERSION = 1
 
 
-def _canonical_decimal_text(value: Decimal) -> str:
-    """Canonical exact numeric identity for bounded-real risk limits."""
-
-    normalized = value.normalize()
-    rendered = format(normalized, "f")
-    if "." in rendered:
-        rendered = rendered.rstrip("0").rstrip(".")
-    return rendered or "0"
-
-
 def _bounded_real_envelope_digest(
     *,
     envelope_id: str,
@@ -152,9 +158,9 @@ def _bounded_real_envelope_digest(
         "account_id": account_id,
         "policy_id": policy_id,
         "allowed_actions": sorted(allowed_actions),
-        "max_capital": _canonical_decimal_text(max_capital),
-        "max_single_notional": _canonical_decimal_text(max_single_notional),
-        "max_gross_leverage": _canonical_decimal_text(max_gross_leverage),
+        "max_capital": _bounded_real_decimal_text(max_capital),
+        "max_single_notional": _bounded_real_decimal_text(max_single_notional),
+        "max_gross_leverage": _bounded_real_decimal_text(max_gross_leverage),
     }
     canonical = json.dumps(
         payload,

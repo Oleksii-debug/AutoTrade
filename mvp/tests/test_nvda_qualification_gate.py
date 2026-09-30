@@ -167,7 +167,7 @@ class NvdaQualificationGateTests(unittest.TestCase):
             ),
         )
         with patch(
-            "tools.check_nvda_qualification.verify_qualification_attestation",
+            "tools.check_nvda_qualification.verify_canonical_qualification_attestation",
             return_value=accepted,
         ) as verify:
             result = validate_trusted_nvda_qualification(
@@ -194,7 +194,7 @@ class NvdaQualificationGateTests(unittest.TestCase):
         )
         with (
             patch(
-                "tools.check_nvda_qualification.verify_qualification_attestation",
+                "tools.check_nvda_qualification.verify_canonical_qualification_attestation",
                 return_value=bad_accepted,
             ),
             self.assertRaisesRegex(NvdaQualificationError, "workflow set"),
@@ -220,7 +220,7 @@ class NvdaQualificationGateTests(unittest.TestCase):
         )
         with (
             patch(
-                "tools.check_nvda_qualification.verify_qualification_attestation",
+                "tools.check_nvda_qualification.verify_canonical_qualification_attestation",
                 return_value=wrong_release_accepted,
             ),
             self.assertRaisesRegex(NvdaQualificationError, "release binding"),

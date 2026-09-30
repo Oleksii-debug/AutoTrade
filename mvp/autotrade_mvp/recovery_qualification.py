@@ -238,6 +238,87 @@ class RecoveryScenarioEvidence:
         object.__setattr__(self, "protection_state", protection)
 
 
+def _snapshot_recovery_scenario_evidence(
+    item: RecoveryScenarioEvidence,
+) -> RecoveryScenarioEvidence:
+    """Detach one exact terminal recovery evidence value before trust callbacks."""
+
+    if type(item) is not RecoveryScenarioEvidence:
+        raise TypeError(
+            "evidence must contain canonical RecoveryScenarioEvidence exact values"
+        )
+    values = {
+        "scenario": item.scenario,
+        "status": item.status,
+        "source_sha": item.source_sha,
+        "release_artifact_id": item.release_artifact_id,
+        "release_artifact_sha256": item.release_artifact_sha256,
+        "evidence_artifact_id": item.evidence_artifact_id,
+        "evidence_artifact_sha256": item.evidence_artifact_sha256,
+        "evidence_refs": item.evidence_refs,
+        "evidence_schema_version": item.evidence_schema_version,
+        "protocol_id": item.protocol_id,
+        "test_run_id": item.test_run_id,
+        "tests_run": item.tests_run,
+        "unresolved_limits": item.unresolved_limits,
+        "downtime_ms": item.downtime_ms,
+        "data_loss_events": item.data_loss_events,
+        "duplicate_external_actions": item.duplicate_external_actions,
+        "unknown_submissions": item.unknown_submissions,
+        "unresolved_reconciliation_items": item.unresolved_reconciliation_items,
+        "journal_integrity_verified": item.journal_integrity_verified,
+        "backup_integrity_verified": item.backup_integrity_verified,
+        "reconciliation_complete": item.reconciliation_complete,
+        "authority_reacquired": item.authority_reacquired,
+        "old_sender_fenced": item.old_sender_fenced,
+        "rollback_completed": item.rollback_completed,
+        "open_risk_present": item.open_risk_present,
+        "protection_state": item.protection_state,
+    }
+    if type(values["scenario"]) is not RecoveryScenario:
+        raise TypeError("scenario must be exact RecoveryScenario")
+    if type(values["status"]) is not RecoveryEvidenceStatus:
+        raise TypeError("status must be exact RecoveryEvidenceStatus")
+    for field in (
+        "source_sha",
+        "release_artifact_id",
+        "release_artifact_sha256",
+        "evidence_artifact_id",
+        "evidence_artifact_sha256",
+        "evidence_schema_version",
+        "protocol_id",
+        "test_run_id",
+        "protection_state",
+    ):
+        if type(values[field]) is not str:
+            raise TypeError(f"{field} must use exact str")
+    for field in ("evidence_refs", "tests_run", "unresolved_limits"):
+        current = values[field]
+        if type(current) is not tuple or any(type(value) is not str for value in current):
+            raise TypeError(f"{field} must use an exact tuple of exact str values")
+    for field in (
+        "downtime_ms",
+        "data_loss_events",
+        "duplicate_external_actions",
+        "unknown_submissions",
+        "unresolved_reconciliation_items",
+    ):
+        if type(values[field]) is not int:
+            raise TypeError(f"{field} must use exact int")
+    for field in (
+        "journal_integrity_verified",
+        "backup_integrity_verified",
+        "reconciliation_complete",
+        "authority_reacquired",
+        "old_sender_fenced",
+        "rollback_completed",
+        "open_risk_present",
+    ):
+        if type(values[field]) is not bool:
+            raise TypeError(f"{field} must use exact bool")
+    return RecoveryScenarioEvidence(**values)
+
+
 @dataclass(frozen=True, slots=True)
 class RecoveryQualificationPolicy:
     source_sha: str
@@ -371,6 +452,30 @@ def recovery_evidence_receipt_metadata(
     }
 
 
+def recovery_evidence_receipt_payload(
+    item: RecoveryScenarioEvidence,
+) -> dict[str, object]:
+    """Canonical bytes whose digest binds every recovery qualification fact."""
+
+    payload = dict(recovery_evidence_receipt_metadata(item))
+    # The content digest cannot include itself; every other decision-relevant fact
+    # remains inside the immutable receipt bytes.
+    payload.pop("evidence_artifact_sha256")
+    return payload
+
+
+def recovery_evidence_receipt_bytes(
+    item: RecoveryScenarioEvidence,
+) -> bytes:
+    return json.dumps(
+        recovery_evidence_receipt_payload(item),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
 def _store_artifact_matches(
     read_snapshot,
     *,
@@ -379,10 +484,11 @@ def _store_artifact_matches(
     media_type: str,
     source_sha: str,
     metadata: dict[str, object],
+    expected_bytes: bytes | None = None,
 ) -> bool:
     """Verify stored bytes and declared bindings, not independent producer trust."""
     try:
-        manifest, _raw = read_snapshot(artifact_id)
+        manifest, raw = read_snapshot(artifact_id)
         if not isinstance(manifest.get("manifest_hash"), str):
             return False
         if manifest.get("sha256") != artifact_sha256:
@@ -392,6 +498,10 @@ def _store_artifact_matches(
         if manifest.get("source_refs") != [f"git:{source_sha}"]:
             return False
         if manifest.get("metadata") != metadata:
+            return False
+        if "sha256:" + sha256(raw).hexdigest() != artifact_sha256:
+            return False
+        if expected_bytes is not None and raw != expected_bytes:
             return False
     except (
         ArtifactIntegrityError,
@@ -557,8 +667,12 @@ def qualify_recovery_release(
     if type(policy) is not RecoveryQualificationPolicy:
         raise TypeError("policy must be the canonical RecoveryQualificationPolicy")
     policy_requirement = recovery_policy_subject_requirement(policy)
-    if isinstance(evidence, (str, bytes)) or not isinstance(evidence, Sequence):
-        raise TypeError("evidence must be a sequence")
+    if type(evidence) not in (list, tuple):
+        raise TypeError("evidence must be an exact list or tuple")
+    evidence_snapshot = tuple(
+        _snapshot_recovery_scenario_evidence(item)
+        for item in evidence
+    )
     if evidence_store is not None and type(evidence_store) is not ArtifactStore:
         raise TypeError(
             "evidence_store must be ArtifactStore (canonical exact type required)"
@@ -592,9 +706,7 @@ def qualify_recovery_release(
         ):
             trusted_read = None
 
-    for item in evidence:
-        if not isinstance(item, RecoveryScenarioEvidence):
-            raise TypeError("evidence must contain RecoveryScenarioEvidence")
+    for item in evidence_snapshot:
         if item.scenario in by_scenario:
             raise ValueError(f"duplicate evidence for {item.scenario.value}")
         by_scenario[item.scenario] = item
@@ -686,6 +798,7 @@ def qualify_recovery_release(
                 media_type=_RECOVERY_EVIDENCE_MEDIA_TYPE,
                 source_sha=item.source_sha,
                 metadata=recovery_evidence_receipt_metadata(item),
+                expected_bytes=recovery_evidence_receipt_bytes(item),
             )
         if not integrity_verified:
             blockers.append(f"{prefix}:evidence_integrity_unverified")

@@ -67,7 +67,6 @@ _QUALIFICATION_PROTOCOL = "release-freeze-v1"
 _QUALIFICATION_PROTOCOL_VERSION = "1.0.0"
 _QUALIFICATION_REQUIREMENT = "release-candidate-freeze"
 _QUALIFICATION_SUBJECT_REQUIREMENT_PREFIX = "release-candidate-subject-sha256:"
-_FROZEN_DECISION_TOKEN = object()
 
 
 def _text(value: str, *, name: str) -> str:
@@ -332,13 +331,114 @@ class ReleaseCandidateInput:
         )
 
 
+
+def _exact_snapshot_text(value: object, *, name: str) -> str:
+    """Require an exact built-in string at a terminal snapshot boundary."""
+
+    if type(value) is not str:
+        raise ReleaseCandidateError(f"{name} must be an exact built-in string")
+    return value
+
+
+def _snapshot_release_artifact(
+    artifact: ReleaseArtifactEvidence,
+) -> ReleaseArtifactEvidence:
+    """Detach one caller artifact into an exact base, scalar-only snapshot."""
+
+    if not isinstance(artifact, ReleaseArtifactEvidence):
+        raise ReleaseCandidateError(
+            "every artifact must be ReleaseArtifactEvidence"
+        )
+    role = artifact.role
+    artifact_id = artifact.artifact_id
+    artifact_sha256 = artifact.artifact_sha256
+    source_sha = artifact.source_sha
+    signature_status = artifact.signature_status
+    evidence_status = artifact.evidence_status
+    values = {
+        "role": _exact_snapshot_text(role, name="artifact.role"),
+        "artifact_id": _exact_snapshot_text(
+            artifact_id,
+            name="artifact.artifact_id",
+        ),
+        "artifact_sha256": _exact_snapshot_text(
+            artifact_sha256,
+            name="artifact.artifact_sha256",
+        ),
+        "source_sha": _exact_snapshot_text(
+            source_sha,
+            name="artifact.source_sha",
+        ),
+        "signature_status": _exact_snapshot_text(
+            signature_status,
+            name="artifact.signature_status",
+        ),
+        "evidence_status": _exact_snapshot_text(
+            evidence_status,
+            name="artifact.evidence_status",
+        ),
+    }
+    return ReleaseArtifactEvidence.create(**values)
+
+
+def _snapshot_release_candidate(
+    candidate: ReleaseCandidateInput,
+) -> ReleaseCandidateInput:
+    """Detach the complete caller graph before any authority callback executes."""
+
+    if not isinstance(candidate, ReleaseCandidateInput):
+        raise TypeError("candidate must be ReleaseCandidateInput")
+
+    release_id = candidate.release_id
+    source_sha = candidate.source_sha
+    baseline_hash = candidate.baseline_hash
+    schema_contract_hash = candidate.schema_contract_hash
+    artifacts = candidate.artifacts
+    unresolved_blockers = candidate.unresolved_blockers
+
+    if type(artifacts) is not tuple:
+        raise ReleaseCandidateError(
+            "candidate.artifacts must be an exact tuple at the terminal boundary"
+        )
+    if type(unresolved_blockers) is not tuple:
+        raise ReleaseCandidateError(
+            "candidate.unresolved_blockers must be an exact tuple at the terminal boundary"
+        )
+    exact_blockers = tuple(
+        _exact_snapshot_text(value, name="candidate.unresolved_blocker")
+        for value in unresolved_blockers
+    )
+    exact_artifacts = tuple(
+        _snapshot_release_artifact(artifact)
+        for artifact in artifacts
+    )
+    return ReleaseCandidateInput.create(
+        release_id=_exact_snapshot_text(
+            release_id,
+            name="candidate.release_id",
+        ),
+        source_sha=_exact_snapshot_text(
+            source_sha,
+            name="candidate.source_sha",
+        ),
+        baseline_hash=_exact_snapshot_text(
+            baseline_hash,
+            name="candidate.baseline_hash",
+        ),
+        schema_contract_hash=_exact_snapshot_text(
+            schema_contract_hash,
+            name="candidate.schema_contract_hash",
+        ),
+        artifacts=exact_artifacts,
+        unresolved_blockers=exact_blockers,
+    )
+
 def release_candidate_subject_requirement(
     candidate: ReleaseCandidateInput,
 ) -> str:
     """Return the signed requirement binding every release-authority claim."""
 
-    if not isinstance(candidate, ReleaseCandidateInput):
-        raise TypeError("candidate must be ReleaseCandidateInput")
+    candidate = _snapshot_release_candidate(candidate)
     subject = {
         "release_id": candidate.release_id,
         "source_sha": candidate.source_sha,
@@ -383,9 +483,14 @@ class ReleaseCandidateDecision:
     qualification_attestation_digest: str | None = None
     qualification_policy_id: str | None = None
     qualification_trust_root_id: str | None = None
-    _freeze_token: InitVar[object | None] = None
+    _verification_store: InitVar[ArtifactStore | None] = None
+    _verification_root: InitVar[str | Path | None] = None
 
-    def __post_init__(self, _freeze_token: object | None) -> None:
+    def __post_init__(
+        self,
+        _verification_store: ArtifactStore | None,
+        _verification_root: str | Path | None,
+    ) -> None:
         if self.status not in {"FROZEN", "BLOCKED"}:
             raise ReleaseCandidateError("unsupported release-candidate status")
         if not isinstance(self.reasons, tuple) or any(
@@ -602,9 +707,62 @@ class ReleaseCandidateDecision:
                     "frozen release candidate qualification receipt "
                     "does not cover exact artifact set"
                 )
-            if _freeze_token is not _FROZEN_DECISION_TOKEN:
+            if (
+                type(_verification_store) is not ArtifactStore
+                or _verification_root is None
+            ):
                 raise ReleaseCandidateError(
-                    "frozen release candidate requires verified factory authority"
+                    "frozen release candidate requires canonical qualification "
+                    "verification context"
+                )
+            windows_package = next(
+                item
+                for item in reconstructed_candidate.artifacts
+                if item.role == "WINDOWS_PACKAGE"
+            )
+            try:
+                accepted = verify_canonical_qualification_attestation(
+                    receipt,
+                    evidence_store=_verification_store,
+                    evidence_root=_verification_root,
+                    expected_source_sha=manifest_source_sha,
+                    expected_domain=_QUALIFICATION_DOMAIN,
+                    expected_gate=_QUALIFICATION_GATE,
+                    expected_package_id=_QUALIFICATION_PACKAGE,
+                    expected_protocol_id=_QUALIFICATION_PROTOCOL,
+                    expected_protocol_version=_QUALIFICATION_PROTOCOL_VERSION,
+                    expected_requirement_id=_QUALIFICATION_REQUIREMENT,
+                    expected_release_artifact_id=windows_package.artifact_id,
+                    expected_release_artifact_sha256=(
+                        windows_package.artifact_sha256
+                    ),
+                )
+            except (QualificationTrustError, TypeError, ValueError) as error:
+                raise ReleaseCandidateError(
+                    "frozen release candidate qualification receipt is not "
+                    "canonically verified"
+                ) from error
+            if accepted.result != "PASS":
+                raise ReleaseCandidateError(
+                    "frozen release candidate qualification result is not PASS"
+                )
+            if not _qualification_covers_exact_candidate(
+                accepted,
+                reconstructed_candidate,
+            ):
+                raise ReleaseCandidateError(
+                    "frozen release candidate canonically verified qualification "
+                    "does not cover exact artifact set"
+                )
+            if (
+                accepted.attestation_id != self.qualification_attestation_id
+                or accepted.attestation_digest
+                != self.qualification_attestation_digest
+                or accepted.policy_id != self.qualification_policy_id
+                or accepted.trust_root_id != self.qualification_trust_root_id
+            ):
+                raise ReleaseCandidateError(
+                    "frozen release candidate canonical qualification identity mismatch"
                 )
         else:
             if not self.reasons:
@@ -765,12 +923,11 @@ def _frozen_receipt_structurally_covers_exact_candidate(
     receipt: SignedQualificationAttestation,
     candidate: ReleaseCandidateInput,
 ) -> bool:
-    """Validate frozen-manifest self-consistency without re-granting trust.
+    """Validate frozen-manifest self-consistency before trust verification.
 
-    ReleaseCandidateDecision has no policy/evidence-store inputs with which to
-    repeat signature verification. The factory token proves the object came
-    from the verified freeze path; this check only ensures the embedded,
-    canonically parsed receipt still describes the reconstructed manifest.
+    This check is deliberately structural. ReleaseCandidateDecision separately
+    re-runs the canonical exact-source signature/evidence verifier before a
+    FROZEN value can exist.
     """
 
     return _qualification_claims_cover_exact_candidate(
@@ -799,8 +956,7 @@ def freeze_release_candidate(
     every candidate artifact.
     """
 
-    if not isinstance(candidate, ReleaseCandidateInput):
-        raise TypeError("candidate must be ReleaseCandidateInput")
+    candidate = _snapshot_release_candidate(candidate)
     if evidence_store is not None and type(evidence_store) is not ArtifactStore:
         raise TypeError(
             "evidence_store must be ArtifactStore (canonical exact type required)"
@@ -942,5 +1098,6 @@ def freeze_release_candidate(
         qualification_attestation_digest=accepted.attestation_digest,
         qualification_policy_id=accepted.policy_id,
         qualification_trust_root_id=accepted.trust_root_id,
-        _freeze_token=_FROZEN_DECISION_TOKEN,
+        _verification_store=evidence_store,
+        _verification_root=evidence_root,
     )

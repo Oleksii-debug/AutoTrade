@@ -185,6 +185,7 @@ def freeze_with_integrity_store(
     with_attestation=False,
     receipt_override=None,
     policy_override=None,
+    before_canonical_verify=None,
 ):
     with TemporaryDirectory() as directory:
         store = ArtifactStore(directory)
@@ -237,6 +238,8 @@ def freeze_with_integrity_store(
         )
 
         def canonical_verify(receipt_arg, **kwargs):
+            if before_canonical_verify is not None:
+                before_canonical_verify()
             return verify_qualification_attestation(
                 receipt_arg,
                 policy=canonical_policy,
@@ -294,6 +297,87 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
             manifest["qualification"]["policy_id"],
             decision.qualification_policy_id,
         )
+
+
+    def test_freeze_uses_one_exact_detached_candidate_graph_across_callbacks(self):
+        phase = {"mutated": False}
+
+        class HostileArtifact(ReleaseArtifactEvidence):
+            def __getattribute__(self, name):
+                if phase["mutated"]:
+                    if name == "evidence_status":
+                        return "FAIL"
+                    if name == "signature_status":
+                        return "INVALID"
+                return super().__getattribute__(name)
+
+        class HostileCandidate(ReleaseCandidateInput):
+            def __getattribute__(self, name):
+                if phase["mutated"]:
+                    if name == "source_sha":
+                        return OTHER_SOURCE
+                    if name == "unresolved_blockers":
+                        return ("late-caller-blocker",)
+                return super().__getattribute__(name)
+
+        base = self.candidate()
+        first = base.artifacts[0]
+        hostile_artifact = HostileArtifact(
+            role=first.role,
+            artifact_id=first.artifact_id,
+            artifact_sha256=first.artifact_sha256,
+            source_sha=first.source_sha,
+            signature_status=first.signature_status,
+            evidence_status=first.evidence_status,
+        )
+        hostile_artifacts = (hostile_artifact,) + base.artifacts[1:]
+        hostile_candidate = HostileCandidate(
+            release_id=base.release_id,
+            source_sha=base.source_sha,
+            baseline_hash=base.baseline_hash,
+            schema_contract_hash=base.schema_contract_hash,
+            artifacts=hostile_artifacts,
+            unresolved_blockers=base.unresolved_blockers,
+        )
+
+        decision = freeze_with_integrity_store(
+            hostile_candidate,
+            with_attestation=True,
+            before_canonical_verify=lambda: phase.__setitem__("mutated", True),
+        )
+
+        self.assertTrue(phase["mutated"])
+        self.assertEqual(decision.status, "FROZEN")
+        manifest = json.loads(decision.manifest_json)
+        self.assertEqual(manifest["source_sha"], SOURCE)
+        by_role = {item["role"]: item for item in manifest["artifacts"]}
+        self.assertEqual(by_role[first.role]["evidence_status"], "PASS")
+        self.assertEqual(by_role[first.role]["signature_status"], first.signature_status)
+        self.assertNotIn("late-caller-blocker", decision.reasons)
+
+    def test_freeze_rejects_nonexact_terminal_container_views_before_callbacks(self):
+        class HostileCandidate(ReleaseCandidateInput):
+            def __getattribute__(self, name):
+                value = super().__getattribute__(name)
+                if name == "artifacts":
+                    return list(value)
+                return value
+
+        base = self.candidate()
+        hostile_candidate = HostileCandidate(
+            release_id=base.release_id,
+            source_sha=base.source_sha,
+            baseline_hash=base.baseline_hash,
+            schema_contract_hash=base.schema_contract_hash,
+            artifacts=base.artifacts,
+            unresolved_blockers=base.unresolved_blockers,
+        )
+
+        with self.assertRaisesRegex(
+            ReleaseCandidateError,
+            "candidate.artifacts must be an exact tuple",
+        ):
+            freeze_release_candidate(hostile_candidate)
 
     def test_caller_selected_trust_policy_cannot_freeze_release(self):
         candidate = self.candidate()
@@ -417,7 +501,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ReleaseCandidateError,
-            "requires verified factory authority",
+            "requires canonical qualification verification context",
         ):
             ReleaseCandidateDecision(
                 status="FROZEN",
@@ -430,7 +514,107 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                 qualification_trust_root_id=decision.qualification_trust_root_id,
             )
 
-    def test_imported_factory_token_cannot_bypass_signed_artifact_binding(self):
+    def test_frozen_rehydration_reverifies_canonical_signature_and_evidence(self):
+        candidate = self.candidate()
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            for item in candidate.artifacts:
+                data = _ARTIFACT_BYTES[item.artifact_id]
+                store.publish_bytes(
+                    artifact_id=item.artifact_id,
+                    data=data,
+                    media_type=RELEASE_MEDIA_TYPE,
+                    rights={"storage": True, "export": False},
+                    source_refs=[f"git:{item.source_sha}"],
+                    metadata={
+                        "evidence_kind": RELEASE_EVIDENCE_KIND,
+                        "role": item.role,
+                        "source_sha": item.source_sha,
+                        "signature_status": item.signature_status,
+                        "evidence_status": item.evidence_status,
+                    },
+                )
+            trust_root = _trust_root()
+            canonical_policy = QualificationTrustPolicy(
+                policy_version="2026.09",
+                roots=(trust_root,),
+            )
+            receipt = _qualification(candidate, trust_root)
+
+            def canonical_verify(receipt_arg, **kwargs):
+                return verify_qualification_attestation(
+                    receipt_arg,
+                    policy=canonical_policy,
+                    expected_policy_id=canonical_policy.policy_id,
+                    expected_policy_version=canonical_policy.policy_version,
+                    **kwargs,
+                )
+
+            with patch.object(
+                release_candidate_module,
+                "verify_canonical_qualification_attestation",
+                side_effect=canonical_verify,
+            ):
+                original = freeze_release_candidate(
+                    candidate,
+                    evidence_store=store,
+                    evidence_root=directory,
+                    qualification_receipt=receipt,
+                )
+                rehydrated = ReleaseCandidateDecision(
+                    status="FROZEN",
+                    reasons=(),
+                    manifest_json=original.manifest_json,
+                    manifest_sha256=original.manifest_sha256,
+                    qualification_attestation_id=original.qualification_attestation_id,
+                    qualification_attestation_digest=original.qualification_attestation_digest,
+                    qualification_policy_id=original.qualification_policy_id,
+                    qualification_trust_root_id=original.qualification_trust_root_id,
+                    _verification_store=store,
+                    _verification_root=directory,
+                )
+                self.assertEqual(rehydrated, original)
+
+                body = json.loads(original.manifest_json)
+                encoded_signature = body["qualification"]["receipt"]["signature_b64"]
+                signature_bytes = base64.b64decode(encoded_signature)
+                body["qualification"]["receipt"]["signature_b64"] = base64.b64encode(
+                    b"\\x00" * len(signature_bytes)
+                ).decode("ascii")
+                forged_json = json.dumps(
+                    body,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+                forged_sha = (
+                    "sha256:" + sha256(forged_json.encode("utf-8")).hexdigest()
+                )
+                with self.assertRaisesRegex(
+                    ReleaseCandidateError,
+                    "qualification receipt is not canonically verified",
+                ):
+                    ReleaseCandidateDecision(
+                        status="FROZEN",
+                        reasons=(),
+                        manifest_json=forged_json,
+                        manifest_sha256=forged_sha,
+                        qualification_attestation_id=(
+                            original.qualification_attestation_id
+                        ),
+                        qualification_attestation_digest=(
+                            original.qualification_attestation_digest
+                        ),
+                        qualification_policy_id=original.qualification_policy_id,
+                        qualification_trust_root_id=(
+                            original.qualification_trust_root_id
+                        ),
+                        _verification_store=store,
+                        _verification_root=directory,
+                    )
+
+    def test_structural_rehydration_rejects_changed_signed_artifact_binding(self):
         decision = freeze_with_integrity_store(
             self.candidate(),
             with_attestation=True,
@@ -463,10 +647,9 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                 qualification_attestation_digest=decision.qualification_attestation_digest,
                 qualification_policy_id=decision.qualification_policy_id,
                 qualification_trust_root_id=decision.qualification_trust_root_id,
-                _freeze_token=release_candidate_module._FROZEN_DECISION_TOKEN,
             )
 
-    def test_imported_factory_token_cannot_bypass_signed_role_binding(self):
+    def test_structural_rehydration_rejects_changed_signed_role_binding(self):
         decision = freeze_with_integrity_store(
             self.candidate(),
             with_attestation=True,
@@ -501,7 +684,6 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                 qualification_attestation_digest=decision.qualification_attestation_digest,
                 qualification_policy_id=decision.qualification_policy_id,
                 qualification_trust_root_id=decision.qualification_trust_root_id,
-                _freeze_token=release_candidate_module._FROZEN_DECISION_TOKEN,
             )
 
     def test_direct_frozen_decision_rejects_noncanonical_artifact_manifest(self):

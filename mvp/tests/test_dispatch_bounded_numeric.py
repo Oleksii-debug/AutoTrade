@@ -179,6 +179,21 @@ class DispatchBoundedNumericTransportTests(unittest.TestCase):
                 self.assertEqual(outcome_again.status, "UNKNOWN")
                 self.assertEqual(len(sends), 1)
 
+    def test_invalid_utf8_and_generic_json_errors_do_not_reflect_provider_bytes(self):
+        for raw in (
+            b'{"raw-secret":"dont-print-me-\xff"}',
+            b'{"raw-secret":"dont-print-me","price": }',
+            b'{"raw-secret":"dont-print-me" "price":2}',
+        ):
+            with self.subTest(prefix=raw[:18]):
+                with self.assertRaises(ValueError) as caught:
+                    ExactJsonTransportResponse(raw)
+                self.assertEqual(
+                    str(caught.exception),
+                    "provider response must be exact UTF-8 JSON bytes",
+                )
+                self.assertNotIn("dont-print-me", str(caught.exception))
+
     def test_duplicate_and_nonfinite_json_fail_closed(self):
         for raw in (
             b'{"price":1.25,"price":2.5}',

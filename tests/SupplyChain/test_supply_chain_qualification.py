@@ -23,6 +23,7 @@ from mvp.autotrade_mvp.supply_chain_qualification import (
     ModelDataRightsEvidence,
     SupplyChainEvidence,
     qualify_supply_chain,
+    supply_chain_subject_requirement,
 )
 
 
@@ -349,7 +350,10 @@ def _signed_review(value, *, refs=None, result="PASS", root=None):
         package_id="WP-64",
         protocol_id="supply-chain-review-v1",
         protocol_version="1.0.0",
-        requirement_ids=("independent-supply-chain-review",),
+        requirement_ids=(
+            "independent-supply-chain-review",
+            supply_chain_subject_requirement(value),
+        ),
         evidence_refs=_evidence_refs(value) if refs is None else tuple(refs),
         producer_id=root.producer_id,
         verifier_id=root.verifier_id,
@@ -553,6 +557,30 @@ class SupplyChainQualificationTests(unittest.TestCase):
             result.reason_codes,
         )
 
+
+    def test_signed_review_must_bind_semantic_subject_not_only_artifact_refs(self):
+        original = evidence()
+        receipt, canonical_policy = _signed_review(original)
+        mutated = evidence(
+            comp=component(source_revision="tag:retagged-with-same-bytes"),
+        )
+
+        result = qualify_signed(
+            mutated,
+            receipt=receipt,
+            canonical_policy=canonical_policy,
+        )
+
+        self.assertEqual(result.status, "FAIL")
+        self.assertIn(
+            "SUPPLY_CHAIN.TRUST_ATTESTATION_INVALID",
+            result.reason_codes,
+        )
+        self.assertNotIn(
+            "SUPPLY_CHAIN.ARTIFACT_HASH_MISMATCH:"
+            + mutated.components[0].component_id,
+            result.reason_codes,
+        )
 
     def test_signed_review_must_cover_exact_supply_chain_evidence_set(self):
         value = evidence()

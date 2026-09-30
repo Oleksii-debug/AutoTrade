@@ -7,6 +7,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
 
+import mvp.autotrade_mvp.supply_chain_qualification as supply_chain_module
 from mvp.autotrade_mvp.qualification_attestation import (
     EvidenceArtifactRef,
     QualificationAttestation,
@@ -449,6 +450,78 @@ def qualify_signed(value, *, receipt=None, canonical_policy=None):
             )
 
 class SupplyChainQualificationTests(unittest.TestCase):
+
+    def test_terminal_snapshot_rejects_nested_component_subclass(self):
+        base = component()
+
+        class HostileComponent(ComponentEvidence):
+            pass
+
+        hostile = HostileComponent(
+            **{
+                name: getattr(base, name)
+                for name in base.__dataclass_fields__
+            }
+        )
+        value = evidence(comp=hostile)
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "exact ComponentEvidence",
+        ):
+            qualify_supply_chain(value)
+
+    def test_signer_side_mutation_cannot_change_detached_supply_chain_graph(self):
+        value = evidence()
+        original_component = value.components[0]
+        original_rights = value.model_data_rights[0]
+        original_release_sha = value.release_commit_sha
+        real_verify = (
+            supply_chain_module.verify_canonical_qualification_attestation
+        )
+
+        def mutate_then_verify(receipt, **kwargs):
+            object.__setattr__(
+                original_component,
+                "license_status",
+                "BLOCKED",
+            )
+            object.__setattr__(
+                original_component,
+                "distribution_rights",
+                "BLOCKED",
+            )
+            object.__setattr__(
+                original_component,
+                "notice_present",
+                False,
+            )
+            object.__setattr__(
+                original_rights,
+                "rights_status",
+                "BLOCKED",
+            )
+            object.__setattr__(
+                value,
+                "release_commit_sha",
+                "2" * 40,
+            )
+            return real_verify(receipt, **kwargs)
+
+        with patch.object(
+            supply_chain_module,
+            "verify_canonical_qualification_attestation",
+            side_effect=mutate_then_verify,
+        ):
+            result = qualify_signed(value)
+
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.reason_codes, ())
+        self.assertFalse(result.release_authority)
+        self.assertEqual(original_component.license_status, "BLOCKED")
+        self.assertEqual(original_rights.rights_status, "BLOCKED")
+        self.assertEqual(value.release_commit_sha, "2" * 40)
+        self.assertNotEqual(value.release_commit_sha, original_release_sha)
 
     def test_valid_independent_signed_review_can_close_wp64_trust_gate(self):
         result = qualify_signed(evidence())

@@ -210,12 +210,12 @@ class RiskPolicyDowngradeFenceTests(unittest.TestCase):
                 policy=_policy("1.5"),
                 committed_at=NOW + timedelta(seconds=1),
             )
-            original_append = store.append_event
+            original_append = JournalStore.append_event
             triggered = False
 
-            def append_after_newer_activation(envelope, *args, **kwargs):
+            def append_after_newer_activation(target, envelope, *args, **kwargs):
                 nonlocal triggered
-                if not triggered:
+                if target is store and not triggered:
                     triggered = True
                     concurrent.activate(
                         scope=exact_scope,
@@ -223,12 +223,12 @@ class RiskPolicyDowngradeFenceTests(unittest.TestCase):
                         version=2,
                         committed_at=NOW + timedelta(seconds=2),
                     )
-                return original_append(envelope, *args, **kwargs)
+                return original_append(target, envelope, *args, **kwargs)
 
             with patch.object(
-                store,
+                JournalStore,
                 "append_event",
-                side_effect=append_after_newer_activation,
+                new=append_after_newer_activation,
             ):
                 with self.assertRaisesRegex(
                     RiskPolicyAuthorityError,

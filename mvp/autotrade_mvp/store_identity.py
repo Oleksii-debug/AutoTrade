@@ -102,6 +102,83 @@ class JournalStoreIdentity:
     windows_file_index_low: int | None = None
 
 
+def require_exact_journal_store_identity(
+    value: object,
+    *,
+    subject: str = "journal store identity",
+) -> JournalStoreIdentity:
+    """Reject polymorphic state before any named lookup or equality dispatch."""
+
+    if type(value) is not JournalStoreIdentity:
+        raise TypeError(f"{subject} must be exact JournalStoreIdentity")
+    state = vars(value)
+    state_names = tuple(state)
+    expected_names = frozenset(
+        {
+            "canonical_path",
+            "filesystem_device",
+            "filesystem_inode",
+            "identity_source",
+            "windows_volume_serial",
+            "windows_file_index_high",
+            "windows_file_index_low",
+        }
+    )
+    if any(type(name) is not str for name in state_names):
+        raise TypeError(f"{subject} state keys must be exact str")
+    if frozenset(state_names) != expected_names:
+        raise TypeError(f"{subject} state shape is non-canonical")
+
+    canonical_path = state["canonical_path"]
+    filesystem_device = state["filesystem_device"]
+    filesystem_inode = state["filesystem_inode"]
+    identity_source = state["identity_source"]
+    windows_volume_serial = state["windows_volume_serial"]
+    windows_file_index_high = state["windows_file_index_high"]
+    windows_file_index_low = state["windows_file_index_low"]
+
+    if type(canonical_path) is not str or not canonical_path:
+        raise TypeError(f"{subject} canonical_path must be exact non-empty str")
+    if type(identity_source) is not str:
+        raise TypeError(f"{subject} identity_source must be exact str")
+
+    if identity_source == "posix_stat":
+        if (
+            type(filesystem_device) is not int
+            or type(filesystem_inode) is not int
+            or windows_volume_serial is not None
+            or windows_file_index_high is not None
+            or windows_file_index_low is not None
+        ):
+            raise TypeError(f"{subject} has non-canonical POSIX identity fields")
+    elif identity_source == "windows_by_handle":
+        if (
+            filesystem_device is not None
+            or filesystem_inode is not None
+            or type(windows_volume_serial) is not int
+            or type(windows_file_index_high) is not int
+            or type(windows_file_index_low) is not int
+        ):
+            raise TypeError(f"{subject} has non-canonical Windows identity fields")
+        if windows_volume_serial == 0 or (
+            windows_file_index_high == 0
+            and windows_file_index_low == 0
+        ):
+            raise ValueError(f"{subject} has no strong Windows file identity")
+    else:
+        raise ValueError(f"{subject} identity_source is unsupported")
+
+    return JournalStoreIdentity(
+        canonical_path=canonical_path,
+        filesystem_device=filesystem_device,
+        filesystem_inode=filesystem_inode,
+        identity_source=identity_source,
+        windows_volume_serial=windows_volume_serial,
+        windows_file_index_high=windows_file_index_high,
+        windows_file_index_low=windows_file_index_low,
+    )
+
+
 def freeze_database_path(path: str | Path) -> Path:
     """Freeze caller path text to one absolute canonical filesystem location."""
 
@@ -480,6 +557,10 @@ def require_database_identity(
 ) -> JournalStoreIdentity:
     """Fail closed if a frozen journal path no longer names the expected file."""
 
+    expected = require_exact_journal_store_identity(
+        expected,
+        subject="expected journal store identity",
+    )
     try:
         actual = observe_database_identity(path)
     except OSError as error:

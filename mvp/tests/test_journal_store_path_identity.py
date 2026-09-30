@@ -9,10 +9,216 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import (
+    JournalStore,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
+from mvp.autotrade_mvp.store_identity import JournalStoreIdentity
 
 
 class JournalStorePathIdentityRegressionTests(unittest.TestCase):
+    def test_raw_state_non_string_key_is_rejected_without_reentry(self) -> None:
+        touched = []
+
+        class PoisonKey:
+            def __hash__(self):
+                touched.append("hash")
+                return hash("append_event")
+
+            def __eq__(self, other):
+                touched.append("eq")
+                return other == "append_event"
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite")
+            key = PoisonKey()
+            vars(store)[key] = "poison"
+            touched.clear()
+
+            with self.assertRaisesRegex(TypeError, "state keys must be exact str"):
+                require_exact_journal_store_authority(store)
+            self.assertEqual(touched, [])
+
+            with self.assertRaisesRegex(TypeError, "state keys must be exact str"):
+                store.current_journal_sequence()
+            self.assertEqual(touched, [])
+
+    def test_direct_store_io_seals_path_before_callback_or_sqlite(self) -> None:
+        touched = []
+
+        class PoisonPath:
+            def __fspath__(self):
+                touched.append("fspath")
+                raise AssertionError("unexpected fspath")
+
+            def __str__(self):
+                touched.append("str")
+                raise AssertionError("unexpected str")
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite")
+            store.path = PoisonPath()
+
+            with patch("mvp.autotrade_mvp.persistence.sqlite3.connect") as connect:
+                with self.assertRaisesRegex(TypeError, "path must be exact platform Path"):
+                    store.current_journal_sequence()
+                connect.assert_not_called()
+            self.assertEqual(touched, [])
+
+            payload = {"probe": "write"}
+            with patch("mvp.autotrade_mvp.persistence.sqlite3.connect") as connect:
+                with self.assertRaisesRegex(TypeError, "path must be exact platform Path"):
+                    store.append_event(
+                        {
+                            "event_id": "path-fence-write",
+                            "event_type": "Probe",
+                            "aggregate_type": "probe",
+                            "aggregate_id": "probe",
+                            "aggregate_version": "1",
+                            "payload": payload,
+                            "payload_hash": payload_digest(payload),
+                            "committed_at": "2026-09-30T19:30:00Z",
+                            "owner_epoch": "1",
+                        }
+                    )
+                connect.assert_not_called()
+            self.assertEqual(touched, [])
+
+    def test_store_identity_rejects_post_construction_path_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = JournalStore(root / "journal.sqlite")
+            store.path = root / "other.sqlite"
+            with self.assertRaisesRegex(RuntimeError, "path and identity disagree"):
+                _ = store.store_identity
+
+    def test_persistence_owned_authority_rejects_method_shadow_before_callback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite")
+            touched = []
+            store.__dict__["current_journal_sequence"] = (
+                lambda *_args, **_kwargs: touched.append("sequence")
+            )
+
+            with self.assertRaisesRegex(TypeError, "instance state is shadowed"):
+                require_exact_journal_store_authority(store)
+            self.assertEqual(touched, [])
+
+    def test_persistence_owned_authority_rejects_mutated_or_polymorphic_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = JournalStore(root / "journal.sqlite")
+            original_path = store.path
+
+            store.path = root / "other.sqlite"
+            with self.assertRaisesRegex(RuntimeError, "path and identity disagree"):
+                require_exact_journal_store_authority(store)
+
+            touched = []
+
+            class HostilePath:
+                def __fspath__(self):
+                    touched.append("fspath")
+                    return str(original_path)
+
+                def __str__(self):
+                    touched.append("str")
+                    return str(original_path)
+
+            store.path = HostilePath()
+            with self.assertRaisesRegex(TypeError, "path must be exact platform Path"):
+                require_exact_journal_store_authority(store)
+            self.assertEqual(touched, [])
+
+    def test_exact_identity_with_hostile_field_fails_before_sqlite_or_equality(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite"
+            store = JournalStore(path)
+            genuine = store.store_identity
+            touched = []
+
+            class HostileField:
+                def __eq__(self, _other):
+                    touched.append("eq")
+                    return True
+
+                def __ne__(self, _other):
+                    touched.append("ne")
+                    return False
+
+            store._store_identity = JournalStoreIdentity(
+                canonical_path=HostileField(),
+                filesystem_device=genuine.filesystem_device,
+                filesystem_inode=genuine.filesystem_inode,
+                identity_source=genuine.identity_source,
+                windows_volume_serial=genuine.windows_volume_serial,
+                windows_file_index_high=genuine.windows_file_index_high,
+                windows_file_index_low=genuine.windows_file_index_low,
+            )
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "canonical_path must be exact non-empty str",
+            ):
+                _ = store.store_identity
+            self.assertEqual(touched, [])
+
+            with patch(
+                "mvp.autotrade_mvp.persistence.sqlite3.connect",
+                side_effect=AssertionError("poisoned exact identity reached sqlite"),
+            ):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "canonical_path must be exact non-empty str",
+                ):
+                    store.current_journal_sequence()
+            self.assertEqual(touched, [])
+
+    def test_mutated_identity_type_fails_before_hostile_comparison_or_sqlite_use(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite"
+            store = JournalStore(path)
+            touched = []
+
+            class HostileIdentity:
+                canonical_path = str(path.resolve())
+
+                def __eq__(self, _other):
+                    touched.append("eq")
+                    return True
+
+                def __ne__(self, _other):
+                    touched.append("ne")
+                    return False
+
+            store._store_identity = HostileIdentity()
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "journal store identity must be exact JournalStoreIdentity",
+            ):
+                _ = store.store_identity
+            self.assertEqual(touched, [])
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "selected journal store identity must be exact JournalStoreIdentity",
+            ):
+                store.current_journal_sequence()
+            self.assertEqual(touched, [])
+
+            with patch(
+                "mvp.autotrade_mvp.persistence.sqlite3.connect",
+                side_effect=AssertionError("poisoned identity reached sqlite"),
+            ):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "selected journal store identity must be exact JournalStoreIdentity",
+                ):
+                    store.current_journal_sequence()
+            self.assertEqual(touched, [])
+
     def test_relative_backing_path_is_frozen_at_construction(self) -> None:
         original_cwd = Path.cwd()
         try:

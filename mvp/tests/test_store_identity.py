@@ -9,16 +9,107 @@ from pathlib import Path
 from unittest.mock import patch
 
 from mvp.autotrade_mvp.store_identity import (
+    JournalStoreIdentity,
     connection_main_identity,
     establish_database_anchor,
     freeze_database_path,
     guard_windows_database_authority,
     observe_database_identity,
     require_database_identity,
+    require_exact_journal_store_identity,
 )
 
 
 class StoreIdentityTests(unittest.TestCase):
+    def test_exact_identity_raw_state_key_fails_before_callback(self):
+        touched = []
+
+        class PoisonKey:
+            def __hash__(self):
+                touched.append("hash")
+                return hash("canonical_path")
+
+            def __eq__(self, other):
+                touched.append("eq")
+                return other == "canonical_path"
+
+        identity = JournalStoreIdentity(
+            canonical_path="/tmp/journal.sqlite",
+            filesystem_device=1,
+            filesystem_inode=2,
+        )
+        state = vars(identity)
+        canonical_path = state.pop("canonical_path")
+        key = PoisonKey()
+        state[key] = "poison"
+        state["canonical_path"] = canonical_path
+        touched.clear()
+
+        with self.assertRaisesRegex(TypeError, "state keys must be exact str"):
+            require_exact_journal_store_identity(identity)
+        self.assertEqual(touched, [])
+
+    def test_exact_identity_with_hostile_field_fails_before_reflected_equality(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite"
+            sqlite3.connect(path).close()
+            genuine = observe_database_identity(path)
+            touched = []
+
+            class HostileField:
+                def __eq__(self, _other):
+                    touched.append("eq")
+                    return True
+
+                def __ne__(self, _other):
+                    touched.append("ne")
+                    return False
+
+            poisoned = JournalStoreIdentity(
+                canonical_path=HostileField(),
+                filesystem_device=genuine.filesystem_device,
+                filesystem_inode=genuine.filesystem_inode,
+                identity_source=genuine.identity_source,
+                windows_volume_serial=genuine.windows_volume_serial,
+                windows_file_index_high=genuine.windows_file_index_high,
+                windows_file_index_low=genuine.windows_file_index_low,
+            )
+            with self.assertRaisesRegex(
+                TypeError,
+                "canonical_path must be exact non-empty str",
+            ):
+                require_database_identity(path, poisoned)
+            self.assertEqual(touched, [])
+
+    def test_foreign_expected_identity_fails_before_reflected_equality(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite"
+            sqlite3.connect(path).close()
+            touched = []
+
+            class HostileIdentity:
+                canonical_path = str(path.resolve())
+
+                def __eq__(self, _other):
+                    touched.append("eq")
+                    return True
+
+                def __ne__(self, _other):
+                    touched.append("ne")
+                    return False
+
+            hostile = HostileIdentity()
+            with self.assertRaisesRegex(
+                TypeError,
+                "expected journal store identity must be exact JournalStoreIdentity",
+            ):
+                require_database_identity(path, hostile)
+            self.assertEqual(touched, [])
+
+            genuine = observe_database_identity(path)
+            self.assertIs(type(genuine), JournalStoreIdentity)
+            self.assertEqual(require_database_identity(path, genuine), genuine)
+
     def test_freeze_database_path_binds_relative_text_to_construction_cwd(self) -> None:
         original_cwd = Path.cwd()
         try:
@@ -177,6 +268,18 @@ class StoreIdentityTests(unittest.TestCase):
                 )
             finally:
                 connection.close()
+
+
+    def test_validated_identity_is_detached_from_mutable_dataclass_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite"
+            sqlite3.connect(path).close()
+            original = observe_database_identity(path)
+            validated = require_exact_journal_store_identity(original)
+            self.assertIsNot(validated, original)
+            self.assertEqual(validated, original)
+            vars(original)["canonical_path"] = str(path.with_name("other.sqlite"))
+            self.assertEqual(validated.canonical_path, str(path.resolve()))
 
 
 if __name__ == "__main__":

@@ -317,7 +317,7 @@ class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
             payload={"per_share": "1.25", "currency": "USDT"},
         )
         with self.assertRaisesRegex(
-            CorporateActionEvidenceError, "sealed ProviderResponseObservation"
+            CorporateActionEvidenceError, "exact ProviderResponseObservation"
         ):
             resolve_authoritative_corporate_action(
                 "provider-read:sha256:" + "a" * 64,

@@ -5,10 +5,12 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
 
+from mvp.autotrade_mvp import qualification_attestation as qualification_trust
 from mvp.autotrade_mvp.qualification_attestation import (
     EvidenceArtifactRef,
     QualificationAttestation,
@@ -73,6 +75,16 @@ def complete_evidence():
         }
         for package in EXPECTED_PACKAGE_IDS
     )
+    records.extend(
+        {
+            "kind": "QUALIFICATION_GATE",
+            "requirement_id": gate,
+            "source_sha": SHA,
+            "status": "PASS",
+            "evidence_ref": f"artifact://whole-product/gate/{gate}",
+        }
+        for gate in sorted(EXPECTED_GATE_NAMES)
+    )
     return records
 
 
@@ -92,6 +104,8 @@ def verified_evidence(store, trust_root):
         ("PRODUCT_SECTION", section) for section in EXPECTED_SECTION_IDS
     ] + [
         ("WORK_PACKAGE", package) for package in EXPECTED_PACKAGE_IDS
+    ] + [
+        ("QUALIFICATION_GATE", gate) for gate in sorted(EXPECTED_GATE_NAMES)
     ]
     for kind, requirement_id in requirements:
         artifact_id = str(
@@ -129,7 +143,7 @@ def verified_evidence(store, trust_root):
             package_id="WP-60",
             protocol_id="whole-product-completion-v1",
             protocol_version="1.0.0",
-            requirement_ids=(requirement_id,),
+            requirement_ids=(f"{kind}/{requirement_id}",),
             evidence_refs=(evidence_ref,),
             producer_id=trust_root.producer_id,
             verifier_id=trust_root.verifier_id,
@@ -302,14 +316,24 @@ def evaluate(
     source_sha=SHA,
     evidence_context=None,
 ):
-    return evaluate_completion(
+    args = (
         bank or complete_bank(),
         qualification or complete_qualification(),
         nvda_status or nvda(),
-        spec_text=SPEC,
-        exact_source_sha=source_sha,
-        evidence_context=evidence_context,
     )
+    kwargs = {
+        "spec_text": SPEC,
+        "exact_source_sha": source_sha,
+        "evidence_context": evidence_context,
+    }
+    if evidence_context is None:
+        return evaluate_completion(*args, **kwargs)
+    with patch.object(
+        qualification_trust,
+        "load_canonical_qualification_trust_policy",
+        return_value=evidence_context.policy,
+    ):
+        return evaluate_completion(*args, **kwargs)
 
 
 class ProductCompletionGateTests(unittest.TestCase):
@@ -359,9 +383,45 @@ class ProductCompletionGateTests(unittest.TestCase):
         self.assertEqual(report["blockers"], [])
         self.assertEqual(report["missing_section_evidence"], [])
         self.assertEqual(report["missing_package_evidence"], [])
+        self.assertEqual(report["missing_gate_evidence"], [])
         self.assertEqual(report["nonpassing_evidence"], [])
         self.assertTrue(report["nvda_source_matches"])
         self.assertTrue(report["qualification_source_matches"])
+
+    def test_caller_selected_policy_cannot_select_terminal_whole_product_trust(self):
+        with TemporaryDirectory() as directory:
+            (
+                qualification,
+                evidence_context,
+                nvda_status,
+            ) = verified_completion_fixture(directory)
+            canonical_root = fixture_root(
+                scopes=(QualificationScope("RELEASE", "FREEZE"),)
+            )
+            canonical_policy = fixture_policy(canonical_root)
+            with patch.object(
+                qualification_trust,
+                "load_canonical_qualification_trust_policy",
+                return_value=canonical_policy,
+            ):
+                report = evaluate_completion(
+                    complete_bank(),
+                    qualification,
+                    nvda_status,
+                    spec_text=SPEC,
+                    exact_source_sha=SHA,
+                    evidence_context=evidence_context,
+                )
+
+        self.assertFalse(report["complete"])
+        self.assertFalse(report["nvda_qualified"])
+        self.assertTrue(report["nonpassing_evidence"])
+        self.assertTrue(
+            all(
+                item.endswith(":independent_verification")
+                for item in report["nonpassing_evidence"]
+            )
+        )
 
     def test_completion_ignores_post_capture_publication_store_poisoning(self):
         with TemporaryDirectory() as directory:
@@ -508,6 +568,20 @@ class ProductCompletionGateTests(unittest.TestCase):
         report = evaluate(qualification=qualification)
         self.assertFalse(report["complete"])
         self.assertIn("economic_edge", report["missing_required_gates"])
+
+    def test_terminal_gate_requires_independently_signed_gate_evidence(self):
+        qualification = complete_qualification()
+        qualification["whole_product_evidence"] = [
+            item
+            for item in qualification["whole_product_evidence"]
+            if not (
+                item["kind"] == "QUALIFICATION_GATE"
+                and item["requirement_id"] == "economic_edge"
+            )
+        ]
+        report = evaluate(qualification=qualification)
+        self.assertFalse(report["complete"])
+        self.assertIn("economic_edge", report["missing_gate_evidence"])
 
     def test_completion_protocol_rejects_schema_version_drift(self):
         bank = complete_bank()

@@ -18,6 +18,8 @@ from mvp.autotrade_mvp.corporate_action_accounting import (
     commit_authoritative_corporate_action,
 )
 from mvp.autotrade_mvp.corporate_action_evidence import (
+    AuthoritativeCorporateAction,
+    CorporateActionEvidenceError,
     CorporateActionObservation,
     DurableCorporateActionEvidenceStore,
     resolve_authoritative_corporate_action,
@@ -1301,6 +1303,195 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
                 1,
             )
             self.assertEqual(len(economics.transactions), 2)
+
+
+
+    def test_direct_authoritative_action_construction_cannot_mint_financial_authority(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            durable_evidence = evidence_store(store)
+            economics = economic_book(store)
+            legitimate = resolve_action(sealed_action())
+            forged = AuthoritativeCorporateAction(
+                event=legitimate.event,
+                evidence_ref=legitimate.evidence_ref,
+                provider_id=legitimate.provider_id,
+                account_id=legitimate.account_id,
+                environment=legitimate.environment,
+                external_event_id=legitimate.external_event_id,
+                provider_revision=legitimate.provider_revision,
+                raw_evidence_digest=legitimate.raw_evidence_digest,
+                query_digest=legitimate.query_digest,
+                capability_snapshot_id=legitimate.capability_snapshot_id,
+                provider_instrument_version=legitimate.provider_instrument_version,
+                observed_at=legitimate.observed_at,
+                provenance_digest=legitimate.provenance_digest,
+                corrects_external_event_id=legitimate.corrects_external_event_id,
+            )
+            before_transactions = economics.transactions
+            before_evidence = store.load_events(
+                "corporate_action_evidence", durable_evidence.aggregate_id
+            )
+
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceError, "lacks resolver issuance authority"
+            ):
+                commit_authoritative_corporate_action(
+                    store=store,
+                    evidence_store=durable_evidence,
+                    economic_book=economics,
+                    corporate_book=pure_book(),
+                    accepted=forged,
+                )
+
+            economics.refresh()
+            self.assertEqual(economics.transactions, before_transactions)
+            self.assertEqual(
+                store.load_events(
+                    "corporate_action_evidence", durable_evidence.aggregate_id
+                ),
+                before_evidence,
+            )
+            self.assertEqual(
+                store.load_events_by_aggregate_type("corporate_action_activation"),
+                [],
+            )
+
+    def test_resolver_issued_action_rejects_post_issuance_field_substitution(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            durable_evidence = evidence_store(store)
+            economics = economic_book(store)
+            accepted = resolve_action(sealed_action())
+            object.__setattr__(accepted, "provider_revision", "forged-after-issuance")
+            before_transactions = economics.transactions
+
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceError, "changed after resolver issuance"
+            ):
+                commit_authoritative_corporate_action(
+                    store=store,
+                    evidence_store=durable_evidence,
+                    economic_book=economics,
+                    corporate_book=pure_book(),
+                    accepted=accepted,
+                )
+
+            economics.refresh()
+            self.assertEqual(economics.transactions, before_transactions)
+            self.assertEqual(
+                store.load_events(
+                    "corporate_action_evidence", durable_evidence.aggregate_id
+                ),
+                [],
+            )
+            self.assertEqual(
+                store.load_events_by_aggregate_type("corporate_action_activation"),
+                [],
+            )
+
+    def test_durable_authority_subclasses_are_rejected_before_virtual_dispatch(self):
+        touched = []
+
+        class HostileStore(JournalStore):
+            def current_journal_sequence(self):
+                touched.append("store-current-sequence")
+                raise AssertionError("hostile JournalStore callback")
+
+            def commit_command(self, *args, **kwargs):
+                touched.append("store-commit")
+                raise AssertionError("hostile JournalStore callback")
+
+        class HostileEvidenceStore(DurableCorporateActionEvidenceStore):
+            def prepare_record_mutation(self, accepted):
+                touched.append("evidence-prepare")
+                raise AssertionError("hostile evidence callback")
+
+        class HostileEconomicBook(DurableProviderEconomicBook):
+            def refresh(self):
+                touched.append("economic-refresh")
+                raise AssertionError("hostile economic callback")
+
+            @property
+            def transactions(self):
+                touched.append("economic-transactions")
+                raise AssertionError("hostile economic callback")
+
+            def prepare_batch_mutation(self, *args, **kwargs):
+                touched.append("economic-prepare")
+                raise AssertionError("hostile economic callback")
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            accepted = resolve_action(sealed_action())
+            durable_evidence = evidence_store(store)
+            economics = economic_book(store)
+
+            hostile_store = HostileStore(Path(directory) / "hostile.sqlite3")
+            hostile_evidence = HostileEvidenceStore(
+                store,
+                provider_id="BINANCE",
+                account_id="acct-1",
+                environment="PAPER",
+            )
+            hostile_economics = HostileEconomicBook(
+                store,
+                provider_id="BINANCE",
+                account_id="acct-1",
+                environment="PAPER",
+            )
+            touched.clear()
+            before_events = tuple(store.load_events_by_aggregate_type(
+                "corporate_action_activation"
+            ))
+            before_evidence = tuple(store.load_events(
+                "corporate_action_evidence", durable_evidence.aggregate_id
+            ))
+            before_transactions = economics.transactions
+            touched.clear()
+
+            cases = (
+                (
+                    {"store": hostile_store, "evidence_store": durable_evidence,
+                     "economic_book": economics},
+                    "exact JournalStore",
+                ),
+                (
+                    {"store": store, "evidence_store": hostile_evidence,
+                     "economic_book": economics},
+                    "exact DurableCorporateActionEvidenceStore",
+                ),
+                (
+                    {"store": store, "evidence_store": durable_evidence,
+                     "economic_book": hostile_economics},
+                    "exact DurableProviderEconomicBook",
+                ),
+            )
+            for overrides, message in cases:
+                with self.subTest(message=message):
+                    with self.assertRaisesRegex(TypeError, message):
+                        commit_authoritative_corporate_action(
+                            corporate_book=pure_book(),
+                            accepted=accepted,
+                            **overrides,
+                        )
+                    self.assertEqual(touched, [])
+
+            economics.refresh()
+            self.assertEqual(economics.transactions, before_transactions)
+            self.assertEqual(
+                tuple(store.load_events(
+                    "corporate_action_evidence", durable_evidence.aggregate_id
+                )),
+                before_evidence,
+            )
+            self.assertEqual(
+                tuple(store.load_events_by_aggregate_type(
+                    "corporate_action_activation"
+                )),
+                before_events,
+            )
 
 
 

@@ -33,6 +33,7 @@ from .corporate_action_evidence import (
     AuthoritativeCorporateAction,
     CorporateActionEvidenceConflict,
     DurableCorporateActionEvidenceStore,
+    require_authoritative_corporate_action_issuance,
 )
 from .corporate_actions import (
     CorporateActionBook,
@@ -891,17 +892,20 @@ def commit_authoritative_corporate_action(
     qualified host clock/scheduler boundary.
     """
 
-    if not isinstance(store, JournalStore):
-        raise TypeError("store must be JournalStore")
-    if not isinstance(evidence_store, DurableCorporateActionEvidenceStore):
+    if type(store) is not JournalStore:
+        raise TypeError("store must be an exact JournalStore")
+    if type(evidence_store) is not DurableCorporateActionEvidenceStore:
         raise TypeError(
-            "evidence_store must be DurableCorporateActionEvidenceStore"
+            "evidence_store must be an exact DurableCorporateActionEvidenceStore"
         )
-    if not isinstance(economic_book, DurableProviderEconomicBook):
-        raise TypeError("economic_book must be DurableProviderEconomicBook")
+    if type(economic_book) is not DurableProviderEconomicBook:
+        raise TypeError(
+            "economic_book must be an exact DurableProviderEconomicBook"
+        )
     if type(corporate_book) is not CorporateActionBook:
         raise TypeError("corporate_book must be an exact CorporateActionBook")
     _require_authoritative_action(accepted)
+    require_authoritative_corporate_action_issuance(accepted)
     if evidence_store.store is not store or economic_book.store is not store:
         raise ValueError(
             "corporate-action evidence and economics must share one JournalStore"

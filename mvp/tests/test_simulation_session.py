@@ -10,10 +10,9 @@ import unittest
 from unittest.mock import patch
 
 import mvp.autotrade_mvp.simulation_session as simulation_session
-from mvp.autotrade_mvp.accounting import book_external_cash_flow
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.exact_decimal import ExactDecimalError
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.pipeline import MovingAverageStrategy
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
 from mvp.autotrade_mvp.simulation_session import (
@@ -31,26 +30,130 @@ ROUNDINGS = (ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN)
 
 
 class CanonicalSimulationSessionTests(unittest.TestCase):
-    def test_orphaned_bootstrap_state_cannot_start_another_send(self):
+    @staticmethod
+    def _append_foreign_event(store: JournalStore) -> None:
+        payload = {"foreign": True}
+        store.append_event({
+            "event_id": "foreign-event",
+            "event_type": "ForeignDurableState",
+            "schema_version": "1.0.0",
+            "aggregate_type": "foreign_test",
+            "aggregate_id": "foreign",
+            "aggregate_version": "1",
+            "host_id": "foreign-host",
+            "owner_epoch": "1",
+            "environment": ENVIRONMENT,
+            "occurred_at": NOW,
+            "observed_at": NOW,
+            "committed_at": NOW,
+            "correlation_id": "foreign-correlation",
+            "causation_id": None,
+            "payload": payload,
+            "payload_hash": payload_digest(payload),
+            "evidence_refs": [],
+        })
+
+    def test_foreign_nonempty_journal_is_rejected_without_mutation(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
-            book = DurableProviderEconomicBook(
-                store, provider_id=PROVIDER, account_id=ACCOUNT,
-                environment=ENVIRONMENT,
+            self._append_foreign_event(store)
+            sequence_before = store.current_journal_sequence()
+            foreign_before = store.load_events("foreign_test", "foreign")
+
+            with self.assertRaisesRegex(ValueError, "foreign durable journal"):
+                run_canonical_simulation(
+                    HOLD, directory, episode_id="foreign",
+                    source_sha=SOURCE_SHA, now=NOW,
+                )
+
+            self.assertEqual(store.current_journal_sequence(), sequence_before)
+            self.assertEqual(store.load_events("foreign_test", "foreign"), foreign_before)
+            self.assertEqual(
+                store.load_events("canonical_simulation_session", "single-episode"),
+                [],
             )
-            book.append(book_external_cash_flow(
-                transaction_id="seed-before-crash",
-                cause_event_id="bootstrap-before-crash",
-                currency="USD", amount="1000",
-            ))
-            result = run_canonical_simulation(
-                BUY, directory, episode_id="orphan", source_sha=SOURCE_SHA, now=NOW
-            )
-            self.assertEqual(result["status"], "UNKNOWN")
-            self.assertEqual(result["new_outbound_requests"], 0)
-            self.assertFalse(result["reconciled"])
-            self.assertEqual(result["source_sha"], SOURCE_SHA)
+            self.assertEqual(store.load_events_by_aggregate_type("economic_book"), [])
             self.assertEqual(store.load_events_by_aggregate_type("submission_attempt"), [])
+
+    def test_ownership_is_first_durable_event_before_bootstrap(self):
+        with TemporaryDirectory() as directory:
+            result = run_canonical_simulation(
+                HOLD, directory, episode_id="ownership-first",
+                source_sha=SOURCE_SHA, now=NOW,
+            )
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            all_events = store.load_events_after_journal_sequence(0)
+            self.assertGreaterEqual(len(all_events), 3)
+            first = all_events[0]
+            self.assertEqual(first["event_type"], "SimulationSessionOwned")
+            self.assertEqual(first["aggregate_type"], "canonical_simulation_session")
+            self.assertEqual(first["aggregate_id"], "single-episode")
+            self.assertEqual(first["journal_sequence"], 1)
+            self.assertEqual(first["payload"]["session_id"], result["session_id"])
+            self.assertEqual(first["payload"]["source_sha"], SOURCE_SHA)
+            self.assertEqual(first["payload"]["protocol_id"], result["protocol_id"])
+            self.assertEqual(
+                [event["event_type"] for event in store.load_events(
+                    "canonical_simulation_session", "single-episode"
+                )],
+                [
+                    "SimulationSessionOwned",
+                    "SimulationSessionStarted",
+                    "SimulationSessionCompleted",
+                ],
+            )
+
+    def test_owner_only_crash_resumes_bootstrap_without_duplicate_owner(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            values = simulation_session._prices(HOLD)
+            input_hash, session_id, protocol_id, protocol = (
+                simulation_session._session_identity(
+                    values,
+                    episode_id="owner-crash",
+                    source_sha=SOURCE_SHA,
+                )
+            )
+            identity = simulation_session._identity_payload(
+                episode_id="owner-crash",
+                input_hash=input_hash,
+                session_id=session_id,
+                source_sha=SOURCE_SHA,
+                protocol_id=protocol_id,
+                protocol=protocol,
+            )
+            store = JournalStore(root / "journal.sqlite3")
+            simulation_session._event(
+                store,
+                "SimulationSessionOwned",
+                session_id,
+                {"schema_version": "1.0.0", **identity},
+                NOW,
+            )
+            self.assertEqual(store.current_journal_sequence(), 1)
+
+            result = run_canonical_simulation(
+                HOLD, directory, episode_id="owner-crash",
+                source_sha=SOURCE_SHA, now=NOW,
+            )
+            self.assertEqual(result["status"], "HOLD")
+            self.assertEqual(result["new_outbound_requests"], 0)
+            self.assertEqual(result["session_id"], session_id)
+            sessions = store.load_events(
+                "canonical_simulation_session", "single-episode"
+            )
+            self.assertEqual(
+                [event["event_type"] for event in sessions],
+                [
+                    "SimulationSessionOwned",
+                    "SimulationSessionStarted",
+                    "SimulationSessionCompleted",
+                ],
+            )
+            self.assertEqual(
+                sum(event["event_type"] == "SimulationSessionOwned" for event in sessions),
+                1,
+            )
 
     def test_buy_reconciles_durable_economics_and_resume_sends_nothing(self):
         with TemporaryDirectory() as directory:
@@ -79,13 +182,19 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
             sessions = reopened.load_events("canonical_simulation_session", "single-episode")
             self.assertEqual(
                 [event["event_type"] for event in sessions],
-                ["SimulationSessionStarted", "SimulationSessionCompleted"],
+                [
+                    "SimulationSessionOwned",
+                    "SimulationSessionStarted",
+                    "SimulationSessionCompleted",
+                ],
             )
-            started = sessions[0]["payload"]
-            self.assertEqual(started["source_sha"], SOURCE_SHA)
-            self.assertEqual(started["protocol_id"], first["protocol_id"])
-            self.assertEqual(started["session_id"], first["session_id"])
-            self.assertEqual(started["protocol"]["source_sha"], SOURCE_SHA)
+            owner = sessions[0]["payload"]
+            started = sessions[1]["payload"]
+            for payload in (owner, started):
+                self.assertEqual(payload["source_sha"], SOURCE_SHA)
+                self.assertEqual(payload["protocol_id"], first["protocol_id"])
+                self.assertEqual(payload["session_id"], first["session_id"])
+                self.assertEqual(payload["protocol"]["source_sha"], SOURCE_SHA)
             self.assertEqual(
                 started["protocol"]["financial_scope"]["instrument"], INSTRUMENT
             )
@@ -110,6 +219,26 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
                     HOLD, directory, episode_id="buy", source_sha=SOURCE_SHA
                 )
 
+    def test_completed_projector_rejects_forged_fill_identity(self):
+        with TemporaryDirectory() as directory:
+            result = run_canonical_simulation(
+                BUY, directory, episode_id="forged-fill",
+                source_sha=SOURCE_SHA, now=NOW,
+            )
+            forged = {**result, "fill_id": "forged-provider-execution"}
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            with self.assertRaisesRegex(ValueError, "not proven by reconciliation"):
+                simulation_session._validate_completed_result(
+                    store,
+                    Path(directory),
+                    forged,
+                    episode_id="forged-fill",
+                    input_hash=result["input_hash"],
+                    session_id=result["session_id"],
+                    source_sha=SOURCE_SHA,
+                    protocol_id=result["protocol_id"],
+                )
+
     def test_hold_has_no_submission_or_financial_fill_and_resumes(self):
         with TemporaryDirectory() as directory:
             first = run_canonical_simulation(
@@ -130,6 +259,67 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
             self.assertEqual(again["status"], "HOLD")
             self.assertTrue(again["resumed"])
             self.assertEqual(again["new_outbound_requests"], 0)
+
+    def test_guarded_blocked_is_terminal_and_restarts_zero_wire(self):
+        with TemporaryDirectory() as directory:
+            with patch.object(
+                simulation_session.AuthorityService,
+                "dispatch_allowed",
+                return_value=(False, "test_forced_block"),
+            ):
+                first = run_canonical_simulation(
+                    BUY, directory, episode_id="blocked",
+                    source_sha=SOURCE_SHA, now=NOW,
+                )
+            self.assertEqual(first["status"], "BLOCKED")
+            self.assertEqual(first["new_outbound_requests"], 0)
+            self.assertEqual(first["zero_wire_evidence"], "SUBMISSION_BLOCKED")
+            self.assertIsNone(first["fill_id"])
+
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            sessions = store.load_events(
+                "canonical_simulation_session", "single-episode"
+            )
+            submissions = store.load_events_by_aggregate_type("submission_attempt")
+            self.assertEqual(
+                [event["event_type"] for event in sessions],
+                [
+                    "SimulationSessionOwned",
+                    "SimulationSessionStarted",
+                    "SimulationSessionCompleted",
+                ],
+            )
+            self.assertEqual(
+                [event["event_type"] for event in submissions],
+                ["SubmissionPrepared", "SubmissionBlocked"],
+            )
+            reservations = DurableReservationBook(
+                store, environment=ENVIRONMENT, account_id=ACCOUNT,
+                resolution_artifact_store=ArtifactStore(Path(directory) / "artifacts"),
+                resolution_artifact_root=Path(directory) / "artifacts",
+            )
+            active = reservations.active()
+            self.assertEqual(len(active), 1)
+            self.assertEqual(active[0].state, "WORKING")
+
+            again = run_canonical_simulation(
+                BUY, directory, episode_id="blocked",
+                source_sha=SOURCE_SHA, now=NOW,
+            )
+            self.assertEqual(again["status"], "BLOCKED")
+            self.assertTrue(again["resumed"])
+            self.assertEqual(again["new_outbound_requests"], 0)
+            self.assertEqual(again["order_id"], first["order_id"])
+            self.assertEqual(
+                store.load_events(
+                    "canonical_simulation_session", "single-episode"
+                ),
+                sessions,
+            )
+            self.assertEqual(
+                store.load_events_by_aggregate_type("submission_attempt"),
+                submissions,
+            )
 
     def test_ambiguous_send_blocks_restart_without_duplicate_exposure(self):
         with TemporaryDirectory() as directory:

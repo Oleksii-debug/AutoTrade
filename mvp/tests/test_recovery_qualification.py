@@ -17,6 +17,8 @@ from mvp.autotrade_mvp.recovery_qualification import (
     RecoveryEvidenceStatus,
     RecoveryQualificationDecision,
     RecoveryQualificationPolicy,
+    RecoveryRawEvidenceRef,
+    RecoveryRawEvidenceRole,
     RecoveryScenario,
     RecoveryScenarioEvidence,
     qualify_recovery_release,
@@ -89,6 +91,7 @@ def evidence(
     test_run_id=None,
     tests_run=None,
     unresolved_limits=(),
+    raw_evidence_refs=(),
 ):
     receipt_id = evidence_artifact_id or str(
         uuid5(
@@ -123,6 +126,7 @@ def evidence(
         rollback_completed=rollback_completed,
         open_risk_present=open_risk_present,
         protection_state=protection_state,
+        raw_evidence_refs=raw_evidence_refs,
     )
     provisional = RecoveryScenarioEvidence(**values)
     receipt_hash = (
@@ -138,6 +142,47 @@ def evidence(
 
 def complete_evidence():
     return [evidence(scenario) for scenario in RecoveryScenario]
+
+
+def raw_ref(
+    scenario,
+    role,
+    *,
+    source_sha=SOURCE_SHA,
+    artifact_label=None,
+    artifact_hash=None,
+    evidence_kind=None,
+    media_type="application/vnd.autotrade.recovery-raw-evidence",
+    artifact_id_value=None,
+    release_artifact_id=RELEASE_ARTIFACT_ID,
+    release_artifact_sha256=ARTIFACT_SHA,
+    evidence_schema_version=EVIDENCE_SCHEMA,
+    protocol_id=PROTOCOL_ID,
+    test_run_id=None,
+):
+    label = artifact_label or f"{scenario.value.lower()}:{role.value.lower()}"
+    aid = artifact_id_value or str(
+        uuid5(NAMESPACE_URL, "autotrade-recovery-raw:" + label)
+    )
+    digest = artifact_hash or "sha256:" + sha256(
+        ("raw:" + label).encode("utf-8")
+    ).hexdigest()
+    return RecoveryRawEvidenceRef(
+        scenario=scenario,
+        role=role,
+        artifact_ref=EvidenceArtifactRef(
+            artifact_id=aid,
+            sha256=digest,
+            media_type=media_type,
+            evidence_kind=evidence_kind or ("RECOVERY_" + role.value),
+            source_sha=source_sha,
+        ),
+        release_artifact_id=release_artifact_id,
+        release_artifact_sha256=release_artifact_sha256,
+        evidence_schema_version=evidence_schema_version,
+        protocol_id=protocol_id,
+        test_run_id=test_run_id or f"run-{scenario.value.lower()}-001",
+    )
 
 
 def _receipt_bytes(item):
@@ -387,6 +432,60 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
             current_policy.max_downtime_ms[RecoveryScenario.POWER_LOSS],
             0,
         )
+
+    def test_typed_raw_evidence_is_canonically_bound_into_receipt_bytes(self):
+        scenario = RecoveryScenario.NETWORK_LOSS
+        base = evidence(scenario)
+        typed = evidence(
+            scenario,
+            raw_evidence_refs=(
+                raw_ref(
+                    scenario,
+                    RecoveryRawEvidenceRole.JOURNAL_INTEGRITY,
+                ),
+            ),
+        )
+
+        self.assertNotEqual(
+            recovery_evidence_receipt_bytes(base),
+            recovery_evidence_receipt_bytes(typed),
+        )
+        metadata = recovery_evidence_receipt_metadata(typed)
+        self.assertEqual(
+            metadata["raw_evidence_refs"][0]["role"],
+            "JOURNAL_INTEGRITY",
+        )
+        self.assertEqual(
+            metadata["raw_evidence_refs"][0]["artifact_ref"]["sha256"],
+            typed.raw_evidence_refs[0].artifact_ref.sha256,
+        )
+
+    def test_typed_raw_evidence_rejects_polymorphic_or_cross_scope_refs(self):
+        scenario = RecoveryScenario.NETWORK_LOSS
+        base_ref = raw_ref(
+            scenario,
+            RecoveryRawEvidenceRole.JOURNAL_INTEGRITY,
+        )
+
+        class DerivedRawRef(RecoveryRawEvidenceRef):
+            pass
+
+        hostile = DerivedRawRef(
+            **{
+                name: getattr(base_ref, name)
+                for name in base_ref.__dataclass_fields__
+            }
+        )
+        with self.assertRaisesRegex(TypeError, "exact RecoveryRawEvidenceRef"):
+            evidence(scenario, raw_evidence_refs=(hostile,))
+
+        wrong_scenario = raw_ref(
+            RecoveryScenario.POWER_LOSS,
+            RecoveryRawEvidenceRole.JOURNAL_INTEGRITY,
+            test_run_id="run-network_loss-001",
+        )
+        with self.assertRaisesRegex(ValueError, "scenario does not match"):
+            evidence(scenario, raw_evidence_refs=(wrong_scenario,))
 
     def test_missing_or_corrupt_recovery_receipt_fails_closed(self):
         items = complete_evidence()

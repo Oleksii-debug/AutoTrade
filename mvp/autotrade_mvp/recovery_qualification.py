@@ -25,6 +25,7 @@ from research.autotrade_research.artifacts.store import (
 
 from .qualification_attestation import (
     AcceptedQualificationAttestation,
+    EvidenceArtifactRef,
     QualificationTrustError,
     QualificationTrustPolicy,
     SignedQualificationAttestation,
@@ -59,6 +60,158 @@ class RecoveryEvidenceStatus(StrEnum):
     PASS = "PASS"
     FAIL = "FAIL"
     INCONCLUSIVE = "INCONCLUSIVE"
+
+
+class RecoveryRawEvidenceRole(StrEnum):
+    JOURNAL_INTEGRITY = "JOURNAL_INTEGRITY"
+    BACKUP_INTEGRITY = "BACKUP_INTEGRITY"
+    RECONCILIATION = "RECONCILIATION"
+    SENDER_FENCE = "SENDER_FENCE"
+    AUTHORITY_REACQUISITION = "AUTHORITY_REACQUISITION"
+    DATA_LOSS_AUDIT = "DATA_LOSS_AUDIT"
+    DUPLICATE_EXTERNAL_ACTION_AUDIT = "DUPLICATE_EXTERNAL_ACTION_AUDIT"
+    UNKNOWN_SUBMISSION_AUDIT = "UNKNOWN_SUBMISSION_AUDIT"
+    PROTECTION_STATE = "PROTECTION_STATE"
+    UPGRADE_ROLLBACK = "UPGRADE_ROLLBACK"
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryRawEvidenceRef:
+    scenario: RecoveryScenario
+    role: RecoveryRawEvidenceRole
+    artifact_ref: EvidenceArtifactRef
+    release_artifact_id: str
+    release_artifact_sha256: str
+    evidence_schema_version: str
+    protocol_id: str
+    test_run_id: str
+
+    def __post_init__(self) -> None:
+        if type(self.scenario) is not RecoveryScenario:
+            raise TypeError("raw evidence scenario must be exact RecoveryScenario")
+        if type(self.role) is not RecoveryRawEvidenceRole:
+            raise TypeError("raw evidence role must be exact RecoveryRawEvidenceRole")
+        if type(self.artifact_ref) is not EvidenceArtifactRef:
+            raise TypeError("raw evidence artifact_ref must be exact EvidenceArtifactRef")
+        for name in (
+            "release_artifact_id",
+            "release_artifact_sha256",
+            "evidence_schema_version",
+            "protocol_id",
+            "test_run_id",
+        ):
+            if type(getattr(self, name)) is not str:
+                raise TypeError(f"raw evidence {name} must use exact str")
+        object.__setattr__(
+            self,
+            "release_artifact_id",
+            _artifact_id(self.release_artifact_id, name="raw.release_artifact_id"),
+        )
+        object.__setattr__(
+            self,
+            "release_artifact_sha256",
+            _sha256(
+                self.release_artifact_sha256,
+                name="raw.release_artifact_sha256",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "evidence_schema_version",
+            _text(
+                self.evidence_schema_version,
+                name="raw.evidence_schema_version",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "protocol_id",
+            _text(self.protocol_id, name="raw.protocol_id"),
+        )
+        object.__setattr__(
+            self,
+            "test_run_id",
+            _text(self.test_run_id, name="raw.test_run_id"),
+        )
+
+    def canonical(self) -> dict[str, object]:
+        return {
+            "scenario": self.scenario.value,
+            "role": self.role.value,
+            "artifact_ref": self.artifact_ref.canonical(),
+            "release_artifact_id": self.release_artifact_id,
+            "release_artifact_sha256": self.release_artifact_sha256,
+            "evidence_schema_version": self.evidence_schema_version,
+            "protocol_id": self.protocol_id,
+            "test_run_id": self.test_run_id,
+        }
+
+
+def _snapshot_shared_evidence_artifact_ref(
+    ref: EvidenceArtifactRef,
+) -> EvidenceArtifactRef:
+    if type(ref) is not EvidenceArtifactRef:
+        raise TypeError("raw evidence artifact_ref must be exact EvidenceArtifactRef")
+    values = {
+        name: object.__getattribute__(ref, name)
+        for name in (
+            "artifact_id",
+            "sha256",
+            "media_type",
+            "evidence_kind",
+            "source_sha",
+        )
+    }
+    for name, value in values.items():
+        if type(value) is not str:
+            raise TypeError(f"raw artifact_ref.{name} must use exact str")
+    return EvidenceArtifactRef(**values)
+
+
+def _snapshot_recovery_raw_evidence_ref(
+    ref: RecoveryRawEvidenceRef,
+) -> RecoveryRawEvidenceRef:
+    if type(ref) is not RecoveryRawEvidenceRef:
+        raise TypeError(
+            "raw_evidence_refs must contain exact RecoveryRawEvidenceRef values"
+        )
+    scenario = object.__getattribute__(ref, "scenario")
+    role = object.__getattribute__(ref, "role")
+    artifact_ref = object.__getattribute__(ref, "artifact_ref")
+    release_artifact_id = object.__getattribute__(ref, "release_artifact_id")
+    release_artifact_sha256 = object.__getattribute__(
+        ref,
+        "release_artifact_sha256",
+    )
+    evidence_schema_version = object.__getattribute__(
+        ref,
+        "evidence_schema_version",
+    )
+    protocol_id = object.__getattribute__(ref, "protocol_id")
+    test_run_id = object.__getattribute__(ref, "test_run_id")
+    if type(scenario) is not RecoveryScenario:
+        raise TypeError("raw evidence scenario must be exact RecoveryScenario")
+    if type(role) is not RecoveryRawEvidenceRole:
+        raise TypeError("raw evidence role must be exact RecoveryRawEvidenceRole")
+    for name, value in (
+        ("release_artifact_id", release_artifact_id),
+        ("release_artifact_sha256", release_artifact_sha256),
+        ("evidence_schema_version", evidence_schema_version),
+        ("protocol_id", protocol_id),
+        ("test_run_id", test_run_id),
+    ):
+        if type(value) is not str:
+            raise TypeError(f"raw evidence {name} must use exact str")
+    return RecoveryRawEvidenceRef(
+        scenario=scenario,
+        role=role,
+        artifact_ref=_snapshot_shared_evidence_artifact_ref(artifact_ref),
+        release_artifact_id=release_artifact_id,
+        release_artifact_sha256=release_artifact_sha256,
+        evidence_schema_version=evidence_schema_version,
+        protocol_id=protocol_id,
+        test_run_id=test_run_id,
+    )
 
 
 _REQUIRED_SCENARIOS = frozenset(RecoveryScenario)
@@ -152,6 +305,7 @@ class RecoveryScenarioEvidence:
     rollback_completed: bool
     open_risk_present: bool
     protection_state: str
+    raw_evidence_refs: tuple[RecoveryRawEvidenceRef, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.scenario, RecoveryScenario):
@@ -236,6 +390,35 @@ class RecoveryScenarioEvidence:
         if not self.open_risk_present and protection != "NO_OPEN_RISK":
             raise ValueError("protection_state contradicts open_risk_present")
         object.__setattr__(self, "protection_state", protection)
+        if type(self.raw_evidence_refs) is not tuple:
+            raise TypeError("raw_evidence_refs must be an exact tuple")
+        raw_refs = tuple(
+            _snapshot_recovery_raw_evidence_ref(ref)
+            for ref in self.raw_evidence_refs
+        )
+        roles = [ref.role for ref in raw_refs]
+        if len(roles) != len(set(roles)):
+            raise ValueError("raw_evidence_refs must have unique roles per scenario")
+        for ref in raw_refs:
+            if ref.scenario is not self.scenario:
+                raise ValueError("raw evidence scenario does not match scenario receipt")
+            if ref.artifact_ref.source_sha != self.source_sha:
+                raise ValueError("raw evidence source SHA does not match scenario receipt")
+            if ref.release_artifact_id != self.release_artifact_id:
+                raise ValueError("raw evidence release artifact id does not match scenario receipt")
+            if ref.release_artifact_sha256 != self.release_artifact_sha256:
+                raise ValueError("raw evidence release digest does not match scenario receipt")
+            if ref.evidence_schema_version != self.evidence_schema_version:
+                raise ValueError("raw evidence schema does not match scenario receipt")
+            if ref.protocol_id != self.protocol_id:
+                raise ValueError("raw evidence protocol does not match scenario receipt")
+            if ref.test_run_id != self.test_run_id:
+                raise ValueError("raw evidence test run does not match scenario receipt")
+        object.__setattr__(
+            self,
+            "raw_evidence_refs",
+            tuple(sorted(raw_refs, key=lambda ref: ref.role.value)),
+        )
 
 
 def _snapshot_recovery_scenario_evidence(
@@ -274,6 +457,7 @@ def _snapshot_recovery_scenario_evidence(
         "rollback_completed": item.rollback_completed,
         "open_risk_present": item.open_risk_present,
         "protection_state": item.protection_state,
+        "raw_evidence_refs": item.raw_evidence_refs,
     }
     if type(values["scenario"]) is not RecoveryScenario:
         raise TypeError("scenario must be exact RecoveryScenario")
@@ -296,6 +480,13 @@ def _snapshot_recovery_scenario_evidence(
         current = values[field]
         if type(current) is not tuple or any(type(value) is not str for value in current):
             raise TypeError(f"{field} must use an exact tuple of exact str values")
+    raw_refs = values["raw_evidence_refs"]
+    if type(raw_refs) is not tuple:
+        raise TypeError("raw_evidence_refs must use an exact tuple")
+    values["raw_evidence_refs"] = tuple(
+        _snapshot_recovery_raw_evidence_ref(ref)
+        for ref in raw_refs
+    )
     for field in (
         "downtime_ms",
         "data_loss_events",
@@ -510,7 +701,7 @@ def recovery_evidence_receipt_metadata(
 
     if not isinstance(item, RecoveryScenarioEvidence):
         raise TypeError("item must be RecoveryScenarioEvidence")
-    return {
+    payload = {
         "evidence_kind": "RECOVERY_SCENARIO_EVIDENCE",
         "scenario": item.scenario.value,
         "status": item.status.value,
@@ -539,6 +730,12 @@ def recovery_evidence_receipt_metadata(
         "open_risk_present": item.open_risk_present,
         "protection_state": item.protection_state,
     }
+    if item.raw_evidence_refs:
+        payload["raw_evidence_refs"] = [
+            ref.canonical()
+            for ref in item.raw_evidence_refs
+        ]
+    return payload
 
 
 def recovery_evidence_receipt_payload(

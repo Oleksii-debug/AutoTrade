@@ -163,6 +163,79 @@ def resolve(
 
 
 class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
+    def test_exact_base_instance_method_shadows_never_gain_issuer_authority(self):
+        touched = []
+        legitimate = sealed_dividend()
+
+        def hostile(label):
+            def callback(*args, **kwargs):
+                touched.append(label)
+                raise AssertionError("instance-owned authority callback")
+            return callback
+
+        # Exact-base provider/binding methods may be monkey-patched through
+        # instance dictionaries; exact type by itself does not imply origin.
+        source = sealed_dividend()
+        object.__setattr__(source, "require_scope", hostile("source-scope"))
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError, "callback may not be shadowed"
+        ):
+            resolve_authoritative_corporate_action(
+                legitimate.evidence_ref,
+                evidence_resolver=lambda _: source,
+                instrument_registry=canonical_registry(),
+                expected_provider_id="BINANCE",
+                expected_account_id="acct-1",
+                expected_environment="PAPER",
+                allowed_endpoints=frozenset({ENDPOINT}),
+                permission_scope="ORDER.READ",
+            )
+        self.assertEqual(touched, [])
+
+        source = sealed_dividend()
+        object.__setattr__(
+            source.query_binding,
+            "require_scope",
+            hostile("binding-scope"),
+        )
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError, "callback may not be shadowed"
+        ):
+            resolve_authoritative_corporate_action(
+                legitimate.evidence_ref,
+                evidence_resolver=lambda _: source,
+                instrument_registry=canonical_registry(),
+                expected_provider_id="BINANCE",
+                expected_account_id="acct-1",
+                expected_environment="PAPER",
+                allowed_endpoints=frozenset({ENDPOINT}),
+                permission_scope="ORDER.READ",
+            )
+        self.assertEqual(touched, [])
+
+        for name in ("exact", "at"):
+            with self.subTest(name=name):
+                registry = canonical_registry()
+                setattr(registry, name, hostile(name))
+                with self.assertRaisesRegex(
+                    CorporateActionEvidenceError,
+                    "registry callbacks may not be shadowed",
+                ):
+                    resolve(legitimate, instrument_registry=registry)
+                self.assertEqual(touched, [])
+
+        registry = canonical_registry()
+        registered = registry.exact(f"{INSTRUMENT_ID}@1")
+        object.__setattr__(registered, "contains", hostile("instrument-contains"))
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError, "untrusted dispatch"
+        ):
+            resolve(legitimate, instrument_registry=registry)
+        self.assertEqual(touched, [])
+
+        # A normal exact-base source/registry still emits the same event.
+        self.assertEqual(resolve(legitimate).event.kind, "CASH_DIVIDEND")
+
     def test_polymorphic_provider_source_and_registry_are_denied_before_callbacks(self):
         legitimate = sealed_dividend()
         touched = []

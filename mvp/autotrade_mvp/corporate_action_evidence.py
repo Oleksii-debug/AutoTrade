@@ -574,6 +574,61 @@ def _require_exact_provider_json_graph(value: object, *, depth: int = 0) -> None
         )
 
 
+def _require_unshadowed_corporate_registry(
+    registry: InstrumentRegistry,
+) -> None:
+    """Admit exact canonical registry data before calling class-owned lookup."""
+    if type(registry) is not InstrumentRegistry:
+        raise TypeError("instrument_registry must be an exact InstrumentRegistry")
+    attributes = vars(registry)
+    if type(attributes) is not dict or "exact" in attributes or "at" in attributes:
+        raise CorporateActionEvidenceError(
+            "corporate-action instrument registry callbacks may not be shadowed"
+        )
+    versions = attributes.get("_versions")
+    if type(versions) is not dict:
+        raise CorporateActionEvidenceError(
+            "corporate-action instrument history must use exact containers"
+        )
+    for instrument_id, records in versions.items():
+        if type(instrument_id) is not str or type(records) is not list:
+            raise CorporateActionEvidenceError(
+                "corporate-action instrument history must use exact containers"
+            )
+        for instrument in records:
+            if type(instrument) is not InstrumentVersion:
+                raise CorporateActionEvidenceError(
+                    "corporate-action instrument history must contain exact versions"
+                )
+            fields = vars(instrument)
+            if (
+                type(fields) is not dict
+                or "contains" in fields
+                or type(instrument.instrument_id) is not str
+                or type(instrument.version) is not int
+                or type(instrument.provider_id) is not str
+                or type(instrument.provider_symbol) is not str
+                or type(instrument.effective_from) is not datetime
+                or (
+                    instrument.effective_to is not None
+                    and type(instrument.effective_to) is not datetime
+                )
+            ):
+                raise CorporateActionEvidenceError(
+                    "corporate-action instrument history contains untrusted dispatch"
+                )
+            if (
+                type(instrument.effective_from.tzinfo) is not timezone
+                or (
+                    instrument.effective_to is not None
+                    and type(instrument.effective_to.tzinfo) is not timezone
+                )
+            ):
+                raise CorporateActionEvidenceError(
+                    "corporate-action instrument timestamps must use exact timezone"
+                )
+
+
 def _require_exact_provider_source_graph(
     source: ProviderResponseObservation,
 ) -> AuthenticatedReadQueryBinding:
@@ -581,10 +636,18 @@ def _require_exact_provider_source_graph(
         raise CorporateActionEvidenceError(
             "corporate-action evidence must be an exact ProviderResponseObservation"
         )
+    if "require_scope" in vars(source):
+        raise CorporateActionEvidenceError(
+            "corporate-action provider source callback may not be shadowed"
+        )
     binding = source.query_binding
     if type(binding) is not AuthenticatedReadQueryBinding:
         raise CorporateActionEvidenceError(
             "corporate-action query binding must be exact"
+        )
+    if "require_scope" in vars(binding):
+        raise CorporateActionEvidenceError(
+            "corporate-action provider binding callback may not be shadowed"
         )
     if (
         type(source.evidence_ref) is not str
@@ -639,8 +702,7 @@ def resolve_authoritative_corporate_action(
     reference = _text(evidence_ref, "evidence_ref")
     if not callable(evidence_resolver):
         raise TypeError("evidence_resolver must be callable")
-    if type(instrument_registry) is not InstrumentRegistry:
-        raise TypeError("instrument_registry must be an exact InstrumentRegistry")
+    _require_unshadowed_corporate_registry(instrument_registry)
     if normalizer is not None:
         raise TypeError(
             "caller-supplied corporate-action normalizer is not financial authority"
@@ -695,18 +757,19 @@ def resolve_authoritative_corporate_action(
         raise CorporateActionEvidenceError(
             "corporate-action evidence endpoint is not allowed"
         )
-    try:
-        source.require_scope(
-            provider_id=expected_provider,
-            surface=Surface.ACTIVITIES,
-            endpoint=endpoint,
-            account_id=expected_account,
-            environment=expected_environment_value,
-        )
-    except Exception as error:
+    # The source/binding are exact scalars, but their mutable instance
+    # dictionaries do not constitute method authority. Inspect exact fields
+    # directly rather than dispatch through either instance method.
+    if (
+        binding.provider_id != expected_provider
+        or binding.surface is not Surface.ACTIVITIES
+        or binding.endpoint != endpoint
+        or binding.account_id != expected_account
+        or binding.environment != expected_environment_value
+    ):
         raise CorporateActionEvidenceError(
             "corporate-action provider evidence scope mismatch"
-        ) from error
+        )
     if binding.permission_scope != required_permission:
         raise CorporateActionEvidenceError(
             "corporate-action evidence permission scope mismatch"
@@ -722,8 +785,8 @@ def resolve_authoritative_corporate_action(
         f"{observation.instrument_id}@{observation.instrument_version}"
     )
     try:
-        instrument = instrument_registry.exact(version_ref)
-        effective_instrument = instrument_registry.at(
+        instrument = InstrumentRegistry.exact(instrument_registry, version_ref)
+        effective_instrument = InstrumentRegistry.at(instrument_registry,
             observation.instrument_id,
             observation.effective_at,
         )

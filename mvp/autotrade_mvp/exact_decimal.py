@@ -56,9 +56,16 @@ def _integer_digit_count(value: int, *, limit: int) -> int:
 
 
 def _validate_decimal_envelope(value: Decimal) -> tuple[int, tuple[int, ...], int]:
-    if not isinstance(value, Decimal) or not value.is_finite():
+    # Decimal is subclassable and methods such as is_finite(), as_tuple(), and
+    # __format__ are virtual on subclasses. Financial authority therefore
+    # accepts only the exact built-in scalar before consulting any Decimal
+    # semantics; otherwise a caller-controlled subclass could choose the
+    # coefficient/exponent or canonical identity consumed below.
+    if type(value) is not Decimal:
         raise ExactDecimalError("value must be a finite Decimal")
-    sign, digits, exponent = value.as_tuple()
+    if not Decimal.is_finite(value):
+        raise ExactDecimalError("value must be a finite Decimal")
+    sign, digits, exponent = Decimal.as_tuple(value)
     if not isinstance(exponent, int):
         raise ExactDecimalError("value must be a finite Decimal")
     if not any(digits):
@@ -80,7 +87,11 @@ def _validate_fraction_intermediate(
     *,
     max_digits: int = MAX_RATIONAL_DIGITS,
 ) -> None:
-    if not isinstance(value, Fraction):
+    # Fraction is subclassable and numerator/denominator can be overridden.
+    # Exact-rational authority must reject polymorphic values before reading
+    # either property; all internally constructed Fraction values are exact
+    # built-ins already.
+    if type(value) is not Fraction:
         raise TypeError("value must be Fraction")
     if _integer_digit_count(value.numerator, limit=max_digits) > max_digits:
         raise ExactDecimalError("rational numerator exceeds resource envelope")
@@ -128,6 +139,7 @@ def is_exact_decimal_multiple(value: Decimal, quantum: Decimal) -> bool:
     units = value_fraction / quantum_fraction
     _validate_fraction_intermediate(units)
     return units.denominator == 1
+
 
 def _decimal_from_scaled_integer(coefficient: int, scale: int) -> Decimal:
     if scale < 0:
@@ -239,6 +251,11 @@ def round_fraction_to_quantum(
     _validate_fraction_intermediate(units)
     floor_units = units.numerator // units.denominator
 
+    # ``str`` is subclassable and equality can be overridden. Reject a
+    # polymorphic mode before any branch comparison so caller code cannot
+    # select financial rounding semantics through virtual ``__eq__``.
+    if type(mode) is not str:
+        raise ExactDecimalError("unsupported rounding mode")
     if mode == "FLOOR":
         rounded_units = floor_units
     elif mode == "CEILING":

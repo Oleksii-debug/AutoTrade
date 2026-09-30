@@ -26,10 +26,10 @@ from .instruments import InstrumentRegistry, InstrumentVersion
 
 
 def _decimal(value, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise TypeError(f"{name} must use Decimal, string or integer input")
-    if isinstance(value, Decimal) and type(value) is not Decimal:
-        raise TypeError(f"{name} must use an exact built-in Decimal")
+    if type(value) not in {Decimal, str, int}:
+        raise TypeError(
+            f"{name} must use exact built-in Decimal, string or integer input"
+        )
     try:
         result = value if type(value) is Decimal else Decimal(value)
     except (InvalidOperation, TypeError, ValueError) as error:
@@ -75,11 +75,9 @@ def _exact_ratio(numerator: Decimal, denominator: Decimal) -> Decimal:
     try:
         denominator_fraction = as_fraction(denominator)
         if denominator_fraction == 0:
-            raise ValueError("corporate-action ratio denominator must be non-zero")
+            raise ZeroDivisionError
         ratio = bounded_fraction(as_fraction(numerator) / denominator_fraction)
         return terminating_decimal(ratio)
-    except ValueError:
-        raise
     except (ExactDecimalError, ZeroDivisionError) as error:
         raise ValueError(
             "corporate-action ratio is not an exact terminating decimal within resource envelope"
@@ -94,13 +92,11 @@ def _exact_ratio_product(
     try:
         denominator_fraction = as_fraction(denominator)
         if denominator_fraction == 0:
-            raise ValueError("corporate-action ratio denominator must be non-zero")
+            raise ZeroDivisionError
         result = bounded_fraction(
             as_fraction(value) * as_fraction(numerator) / denominator_fraction
         )
         return terminating_decimal(result)
-    except ValueError:
-        raise
     except (ExactDecimalError, ZeroDivisionError) as error:
         raise ValueError(
             "corporate-action ratio product is not an exact terminating decimal "
@@ -768,9 +764,9 @@ class CorporateActionBook:
             raise ValueError(
                 "successor_instrument_version must be a canonical positive integer"
             )
-        successor_version = int(raw_version)
         current = self.instrument_version
-        if successor_version != current.version + 1:
+        successor_version = current.version + 1
+        if raw_version != str(successor_version):
             raise ValueError(
                 "symbol change successor must be the next instrument version"
             )

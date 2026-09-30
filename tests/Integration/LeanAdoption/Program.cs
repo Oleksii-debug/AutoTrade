@@ -3,7 +3,29 @@ using QuantConnect;
 using QuantConnect.Orders;
 using QuantConnect.Orders.Fees;
 using QuantConnect.Securities;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Xml.Linq;
+
+static string RehashRestartState(string source, Action<JsonObject> mutate)
+{
+    var root = JsonNode.Parse(source)?.AsObject()
+        ?? throw new InvalidOperationException("Restart-state test fixture is not a JSON object.");
+    mutate(root);
+
+    var payload = new JsonObject
+    {
+        ["SchemaVersion"] = root["SchemaVersion"]?.DeepClone(),
+        ["ArrivalHighWaterUtc"] = root["ArrivalHighWaterUtc"]?.DeepClone(),
+        ["Callbacks"] = root["Callbacks"]?.DeepClone(),
+    };
+    var canonical = payload.ToJsonString(new JsonSerializerOptions { WriteIndented = false });
+    var digest = SHA256.HashData(Encoding.UTF8.GetBytes(canonical));
+    root["StateHash"] = "sha256:" + Convert.ToHexString(digest).ToLowerInvariant();
+    return root.ToJsonString(new JsonSerializerOptions { WriteIndented = false });
+}
 
 static void Require(bool condition, string message)
 {
@@ -346,6 +368,52 @@ var zeroFeeAfterRestart = zeroFeeResumed.Observe(new OrderEvent
 Require(
     zeroFeeAfterRestart.DuplicateIdentity && !zeroFeeAfterRestart.IdentityConflict,
     "Restart must preserve semantic equivalence of null/default fee and LEAN OrderFee.Zero.");
+
+// Prove malformed persisted identity cannot survive even with a recomputed public state hash.
+var rehashedUnchangedZeroFee = RehashRestartState(zeroFeeCheckpoint, _ => { });
+_ = LeanCallbackCharacterizer.RestoreRestartState(rehashedUnchangedZeroFee);
+
+var nullFeeCurrencyCheckpoint = RehashRestartState(
+    zeroFeeCheckpoint,
+    root => root["Callbacks"]!.AsArray()[0]!.AsObject()["FeeCurrency"] = null);
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(nullFeeCurrencyCheckpoint),
+    "rehash-valid restart state with null no-fee currency must fail closed");
+
+var nullSymbolCheckpoint = RehashRestartState(
+    zeroFeeCheckpoint,
+    root => root["Callbacks"]!.AsArray()[0]!.AsObject()["Symbol"] = null);
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(nullSymbolCheckpoint),
+    "rehash-valid restart state with null symbol must fail closed");
+
+var nullFillCurrencyCheckpoint = RehashRestartState(
+    zeroFeeCheckpoint,
+    root => root["Callbacks"]!.AsArray()[0]!.AsObject()["FillPriceCurrency"] = null);
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(nullFillCurrencyCheckpoint),
+    "rehash-valid restart state with null fill currency must fail closed");
+
+var missingSymbolCheckpoint = RehashRestartState(
+    zeroFeeCheckpoint,
+    root => root["Callbacks"]!.AsArray()[0]!.AsObject().Remove("Symbol"));
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(missingSymbolCheckpoint),
+    "rehash-valid restart state with missing required symbol must fail closed");
+
+var undefinedStatusCheckpoint = RehashRestartState(
+    zeroFeeCheckpoint,
+    root => root["Callbacks"]!.AsArray()[0]!.AsObject()["Status"] = 2147483647);
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(undefinedStatusCheckpoint),
+    "rehash-valid restart state with undefined order status must fail closed");
+
+var undefinedDirectionCheckpoint = RehashRestartState(
+    zeroFeeCheckpoint,
+    root => root["Callbacks"]!.AsArray()[0]!.AsObject()["Direction"] = 2147483647);
+ExpectFailure<InvalidDataException>(
+    () => LeanCallbackCharacterizer.RestoreRestartState(undefinedDirectionCheckpoint),
+    "rehash-valid restart state with undefined order direction must fail closed");
 
 var conflictingDuplicate = callbacks.Observe(new OrderEvent
 {

@@ -377,6 +377,7 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 "account_id": ACCOUNT_ID,
                 "environment": ENVIRONMENT,
                 "provider_environment": "TESTNET",
+                "prepared_request_sha256": payload_digest({}),
             }
             testnet_guard = authority.dispatch_guard(
                 record.admission_id,
@@ -430,6 +431,7 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                     "account_id": ACCOUNT_ID,
                     "environment": ENVIRONMENT,
                     "provider_environment": "DEMO",
+                    "prepared_request_sha256": payload_digest({}),
                 },
             )
             demo_scope = {
@@ -437,6 +439,7 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 "account_id": ACCOUNT_ID,
                 "environment": ENVIRONMENT,
                 "provider_environment": "DEMO",
+                "prepared_request_sha256": payload_digest({}),
             }
             self.assertEqual(
                 demo_guard(

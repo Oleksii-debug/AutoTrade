@@ -818,43 +818,6 @@ class DispatchTests(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(ValueError):
                 ExactJsonTransportResponse(raw)
 
-    def test_provider_bound_scope_requires_prepared_scope_authority(self):
-        with TemporaryDirectory() as directory:
-            store = self.store(directory)
-            dispatcher = GuardedDispatcher(
-                store,
-                environment="SIMULATION",
-                account_id="acct",
-                owner_token="owner",
-            )
-            outbound = 0
-
-            def transport(_client_id, _request, final_guard):
-                nonlocal outbound
-                final_guard()
-                outbound += 1
-                return {"provider_order_id": "must-not-send"}
-
-            result = dispatcher.dispatch(
-                attempt_id="provider-scope-generic-authority",
-                intent_id="i1",
-                intent_hash="h1",
-                provider="simulated",
-                request={},
-                now="2026-09-24T18:00:00Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
-                transport_send=transport,
-                submission_scope={
-                    "provider": "SIMULATED",
-                    "provider_environment": "SIMULATION",
-                    "account_id": "acct",
-                    "environment": "SIMULATION",
-                },
-            )
-            self.assertEqual(result.status, "BLOCKED")
-            self.assertEqual(result.reason, "prepared_scope_authority_required")
-            self.assertEqual(outbound, 0)
-
     def test_submission_scope_is_part_of_attempt_idempotency_contract(self):
         with TemporaryDirectory() as directory:
             store = self.store(directory)

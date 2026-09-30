@@ -26,6 +26,11 @@ from mvp.autotrade_mvp._generated_decimal_limits import (
     MAX_SIGNIFICANT_DIGITS,
 )
 
+from tools.generate_common_scalar_corpus import (
+    _within_decimal_envelope as corpus_within_decimal_envelope,
+    _within_decimal_geometry as corpus_within_decimal_geometry,
+)
+
 
 ROOT = Path(__file__).resolve().parents[2]
 COMMON = ROOT / "contracts" / "jsonschema" / "common.schema.json"
@@ -140,6 +145,61 @@ class CommonScalarConformanceTests(unittest.TestCase):
                 self.assertTrue(helper("0", limits))
                 self.assertTrue(helper("0.1", limits))
                 self.assertFalse(helper("1", limits))
+
+    def test_corpus_decimal_zero_geometry_agrees_with_shipped_bindings(self):
+        # Production envelope limits are large enough to mask treating the
+        # zero integer-part token as one digit. Use a direct geometry cut
+        # with max integer magnitude zero to protect this invariant.
+        limits = (1, 1, 0)
+        for helper in (
+            corpus_within_decimal_geometry,
+            contract_within_decimal_envelope,
+            mvp_within_decimal_envelope,
+        ):
+            with self.subTest(helper=helper.__module__):
+                for value, expected in (
+                    ("0", True),
+                    ("0.1", True),
+                    ("-0.1", True),
+                    ("1", False),
+                    ("-1", False),
+                    ("0.11", False),
+                    ("0.01", False),
+                ):
+                    with self.subTest(value=value):
+                        self.assertIs(helper(value, limits), expected)
+
+    def test_corpus_schema_envelope_and_binding_agree_on_zero_and_limits(self):
+        definition = self.common["$defs"]["Decimal"]
+        cases = (
+            "0",
+            "0.1",
+            "-0.1",
+            "1",
+            "-1",
+            "0." + "0" * (MAX_SCALE - 1) + "1",
+            "-0." + "0" * (MAX_SCALE - 1) + "1",
+            "0." + "0" * MAX_SCALE + "1",
+            "9" * MAX_INTEGER_DIGITS,
+            "9" * (MAX_INTEGER_DIGITS + 1),
+        )
+        for value in cases:
+            with self.subTest(value_head=value[:12], length=len(value)):
+                result = corpus_within_decimal_envelope(value, definition)
+                self.assertEqual(
+                    result,
+                    contract_within_decimal_envelope(
+                        value,
+                        (MAX_SIGNIFICANT_DIGITS, MAX_SCALE, MAX_INTEGER_DIGITS),
+                    ),
+                )
+                self.assertEqual(
+                    result,
+                    mvp_within_decimal_envelope(
+                        value,
+                        (MAX_SIGNIFICANT_DIGITS, MAX_SCALE, MAX_INTEGER_DIGITS),
+                    ),
+                )
 
     def test_python_binding_rejects_string_subclasses_before_virtual_dispatch(self):
         class HostileText(str):

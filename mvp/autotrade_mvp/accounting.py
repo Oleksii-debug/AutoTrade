@@ -14,6 +14,7 @@ from typing import Iterable
 
 from .exact_decimal import (
     ExactDecimalError,
+    MAX_INTEGER_DIGITS,
     as_fraction,
     bounded_fraction,
     canonical_decimal_text,
@@ -877,6 +878,8 @@ def _canonical_equity_split_terms(
         or den_text == "0"
         or (len(num_text) > 1 and num_text.startswith("0"))
         or (len(den_text) > 1 and den_text.startswith("0"))
+        or len(num_text) > MAX_INTEGER_DIGITS
+        or len(den_text) > MAX_INTEGER_DIGITS
     ):
         raise AccountingConflict("Split projection ratio identity is not canonical")
     numerator = _decimal(num_text, name="split numerator")

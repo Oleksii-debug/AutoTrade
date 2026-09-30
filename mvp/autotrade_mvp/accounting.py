@@ -33,10 +33,10 @@ class AccountingConflict(ValueError):
 
 
 def _decimal(value: Decimal | str | int, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise TypeError(f"{name} must use Decimal, string or integer input")
-    if isinstance(value, Decimal) and type(value) is not Decimal:
-        raise TypeError(f"{name} must use an exact built-in Decimal")
+    if type(value) not in {Decimal, str, int}:
+        raise TypeError(
+            f"{name} must use exact built-in Decimal, string or integer input"
+        )
     try:
         result = value if type(value) is Decimal else Decimal(value)
     except (InvalidOperation, ValueError, TypeError) as error:
@@ -51,7 +51,7 @@ def _decimal(value: Decimal | str | int, *, name: str) -> Decimal:
 
 
 def _name(value: str, *, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{field} is required")
     return value.strip()
 
@@ -226,9 +226,20 @@ class JournalTransaction:
     corrects_transaction_id: str | None = None
 
 
+def _require_exact_transaction_graph(transaction: JournalTransaction) -> None:
+    # Economic authority must not dispatch through caller-defined semantic
+    # subclasses before canonicalization. The exact base dataclasses plus an
+    # immutable tuple make every subsequent field read non-virtual.
+    if type(transaction) is not JournalTransaction:
+        raise TypeError("transaction must be an exact JournalTransaction")
+    if type(transaction.postings) is not tuple:
+        raise TypeError("transaction postings must be an exact tuple")
+    if any(type(item) is not Posting for item in transaction.postings):
+        raise TypeError("transaction postings must contain exact Posting values")
+
+
 def _normalized_transaction(transaction: JournalTransaction) -> JournalTransaction:
-    if not isinstance(transaction, JournalTransaction):
-        raise TypeError("transaction must be a JournalTransaction")
+    _require_exact_transaction_graph(transaction)
     return JournalTransaction(
         transaction_id=_name(transaction.transaction_id, field="transaction_id"),
         cause_event_id=_name(transaction.cause_event_id, field="cause_event_id"),
@@ -302,6 +313,7 @@ def transaction_digest(transaction: JournalTransaction) -> str:
 
 
 def validate_transaction(transaction: JournalTransaction) -> None:
+    _require_exact_transaction_graph(transaction)
     _name(transaction.transaction_id, field="transaction_id")
     _name(transaction.cause_event_id, field="cause_event_id")
     effective = _instant(

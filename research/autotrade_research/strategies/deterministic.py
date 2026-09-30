@@ -17,11 +17,10 @@ from uuid import UUID
 
 from autotrade_numeric import (
     MAX_INTEGER_DIGITS,
-    MAX_DECIMAL_TEXT_LENGTH,
-    MAX_SIGNIFICANT_DIGITS,
     as_fraction,
     bounded_fraction,
 )
+from autotrade_numeric._generated_decimal_limits import MAX_DECIMAL_TEXT_LENGTH
 
 
 def _decimal(value, *, name: str) -> Decimal:

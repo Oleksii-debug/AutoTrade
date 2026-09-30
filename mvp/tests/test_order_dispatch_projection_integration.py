@@ -1,10 +1,13 @@
 from decimal import Decimal
+import json
 from tempfile import TemporaryDirectory
 import unittest
 
 from mvp.autotrade_mvp.dispatch import (
+    ExactJsonTransportResponse,
     GuardedDispatcher,
     stable_client_order_id,
+    submission_attempt_aggregate_id,
 )
 from mvp.autotrade_mvp.durable_order_projection import (
     DurableOrderBookProjection,
@@ -96,6 +99,104 @@ def reconcile_simulated(
 
 
 class DispatchOrderProjectionIntegrationTests(unittest.TestCase):
+    def test_sha_bound_exact_json_submission_projects_ack_without_inventing_fill(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            provider = SimulatedProvider(
+                account_id=ACCOUNT, initial_cash="1000", fee_rate="0.001"
+            )
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id=ACCOUNT,
+                owner_token="sim-owner",
+            )
+            intent_id = "intent-exact-raw-projection"
+            client_order_id = stable_client_order_id(
+                "simulated", intent_id,
+                environment="SIMULATION", account_id=ACCOUNT,
+            )
+            orders = projection(store)
+            orders.create_order(
+                event_key="intent-created:exact-raw",
+                client_order_id=client_order_id,
+                instrument=INSTRUMENT,
+                side="BUY",
+                requested_quantity="2",
+                committed_at=NOW,
+            )
+            attempt_id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+            request = {
+                "attempt_id": attempt_id,
+                "instrument_version": INSTRUMENT,
+                "side": "BUY",
+                "quantity": "2",
+                "price": "100",
+                "now": NOW,
+                "fill_immediately": False,
+            }
+
+            def exact_send(cid, frozen_request, final_guard):
+                provider_reply = provider.transport_send(
+                    cid, frozen_request, final_guard
+                )
+                exact_text = json.dumps(
+                    provider_reply,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+                self.assertTrue(exact_text.endswith("}"))
+                # Extra exact provider field exercises Decimal conversion
+                # without changing the simulated ACK identity/evidence.
+                exact_text = exact_text[:-1] + ',"diagnostic_price":65000.10}'
+                return ExactJsonTransportResponse(exact_text.encode("utf-8"))
+
+            outcome = dispatcher.dispatch(
+                attempt_id=attempt_id,
+                intent_id=intent_id,
+                intent_hash="sha256:" + "b" * 64,
+                provider="simulated",
+                request=request,
+                now=NOW,
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=exact_send,
+            )
+            self.assertEqual(outcome.status, "SENT")
+            self.assertEqual(
+                outcome.response["diagnostic_price"].as_tuple(),
+                Decimal("65000.10").as_tuple(),
+            )
+            terminal = store.load_events(
+                "submission_attempt",
+                submission_attempt_aggregate_id(
+                    environment="SIMULATION",
+                    account_id=ACCOUNT,
+                    attempt_id=attempt_id,
+                ),
+            )[-1]
+            self.assertEqual(terminal["event_type"], "SubmissionSent")
+            self.assertNotIn("response", terminal["payload"])
+            self.assertEqual(
+                terminal["payload"]["response_encoding"], "utf-8-json"
+            )
+            projected = orders.sync_submission_attempt(attempt_id=attempt_id)
+            self.assertEqual(len(projected), 2)
+            self.assertEqual(projected[0].snapshot.state, "SEND_STARTED")
+            self.assertEqual(projected[1].snapshot.state, "WORKING")
+            self.assertEqual(
+                projected[1].snapshot.provider_order_id,
+                outcome.response["provider_order_id"],
+            )
+            self.assertEqual(
+                projected[1].snapshot.filled_quantity, Decimal("0")
+            )
+            restarted = projection(store).order(client_order_id).snapshot()
+            self.assertEqual(restarted.state, "WORKING")
+            self.assertEqual(restarted.filled_quantity, Decimal("0"))
+            self.assertEqual(provider.outbound_request_count, 1)
+
     def test_dispatch_ack_fill_projection_and_reconciliation_share_identity(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

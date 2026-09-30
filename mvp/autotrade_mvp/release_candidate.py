@@ -742,47 +742,6 @@ class ReleaseCandidateDecision:
                 raise ReleaseCandidateError(
                     "frozen release candidate dependency-rights artifact does not reference WP-64 proof"
                 )
-            if (
-                type(_verification_store) is not ArtifactStore
-                or _verification_root is None
-                or type(_supply_chain_evidence) is not SupplyChainEvidence
-                or type(_supply_chain_receipt) is not SignedQualificationAttestation
-            ):
-                raise ReleaseCandidateError(
-                    "frozen release candidate requires canonical WP-64 replay context"
-                )
-            try:
-                supply_result = qualify_supply_chain(
-                    _supply_chain_evidence,
-                    evidence_store=_verification_store,
-                    evidence_root=_verification_root,
-                    trust_receipt=_supply_chain_receipt,
-                )
-            except (TypeError, ValueError) as error:
-                raise ReleaseCandidateError(
-                    "frozen release candidate WP-64 proof cannot be canonically replayed"
-                ) from error
-            supply_expected = {
-                "qualification_id": supply_result.qualification_id,
-                "attestation_id": supply_result.accepted_attestation_id,
-                "attestation_digest": supply_result.accepted_attestation_digest,
-                "policy_id": supply_result.accepted_policy_id,
-                "trust_root_id": supply_result.accepted_trust_root_id,
-                "subject_requirement": supply_result.subject_requirement,
-                "release_artifact_id": supply_result.release_artifact_id,
-                "release_artifact_sha256": supply_result.release_artifact_sha256,
-                "dependency_rights_artifact_id": dependency_rights.artifact_id,
-                "dependency_rights_artifact_sha256": dependency_rights.artifact_sha256,
-            }
-            if (
-                supply_result.status != "PASS"
-                or supply_observed != supply_expected
-                or any(value is None for value in supply_expected.values())
-            ):
-                raise ReleaseCandidateError(
-                    "frozen release candidate WP-64 proof identity is not canonical"
-                )
-
             qualification = manifest.get("qualification")
             if type(qualification) is not dict or set(qualification) != {
                 "attestation_id",
@@ -900,6 +859,47 @@ class ReleaseCandidateDecision:
                 raise ReleaseCandidateError(
                     "frozen release candidate canonical qualification identity mismatch"
                 )
+            if (
+                type(_verification_store) is not ArtifactStore
+                or _verification_root is None
+                or type(_supply_chain_evidence) is not SupplyChainEvidence
+                or type(_supply_chain_receipt) is not SignedQualificationAttestation
+            ):
+                raise ReleaseCandidateError(
+                    "frozen release candidate requires canonical WP-64 replay context"
+                )
+            try:
+                supply_result = qualify_supply_chain(
+                    _supply_chain_evidence,
+                    evidence_store=_verification_store,
+                    evidence_root=_verification_root,
+                    trust_receipt=_supply_chain_receipt,
+                )
+            except (TypeError, ValueError) as error:
+                raise ReleaseCandidateError(
+                    "frozen release candidate WP-64 proof cannot be canonically replayed"
+                ) from error
+            supply_expected = {
+                "qualification_id": supply_result.qualification_id,
+                "attestation_id": supply_result.accepted_attestation_id,
+                "attestation_digest": supply_result.accepted_attestation_digest,
+                "policy_id": supply_result.accepted_policy_id,
+                "trust_root_id": supply_result.accepted_trust_root_id,
+                "subject_requirement": supply_result.subject_requirement,
+                "release_artifact_id": supply_result.release_artifact_id,
+                "release_artifact_sha256": supply_result.release_artifact_sha256,
+                "dependency_rights_artifact_id": dependency_rights.artifact_id,
+                "dependency_rights_artifact_sha256": dependency_rights.artifact_sha256,
+            }
+            if (
+                supply_result.status != "PASS"
+                or supply_observed != supply_expected
+                or any(value is None for value in supply_expected.values())
+            ):
+                raise ReleaseCandidateError(
+                    "frozen release candidate WP-64 proof identity is not canonical"
+                )
+
         else:
             if not self.reasons:
                 raise ReleaseCandidateError(

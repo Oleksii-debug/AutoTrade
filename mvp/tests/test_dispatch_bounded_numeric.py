@@ -90,7 +90,6 @@ class DispatchBoundedNumericTransportTests(unittest.TestCase):
 
             for name, callback in (
                 ("load_events", hostile_load),
-                ("append_event", hostile_append),
                 ("_connect", hostile_connect),
             ):
                 with self.subTest(name=name):
@@ -100,6 +99,17 @@ class DispatchBoundedNumericTransportTests(unittest.TestCase):
                     ):
                         dispatcher._events("shadowed-attempt")
                     del store.__dict__[name]
+
+            store.__dict__["append_event"] = hostile_append
+            with self.assertRaisesRegex(TypeError, "instance state is shadowed"):
+                dispatcher._append(
+                    attempt_id="shadowed-attempt",
+                    event_type="SubmissionPrepared",
+                    version=1,
+                    payload={},
+                    now="2026-09-30T17:00:00Z",
+                )
+            del store.__dict__["append_event"]
 
             other = JournalStore(directory + "/other.sqlite3")
             dispatcher.store = other

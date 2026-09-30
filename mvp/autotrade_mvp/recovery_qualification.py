@@ -381,6 +381,95 @@ class RecoveryQualificationPolicy:
         )
 
 
+_MAPPING_PROXY_TYPE = type(MappingProxyType({}))
+
+
+def _snapshot_recovery_qualification_policy(
+    policy: RecoveryQualificationPolicy,
+) -> RecoveryQualificationPolicy:
+    """Detach one exact recovery decision policy before any trust callback."""
+
+    if type(policy) is not RecoveryQualificationPolicy:
+        raise TypeError(
+            "policy must be the canonical RecoveryQualificationPolicy"
+        )
+    source_sha = object.__getattribute__(policy, "source_sha")
+    release_artifact_id = object.__getattribute__(
+        policy,
+        "release_artifact_id",
+    )
+    release_artifact_sha256 = object.__getattribute__(
+        policy,
+        "release_artifact_sha256",
+    )
+    evidence_schema_version = object.__getattribute__(
+        policy,
+        "evidence_schema_version",
+    )
+    protocol_id = object.__getattribute__(policy, "protocol_id")
+    max_downtime_ms = object.__getattribute__(policy, "max_downtime_ms")
+    required_tests = object.__getattribute__(policy, "required_tests")
+
+    for value, name in (
+        (source_sha, "policy.source_sha"),
+        (release_artifact_id, "policy.release_artifact_id"),
+        (release_artifact_sha256, "policy.release_artifact_sha256"),
+        (evidence_schema_version, "policy.evidence_schema_version"),
+        (protocol_id, "policy.protocol_id"),
+    ):
+        if type(value) is not str:
+            raise TypeError(f"{name} must use exact str")
+    if type(max_downtime_ms) is not _MAPPING_PROXY_TYPE:
+        raise TypeError(
+            "policy.max_downtime_ms must use the canonical immutable mapping"
+        )
+    if type(required_tests) is not _MAPPING_PROXY_TYPE:
+        raise TypeError(
+            "policy.required_tests must use the canonical immutable mapping"
+        )
+
+    limits: dict[RecoveryScenario, int] = {}
+    tests: dict[RecoveryScenario, tuple[str, ...]] = {}
+    for scenario in sorted(RecoveryScenario, key=lambda item: item.value):
+        if scenario not in max_downtime_ms or scenario not in required_tests:
+            raise ValueError(
+                "recovery policy snapshot must cover every required scenario"
+            )
+        limit = max_downtime_ms[scenario]
+        scenario_tests = required_tests[scenario]
+        if type(limit) is not int:
+            raise TypeError(
+                f"policy.max_downtime_ms[{scenario.value}] must use exact int"
+            )
+        if (
+            type(scenario_tests) is not tuple
+            or any(type(test_id) is not str for test_id in scenario_tests)
+        ):
+            raise TypeError(
+                f"policy.required_tests[{scenario.value}] must use exact tuple[str]"
+            )
+        limits[scenario] = limit
+        tests[scenario] = tuple(scenario_tests)
+    if set(max_downtime_ms) != _REQUIRED_SCENARIOS:
+        raise ValueError(
+            "recovery policy max_downtime_ms has unsupported scenarios"
+        )
+    if set(required_tests) != _REQUIRED_SCENARIOS:
+        raise ValueError(
+            "recovery policy required_tests has unsupported scenarios"
+        )
+
+    return RecoveryQualificationPolicy(
+        source_sha=source_sha,
+        release_artifact_id=release_artifact_id,
+        release_artifact_sha256=release_artifact_sha256,
+        evidence_schema_version=evidence_schema_version,
+        protocol_id=protocol_id,
+        max_downtime_ms=limits,
+        required_tests=tests,
+    )
+
+
 def recovery_policy_subject_requirement(
     policy: RecoveryQualificationPolicy,
 ) -> str:
@@ -681,10 +770,6 @@ class RecoveryQualificationDecision:
                 raise ValueError(
                     "PASS recovery decision requires accepted qualification trust"
                 )
-            if type(_verification_policy) is not RecoveryQualificationPolicy:
-                raise ValueError(
-                    "PASS recovery decision requires independently verifiable qualification evidence"
-                )
             if (
                 type(_verification_evidence) is not tuple
                 or any(
@@ -695,6 +780,18 @@ class RecoveryQualificationDecision:
                 raise ValueError(
                     "PASS recovery decision requires exact independently verifiable qualification evidence"
                 )
+            try:
+                verification_policy = _snapshot_recovery_qualification_policy(
+                    _verification_policy
+                )
+                verification_evidence = tuple(
+                    _snapshot_recovery_scenario_evidence(item)
+                    for item in _verification_evidence
+                )
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    "PASS recovery decision requires independently verifiable qualification evidence"
+                ) from error
             if type(_verification_store) is not ArtifactStore:
                 raise ValueError(
                     "PASS recovery decision requires canonical evidence store authority"
@@ -708,7 +805,6 @@ class RecoveryQualificationDecision:
                     "PASS recovery decision requires exact signed qualification evidence"
                 )
 
-            verification_evidence = tuple(_verification_evidence)
             by_scenario = {
                 item.scenario: item
                 for item in verification_evidence
@@ -727,7 +823,7 @@ class RecoveryQualificationDecision:
                 raise ValueError(
                     "PASS recovery decision evidence artifact identities must be unique"
                 )
-            if not self.matches_policy(_verification_policy):
+            if not self.matches_policy(verification_policy):
                 raise ValueError(
                     "PASS recovery decision does not match recovery qualification policy"
                 )
@@ -786,9 +882,9 @@ class RecoveryQualificationDecision:
                     or item.status is not RecoveryEvidenceStatus.PASS
                     or item.unresolved_limits
                     or item.downtime_ms
-                    > _verification_policy.max_downtime_ms[item.scenario]
+                    > verification_policy.max_downtime_ms[item.scenario]
                     or not set(
-                        _verification_policy.required_tests[item.scenario]
+                        verification_policy.required_tests[item.scenario]
                     ).issubset(item.tests_run)
                     or item.data_loss_events
                     or item.duplicate_external_actions
@@ -933,8 +1029,7 @@ def qualify_recovery_release(
 ) -> RecoveryQualificationDecision:
     """Evaluate recovery evidence without performing recovery itself."""
 
-    if type(policy) is not RecoveryQualificationPolicy:
-        raise TypeError("policy must be the canonical RecoveryQualificationPolicy")
+    policy = _snapshot_recovery_qualification_policy(policy)
     policy_requirement = recovery_policy_subject_requirement(policy)
     if type(evidence) not in (list, tuple):
         raise TypeError("evidence must be an exact list or tuple")

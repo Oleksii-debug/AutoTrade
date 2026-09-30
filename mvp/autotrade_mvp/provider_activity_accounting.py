@@ -2244,6 +2244,40 @@ def book_external_provider_cash_activity(
             "provider cash activity has only part of its durable financial effect"
         )
     if existing_imported is not None and existing_economic is not None:
+        def require_semantic_owner(
+            event: Mapping[str, object],
+            *,
+            event_type: str,
+            aggregate_type: str,
+            aggregate_id: str,
+        ) -> None:
+            if (
+                event.get("event_type") != event_type
+                or event.get("aggregate_type") != aggregate_type
+                or event.get("aggregate_id") != aggregate_id
+            ):
+                raise AccountingConflict(
+                    "provider cash activity replay has invalid durable semantic owner"
+                )
+            version = event.get("aggregate_version")
+            if type(version) is not int or version <= 0:
+                raise AccountingConflict(
+                    "provider cash activity replay has invalid aggregate version"
+                )
+
+        require_semantic_owner(
+            existing_imported,
+            event_type="ProviderActivityImported",
+            aggregate_type="provider_activity",
+            aggregate_id=identity,
+        )
+        require_semantic_owner(
+            existing_economic,
+            event_type="EconomicTransactionBooked",
+            aggregate_type="economic_book",
+            aggregate_id=book_id,
+        )
+
         imported_payload = existing_imported.get("payload")
         economic_payload = existing_economic.get("payload")
         if not isinstance(imported_payload, Mapping) or not isinstance(

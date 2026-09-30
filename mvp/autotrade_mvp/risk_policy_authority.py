@@ -42,6 +42,31 @@ _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _ACTIVATION_EVENT_ID_RE = re.compile(r"^risk-policy-activate(?:-v2)?:[0-9a-f]{64}$")
 _ACTIVATION_REQUEST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
+
+def _canonical_journal_authority_snapshot(
+    store: JournalStore,
+) -> tuple[object, object]:
+    """Seal one exact JournalStore instance and physical backing generation."""
+    if type(store) is not JournalStore:
+        raise TypeError("store must be exact JournalStore")
+    state = vars(store)
+    class_owned_names = {
+        name
+        for base in JournalStore.__mro__
+        for name in base.__dict__
+    }
+    if class_owned_names.intersection(state):
+        raise TypeError("canonical JournalStore instance state is shadowed")
+    if "path" not in state or "_store_identity" not in state:
+        raise TypeError("canonical JournalStore backing state is unavailable")
+    path = state["path"]
+    identity = JournalStore.store_identity.__get__(store, JournalStore)
+    if getattr(identity, "canonical_path", None) != str(path):
+        raise RiskPolicyAuthorityError(
+            "canonical JournalStore backing identity changed"
+        )
+    return path, identity
+
 _DECIMAL_FIELDS = (
     "max_abs_position",
     "max_single_notional",
@@ -531,13 +556,22 @@ class DurableRiskPolicyRegistry:
     """Append-only quantitative-policy registration and activation authority."""
 
     def __init__(self, store: JournalStore) -> None:
-        # JournalStore is financial state authority. Accepting subclasses here
-        # would dispatch replay/write calls through caller-controlled overrides
-        # and let a forged chronology impersonate durable SQLite state.
-        # Keep this boundary exact until persistence issues a sealed capability.
-        if type(store) is not JournalStore:
-            raise TypeError("store must be exact JournalStore")
+        (
+            self._journal_store_path,
+            self._journal_store_identity,
+        ) = _canonical_journal_authority_snapshot(store)
         self.store = store
+
+    def _journal_store_authority(self) -> JournalStore:
+        path, identity = _canonical_journal_authority_snapshot(self.store)
+        if (
+            path != self._journal_store_path
+            or identity != self._journal_store_identity
+        ):
+            raise RiskPolicyAuthorityError(
+                "risk policy journal authority changed"
+            )
+        return self.store
 
     def _replay(
         self,
@@ -551,13 +585,18 @@ class DurableRiskPolicyRegistry:
             raise RiskPolicyAuthorityError(
                 "journal_sequence_cut must be a non-negative integer"
             )
-        current = self.store.current_journal_sequence()
+        store = self._journal_store_authority()
+        current = JournalStore.current_journal_sequence(store)
         if journal_sequence_cut > current:
             raise RiskPolicyAuthorityError(
                 "journal_sequence_cut cannot be newer than the durable journal"
             )
 
-        events = self.store.load_events(_AGGREGATE_TYPE, scope.aggregate_id)
+        events = JournalStore.load_events(
+            store,
+            _AGGREGATE_TYPE,
+            scope.aggregate_id,
+        )
         registered: dict[
             tuple[str, int], tuple[RiskPolicyIdentity, RiskPolicy, str, int]
         ] = {}
@@ -724,7 +763,8 @@ class DurableRiskPolicyRegistry:
         )
 
     def _current_state(self, scope: RiskPolicyScope) -> tuple[int, _ReplayState]:
-        cut = self.store.current_journal_sequence()
+        store = self._journal_store_authority()
+        cut = JournalStore.current_journal_sequence(store)
         return cut, self._replay(scope, journal_sequence_cut=cut)
 
     def register(
@@ -782,7 +822,8 @@ class DurableRiskPolicyRegistry:
             "committed_at": committed_at_text,
         }
         try:
-            return self.store.append_event(envelope).inserted
+            store = self._journal_store_authority()
+            return JournalStore.append_event(store, envelope).inserted
         except ValueError as error:
             _cut, current = self._current_state(scope)
             persisted = current.registered.get(key)
@@ -908,7 +949,8 @@ class DurableRiskPolicyRegistry:
             "committed_at": committed_at_text,
         }
         try:
-            result = self.store.append_event(envelope)
+            store = self._journal_store_authority()
+            result = JournalStore.append_event(store, envelope)
             if result.inserted:
                 return True
         except ValueError as error:
@@ -979,7 +1021,8 @@ class DurableRiskPolicyRegistry:
 
         if type(scope) is not RiskPolicyScope:
             raise TypeError("scope must be RiskPolicyScope")
-        current = self.store.current_journal_sequence()
+        store = self._journal_store_authority()
+        current = JournalStore.current_journal_sequence(store)
         cut = current if journal_sequence_cut is None else journal_sequence_cut
         state = self._replay(scope, journal_sequence_cut=cut)
         if (

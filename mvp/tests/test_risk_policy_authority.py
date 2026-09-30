@@ -56,6 +56,76 @@ def policy(*, max_gross_leverage="2", max_daily_loss="100"):
 
 
 class DurableRiskPolicyRegistryTests(unittest.TestCase):
+    def test_exact_journal_instance_shadow_cannot_intercept_risk_authority(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            touched = []
+
+            store.__dict__["append_event"] = lambda *_args, **_kwargs: touched.append(
+                "append"
+            )
+            with self.assertRaisesRegex(TypeError, "instance state is shadowed"):
+                registry.register(
+                    scope=scope(),
+                    policy_id="core-risk",
+                    version=1,
+                    policy=policy(),
+                    committed_at=NOW,
+                )
+            self.assertEqual(touched, [])
+            del store.__dict__["append_event"]
+
+            self.assertTrue(
+                registry.register(
+                    scope=scope(),
+                    policy_id="core-risk",
+                    version=1,
+                    policy=policy(),
+                    committed_at=NOW,
+                )
+            )
+            store.__dict__["load_events"] = lambda *_args, **_kwargs: touched.append(
+                "load"
+            )
+            with self.assertRaisesRegex(TypeError, "instance state is shadowed"):
+                registry.resolve_current(scope())
+            self.assertEqual(touched, [])
+            del store.__dict__["load_events"]
+
+            def forged_current_sequence(*_args, **_kwargs):
+                touched.append("sequence")
+                return 999999
+
+            store.__dict__["current_journal_sequence"] = forged_current_sequence
+            with self.assertRaisesRegex(TypeError, "instance state is shadowed"):
+                registry.resolve_current(scope())
+            self.assertEqual(touched, [])
+
+    def test_risk_registry_rejects_selected_journal_generation_rebinding(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            other = JournalStore(Path(directory) / "other.sqlite3")
+            original_path = store.path
+            original_identity = store.store_identity
+            store.path = other.path
+            store._store_identity = other.store_identity
+            with self.assertRaisesRegex(
+                RiskPolicyAuthorityError,
+                "journal authority changed",
+            ):
+                registry.register(
+                    scope=scope(),
+                    policy_id="core-risk",
+                    version=1,
+                    policy=policy(),
+                    committed_at=NOW,
+                )
+            store.path = original_path
+            store._store_identity = original_identity
+            self.assertEqual(store.current_journal_sequence(), 0)
+
     def test_registration_is_content_addressed_idempotent_and_conflicts_on_reuse(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

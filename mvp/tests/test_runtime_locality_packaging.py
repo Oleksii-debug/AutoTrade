@@ -19,7 +19,9 @@ from tools.stage_windows_foundation import FoundationStagingError, stage_windows
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SOURCE_SHA = "a" * 40
+SOURCE_SHA = subprocess.check_output(("git", "rev-parse", "--verify", "HEAD"), cwd=ROOT, text=True).strip()
+if len(SOURCE_SHA) != 40 or any(ch not in "0123456789abcdef" for ch in SOURCE_SHA):
+    raise RuntimeError("integration oracle requires an exact checked-out Git commit")
 
 
 def _isolated_python(*, staging: Path, script: str, extra_env: dict[str, str] | None = None):
@@ -29,7 +31,7 @@ def _isolated_python(*, staging: Path, script: str, extra_env: dict[str, str] | 
     if extra_env:
         environment.update(extra_env)
     return subprocess.run(
-        [sys.executable, "-I", "-c", script],
+        [sys.executable, "-I", "-S", "-c", script],
         cwd=staging,
         env=environment,
         text=True,
@@ -73,19 +75,25 @@ class ProductionFoundationPackagingTests(unittest.TestCase):
 import os
 from pathlib import Path
 import sys
-staging = os.environ['AUTOTRADE_STAGING']
-sys.path.insert(0, staging)
+assert sys.flags.isolated == 1 and sys.flags.no_site == 1
+staging = Path(os.environ['AUTOTRADE_STAGING']).resolve(strict=True)
+sys.path.insert(0, str(staging))
 from autotrade_foundation.local_filesystem import require_qualified_local_filesystem_path
 from mvp.autotrade_mvp.persistence import JournalStore
 path = Path(os.environ['AUTOTRADE_TEST_DB'])
 require_qualified_local_filesystem_path(path)
 assert not path.exists()
+for name, module in tuple(sys.modules.items()):
+    if name in ('mvp', 'mvp.autotrade_mvp', 'autotrade_foundation') or name.startswith(
+        ('mvp.autotrade_mvp.', 'autotrade_foundation.')
+    ):
+        module_file = Path(module.__file__).resolve(strict=True)
+        assert module_file.is_relative_to(staging), (name, module_file)
+    assert name != 'research' and not name.startswith('research.')
+    assert name != 'autotrade_research' and not name.startswith('autotrade_research.')
 store = JournalStore(path)
 assert path.is_file()
 assert store.store_identity.canonical_path == str(path.resolve())
-for name in sys.modules:
-    assert name != 'research' and not name.startswith('research.')
-    assert name != 'autotrade_research' and not name.startswith('autotrade_research.')
 print('STAGED_JOURNAL_OK')
 """
             completed = _isolated_python(
@@ -115,17 +123,23 @@ print('STAGED_JOURNAL_OK')
             script = """
 import os
 import sys
+assert sys.flags.isolated == 1 and sys.flags.no_site == 1
 sys.path.insert(0, os.environ['AUTOTRADE_STAGING'])
-from mvp.autotrade_mvp.persistence import JournalStore
-JournalStore(os.environ['AUTOTRADE_TEST_DB'])
+try:
+    from mvp.autotrade_mvp.persistence import JournalStore
+except ModuleNotFoundError as error:
+    assert error.name == 'autotrade_foundation', error.name
+    print('MISSING_FOUNDATION_DENIED')
+else:
+    raise AssertionError('installed product imported without mandatory foundation')
 """
             completed = _isolated_python(
                 staging=staging,
                 script=script,
                 extra_env={"AUTOTRADE_TEST_DB": str(database)},
             )
-            self.assertNotEqual(completed.returncode, 0)
-            self.assertIn("autotrade_foundation", completed.stderr)
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertEqual(completed.stdout.strip(), "MISSING_FOUNDATION_DENIED")
             self.assertFalse(database.exists())
 
     def test_resource_lock_delegates_to_foundation_before_lock_file_creation(self):

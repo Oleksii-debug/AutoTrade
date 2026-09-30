@@ -42,7 +42,11 @@ def _decimal(value, *, name: str) -> Decimal:
 def _time(value: datetime, *, name: str) -> datetime:
     if type(value) is not datetime or value.tzinfo is None:
         raise ValueError(f"{name} must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    # Even an exact datetime can contain a caller-supplied tzinfo subclass.
+    # Seal the nested graph before astimezone() can invoke virtual offsets.
+    if type(value.tzinfo) is not timezone:
+        raise ValueError(f"{name} must use a built-in timezone")
+    return datetime.astimezone(value, timezone.utc)
 
 
 def _text(value: str, *, name: str) -> str:

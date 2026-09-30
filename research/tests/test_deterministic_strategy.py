@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 import json
 from pathlib import Path
@@ -1463,6 +1463,57 @@ class DeterministicStrategyTests(unittest.TestCase):
                 lookback=2, threshold="1e99999",
                 proposal_quantity="1", descriptor=self.descriptor(),
             )
+
+    def test_causal_time_rejects_nested_timezone_callbacks_before_observation(self):
+        called = []
+
+        class CallerTimezone(tzinfo):
+            def utcoffset(self, value):
+                called.append("utcoffset")
+                raise AssertionError("untrusted time callback invoked")
+
+            def dst(self, value):
+                called.append("dst")
+                raise AssertionError("untrusted time callback invoked")
+
+            def fromutc(self, value):
+                called.append("fromutc")
+                raise AssertionError("untrusted time callback invoked")
+
+        hostile = datetime(2026, 1, 1, 12, tzinfo=CallerTimezone())
+        with self.assertRaisesRegex(ValueError, "built-in timezone"):
+            CausalObservation.create(
+                event_id="untrusted-clock",
+                symbol="AAA",
+                available_at=hostile,
+                price="100",
+            )
+        with self.assertRaisesRegex(ValueError, "built-in timezone"):
+            DeterministicProposal(
+                symbol="AAA",
+                action="HOLD",
+                quantity="0",
+                decision_time=hostile,
+                evidence_event_ids=(),
+                model_calls=0,
+                economic_edge_claim="UNPROVEN",
+                reason="no exposure",
+            )
+        self.assertEqual(called, [])
+
+        # Exact built-in non-UTC fixed offsets remain supported.
+        accepted = CausalObservation.create(
+            event_id="fixed-clock",
+            symbol="AAA",
+            available_at=datetime(
+                2026, 1, 1, 12, tzinfo=timezone(timedelta(hours=2)),
+            ),
+            price="100",
+        )
+        self.assertEqual(
+            accepted.available_at,
+            datetime(2026, 1, 1, 10, tzinfo=timezone.utc),
+        )
 
     def test_bounded_numeric_ingress_denies_hostile_tokens_before_decimal_construction(self):
         # The neutral parser must reject adverse input *before* Decimal(value).

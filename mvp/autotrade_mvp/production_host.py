@@ -9,13 +9,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import isfinite
-import os
 from pathlib import Path
 import ssl
 from threading import Condition, Thread, current_thread
-from typing import BinaryIO, Callable
+from typing import Callable
 from urllib.parse import urlsplit
 
+from research.autotrade_research.artifacts.resource_lock import (
+    ResourceLock,
+    ResourceLockBusyError,
+)
 from research.autotrade_research.io.strict_json import strict_json_loads
 
 from .host_network import (
@@ -26,6 +29,7 @@ from .host_network import (
     TransportResponse,
 )
 from .persistence import JournalStore
+from .store_identity import JournalStoreIdentity, require_database_identity
 from .security import SecurityBoundary, _authenticated_origin
 
 
@@ -172,11 +176,15 @@ def load_production_host_config(path: str | Path) -> ProductionHostConfig:
 
 
 class _InstanceFence:
-    """Process-lifetime exclusive ownership of one durable host journal."""
+    """Process-lifetime bootstrap exclusion using the shared ResourceLock TCB.
 
-    def __init__(self, *, path: Path, handle: BinaryIO) -> None:
-        self.path = path
-        self._handle = handle
+    This lock is coordination only. Physical financial-store authority remains
+    JournalStore.store_identity and is checked separately on every host dispatch.
+    """
+
+    def __init__(self, lock: ResourceLock) -> None:
+        self.path = lock.path
+        self._lock = lock
         self._release_condition = Condition()
         self._release_state = "ACTIVE"
         self._release_error: BaseException | None = None
@@ -190,37 +198,17 @@ class _InstanceFence:
     def acquire(cls, journal_path: Path) -> "_InstanceFence":
         if not journal_path.is_absolute():
             raise ValueError("instance-fence journal path must be absolute")
-        fence_path = Path(str(journal_path) + ".host.lock")
-        fence_path.parent.mkdir(parents=True, exist_ok=True)
-        handle = fence_path.open("a+b")
+        lock = ResourceLock(
+            Path(str(journal_path) + ".host.lock"),
+            blocking=False,
+        )
         try:
-            if os.name == "nt":
-                import msvcrt
-
-                handle.seek(0, os.SEEK_END)
-                if handle.tell() == 0:
-                    handle.write(b"\0")
-                    handle.flush()
-                handle.seek(0)
-                try:
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                except OSError as exc:
-                    raise RuntimeError(
-                        "production host instance is already owned"
-                    ) from exc
-            else:
-                import fcntl
-
-                try:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except OSError as exc:
-                    raise RuntimeError(
-                        "production host instance is already owned"
-                    ) from exc
-        except BaseException:
-            handle.close()
-            raise
-        return cls(path=fence_path, handle=handle)
+            lock.acquire()
+        except ResourceLockBusyError as exc:
+            raise RuntimeError(
+                "production host instance is already owned"
+            ) from exc
+        return cls(lock)
 
     def release(self) -> None:
         with self._release_condition:
@@ -234,22 +222,8 @@ class _InstanceFence:
             self._release_state = "RELEASING"
 
         try:
-            if os.name == "nt":
-                import msvcrt
-
-                self._handle.seek(0)
-                msvcrt.locking(self._handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
-            self._handle.close()
+            self._lock.release()
         except BaseException as exc:
-            try:
-                if not self._handle.closed:
-                    self._handle.close()
-            except BaseException as close_error:
-                exc.add_note(f"best-effort fence handle close also failed: {close_error!r}")
             with self._release_condition:
                 self._release_error = exc
                 self._release_state = "FAILED"
@@ -259,6 +233,37 @@ class _InstanceFence:
         with self._release_condition:
             self._release_state = "RELEASED"
             self._release_condition.notify_all()
+
+
+class _StoreIdentityGate:
+    """Bind every host response to the retained physical journal generation."""
+
+    def __init__(
+        self,
+        application: AuthenticatedHostApplication,
+        journal: JournalStore,
+    ) -> None:
+        self._dispatch = application.dispatch
+        self._journal_path = journal.path
+        self.store_identity: JournalStoreIdentity = journal.store_identity
+
+    def dispatch(
+        self,
+        *,
+        method: str,
+        target: str,
+        headers,
+        body: bytes = b"",
+    ) -> TransportResponse:
+        require_database_identity(self._journal_path, self.store_identity)
+        response = self._dispatch(
+            method=method,
+            target=target,
+            headers=headers,
+            body=body,
+        )
+        require_database_identity(self._journal_path, self.store_identity)
+        return response
 
 
 class _CommandAdmissionGate:
@@ -352,6 +357,7 @@ class ProductionHostRuntime:
     ) -> None:
         self.config = config
         self.journal = journal
+        self.store_identity: JournalStoreIdentity = journal.store_identity
         self.application = application
         self.server = server
         self._instance_fence = instance_fence
@@ -590,7 +596,8 @@ def build_production_host(
             snapshot_provider=snapshot_provider,
             now=now,
         )
-        admission_gate = _CommandAdmissionGate(application)
+        identity_gate = _StoreIdentityGate(application, journal)
+        admission_gate = _CommandAdmissionGate(identity_gate)
         application.dispatch = admission_gate.dispatch  # type: ignore[method-assign]
         server = AuthenticatedHostServer(
             (config.bind_host, config.bind_port),

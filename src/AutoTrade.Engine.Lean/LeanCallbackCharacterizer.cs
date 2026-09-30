@@ -20,6 +20,8 @@ public sealed class LeanCallbackCharacterizer
     {
         WriteIndented = false,
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+        RespectRequiredConstructorParameters = true,
+        RespectNullableAnnotations = true,
     };
 
     private readonly Dictionary<(int OrderId, int EventId), CallbackFingerprint> _seen = new();
@@ -219,22 +221,34 @@ public sealed class LeanCallbackCharacterizer
                     "LEAN callback restart economic fee requires a non-zero amount and real currency identity.");
             }
             if (!entry.HasOrderFee &&
-                (entry.FeeAmount != decimal.Zero || !string.IsNullOrEmpty(entry.FeeCurrency)))
+                (entry.FeeAmount != decimal.Zero ||
+                 entry.FeeCurrency is null ||
+                 entry.FeeCurrency.Length != 0))
             {
                 throw new InvalidDataException(
                     "LEAN callback restart no-fee tuple must be exactly zero with empty currency.");
             }
+            if (!Enum.IsDefined(typeof(OrderStatus), entry.Status))
+            {
+                throw new InvalidDataException(
+                    "LEAN callback restart order status is not a defined canonical value.");
+            }
+            if (!Enum.IsDefined(typeof(OrderDirection), entry.Direction))
+            {
+                throw new InvalidDataException(
+                    "LEAN callback restart order direction is not a defined canonical value.");
+            }
 
             var fingerprint = new CallbackFingerprint(
                 entry.Status,
-                entry.Symbol ?? string.Empty,
+                entry.Symbol,
                 entry.FillQuantity,
                 entry.FillPrice,
-                entry.FillPriceCurrency ?? string.Empty,
+                entry.FillPriceCurrency,
                 entry.Direction,
                 entry.HasOrderFee,
                 entry.FeeAmount,
-                entry.FeeCurrency ?? string.Empty,
+                entry.FeeCurrency,
                 entry.Quantity,
                 entry.IsAssignment,
                 entry.IsInTheMoney,

@@ -332,6 +332,69 @@ class CapabilityFoundationTests(unittest.TestCase):
                 at=NOW + timedelta(minutes=5),
             )
 
+    def test_registry_verified_lookup_requires_current_process_admission(self):
+        historical = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=complete_claims(),
+            observed_at=NOW,
+        )
+        object.__setattr__(historical, "_can_admit", False)
+        registry = CapabilityRegistry()
+        registry.add(historical)
+
+        latest = registry.latest(
+            provider_id="simulated",
+            account_id="paper-account",
+            entity_id="entity-1",
+            environment="PAPER",
+            instrument_version="instrument-v1",
+            at=NOW,
+        )
+        self.assertIs(latest, historical)
+        self.assertEqual(latest.status, "VERIFIED")
+        with self.assertRaisesRegex(CapabilityError, "fresh admission"):
+            registry.require_verified(
+                provider_id="simulated",
+                account_id="paper-account",
+                entity_id="entity-1",
+                environment="PAPER",
+                instrument_version="instrument-v1",
+                at=NOW,
+            )
+
+    def test_registry_rejects_snapshot_subclass_authority(self):
+        class ForgedSnapshot(CapabilitySnapshot):
+            pass
+
+        canonical = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=complete_claims(),
+            observed_at=NOW,
+        )
+        forged = ForgedSnapshot(
+            snapshot_id=SNAPSHOT_2,
+            provider_id=canonical.provider_id,
+            account_id=canonical.account_id,
+            entity_id=canonical.entity_id,
+            environment=canonical.environment,
+            instrument_version=canonical.instrument_version,
+            observed_at=canonical.observed_at,
+            expires_at=canonical.expires_at,
+            supported_order_types=canonical.supported_order_types,
+            time_in_force=canonical.time_in_force,
+            permission_scopes=canonical.permission_scopes,
+            position_mode=canonical.position_mode,
+            native_protection=canonical.native_protection,
+            rate_limit_policy_id=canonical.rate_limit_policy_id,
+            data_entitlements=canonical.data_entitlements,
+            evidence=canonical.evidence,
+            status="UNKNOWN",
+            sources=canonical.sources,
+        )
+        registry = CapabilityRegistry()
+        with self.assertRaisesRegex(TypeError, "exact CapabilitySnapshot"):
+            registry.add(forged)
+
     def test_snapshot_id_is_immutable(self):
         snapshot = derive_capability_snapshot(
             snapshot_id=SNAPSHOT_1,

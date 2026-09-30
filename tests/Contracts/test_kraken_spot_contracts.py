@@ -16,6 +16,7 @@ from mvp.autotrade_mvp.capabilities import (
 from mvp.autotrade_mvp.dispatch import (
     ExactJsonTransportResponse,
     GuardedDispatcher,
+    PreparedSubmissionAuthorityCheck,
     load_submission_response_binding,
     stable_client_order_id,
 )
@@ -24,7 +25,7 @@ from mvp.autotrade_mvp.kraken_spot import (
     parse_spot_submission_response,
     prepare_spot_order_request,
 )
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_core import observe_submission_json_response
 
 
@@ -130,6 +131,33 @@ class KrakenSpotContractTests(unittest.TestCase):
                 account_id=prepared_request.account_id,
                 owner_token="contract-owner",
             )
+            submission_scope = {
+                "provider": "KRAKEN",
+                "account_id": prepared_request.account_id,
+                "environment": prepared_request.environment,
+                "provider_environment": prepared_request.environment,
+                "endpoint": prepared_request.endpoint,
+                "prepared_request_sha256": prepared_request.body_sha256,
+                "capability_snapshot_ids": [
+                    prepared_request.capability_snapshot_id
+                ],
+                "instrument_versions": [
+                    prepared_request.instrument_version
+                ],
+            }
+
+            def contract_authority(
+                _intent,
+                _now,
+                prepared_scope,
+                prepared_scope_hash,
+            ):
+                if dict(prepared_scope) != submission_scope:
+                    return False, "prepared_scope_mismatch"
+                if prepared_scope_hash != payload_digest(submission_scope):
+                    return False, "prepared_scope_hash_mismatch"
+                return True, "allowed"
+
             outcome = dispatcher.dispatch(
                 attempt_id=attempt_id,
                 intent_id=intent_id,
@@ -137,7 +165,7 @@ class KrakenSpotContractTests(unittest.TestCase):
                 provider="KRAKEN",
                 request=prepared_request.body,
                 now="2026-09-24T20:00:00Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=PreparedSubmissionAuthorityCheck(contract_authority),
                 transport_send=lambda _cid, _request, guard: (
                     guard(),
                     ExactJsonTransportResponse(raw),
@@ -145,16 +173,7 @@ class KrakenSpotContractTests(unittest.TestCase):
                 client_id_max_length=36,
                 client_id_format="UUID",
                 sender_check=lambda _owner, _epoch: None,
-                submission_scope={
-                    "endpoint": prepared_request.endpoint,
-                    "prepared_request_sha256": prepared_request.body_sha256,
-                    "capability_snapshot_ids": [
-                        prepared_request.capability_snapshot_id
-                    ],
-                    "instrument_versions": [
-                        prepared_request.instrument_version
-                    ],
-                },
+                submission_scope=submission_scope,
             )
             self.assertEqual(outcome.status, "SENT")
             binding = load_submission_response_binding(
@@ -174,6 +193,7 @@ class KrakenSpotContractTests(unittest.TestCase):
                 instrument_versions=(
                     prepared_request.instrument_version,
                 ),
+                provider_environment=prepared_request.environment,
             )
         return attempt_id, prepared_request, observation
 

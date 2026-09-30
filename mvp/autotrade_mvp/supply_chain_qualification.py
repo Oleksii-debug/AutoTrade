@@ -701,20 +701,6 @@ def qualify_supply_chain(
                 expected_release_artifact_id=evidence.release_artifact_id,
                 expected_release_artifact_sha256=evidence.release_artifact_sha256,
             )
-            accepted_subject = verify_canonical_qualification_attestation(
-                trust_receipt,
-                evidence_store=evidence_store,
-                evidence_root=evidence_root,
-                expected_source_sha=evidence.release_commit_sha,
-                expected_domain="SUPPLY_CHAIN",
-                expected_gate="RELEASE",
-                expected_package_id="WP-64",
-                expected_protocol_id="supply-chain-review-v1",
-                expected_protocol_version="1.0.0",
-                expected_requirement_id=subject_requirement,
-                expected_release_artifact_id=evidence.release_artifact_id,
-                expected_release_artifact_sha256=evidence.release_artifact_sha256,
-            )
             accepted_trust = accepted_review
             review_identity = (
                 accepted_review.attestation_id,
@@ -722,12 +708,29 @@ def qualify_supply_chain(
                 accepted_review.policy_id,
                 accepted_review.trust_root_id,
             )
-            subject_identity = (
-                accepted_subject.attestation_id,
-                accepted_subject.attestation_digest,
-                accepted_subject.policy_id,
-                accepted_subject.trust_root_id,
-            )
+            accepted_subject = None
+            subject_identity = None
+            if subject_requirement in accepted_review.requirement_ids:
+                accepted_subject = verify_canonical_qualification_attestation(
+                    trust_receipt,
+                    evidence_store=evidence_store,
+                    evidence_root=evidence_root,
+                    expected_source_sha=evidence.release_commit_sha,
+                    expected_domain="SUPPLY_CHAIN",
+                    expected_gate="RELEASE",
+                    expected_package_id="WP-64",
+                    expected_protocol_id="supply-chain-review-v1",
+                    expected_protocol_version="1.0.0",
+                    expected_requirement_id=subject_requirement,
+                    expected_release_artifact_id=evidence.release_artifact_id,
+                    expected_release_artifact_sha256=evidence.release_artifact_sha256,
+                )
+                subject_identity = (
+                    accepted_subject.attestation_id,
+                    accepted_subject.attestation_digest,
+                    accepted_subject.policy_id,
+                    accepted_subject.trust_root_id,
+                )
 
             expected_refs = {
                 (
@@ -789,8 +792,8 @@ def qualify_supply_chain(
                 for ref in accepted_trust.evidence_refs
             }
             if (
-                review_identity != subject_identity
-                or subject_requirement not in accepted_review.requirement_ids
+                subject_identity is None
+                or review_identity != subject_identity
             ):
                 record(
                     "independent_evidence_trust",

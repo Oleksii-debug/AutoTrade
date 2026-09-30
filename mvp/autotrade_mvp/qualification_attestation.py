@@ -10,12 +10,13 @@ import os
 from pathlib import Path
 import re
 import subprocess
-from typing import Iterable, Mapping
+from typing import Callable, Iterable, Mapping
 from uuid import UUID
 
-from research.autotrade_research.artifacts.store import (
+from research.autotrade_research.artifacts import (
     ArtifactIntegrityError,
     ArtifactStore,
+    trusted_authenticated_reader,
 )
 
 
@@ -1102,10 +1103,11 @@ def _verify_rsa_pkcs1v15_sha256(
 
 
 def _resolve_evidence(
-    store: ArtifactStore, ref: EvidenceArtifactRef
+    read_snapshot: Callable[[str], tuple[dict[str, object], bytes]],
+    ref: EvidenceArtifactRef,
 ) -> None:
     try:
-        manifest, data = store.read_authenticated_snapshot(ref.artifact_id)
+        manifest, data = read_snapshot(ref.artifact_id)
         if "manifest_hash" not in manifest:
             raise QualificationTrustError(
                 "evidence manifest lacks integrity binding"
@@ -1149,6 +1151,7 @@ def verify_qualification_attestation(
     *,
     policy: QualificationTrustPolicy,
     evidence_store: ArtifactStore,
+    evidence_root: str | Path,
     expected_policy_id: str,
     expected_policy_version: str,
     expected_source_sha: str,
@@ -1169,8 +1172,19 @@ def verify_qualification_attestation(
         raise TypeError(
             "policy must be QualificationTrustPolicy"
         )
-    if not isinstance(evidence_store, ArtifactStore):
-        raise TypeError("evidence_store must be ArtifactStore")
+    if type(evidence_store) is not ArtifactStore:
+        raise TypeError(
+            "evidence_store must be the canonical ArtifactStore"
+        )
+    try:
+        evidence_reader = trusted_authenticated_reader(
+            evidence_root,
+            publication_store=evidence_store,
+        )
+    except (ArtifactIntegrityError, OSError, TypeError, ValueError) as error:
+        raise QualificationTrustError(
+            "evidence artifact authority cannot be bound"
+        ) from error
 
     expected_policy_id = _digest(
         expected_policy_id, name="expected_policy_id"
@@ -1310,7 +1324,7 @@ def verify_qualification_attestation(
         root=root,
     )
     for ref in attestation.evidence_refs:
-        _resolve_evidence(evidence_store, ref)
+        _resolve_evidence(evidence_reader, ref)
 
     return AcceptedQualificationAttestation(
         attestation_id=attestation.attestation_id,
@@ -1334,6 +1348,7 @@ def verify_canonical_qualification_attestation(
     receipt: SignedQualificationAttestation,
     *,
     evidence_store: ArtifactStore,
+    evidence_root: str | Path,
     expected_source_sha: str,
     expected_domain: str,
     expected_gate: str,
@@ -1358,6 +1373,7 @@ def verify_canonical_qualification_attestation(
         receipt,
         policy=policy,
         evidence_store=evidence_store,
+        evidence_root=evidence_root,
         expected_policy_id=policy.policy_id,
         expected_policy_version=policy.policy_version,
         expected_source_sha=expected_source_sha,

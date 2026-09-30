@@ -13,6 +13,7 @@ from typing import Any, Mapping
 from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from .exact_decimal import ExactDecimalError, canonical_decimal_text
 from .instruments import (
     InstrumentNotFound,
     InstrumentRegistry,
@@ -77,12 +78,12 @@ def _decimal(value: Decimal | str | int, field: str, *, positive: bool = False) 
 
 
 def _decimal_text(value: Decimal) -> str:
-    if value == 0:
-        return "0"
-    text = format(value.normalize(), "f")
-    if "." in text:
-        text = text.rstrip("0").rstrip(".")
-    return text
+    try:
+        return canonical_decimal_text(value)
+    except ExactDecimalError as error:
+        raise MarketDataError(
+            "market decimal exceeds the supported exact-decimal resource envelope"
+        ) from error
 
 
 def _utc_text(value: datetime) -> str:

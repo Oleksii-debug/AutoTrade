@@ -16,6 +16,7 @@ from uuid import UUID
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 from .accounting import JournalTransaction, posting, validate_transaction
+from .exact_decimal import ExactDecimalError, canonical_decimal_text
 
 
 class OptionError(ValueError):
@@ -390,9 +391,12 @@ def _input_digest(value: str) -> str:
 
 def _decimal_text(value: Decimal) -> str:
     normalized = _decimal(value, "decimal evidence")
-    if normalized == 0:
-        return "0"
-    return format(normalized.normalize(), "f")
+    try:
+        return canonical_decimal_text(normalized)
+    except ExactDecimalError as error:
+        raise OptionError(
+            "decimal evidence exceeds the supported exact-decimal resource envelope"
+        ) from error
 
 
 def _instant_text(value: datetime) -> str:

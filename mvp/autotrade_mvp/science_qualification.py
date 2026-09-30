@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+from pathlib import Path
 from typing import Callable
 
 from research.autotrade_research.artifacts.store import ArtifactStore
@@ -184,6 +185,7 @@ def qualify_scientific_learning(
     qualification_receipt: SignedQualificationAttestation | None = None,
     qualification_policy: QualificationTrustPolicy | None = None,
     evidence_store: ArtifactStore | None = None,
+    evidence_root: str | Path | None = None,
     expected_policy_id: str | None = None,
     expected_policy_version: str | None = None,
 ) -> ScientificQualificationResult:
@@ -209,6 +211,7 @@ def qualify_scientific_learning(
         qualification_receipt,
         qualification_policy,
         evidence_store,
+        evidence_root,
         expected_policy_id,
         expected_policy_version,
     )
@@ -222,6 +225,7 @@ def qualify_scientific_learning(
                 qualification_receipt,
                 policy=qualification_policy,
                 evidence_store=evidence_store,
+                evidence_root=evidence_root,
                 expected_policy_id=expected_policy_id,
                 expected_policy_version=expected_policy_version,
                 expected_source_sha=evidence.source_sha,

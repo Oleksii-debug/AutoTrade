@@ -218,6 +218,7 @@ def qualify(
             policy=policy,
             evidence=evidence,
             evidence_store=store,
+            evidence_root=directory,
             **trust_kwargs,
         )
 
@@ -295,7 +296,7 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
         )
         self.assertEqual(decision.status, RecoveryEvidenceStatus.INCONCLUSIVE)
         self.assertIn(
-            "independent_evidence_trust_unavailable",
+            "independent_evidence_trust_incomplete",
             decision.blockers,
         )
         self.assertFalse(decision.authorizes_trading)

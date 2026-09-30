@@ -13,12 +13,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Mapping
 from uuid import UUID, NAMESPACE_URL, uuid5
 
-from research.autotrade_research.artifacts.store import (
+from research.autotrade_research.artifacts import (
     ArtifactIntegrityError,
     ArtifactStore,
+    trusted_authenticated_reader,
 )
 from research.autotrade_research.io.strict_json import strict_json_loads
 
@@ -185,6 +187,7 @@ class DurableReservationBook:
         environment: str,
         account_id: str,
         resolution_artifact_store: ArtifactStore | None = None,
+        resolution_artifact_root: str | Path | None = None,
     ):
         if not isinstance(store, JournalStore):
             raise TypeError("store must be JournalStore")
@@ -193,10 +196,24 @@ class DurableReservationBook:
         self.account_id = _text(account_id, name="account_id")
         if (
             resolution_artifact_store is not None
-            and not isinstance(resolution_artifact_store, ArtifactStore)
+            and type(resolution_artifact_store) is not ArtifactStore
         ):
-            raise TypeError("resolution_artifact_store must be ArtifactStore or None")
+            raise TypeError(
+                "resolution_artifact_store must be the canonical ArtifactStore or None"
+            )
+        if resolution_artifact_store is not None and resolution_artifact_root is None:
+            raise TypeError(
+                "resolution_artifact_root is required when a publication store is supplied"
+            )
         self.resolution_artifact_store = resolution_artifact_store
+        self._resolution_artifact_reader = (
+            None
+            if resolution_artifact_root is None
+            else trusted_authenticated_reader(
+                resolution_artifact_root,
+                publication_store=resolution_artifact_store,
+            )
+        )
         self.scope_id = _journal_identity(
             self.environment,
             self.account_id,
@@ -751,14 +768,12 @@ class DurableReservationBook:
         artifact_id, digest, evidence = _immutable_evidence_ref(
             resolution_evidence
         )
-        if self.resolution_artifact_store is None:
+        if self._resolution_artifact_reader is None:
             raise ReservationConflict(
                 "terminal release requires the trusted resolution artifact store"
             )
         try:
-            manifest, raw = self.resolution_artifact_store.read_authenticated_snapshot(
-                artifact_id
-            )
+            manifest, raw = self._resolution_artifact_reader(artifact_id)
             manifest_hash = manifest.get("manifest_hash")
             if (
                 not isinstance(manifest_hash, str)

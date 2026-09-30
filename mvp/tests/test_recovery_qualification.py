@@ -630,7 +630,7 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
             second.scenario,
             raw_evidence_refs=tuple(second_refs),
         )
-        decision = qualify(
+        decision = qualify_recovery_release(
             policy=policy(),
             evidence=[first, changed_second, *items[2:]],
         )

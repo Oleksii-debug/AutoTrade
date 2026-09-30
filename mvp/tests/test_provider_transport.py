@@ -4,7 +4,7 @@ from decimal import Decimal
 import json
 from io import BytesIO
 from unittest.mock import patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler
 import subprocess
 import sys
@@ -53,6 +53,7 @@ from mvp.autotrade_mvp.provider_transport import (
     SignedHttpRequest,
     UrllibJsonWireClient,
     _exact_trading_response,
+    _binance_exact_trading_response,
     KRAKEN_SPOT_ENDPOINT_POLICIES,
     KrakenSpotAuthenticatedReadSigner,
     KrakenSpotAuthenticatedReadTransport,
@@ -2748,6 +2749,104 @@ class ProviderTransportTests(unittest.TestCase):
                 wire_client=RecordingWire(events),
             )
 
+    def test_binance_5xx_and_backend_timeout_are_unknown_not_definitive(self):
+        cases = (
+            (503, b'{"code":-1000,"msg":"backend failure"}',
+             "binance_spot_http_5xx_execution_unknown"),
+            (200, b'{"code":-1007,"msg":"Timeout waiting for response"}',
+             "binance_spot_backend_timeout_execution_unknown"),
+        )
+        for status, body, reason in cases:
+            with self.subTest(status=status, body=body):
+                exact = _binance_exact_trading_response(
+                    TradingWireResponse(http_status=status, body=body)
+                )
+                self.assertTrue(exact.requires_reconciliation)
+                self.assertEqual(exact.ambiguity_reason, reason)
+                self.assertEqual(exact.http_status, status)
+                self.assertEqual(exact.response_bytes, body)
+        definite = _binance_exact_trading_response(
+            TradingWireResponse(http_status=400, body=b'{"code":-1013,"msg":"filter"}')
+        )
+        self.assertFalse(definite.requires_reconciliation)
+        self.assertEqual(definite.http_status, 400)
+        successful = _binance_exact_trading_response(
+            TradingWireResponse(http_status=200, body=b'{"orderId":123}')
+        )
+        self.assertFalse(successful.requires_reconciliation)
+        self.assertEqual(successful.http_status, 200)
+
+    def test_binance_ambiguous_http_after_send_is_durable_unknown_without_retry(self):
+        cases = (
+            (503, b'{"code":-1000,"msg":"server"}',
+             "binance_spot_http_5xx_execution_unknown"),
+            (200, b'{"code":-1007,"msg":"timeout"}',
+             "binance_spot_backend_timeout_execution_unknown"),
+        )
+        for status, body, reason in cases:
+            with self.subTest(status=status), TemporaryDirectory() as directory:
+                events = []
+                wire = RecordingWire(events, response=body, http_status=status)
+                transport, _ = self.make_transport(events=events, wire=wire)
+                store = JournalStore(f"{directory}/journal.sqlite3")
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment="PAPER",
+                    account_id="acct-1",
+                    owner_token="owner-1",
+                )
+                intent_id = f"intent-binance-ambiguous-{status}"
+                attempt_id = f"attempt-binance-ambiguous-{status}"
+                client_id = stable_client_order_id(
+                    "BINANCE", intent_id,
+                    environment="PAPER", account_id="acct-1",
+                )
+                args = dict(
+                    attempt_id=attempt_id,
+                    intent_id=intent_id,
+                    intent_hash=f"intent-binance-ambiguous-hash-{status}",
+                    provider="BINANCE",
+                    request=prepared_request(client_id),
+                    now="2026-09-25T10:00:00Z",
+                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    transport_send=transport,
+                    sender_check=lambda _owner, _epoch: None,
+                    final_barrier_clock=lambda: "2026-09-25T10:00:01Z",
+                    submission_scope={
+                        "capability_snapshot_id": "cap-1",
+                        "provider": "BINANCE",
+                        "account_id": "acct-1",
+                        "environment": "PAPER",
+                    },
+                )
+                outcome = dispatcher.dispatch(**args)
+                self.assertEqual(outcome.status, "UNKNOWN")
+                self.assertEqual(outcome.reason, reason)
+                self.assertEqual(len(wire.requests), 1)
+                aggregate_id = dispatcher._aggregate_id(attempt_id)
+                events_saved = store.load_events("submission_attempt", aggregate_id)
+                self.assertEqual(
+                    [event["event_type"] for event in events_saved],
+                    ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
+                )
+                terminal = events_saved[-1]["payload"]
+                self.assertEqual(terminal["http_status"], status)
+                self.assertEqual(terminal["response_text"], body.decode("utf-8"))
+                self.assertEqual(terminal["reason"], reason)
+                self.assertEqual(terminal["retry_disposition"], "RECONCILE_FIRST")
+                self.assertNotIn("response", terminal)
+                restarted = GuardedDispatcher(
+                    JournalStore(f"{directory}/journal.sqlite3"),
+                    environment="PAPER",
+                    account_id="acct-1",
+                    owner_token="owner-1",
+                )
+                repeated = restarted.dispatch(
+                    **{**args, "transport_send": lambda *_: self.fail("blind resend")}
+                )
+                self.assertEqual(repeated.status, "UNKNOWN")
+                self.assertEqual(len(wire.requests), 1)
+
     def test_definitive_http_rejection_is_durable_response_not_unknown(self):
         with TemporaryDirectory() as directory:
             events = []
@@ -4196,6 +4295,261 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
                 response(http_status=200, body=too_large)
         with self.assertRaises(ProviderTransportError):
             _exact_trading_response(too_large)
+
+
+    def test_bybit_default_urllib_typed_response_is_preserved(self):
+        # Reuse the real Bybit preparation/capability/signer, replacing only
+        # network I/O with deterministic in-memory HTTP status/bytes.
+        from mvp.tests.test_bybit_transport import (
+            BybitV5SharedTransportTests, prepared,
+        )
+        from mvp.autotrade_mvp.bybit_v5 import guarded_order_projection
+
+        class BodyStream(BytesIO):
+            def __init__(self, body):
+                super().__init__(body)
+                self.status = 200
+                self.read_sizes = []
+            def read(self, size=-1):
+                self.read_sizes.append(size)
+                return super().read(size)
+
+        for status, body in (
+            (200, b'{"retCode":0,"retMsg":"OK","result":{"orderId":"provider-1","orderLinkId":"bybit-order-1"}}'),
+            (429, b'{"retCode":10006,"retMsg":"rate limit","result":{}}'),
+        ):
+            with self.subTest(status=status):
+                events = []
+                stream = BodyStream(body)
+                calls = []
+
+                class FakeOpener:
+                    def open(self, request, *, timeout):
+                        calls.append((request, timeout))
+                        if status == 429:
+                            raise HTTPError(request.full_url, status, "rate limit", {}, stream)
+                        return stream
+
+                client = UrllibJsonWireClient(max_response_bytes=256)
+                client._opener = FakeOpener()
+                capability, prepared_request = prepared()
+                transport, resolver = BybitV5SharedTransportTests().make_transport(
+                    capability=capability, events=events, wire=client,
+                )
+                exact = transport(
+                    "bybit-order-1",
+                    guarded_order_projection(prepared_request),
+                    lambda: events.append("guard"),
+                )
+                self.assertEqual(type(exact.response_bytes), bytes)
+                self.assertEqual(exact.response_bytes, body)
+                self.assertEqual(exact.http_status, status)
+                self.assertEqual(exact.payload["retCode"], 0 if status == 200 else 10006)
+                self.assertEqual(stream.read_sizes, [257])
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(len(resolver.calls), 1)
+                self.assertEqual(events, [
+                    "capability", "resolve", "capability", "guard",
+                ])
+
+    def test_typed_wire_status_rejects_int_subclasses_before_comparison_callbacks(self):
+        # Exact response CLASS is not enough: a malicious subclass nested
+        # in http_status can override comparisons during construction.
+        callbacks = []
+
+        class SpoofedHttpStatus(int):
+            def __lt__(self, _other):
+                callbacks.append("lt")
+                return False
+
+            def __gt__(self, _other):
+                callbacks.append("gt")
+                return False
+
+        for response_type in (
+            TradingWireResponse,
+            AuthenticatedReadWireResponse,
+        ):
+            with self.subTest(response_type=response_type.__name__):
+                with self.assertRaisesRegex(
+                    ProviderTransportScopeError,
+                    "HTTP status must be an integer",
+                ):
+                    response_type(http_status=SpoofedHttpStatus(777), body=b"{}")
+                self.assertEqual(callbacks, [])
+                accepted = response_type(http_status=200, body=b"{}")
+                self.assertIs(type(accepted.http_status), int)
+
+    def test_exact_trading_adapter_revalidates_nested_status_after_construction(self):
+        # Even an exact frozen dataclass can be mutated by object.__setattr__.
+        # Never trust a past __post_init__ decision at post-SEND evidence time.
+        callbacks = []
+
+        class MutatedStatus(int):
+            def __lt__(self, _other):
+                callbacks.append("lt")
+                raise AssertionError("hostile comparator executed")
+
+            def __gt__(self, _other):
+                callbacks.append("gt")
+                raise AssertionError("hostile comparator executed")
+
+        typed = TradingWireResponse(http_status=200, body=b"{}")
+        object.__setattr__(typed, "http_status", MutatedStatus(777))
+        with self.assertRaisesRegex(
+            ProviderTransportError, "invalid trading HTTP response status",
+        ):
+            _exact_trading_response(typed)
+        self.assertEqual(callbacks, [])
+
+        for bad in (True, 99, 600, "200"):
+            with self.subTest(bad=repr(bad)):
+                object.__setattr__(typed, "http_status", bad)
+                with self.assertRaisesRegex(
+                    ProviderTransportError, "invalid trading HTTP response status",
+                ):
+                    _exact_trading_response(typed)
+
+        object.__setattr__(typed, "http_status", 503)
+        legitimate = _exact_trading_response(typed)
+        self.assertEqual(legitimate.http_status, 503)
+        self.assertEqual(legitimate.response_bytes, b"{}")
+
+    def test_trading_wire_subclass_cannot_impersonate_post_send_exact_status(self):
+        callbacks = []
+        class HostileTradingWireResponse(TradingWireResponse):
+            def __getattribute__(self, name):
+                if name in ("body", "http_status"):
+                    callbacks.append(name)
+                    raise AssertionError("untrusted virtual getter ran after send")
+                return object.__getattribute__(self, name)
+
+        forged = object.__new__(HostileTradingWireResponse)
+        with self.assertRaisesRegex(ProviderTransportError, "unsupported response contract"):
+            _exact_trading_response(forged)
+        self.assertEqual(callbacks, [])
+
+    def test_signed_http_error_context_is_detached_after_redacted_outcome(self):
+        secret = "SYNTHETIC_SIGNED_QUERY_OR_KEY_NO_LOGGING"
+        sensitive_url = "https://api.example.test/read?signature=" + secret
+        signed_read = AuthenticatedReadHttpRequest(
+            url=sensitive_url,
+            headers={"X-API-KEY": secret},
+            timeout_seconds=2,
+        )
+
+        class SensitiveStream(BytesIO):
+            def __init__(self, body, *, fail=False):
+                super().__init__(body)
+                self.fail = fail
+                self.read_sizes = []
+            def read(self, size=-1):
+                self.read_sizes.append(size)
+                if self.fail:
+                    raise OSError(secret)
+                return super().read(size)
+
+        for status, body, read_fail, expected, size_calls in (
+            (302, b"redirect-not-read", False, "redirect is prohibited", []),
+            (429, b"x" * 9, False, "invalid or oversized", [9]),
+            (500, b"x" * 3, True, "error body unavailable", [9]),
+        ):
+            with self.subTest(status=status):
+                client = UrllibJsonWireClient(max_response_bytes=8)
+                stream = SensitiveStream(body, fail=read_fail)
+                source_error = HTTPError(
+                    sensitive_url, status, "SECRET-BEARING HTTP ERROR",
+                    {"X-API-KEY": secret}, stream,
+                )
+                class FailingOpener:
+                    def open(self, *_args, **_kwargs):
+                        raise source_error
+                client._opener = FailingOpener()
+                with self.assertRaisesRegex(
+                    ProviderTransportError, expected,
+                ) as caught:
+                    client.send(signed_read)
+                self.assertEqual(stream.read_sizes, size_calls)
+                graph = [caught.exception]
+                visited = set()
+                while graph:
+                    current = graph.pop()
+                    if id(current) in visited:
+                        continue
+                    visited.add(id(current))
+                    self.assertNotIsInstance(current, HTTPError)
+                    self.assertNotIn(secret, str(current))
+                    self.assertNotIn(secret, repr(current))
+                    if current.__cause__ is not None:
+                        graph.append(current.__cause__)
+                    if current.__context__ is not None:
+                        graph.append(current.__context__)
+
+        class BrokenDnsOpener:
+            def open(self, *_args, **_kwargs):
+                raise URLError(secret)
+        client = UrllibJsonWireClient(max_response_bytes=8)
+        client._opener = BrokenDnsOpener()
+        with self.assertRaisesRegex(
+            ProviderTransportError, "transport response unavailable"
+        ) as caught:
+            client.send(signed_read)
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertIsNone(caught.exception.__context__)
+        self.assertNotIn(secret, repr(caught.exception))
+
+    def test_http_error_hostile_status_cannot_dispatch_comparison_or_leak_context(self):
+        observed = []
+        secret = "SYNTHETIC_HOSTILE_HTTP_STATUS_SECRET"
+        class HostileCode(int):
+            def __int__(self):
+                observed.append("int")
+                raise AssertionError(secret)
+            def __le__(self, _):
+                observed.append("le")
+                raise AssertionError(secret)
+        for status in (True, "503", HostileCode(503)):
+            with self.subTest(status=repr(status)):
+                client = UrllibJsonWireClient(max_response_bytes=8)
+                error = HTTPError(
+                    "https://api.example.test/?signature=" + secret,
+                    status, "synthetic", {}, BytesIO(b"ok"),
+                )
+                class FailingOpener:
+                    def open(self, *_args, **_kwargs):
+                        raise error
+                client._opener = FailingOpener()
+                with self.assertRaisesRegex(
+                    ProviderTransportError, "error status invalid",
+                ) as caught:
+                    client.send(self.request())
+                self.assertIsNone(caught.exception.__cause__)
+                self.assertIsNone(caught.exception.__context__)
+                self.assertNotIn(secret, repr(caught.exception))
+        self.assertEqual(observed, [])
+
+    def test_authenticated_http_error_keeps_exact_status_and_budget(self):
+        class Body(BytesIO):
+            def __init__(self):
+                super().__init__(b"12345678")
+                self.calls = []
+            def read(self, size=-1):
+                self.calls.append(size)
+                return super().read(size)
+        client = UrllibJsonWireClient(max_response_bytes=8)
+        body = Body()
+        class FailingOpener:
+            def open(self, request, *_args, **_kwargs):
+                raise HTTPError(request.full_url, 429, "rate limit", {}, body)
+        client._opener = FailingOpener()
+        exact = client.send(AuthenticatedReadHttpRequest(
+            url="https://api.example.test/read?signature=fake",
+            headers={"X-API-KEY": "synthetic"}, timeout_seconds=2,
+        ))
+        self.assertIs(type(exact), AuthenticatedReadWireResponse)
+        self.assertEqual(exact.http_status, 429)
+        self.assertEqual(exact.body, b"12345678")
+        self.assertEqual(body.calls, [9])
 
 
 if __name__ == "__main__":

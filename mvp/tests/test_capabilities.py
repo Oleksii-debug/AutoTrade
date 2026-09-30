@@ -11,7 +11,10 @@ from mvp.autotrade_mvp.capabilities import (
     derive_capability_snapshot as _derive_capability_snapshot,
 )
 
-from mvp.tests.capability_test_support import fresh_test_admission
+from mvp.tests.capability_test_support import (
+    fresh_test_admission,
+    register_fresh_test_snapshot,
+)
 
 
 NOW = datetime(2026, 9, 24, 16, 0, tzinfo=timezone.utc)
@@ -301,9 +304,9 @@ class CapabilityFoundationTests(unittest.TestCase):
         self.assertEqual(demo.provider_environment, "DEMO")
 
         registry = CapabilityRegistry()
-        registry.add(testnet)
-        registry.add(demo)
-        self.assertIs(
+        register_fresh_test_snapshot(registry, testnet)
+        register_fresh_test_snapshot(registry, demo)
+        self.assertEqual(
             registry.require_verified(
                 provider_id="BYBIT",
                 account_id="paper-account",
@@ -315,7 +318,7 @@ class CapabilityFoundationTests(unittest.TestCase):
             ),
             testnet,
         )
-        self.assertIs(
+        self.assertEqual(
             registry.require_verified(
                 provider_id="BYBIT",
                 account_id="paper-account",
@@ -374,8 +377,8 @@ class CapabilityFoundationTests(unittest.TestCase):
             ),
             observed_at=second_at,
         )
-        registry.add(first)
-        registry.add(second)
+        register_fresh_test_snapshot(registry, first)
+        register_fresh_test_snapshot(registry, second)
 
         self.assertEqual(
             registry.require_verified(

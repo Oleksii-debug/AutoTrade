@@ -30,6 +30,16 @@ OTHER_SOURCE_SHA = "b" * 40
 ROUNDINGS = (ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN)
 
 
+class HostileDecimal(Decimal):
+    """Decimal subclass whose virtual methods must never become strategy authority."""
+
+    def is_finite(self):
+        raise AssertionError("hostile Decimal.is_finite() was virtual-dispatched")
+
+    def as_tuple(self):
+        raise AssertionError("hostile Decimal.as_tuple() was virtual-dispatched")
+
+
 class CanonicalSimulationSessionTests(unittest.TestCase):
     def test_orphaned_bootstrap_state_cannot_start_another_send(self):
         with TemporaryDirectory() as directory:
@@ -255,6 +265,34 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
                             source_sha=value, now=NOW,
                         )
                     self.assertFalse(state_dir.exists())
+
+    def test_versioned_protocol_canonicalizes_equivalent_price_spellings(self):
+        observations = []
+        for prices in (["100.0", "101.0"], ["100", "101"]):
+            with TemporaryDirectory() as directory:
+                result = run_canonical_simulation(
+                    prices, directory, episode_id="canonical-spelling",
+                    source_sha=SOURCE_SHA, now=NOW,
+                )
+                observations.append((
+                    result["input_hash"],
+                    result["protocol_id"],
+                    result["session_id"],
+                ))
+        self.assertEqual(observations[0], observations[1])
+
+    def test_strategy_exact_boundary_precedes_every_result_path(self):
+        strategy = MovingAverageStrategy()
+        with self.assertRaisesRegex(ExactDecimalError, "finite Decimal"):
+            strategy.decide([HostileDecimal("100")], Decimal("1"))
+        with self.assertRaisesRegex(ExactDecimalError, "finite Decimal"):
+            strategy.decide([Decimal("100")], HostileDecimal("1"))
+        with self.assertRaisesRegex(ExactDecimalError, "maximum scale"):
+            strategy.decide([Decimal("1e-257")], Decimal("1"))
+        with self.assertRaisesRegex(ExactDecimalError, "maximum integer digits"):
+            strategy.decide([Decimal("100")], Decimal("1e256"))
+        with self.assertRaisesRegex(ValueError, "At least one price"):
+            strategy.decide([], Decimal("1"))
 
     def test_strategy_decisions_are_identical_across_hostile_decimal_contexts(self):
         cases = (

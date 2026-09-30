@@ -23,6 +23,7 @@ from mvp.autotrade_mvp.binance_spot import parse_account_trades
 from mvp.autotrade_mvp.kraken_spot import parse_trade_history
 from mvp.autotrade_mvp.dispatch import (
     GuardedDispatcher,
+    PreparedSubmissionAuthorityCheck,
     load_submission_response_binding,
     stable_client_order_id,
 )
@@ -163,6 +164,32 @@ def alpaca_trade_handle(*, environment="PAPER", account_id="acct-alpaca"):
         purpose="TRADE",
         generation=1,
     )
+
+
+def prepared_allow_all():
+    return PreparedSubmissionAuthorityCheck(
+        lambda _intent_hash, _now, _scope, _scope_hash: (True, "allowed")
+    )
+
+
+def financial_submission_scope(
+    *,
+    provider,
+    account_id,
+    environment,
+    request,
+    provider_environment=None,
+    **extra,
+):
+    scope = {
+        "provider": provider,
+        "account_id": account_id,
+        "environment": environment,
+        "provider_environment": provider_environment or environment,
+        "prepared_request_sha256": payload_digest(dict(request)),
+    }
+    scope.update(extra)
+    return scope
 
 
 ALPACA_NOW = datetime(2026, 9, 25, 10, 0, tzinfo=timezone.utc)
@@ -1264,16 +1291,18 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 provider="WHITEBIT",
                 request=actual.to_guarded_dispatch_request(),
                 now="2026-09-25T12:00:00Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=prepared_allow_all(),
                 transport_send=transport,
                 sender_check=lambda _owner, _epoch: None,
                 final_barrier_clock=lambda: "2026-09-25T12:00:01Z",
-                submission_scope={
-                    "capability_snapshot_id": "wb-cap-1",
-                    "provider": "WHITEBIT",
-                    "account_id": "acct-wb",
-                    "environment": "LIVE",
-                },
+                submission_scope=financial_submission_scope(
+                    provider="WHITEBIT",
+                    account_id="acct-wb",
+                    environment="LIVE",
+                    provider_environment="LIVE",
+                    request=actual.to_guarded_dispatch_request(),
+                    capability_snapshot_id="wb-cap-1",
+                ),
             )
             self.assertEqual(result.status, "UNKNOWN")
             self.assertEqual(result.reason, "transport_result_ambiguous")
@@ -1286,15 +1315,17 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 provider="WHITEBIT",
                 request=actual.to_guarded_dispatch_request(),
                 now="2026-09-25T12:00:02Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=prepared_allow_all(),
                 transport_send=transport,
                 sender_check=lambda _owner, _epoch: None,
-                submission_scope={
-                    "capability_snapshot_id": "wb-cap-1",
-                    "provider": "WHITEBIT",
-                    "account_id": "acct-wb",
-                    "environment": "LIVE",
-                },
+                submission_scope=financial_submission_scope(
+                    provider="WHITEBIT",
+                    account_id="acct-wb",
+                    environment="LIVE",
+                    provider_environment="LIVE",
+                    request=actual.to_guarded_dispatch_request(),
+                    capability_snapshot_id="wb-cap-1",
+                ),
             )
             self.assertEqual(repeated.status, "UNKNOWN")
             self.assertEqual(events.count("wire"), 1)
@@ -1435,16 +1466,18 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                     "provider": "WHITEBIT",
                     "request": actual.to_guarded_dispatch_request(),
                     "now": "2026-09-25T12:00:00Z",
-                    "authority_check": lambda _hash, _now: (True, "allowed"),
+                    "authority_check": prepared_allow_all(),
                     "transport_send": transport,
                     "sender_check": lambda _owner, _epoch: None,
                     "final_barrier_clock": lambda: "2026-09-25T12:00:01Z",
-                    "submission_scope": {
-                        "capability_snapshot_id": "wb-cap-1",
-                        "provider": "WHITEBIT",
-                        "account_id": "acct-wb",
-                        "environment": "LIVE",
-                    },
+                    "submission_scope": financial_submission_scope(
+                        provider="WHITEBIT",
+                        account_id="acct-wb",
+                        environment="LIVE",
+                        provider_environment="LIVE",
+                        request=actual.to_guarded_dispatch_request(),
+                        capability_snapshot_id="wb-cap-1",
+                    ),
                 }
                 result = dispatcher.dispatch(**kwargs)
                 self.assertEqual(result.status, "UNKNOWN")
@@ -2407,22 +2440,27 @@ with open(path, "a+b") as stream:
                 max_length=36,
                 client_id_format="UUID",
             )
+            request = kraken_prepared_request(client_id)
             kwargs = {
                 "attempt_id": "22222222-2222-4222-8222-222222222222",
                 "intent_id": intent_id,
                 "intent_hash": "sha256:" + "2" * 64,
                 "provider": "KRAKEN",
-                "request": kraken_prepared_request(client_id),
+                "request": request,
                 "now": now,
-                "authority_check": lambda _provider, _environment: (
-                    True,
-                    "allowed",
-                ),
+                "authority_check": prepared_allow_all(),
                 "transport_send": transport,
                 "sender_check": lambda _owner, _epoch: None,
                 "client_id_max_length": 36,
                 "client_id_format": "UUID",
                 "final_barrier_clock": lambda: now,
+                "submission_scope": financial_submission_scope(
+                    provider="KRAKEN",
+                    account_id="acct-kraken",
+                    environment="LIVE",
+                    provider_environment="LIVE",
+                    request=request,
+                ),
             }
 
             outcome = dispatcher.dispatch(**kwargs)
@@ -2502,19 +2540,27 @@ with open(path, "a+b") as stream:
                 max_length=36,
                 client_id_format="UUID",
             )
+            request = kraken_prepared_request(client_id)
             outcome = dispatcher.dispatch(
                 attempt_id="11111111-1111-4111-8111-111111111111",
                 intent_id=intent_id,
                 intent_hash="sha256:" + "1" * 64,
                 provider="KRAKEN",
-                request=kraken_prepared_request(client_id),
+                request=request,
                 now=now,
-                authority_check=lambda _provider, _environment: (True, "allowed"),
+                authority_check=prepared_allow_all(),
                 transport_send=transport,
                 sender_check=lambda _owner, _epoch: None,
                 client_id_max_length=36,
                 client_id_format="UUID",
                 final_barrier_clock=lambda: now,
+                submission_scope=financial_submission_scope(
+                    provider="KRAKEN",
+                    account_id="acct-kraken",
+                    environment="LIVE",
+                    provider_environment="LIVE",
+                    request=request,
+                ),
             )
 
             self.assertEqual(outcome.status, "UNKNOWN")
@@ -2808,16 +2854,18 @@ class ProviderTransportTests(unittest.TestCase):
                 provider="BINANCE",
                 request=prepared_request(client_id),
                 now="2026-09-25T10:00:00Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=prepared_allow_all(),
                 transport_send=transport,
                 sender_check=lambda _owner, _epoch: None,
                 final_barrier_clock=lambda: "2026-09-25T10:00:01Z",
-                submission_scope={
-                    "capability_snapshot_id": "cap-1",
-                    "provider": "BINANCE",
-                    "account_id": "acct-1",
-                    "environment": "PAPER",
-                },
+                submission_scope=financial_submission_scope(
+                    provider="BINANCE",
+                    account_id="acct-1",
+                    environment="PAPER",
+                    provider_environment="PAPER",
+                    request=prepared_request(client_id),
+                    capability_snapshot_id="cap-1",
+                ),
             )
             self.assertEqual(result.status, "SENT")
             self.assertEqual(result.response["code"], -1013)
@@ -2876,16 +2924,18 @@ class ProviderTransportTests(unittest.TestCase):
                 provider="BINANCE",
                 request=request,
                 now="2026-09-25T10:00:00Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=prepared_allow_all(),
                 transport_send=transport,
                 sender_check=lambda _owner, _epoch: None,
                 final_barrier_clock=lambda: "2026-09-25T10:00:01Z",
-                submission_scope={
-                    "capability_snapshot_id": "cap-1",
-                    "provider": "BINANCE",
-                    "account_id": "acct-1",
-                    "environment": "PAPER",
-                },
+                submission_scope=financial_submission_scope(
+                    provider="BINANCE",
+                    account_id="acct-1",
+                    environment="PAPER",
+                    provider_environment="PAPER",
+                    request=request,
+                    capability_snapshot_id="cap-1",
+                ),
             )
             self.assertEqual(result.status, "UNKNOWN")
             self.assertEqual(result.reason, "transport_result_ambiguous")
@@ -2916,15 +2966,17 @@ class ProviderTransportTests(unittest.TestCase):
                 provider="BINANCE",
                 request=request,
                 now="2026-09-25T10:00:02Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=prepared_allow_all(),
                 transport_send=transport,
                 sender_check=lambda _owner, _epoch: None,
-                submission_scope={
-                    "capability_snapshot_id": "cap-1",
-                    "provider": "BINANCE",
-                    "account_id": "acct-1",
-                    "environment": "PAPER",
-                },
+                submission_scope=financial_submission_scope(
+                    provider="BINANCE",
+                    account_id="acct-1",
+                    environment="PAPER",
+                    provider_environment="PAPER",
+                    request=request,
+                    capability_snapshot_id="cap-1",
+                ),
             )
             self.assertEqual(repeated.status, "UNKNOWN")
             self.assertEqual(events.count("wire"), 1)
@@ -2964,9 +3016,17 @@ class ProviderTransportTests(unittest.TestCase):
                 provider="BINANCE",
                 request=prepared_request(client_id),
                 now="2026-09-25T10:00:00Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=prepared_allow_all(),
                 transport_send=transport,
                 sender_check=lambda _owner, _epoch: None,
+                submission_scope=financial_submission_scope(
+                    provider="BINANCE",
+                    account_id="acct-1",
+                    environment="PAPER",
+                    provider_environment="PAPER",
+                    request=prepared_request(client_id),
+                    capability_snapshot_id="cap-1",
+                ),
             )
             self.assertEqual(result.status, "BLOCKED")
             self.assertEqual(result.reason, "transport_failed_before_send")

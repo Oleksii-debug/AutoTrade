@@ -775,6 +775,71 @@ def observe_submission_json_response(
     if provider == "BYBIT" or provider_environment is not None:
         expected_scope["provider_environment"] = provider_env
     actual_scope = _thaw_json(response_binding.submission_scope)
+    if not isinstance(actual_scope, dict):
+        raise ProviderCoreError("durable submission scope must be an object")
+
+    provider_id_context = actual_scope.pop("provider_id", None)
+    provider_alias_context = actual_scope.pop("provider", None)
+    account_context = actual_scope.pop("account_id", None)
+    environment_context = actual_scope.pop("environment", None)
+    context_present = any(
+        value is not None
+        for value in (
+            provider_id_context,
+            provider_alias_context,
+            account_context,
+            environment_context,
+        )
+    )
+    if context_present:
+        if provider_id_context is None and provider_alias_context is None:
+            raise ProviderCoreError(
+                "durable submission authority context requires provider identity"
+            )
+        if account_context is None or environment_context is None:
+            raise ProviderCoreError(
+                "durable submission authority context is incomplete"
+            )
+        if (
+            provider_id_context is not None
+            and _text(provider_id_context, "submission_scope.provider_id").upper()
+            != provider
+        ):
+            raise ProviderCoreError(
+                "durable submission authority provider mismatch"
+            )
+        if (
+            provider_alias_context is not None
+            and _text(provider_alias_context, "submission_scope.provider").upper()
+            != provider
+        ):
+            raise ProviderCoreError(
+                "durable submission authority provider mismatch"
+            )
+        if (
+            provider_id_context is not None
+            and provider_alias_context is not None
+            and _text(provider_id_context, "submission_scope.provider_id").upper()
+            != _text(provider_alias_context, "submission_scope.provider").upper()
+        ):
+            raise ProviderCoreError(
+                "durable submission authority provider identity conflicts"
+            )
+        if (
+            _text(account_context, "submission_scope.account_id")
+            != response_binding.account_id
+        ):
+            raise ProviderCoreError(
+                "durable submission authority account mismatch"
+            )
+        if (
+            _text(environment_context, "submission_scope.environment").upper()
+            != response_binding.environment
+        ):
+            raise ProviderCoreError(
+                "durable submission authority environment mismatch"
+            )
+
     if actual_scope != expected_scope:
         raise ProviderCoreError(
             "durable submission scope does not match prepared provider request"

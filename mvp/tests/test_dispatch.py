@@ -6,14 +6,32 @@ from mvp.autotrade_mvp.dispatch import (
     DispatchBlocked,
     ExactJsonTransportResponse,
     GuardedDispatcher,
+    PreparedSubmissionAuthorityCheck,
     SubmissionResponseBinding,
     load_submission_response_binding,
     stable_client_order_id,
 )
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
 from mvp.tests.test_reconciliation_journal import reconciliation
 from mvp.autotrade_mvp.recovery import RecoveryController
+
+
+def prepared_allow_all():
+    return PreparedSubmissionAuthorityCheck(
+        lambda _intent, _now, _scope, _scope_hash: (True, "allowed")
+    )
+
+
+def financial_submission_scope(*, provider, environment, account_id, request):
+    return {
+        "provider": provider,
+        "provider_environment": "MAINNET",
+        "account_id": account_id,
+        "environment": environment,
+        "prepared_request_sha256": payload_digest(dict(request)),
+    }
+
 
 
 class SimulatedProcessDeath(BaseException):
@@ -154,9 +172,6 @@ class DispatchTests(unittest.TestCase):
             store = self.store(directory)
             sends = []
 
-            def authority(intent_hash, now):
-                return True, "allowed"
-
             def transport(client_id, request, final_guard):
                 final_guard()
                 sends.append(client_id)
@@ -169,16 +184,23 @@ class DispatchTests(unittest.TestCase):
                 store, environment="LIVE", account_id="acct", owner_token="live-owner"
             )
             for dispatcher in (paper, live):
+                request = {}
                 outcome = dispatcher.dispatch(
                     attempt_id="same-attempt",
                     intent_id="same-intent",
                     intent_hash="hash",
                     provider="provider",
-                    request={},
+                    request=request,
                     now="2026-09-24T18:00:00Z",
-                    authority_check=authority,
+                    authority_check=prepared_allow_all(),
                     transport_send=transport,
                     sender_check=lambda _owner, _epoch: None,
+                    submission_scope=financial_submission_scope(
+                        provider="provider",
+                        environment=dispatcher.environment,
+                        account_id="acct",
+                        request=request,
+                    ),
                 )
                 self.assertEqual(outcome.status, "SENT")
 
@@ -1069,6 +1091,199 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(result.reason, "authority_check_invalid_reason")
             self.assertEqual(outbound, 0)
 
+    def test_paper_and_live_reject_legacy_authority_before_submission_sending(self):
+        for environment in ("PAPER", "LIVE"):
+            with self.subTest(environment=environment), TemporaryDirectory() as directory:
+                store = self.store(directory)
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment=environment,
+                    account_id="acct",
+                    owner_token="owner",
+                )
+                transport_calls = 0
+                request = {"side": "BUY"}
+                scope = financial_submission_scope(
+                    provider="sim",
+                    environment=environment,
+                    account_id="acct",
+                    request=request,
+                )
+
+                def transport(_client_id, _request, _final_guard):
+                    nonlocal transport_calls
+                    transport_calls += 1
+                    raise AssertionError("legacy financial authority must block before transport")
+
+                result = dispatcher.dispatch(
+                    attempt_id=f"legacy-{environment.lower()}",
+                    intent_id="i1",
+                    intent_hash="h1",
+                    provider="sim",
+                    request=request,
+                    now="2026-09-24T18:00:00Z",
+                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    transport_send=transport,
+                    sender_check=lambda _owner, _epoch: None,
+                    submission_scope=scope,
+                )
+                self.assertEqual(result.status, "BLOCKED")
+                self.assertEqual(result.reason, "prepared_scope_authority_required")
+                self.assertEqual(transport_calls, 0)
+                events = store.load_events(
+                    "submission_attempt",
+                    dispatcher._aggregate_id(f"legacy-{environment.lower()}"),
+                )
+                self.assertEqual(
+                    [event["event_type"] for event in events],
+                    ["SubmissionPrepared", "SubmissionBlocked"],
+                )
+
+    def test_financial_scope_is_cross_bound_to_concrete_send_tuple(self):
+        cases = (
+            (
+                "provider",
+                lambda scope: scope.__setitem__("provider", "other-provider"),
+                "submission_scope_provider_mismatch",
+            ),
+            (
+                "account",
+                lambda scope: scope.__setitem__("account_id", "other-account"),
+                "submission_scope_account_mismatch",
+            ),
+            (
+                "environment",
+                lambda scope: scope.__setitem__("environment", "LIVE"),
+                "submission_scope_environment_mismatch",
+            ),
+            (
+                "request",
+                lambda scope: scope.__setitem__(
+                    "prepared_request_sha256",
+                    "sha256:" + "0" * 64,
+                ),
+                "submission_scope_request_digest_mismatch",
+            ),
+            (
+                "missing-provider",
+                lambda scope: scope.pop("provider"),
+                "submission_scope_provider_required",
+            ),
+            (
+                "missing-request",
+                lambda scope: scope.pop("prepared_request_sha256"),
+                "submission_scope_request_digest_required",
+            ),
+        )
+        for name, mutate, expected_reason in cases:
+            with self.subTest(case=name), TemporaryDirectory() as directory:
+                store = self.store(directory)
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment="PAPER",
+                    account_id="acct",
+                    owner_token="owner",
+                )
+                request = {"side": "BUY", "quantity": "1"}
+                scope = financial_submission_scope(
+                    provider="sim",
+                    environment="PAPER",
+                    account_id="acct",
+                    request=request,
+                )
+                mutate(scope)
+                transport_calls = 0
+
+                def transport(_client_id, _request, _final_guard):
+                    nonlocal transport_calls
+                    transport_calls += 1
+                    raise AssertionError("mismatched financial scope must not reach transport")
+
+                result = dispatcher.dispatch(
+                    attempt_id=f"tuple-{name}",
+                    intent_id=f"intent-{name}",
+                    intent_hash=f"hash-{name}",
+                    provider="sim",
+                    request=request,
+                    now="2026-09-24T18:00:00Z",
+                    authority_check=prepared_allow_all(),
+                    transport_send=transport,
+                    sender_check=lambda _owner, _epoch: None,
+                    submission_scope=scope,
+                )
+                self.assertEqual(result.status, "BLOCKED")
+                self.assertEqual(result.reason, expected_reason)
+                self.assertEqual(transport_calls, 0)
+                events = store.load_events(
+                    "submission_attempt",
+                    dispatcher._aggregate_id(f"tuple-{name}"),
+                )
+                self.assertEqual(
+                    [event["event_type"] for event in events],
+                    ["SubmissionPrepared", "SubmissionBlocked"],
+                )
+
+    def test_matching_financial_scope_reaches_both_authority_barriers(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="acct",
+                owner_token="owner",
+            )
+            request = {"side": "BUY", "quantity": "1"}
+            scope = financial_submission_scope(
+                provider="sim",
+                environment="PAPER",
+                account_id="acct",
+                request=request,
+            )
+            checks = []
+            outbound = 0
+
+            def authority(_intent_hash, _now, prepared_scope, prepared_scope_hash):
+                checks.append((dict(prepared_scope), prepared_scope_hash))
+                return True, "allowed"
+
+            def transport(_client_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return {"provider_order_id": "p-1"}
+
+            result = dispatcher.dispatch(
+                attempt_id="exact-financial-scope",
+                intent_id="i1",
+                intent_hash="h1",
+                provider="sim",
+                request=request,
+                now="2026-09-24T18:00:00Z",
+                authority_check=PreparedSubmissionAuthorityCheck(authority),
+                transport_send=transport,
+                sender_check=lambda _owner, _epoch: None,
+                submission_scope=scope,
+            )
+            self.assertEqual(result.status, "SENT")
+            self.assertEqual(outbound, 1)
+            self.assertEqual(len(checks), 2)
+            self.assertEqual(checks[0], checks[1])
+            self.assertEqual(checks[0][0], scope)
+            self.assertEqual(checks[0][1], payload_digest(scope))
+            events = store.load_events(
+                "submission_attempt",
+                dispatcher._aggregate_id("exact-financial-scope"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionSent"],
+            )
+            self.assertEqual(events[0]["payload"]["submission_scope"], scope)
+            self.assertEqual(
+                events[0]["payload"]["submission_scope_hash"],
+                payload_digest(scope),
+            )
+
     def test_paper_and_live_require_sender_fence_before_outbound(self):
         for environment in ("PAPER", "LIVE"):
             with self.subTest(environment=environment), TemporaryDirectory() as directory:
@@ -1088,15 +1303,22 @@ class DispatchTests(unittest.TestCase):
                     outbound += 1
                     return {"provider_order_id": "must-not-happen"}
 
+                request = {}
                 result = dispatcher.dispatch(
                     attempt_id="fence-required",
                     intent_id="i1",
                     intent_hash="h1",
                     provider="sim",
-                    request={},
+                    request=request,
                     now="2026-09-24T18:00:00Z",
-                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    authority_check=prepared_allow_all(),
                     transport_send=transport,
+                    submission_scope=financial_submission_scope(
+                        provider="sim",
+                        environment=environment,
+                        account_id="acct",
+                        request=request,
+                    ),
                 )
                 self.assertEqual(result.status, "BLOCKED")
                 self.assertEqual(result.reason, "sender_fence_required")
@@ -1139,16 +1361,23 @@ class DispatchTests(unittest.TestCase):
                 outbound += 1
                 return {"provider_order_id": "must-not-happen"}
 
+            request = {}
             result = dispatcher.dispatch(
                 attempt_id="fenced-a1",
                 intent_id="i1",
                 intent_hash="h1",
                 provider="sim",
-                request={},
+                request=request,
                 now="2026-09-24T18:00:00Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=prepared_allow_all(),
                 transport_send=transport,
                 sender_check=recovery.validate_sender,
+                submission_scope=financial_submission_scope(
+                    provider="sim",
+                    environment="PAPER",
+                    account_id="acct",
+                    request=request,
+                ),
             )
             self.assertEqual(result.status, "BLOCKED")
             self.assertEqual(result.reason, "sender_fence_rejected:PermissionError")
@@ -1178,16 +1407,23 @@ class DispatchTests(unittest.TestCase):
                 outbound += 1
                 return {"provider_order_id": "p-1"}
 
+            request = {}
             result = dispatcher.dispatch(
                 attempt_id="paper-current-owner",
                 intent_id="i1",
                 intent_hash="h1",
                 provider="sim",
-                request={},
+                request=request,
                 now="2026-09-24T18:00:00Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=prepared_allow_all(),
                 transport_send=transport,
                 sender_check=recovery.validate_sender,
+                submission_scope=financial_submission_scope(
+                    provider="sim",
+                    environment="PAPER",
+                    account_id="acct",
+                    request=request,
+                ),
             )
             self.assertEqual(result.status, "SENT")
             self.assertEqual(outbound, 1)

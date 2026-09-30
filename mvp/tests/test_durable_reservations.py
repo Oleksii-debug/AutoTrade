@@ -6,7 +6,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from mvp.autotrade_mvp.dispatch import GuardedDispatcher
+from mvp.autotrade_mvp.dispatch import (
+    GuardedDispatcher,
+    PreparedSubmissionAuthorityCheck,
+)
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.reconciliation import (
     CoverageSurfaceEvidence,
@@ -125,16 +128,29 @@ class DurableReservationBookTests(unittest.TestCase):
             self.assertTrue(owner_token)
             self.assertEqual(owner_epoch, 1)
 
+        request = {"instrument": "TEST", "quantity": "1"}
         outcome = dispatcher.dispatch(
             attempt_id=attempt_id,
             intent_id=intent_id,
             intent_hash="sha256:" + "1" * 64,
             provider=provider,
-            request={"instrument": "TEST", "quantity": "1"},
+            request=request,
             now="2026-09-25T00:00:00Z",
-            authority_check=lambda intent_hash, now: (True, "allowed"),
+            authority_check=PreparedSubmissionAuthorityCheck(
+                lambda _intent_hash, _now, _scope, _scope_hash: (
+                    True,
+                    "allowed",
+                )
+            ),
             transport_send=ambiguous_transport,
             sender_check=sender_check,
+            submission_scope={
+                "provider": provider,
+                "account_id": "paper-account",
+                "environment": "PAPER",
+                "provider_environment": "PAPER",
+                "prepared_request_sha256": payload_digest(request),
+            },
         )
         self.assertEqual(outcome.status, "UNKNOWN")
         return outcome

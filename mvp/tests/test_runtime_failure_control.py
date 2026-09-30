@@ -5,8 +5,11 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from mvp.autotrade_mvp.dispatch import GuardedDispatcher
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.dispatch import (
+    GuardedDispatcher,
+    PreparedSubmissionAuthorityCheck,
+)
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.reconciliation import SubmissionResolution
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
 from mvp.tests.test_reconciliation_journal import reconciliation
@@ -16,6 +19,22 @@ from mvp.autotrade_mvp.recovery import (
     RecoveryController,
     SendPhase,
 )
+
+
+def prepared_allow_all():
+    return PreparedSubmissionAuthorityCheck(
+        lambda _intent_hash, _now, _scope, _scope_hash: (True, "allowed")
+    )
+
+
+def bybit_scope(*, account_id, request, provider_environment):
+    return {
+        "provider": "BYBIT",
+        "account_id": account_id,
+        "environment": "PAPER",
+        "provider_environment": provider_environment,
+        "prepared_request_sha256": payload_digest(request),
+    }
 
 
 class DurableReconciliationAuthorityTests(unittest.TestCase):
@@ -169,17 +188,22 @@ class DurableReconciliationAuthorityTests(unittest.TestCase):
                 final_guard()
                 raise TimeoutError("provider outcome is ambiguous")
 
+            request = {"symbol": "BTCUSDT"}
             outcome = dispatcher.dispatch(
                 attempt_id="bybit-unknown-1",
                 intent_id="bybit-intent-1",
                 intent_hash="sha256:intent",
                 provider="BYBIT",
-                request={"symbol": "BTCUSDT"},
+                request=request,
                 now="2026-09-24T18:00:00Z",
-                authority_check=lambda _intent_hash, _now: (True, "allowed"),
+                authority_check=prepared_allow_all(),
                 transport_send=transport,
                 sender_check=lambda _owner, _epoch: None,
-                submission_scope={"provider_environment": "TESTNET"},
+                submission_scope=bybit_scope(
+                    account_id="bybit-account",
+                    request=request,
+                    provider_environment="TESTNET",
+                ),
             )
             self.assertEqual(outcome.status, "UNKNOWN")
 
@@ -257,7 +281,7 @@ class DurableReconciliationAuthorityTests(unittest.TestCase):
             self.assertTrue(restarted.provider_reconciled)
             self.assertEqual(restarted.state, HostState.READY)
 
-    def test_legacy_bybit_unknown_without_provider_domain_stays_opaque(self):
+    def test_current_bybit_dispatch_rejects_legacy_scope_before_wire(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"
             store = JournalStore(path)
@@ -273,10 +297,13 @@ class DurableReconciliationAuthorityTests(unittest.TestCase):
                 owner_token=owner_one.owner_id,
                 owner_epoch=owner_one.epoch,
             )
+            wire_calls = 0
 
             def transport(_client_id, _request, final_guard):
+                nonlocal wire_calls
                 final_guard()
-                raise TimeoutError("provider outcome is ambiguous")
+                wire_calls += 1
+                raise AssertionError("legacy financial scope must never reach wire")
 
             outcome = dispatcher.dispatch(
                 attempt_id="legacy-bybit-unknown",
@@ -285,30 +312,19 @@ class DurableReconciliationAuthorityTests(unittest.TestCase):
                 provider="BYBIT",
                 request={"symbol": "BTCUSDT"},
                 now="2026-09-24T18:00:00Z",
-                authority_check=lambda _intent_hash, _now: (True, "allowed"),
+                authority_check=prepared_allow_all(),
                 transport_send=transport,
                 sender_check=lambda _owner, _epoch: None,
                 submission_scope={},
             )
-            self.assertEqual(outcome.status, "UNKNOWN")
-
-            restarted = RecoveryController(
-                owner_store=JournalStore(path),
-                owner_scope="PAPER:legacy-bybit-account",
+            self.assertEqual(outcome.status, "BLOCKED")
+            self.assertEqual(outcome.reason, "submission_scope_provider_required")
+            self.assertEqual(wire_calls, 0)
+            events = store.load_events_by_aggregate_type("submission_attempt")
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionBlocked"],
             )
-            restarted.start("host-b")
-            opaque = [
-                item
-                for item in restarted.unresolved_attempts
-                if item.startswith("legacy_submission_domain:")
-            ]
-            self.assertEqual(len(opaque), 1)
-            self.assertIn(
-                "legacy_submission_provider_environment_unrecoverable",
-                restarted.reason_codes,
-            )
-            self.assertFalse(restarted.provider_reconciled)
-            self.assertEqual(restarted.state, HostState.DEGRADED)
 
     def test_mixed_domain_recovered_unknowns_are_resolved_all_or_nothing(self):
         with TemporaryDirectory() as directory:
@@ -336,22 +352,22 @@ class DurableReconciliationAuthorityTests(unittest.TestCase):
                 ("testnet", "TESTNET"),
                 ("demo", "DEMO"),
             ):
+                request = {"symbol": "BTCUSDT", "domain": suffix}
                 outcomes[suffix] = dispatcher.dispatch(
                     attempt_id=f"mixed-{suffix}",
                     intent_id=f"intent-{suffix}",
                     intent_hash=f"sha256:{suffix}",
                     provider="BYBIT",
-                    request={"symbol": "BTCUSDT", "domain": suffix},
+                    request=request,
                     now="2026-09-24T18:00:00Z",
-                    authority_check=lambda _intent_hash, _now: (
-                        True,
-                        "allowed",
-                    ),
+                    authority_check=prepared_allow_all(),
                     transport_send=transport,
                     sender_check=lambda _owner, _epoch: None,
-                    submission_scope={
-                        "provider_environment": provider_environment
-                    },
+                    submission_scope=bybit_scope(
+                        account_id="bybit-mixed-account",
+                        request=request,
+                        provider_environment=provider_environment,
+                    ),
                 )
                 self.assertEqual(outcomes[suffix].status, "UNKNOWN")
 

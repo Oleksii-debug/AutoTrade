@@ -7,8 +7,12 @@ from mvp.autotrade_mvp.bybit_v5 import (
     guarded_order_projection,
     prepare_order_submission,
 )
-from mvp.autotrade_mvp.dispatch import GuardedDispatcher, stable_client_order_id
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.dispatch import (
+    GuardedDispatcher,
+    PreparedSubmissionAuthorityCheck,
+    stable_client_order_id,
+)
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_transport import (
     BYBIT_V5_ENDPOINT_POLICIES,
     BybitV5AuthenticatedReadSigner,
@@ -678,7 +682,9 @@ class BybitV5SharedTransportTests(unittest.TestCase):
                 provider="BYBIT",
                 request=projected,
                 now="2026-09-25T10:00:00Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=PreparedSubmissionAuthorityCheck(
+                    lambda _hash, _now, _scope, _scope_hash: (True, "allowed")
+                ),
                 transport_send=transport,
                 sender_check=lambda _owner, _epoch: None,
                 final_barrier_clock=lambda: "2026-09-25T10:00:01Z",
@@ -688,6 +694,7 @@ class BybitV5SharedTransportTests(unittest.TestCase):
                     "account_id": "bybit-account",
                     "environment": "PAPER",
                     "provider_environment": "TESTNET",
+                    "prepared_request_sha256": payload_digest(dict(projected)),
                 },
             )
             self.assertEqual(result.status, "UNKNOWN")
@@ -701,7 +708,9 @@ class BybitV5SharedTransportTests(unittest.TestCase):
                 provider="BYBIT",
                 request=projected,
                 now="2026-09-25T10:00:02Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=PreparedSubmissionAuthorityCheck(
+                    lambda _hash, _now, _scope, _scope_hash: (True, "allowed")
+                ),
                 transport_send=transport,
                 sender_check=lambda _owner, _epoch: None,
                 submission_scope={
@@ -710,6 +719,7 @@ class BybitV5SharedTransportTests(unittest.TestCase):
                     "account_id": "bybit-account",
                     "environment": "PAPER",
                     "provider_environment": "TESTNET",
+                    "prepared_request_sha256": payload_digest(dict(projected)),
                 },
             )
             self.assertEqual(repeated.status, "UNKNOWN")

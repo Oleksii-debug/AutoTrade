@@ -19,6 +19,7 @@ from .allocation import (
     revalidate_evidence_bound_allocation,
 )
 from .durable_reservations import DurableReservationBook
+from .dispatch import PreparedSubmissionAuthorityCheck
 from .persistence import JournalStore, canonical_json, payload_digest
 from .provider_core import ProviderCoreError, normalize_provider_environment
 from .reconciliation_journal import load_account_resource_availability_evidence
@@ -678,6 +679,28 @@ def _dispatch_provider_domain(
         name="submission_scope",
     )
     return provider, provider_environment
+
+
+def _dispatch_prepared_request_sha256(
+    submission_scope: Mapping[str, Any] | None,
+) -> str:
+    """Return the exact provider-request digest bound into financial dispatch scope."""
+
+    if submission_scope is None or not isinstance(submission_scope, Mapping):
+        raise ValueError("submission_scope must be a mapping")
+    value = submission_scope.get("prepared_request_sha256")
+    if not isinstance(value, str) or not value.startswith("sha256:"):
+        raise ValueError(
+            "submission_scope prepared_request_sha256 must be a canonical SHA-256 digest"
+        )
+    digest = value.removeprefix("sha256:")
+    if len(digest) != 64 or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
+        raise ValueError(
+            "submission_scope prepared_request_sha256 must be a canonical SHA-256 digest"
+        )
+    return value
 
 
 @dataclass(frozen=True)
@@ -4039,8 +4062,8 @@ class AuthorityService:
         action: str,
         capability_snapshot_id: str | None = None,
         submission_scope: Mapping[str, Any] | None = None,
-    ) -> Callable[[str, str], tuple[bool, str]]:
-        """Bind admitted scope and immutable submission domain to final send."""
+    ) -> PreparedSubmissionAuthorityCheck:
+        """Bind financial authority to the exact dispatcher-prepared scope identity."""
         aid = _text(admission_id, name="admission_id")
         account = _text(account_id, name="account_id")
         env = _text(environment, name="environment").upper()
@@ -4051,8 +4074,12 @@ class AuthorityService:
             if capability_snapshot_id is None
             else _text(capability_snapshot_id, name="capability_snapshot_id")
         )
+        expected_submission_scope_hash: str | None = None
         if submission_scope is None:
-            frozen_submission_scope = None
+            if env in {"PAPER", "LIVE"}:
+                raise ValueError(
+                    "financial dispatch guard requires exact submission_scope"
+                )
         else:
             if not isinstance(submission_scope, Mapping):
                 raise ValueError("submission_scope must be a mapping")
@@ -4064,16 +4091,78 @@ class AuthorityService:
                 raise ValueError(
                     "submission_scope must be canonical JSON"
                 ) from error
-            _dispatch_provider_domain(
-                canonical_submission_scope,
-                account_id=account,
-                environment=env,
+            dispatch_provider, dispatch_provider_environment = (
+                _dispatch_provider_domain(
+                    canonical_submission_scope,
+                    account_id=account,
+                    environment=env,
+                )
             )
-            frozen_submission_scope = MappingProxyType(
-                canonical_submission_scope
+            if env in {"PAPER", "LIVE"}:
+                if (
+                    dispatch_provider is None
+                    or dispatch_provider_environment is None
+                ):
+                    raise ValueError(
+                        "financial dispatch submission_scope requires provider domain"
+                    )
+                _dispatch_prepared_request_sha256(
+                    canonical_submission_scope
+                )
+            expected_submission_scope_hash = (
+                "sha256:"
+                + sha256(
+                    canonical_json(canonical_submission_scope).encode("utf-8")
+                ).hexdigest()
             )
 
-        def check(intent_hash: str, now: str) -> tuple[bool, str]:
+        def check(
+            intent_hash: str,
+            now: str,
+            prepared_submission_scope: Mapping[str, Any],
+            prepared_submission_scope_hash: str,
+        ) -> tuple[bool, str]:
+            if not isinstance(prepared_submission_scope, Mapping):
+                return False, "submission_scope_invalid"
+            try:
+                canonical_prepared_scope = json.loads(
+                    canonical_json(dict(prepared_submission_scope))
+                )
+            except (TypeError, ValueError):
+                return False, "submission_scope_invalid"
+            calculated_hash = (
+                "sha256:"
+                + sha256(
+                    canonical_json(canonical_prepared_scope).encode("utf-8")
+                ).hexdigest()
+            )
+            if env in {"PAPER", "LIVE"}:
+                try:
+                    prepared_provider, prepared_provider_environment = (
+                        _dispatch_provider_domain(
+                            canonical_prepared_scope,
+                            account_id=account,
+                            environment=env,
+                        )
+                    )
+                    if (
+                        prepared_provider is None
+                        or prepared_provider_environment is None
+                    ):
+                        return False, "provider_domain_required"
+                    _dispatch_prepared_request_sha256(
+                        canonical_prepared_scope
+                    )
+                except ValueError:
+                    return False, "submission_scope_invalid"
+            if prepared_submission_scope_hash != calculated_hash:
+                return False, "submission_scope_hash_mismatch"
+            if (
+                expected_submission_scope_hash is not None
+                and prepared_submission_scope_hash
+                != expected_submission_scope_hash
+            ):
+                return False, "submission_scope_changed"
             return self.dispatch_allowed(
                 aid,
                 intent_hash=intent_hash,
@@ -4084,11 +4173,10 @@ class AuthorityService:
                 action=normalized_action,
                 now=now,
                 capability_snapshot_id=capability,
-                submission_scope=frozen_submission_scope,
+                submission_scope=canonical_prepared_scope,
             )
 
-        return check
-
+        return PreparedSubmissionAuthorityCheck(check)
 
     def export_state(self) -> dict:
         """Return a canonical JSON-compatible snapshot of authority state.

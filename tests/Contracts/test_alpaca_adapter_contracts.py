@@ -26,6 +26,9 @@ from mvp.autotrade_mvp.dispatch import (
 )
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import observe_submission_json_response
+from tests.Contracts.financial_authority_fixture import (
+    canonical_financial_dispatch_guard,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -111,25 +114,43 @@ def durable_observation(*, payload, intent_id: str):
             account_id="contract-account",
             owner_token="contract-owner",
         )
+        submission_scope = {
+            "provider": "ALPACA",
+            "account_id": "contract-account",
+            "environment": "PAPER",
+            "provider_environment": "PAPER",
+            "endpoint": request.endpoint,
+            "prepared_request_sha256": request.body_sha256,
+            "capability_snapshot_ids": list(request.capability_snapshot_ids),
+            "instrument_versions": list(request.instrument_versions),
+        }
+
+        authority_check, authority_intent_hash = canonical_financial_dispatch_guard(
+            store,
+            provider_id="ALPACA",
+            provider_environment="PAPER",
+            account_id="contract-account",
+            environment="PAPER",
+            capability_snapshot_id=request.capability_snapshot_ids[0],
+            intent_id=intent_id,
+            submission_scope=submission_scope,
+            now="2026-09-24T20:00:00Z",
+        )
+
         outcome = dispatcher.dispatch(
             attempt_id=attempt_id,
             intent_id=intent_id,
-            intent_hash="contract-intent-hash",
+            intent_hash=authority_intent_hash,
             provider="ALPACA",
             request=request.body,
             now="2026-09-24T20:00:00Z",
-            authority_check=lambda _hash, _now: (True, "allowed"),
+            authority_check=authority_check,
             transport_send=lambda _cid, _request, guard: (
                 guard(),
                 ExactJsonTransportResponse(raw),
             )[1],
             sender_check=lambda _owner, _epoch: None,
-            submission_scope={
-                "endpoint": request.endpoint,
-                "prepared_request_sha256": request.body_sha256,
-                "capability_snapshot_ids": list(request.capability_snapshot_ids),
-                "instrument_versions": list(request.instrument_versions),
-            },
+            submission_scope=submission_scope,
         )
         if outcome.status != "SENT":
             raise AssertionError(f"guarded dispatch did not persist SENT: {outcome}")
@@ -146,6 +167,7 @@ def durable_observation(*, payload, intent_id: str):
             prepared_request_sha256=request.body_sha256,
             capability_snapshot_ids=request.capability_snapshot_ids,
             instrument_versions=request.instrument_versions,
+            provider_environment="PAPER",
         )
     return attempt_id, request, observation
 

@@ -2572,6 +2572,169 @@ class AuthorityTests(unittest.TestCase):
             )
 
 
+    def test_dispatch_guard_consumes_exact_dispatcher_prepared_scope(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = authority_service(store)
+            item = policy(autonomous=True)
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store, environment="PAPER", account_id="paper-1"
+            )
+            admitted = authority.admit(
+                command_id="scope-bind-command",
+                idempotency_key="scope-bind-command",
+                admission_id="scope-bind-admission",
+                policy_id=item.policy_id,
+                intent_id="scope-bind-intent",
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_book=reservations,
+                reservation_id="scope-bind-reservation",
+                **public_financial_kwargs(store),
+            )
+            request = {}
+            admitted_scope = {
+                "provider_id": admitted.provider_id,
+                "provider_environment": admitted.provider_environment,
+                "account_id": admitted.account_id,
+                "environment": admitted.environment,
+                "prepared_request_sha256": payload_digest(request),
+            }
+            wrong_scope = dict(admitted_scope)
+            wrong_scope["provider_id"] = "OTHER_PROVIDER"
+            guard = authority.dispatch_guard(
+                admitted.admission_id,
+                account_id=admitted.account_id,
+                environment=admitted.environment,
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                capability_snapshot_id=PUBLIC_CAPABILITY_SNAPSHOT_ID,
+                submission_scope=admitted_scope,
+            )
+            dispatcher = GuardedDispatcher(
+                store,
+                environment=admitted.environment,
+                account_id=admitted.account_id,
+                owner_token="scope-bind-owner",
+            )
+            outbound = 0
+
+            def transport(_client_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return {"provider_order_id": "sent"}
+
+            self.assertEqual(
+                guard(
+                    PUBLIC_INTENT_HASH,
+                    "2026-09-24T18:01:15Z",
+                    wrong_scope,
+                    payload_digest(wrong_scope),
+                ),
+                (False, "submission_scope_changed"),
+            )
+
+            result = dispatcher.dispatch(
+                attempt_id="scope-bind-attempt",
+                intent_id="scope-bind-intent",
+                intent_hash=PUBLIC_INTENT_HASH,
+                provider=admitted.provider_id,
+                request=request,
+                now="2026-09-24T18:01:15Z",
+                authority_check=guard,
+                transport_send=transport,
+                sender_check=lambda _owner, _epoch: None,
+                submission_scope=wrong_scope,
+            )
+            self.assertEqual(result.status, "BLOCKED")
+            self.assertEqual(result.reason, "submission_scope_provider_mismatch")
+            self.assertEqual(outbound, 0)
+
+            request_mismatch = dispatcher.dispatch(
+                attempt_id="scope-bind-request-mismatch",
+                intent_id="scope-bind-intent",
+                intent_hash=PUBLIC_INTENT_HASH,
+                provider=admitted.provider_id,
+                request={"different": True},
+                now="2026-09-24T18:01:15Z",
+                authority_check=guard,
+                transport_send=transport,
+                sender_check=lambda _owner, _epoch: None,
+                submission_scope=admitted_scope,
+            )
+            self.assertEqual(request_mismatch.status, "BLOCKED")
+            self.assertEqual(
+                request_mismatch.reason,
+                "submission_scope_request_digest_mismatch",
+            )
+            self.assertEqual(outbound, 0)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "requires exact submission_scope",
+            ):
+                authority.dispatch_guard(
+                    admitted.admission_id,
+                    account_id=admitted.account_id,
+                    environment=admitted.environment,
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    capability_snapshot_id=PUBLIC_CAPABILITY_SNAPSHOT_ID,
+                )
+
+            missing_request_scope = dict(admitted_scope)
+            missing_request_scope.pop("prepared_request_sha256")
+            with self.assertRaisesRegex(
+                ValueError,
+                "prepared_request_sha256",
+            ):
+                authority.dispatch_guard(
+                    admitted.admission_id,
+                    account_id=admitted.account_id,
+                    environment=admitted.environment,
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    capability_snapshot_id=PUBLIC_CAPABILITY_SNAPSHOT_ID,
+                    submission_scope=missing_request_scope,
+                )
+
+            sent = dispatcher.dispatch(
+                attempt_id="scope-bind-exact",
+                intent_id="scope-bind-intent",
+                intent_hash=PUBLIC_INTENT_HASH,
+                provider=admitted.provider_id,
+                request=request,
+                now="2026-09-24T18:01:15Z",
+                authority_check=guard,
+                transport_send=transport,
+                sender_check=lambda _owner, _epoch: None,
+                submission_scope=admitted_scope,
+            )
+            self.assertEqual(sent.status, "SENT")
+            self.assertEqual(outbound, 1)
+            events = store.load_events(
+                "submission_attempt",
+                dispatcher._aggregate_id("scope-bind-exact"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionSent"],
+            )
+            self.assertEqual(
+                events[0]["payload"]["submission_scope_hash"],
+                payload_digest(admitted_scope),
+            )
+
+
     def test_public_dispatch_blocks_after_other_reservation_advances_book(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")

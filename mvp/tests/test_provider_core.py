@@ -8,6 +8,7 @@ import unittest
 from mvp.autotrade_mvp.dispatch import (
     ExactJsonTransportResponse,
     GuardedDispatcher,
+    PreparedSubmissionAuthorityCheck,
     load_submission_response_binding,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
@@ -123,6 +124,7 @@ class ProviderCoreTests(unittest.TestCase):
         capability_snapshot_ids=("cap-1",),
         instrument_versions=("BTCUSD:v1",),
         raw=b'{ "orderId" : "provider-1" }',
+        scope_extra=None,
     ):
         store = JournalStore(f"{directory}/journal.sqlite3")
         dispatcher = GuardedDispatcher(
@@ -141,12 +143,17 @@ class ProviderCoreTests(unittest.TestCase):
         )
         request_sha = "sha256:" + sha256(request_text.encode("utf-8")).hexdigest()
         scope = {
+            "provider": "BYBIT",
+            "account_id": "acct",
+            "environment": "PAPER",
             "endpoint": "/v5/order/create",
             "prepared_request_sha256": request_sha,
             "capability_snapshot_ids": list(capability_snapshot_ids),
             "instrument_versions": list(instrument_versions),
             "provider_environment": "TESTNET",
         }
+        if scope_extra:
+            scope.update(scope_extra)
 
         def transport(_client_id, _request, guard):
             guard()
@@ -159,7 +166,9 @@ class ProviderCoreTests(unittest.TestCase):
             provider="BYBIT",
             request=request,
             now="2026-09-24T18:00:00Z",
-            authority_check=lambda _hash, _now: (True, "allowed"),
+            authority_check=PreparedSubmissionAuthorityCheck(
+                lambda _hash, _now, _scope, _scope_hash: (True, "allowed")
+            ),
             transport_send=transport,
             sender_check=lambda _owner, _epoch: None,
             submission_scope=scope,
@@ -226,6 +235,26 @@ class ProviderCoreTests(unittest.TestCase):
                 values.update(kwargs)
                 with self.subTest(kwargs=kwargs), self.assertRaises(ProviderCoreError):
                     observe_submission_json_response(**values)
+
+    def test_submission_observation_rejects_unknown_durable_scope_fields(self):
+        with TemporaryDirectory() as directory:
+            binding, request_sha = self._durable_submission_binding(
+                directory,
+                scope_extra={"unexpected_authority_field": "forbidden"},
+            )
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "durable submission scope does not match prepared provider request",
+            ):
+                observe_submission_json_response(
+                    response_binding=binding,
+                    provider_id="BYBIT",
+                    endpoint="/v5/order/create",
+                    prepared_request_sha256=request_sha,
+                    capability_snapshot_ids=("cap-1",),
+                    instrument_versions=("BTCUSD:v1",),
+                    provider_environment="TESTNET",
+                )
 
     def test_submission_observation_cannot_be_constructed_directly(self):
         with TemporaryDirectory() as directory:

@@ -8,7 +8,7 @@ from hashlib import sha256
 import json
 import re
 from pathlib import Path
-from types import MappingProxyType
+from types import FunctionType, MappingProxyType
 from typing import Any, Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5, uuid4
 
@@ -16,6 +16,96 @@ from .persistence import JournalStore, canonical_json, payload_digest
 
 
 AuthorityCheck = Callable[[str, str], tuple[bool, str]]
+PreparedAuthorityCheck = Callable[
+    [str, str, Mapping[str, Any], str], tuple[bool, str]
+]
+
+
+def _is_canonical_prepared_authority_callback(callback: Any) -> bool:
+    """Accept only the exact AuthorityService.dispatch_guard closure.
+
+    PAPER/LIVE financial authority must execute the canonical AuthorityService
+    admission/risk/reservation checks. PreparedSubmissionAuthorityCheck is a
+    calling-convention wrapper, not authority by itself; arbitrary callbacks,
+    subclasses, proxies and delegates must not acquire send authority merely by
+    matching its public signature.
+    """
+
+    if type(callback) is not FunctionType:
+        return False
+    try:
+        from .authority import AuthorityService
+    except ImportError:
+        return False
+
+    expected_qualname = f"{AuthorityService.dispatch_guard.__qualname__}.<locals>.check"
+    if (
+        callback.__module__ != AuthorityService.__module__
+        or callback.__qualname__ != expected_qualname
+    ):
+        return False
+
+    code_type = type(callback.__code__)
+    expected_codes = tuple(
+        constant
+        for constant in AuthorityService.dispatch_guard.__code__.co_consts
+        if isinstance(constant, code_type)
+        and getattr(constant, "co_qualname", None) == expected_qualname
+    )
+    if len(expected_codes) != 1 or callback.__code__ is not expected_codes[0]:
+        return False
+
+    closure = callback.__closure__
+    if closure is None or len(closure) != len(callback.__code__.co_freevars):
+        return False
+    try:
+        closed = {
+            name: cell.cell_contents
+            for name, cell in zip(callback.__code__.co_freevars, closure)
+        }
+    except ValueError:
+        return False
+    return type(closed.get("self")) is AuthorityService
+
+
+@dataclass(frozen=True)
+class PreparedSubmissionAuthorityCheck:
+    """Calling-convention marker for an authority that consumes prepared scope.
+
+    This wrapper is not itself an authority credential. Product financial
+    authority is supplied by AuthorityService.dispatch_guard(); the marker only
+    lets GuardedDispatcher pass the exact prepared scope and digest to that
+    canonical guard while retaining legacy two-argument seams elsewhere.
+    """
+
+    callback: PreparedAuthorityCheck
+
+    def __post_init__(self) -> None:
+        if not callable(self.callback):
+            raise TypeError("prepared authority callback must be callable")
+
+    def __call__(
+        self,
+        intent_hash: str,
+        now: str,
+        submission_scope: Mapping[str, Any],
+        submission_scope_hash: str,
+    ) -> tuple[bool, str]:
+        return self.callback(
+            intent_hash,
+            now,
+            submission_scope,
+            submission_scope_hash,
+        )
+
+
+def _is_canonical_prepared_authority_check(value: Any) -> bool:
+    return (
+        type(value) is PreparedSubmissionAuthorityCheck
+        and _is_canonical_prepared_authority_callback(value.callback)
+    )
+
+
 SenderCheck = Callable[[str, int], None]
 TransportSend = Callable[[str, Mapping[str, Any], Callable[[], None]], Any]
 
@@ -219,6 +309,83 @@ def _validated_authority_result(result: Any) -> tuple[bool, str]:
     if not isinstance(reason, str) or not reason.strip():
         return False, "authority_check_invalid_reason"
     return allowed, reason.strip()
+
+
+def _invoke_authority_check(
+    authority_check: AuthorityCheck | PreparedSubmissionAuthorityCheck,
+    *,
+    intent_hash: str,
+    now: str,
+    submission_scope: Mapping[str, Any],
+    submission_scope_hash: str,
+) -> tuple[bool, str]:
+    """Invoke prepared-scope-aware authority without weakening legacy test seams."""
+
+    if type(authority_check) is PreparedSubmissionAuthorityCheck:
+        return authority_check(
+            intent_hash,
+            now,
+            submission_scope,
+            submission_scope_hash,
+        )
+    return authority_check(intent_hash, now)
+
+
+def _financial_submission_scope_reason(
+    *,
+    environment: str,
+    account_id: str,
+    provider: str,
+    request_hash: str,
+    submission_scope: Mapping[str, Any],
+) -> str | None:
+    """Cross-bind PAPER/LIVE financial scope to the concrete send tuple."""
+
+    if environment not in {"PAPER", "LIVE"}:
+        return None
+
+    def scope_text(key: str) -> str | None:
+        value = submission_scope.get(key)
+        if not isinstance(value, str) or not value.strip():
+            return None
+        return value.strip()
+
+    provider_id = scope_text("provider_id")
+    provider_alias = scope_text("provider")
+    if provider_id is None and provider_alias is None:
+        return "submission_scope_provider_required"
+    if (
+        provider_id is not None
+        and provider_alias is not None
+        and provider_id.upper() != provider_alias.upper()
+    ):
+        return "submission_scope_provider_mismatch"
+    scope_provider = provider_id if provider_id is not None else provider_alias
+    if scope_provider is None or scope_provider.upper() != provider.strip().upper():
+        return "submission_scope_provider_mismatch"
+
+    scope_account = scope_text("account_id")
+    if scope_account is None:
+        return "submission_scope_account_required"
+    if scope_account != account_id:
+        return "submission_scope_account_mismatch"
+
+    scope_environment = scope_text("environment")
+    if scope_environment is None:
+        return "submission_scope_environment_required"
+    if scope_environment.upper() != environment:
+        return "submission_scope_environment_mismatch"
+
+    if scope_text("provider_environment") is None:
+        return "submission_scope_provider_environment_required"
+
+    prepared_request_sha256 = scope_text("prepared_request_sha256")
+    if prepared_request_sha256 is None:
+        return "submission_scope_request_digest_required"
+    if prepared_request_sha256 != request_hash:
+        return "submission_scope_request_digest_mismatch"
+
+    return None
 
 
 @dataclass(frozen=True)
@@ -598,7 +765,7 @@ class GuardedDispatcher:
         provider: str,
         request: Mapping[str, Any],
         now: str,
-        authority_check: AuthorityCheck,
+        authority_check: AuthorityCheck | PreparedSubmissionAuthorityCheck,
         transport_send: TransportSend,
         client_id_max_length: int = 32,
         client_id_format: str = "TOKEN",
@@ -632,6 +799,19 @@ class GuardedDispatcher:
         submission_scope_hash = (
             "sha256:" + sha256(scope_canonical.encode("utf-8")).hexdigest()
         )
+        prepared_submission_scope = _freeze_json(scope_dict)
+        financial_preflight_reason: str | None = None
+        if self.environment in {"PAPER", "LIVE"}:
+            if not _is_canonical_prepared_authority_check(authority_check):
+                financial_preflight_reason = "prepared_scope_authority_required"
+            else:
+                financial_preflight_reason = _financial_submission_scope_reason(
+                    environment=self.environment,
+                    account_id=self.account_id,
+                    provider=provider,
+                    request_hash=request_hash,
+                    submission_scope=prepared_submission_scope,
+                )
         client_order_id = stable_client_order_id(
             provider,
             intent_id,
@@ -692,8 +872,32 @@ class GuardedDispatcher:
                 now=now,
             )
 
+        if financial_preflight_reason is not None:
+            self._append(
+                attempt_id=attempt_id,
+                event_type="SubmissionBlocked",
+                version=2,
+                payload={
+                    "client_order_id": client_order_id,
+                    "reason": financial_preflight_reason,
+                },
+                now=now,
+            )
+            return DispatchOutcome(
+                "BLOCKED",
+                client_order_id,
+                None,
+                financial_preflight_reason,
+            )
+
         try:
-            authority_result = authority_check(intent_hash, now)
+            authority_result = _invoke_authority_check(
+                authority_check,
+                intent_hash=intent_hash,
+                now=now,
+                submission_scope=prepared_submission_scope,
+                submission_scope_hash=submission_scope_hash,
+            )
         except Exception as error:
             reason = f"authority_check_failed_before_send:{type(error).__name__}"
             self._append(
@@ -800,7 +1004,13 @@ class GuardedDispatcher:
                     )
                     raise DispatchBlocked(barrier_reason) from error
             try:
-                authority_result = authority_check(intent_hash, barrier_now)
+                authority_result = _invoke_authority_check(
+                    authority_check,
+                    intent_hash=intent_hash,
+                    now=barrier_now,
+                    submission_scope=prepared_submission_scope,
+                    submission_scope_hash=submission_scope_hash,
+                )
             except Exception as error:
                 barrier_reason = (
                     "authority_check_failed_at_final_barrier:"

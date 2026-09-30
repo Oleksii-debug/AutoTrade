@@ -22,6 +22,7 @@ from mvp.autotrade_mvp.provider_transport import (
 from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
 from mvp.autotrade_mvp.provider_core import Surface, prepare_authenticated_read_query
 from mvp.tests.test_bybit_v5 import READ_AT, read_capability, write_capability
+from mvp.tests.capability_test_support import register_fresh_test_snapshot
 from mvp.tests.test_provider_transport import (
     FakeSecretResolver,
     RecordingCapabilityRegistry,
@@ -115,7 +116,7 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
         provider_environment="TESTNET",
     ):
         registry = RecordingCapabilityRegistry(events)
-        registry.add(capability)
+        register_fresh_test_snapshot(registry, capability)
         resolver = FakeSecretResolver(events)
         transport = BybitV5AuthenticatedReadTransport(
             policy=BYBIT_V5_ENDPOINT_POLICIES[provider_environment],
@@ -254,7 +255,7 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"
             first = DurableCapabilityRegistry(JournalStore(path))
-            self.assertTrue(first.add(capability))
+            self.assertTrue(register_fresh_test_snapshot(first, capability))
             self.assertEqual(
                 len(first.store.load_events_by_aggregate_type("capability_history")),
                 1,
@@ -293,7 +294,7 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
             self.assertEqual(wire.requests, [])
             self.assertEqual(events, [])
 
-            self.assertFalse(restarted.add(capability))
+            self.assertFalse(register_fresh_test_snapshot(restarted, capability))
             self.assertEqual(
                 len(restarted.store.load_events_by_aggregate_type("capability_history")),
                 1,
@@ -404,7 +405,7 @@ class BybitV5SharedTransportTests(unittest.TestCase):
         on_resolve=None,
     ):
         registry = RecordingCapabilityRegistry(events)
-        registry.add(capability)
+        register_fresh_test_snapshot(registry, capability)
         resolver = FakeSecretResolver(events, on_resolve=on_resolve)
         transport = BybitV5HttpTransport(
             policy=(

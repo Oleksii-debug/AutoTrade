@@ -16,7 +16,7 @@ import sqlite3
 from typing import Any
 from uuid import UUID, uuid4, uuid5
 
-from .artifacts.store import ArtifactStore
+from .artifacts import ArtifactIntegrityError, ArtifactStore, trusted_authenticated_reader
 
 
 FINAL_STATES = {"SUCCEEDED", "FAILED", "CANCELLED"}
@@ -87,47 +87,74 @@ def _require_immutable_artifact_ref(value: Any, name: str) -> str:
     return reference
 
 
-def _verify_artifact_ref(
-    artifact_store: ArtifactStore,
+def _trusted_reader(
+    authoritative_root: str | Path | None,
+    publication_store: ArtifactStore | None,
+):
+    if authoritative_root is None or publication_store is None:
+        return None
+    try:
+        return trusted_authenticated_reader(
+            authoritative_root,
+            publication_store=publication_store,
+        )
+    except (
+        ArtifactIntegrityError,
+        FileNotFoundError,
+        OSError,
+        TypeError,
+        ValueError,
+    ):
+        return None
+
+
+def _authenticated_artifact_snapshot(
+    *,
+    read_snapshot,
     reference: str,
-) -> bool:
-    if not isinstance(artifact_store, ArtifactStore):
-        raise TypeError("artifact_store must be ArtifactStore")
+) -> tuple[dict[str, Any], bytes] | None:
     normalized = _require_immutable_artifact_ref(reference, "artifact_ref")
     artifact_id, digest = normalized[len("artifact:"):].split("@sha256:", 1)
     expected_hash = "sha256:" + digest
     try:
-        manifest = artifact_store.load_manifest(artifact_id)
-        payload = artifact_store.read_bytes(artifact_id)
-    except (FileNotFoundError, UnicodeError, ValueError, TypeError):
-        return False
+        manifest, payload = read_snapshot(artifact_id)
+    except (
+        ArtifactIntegrityError,
+        FileNotFoundError,
+        OSError,
+        UnicodeError,
+        ValueError,
+        TypeError,
+    ):
+        return None
     manifest_hash = manifest.get("manifest_hash")
-    return (
+    if not (
         manifest.get("sha256") == expected_hash
         and "sha256:" + sha256(payload).hexdigest() == expected_hash
         and isinstance(manifest_hash, str)
         and len(manifest_hash) == 71
         and manifest_hash.startswith("sha256:")
         and all(ch in "0123456789abcdef" for ch in manifest_hash[7:])
-    )
+    ):
+        return None
+    return manifest, payload
 
 
 def _verify_job_output_artifact(
     *,
-    artifact_store: ArtifactStore,
+    read_snapshot,
     output_ref: str,
     job_id: str,
     generation: int,
     input_hashes: list[str],
 ) -> bool:
-    if not _verify_artifact_ref(artifact_store, output_ref):
+    snapshot = _authenticated_artifact_snapshot(
+        read_snapshot=read_snapshot,
+        reference=output_ref,
+    )
+    if snapshot is None:
         return False
-    reference = _require_immutable_artifact_ref(output_ref, "output_ref")
-    artifact_id = reference[len("artifact:"):].split("@sha256:", 1)[0]
-    try:
-        manifest = artifact_store.load_manifest(artifact_id)
-    except (FileNotFoundError, UnicodeError, ValueError, TypeError):
-        return False
+    manifest, _payload = snapshot
     metadata = manifest.get("metadata")
     return (
         isinstance(metadata, dict)
@@ -140,7 +167,7 @@ def _verify_job_output_artifact(
 
 def _verify_job_checkpoint_artifact(
     *,
-    artifact_store: ArtifactStore,
+    read_snapshot,
     checkpoint_ref: str,
     job_id: str,
     generation: int,
@@ -148,17 +175,13 @@ def _verify_job_checkpoint_artifact(
 ) -> bool:
     """Prove a checkpoint is immutable and belongs to this exact job generation."""
 
-    if not _verify_artifact_ref(artifact_store, checkpoint_ref):
-        return False
-    reference = _require_immutable_artifact_ref(
-        checkpoint_ref,
-        "checkpoint_ref",
+    snapshot = _authenticated_artifact_snapshot(
+        read_snapshot=read_snapshot,
+        reference=checkpoint_ref,
     )
-    artifact_id = reference[len("artifact:"):].split("@sha256:", 1)[0]
-    try:
-        manifest = artifact_store.load_manifest(artifact_id)
-    except (FileNotFoundError, UnicodeError, ValueError, TypeError):
+    if snapshot is None:
         return False
+    manifest, _payload = snapshot
     metadata = manifest.get("metadata")
     return (
         isinstance(metadata, dict)
@@ -171,22 +194,23 @@ def _verify_job_checkpoint_artifact(
 
 def _verify_external_resolution_artifact(
     *,
-    artifact_store: ArtifactStore,
+    read_snapshot,
     evidence_ref: str,
     job_id: str,
     generation: int,
     verdict: str,
     output_refs: list[str],
 ) -> bool:
-    if not _verify_artifact_ref(artifact_store, evidence_ref):
+    snapshot = _authenticated_artifact_snapshot(
+        read_snapshot=read_snapshot,
+        reference=evidence_ref,
+    )
+    if snapshot is None:
         return False
-    reference = _require_immutable_artifact_ref(evidence_ref, "evidence_ref")
-    artifact_id = reference[len("artifact:"):].split("@sha256:", 1)[0]
+    manifest, payload = snapshot
     try:
-        manifest = artifact_store.load_manifest(artifact_id)
-        payload = artifact_store.read_bytes(artifact_id)
         proof = json.loads(payload.decode("utf-8"))
-    except (FileNotFoundError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+    except (UnicodeError, ValueError, TypeError, json.JSONDecodeError):
         return False
     if manifest.get("media_type") != "application/json":
         return False
@@ -208,6 +232,7 @@ def _verify_external_resolution_artifact(
     ):
         return False
     return proof.get("schema_version") == "1.0.0"
+
 
 def _require_research_kind(kind: str) -> str:
     normalized = _require_text(kind, "kind")
@@ -585,6 +610,7 @@ class ResearchJobStore:
         verdict: str,
         evidence_ref: str,
         artifact_store: ArtifactStore | None = None,
+        artifact_root: str | Path | None = None,
         output_refs: list[str] | None = None,
         now: datetime | None = None,
     ) -> bool:
@@ -667,8 +693,9 @@ class ResearchJobStore:
                     "job is not waiting for the supplied external resolution"
                 )
 
-            if artifact_store is None or not _verify_external_resolution_artifact(
-                artifact_store=artifact_store,
+            read_snapshot = _trusted_reader(artifact_root, artifact_store)
+            if read_snapshot is None or not _verify_external_resolution_artifact(
+                read_snapshot=read_snapshot,
                 evidence_ref=evidence,
                 job_id=identifier,
                 generation=generation,
@@ -682,7 +709,7 @@ class ResearchJobStore:
             input_hashes = json.loads(row["input_hashes_json"])
             if normalized_verdict == "PROVEN_SUCCEEDED" and any(
                 not _verify_job_output_artifact(
-                    artifact_store=artifact_store,
+                    read_snapshot=read_snapshot,
                     output_ref=output_ref,
                     job_id=identifier,
                     generation=generation,
@@ -785,6 +812,7 @@ class ResearchJobStore:
         checkpoint_ref: str,
         resource_usage: dict[str, int | float],
         artifact_store: ArtifactStore,
+        artifact_root: str | Path,
         now: datetime | None = None,
     ) -> dict[str, Any]:
         identifier = str(UUID(_require_text(job_id, "job_id")))
@@ -801,8 +829,9 @@ class ResearchJobStore:
             row = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (identifier,)).fetchone()
             self._require_live_lease(row, worker, generation, current)
             input_hashes = json.loads(row["input_hashes_json"])
-            if not _verify_job_checkpoint_artifact(
-                artifact_store=artifact_store,
+            read_snapshot = _trusted_reader(artifact_root, artifact_store)
+            if read_snapshot is None or not _verify_job_checkpoint_artifact(
+                read_snapshot=read_snapshot,
                 checkpoint_ref=checkpoint,
                 job_id=identifier,
                 generation=generation,
@@ -842,6 +871,7 @@ class ResearchJobStore:
         worker_id: str,
         generation: int,
         artifact_store: ArtifactStore,
+        artifact_root: str | Path,
         data: bytes,
         media_type: str,
         rights: dict[str, Any],
@@ -903,6 +933,7 @@ class ResearchJobStore:
             checkpoint_ref=checkpoint_ref,
             resource_usage=resource_usage,
             artifact_store=artifact_store,
+            artifact_root=artifact_root,
             now=now,
         )
         return manifest, record
@@ -1056,6 +1087,7 @@ class ResearchJobStore:
         generation: int,
         output_refs: list[str],
         artifact_store: ArtifactStore | None = None,
+        artifact_root: str | Path | None = None,
         now: datetime | None = None,
     ) -> bool:
         identifier = str(UUID(_require_text(job_id, "job_id")))
@@ -1097,9 +1129,10 @@ class ResearchJobStore:
                 connection.rollback()
                 raise ValueError("output_refs must not contain duplicates")
             input_hashes = json.loads(row["input_hashes_json"])
-            if artifact_store is None or any(
+            read_snapshot = _trusted_reader(artifact_root, artifact_store)
+            if read_snapshot is None or any(
                 not _verify_job_output_artifact(
-                    artifact_store=artifact_store,
+                    read_snapshot=read_snapshot,
                     output_ref=output_ref,
                     job_id=identifier,
                     generation=generation,
@@ -1130,6 +1163,7 @@ class ResearchJobStore:
         worker_id: str,
         generation: int,
         artifact_store: ArtifactStore,
+        artifact_root: str | Path,
         data: bytes,
         media_type: str,
         rights: dict[str, Any],
@@ -1183,6 +1217,7 @@ class ResearchJobStore:
             generation=generation,
             output_refs=[output_ref],
             artifact_store=artifact_store,
+            artifact_root=artifact_root,
             now=now,
         )
         return manifest, accepted

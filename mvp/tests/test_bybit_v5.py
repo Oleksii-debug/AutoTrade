@@ -598,6 +598,28 @@ class BybitV5AdapterTests(unittest.TestCase):
             )
         return attempt, prepared, observation
 
+    def test_prepared_submission_rejects_cross_domain_same_runtime_capability(self):
+        capability = submission_write_capability(
+            environment="PAPER",
+            provider_environment="DEMO",
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "provider_environment does not match",
+        ):
+            prepare_order_submission(
+                capability=capability,
+                at=READ_AT,
+                provider_environment="TESTNET",
+                product_family="SPOT",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="MARKET",
+                quantity="0.01",
+                client_order_id="domain-mismatch",
+                time_in_force="IOC",
+            )
+
     def test_success_response_is_acknowledgement_not_fill(self):
         attempt, prepared, observation = self._durable_write_observation(
             {

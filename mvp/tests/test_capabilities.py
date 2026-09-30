@@ -37,13 +37,19 @@ def claim(
     observed_at=NOW - timedelta(minutes=1),
     expires_at=NOW + timedelta(minutes=10),
     instrument_version="instrument-v1",
+    provider_id="simulated",
+    account_id="paper-account",
+    entity_id="entity-1",
+    environment="PAPER",
+    provider_environment=None,
 ) -> CapabilityClaim:
     return CapabilityClaim(
         source=source,
-        provider_id="simulated",
-        account_id="paper-account",
-        entity_id="entity-1",
-        environment="PAPER",
+        provider_id=provider_id,
+        account_id=account_id,
+        entity_id=entity_id,
+        environment=environment,
+        provider_environment=provider_environment,
         instrument_version=instrument_version,
         observed_at=observed_at,
         expires_at=expires_at,
@@ -270,6 +276,75 @@ class CapabilityFoundationTests(unittest.TestCase):
             observed_at=NOW,
         )
         self.assertEqual(second.status, "CONFLICTED")
+
+    def test_bybit_provider_domain_is_part_of_capability_identity(self):
+        testnet = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=complete_claims(
+                provider_id="BYBIT",
+                provider_environment="TESTNET",
+            ),
+            observed_at=NOW,
+        )
+        demo = derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_2,
+            claims=complete_claims(
+                provider_id="BYBIT",
+                provider_environment="DEMO",
+            ),
+            observed_at=NOW,
+        )
+        self.assertNotEqual(testnet.identity, demo.identity)
+        self.assertEqual(testnet.provider_environment, "TESTNET")
+        self.assertEqual(demo.provider_environment, "DEMO")
+
+        registry = CapabilityRegistry()
+        registry.add(testnet)
+        registry.add(demo)
+        self.assertIs(
+            registry.require_verified(
+                provider_id="BYBIT",
+                account_id="paper-account",
+                entity_id="entity-1",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                instrument_version="instrument-v1",
+                at=NOW,
+            ),
+            testnet,
+        )
+        self.assertIs(
+            registry.require_verified(
+                provider_id="BYBIT",
+                account_id="paper-account",
+                entity_id="entity-1",
+                environment="PAPER",
+                provider_environment="DEMO",
+                instrument_version="instrument-v1",
+                at=NOW,
+            ),
+            demo,
+        )
+        with self.assertRaisesRegex(CapabilityError, "explicit provider_environment"):
+            registry.require_verified(
+                provider_id="BYBIT",
+                account_id="paper-account",
+                entity_id="entity-1",
+                environment="PAPER",
+                instrument_version="instrument-v1",
+                at=NOW,
+            )
+
+    def test_bybit_claim_never_infers_testnet_or_demo_from_paper(self):
+        with self.assertRaisesRegex(CapabilityError, "explicit provider_environment"):
+            claim("API", provider_id="BYBIT")
+        with self.assertRaisesRegex(CapabilityError, "does not match runtime"):
+            claim(
+                "API",
+                provider_id="BYBIT",
+                environment="LIVE",
+                provider_environment="TESTNET",
+            )
 
     def test_identity_mismatch_is_rejected_not_intersected(self):
         claims = list(complete_claims())

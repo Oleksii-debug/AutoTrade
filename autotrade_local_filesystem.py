@@ -6,40 +6,47 @@ import sys
 
 
 class LocalFilesystemQualificationError(RuntimeError):
-    """Raised when a durable local-filesystem path is not safely qualified."""
+    """Raised when a durable path is not on a qualified local filesystem."""
 
 
-def require_qualified_local_filesystem_path(path: str | os.PathLike[str]) -> None:
-    """Reuse the neutral resource-lock locality policy for durable local state.
+def require_qualified_local_filesystem_path(
+    path: str | os.PathLike[str],
+) -> None:
+    """Reject Windows UNC and known non-local drive types before filesystem I/O.
 
-    The current Windows policy rejects UNC paths plus UNKNOWN/NO_ROOT/REMOTE
-    drive types before any caller creates or opens the target. POSIX callers
-    preserve their existing behavior; this function does not pretend that
-    pathname identity proves network-filesystem safety there.
+    This neutral production module is intentionally independent of research and
+    financial packages so installed runtimes can import the locality fence
+    without carrying the research source tree. POSIX remains unchanged: this
+    helper does not claim that pathname identity alone proves local storage.
     """
 
     if sys.platform != "win32":
         return
 
-    try:
-        from autotrade_research.artifacts.resource_lock import (
-            ResourceLockError,
-            _reject_known_remote_lock_path,
-        )
-    except ModuleNotFoundError:
-        try:
-            from research.autotrade_research.artifacts.resource_lock import (
-                ResourceLockError,
-                _reject_known_remote_lock_path,
-            )
-        except ModuleNotFoundError as error:
-            raise LocalFilesystemQualificationError(
-                "qualified Windows local-filesystem policy is unavailable"
-            ) from error
-
-    try:
-        _reject_known_remote_lock_path(Path(path))
-    except ResourceLockError as error:
+    raw_path = os.fspath(path)
+    if raw_path.startswith(("\\\\", "//")):
         raise LocalFilesystemQualificationError(
             "path must be on a qualified local filesystem"
-        ) from error
+        )
+
+    absolute = os.path.abspath(raw_path)
+    drive, _ = os.path.splitdrive(absolute)
+    if not drive:
+        raise LocalFilesystemQualificationError(
+            "path has no qualified local Windows drive"
+        )
+
+    import ctypes
+    from ctypes import wintypes
+
+    get_drive_type = ctypes.WinDLL("kernel32", use_last_error=True).GetDriveTypeW
+    get_drive_type.argtypes = (wintypes.LPCWSTR,)
+    get_drive_type.restype = wintypes.UINT
+    drive_type = get_drive_type(drive + "\\")
+
+    # DRIVE_REMOVABLE=2, DRIVE_FIXED=3, DRIVE_CDROM=5, DRIVE_RAMDISK=6.
+    # UNKNOWN=0, NO_ROOT_DIR=1 and REMOTE=4 are not qualified.
+    if drive_type not in {2, 3, 5, 6}:
+        raise LocalFilesystemQualificationError(
+            "path must be on a qualified local filesystem"
+        )

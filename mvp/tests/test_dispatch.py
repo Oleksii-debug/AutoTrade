@@ -1,5 +1,6 @@
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import UUID
 
 from mvp.autotrade_mvp.dispatch import (
@@ -419,15 +420,17 @@ class DispatchTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = self.store(directory)
             dispatcher = GuardedDispatcher(store, environment="SIMULATION", account_id="acct", owner_token="owner")
-            real_append = store.append_event
+            real_append = JournalStore.append_event
             outbound = 0
 
-            def crashing_append(envelope, *, outbox_topic=None):
+            def crashing_append(current_store, envelope, *, outbox_topic=None):
                 if envelope["event_type"] == "SubmissionSent":
                     raise SimulatedProcessDeath("simulated process death before terminal journal")
-                return real_append(envelope, outbox_topic=outbox_topic)
-
-            store.append_event = crashing_append
+                return real_append(
+                    current_store,
+                    envelope,
+                    outbox_topic=outbox_topic,
+                )
 
             def authority(intent_hash, now):
                 return True, "allowed"
@@ -438,15 +441,21 @@ class DispatchTests(unittest.TestCase):
                 outbound += 1
                 return {"provider_order_id": "p1"}
 
-            with self.assertRaisesRegex(SimulatedProcessDeath, "simulated process death"):
-                dispatcher.dispatch(
-                    attempt_id="a1", intent_id="i1", intent_hash="h1",
-                    provider="sim", request={}, now="2026-09-24T18:00:00Z",
-                    authority_check=authority, transport_send=transport,
-                )
+            # The product now rejects per-instance JournalStore method shadows.
+            # Patch the canonical class method for this crash-injection oracle so
+            # the test still exercises failure after wire send and before the
+            # terminal journal record without weakening the runtime boundary.
+            with patch.object(JournalStore, "append_event", new=crashing_append):
+                with self.assertRaisesRegex(
+                    SimulatedProcessDeath, "simulated process death"
+                ):
+                    dispatcher.dispatch(
+                        attempt_id="a1", intent_id="i1", intent_hash="h1",
+                        provider="sim", request={}, now="2026-09-24T18:00:00Z",
+                        authority_check=authority, transport_send=transport,
+                    )
             self.assertEqual(outbound, 1)
 
-            store.append_event = real_append
             recovered = GuardedDispatcher(store, environment="SIMULATION", account_id="acct", owner_token="owner-2").dispatch(
                 attempt_id="a1", intent_id="i1", intent_hash="h1",
                 provider="sim", request={}, now="2026-09-24T18:00:01Z",

@@ -8,7 +8,7 @@ import hashlib
 from pathlib import Path
 import re
 from types import MappingProxyType
-from typing import Callable, Iterable, Mapping
+from typing import Callable, Iterable, Mapping, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -610,6 +610,22 @@ class CapabilitySnapshot:
             "evidence": [dict(item) for item in self.evidence],
             "status": self.status,
         }
+
+
+@runtime_checkable
+class CapabilityLookup(Protocol):
+    """Structural current-admission authority consumed by provider transports."""
+
+    def require_verified(
+        self,
+        *,
+        provider_id: str,
+        account_id: str,
+        entity_id: str,
+        environment: str,
+        instrument_version: str,
+        at: datetime,
+    ) -> CapabilitySnapshot: ...
 
 
 def _intersection(claims: tuple[CapabilityClaim, ...], field: str) -> frozenset[str]:

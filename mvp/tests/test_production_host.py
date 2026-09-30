@@ -104,6 +104,46 @@ class CommandAdmissionGateTests(unittest.TestCase):
         self.assertEqual(rejected.status, 503)
         self.assertEqual(rejected.body, b'{"error":"HOST_SHUTTING_DOWN"}')
 
+    def test_stop_accepting_commits_cut_without_waiting_for_active_command(self):
+        entered = Event()
+        release = Event()
+
+        def dispatch(**kwargs):
+            del kwargs
+            entered.set()
+            release.wait()
+            return TransportResponse(200, "application/json", b"{}")
+
+        application = Mock()
+        application.dispatch = dispatch
+        gate = _CommandAdmissionGate(application)
+        result = []
+        request = Thread(
+            target=lambda: result.append(
+                gate.dispatch(
+                    method="POST",
+                    target="/api/v1/commands",
+                    headers={},
+                    body=b"{}",
+                )
+            )
+        )
+        request.start()
+        self.assertTrue(entered.wait(timeout=1))
+
+        gate.stop_accepting()
+        rejected = gate.dispatch(
+            method="POST",
+            target="/api/v1/commands",
+            headers={},
+            body=b"{}",
+        )
+        self.assertEqual(rejected.status, 503)
+        self.assertTrue(request.is_alive())
+        release.set()
+        request.join(timeout=1)
+        self.assertEqual(result[0].status, 200)
+
 
 class InstanceFenceTests(unittest.TestCase):
     def test_release_failure_is_terminal_and_never_claimed_released(self):
@@ -141,6 +181,109 @@ class ProductionHostRuntimeTests(unittest.TestCase):
             admission_gate=gate or Mock(),
         )
 
+    def test_shutdown_cut_rejects_handler_that_reaches_gate_after_closing(self):
+        application = Mock()
+        executed = Event()
+
+        def dispatch(**kwargs):
+            del kwargs
+            executed.set()
+            return TransportResponse(200, "application/json", b"{}")
+
+        application.dispatch = dispatch
+        gate = _CommandAdmissionGate(application)
+        runtime = self._runtime(gate=gate)
+        request_ready = Event()
+        release_request = Event()
+        responses = []
+
+        def late_request():
+            request_ready.set()
+            release_request.wait()
+            responses.append(
+                gate.dispatch(
+                    method="POST",
+                    target="/api/v1/commands",
+                    headers={},
+                    body=b"{}",
+                )
+            )
+
+        request = Thread(target=late_request)
+        request.start()
+        self.assertTrue(request_ready.wait(timeout=1))
+
+        close_done = Event()
+        closer = Thread(target=lambda: (runtime.close(), close_done.set()))
+        closer.start()
+        with runtime._lifecycle_condition:
+            self.assertTrue(
+                runtime._lifecycle_condition.wait_for(
+                    lambda: runtime._serve_state in {"CLOSING", "CLOSED", "FAILED"},
+                    timeout=1,
+                )
+            )
+        release_request.set()
+        request.join(timeout=1)
+        closer.join(timeout=1)
+        self.assertFalse(request.is_alive())
+        self.assertFalse(closer.is_alive())
+        self.assertTrue(close_done.is_set())
+        self.assertEqual(responses[0].status, 503)
+        self.assertEqual(responses[0].body, b'{"error":"HOST_SHUTTING_DOWN"}')
+        self.assertFalse(executed.is_set())
+        self.assertTrue(runtime.closed)
+
+    def test_shutdown_cut_drains_command_admitted_before_closing_before_fence_release(self):
+        entered = Event()
+        release = Event()
+        application = Mock()
+
+        def dispatch(**kwargs):
+            del kwargs
+            entered.set()
+            release.wait()
+            return TransportResponse(200, "application/json", b"{}")
+
+        application.dispatch = dispatch
+        gate = _CommandAdmissionGate(application)
+        fence = Mock()
+        fence_released = Event()
+        fence.release.side_effect = fence_released.set
+        runtime = self._runtime(gate=gate, fence=fence)
+        responses = []
+        request = Thread(
+            target=lambda: responses.append(
+                gate.dispatch(
+                    method="POST",
+                    target="/api/v1/commands",
+                    headers={},
+                    body=b"{}",
+                )
+            )
+        )
+        request.start()
+        self.assertTrue(entered.wait(timeout=1))
+
+        closer = Thread(target=runtime.close)
+        closer.start()
+        with runtime._lifecycle_condition:
+            self.assertTrue(
+                runtime._lifecycle_condition.wait_for(
+                    lambda: runtime._serve_state == "CLOSING",
+                    timeout=1,
+                )
+            )
+        self.assertFalse(fence_released.is_set())
+        release.set()
+        request.join(timeout=1)
+        closer.join(timeout=1)
+        self.assertFalse(request.is_alive())
+        self.assertFalse(closer.is_alive())
+        self.assertEqual(responses[0].status, 200)
+        self.assertTrue(fence_released.is_set())
+        self.assertTrue(runtime.closed)
+
     def test_pre_serve_close_is_terminal_idempotent_and_ordered(self):
         ordering = []
         server = Mock()
@@ -154,6 +297,7 @@ class ProductionHostRuntimeTests(unittest.TestCase):
         runtime.close()
         self.assertTrue(runtime.closed)
         self.assertEqual(ordering, ["drained", "listener-closed", "fence-released"])
+        gate.stop_accepting.assert_called_once_with()
         server.shutdown.assert_not_called()
         with self.assertRaisesRegex(RuntimeError, "closed"):
             runtime.serve_forever()
@@ -224,6 +368,7 @@ class ProductionHostRuntimeTests(unittest.TestCase):
         self.assertFalse(first.is_alive())
         self.assertFalse(second.is_alive())
         self.assertTrue(runtime.closed)
+        gate.stop_accepting.assert_called_once_with()
         gate.stop_and_drain.assert_called_once_with()
         server.server_close.assert_called_once_with()
         fence.release.assert_called_once_with()
@@ -332,6 +477,7 @@ class ProductionHostRuntimeTests(unittest.TestCase):
         caller.join(timeout=1)
         self.assertFalse(caller.is_alive())
         self.assertEqual(errors, [failure])
+        gate.stop_accepting.assert_called_once_with()
         gate.stop_and_drain.assert_called_once_with()
         self.assertEqual(ordering, ["listener-closed", "fence-released"])
         self.assertFalse(runtime.closed)

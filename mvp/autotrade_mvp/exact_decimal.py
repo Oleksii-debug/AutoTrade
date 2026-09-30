@@ -18,6 +18,13 @@ from decimal import Decimal
 from fractions import Fraction
 from typing import Iterable, Literal
 
+from ._generated_common_scalars import is_valid_common_scalar
+from ._generated_decimal_limits import (
+    MAX_INTEGER_DIGITS,
+    MAX_SCALE,
+    MAX_SIGNIFICANT_DIGITS,
+)
+
 
 class ExactDecimalError(ValueError):
     """Raised when exact Decimal arithmetic cannot satisfy its contract."""
@@ -25,11 +32,8 @@ class ExactDecimalError(ValueError):
 
 RoundingMode = Literal["FLOOR", "CEILING", "HALF_EVEN"]
 
-# Canonical runtime resource envelope for exact financial decimal authority.
-# Contract-layer lexical validation must remain compatible with these bounds.
-MAX_SIGNIFICANT_DIGITS = 256
-MAX_SCALE = 256
-MAX_INTEGER_DIGITS = 256
+# Wire Decimal limits are generated into this package from the canonical schema.
+# Keep only operation-specific intermediate budgets local to exact arithmetic.
 MAX_RATIONAL_DIGITS = 1024
 
 
@@ -80,6 +84,21 @@ def _validate_decimal_envelope(value: Decimal) -> tuple[int, tuple[int, ...], in
     if integer_digits > MAX_INTEGER_DIGITS:
         raise ExactDecimalError("decimal exceeds maximum integer digits")
     return sign, digits, exponent
+
+
+def parse_canonical_decimal_text(value: object) -> Decimal:
+    """Parse canonical bounded wire Decimal text after cheap lexical admission.
+
+    The package-local common-scalar binding owns the wire grammar and resource
+    geometry. Only after that text-only validation succeeds do we construct
+    Decimal, then re-apply the exact-financial envelope as a defensive invariant.
+    """
+
+    if type(value) is not str or not is_valid_common_scalar("Decimal", value):
+        raise ExactDecimalError("value must be canonical bounded Decimal text")
+    result = Decimal(value)
+    _validate_decimal_envelope(result)
+    return result
 
 
 def _validate_fraction_intermediate(

@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 COMMON = ROOT / "contracts" / "jsonschema" / "common.schema.json"
 MANIFEST = ROOT / "contracts" / "manifest.json"
 CORPUS = ROOT / "contracts" / "fixtures" / "common-scalars.corpus.json"
+DECIMAL_ENVELOPE_KEY = "x-autotrade-decimal-envelope"
 
 
 CANDIDATES: tuple[tuple[str, str, object], ...] = (
@@ -33,6 +34,41 @@ CANDIDATES: tuple[tuple[str, str, object], ...] = (
     ("decimal-leading-plus", "Decimal", "+1"),
     ("decimal-final-lf", "Decimal", "1\n"),
     ("decimal-final-crlf", "Decimal", "1\r\n"),
+    (
+        "decimal-significant-at-limit",
+        "Decimal",
+        "9" * 128 + "." + "9" * 128,
+    ),
+    (
+        "decimal-significant-over-limit",
+        "Decimal",
+        "9" * 129 + "." + "9" * 128,
+    ),
+    ("decimal-integer-at-limit", "Decimal", "9" * 256),
+    ("decimal-integer-over-limit", "Decimal", "9" * 257),
+    ("decimal-scale-at-limit", "Decimal", "0." + "0" * 255 + "1"),
+    ("decimal-scale-over-limit", "Decimal", "0." + "0" * 256 + "1"),
+    (
+        "decimal-mixed-significant-over-limit",
+        "Decimal",
+        "9" * 129 + "." + "9" * 128,
+    ),
+    ("decimal-negative-integer-at-limit", "Decimal", "-" + "9" * 256),
+    (
+        "decimal-negative-scale-at-limit",
+        "Decimal",
+        "-0." + "0" * 255 + "1",
+    ),
+    (
+        "decimal-raw-length-at-limit",
+        "Decimal",
+        "-0." + "0" * 255 + "1",
+    ),
+    (
+        "decimal-raw-length-over-limit",
+        "Decimal",
+        "-0." + "0" * 256 + "1",
+    ),
     ("sequence-zero", "Sequence", "0"),
     ("sequence-large", "Sequence", "184467440737095516160000"),
     ("sequence-leading-zero", "Sequence", "01"),
@@ -67,6 +103,44 @@ CANDIDATES: tuple[tuple[str, str, object], ...] = (
 )
 
 
+def _decimal_envelope(definition: dict[str, object]) -> tuple[int, int, int]:
+    raw = definition.get(DECIMAL_ENVELOPE_KEY)
+    if (
+        not isinstance(raw, dict)
+        or set(raw)
+        != {"max_significant_digits", "max_scale", "max_integer_digits"}
+    ):
+        raise ValueError("Decimal resource envelope metadata is missing or invalid")
+    values = (
+        raw["max_significant_digits"],
+        raw["max_scale"],
+        raw["max_integer_digits"],
+    )
+    if any(type(value) is not int or value <= 0 for value in values):
+        raise ValueError("Decimal resource envelope limits must be positive integers")
+    return values  # type: ignore[return-value]
+
+
+def _within_decimal_envelope(
+    value: object,
+    definition: dict[str, object],
+) -> bool:
+    if type(value) is not str:
+        return False
+    max_significant_digits, max_scale, max_integer_digits = _decimal_envelope(
+        definition
+    )
+    unsigned = value[1:] if value.startswith("-") else value
+    integer_part, dot, fractional_part = unsigned.partition(".")
+    coefficient = integer_part + fractional_part
+    significant_digits = len(coefficient.lstrip("0")) or 1
+    return (
+        len(integer_part) <= max_integer_digits
+        and (len(fractional_part) if dot else 0) <= max_scale
+        and significant_digits <= max_significant_digits
+    )
+
+
 def generated_document() -> dict[str, object]:
     common = json.loads(COMMON.read_text(encoding="utf-8"))
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
@@ -95,12 +169,18 @@ def generated_document() -> dict[str, object]:
             {"$ref": f"{common['$id']}#/$defs/{definition}"},
             registry=registry,
         )
+        expected = validator.is_valid(value)
+        if definition == "Decimal":
+            expected = expected and _within_decimal_envelope(
+                value,
+                common["$defs"]["Decimal"],
+            )
         cases.append(
             {
                 "name": name,
                 "type": definition,
                 "value": value,
-                "expected": validator.is_valid(value),
+                "expected": expected,
             }
         )
 

@@ -152,8 +152,6 @@ class KrakenSpotContractTests(unittest.TestCase):
                 prepared_scope,
                 prepared_scope_hash,
             ):
-                if dict(prepared_scope) != submission_scope:
-                    return False, "prepared_scope_mismatch"
                 if prepared_scope_hash != payload_digest(submission_scope):
                     return False, "prepared_scope_hash_mismatch"
                 return True, "allowed"

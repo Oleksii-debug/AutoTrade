@@ -694,7 +694,7 @@ class BybitV5SharedTransportTests(unittest.TestCase):
                     "account_id": "bybit-account",
                     "environment": "PAPER",
                     "provider_environment": "TESTNET",
-                    "prepared_request_sha256": payload_digest(projected),
+                    "prepared_request_sha256": payload_digest(dict(projected)),
                 },
             )
             self.assertEqual(result.status, "UNKNOWN")
@@ -719,7 +719,7 @@ class BybitV5SharedTransportTests(unittest.TestCase):
                     "account_id": "bybit-account",
                     "environment": "PAPER",
                     "provider_environment": "TESTNET",
-                    "prepared_request_sha256": payload_digest(projected),
+                    "prepared_request_sha256": payload_digest(dict(projected)),
                 },
             )
             self.assertEqual(repeated.status, "UNKNOWN")

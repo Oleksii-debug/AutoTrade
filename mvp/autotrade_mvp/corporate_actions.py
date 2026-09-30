@@ -118,8 +118,14 @@ def _text(value: str, *, name: str) -> str:
 
 
 def _utc_instant(value: datetime, *, name: str) -> datetime:
-    if type(value) is not datetime or value.tzinfo is None:
-        raise ValueError(f"{name} must be a timezone-aware datetime")
+    if (
+        type(value) is not datetime
+        or value.tzinfo is None
+        or type(value.tzinfo) is not timezone
+    ):
+        raise ValueError(
+            f"{name} must use an exact datetime with built-in timezone"
+        )
     return datetime.astimezone(value, timezone.utc)
 
 
@@ -366,6 +372,26 @@ class Transition:
     reason: str
 
 
+def _require_exact_event(event: CorporateEvent) -> None:
+    if type(event) is not CorporateEvent:
+        raise TypeError("event must be an exact CorporateEvent")
+    if type(event.payload) is not dict:
+        raise TypeError("corporate event payload must be an exact dict")
+
+
+def _require_exact_transition(transition: Transition) -> None:
+    if type(transition) is not Transition:
+        raise TypeError("checkpoint transition must be an exact Transition")
+    if type(transition.event_id) is not str:
+        raise TypeError("checkpoint transition event_id must be an exact string")
+    if type(transition.before) is not EquityState or type(transition.after) is not EquityState:
+        raise TypeError("checkpoint transition states must be exact EquityState values")
+    if type(transition.economic_pnl) is not Decimal:
+        raise TypeError("checkpoint transition P&L must be an exact Decimal")
+    if type(transition.reason) is not str:
+        raise TypeError("checkpoint transition reason must be an exact string")
+
+
 @dataclass(frozen=True)
 class CorporateActionCheckpoint:
     """Exact corporate-action restart boundary.
@@ -385,26 +411,25 @@ class CorporateActionCheckpoint:
             "checkpoint_id",
             _text(self.checkpoint_id, name="checkpoint_id"),
         )
-        if not isinstance(self.state, EquityState):
-            raise TypeError("checkpoint state must be EquityState")
-        if not isinstance(self.instrument_version, InstrumentVersion):
+        if type(self.state) is not EquityState:
+            raise TypeError("checkpoint state must be an exact EquityState")
+        if type(self.instrument_version) is not InstrumentVersion:
             raise TypeError(
-                "checkpoint instrument_version must be InstrumentVersion"
+                "checkpoint instrument_version must be an exact InstrumentVersion"
             )
+        if type(self.records) is not tuple:
+            raise TypeError("checkpoint records must be an exact tuple")
 
         seen: set[str] = set()
         previous_after: EquityState | None = None
         for record in self.records:
-            if (
-                not isinstance(record, tuple)
-                or len(record) != 2
-                or not isinstance(record[0], CorporateEvent)
-                or not isinstance(record[1], Transition)
-            ):
+            if type(record) is not tuple or len(record) != 2:
                 raise TypeError(
-                    "checkpoint records must contain CorporateEvent/Transition pairs"
+                    "checkpoint records must contain exact event/transition pairs"
                 )
             event, transition = record
+            _require_exact_event(event)
+            _require_exact_transition(transition)
             if event.event_id in seen:
                 raise ValueError("checkpoint contains duplicate corporate event identity")
             if transition.event_id != event.event_id:
@@ -432,12 +457,12 @@ class CorporateActionBook:
         instrument_version: InstrumentVersion,
         registry: InstrumentRegistry,
     ):
-        if not isinstance(state, EquityState):
-            raise TypeError("state must be EquityState")
-        if not isinstance(instrument_version, InstrumentVersion):
-            raise TypeError("instrument_version must be InstrumentVersion")
-        if not isinstance(registry, InstrumentRegistry):
-            raise TypeError("registry must be InstrumentRegistry")
+        if type(state) is not EquityState:
+            raise TypeError("state must be an exact EquityState")
+        if type(instrument_version) is not InstrumentVersion:
+            raise TypeError("instrument_version must be an exact InstrumentVersion")
+        if type(registry) is not InstrumentRegistry:
+            raise TypeError("registry must be an exact InstrumentRegistry")
         if instrument_version.asset_class != "CASH_EQUITY":
             raise ValueError("corporate-action book requires a CASH_EQUITY instrument")
         registered = tuple(
@@ -477,14 +502,14 @@ class CorporateActionBook:
         registry: InstrumentRegistry,
         events: Iterable[CorporateEvent],
     ) -> "CorporateActionBook":
+        materialized = tuple(events)
+        for event in materialized:
+            _require_exact_event(event)
         book = cls(
             state,
             instrument_version=instrument_version,
             registry=registry,
         )
-        materialized = tuple(events)
-        if not all(isinstance(event, CorporateEvent) for event in materialized):
-            raise TypeError("events must contain CorporateEvent values")
 
         by_date: dict[date, list[CorporateEvent]] = {}
         for event in materialized:
@@ -533,11 +558,13 @@ class CorporateActionBook:
     ) -> "CorporateActionBook":
         """Restore checkpoint state and replay only the strict retained suffix."""
 
-        if not isinstance(checkpoint, CorporateActionCheckpoint):
-            raise TypeError("checkpoint must be CorporateActionCheckpoint")
+        if type(checkpoint) is not CorporateActionCheckpoint:
+            raise TypeError("checkpoint must be an exact CorporateActionCheckpoint")
+        if type(registry) is not InstrumentRegistry:
+            raise TypeError("registry must be an exact InstrumentRegistry")
         materialized = tuple(events)
-        if not all(isinstance(event, CorporateEvent) for event in materialized):
-            raise TypeError("events must contain CorporateEvent values")
+        for event in materialized:
+            _require_exact_event(event)
         event_ids = tuple(event.event_id for event in materialized)
         if len(set(event_ids)) != len(event_ids):
             raise ValueError(
@@ -607,8 +634,7 @@ class CorporateActionBook:
         )
 
     def apply(self, event: CorporateEvent) -> Transition:
-        if not isinstance(event, CorporateEvent):
-            raise TypeError("event must be CorporateEvent")
+        _require_exact_event(event)
         existing = self._events.get(event.event_id)
         if existing is not None:
             prior_event, transition = existing

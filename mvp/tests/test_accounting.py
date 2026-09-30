@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 import unittest
 
 from mvp.autotrade_mvp.accounting import (
@@ -16,6 +16,7 @@ from mvp.autotrade_mvp.accounting import (
     validate_transaction,
 )
 from mvp.autotrade_mvp.economics import cash_round_trip
+from mvp.autotrade_mvp.exact_decimal import MAX_INTEGER_DIGITS
 
 
 class AccountingFoundationTests(unittest.TestCase):
@@ -659,6 +660,138 @@ class AccountingFoundationTests(unittest.TestCase):
                 instrument="ABC",
                 settlement_currency="USD",
             )
+
+
+
+class AccountingExactAuthorityTests(unittest.TestCase):
+    _ROUNDINGS = (ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN)
+    _PRECISIONS = (6, 10, 28, 80)
+
+    def test_unbalanced_tiny_residual_is_rejected_in_every_decimal_context(self):
+        transaction = JournalTransaction(
+            transaction_id="hostile-context-unbalanced",
+            cause_event_id="hostile-context-unbalanced-cause",
+            postings=(
+                posting("A", "USD", "1e30"),
+                posting("B", "USD", "1e-30"),
+                posting("C", "USD", "-1e30"),
+            ),
+        )
+
+        for precision in self._PRECISIONS:
+            for rounding in self._ROUNDINGS:
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        with self.assertRaisesRegex(ValueError, "not balanced"):
+                            validate_transaction(transaction)
+
+    def test_high_significance_reversal_is_context_invariant(self):
+        original = JournalTransaction(
+            transaction_id="high-significance-original",
+            cause_event_id="high-significance-cause",
+            postings=(
+                posting("CASH:USD", "USD", "12345678901234567890.123456789"),
+                posting("CLEARING:USD", "USD", "-12345678901234567890.123456789"),
+            ),
+        )
+        expected = (
+            Decimal("-12345678901234567890.123456789"),
+            Decimal("12345678901234567890.123456789"),
+        )
+        digests = set()
+
+        for precision in self._PRECISIONS:
+            for rounding in self._ROUNDINGS:
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        reversal = reverse_transaction(
+                            original,
+                            transaction_id="high-significance-reversal",
+                            cause_event_id="high-significance-reversal-cause",
+                        )
+                        self.assertEqual(
+                            tuple(item.signed_amount for item in reversal.postings),
+                            expected,
+                        )
+                        digests.add(transaction_digest(reversal))
+
+        self.assertEqual(len(digests), 1)
+
+    def test_balance_projection_preserves_tiny_residual_in_every_decimal_context(self):
+        transactions = (
+            JournalTransaction(
+                transaction_id="balance-large-in",
+                cause_event_id="balance-large-in-cause",
+                postings=(
+                    posting("TARGET", "USD", "1e30"),
+                    posting("OFFSET", "USD", "-1e30"),
+                ),
+            ),
+            JournalTransaction(
+                transaction_id="balance-tiny-in",
+                cause_event_id="balance-tiny-in-cause",
+                postings=(
+                    posting("TARGET", "USD", "1e-30"),
+                    posting("OFFSET", "USD", "-1e-30"),
+                ),
+            ),
+            JournalTransaction(
+                transaction_id="balance-large-out",
+                cause_event_id="balance-large-out-cause",
+                postings=(
+                    posting("TARGET", "USD", "-1e30"),
+                    posting("OFFSET", "USD", "1e30"),
+                ),
+            ),
+        )
+
+        for precision in self._PRECISIONS:
+            for rounding in self._ROUNDINGS:
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        book = EconomicBook(transactions)
+                        self.assertEqual(
+                            book.balance("TARGET", "USD"),
+                            Decimal("1e-30"),
+                        )
+
+    def test_oversized_durable_split_ratio_is_rejected_before_decimal_parse(self):
+        oversized_numerator = "1" * (MAX_INTEGER_DIGITS + 1)
+        transaction = JournalTransaction(
+            transaction_id="oversized-split-ratio",
+            cause_event_id="oversized-split-ratio-cause",
+            postings=(
+                posting("POSITION:ABC", "ABC", "1"),
+                posting(
+                    "CORPORATE_ACTION_SPLIT_CLEARING:ABC:"
+                    + oversized_numerator
+                    + ":1",
+                    "ABC",
+                    "-1",
+                ),
+            ),
+        )
+        book = EconomicBook((transaction,))
+        before = book.transactions
+
+        with self.assertRaisesRegex(
+            AccountingConflict,
+            "ratio identity is not canonical",
+        ):
+            project_equity_position(
+                book,
+                instrument="ABC",
+                settlement_currency="USD",
+            )
+
+        self.assertEqual(book.transactions, before)
+
 
 
 

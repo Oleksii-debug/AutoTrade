@@ -13,7 +13,7 @@ from math import isfinite
 import os
 from pathlib import Path
 import ssl
-from threading import Condition, Lock, Thread
+from threading import Condition, Lock, Thread, current_thread
 from typing import BinaryIO, Callable
 from urllib.parse import urlsplit
 
@@ -32,6 +32,8 @@ _ALLOWED_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 _COMMAND_PATH = "/api/v1/commands"
 _SHUTTING_DOWN_BODY = b'{"error":"HOST_SHUTTING_DOWN"}'
 _MAX_SERVE_POLL_SECONDS = 0.5
+_MAX_CONFIG_BYTES = 64 * 1024
+_MAX_CONFIG_DEPTH = 16
 _CONFIG_FIELDS = frozenset(
     {
         "journal_path",
@@ -43,6 +45,8 @@ _CONFIG_FIELDS = frozenset(
         "public_origin",
     }
 )
+_TERMINAL_STATES = frozenset({"CLOSED", "FAILED"})
+_STOPPING_STATES = frozenset({"CLOSING", "CLOSED", "FAILED"})
 
 
 @dataclass(frozen=True)
@@ -87,9 +91,22 @@ class ProductionHostConfig:
         object.__setattr__(self, "public_origin", canonical_origin)
 
 
+def _validate_json_depth(value: object, *, depth: int = 0) -> None:
+    if depth > _MAX_CONFIG_DEPTH:
+        raise ValueError("production host config exceeds maximum JSON depth")
+    if isinstance(value, dict):
+        for child in value.values():
+            _validate_json_depth(child, depth=depth + 1)
+    elif isinstance(value, list):
+        for child in value:
+            _validate_json_depth(child, depth=depth + 1)
+
+
 def _strict_json_object(payload: bytes) -> dict[str, object]:
     if not isinstance(payload, bytes):
         raise TypeError("production host config payload must be bytes")
+    if len(payload) > _MAX_CONFIG_BYTES:
+        raise ValueError("production host config exceeds maximum size")
     try:
         text = payload.decode("utf-8")
     except UnicodeDecodeError as error:
@@ -103,12 +120,22 @@ def _strict_json_object(payload: bytes) -> dict[str, object]:
             result[key] = value
         return result
 
+    def reject_non_finite(value: str) -> object:
+        raise ValueError(f"production host config has non-finite JSON number: {value}")
+
     try:
-        parsed = json.loads(text, object_pairs_hook=object_pairs)
+        parsed = json.loads(
+            text,
+            object_pairs_hook=object_pairs,
+            parse_constant=reject_non_finite,
+        )
     except json.JSONDecodeError as error:
         raise ValueError("production host config is not valid JSON") from error
+    except RecursionError as error:
+        raise ValueError("production host config exceeds maximum JSON depth") from error
     if not isinstance(parsed, dict):
         raise ValueError("production host config must be one JSON object")
+    _validate_json_depth(parsed)
     return parsed
 
 
@@ -158,7 +185,7 @@ def parse_production_host_config(payload: bytes) -> ProductionHostConfig:
 
 
 def load_production_host_config(path: str | Path) -> ProductionHostConfig:
-    """Read exactly one config payload from an explicit absolute config path."""
+    """Read one bounded config payload from an explicit absolute config path."""
 
     config_path = Path(path)
     if not config_path.is_absolute():
@@ -166,7 +193,10 @@ def load_production_host_config(path: str | Path) -> ProductionHostConfig:
     canonical_path = config_path.resolve(strict=True)
     if not canonical_path.is_file():
         raise ValueError("production host config path must reference a file")
-    payload = canonical_path.read_bytes()
+    with canonical_path.open("rb") as handle:
+        payload = handle.read(_MAX_CONFIG_BYTES + 1)
+    if len(payload) > _MAX_CONFIG_BYTES:
+        raise ValueError("production host config exceeds maximum size")
     return parse_production_host_config(payload)
 
 
@@ -176,8 +206,14 @@ class _InstanceFence:
     def __init__(self, *, path: Path, handle: BinaryIO) -> None:
         self.path = path
         self._handle = handle
-        self._released = False
-        self._release_lock = Lock()
+        self._release_condition = Condition()
+        self._release_state = "ACTIVE"
+        self._release_error: BaseException | None = None
+
+    @property
+    def released(self) -> bool:
+        with self._release_condition:
+            return self._release_state == "RELEASED"
 
     @classmethod
     def acquire(cls, journal_path: Path) -> "_InstanceFence":
@@ -216,22 +252,42 @@ class _InstanceFence:
         return cls(path=fence_path, handle=handle)
 
     def release(self) -> None:
-        with self._release_lock:
-            if self._released:
+        with self._release_condition:
+            while self._release_state == "RELEASING":
+                self._release_condition.wait()
+            if self._release_state == "RELEASED":
                 return
+            if self._release_state == "FAILED":
+                assert self._release_error is not None
+                raise self._release_error
+            self._release_state = "RELEASING"
+
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                self._handle.seek(0)
+                msvcrt.locking(self._handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+            self._handle.close()
+        except BaseException as exc:
             try:
-                if os.name == "nt":
-                    import msvcrt
+                if not self._handle.closed:
+                    self._handle.close()
+            except BaseException as close_error:
+                exc.add_note(f"best-effort fence handle close also failed: {close_error!r}")
+            with self._release_condition:
+                self._release_error = exc
+                self._release_state = "FAILED"
+                self._release_condition.notify_all()
+            raise
 
-                    self._handle.seek(0)
-                    msvcrt.locking(self._handle.fileno(), msvcrt.LK_UNLCK, 1)
-                else:
-                    import fcntl
-
-                    fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
-            finally:
-                self._released = True
-                self._handle.close()
+        with self._release_condition:
+            self._release_state = "RELEASED"
+            self._release_condition.notify_all()
 
 
 class _CommandAdmissionGate:
@@ -289,7 +345,7 @@ class _CommandAdmissionGate:
 
 
 class ProductionHostRuntime:
-    """Own one canonical host listener and instance fence through shutdown."""
+    """Own one canonical host listener and instance fence through terminal shutdown."""
 
     def __init__(
         self,
@@ -307,59 +363,134 @@ class ProductionHostRuntime:
         self.server = server
         self._instance_fence = instance_fence
         self._admission_gate = admission_gate
-        self._closed = False
+        self._lifecycle_condition = Condition()
         self._serve_state = "IDLE"
         self._serve_thread: Thread | None = None
         self._serve_error: BaseException | None = None
-        self._lifecycle_lock = Lock()
-        # Tiny deterministic test seams around the two pre-I/O cancellation points.
+        self._terminal_error: BaseException | None = None
+        self._teardown_owner: Thread | None = None
         self._serve_entry_hook: Callable[[], None] = lambda: None
         self._serve_loop_entry_hook: Callable[[], None] = lambda: None
 
     @property
     def closed(self) -> bool:
-        with self._lifecycle_lock:
-            return self._closed
+        with self._lifecycle_condition:
+            return self._serve_state == "CLOSED"
+
+    @property
+    def shutdown_requested(self) -> bool:
+        with self._lifecycle_condition:
+            return self._serve_state in _STOPPING_STATES
 
     @property
     def serving(self) -> bool:
-        with self._lifecycle_lock:
+        with self._lifecycle_condition:
             return self._serve_state == "SERVING"
+
+    def _raise_terminal_failure(self) -> None:
+        assert self._terminal_error is not None
+        raise self._terminal_error
 
     def _run_server(self, poll_interval: float) -> None:
         try:
             self._serve_entry_hook()
-            with self._lifecycle_lock:
-                if self._closed:
+            with self._lifecycle_condition:
+                if self._serve_state in _STOPPING_STATES:
                     return
-                # ENTERING has passed worker startup admission but has not yet
-                # touched the server request loop. close() can still cancel it
-                # without any BaseServer shutdown handshake.
+                if self._serve_state != "STARTING":
+                    raise RuntimeError("production host runtime startup state corrupted")
                 self._serve_state = "ENTERING"
+                self._lifecycle_condition.notify_all()
             self._serve_loop_entry_hook()
-            with self._lifecycle_lock:
-                if self._closed:
+            with self._lifecycle_condition:
+                if self._serve_state in _STOPPING_STATES:
                     return
-                # ProductionHostRuntime owns a cooperative loop over the canonical
-                # server's public handle_request() primitive. This removes the
-                # BaseServer.shutdown() pre-entry deadlock class entirely: close()
-                # only publishes cancellation and joins an already-active worker.
+                if self._serve_state != "ENTERING":
+                    raise RuntimeError("production host runtime entry state corrupted")
                 self.server.timeout = min(poll_interval, _MAX_SERVE_POLL_SECONDS)
                 self._serve_state = "SERVING"
+                self._lifecycle_condition.notify_all()
 
             while True:
-                with self._lifecycle_lock:
-                    if self._closed:
+                with self._lifecycle_condition:
+                    if self._serve_state in _STOPPING_STATES:
                         return
                 self.server.handle_request()
-                # Preserve ThreadingMixIn housekeeping that BaseServer.serve_forever
-                # normally invokes once per poll iteration.
                 self.server.service_actions()
         except BaseException as exc:
-            self._serve_error = exc
+            with self._lifecycle_condition:
+                if self._serve_error is None:
+                    self._serve_error = exc
+                if self._serve_state not in _TERMINAL_STATES:
+                    self._serve_state = "CLOSING"
+                self._lifecycle_condition.notify_all()
         finally:
-            with self._lifecycle_lock:
-                self._serve_state = "IDLE"
+            with self._lifecycle_condition:
+                self._lifecycle_condition.notify_all()
+
+    def _terminal_teardown(self, cause: BaseException | None = None) -> None:
+        owner = current_thread()
+        with self._lifecycle_condition:
+            if cause is not None and self._serve_error is None:
+                self._serve_error = cause
+            while True:
+                if self._serve_state == "CLOSED":
+                    return
+                if self._serve_state == "FAILED":
+                    self._raise_terminal_failure()
+                if self._serve_state == "CLOSING":
+                    if self._teardown_owner is None:
+                        self._teardown_owner = owner
+                        break
+                    if self._teardown_owner is owner:
+                        break
+                    self._lifecycle_condition.wait()
+                    continue
+                self._serve_state = "CLOSING"
+                self._teardown_owner = owner
+                self._lifecycle_condition.notify_all()
+                break
+            worker = self._serve_thread
+
+        stage = "command admission drain"
+        cleanup_error: BaseException | None = None
+        try:
+            self._admission_gate.stop_and_drain()
+            stage = "serve worker join"
+            if worker is not None and worker is not owner:
+                worker.join()
+            with self._lifecycle_condition:
+                terminal_cause = self._serve_error
+            stage = "listener close"
+            self.server.server_close()
+            stage = "instance fence release"
+            self._instance_fence.release()
+        except BaseException as exc:
+            cleanup_error = exc
+            with self._lifecycle_condition:
+                terminal_cause = self._serve_error
+
+        terminal_error = terminal_cause
+        if cleanup_error is not None:
+            if terminal_error is None:
+                terminal_error = cleanup_error
+            else:
+                terminal_error.add_note(
+                    f"terminal teardown also failed during {stage}: {cleanup_error!r}"
+                )
+
+        with self._lifecycle_condition:
+            if terminal_error is None:
+                self._serve_state = "CLOSED"
+                self._terminal_error = None
+            else:
+                self._serve_state = "FAILED"
+                self._terminal_error = terminal_error
+            self._teardown_owner = None
+            self._lifecycle_condition.notify_all()
+
+        if terminal_error is not None:
+            raise terminal_error
 
     def serve_forever(self, *, poll_interval: float = 0.5) -> None:
         if (
@@ -371,11 +502,13 @@ class ProductionHostRuntime:
         if not isfinite(poll_interval) or poll_interval <= 0:
             raise ValueError("poll_interval must be a finite positive number")
 
-        with self._lifecycle_lock:
-            if self._closed:
+        with self._lifecycle_condition:
+            if self._serve_state == "CLOSED":
                 raise RuntimeError("production host runtime is closed")
+            if self._serve_state == "FAILED":
+                self._raise_terminal_failure()
             if self._serve_state != "IDLE":
-                raise RuntimeError("production host runtime is already serving")
+                raise RuntimeError("production host runtime is already serving or closing")
             self._serve_state = "STARTING"
             self._serve_error = None
             worker = Thread(
@@ -387,43 +520,28 @@ class ProductionHostRuntime:
             self._serve_thread = worker
             worker.start()
         worker.join()
-        error = self._serve_error
+
+        with self._lifecycle_condition:
+            error = self._serve_error
+            state = self._serve_state
         if error is not None:
-            raise error
+            self._terminal_teardown(error)
+        if state in _STOPPING_STATES:
+            self._terminal_teardown()
+            return
+        self._terminal_teardown(
+            RuntimeError("production host serve worker exited without terminal shutdown")
+        )
 
     def close(self) -> None:
-        with self._lifecycle_lock:
-            if self._closed:
-                return
-            self._closed = True
-            state = self._serve_state
-            worker = self._serve_thread
-
-        # Atomically stop new durable command admissions first and allow any command
-        # already admitted at that boundary to finish its durable dispatch.
-        self._admission_gate.stop_and_drain()
-
-        try:
-            if state == "SERVING" and worker is not None:
-                # No BaseServer.shutdown() call is required or permitted here.
-                # The canonical server's handle_request() poll is capped, so the
-                # worker observes _closed and exits before listener teardown.
-                worker.join()
-            # STARTING/ENTERING workers have not touched server request I/O and
-            # recheck _closed before doing so. They may be cancelled without a
-            # blocking join, preserving deterministic pre-entry close semantics.
-        finally:
-            try:
-                self.server.server_close()
-            finally:
-                # AuthenticatedHostServer is configured with non-daemon request
-                # workers below, so server_close() joins any handler that had already
-                # been accepted, including post-ACCEPTED authority completion.
-                self._instance_fence.release()
+        self._terminal_teardown()
 
     def __enter__(self) -> "ProductionHostRuntime":
-        if self.closed:
-            raise RuntimeError("production host runtime is closed")
+        with self._lifecycle_condition:
+            if self._serve_state in _STOPPING_STATES:
+                if self._serve_state == "FAILED":
+                    self._raise_terminal_failure()
+                raise RuntimeError("production host runtime is closing or closed")
         return self
 
     def __exit__(self, exc_type, exc, traceback) -> None:
@@ -478,8 +596,6 @@ def build_production_host(
             application,
             tls_context=tls_context,
         )
-        # ThreadingMixIn otherwise leaves daemon handlers alive after server_close().
-        # Production shutdown must join handlers through the post-ACCEPTED boundary.
         server.daemon_threads = False
         server.block_on_close = True
     except BaseException:

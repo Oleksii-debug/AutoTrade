@@ -8,6 +8,7 @@ import unittest
 from mvp.autotrade_mvp.dispatch import (
     ExactJsonTransportResponse,
     GuardedDispatcher,
+    PreparedSubmissionAuthorityCheck,
     load_submission_response_binding,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
@@ -141,6 +142,9 @@ class ProviderCoreTests(unittest.TestCase):
         )
         request_sha = "sha256:" + sha256(request_text.encode("utf-8")).hexdigest()
         scope = {
+            "provider": "BYBIT",
+            "account_id": "acct",
+            "environment": "PAPER",
             "endpoint": "/v5/order/create",
             "prepared_request_sha256": request_sha,
             "capability_snapshot_ids": list(capability_snapshot_ids),
@@ -159,7 +163,9 @@ class ProviderCoreTests(unittest.TestCase):
             provider="BYBIT",
             request=request,
             now="2026-09-24T18:00:00Z",
-            authority_check=lambda _hash, _now: (True, "allowed"),
+            authority_check=PreparedSubmissionAuthorityCheck(
+                lambda _hash, _now, _scope, _scope_hash: (True, "allowed")
+            ),
             transport_send=transport,
             sender_check=lambda _owner, _epoch: None,
             submission_scope=scope,

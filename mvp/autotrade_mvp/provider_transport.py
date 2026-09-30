@@ -36,7 +36,9 @@ from urllib.request import (
     build_opener,
 )
 
-from .capabilities import CapabilityLookup, CapabilitySnapshot
+from .capabilities import CapabilityRegistry, CapabilitySnapshot
+from .durable_capabilities import DurableCapabilityRegistry
+from .provider_domain import normalize_provider_environment
 from .dispatch import ExactJsonTransportResponse
 from .persistence import JournalStore, payload_digest
 from .kraken_spot import (
@@ -2479,7 +2481,7 @@ class KrakenSpotAuthenticatedReadTransport:
         policy: ProviderEndpointPolicy,
         account_id: str,
         capability_snapshot_id: str,
-        capability_registry: CapabilityLookup,
+        capability_registry: CapabilityRegistry | DurableCapabilityRegistry,
         secret_resolver: ProviderSecretResolver,
         credential_handle: PersistentCredentialHandle,
         session_token: str,
@@ -2517,8 +2519,10 @@ class KrakenSpotAuthenticatedReadTransport:
             capability_snapshot_id,
             name="capability_snapshot_id",
         )
-        if not isinstance(capability_registry, CapabilityLookup):
-            raise TypeError("capability_registry must implement CapabilityLookup")
+        if type(capability_registry) not in {CapabilityRegistry, DurableCapabilityRegistry}:
+            raise TypeError(
+                "capability_registry must be an exact canonical capability registry"
+            )
         if not hasattr(secret_resolver, "resolve_for_execution"):
             raise TypeError(
                 "secret_resolver must implement resolve_for_execution"
@@ -3103,7 +3107,7 @@ class BybitV5HttpTransport:
         provider_environment: str,
         account_id: str,
         capability_snapshot_id: str,
-        capability_registry: CapabilityLookup,
+        capability_registry: CapabilityRegistry | DurableCapabilityRegistry,
         secret_resolver: ProviderSecretResolver,
         credential_handle: PersistentCredentialHandle,
         session_token: str,
@@ -3146,8 +3150,10 @@ class BybitV5HttpTransport:
             raise ProviderTransportScopeError(
                 "credential handle account mismatch"
             )
-        if not isinstance(capability_registry, CapabilityLookup):
-            raise TypeError("capability_registry must implement CapabilityLookup")
+        if type(capability_registry) not in {CapabilityRegistry, DurableCapabilityRegistry}:
+            raise TypeError(
+                "capability_registry must be an exact canonical capability registry"
+            )
         if not hasattr(secret_resolver, "resolve_for_execution"):
             raise TypeError(
                 "secret_resolver must implement resolve_for_execution"
@@ -3546,7 +3552,7 @@ class BybitV5AuthenticatedReadTransport:
         provider_environment: str,
         account_id: str,
         capability_snapshot_id: str,
-        capability_registry: CapabilityLookup,
+        capability_registry: CapabilityRegistry | DurableCapabilityRegistry,
         secret_resolver: ProviderSecretResolver,
         credential_handle: PersistentCredentialHandle,
         session_token: str,
@@ -3585,8 +3591,10 @@ class BybitV5AuthenticatedReadTransport:
             raise ProviderTransportScopeError(
                 "credential handle account mismatch"
             )
-        if not isinstance(capability_registry, CapabilityLookup):
-            raise TypeError("capability_registry must implement CapabilityLookup")
+        if type(capability_registry) not in {CapabilityRegistry, DurableCapabilityRegistry}:
+            raise TypeError(
+                "capability_registry must be an exact canonical capability registry"
+            )
         if not hasattr(secret_resolver, "resolve_for_execution"):
             raise TypeError(
                 "secret_resolver must implement resolve_for_execution"
@@ -4143,7 +4151,7 @@ class BinanceSpotAuthenticatedReadTransport:
         policy: ProviderEndpointPolicy,
         account_id: str,
         capability_snapshot_id: str,
-        capability_registry: CapabilityLookup,
+        capability_registry: CapabilityRegistry | DurableCapabilityRegistry,
         secret_resolver: ProviderSecretResolver,
         credential_handle: PersistentCredentialHandle,
         session_token: str,
@@ -4182,8 +4190,10 @@ class BinanceSpotAuthenticatedReadTransport:
             capability_snapshot_id,
             name="capability_snapshot_id",
         )
-        if not isinstance(capability_registry, CapabilityLookup):
-            raise TypeError("capability_registry must implement CapabilityLookup")
+        if type(capability_registry) not in {CapabilityRegistry, DurableCapabilityRegistry}:
+            raise TypeError(
+                "capability_registry must be an exact canonical capability registry"
+            )
         if not hasattr(secret_resolver, "resolve_for_execution"):
             raise TypeError(
                 "secret_resolver must implement resolve_for_execution"
@@ -4207,6 +4217,11 @@ class BinanceSpotAuthenticatedReadTransport:
             )
 
         self.policy = policy
+        self.provider_environment = normalize_provider_environment(
+            provider_id=policy.provider_id,
+            environment=policy.environment,
+            provider_environment=None,
+        )
         self.account_id = account
         self.capability_snapshot_id = capability
         self.capability_registry = capability_registry
@@ -4290,6 +4305,7 @@ class BinanceSpotAuthenticatedReadTransport:
             query_binding.provider_id != self.policy.provider_id
             or query_binding.account_id != self.account_id
             or query_binding.environment != self.policy.environment
+            or query_binding.provider_environment != self.provider_environment
             or query_binding.capability_snapshot_id != self.capability_snapshot_id
         ):
             raise ProviderTransportScopeError(

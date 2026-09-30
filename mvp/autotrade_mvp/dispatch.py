@@ -314,6 +314,31 @@ def submission_attempt_aggregate_id(
     )
 
 
+def _canonical_journal_authority_snapshot(
+    store: JournalStore,
+) -> tuple[object, object]:
+    """Validate the narrow canonical JournalStore instance/generation seam.
+
+    JournalStore currently has exactly two initialized instance fields. Any
+    additional per-instance attribute can shadow an authority-bearing class
+    method (load_events/append_event/_connect/etc.). Reject that entire class
+    of caller mutation instead of maintaining an open-ended method blacklist.
+    The returned path + physical store identity let long-lived dispatchers
+    detect replacement of the selected backing generation.
+    """
+
+    if type(store) is not JournalStore:
+        raise TypeError("store must be the canonical JournalStore")
+    state = vars(store)
+    if set(state) != {"path", "_store_identity"}:
+        raise TypeError("canonical JournalStore instance state is shadowed")
+    path = state["path"]
+    identity = JournalStore.store_identity.__get__(store, JournalStore)
+    if getattr(identity, "canonical_path", None) != str(path):
+        raise PermissionError("canonical JournalStore backing identity changed")
+    return path, identity
+
+
 def load_submission_response_binding(
     store: JournalStore,
     *,
@@ -323,18 +348,19 @@ def load_submission_response_binding(
 ) -> SubmissionResponseBinding:
     """Load exact provider response provenance from the canonical submission journal."""
 
-    # This factory mints the private durable-response binding token. Do not
-    # virtual-dispatch an authority-bearing journal read through a caller
-    # subclass: matching bytes/digests are not proof that the history exists
-    # in the canonical physical JournalStore.
-    if type(store) is not JournalStore:
-        raise TypeError("store must be the canonical JournalStore")
+    # This factory mints the private durable-response binding token. Reject
+    # subclasses plus any exact-instance shadow state before the authority read.
+    # Full product-selected store capability/recovery composition remains owned
+    # by the canonical WP-48/WP-49 lineage.
+    _canonical_journal_authority_snapshot(store)
     aggregate_id = submission_attempt_aggregate_id(
         environment=environment,
         account_id=account_id,
         attempt_id=attempt_id,
     )
-    events = store.load_events("submission_attempt", aggregate_id)
+    # Resolve the method from the canonical class after rejecting all instance
+    # shadow state; never dispatch through a caller-attached load_events.
+    events = JournalStore.load_events(store, "submission_attempt", aggregate_id)
     if not events:
         raise ValueError("durable submission attempt was not found")
     event_types = [event.get("event_type") for event in events]
@@ -535,11 +561,14 @@ class GuardedDispatcher:
         prepared_lease_seconds: int = 60,
     ):
         # SubmissionPrepared/Sending/Sent/Unknown is financial send-state
-        # authority. Until persistence exposes a sealed store capability,
-        # reject caller-polymorphic journal implementations before any read or
-        # append method can run.
-        if type(store) is not JournalStore:
-            raise TypeError("store must be the canonical JournalStore")
+        # authority. Capture the exact selected physical generation and reject
+        # caller-polymorphic or instance-shadowed journal state before any read
+        # or append can run. A stronger sealed product-issued capability remains
+        # a recovery/persistence integration responsibility.
+        (
+            self._journal_store_path,
+            self._journal_store_identity,
+        ) = _canonical_journal_authority_snapshot(store)
         self.store = store
         normalized_environment = (
             environment.strip().upper() if isinstance(environment, str) else ""
@@ -559,6 +588,16 @@ class GuardedDispatcher:
             raise ValueError("prepared_lease_seconds must be a positive integer")
         self.prepared_lease_seconds = prepared_lease_seconds
 
+    def _journal_store_authority(self) -> JournalStore:
+        store = self.store
+        path, identity = _canonical_journal_authority_snapshot(store)
+        if (
+            path != self._journal_store_path
+            or identity != self._journal_store_identity
+        ):
+            raise PermissionError("submission journal authority changed")
+        return store
+
     def _aggregate_id(self, attempt_id: str) -> str:
         return submission_attempt_aggregate_id(
             environment=self.environment,
@@ -567,7 +606,9 @@ class GuardedDispatcher:
         )
 
     def _events(self, attempt_id: str) -> list[dict[str, Any]]:
-        return self.store.load_events(
+        store = self._journal_store_authority()
+        return JournalStore.load_events(
+            store,
             "submission_attempt",
             self._aggregate_id(attempt_id),
         )
@@ -581,7 +622,9 @@ class GuardedDispatcher:
         payload: dict[str, Any],
         now: str,
     ):
-        return self.store.append_event(
+        store = self._journal_store_authority()
+        return JournalStore.append_event(
+            store,
             _envelope(
                 scope_key=self.scope_key,
                 aggregate_id=self._aggregate_id(attempt_id),

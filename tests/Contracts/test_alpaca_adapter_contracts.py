@@ -21,12 +21,12 @@ from mvp.autotrade_mvp.capabilities import (
 from mvp.autotrade_mvp.dispatch import (
     ExactJsonTransportResponse,
     GuardedDispatcher,
-    PreparedSubmissionAuthorityCheck,
     load_submission_response_binding,
     stable_client_order_id,
 )
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_core import observe_submission_json_response
+from tests.Contracts.financial_authority_fixture import canonical_financial_dispatch_guard
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -123,19 +123,26 @@ def durable_observation(*, payload, intent_id: str):
             "instrument_versions": list(request.instrument_versions),
         }
 
-        def contract_authority(_intent, _now, prepared_scope, prepared_scope_hash):
-            if prepared_scope_hash != payload_digest(submission_scope):
-                return False, "prepared_scope_hash_mismatch"
-            return True, "allowed"
+        authority_check, authority_intent_hash = canonical_financial_dispatch_guard(
+            store,
+            provider_id="ALPACA",
+            provider_environment="PAPER",
+            account_id="contract-account",
+            environment="PAPER",
+            capability_snapshot_id=request.capability_snapshot_ids[0],
+            intent_id=intent_id,
+            submission_scope=submission_scope,
+            now="2026-09-24T20:00:00Z",
+        )
 
         outcome = dispatcher.dispatch(
             attempt_id=attempt_id,
             intent_id=intent_id,
-            intent_hash="contract-intent-hash",
+            intent_hash=authority_intent_hash,
             provider="ALPACA",
             request=request.body,
             now="2026-09-24T20:00:00Z",
-            authority_check=PreparedSubmissionAuthorityCheck(contract_authority),
+            authority_check=authority_check,
             transport_send=lambda _cid, _request, guard: (
                 guard(),
                 ExactJsonTransportResponse(raw),

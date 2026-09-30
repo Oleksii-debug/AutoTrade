@@ -20,12 +20,12 @@ from mvp.autotrade_mvp.capabilities import (
 from mvp.autotrade_mvp.dispatch import (
     ExactJsonTransportResponse,
     GuardedDispatcher,
-    PreparedSubmissionAuthorityCheck,
     load_submission_response_binding,
     stable_client_order_id,
 )
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_core import observe_submission_json_response
+from tests.Contracts.financial_authority_fixture import canonical_financial_dispatch_guard
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -118,39 +118,26 @@ def durable_submission(payload, *, intent_id):
             "provider_environment": "MAINNET",
         }
 
-        def contract_authority(
-            _intent_hash,
-            _now,
-            prepared_scope,
-            prepared_scope_hash,
-        ):
-            if prepared_scope_hash != payload_digest(dict(prepared_scope)):
-                return False, "prepared_scope_hash_mismatch"
-            if prepared_scope.get("provider") != "BYBIT":
-                return False, "provider_mismatch"
-            if prepared_scope.get("account_id") != "contract-account":
-                return False, "account_mismatch"
-            if prepared_scope.get("environment") != "LIVE":
-                return False, "environment_mismatch"
-            if prepared_scope.get("provider_environment") != "MAINNET":
-                return False, "provider_environment_mismatch"
-            if prepared_scope.get("endpoint") != prepared.endpoint:
-                return False, "endpoint_mismatch"
-            if (
-                prepared_scope.get("prepared_request_sha256")
-                != prepared.body_sha256
-            ):
-                return False, "prepared_request_mismatch"
-            return True, "allowed"
+        authority_check, authority_intent_hash = canonical_financial_dispatch_guard(
+            store,
+            provider_id="BYBIT",
+            provider_environment="MAINNET",
+            account_id="contract-account",
+            environment="LIVE",
+            capability_snapshot_id=prepared.capability_snapshot_ids[0],
+            intent_id=intent_id,
+            submission_scope=submission_scope,
+            now="2026-09-24T20:00:00Z",
+        )
 
         outcome = dispatcher.dispatch(
             attempt_id=attempt_id,
             intent_id=intent_id,
-            intent_hash="contract-intent-hash",
+            intent_hash=authority_intent_hash,
             provider="BYBIT",
             request=prepared.body,
             now="2026-09-24T20:00:00Z",
-            authority_check=PreparedSubmissionAuthorityCheck(contract_authority),
+            authority_check=authority_check,
             transport_send=lambda _cid, _request, guard: (
                 guard(),
                 ExactJsonTransportResponse(raw),

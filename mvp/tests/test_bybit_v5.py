@@ -89,7 +89,7 @@ def write_capability(
     position_mode="HEDGE",
     account_id="bybit-account",
     environment="PAPER",
-    provider_environment="TESTNET",
+    provider_environment="DEMO",
     instrument_version="BTCUSDT@1",
     expires_at=None,
     permission_scope=None,

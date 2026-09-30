@@ -16,6 +16,7 @@ from .accounting import book_equity_fill, book_external_cash_flow
 from .authority import AuthoritativeRiskSnapshot, AuthorityPolicy, AuthorityService
 from .dispatch import GuardedDispatcher, stable_client_order_id
 from .durable_reservations import DurableReservationBook
+from .exact_decimal import canonical_decimal_text, exact_add, exact_multiply
 from .persistence import JournalStore, payload_digest
 from .pipeline import MovingAverageStrategy
 from .provider_activity_accounting import (
@@ -75,6 +76,7 @@ def _prices(values: list[str]) -> list[Decimal]:
             raise ValueError("prices must be finite positive decimals") from error
         if not value.is_finite() or value <= 0:
             raise ValueError("prices must be finite positive decimals")
+        canonical_decimal_text(value)
         parsed.append(value)
     return parsed
 
@@ -126,7 +128,7 @@ def _risk_policy() -> RiskPolicy:
 def _risk_context(price: Decimal) -> RiskContext:
     return RiskContext.create(
         state_version=1, equity=str(INITIAL_CASH), positions={},
-        marks={INSTRUMENT: str(price)}, reserved_position_delta={},
+        marks={INSTRUMENT: canonical_decimal_text(price)}, reserved_position_delta={},
         daily_pnl="0", drawdown_fraction="0", market_data_age_seconds="1",
         fx_age_seconds={"USD": "1"}, margin_headroom="1",
         capability_allowed=True, borrow_available=True,
@@ -192,7 +194,13 @@ def run_canonical_simulation(
     decision = MovingAverageStrategy().decide(values, Decimal("1"))
     if decision.side == "SELL":
         raise ValueError("this long-only simulation session supports BUY/HOLD prices")
-    input_payload = {"episode_id": episode_id, "prices": [str(v) for v in values]}
+    # Preserve the durable #1107 input identity until #1112 owns the explicit
+    # versioned protocol/session migration. Decimal string form intentionally
+    # distinguishes prior accepted spellings such as "100" and "100.0".
+    input_payload = {
+        "episode_id": episode_id,
+        "prices": [str(value) for value in values],
+    }
     input_hash = payload_digest(input_payload)
     root = Path(state_dir)
     root.mkdir(parents=True, exist_ok=True)
@@ -286,6 +294,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
 
     policy = _risk_policy()
     context = _risk_context(decision.price)
+
     def resolve_risk(request):
         return AuthoritativeRiskSnapshot(
             context=context, risk_policy=policy,
@@ -320,12 +329,16 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         resolution_artifact_store=ArtifactStore(root / "artifacts"),
         resolution_artifact_root=root / "artifacts",
     )
-    amount = decision.quantity * decision.price
-    required = amount + amount * FEE_RATE
+    amount = exact_multiply(decision.quantity, decision.price)
+    required = exact_add(amount, exact_multiply(amount, FEE_RATE))
+    quantity_text = canonical_decimal_text(decision.quantity)
+    price_text = canonical_decimal_text(decision.price)
+    amount_text = canonical_decimal_text(amount)
+    required_text = canonical_decimal_text(required)
     intent_id = _uuid("intent", episode_id)
     intent_hash = payload_digest({
-        "episode_id": episode_id, "side": "BUY", "quantity": str(decision.quantity),
-        "price": str(decision.price), "instrument": INSTRUMENT,
+        "episode_id": episode_id, "side": "BUY", "quantity": quantity_text,
+        "price": price_text, "instrument": INSTRUMENT,
     })
     admission_id = _uuid("admission", episode_id)
     admission = authority.admit(
@@ -334,16 +347,16 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         admission_id=admission_id, policy_id=policy_id,
         intent_id=intent_id, intent_hash=intent_hash, account_id=ACCOUNT,
         environment=ENVIRONMENT, instrument_id=INSTRUMENT_ID,
-        instrument_version=1, action="ORDER.SUBMIT", notional=str(amount),
+        instrument_version=1, action="ORDER.SUBMIT", notional=amount_text,
         capability_snapshot_id="simulated-capability-v1",
         risk_intent=RiskIntent.create(
-            symbol=INSTRUMENT, side="BUY", quantity=str(decision.quantity),
-            price=str(decision.price), expected_state_version=1,
+            symbol=INSTRUMENT, side="BUY", quantity=quantity_text,
+            price=price_text, expected_state_version=1,
         ),
         risk_context=context, risk_policy=policy, risk_valid_until=future,
         reservation_book=reservations,
         reservation_id=_uuid("reservation", episode_id),
-        reservation_requirements={"CASH:USD": str(required)},
+        reservation_requirements={"CASH:USD": required_text},
         reservation_available={"CASH:USD": snapshot["balances"][0]["available"]},
         reservation_checkpoint_event_id=availability["event_id"],
         reservation_provider_id=PROVIDER, reservation_max_age_seconds="60",
@@ -361,13 +374,22 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         _event(store, "SimulationSessionCompleted", episode_id, result, timestamp)
         return {**result, "resumed": False}
 
-    def final_check(candidate_hash, current_time):
-        return authority.dispatch_allowed(
-            admission_id, intent_hash=candidate_hash, account_id=ACCOUNT,
-            environment=ENVIRONMENT, instrument_id=INSTRUMENT_ID,
-            instrument_version=1, action="ORDER.SUBMIT", now=current_time,
-            capability_snapshot_id="simulated-capability-v1",
-        )
+    submission_scope = {
+        "provider_id": PROVIDER,
+        "provider_environment": ENVIRONMENT,
+        "account_id": ACCOUNT,
+        "environment": ENVIRONMENT,
+    }
+    authority_check = authority.dispatch_guard(
+        admission_id,
+        account_id=ACCOUNT,
+        environment=ENVIRONMENT,
+        instrument_id=INSTRUMENT_ID,
+        instrument_version=1,
+        action="ORDER.SUBMIT",
+        capability_snapshot_id="simulated-capability-v1",
+        submission_scope=submission_scope,
+    )
 
     attempt_id = _uuid("attempt", episode_id)
     dispatch = GuardedDispatcher(
@@ -377,11 +399,12 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         attempt_id=attempt_id, intent_id=intent_id, intent_hash=intent_hash,
         provider="simulated", request={
             "attempt_id": attempt_id, "instrument_version": INSTRUMENT,
-            "side": "BUY", "quantity": str(decision.quantity),
-            "price": str(decision.price), "now": timestamp,
+            "side": "BUY", "quantity": quantity_text,
+            "price": price_text, "now": timestamp,
         },
-        now=timestamp, authority_check=final_check,
+        now=timestamp, authority_check=authority_check,
         transport_send=provider.transport_send,
+        submission_scope=submission_scope,
     )
     if dispatch.status != "SENT":
         return {
@@ -403,7 +426,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         command_id=_uuid("financial-fill-command", episode_id),
         idempotency_key=_uuid("financial-fill-command", episode_id),
         reservation_id=_uuid("reservation", episode_id),
-        usage={"CASH:USD": str(required)},
+        usage={"CASH:USD": required_text},
         transactions=(book_equity_fill(
             transaction_id=_uuid("fill-transaction", episode_id),
             cause_event_id=fill["provider_execution_id"],

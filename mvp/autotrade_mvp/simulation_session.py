@@ -16,8 +16,9 @@ from .accounting import book_equity_fill, book_external_cash_flow
 from .authority import AuthoritativeRiskSnapshot, AuthorityPolicy, AuthorityService
 from .dispatch import GuardedDispatcher, stable_client_order_id
 from .durable_reservations import DurableReservationBook
+from .exact_decimal import ExactDecimalError, exact_add, exact_multiply
 from .persistence import JournalStore, payload_digest
-from .pipeline import MovingAverageStrategy
+from .pipeline import Decision, MovingAverageStrategy
 from .provider_activity_accounting import (
     DurableProviderEconomicBook,
     commit_economic_batch_with_reservation_consumption,
@@ -77,6 +78,18 @@ def _prices(values: list[str]) -> list[Decimal]:
             raise ValueError("prices must be finite positive decimals")
         parsed.append(value)
     return parsed
+
+
+def _buy_reservation_amounts(decision: Decision) -> tuple[Decimal, Decimal]:
+    try:
+        amount = exact_multiply(decision.quantity, decision.price)
+        fee_amount = exact_multiply(amount, FEE_RATE)
+        required = exact_add(amount, fee_amount)
+    except ExactDecimalError as error:
+        raise ValueError(
+            "simulation financial arithmetic exceeds exact decimal resource envelope"
+        ) from error
+    return amount, required
 
 
 def _event(store: JournalStore, kind: str, episode_id: str, payload: dict, now: str) -> dict:
@@ -189,9 +202,21 @@ def run_canonical_simulation(
     if type(fault_after_send) is not bool:
         raise TypeError("fault_after_send must be boolean")
     values = _prices(prices)
-    decision = MovingAverageStrategy().decide(values, Decimal("1"))
+    try:
+        decision = MovingAverageStrategy().decide(values, Decimal("1"))
+    except ExactDecimalError as error:
+        raise ValueError(
+            "simulation strategy arithmetic exceeds exact decimal resource envelope"
+        ) from error
     if decision.side == "SELL":
         raise ValueError("this long-only simulation session supports BUY/HOLD prices")
+
+    amount = required = None
+    if decision.side == "BUY":
+        # Resolve all fee-inclusive admission arithmetic before creating the
+        # state directory or mutating any financial authority.
+        amount, required = _buy_reservation_amounts(decision)
+
     input_payload = {"episode_id": episode_id, "prices": [str(v) for v in values]}
     input_hash = payload_digest(input_payload)
     root = Path(state_dir)
@@ -199,12 +224,14 @@ def run_canonical_simulation(
     with ResourceLock(root / ".canonical-simulation.lock"):
         return _run_locked(
             root, episode_id=episode_id, input_hash=input_hash,
-            decision=decision, now=now, fault_after_send=fault_after_send,
+            decision=decision, amount=amount, required=required,
+            now=now, fault_after_send=fault_after_send,
         )
 
 
 def _run_locked(root: Path, *, episode_id: str, input_hash: str,
-                decision, now: str | None, fault_after_send: bool) -> dict[str, object]:
+                decision: Decision, amount: Decimal | None, required: Decimal | None,
+                now: str | None, fault_after_send: bool) -> dict[str, object]:
     store = JournalStore(root / "journal.sqlite3")
     prior = store.load_events("canonical_simulation_session", _AGGREGATE)
     if prior:
@@ -320,8 +347,8 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         resolution_artifact_store=ArtifactStore(root / "artifacts"),
         resolution_artifact_root=root / "artifacts",
     )
-    amount = decision.quantity * decision.price
-    required = amount + amount * FEE_RATE
+    if amount is None or required is None:
+        raise ValueError("BUY simulation is missing exact reservation amounts")
     intent_id = _uuid("intent", episode_id)
     intent_hash = payload_digest({
         "episode_id": episode_id, "side": "BUY", "quantity": str(decision.quantity),

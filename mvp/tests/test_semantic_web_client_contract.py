@@ -1004,7 +1004,9 @@ class SemanticWebClientContractTests(unittest.TestCase):
     def test_passive_live_refresh_does_not_spam_filter_live_status(self):
         js = APP.read_text(encoding="utf-8")
         apply_scope = js[js.index("function applyTableFilter"):js.index("function reapplyTableFilter")]
-        self.assertIn("if (!announce) return;", apply_scope)
+        self.assertIn("text(tool.statusId, statusMessage);", apply_scope)
+        self.assertIn("if (announce) queuePoliteAnnouncement(statusMessage);", apply_scope)
+        self.assertNotIn("if (!announce) return;", apply_scope)
         reapply_scope = js[js.index("function reapplyTableFilter"):js.index("function visibleTableRows")]
         self.assertIn("applyTableFilter(tool, {announce: false})", reapply_scope)
         bind_scope = js[js.index("function bindTableTools"):js.index("function announceLiveText")]

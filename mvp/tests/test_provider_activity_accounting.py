@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_activity_accounting import (
+    AccountingConflict,
     _activity_identity,
     _book_id,
     book_external_provider_cash_activity,
@@ -265,6 +266,142 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                 imported[0]["payload"]["observed_at"],
                 "2026-09-24T18:02:00Z",
             )
+
+    def test_command_without_provider_cash_effects_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            evidence = activity(
+                provider_id="IBKR",
+                account_id="acct-command-only",
+                activity_id="dep-command-only",
+            )
+
+            def command_without_effects(**kwargs):
+                return kwargs["result"], False, ()
+
+            with patch.object(
+                store,
+                "commit_command",
+                side_effect=command_without_effects,
+            ):
+                with self.assertRaisesRegex(
+                    AccountingConflict,
+                    "durable command exists without its financial effects",
+                ):
+                    book_paper_activity(
+                        store,
+                        provider_id="IBKR",
+                        account_id="acct-command-only",
+                        activity=evidence,
+                        amount="100",
+                        observed_at="2026-09-24T18:02:00Z",
+                    )
+
+    def test_concurrent_exact_provider_cash_commit_replays_idempotently(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            evidence = activity(
+                provider_id="IBKR",
+                account_id="acct-race",
+                activity_id="dep-race",
+            )
+            original_commit_command = store.commit_command
+            calls = 0
+
+            def competing_exact_commit(**kwargs):
+                nonlocal calls
+                calls += 1
+                saved_result, inserted, topics = original_commit_command(**kwargs)
+                if calls == 1:
+                    self.assertTrue(inserted)
+                    return saved_result, False, ()
+                return saved_result, inserted, topics
+
+            with patch.object(
+                store,
+                "commit_command",
+                side_effect=competing_exact_commit,
+            ):
+                transaction, inserted = book_paper_activity(
+                    store,
+                    provider_id="IBKR",
+                    account_id="acct-race",
+                    activity=evidence,
+                    amount="100",
+                    observed_at="2026-09-24T18:02:00Z",
+                )
+
+            self.assertFalse(inserted)
+            self.assertGreaterEqual(calls, 2)
+            self.assertEqual(
+                load_paper_book(
+                    store,
+                    provider_id="IBKR",
+                    account_id="acct-race",
+                ).transactions,
+                (transaction,),
+            )
+            self.assertEqual(
+                len(
+                    store.load_events(
+                        "provider_activity",
+                        paper_activity_identity(
+                            provider_id="IBKR",
+                            account_id="acct-race",
+                            activity_id="dep-race",
+                        ),
+                    )
+                ),
+                1,
+            )
+            self.assertEqual(
+                len(
+                    store.load_events(
+                        "economic_book",
+                        paper_book_id(
+                            provider_id="IBKR",
+                            account_id="acct-race",
+                        ),
+                    )
+                ),
+                1,
+            )
+
+    def test_repoll_rejects_durable_command_result_effect_mismatch(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            evidence = activity(
+                provider_id="IBKR",
+                account_id="acct-result-mismatch",
+                activity_id="dep-result-mismatch",
+            )
+            _, inserted = book_paper_activity(
+                store,
+                provider_id="IBKR",
+                account_id="acct-result-mismatch",
+                activity=evidence,
+                amount="100",
+                observed_at="2026-09-24T18:02:00Z",
+            )
+            self.assertTrue(inserted)
+
+            with patch.object(
+                store,
+                "commit_command",
+                return_value=({"tampered": True}, False, ()),
+            ):
+                with self.assertRaisesRegex(
+                    AccountingConflict,
+                    "durable command result conflicts with its financial effect",
+                ):
+                    book_paper_activity(
+                        store,
+                        provider_id="IBKR",
+                        account_id="acct-result-mismatch",
+                        activity=evidence,
+                        amount="100.00",
+                        observed_at="2026-09-24T18:12:00Z",
+                    )
 
     def test_same_activity_reobserved_later_is_idempotent(self):
         with TemporaryDirectory() as directory:

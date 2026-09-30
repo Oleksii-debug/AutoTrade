@@ -3,12 +3,14 @@
 import json
 import subprocess
 import sys
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.pipeline import MovingAverageStrategy
 from mvp.autotrade_mvp.simulation_session import (
     ACCOUNT, ENVIRONMENT, INSTRUMENT, PROVIDER, run_canonical_simulation,
 )
@@ -147,6 +149,109 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
             self.assertTrue(resumed["resumed"])
             self.assertEqual(resumed["new_outbound_requests"], 0)
             self.assertEqual(resumed["fill_id"], initial["fill_id"])
+
+
+    def test_moving_average_verdict_is_invariant_to_decimal_context(self):
+        prices = [
+            Decimal("1"),
+            Decimal("1.0000000001"),
+            Decimal("1.00000000010001"),
+        ]
+        contexts = (
+            (6, ROUND_FLOOR),
+            (10, ROUND_CEILING),
+            (28, ROUND_HALF_EVEN),
+            (80, ROUND_FLOOR),
+        )
+        observed = []
+        for precision, rounding in contexts:
+            with self.subTest(precision=precision, rounding=rounding):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    decision = MovingAverageStrategy().decide(
+                        prices, Decimal("1")
+                    )
+                observed.append((decision.side, str(decision.quantity), str(decision.price)))
+        self.assertEqual(
+            observed,
+            [("BUY", "1", "1.00000000010001")] * len(contexts),
+        )
+
+    def test_buy_admission_identity_and_reservation_are_context_invariant(self):
+        contexts = (
+            (6, ROUND_FLOOR),
+            (10, ROUND_CEILING),
+            (28, ROUND_HALF_EVEN),
+            (80, ROUND_FLOOR),
+        )
+        evidence = []
+        for precision, rounding in contexts:
+            with self.subTest(precision=precision, rounding=rounding):
+                with TemporaryDirectory() as directory:
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        result = run_canonical_simulation(
+                            BUY,
+                            directory,
+                            episode_id="decimal-context-invariant",
+                            now=NOW,
+                            fault_after_send=True,
+                        )
+                    store = JournalStore(Path(directory) / "journal.sqlite3")
+                    admission = next(
+                        event
+                        for event in store.load_events("authority_state", "canonical")
+                        if event["event_type"] == "AuthorityAdmissionRecorded"
+                    )
+                    risk = store.load_events_by_aggregate_type("risk_decision")
+                    reservation = store.load_events_by_aggregate_type("reservation_book")
+                    submission = store.load_events_by_aggregate_type("submission_attempt")
+                    self.assertEqual(result["status"], "UNKNOWN")
+                    self.assertEqual(result["decision"], "BUY")
+                    self.assertEqual(result["new_outbound_requests"], 1)
+                    self.assertEqual(len(risk), 1)
+                    self.assertEqual(len(reservation), 1)
+                    self.assertGreaterEqual(len(submission), 1)
+                    evidence.append({
+                        "intent_hash": admission["payload"]["intent_hash"],
+                        "notional": admission["payload"]["notional"],
+                        "reservation_requirements": (
+                            reservation[0]["payload"]["request"]["requirements"]
+                        ),
+                        "risk_reservation_requirements": (
+                            risk[0]["payload"]["reservation_requirements"]
+                        ),
+                        "submission_request": submission[0]["payload"]["request"],
+                        "outbound_requests": result["new_outbound_requests"],
+                    })
+        self.assertTrue(all(item == evidence[0] for item in evidence[1:]))
+        self.assertEqual(evidence[0]["notional"], "103")
+        self.assertEqual(
+            evidence[0]["reservation_requirements"],
+            {"CASH:USD": "103.103"},
+        )
+
+    def test_fee_inclusive_output_envelope_failure_precedes_state_mutation(self):
+        prices = [
+            "9" * 255 + "7",
+            "9" * 255 + "8",
+            "9" * 256,
+        ]
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "state"
+            with self.assertRaisesRegex(
+                ValueError,
+                "simulation financial arithmetic exceeds exact decimal resource envelope",
+            ):
+                run_canonical_simulation(
+                    prices,
+                    root,
+                    episode_id="fee-output-envelope",
+                    now=NOW,
+                )
+            self.assertFalse(root.exists())
 
 
 if __name__ == "__main__":

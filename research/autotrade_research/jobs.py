@@ -13,19 +13,28 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import sqlite3
+from threading import RLock
 from typing import Any
 from uuid import UUID, uuid4, uuid5
+from weakref import WeakKeyDictionary
 
-from .artifacts.store import ArtifactStore
+from .artifacts import ArtifactIntegrityError, ArtifactStore, trusted_authenticated_reader
 
 
 FINAL_STATES = {"SUCCEEDED", "FAILED", "CANCELLED"}
+
+# Process-TCB registry for product-selected research evidence authority.  The
+# caller-owned ResearchJobStore object exposes no root/reader replacement field;
+# lifetime cleanup follows the store object's weak reference.  Installed module
+# code is already inside the product TCB, matching the sealed WP-06 reader model.
+_EVIDENCE_AUTHORITY_LOCK = RLock()
+_EVIDENCE_AUTHORITIES = WeakKeyDictionary()
 
 # Automatic lease retry is code-reviewed capability, never caller authority.
 # Callers may disable retry for a safe kind, but cannot promote an arbitrary
 # research/external job into the retry-safe class.
 _REQUEUEABLE_JOB_KINDS = frozenset({"research.replay"})
-ALLOWED_STATES = {"QUEUED", "RUNNING", "WAITING_EXTERNAL", *FINAL_STATES}
+ALLOWED_STATES = {"QUEUED", "RUNNING", "WAITING_EXTERNAL", "PAUSED", *FINAL_STATES}
 
 
 class JobError(RuntimeError):
@@ -87,47 +96,90 @@ def _require_immutable_artifact_ref(value: Any, name: str) -> str:
     return reference
 
 
-def _verify_artifact_ref(
-    artifact_store: ArtifactStore,
+def _trusted_reader(
+    authoritative_root: str | Path | None,
+    publication_store: ArtifactStore | None = None,
+):
+    if authoritative_root is None:
+        return None
+    try:
+        return trusted_authenticated_reader(
+            authoritative_root,
+            publication_store=publication_store,
+        )
+    except (
+        ArtifactIntegrityError,
+        FileNotFoundError,
+        OSError,
+        TypeError,
+        ValueError,
+    ):
+        return None
+
+
+def _bind_evidence_authority(
+    store: object,
+    reader: object,
+    publication_store: ArtifactStore,
+) -> None:
+    with _EVIDENCE_AUTHORITY_LOCK:
+        if store in _EVIDENCE_AUTHORITIES:
+            raise JobError("research evidence authority is already bound")
+        _EVIDENCE_AUTHORITIES[store] = (reader, publication_store)
+
+
+def _bound_evidence_authority(store: object):
+    with _EVIDENCE_AUTHORITY_LOCK:
+        return _EVIDENCE_AUTHORITIES.get(store)
+
+
+def _authenticated_artifact_snapshot(
+    *,
+    read_snapshot,
     reference: str,
-) -> bool:
-    if not isinstance(artifact_store, ArtifactStore):
-        raise TypeError("artifact_store must be ArtifactStore")
+) -> tuple[dict[str, Any], bytes] | None:
     normalized = _require_immutable_artifact_ref(reference, "artifact_ref")
     artifact_id, digest = normalized[len("artifact:"):].split("@sha256:", 1)
     expected_hash = "sha256:" + digest
     try:
-        manifest = artifact_store.load_manifest(artifact_id)
-        payload = artifact_store.read_bytes(artifact_id)
-    except (FileNotFoundError, UnicodeError, ValueError, TypeError):
-        return False
+        manifest, payload = read_snapshot(artifact_id)
+    except (
+        ArtifactIntegrityError,
+        FileNotFoundError,
+        OSError,
+        UnicodeError,
+        ValueError,
+        TypeError,
+    ):
+        return None
     manifest_hash = manifest.get("manifest_hash")
-    return (
+    if not (
         manifest.get("sha256") == expected_hash
         and "sha256:" + sha256(payload).hexdigest() == expected_hash
         and isinstance(manifest_hash, str)
         and len(manifest_hash) == 71
         and manifest_hash.startswith("sha256:")
         and all(ch in "0123456789abcdef" for ch in manifest_hash[7:])
-    )
+    ):
+        return None
+    return manifest, payload
 
 
 def _verify_job_output_artifact(
     *,
-    artifact_store: ArtifactStore,
+    read_snapshot,
     output_ref: str,
     job_id: str,
     generation: int,
     input_hashes: list[str],
 ) -> bool:
-    if not _verify_artifact_ref(artifact_store, output_ref):
+    snapshot = _authenticated_artifact_snapshot(
+        read_snapshot=read_snapshot,
+        reference=output_ref,
+    )
+    if snapshot is None:
         return False
-    reference = _require_immutable_artifact_ref(output_ref, "output_ref")
-    artifact_id = reference[len("artifact:"):].split("@sha256:", 1)[0]
-    try:
-        manifest = artifact_store.load_manifest(artifact_id)
-    except (FileNotFoundError, UnicodeError, ValueError, TypeError):
-        return False
+    manifest, _payload = snapshot
     metadata = manifest.get("metadata")
     return (
         isinstance(metadata, dict)
@@ -140,7 +192,7 @@ def _verify_job_output_artifact(
 
 def _verify_job_checkpoint_artifact(
     *,
-    artifact_store: ArtifactStore,
+    read_snapshot,
     checkpoint_ref: str,
     job_id: str,
     generation: int,
@@ -148,17 +200,13 @@ def _verify_job_checkpoint_artifact(
 ) -> bool:
     """Prove a checkpoint is immutable and belongs to this exact job generation."""
 
-    if not _verify_artifact_ref(artifact_store, checkpoint_ref):
-        return False
-    reference = _require_immutable_artifact_ref(
-        checkpoint_ref,
-        "checkpoint_ref",
+    snapshot = _authenticated_artifact_snapshot(
+        read_snapshot=read_snapshot,
+        reference=checkpoint_ref,
     )
-    artifact_id = reference[len("artifact:"):].split("@sha256:", 1)[0]
-    try:
-        manifest = artifact_store.load_manifest(artifact_id)
-    except (FileNotFoundError, UnicodeError, ValueError, TypeError):
+    if snapshot is None:
         return False
+    manifest, _payload = snapshot
     metadata = manifest.get("metadata")
     return (
         isinstance(metadata, dict)
@@ -171,22 +219,23 @@ def _verify_job_checkpoint_artifact(
 
 def _verify_external_resolution_artifact(
     *,
-    artifact_store: ArtifactStore,
+    read_snapshot,
     evidence_ref: str,
     job_id: str,
     generation: int,
     verdict: str,
     output_refs: list[str],
 ) -> bool:
-    if not _verify_artifact_ref(artifact_store, evidence_ref):
+    snapshot = _authenticated_artifact_snapshot(
+        read_snapshot=read_snapshot,
+        reference=evidence_ref,
+    )
+    if snapshot is None:
         return False
-    reference = _require_immutable_artifact_ref(evidence_ref, "evidence_ref")
-    artifact_id = reference[len("artifact:"):].split("@sha256:", 1)[0]
+    manifest, payload = snapshot
     try:
-        manifest = artifact_store.load_manifest(artifact_id)
-        payload = artifact_store.read_bytes(artifact_id)
         proof = json.loads(payload.decode("utf-8"))
-    except (FileNotFoundError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+    except (UnicodeError, ValueError, TypeError, json.JSONDecodeError):
         return False
     if manifest.get("media_type") != "application/json":
         return False
@@ -208,6 +257,7 @@ def _verify_external_resolution_artifact(
     ):
         return False
     return proof.get("schema_version") == "1.0.0"
+
 
 def _require_research_kind(kind: str) -> str:
     normalized = _require_text(kind, "kind")
@@ -247,12 +297,82 @@ def _validate_budget(budget: dict[str, int | float]) -> dict[str, float]:
 
 
 class ResearchJobStore:
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
 
-    def __init__(self, path: str | Path):
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        authoritative_artifact_root: str | Path | None = None,
+        publication_store: ArtifactStore | None = None,
+    ):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if authoritative_artifact_root is None and publication_store is not None:
+            raise ValueError(
+                "publication_store cannot select research evidence authority"
+            )
+        reader = None
+        private_publication_store = None
+        if authoritative_artifact_root is not None:
+            # Preserve the compatibility check for a caller-supplied store at
+            # trusted composition, but never retain that caller-owned object as
+            # publication authority.
+            if publication_store is not None and _trusted_reader(
+                authoritative_artifact_root,
+                publication_store,
+            ) is None:
+                raise JobError("research evidence authority could not be configured")
+            private_publication_store = ArtifactStore(authoritative_artifact_root)
+            reader = _trusted_reader(
+                authoritative_artifact_root,
+                private_publication_store,
+            )
+            if reader is None:
+                raise JobError("research evidence authority could not be configured")
+            _bind_evidence_authority(
+                self,
+                reader,
+                private_publication_store,
+            )
         self._initialize()
+
+    def _require_artifact_reader(self):
+        authority = _bound_evidence_authority(self)
+        if authority is None:
+            raise JobConflictError(
+                "research job evidence authority is not configured"
+            )
+        return authority[0]
+
+    def _require_publication_store(
+        self,
+        candidate: ArtifactStore,
+    ) -> ArtifactStore:
+        authority = _bound_evidence_authority(self)
+        if authority is None:
+            raise JobConflictError(
+                "research job evidence authority is not configured"
+            )
+        _reader, private_publication_store = authority
+        if type(candidate) is not ArtifactStore:
+            raise JobConflictError(
+                "publication target must be the canonical ArtifactStore"
+            )
+        # Validate the worker-visible convenience store against the same
+        # retained generation before any bytes are written. The validation
+        # reader is temporary; actual publication uses only the module-private
+        # canonical store created from the independently selected root.
+        generation_probe = _trusted_reader(
+            private_publication_store.root,
+            candidate,
+        )
+        if generation_probe is None:
+            raise JobConflictError(
+                "publication target does not match research evidence authority"
+            )
+        del generation_probe
+        return private_publication_store
 
     @contextmanager
     def _connect(self):
@@ -348,6 +468,20 @@ class ResearchJobStore:
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (4, _iso(datetime.now(timezone.utc))),
                 )
+                versions.append(4)
+            if 5 not in versions:
+                columns = {
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
+                }
+                if "submitted_by" not in columns:
+                    connection.execute(
+                        "ALTER TABLE jobs ADD COLUMN submitted_by TEXT"
+                    )
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (5, _iso(datetime.now(timezone.utc))),
+                )
             connection.commit()
 
     @staticmethod
@@ -366,6 +500,11 @@ class ResearchJobStore:
             "cancel_requested": bool(row["cancel_requested"]),
             "output_refs": json.loads(row["output_refs_json"]),
         }
+        if "submitted_by" in row.keys() and row["submitted_by"] is not None:
+            record["submitted_by"] = _require_text(
+                row["submitted_by"],
+                "submitted_by",
+            )
         if row["owner"] is not None:
             record["owner"] = row["owner"]
         if row["lease_until"] is not None:
@@ -395,12 +534,18 @@ class ResearchJobStore:
         resource_budget: dict[str, int | float],
         lease_requeueable: bool = False,
         job_id: str | None = None,
+        submitted_by: str | None = None,
         now: datetime | None = None,
     ) -> tuple[dict[str, Any], bool]:
         job_kind = _require_research_kind(kind)
         key = _require_text(dedupe_key, "dedupe_key")
         hashes = _validate_hashes(input_hashes)
         budget = _validate_budget(resource_budget)
+        submitter = (
+            None
+            if submitted_by is None
+            else _require_text(submitted_by, "submitted_by")
+        )
         if not isinstance(lease_requeueable, bool):
             raise ValueError("lease_requeueable must be boolean")
         if lease_requeueable and job_kind not in _REQUEUEABLE_JOB_KINDS:
@@ -419,6 +564,7 @@ class ResearchJobStore:
                     and json.loads(existing["input_hashes_json"]) == hashes
                     and json.loads(existing["resource_budget_json"]) == budget
                     and bool(existing["lease_requeueable"]) is lease_requeueable
+                    and existing["submitted_by"] == submitter
                 )
                 if not same:
                     connection.rollback()
@@ -432,8 +578,8 @@ class ResearchJobStore:
                     job_id, kind, dedupe_key, input_hashes_json, state, generation,
                     attempt, owner, lease_until, checkpoint_ref, resource_budget_json,
                     resource_usage_json, output_refs_json, error_json, created_at, updated_at,
-                    lease_requeueable
-                ) VALUES (?, ?, ?, ?, 'QUEUED', 1, 0, NULL, NULL, NULL, ?, '{}', '[]', NULL, ?, ?, ?)
+                    lease_requeueable, submitted_by
+                ) VALUES (?, ?, ?, ?, 'QUEUED', 1, 0, NULL, NULL, NULL, ?, '{}', '[]', NULL, ?, ?, ?, ?)
                 """,
                 (
                     identifier,
@@ -444,6 +590,7 @@ class ResearchJobStore:
                     _iso(current),
                     _iso(current),
                     1 if lease_requeueable else 0,
+                    submitter,
                 ),
             )
             row = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (identifier,)).fetchone()
@@ -557,7 +704,6 @@ class ResearchJobStore:
         generation: int,
         verdict: str,
         evidence_ref: str,
-        artifact_store: ArtifactStore | None = None,
         output_refs: list[str] | None = None,
         now: datetime | None = None,
     ) -> bool:
@@ -640,8 +786,9 @@ class ResearchJobStore:
                     "job is not waiting for the supplied external resolution"
                 )
 
-            if artifact_store is None or not _verify_external_resolution_artifact(
-                artifact_store=artifact_store,
+            read_snapshot = self._require_artifact_reader()
+            if not _verify_external_resolution_artifact(
+                read_snapshot=read_snapshot,
                 evidence_ref=evidence,
                 job_id=identifier,
                 generation=generation,
@@ -655,7 +802,7 @@ class ResearchJobStore:
             input_hashes = json.loads(row["input_hashes_json"])
             if normalized_verdict == "PROVEN_SUCCEEDED" and any(
                 not _verify_job_output_artifact(
-                    artifact_store=artifact_store,
+                    read_snapshot=read_snapshot,
                     output_ref=output_ref,
                     job_id=identifier,
                     generation=generation,
@@ -757,7 +904,6 @@ class ResearchJobStore:
         generation: int,
         checkpoint_ref: str,
         resource_usage: dict[str, int | float],
-        artifact_store: ArtifactStore,
         now: datetime | None = None,
     ) -> dict[str, Any]:
         identifier = str(UUID(_require_text(job_id, "job_id")))
@@ -774,8 +920,9 @@ class ResearchJobStore:
             row = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (identifier,)).fetchone()
             self._require_live_lease(row, worker, generation, current)
             input_hashes = json.loads(row["input_hashes_json"])
+            read_snapshot = self._require_artifact_reader()
             if not _verify_job_checkpoint_artifact(
-                artifact_store=artifact_store,
+                read_snapshot=read_snapshot,
                 checkpoint_ref=checkpoint,
                 job_id=identifier,
                 generation=generation,
@@ -844,6 +991,7 @@ class ResearchJobStore:
             kind = row["kind"]
             connection.commit()
 
+        publication_target = self._require_publication_store(artifact_store)
         checkpoint_digest = sha256(data).hexdigest()
         artifact_id = str(
             uuid5(
@@ -854,7 +1002,7 @@ class ResearchJobStore:
                 ),
             )
         )
-        manifest = artifact_store.publish_bytes(
+        manifest = publication_target.publish_bytes(
             artifact_id=artifact_id,
             data=data,
             media_type=media_type,
@@ -875,10 +1023,107 @@ class ResearchJobStore:
             generation=generation,
             checkpoint_ref=checkpoint_ref,
             resource_usage=resource_usage,
-            artifact_store=artifact_store,
             now=now,
         )
         return manifest, record
+
+    def pause(self, job_id: str, *, now: datetime | None = None) -> bool:
+        """Pause retry-safe research work while fencing any live worker generation.
+
+        QUEUED work can pause immediately. RUNNING work can pause only when its
+        enqueue contract already qualifies lease replay as safe; the generation is
+        advanced so the displaced worker cannot checkpoint or publish afterward.
+        Ambiguous/non-requeueable external work must be reconciled, not paused.
+        """
+
+        identifier = str(UUID(_require_text(job_id, "job_id")))
+        current = _utc(now or datetime.now(timezone.utc))
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT state, lease_requeueable, cancel_requested, generation "
+                "FROM jobs WHERE job_id = ?",
+                (identifier,),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                raise KeyError(identifier)
+            state = str(row["state"])
+            if state == "PAUSED":
+                connection.commit()
+                return False
+            if state in FINAL_STATES:
+                connection.commit()
+                return False
+            if bool(row["cancel_requested"]):
+                connection.rollback()
+                raise JobConflictError(
+                    "job cancellation is already requested and cannot be paused"
+                )
+            if state in {"WAITING_EXTERNAL"} or (
+                state == "RUNNING" and not bool(row["lease_requeueable"])
+            ):
+                connection.rollback()
+                raise JobConflictError(
+                    "job cannot be paused without proven retry-safe execution"
+                )
+            if state not in {"QUEUED", "RUNNING"}:
+                connection.rollback()
+                raise JobConflictError("job state cannot be paused")
+            if state == "RUNNING":
+                connection.execute(
+                    """
+                    UPDATE jobs
+                    SET state='PAUSED', owner=NULL, lease_until=NULL,
+                        generation=generation+1, updated_at=?
+                    WHERE job_id=? AND state='RUNNING'
+                    """,
+                    (_iso(current), identifier),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE jobs
+                    SET state='PAUSED', owner=NULL, lease_until=NULL, updated_at=?
+                    WHERE job_id=? AND state='QUEUED'
+                    """,
+                    (_iso(current), identifier),
+                )
+            connection.commit()
+        return True
+
+    def resume(self, job_id: str, *, now: datetime | None = None) -> bool:
+        """Return explicitly paused research work to the durable queue."""
+
+        identifier = str(UUID(_require_text(job_id, "job_id")))
+        current = _utc(now or datetime.now(timezone.utc))
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT state, cancel_requested FROM jobs WHERE job_id = ?",
+                (identifier,),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                raise KeyError(identifier)
+            if row["state"] != "PAUSED":
+                connection.commit()
+                return False
+            if bool(row["cancel_requested"]):
+                connection.rollback()
+                raise JobConflictError(
+                    "cancel-requested job cannot return to the queue"
+                )
+            connection.execute(
+                """
+                UPDATE jobs
+                SET state='QUEUED', owner=NULL, lease_until=NULL, updated_at=?
+                WHERE job_id=? AND state='PAUSED'
+                """,
+                (_iso(current), identifier),
+            )
+            connection.commit()
+        return True
 
     def cancel(self, job_id: str, *, now: datetime | None = None) -> bool:
         identifier = str(UUID(_require_text(job_id, "job_id")))
@@ -930,7 +1175,6 @@ class ResearchJobStore:
         worker_id: str,
         generation: int,
         output_refs: list[str],
-        artifact_store: ArtifactStore | None = None,
         now: datetime | None = None,
     ) -> bool:
         identifier = str(UUID(_require_text(job_id, "job_id")))
@@ -972,9 +1216,10 @@ class ResearchJobStore:
                 connection.rollback()
                 raise ValueError("output_refs must not contain duplicates")
             input_hashes = json.loads(row["input_hashes_json"])
-            if artifact_store is None or any(
+            read_snapshot = self._require_artifact_reader()
+            if any(
                 not _verify_job_output_artifact(
-                    artifact_store=artifact_store,
+                    read_snapshot=read_snapshot,
                     output_ref=output_ref,
                     job_id=identifier,
                     generation=generation,
@@ -1036,8 +1281,9 @@ class ResearchJobStore:
             kind = row["kind"]
             connection.commit()
 
+        publication_target = self._require_publication_store(artifact_store)
         artifact_id = str(uuid5(UUID(identifier), f"generation:{generation}:slot:{result_slot}"))
-        manifest = artifact_store.publish_bytes(
+        manifest = publication_target.publish_bytes(
             artifact_id=artifact_id,
             data=data,
             media_type=media_type,
@@ -1057,7 +1303,6 @@ class ResearchJobStore:
             worker_id=worker,
             generation=generation,
             output_refs=[output_ref],
-            artifact_store=artifact_store,
             now=now,
         )
         return manifest, accepted

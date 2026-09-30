@@ -145,6 +145,18 @@ def _decode_exact_json(raw: bytes) -> object:
     if type(raw) is not bytes or not raw:
         raise ProviderCoreError("provider response bytes must be non-empty bytes")
 
+    # Consume one shared #652 byte/depth resource budget before recursive
+    # JSON materialization; avoid retaining the raw helper error context.
+    resource_failure = False
+    try:
+        require_provider_json_depth(raw)
+    except ValueError:
+        resource_failure = True
+    if resource_failure:
+        raise ProviderCoreError(
+            "provider response exceeds maximum JSON depth or resource budget"
+        )
+
     def no_duplicate_keys(pairs):
         result = {}
         for key, value in pairs:
@@ -162,18 +174,6 @@ def _decode_exact_json(raw: bytes) -> object:
     if text is None:
         raise ProviderCoreError(
             "provider response must be exact UTF-8 JSON bytes"
-        )
-
-    # Consume one shared #652 byte/depth resource budget before recursive
-    # JSON materialization; avoid retaining the raw helper error context.
-    resource_failure = False
-    try:
-        require_provider_json_depth(raw)
-    except ValueError:
-        resource_failure = True
-    if resource_failure:
-        raise ProviderCoreError(
-            "provider response exceeds maximum JSON depth or resource budget"
         )
 
     parse_failure = None

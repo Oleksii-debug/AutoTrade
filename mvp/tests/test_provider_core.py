@@ -181,6 +181,32 @@ class ProviderCoreTests(unittest.TestCase):
                         instrument_versions=("BTCUSD:v1",),
                     )
 
+    def test_oversized_raw_bytes_fail_before_utf8_decode_or_json_materialization(self):
+        # A leading invalid UTF-8 byte distinguishes resource-first rejection
+        # from a pre-budget raw.decode() allocation/error. The payload is exact
+        # bytes and exceeds the one shared hard ceiling by precisely one byte.
+        from mvp.autotrade_mvp.provider_response_limits import HARD_MAX_PROVIDER_RESPONSE_BYTES
+
+        raw = b"\xff" + b"x" * HARD_MAX_PROVIDER_RESPONSE_BYTES
+        with (
+            patch.object(
+                provider_core_module.json,
+                "loads",
+                side_effect=AssertionError("JSON materialized before byte preflight"),
+            ),
+            patch.object(
+                provider_core_module,
+                "parse_bounded_json_number_token",
+                side_effect=AssertionError("Decimal parsed before byte preflight"),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ProviderCoreError, "resource budget"
+            ) as rejected:
+                provider_core_module._decode_exact_json(raw)
+        self.assertIsNone(rejected.exception.__cause__)
+        self.assertIsNone(rejected.exception.__context__)
+
     def test_json_structural_bound_precedes_recursive_materialization(self):
         # _freeze_json permits 65 nested empty containers (root depth 0).
         at_limit = b"[" * 65 + b"]" * 65

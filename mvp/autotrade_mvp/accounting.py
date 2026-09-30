@@ -9,8 +9,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from fractions import Fraction
 from typing import Iterable
 
+from .exact_decimal import (
+    ExactDecimalError,
+    as_fraction,
+    bounded_fraction,
+    canonical_decimal_text,
+    exact_abs,
+    exact_add,
+    exact_multiply,
+    exact_subtract,
+    exact_sum,
+    terminating_decimal,
+)
 from .persistence import payload_digest
 
 
@@ -21,12 +34,18 @@ class AccountingConflict(ValueError):
 def _decimal(value: Decimal | str | int, *, name: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise TypeError(f"{name} must use Decimal, string or integer input")
+    if isinstance(value, Decimal) and type(value) is not Decimal:
+        raise TypeError(f"{name} must use an exact built-in Decimal")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
+        result = value if type(value) is Decimal else Decimal(value)
     except (InvalidOperation, ValueError, TypeError) as error:
         raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
+    if not Decimal.is_finite(result):
         raise ValueError(f"{name} must be a finite decimal")
+    try:
+        as_fraction(result)
+    except ExactDecimalError as error:
+        raise ValueError(f"{name} exceeds exact decimal resource envelope") from error
     return result
 
 
@@ -57,12 +76,134 @@ def _instant_value(value: str, *, field: str) -> datetime:
 
 def _canonical_decimal(value: Decimal) -> str:
     amount = _decimal(value, name="signed_amount")
-    if amount == 0:
-        return "0"
-    fixed = format(amount, "f")
-    if "." in fixed:
-        fixed = fixed.rstrip("0").rstrip(".")
-    return fixed
+    try:
+        return canonical_decimal_text(amount)
+    except ExactDecimalError as error:
+        raise ValueError("signed_amount exceeds exact decimal resource envelope") from error
+
+
+def _exact_negate(value: Decimal, *, conflict: bool = False) -> Decimal:
+    try:
+        return exact_subtract(Decimal("0"), value)
+    except ExactDecimalError as error:
+        if conflict:
+            raise AccountingConflict(
+                "accounting negation exceeds exact arithmetic resource envelope"
+            ) from error
+        raise ValueError(
+            "accounting negation exceeds exact arithmetic resource envelope"
+        ) from error
+
+
+def _exact_total(values: Iterable[Decimal], *, conflict: bool = False) -> Decimal:
+    try:
+        return exact_sum(values)
+    except ExactDecimalError as error:
+        if conflict:
+            raise AccountingConflict(
+                "accounting sum exceeds exact arithmetic resource envelope"
+            ) from error
+        raise ValueError(
+            "accounting sum exceeds exact arithmetic resource envelope"
+        ) from error
+
+
+def _exact_product(*values: Decimal, conflict: bool = False) -> Decimal:
+    try:
+        return exact_multiply(*values)
+    except ExactDecimalError as error:
+        if conflict:
+            raise AccountingConflict(
+                "accounting product exceeds exact arithmetic resource envelope"
+            ) from error
+        raise ValueError(
+            "accounting product exceeds exact arithmetic resource envelope"
+        ) from error
+
+
+def _exact_difference(left: Decimal, right: Decimal, *, conflict: bool = False) -> Decimal:
+    try:
+        return exact_subtract(left, right)
+    except ExactDecimalError as error:
+        if conflict:
+            raise AccountingConflict(
+                "accounting difference exceeds exact arithmetic resource envelope"
+            ) from error
+        raise ValueError(
+            "accounting difference exceeds exact arithmetic resource envelope"
+        ) from error
+
+
+def _exact_addition(left: Decimal, right: Decimal, *, conflict: bool = False) -> Decimal:
+    try:
+        return exact_add(left, right)
+    except ExactDecimalError as error:
+        if conflict:
+            raise AccountingConflict(
+                "accounting addition exceeds exact arithmetic resource envelope"
+            ) from error
+        raise ValueError(
+            "accounting addition exceeds exact arithmetic resource envelope"
+        ) from error
+
+
+def _exact_absolute(value: Decimal, *, conflict: bool = False) -> Decimal:
+    try:
+        return exact_abs(value)
+    except ExactDecimalError as error:
+        if conflict:
+            raise AccountingConflict(
+                "accounting absolute value exceeds exact arithmetic resource envelope"
+            ) from error
+        raise ValueError(
+            "accounting absolute value exceeds exact arithmetic resource envelope"
+        ) from error
+
+
+def _exact_ratio(
+    numerator: Decimal,
+    denominator: Decimal,
+    *,
+    conflict_message: str,
+) -> Decimal:
+    """Return one exact terminating Decimal quotient or fail closed.
+
+    Accounting state has no implicit rounding policy. A rational result that does
+    not terminate therefore cannot be projected into the current Decimal ledger
+    contract and remains an explicit conflict rather than ambient-context output.
+    """
+
+    try:
+        denominator_fraction = as_fraction(denominator)
+        if denominator_fraction == 0:
+            raise AccountingConflict(conflict_message)
+        quotient = bounded_fraction(as_fraction(numerator) / denominator_fraction)
+        return terminating_decimal(quotient)
+    except AccountingConflict:
+        raise
+    except (ExactDecimalError, ZeroDivisionError) as error:
+        raise AccountingConflict(conflict_message) from error
+
+
+def _exact_ratio_product(
+    value: Decimal,
+    numerator: Decimal,
+    denominator: Decimal,
+    *,
+    conflict_message: str,
+) -> Decimal:
+    try:
+        denominator_fraction = as_fraction(denominator)
+        if denominator_fraction == 0:
+            raise AccountingConflict(conflict_message)
+        result = bounded_fraction(
+            as_fraction(value) * as_fraction(numerator) / denominator_fraction
+        )
+        return terminating_decimal(result)
+    except AccountingConflict:
+        raise
+    except (ExactDecimalError, ZeroDivisionError) as error:
+        raise AccountingConflict(conflict_message) from error
 
 
 @dataclass(frozen=True)
@@ -199,13 +340,17 @@ def validate_transaction(transaction: JournalTransaction) -> None:
             )
     if len(transaction.postings) < 2:
         raise ValueError("A journal transaction requires at least two postings")
-    totals: dict[str, Decimal] = {}
+    totals: dict[str, list[Decimal]] = {}
     for item in transaction.postings:
         _name(item.ledger_account, field="ledger_account")
         asset = _name(item.asset_or_currency, field="asset_or_currency")
         amount = _decimal(item.signed_amount, name="signed_amount")
-        totals[asset] = totals.get(asset, Decimal("0")) + amount
-    unbalanced = {asset: amount for asset, amount in totals.items() if amount != 0}
+        totals.setdefault(asset, []).append(amount)
+    unbalanced: dict[str, Decimal] = {}
+    for asset, amounts in totals.items():
+        total = _exact_total(amounts)
+        if total != 0:
+            unbalanced[asset] = total
     if unbalanced:
         raise ValueError(f"Transaction is not balanced by asset/currency: {unbalanced}")
 
@@ -253,7 +398,11 @@ class EconomicBook:
             if original_id in self._reversed_transaction_ids:
                 raise AccountingConflict("Transaction has already been reversed")
             expected = tuple(
-                Posting(item.ledger_account, item.asset_or_currency, -item.signed_amount)
+                Posting(
+                    item.ledger_account,
+                    item.asset_or_currency,
+                    _exact_negate(item.signed_amount, conflict=True),
+                )
                 for item in original.postings
             )
             if normalized.postings != expected:
@@ -337,14 +486,14 @@ class EconomicBook:
     def balance(self, ledger_account: str, asset_or_currency: str) -> Decimal:
         account = _name(ledger_account, field="ledger_account")
         asset = _name(asset_or_currency, field="asset_or_currency")
-        return sum(
+        return _exact_total(
             (
                 item.signed_amount
                 for transaction in self._transactions
                 for item in transaction.postings
                 if item.ledger_account == account and item.asset_or_currency == asset
             ),
-            Decimal("0"),
+            conflict=True,
         )
 
     def cash(self, currency: str) -> Decimal:
@@ -445,7 +594,7 @@ def book_external_cash_flow(
         cause_event_id=_name(cause_event_id, field="cause_event_id"),
         postings=(
             posting(f"CASH:{unit}", unit, value),
-            posting(f"EXTERNAL_EQUITY:{unit}", unit, -value),
+            posting(f"EXTERNAL_EQUITY:{unit}", unit, _exact_negate(value)),
         ),
     )
     validate_transaction(transaction)
@@ -478,20 +627,25 @@ def book_equity_fill(
     fee_amount = _decimal(fee, name="fee")
     if qty <= 0 or unit_price <= 0:
         raise ValueError("quantity and price must be positive")
-    signed_quantity = qty if normalized_side == "BUY" else -qty
-    trade_cash = -(qty * unit_price) if normalized_side == "BUY" else qty * unit_price
+    signed_quantity = qty if normalized_side == "BUY" else _exact_negate(qty)
+    trade_value = _exact_product(qty, unit_price)
+    trade_cash = (
+        _exact_negate(trade_value)
+        if normalized_side == "BUY"
+        else trade_value
+    )
 
     items = [
         posting(f"POSITION:{symbol}", symbol, signed_quantity),
-        posting(f"CLEARING:{symbol}", symbol, -signed_quantity),
+        posting(f"CLEARING:{symbol}", symbol, _exact_negate(signed_quantity)),
         posting(f"CASH:{settlement}", settlement, trade_cash),
-        posting(f"CLEARING:{settlement}", settlement, -trade_cash),
+        posting(f"CLEARING:{settlement}", settlement, _exact_negate(trade_cash)),
     ]
     if fee_amount != 0:
         fee_unit = _name(fee_currency or settlement, field="fee_currency")
         items.extend(
             (
-                posting(f"CASH:{fee_unit}", fee_unit, -fee_amount),
+                posting(f"CASH:{fee_unit}", fee_unit, _exact_negate(fee_amount)),
                 posting(f"FEE_EXPENSE:{fee_unit}", fee_unit, fee_amount),
             )
         )
@@ -533,28 +687,38 @@ def book_equity_split_adjustment(
     before = _decimal(pre_split_quantity, name="pre_split_quantity")
     num = _decimal(numerator, name="numerator")
     den = _decimal(denominator, name="denominator")
+    try:
+        num_fraction = as_fraction(num)
+        den_fraction = as_fraction(den)
+    except ExactDecimalError as error:
+        raise ValueError("split ratio exceeds exact arithmetic resource envelope") from error
     if (
         num <= 0
         or den <= 0
-        or num != num.to_integral_value()
-        or den != den.to_integral_value()
+        or num_fraction.denominator != 1
+        or den_fraction.denominator != 1
     ):
         raise ValueError("split numerator and denominator must be positive integers")
     if before == 0:
         raise ValueError("split adjustment requires a non-zero pre-split position")
 
-    target = before * num
-    after = target / den
-    if after * den != target:
-        raise AccountingConflict(
+    after = _exact_ratio_product(
+        before,
+        num,
+        den,
+        conflict_message=(
             "split quantity cannot be represented exactly by the Decimal position model"
-        )
-    delta = after - before
+        ),
+    )
+    delta = _exact_difference(after, before, conflict=True)
     if delta == 0:
         raise ValueError("split adjustment must change position quantity")
 
-    num_text = format(num.quantize(Decimal("1")), "f")
-    den_text = format(den.quantize(Decimal("1")), "f")
+    try:
+        num_text = canonical_decimal_text(num)
+        den_text = canonical_decimal_text(den)
+    except ExactDecimalError as error:
+        raise ValueError("split ratio exceeds exact arithmetic resource envelope") from error
     transaction = JournalTransaction(
         transaction_id=_name(transaction_id, field="transaction_id"),
         cause_event_id=_name(cause_event_id, field="cause_event_id"),
@@ -563,7 +727,7 @@ def book_equity_split_adjustment(
             posting(
                 f"CORPORATE_ACTION_SPLIT_CLEARING:{symbol}:{num_text}:{den_text}",
                 symbol,
-                -delta,
+                _exact_negate(delta, conflict=True),
             ),
         ),
         economic_effective_at=economic_effective_at,
@@ -596,10 +760,10 @@ def book_fx_exchange(
         transaction_id=_name(transaction_id, field="transaction_id"),
         cause_event_id=_name(cause_event_id, field="cause_event_id"),
         postings=(
-            posting(f"CASH:{sold}", sold, -sold_value),
+            posting(f"CASH:{sold}", sold, _exact_negate(sold_value)),
             posting(f"FX_CLEARING:{sold}", sold, sold_value),
             posting(f"CASH:{bought}", bought, bought_value),
-            posting(f"FX_CLEARING:{bought}", bought, -bought_value),
+            posting(f"FX_CLEARING:{bought}", bought, _exact_negate(bought_value)),
         ),
     )
     validate_transaction(transaction)
@@ -618,7 +782,11 @@ def reverse_transaction(
         transaction_id=_name(transaction_id, field="transaction_id"),
         cause_event_id=_name(cause_event_id, field="cause_event_id"),
         postings=tuple(
-            Posting(item.ledger_account, item.asset_or_currency, -item.signed_amount)
+            Posting(
+                item.ledger_account,
+                item.asset_or_currency,
+                _exact_negate(item.signed_amount, conflict=True),
+            )
             for item in original.postings
         ),
         reverses_transaction_id=original.transaction_id,
@@ -687,7 +855,11 @@ def _canonical_equity_split_terms(
             "Split projection rejects non-canonical extra postings"
         )
     delta = position_postings[0].signed_amount
-    if delta == 0 or split_clearing[0].signed_amount != -delta:
+    if (
+        delta == 0
+        or split_clearing[0].signed_amount
+        != _exact_negate(delta, conflict=True)
+    ):
         raise AccountingConflict(
             "Split projection requires an exactly balanced non-zero quantity delta"
         )
@@ -707,8 +879,8 @@ def _canonical_equity_split_terms(
         or (len(den_text) > 1 and den_text.startswith("0"))
     ):
         raise AccountingConflict("Split projection ratio identity is not canonical")
-    numerator = Decimal(num_text)
-    denominator = Decimal(den_text)
+    numerator = _decimal(num_text, name="split numerator")
+    denominator = _decimal(den_text, name="split denominator")
     if numerator == denominator:
         raise AccountingConflict("Split projection ratio must change quantity")
     return delta, numerator, denominator
@@ -759,20 +931,33 @@ def _canonical_equity_fill_terms(
     ]
     if (
         len(instrument_clearing) != 1
-        or instrument_clearing[0].signed_amount != -quantity
+        or instrument_clearing[0].signed_amount
+        != _exact_negate(quantity, conflict=True)
         or len(settlement_clearing) != 1
     ):
         raise AccountingConflict(
             "Position projection requires canonical equity-fill clearing postings"
         )
 
-    trade_cash = -settlement_clearing[0].signed_amount
+    trade_cash = _exact_negate(
+        settlement_clearing[0].signed_amount,
+        conflict=True,
+    )
     if trade_cash == 0 or (trade_cash > 0) == (quantity > 0):
         raise AccountingConflict(
             "Position projection requires cash direction opposite to quantity"
         )
-    unit_price = abs(trade_cash / quantity)
-    if unit_price <= 0 or not unit_price.is_finite():
+    unit_price = _exact_absolute(
+        _exact_ratio(
+            trade_cash,
+            quantity,
+            conflict_message=(
+                "Position projection requires an exactly representable finite price"
+            ),
+        ),
+        conflict=True,
+    )
+    if unit_price <= 0 or not Decimal.is_finite(unit_price):
         raise AccountingConflict("Position projection requires a finite positive price")
 
     # Clearing legs alone are not evidence that this transaction came from the
@@ -808,7 +993,7 @@ def _canonical_equity_fill_terms(
         instrument=symbol,
         settlement_currency=settlement,
         side="BUY" if quantity > 0 else "SELL",
-        quantity=abs(quantity),
+        quantity=_exact_absolute(quantity, conflict=True),
         price=unit_price,
         fee=fee_amount,
         fee_currency=fee_currency,
@@ -1006,25 +1191,29 @@ def project_equity_position(
     for kind, transaction, terms in position_events:
         if kind == "SPLIT":
             delta, numerator, denominator = terms
-            current_quantity = sum(
+            current_quantity = _exact_total(
                 (
                     lot[0]
                     for lot in mutable_lots
                     if isinstance(lot[0], Decimal)
                 ),
-                Decimal("0"),
+                conflict=True,
             )
             if current_quantity == 0:
                 raise AccountingConflict(
                     "Split adjustment cannot transform an empty projected position"
                 )
-            target = current_quantity * numerator
-            next_quantity = target / denominator
-            if next_quantity * denominator != target:
-                raise AccountingConflict(
-                    "Split projected quantity is not exactly representable"
-                )
-            if next_quantity - current_quantity != delta:
+            next_quantity = _exact_ratio_product(
+                current_quantity,
+                numerator,
+                denominator,
+                conflict_message="Split projected quantity is not exactly representable",
+            )
+            if _exact_difference(
+                next_quantity,
+                current_quantity,
+                conflict=True,
+            ) != delta:
                 raise AccountingConflict(
                     "Split adjustment delta conflicts with projected pre-split quantity"
                 )
@@ -1034,18 +1223,18 @@ def project_equity_position(
                 lot_price = lot[1]
                 assert isinstance(lot_quantity, Decimal)
                 assert isinstance(lot_price, Decimal)
-                quantity_target = lot_quantity * numerator
-                adjusted_quantity = quantity_target / denominator
-                if adjusted_quantity * denominator != quantity_target:
-                    raise AccountingConflict(
-                        "Split lot quantity is not exactly representable"
-                    )
-                price_target = lot_price * denominator
-                adjusted_price = price_target / numerator
-                if adjusted_price * numerator != price_target:
-                    raise AccountingConflict(
-                        "Split lot basis is not exactly representable"
-                    )
+                adjusted_quantity = _exact_ratio_product(
+                    lot_quantity,
+                    numerator,
+                    denominator,
+                    conflict_message="Split lot quantity is not exactly representable",
+                )
+                adjusted_price = _exact_ratio_product(
+                    lot_price,
+                    denominator,
+                    numerator,
+                    conflict_message="Split lot basis is not exactly representable",
+                )
                 lot[0] = adjusted_quantity
                 lot[1] = adjusted_price
             continue
@@ -1062,16 +1251,51 @@ def project_equity_position(
             lot_price = mutable_lots[0][1]
             assert isinstance(lot_quantity, Decimal)
             assert isinstance(lot_price, Decimal)
-            close_quantity = min(abs(remaining), abs(lot_quantity))
+            close_quantity = min(
+                _exact_absolute(remaining, conflict=True),
+                _exact_absolute(lot_quantity, conflict=True),
+            )
 
             if lot_quantity > 0:
-                realized += close_quantity * (unit_price - lot_price)
-                lot_quantity -= close_quantity
-                remaining += close_quantity
+                realized = _exact_addition(
+                    realized,
+                    _exact_product(
+                        close_quantity,
+                        _exact_difference(unit_price, lot_price, conflict=True),
+                        conflict=True,
+                    ),
+                    conflict=True,
+                )
+                lot_quantity = _exact_difference(
+                    lot_quantity,
+                    close_quantity,
+                    conflict=True,
+                )
+                remaining = _exact_addition(
+                    remaining,
+                    close_quantity,
+                    conflict=True,
+                )
             else:
-                realized += close_quantity * (lot_price - unit_price)
-                lot_quantity += close_quantity
-                remaining -= close_quantity
+                realized = _exact_addition(
+                    realized,
+                    _exact_product(
+                        close_quantity,
+                        _exact_difference(lot_price, unit_price, conflict=True),
+                        conflict=True,
+                    ),
+                    conflict=True,
+                )
+                lot_quantity = _exact_addition(
+                    lot_quantity,
+                    close_quantity,
+                    conflict=True,
+                )
+                remaining = _exact_difference(
+                    remaining,
+                    close_quantity,
+                    conflict=True,
+                )
 
             if lot_quantity == 0:
                 mutable_lots.pop(0)
@@ -1091,27 +1315,37 @@ def project_equity_position(
         )
         for lot in mutable_lots
     )
-    quantity = sum((lot.quantity for lot in lots), Decimal("0"))
-    open_cost_basis = sum(
-        (abs(lot.quantity) * lot.unit_price for lot in lots),
-        Decimal("0"),
+    quantity = _exact_total((lot.quantity for lot in lots), conflict=True)
+    open_cost_basis = _exact_total(
+        (
+            _exact_product(
+                _exact_absolute(lot.quantity, conflict=True),
+                lot.unit_price,
+                conflict=True,
+            )
+            for lot in lots
+        ),
+        conflict=True,
     )
 
     unrealized: Decimal | None
     if mark is None:
         unrealized = None
     else:
-        unrealized = sum(
+        unrealized = _exact_total(
             (
-                abs(lot.quantity)
-                * (
-                    (mark - lot.unit_price)
-                    if lot.quantity > 0
-                    else (lot.unit_price - mark)
+                _exact_product(
+                    _exact_absolute(lot.quantity, conflict=True),
+                    (
+                        _exact_difference(mark, lot.unit_price, conflict=True)
+                        if lot.quantity > 0
+                        else _exact_difference(lot.unit_price, mark, conflict=True)
+                    ),
+                    conflict=True,
                 )
                 for lot in lots
             ),
-            Decimal("0"),
+            conflict=True,
         )
 
     return EquityPositionProjection(

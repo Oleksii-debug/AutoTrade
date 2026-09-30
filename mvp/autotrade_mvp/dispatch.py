@@ -330,8 +330,15 @@ def _canonical_journal_authority_snapshot(
     if type(store) is not JournalStore:
         raise TypeError("store must be the canonical JournalStore")
     state = vars(store)
-    if set(state) != {"path", "_store_identity"}:
+    class_owned_names = {
+        name
+        for base in JournalStore.__mro__
+        for name in base.__dict__
+    }
+    if class_owned_names.intersection(state):
         raise TypeError("canonical JournalStore instance state is shadowed")
+    if "path" not in state or "_store_identity" not in state:
+        raise TypeError("canonical JournalStore backing state is unavailable")
     path = state["path"]
     identity = JournalStore.store_identity.__get__(store, JournalStore)
     if getattr(identity, "canonical_path", None) != str(path):

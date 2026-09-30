@@ -9,6 +9,7 @@ from pathlib import Path
 from .accessibility import format_accessible_status
 from .economics import build_economic_report
 from .pipeline import run_multi_episode, run_vertical_slice, verify_replay
+from .simulation_session import run_canonical_simulation
 
 
 def _jsonable_result(result) -> dict:
@@ -60,7 +61,20 @@ def main() -> int:
     parser.add_argument("--accessible-status", action="store_true", help="Show a stable plain-text status for keyboard and screen-reader use")
     parser.add_argument("--economic-report", action="store_true", help="Show evidence-bound simulated economics")
     parser.add_argument("--multi-episode", action="store_true", help="Run semicolon-separated episodes")
+    parser.add_argument("--canonical-simulation", action="store_true", help="Run one journal-backed canonical simulated episode")
+    parser.add_argument("--episode-id", default="episode-1", help="Stable canonical simulation episode identity")
+    parser.add_argument("--at", help="Optional ISO timestamp for deterministic simulation evidence")
+    parser.add_argument("--fault-after-send", action="store_true", help="Inject an ambiguous simulated send, which will never be retried")
     args = parser.parse_args()
+    if args.canonical_simulation:
+        if args.status or args.accessible_status or args.economic_report or args.multi_episode:
+            parser.error("--canonical-simulation cannot be combined with legacy modes")
+        result = run_canonical_simulation(
+            args.prices.split(","), args.state_dir, episode_id=args.episode_id,
+            now=args.at, fault_after_send=args.fault_after_send,
+        )
+        print(json.dumps(result, indent=2))
+        return 0
     if args.status:
         print(json.dumps(get_status(args.state_dir), indent=2))
         return 0

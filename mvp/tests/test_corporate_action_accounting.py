@@ -22,11 +22,12 @@ from mvp.autotrade_mvp.corporate_action_evidence import (
     CorporateActionEvidenceError,
     CorporateActionObservation,
     DurableCorporateActionEvidenceStore,
+    _authoritative_action_material,
     resolve_authoritative_corporate_action,
 )
 from mvp.autotrade_mvp.corporate_actions import CorporateActionBook, EquityState
 from mvp.autotrade_mvp.instruments import InstrumentRegistry
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
 from mvp.autotrade_mvp.provider_core import (
     Surface,
@@ -1351,6 +1352,57 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
                     "corporate_action_evidence", durable_evidence.aggregate_id
                 ),
                 before_evidence,
+            )
+            self.assertEqual(
+                store.load_events_by_aggregate_type("corporate_action_activation"),
+                [],
+            )
+
+    def test_copied_issuer_token_and_recomputed_seal_are_not_authority(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            durable = evidence_store(store)
+            economics = economic_book(store)
+            issued = resolve_action(sealed_action())
+            # Exact dataclass fields and its visible token/hash can all be
+            # copied by a caller; the second object is not resolver-issued.
+            copied = AuthoritativeCorporateAction(
+                event=issued.event,
+                evidence_ref=issued.evidence_ref,
+                provider_id=issued.provider_id,
+                account_id=issued.account_id,
+                environment=issued.environment,
+                external_event_id=issued.external_event_id,
+                provider_revision="forged-revision",
+                raw_evidence_digest=issued.raw_evidence_digest,
+                query_digest=issued.query_digest,
+                capability_snapshot_id=issued.capability_snapshot_id,
+                provider_instrument_version=issued.provider_instrument_version,
+                observed_at=issued.observed_at,
+                provenance_digest=issued.provenance_digest,
+                corrects_external_event_id=issued.corrects_external_event_id,
+            )
+            object.__setattr__(copied, "_issuance_token", issued._issuance_token)
+            object.__setattr__(
+                copied, "_issuance_seal",
+                payload_digest(_authoritative_action_material(copied)),
+            )
+            before_transactions = economics.transactions
+            with self.assertRaisesRegex(
+                CorporateActionEvidenceError, "lacks resolver issuance authority"
+            ):
+                commit_authoritative_corporate_action(
+                    store=store,
+                    evidence_store=durable,
+                    economic_book=economics,
+                    corporate_book=pure_book(),
+                    accepted=copied,
+                )
+            economics.refresh()
+            self.assertEqual(economics.transactions, before_transactions)
+            self.assertEqual(
+                store.load_events("corporate_action_evidence", durable.aggregate_id),
+                [],
             )
             self.assertEqual(
                 store.load_events_by_aggregate_type("corporate_action_activation"),

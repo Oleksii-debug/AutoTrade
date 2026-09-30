@@ -19,12 +19,17 @@ from decimal import Decimal
 from types import MappingProxyType
 from typing import Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5
+from weakref import ref
 import re
 
 from .corporate_actions import CorporateEvent
 from .instruments import InstrumentRegistry, InstrumentVersion
 from .persistence import JournalStore, payload_digest
-from .provider_core import ProviderResponseObservation, Surface
+from .provider_core import (
+    AuthenticatedReadQueryBinding,
+    ProviderResponseObservation,
+    Surface,
+)
 
 
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -342,6 +347,9 @@ def _canonical_observation_from_sealed_response(
 
 
 _AUTHORITATIVE_CORPORATE_ACTION_ISSUANCE_TOKEN = object()
+# Private process-local resolver issuance record, keyed by exact object identity.
+# No caller-visible token or deterministic payload hash can mint another object.
+_ISSUED_CORPORATE_ACTIONS: dict[int, tuple[object, str]] = {}
 
 
 @dataclass(frozen=True)
@@ -494,6 +502,14 @@ def _seal_authoritative_corporate_action(
         _AUTHORITATIVE_CORPORATE_ACTION_ISSUANCE_TOKEN,
     )
     object.__setattr__(accepted, "_issuance_seal", seal)
+    identity = id(accepted)
+
+    def forget(weak):
+        current = _ISSUED_CORPORATE_ACTIONS.get(identity)
+        if current is not None and current[0] is weak:
+            _ISSUED_CORPORATE_ACTIONS.pop(identity, None)
+
+    _ISSUED_CORPORATE_ACTIONS[identity] = (ref(accepted, forget), seal)
     return accepted
 
 
@@ -506,20 +522,95 @@ def require_authoritative_corporate_action_issuance(
         raise TypeError(
             "accepted must be an exact AuthoritativeCorporateAction"
         )
+    issuance = _ISSUED_CORPORATE_ACTIONS.get(id(accepted))
     if (
-        accepted._issuance_token
+        issuance is None
+        or issuance[0]() is not accepted
+        or accepted._issuance_token
         is not _AUTHORITATIVE_CORPORATE_ACTION_ISSUANCE_TOKEN
         or type(accepted._issuance_seal) is not str
     ):
         raise CorporateActionEvidenceError(
             "corporate action lacks resolver issuance authority"
         )
-    if accepted._issuance_seal != payload_digest(
-        _authoritative_action_material(accepted)
+    if (
+        accepted._issuance_seal != issuance[1]
+        or accepted._issuance_seal != payload_digest(
+            _authoritative_action_material(accepted)
+        )
     ):
         raise CorporateActionEvidenceError(
             "corporate action changed after resolver issuance"
         )
+
+
+_FROZEN_JSON_OBJECT_TYPE = type(MappingProxyType({}))
+
+
+def _require_exact_provider_json_graph(value: object, *, depth: int = 0) -> None:
+    """Seal the consumer-side graph before parsing financial provider facts."""
+    if depth > 64:
+        raise CorporateActionEvidenceError(
+            "corporate-action source exceeds canonical JSON depth"
+        )
+    if type(value) is _FROZEN_JSON_OBJECT_TYPE:
+        for key, child in value.items():
+            if type(key) is not str:
+                raise CorporateActionEvidenceError(
+                    "corporate-action source JSON keys must be exact"
+                )
+            _require_exact_provider_json_graph(child, depth=depth + 1)
+    elif type(value) is tuple:
+        for child in value:
+            _require_exact_provider_json_graph(child, depth=depth + 1)
+    elif type(value) is Decimal:
+        if not value.is_finite():
+            raise CorporateActionEvidenceError(
+                "corporate-action source decimal must be finite"
+            )
+    elif type(value) not in {str, int, bool, type(None)}:
+        raise CorporateActionEvidenceError(
+            "corporate-action source contains polymorphic JSON values"
+        )
+
+
+def _require_exact_provider_source_graph(
+    source: ProviderResponseObservation,
+) -> AuthenticatedReadQueryBinding:
+    if type(source) is not ProviderResponseObservation:
+        raise CorporateActionEvidenceError(
+            "corporate-action evidence must be an exact ProviderResponseObservation"
+        )
+    binding = source.query_binding
+    if type(binding) is not AuthenticatedReadQueryBinding:
+        raise CorporateActionEvidenceError(
+            "corporate-action query binding must be exact"
+        )
+    if (
+        type(source.evidence_ref) is not str
+        or type(source.observed_at) is not str
+        or type(source.response_sha256) is not str
+        or type(source.http_status) is not int
+    ):
+        raise CorporateActionEvidenceError(
+            "corporate-action provider source scalars must be exact"
+        )
+    if type(binding.surface) is not Surface:
+        raise CorporateActionEvidenceError(
+            "corporate-action query surface must be exact"
+        )
+    for name in (
+        "provider_id", "account_id", "entity_id", "environment",
+        "capability_snapshot_id", "instrument_version", "endpoint",
+        "prepared_at", "permission_scope", "query_digest",
+    ):
+        if type(getattr(binding, name)) is not str:
+            raise CorporateActionEvidenceError(
+                "corporate-action query binding scalars must be exact"
+            )
+    _require_exact_provider_json_graph(binding.query)
+    _require_exact_provider_json_graph(source.payload)
+    return binding
 
 
 EvidenceResolver = Callable[[str], ProviderResponseObservation]
@@ -548,8 +639,8 @@ def resolve_authoritative_corporate_action(
     reference = _text(evidence_ref, "evidence_ref")
     if not callable(evidence_resolver):
         raise TypeError("evidence_resolver must be callable")
-    if not isinstance(instrument_registry, InstrumentRegistry):
-        raise TypeError("instrument_registry must be InstrumentRegistry")
+    if type(instrument_registry) is not InstrumentRegistry:
+        raise TypeError("instrument_registry must be an exact InstrumentRegistry")
     if normalizer is not None:
         raise TypeError(
             "caller-supplied corporate-action normalizer is not financial authority"
@@ -569,8 +660,10 @@ def resolve_authoritative_corporate_action(
         raise CorporateActionEvidenceError(
             "expected_environment must be canonical"
         )
-    if not isinstance(allowed_endpoints, frozenset) or not allowed_endpoints:
-        raise TypeError("allowed_endpoints must be a non-empty frozenset")
+    if type(allowed_endpoints) is not frozenset or not allowed_endpoints:
+        raise TypeError("allowed_endpoints must be an exact non-empty frozenset")
+    if any(type(value) is not str for value in allowed_endpoints):
+        raise TypeError("allowed_endpoints values must be exact strings")
     endpoints = frozenset(
         _text(value, "allowed endpoint") for value in allowed_endpoints
     )
@@ -589,16 +682,14 @@ def resolve_authoritative_corporate_action(
         raise CorporateActionEvidenceError(
             "corporate-action evidence could not be resolved"
         ) from error
-    if not isinstance(source, ProviderResponseObservation):
-        raise CorporateActionEvidenceError(
-            "corporate-action evidence must be a sealed ProviderResponseObservation"
-        )
+    # Exact issuer and full canonical frozen source/binding graphs must be
+    # established before any provider or instrument virtual dispatch.
+    binding = _require_exact_provider_source_graph(source)
     if source.evidence_ref != reference:
         raise CorporateActionEvidenceError(
             "resolved corporate-action evidence identity mismatch"
         )
 
-    binding = source.query_binding
     endpoint = binding.endpoint
     if endpoint not in endpoints:
         raise CorporateActionEvidenceError(

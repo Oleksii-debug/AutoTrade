@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from types import MappingProxyType
 from decimal import Decimal
 import json
 from tempfile import TemporaryDirectory
@@ -15,6 +16,8 @@ from mvp.autotrade_mvp.corporate_actions import CorporateEvent
 from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import (
+    AuthenticatedReadQueryBinding,
+    ProviderResponseObservation,
     Surface,
     observe_authenticated_json_response,
     prepare_authenticated_read_query,
@@ -99,11 +102,13 @@ def sealed_dividend(
             READ_NOW + timedelta(seconds=effective_offset)
         ).isoformat().replace("+00:00", "Z"),
         "kind": kind,
-        "per_share": per_share,
-        "currency": currency,
         "source_sequence": source_sequence,
         "complete": complete,
     }
+    if kind == "SPLIT":
+        payload.update({"numerator": "2", "denominator": "1"})
+    else:
+        payload.update({"per_share": per_share, "currency": currency})
     for name, value in (
         ("corrects_external_event_id", corrects),
         ("announcement_at", announcement_at),
@@ -158,6 +163,107 @@ def resolve(
 
 
 class CorporateActionEvidenceBoundaryTests(unittest.TestCase):
+    def test_polymorphic_provider_source_and_registry_are_denied_before_callbacks(self):
+        legitimate = sealed_dividend()
+        touched = []
+
+        class HostileRegistry(InstrumentRegistry):
+            def exact(self, *args, **kwargs):
+                touched.append("instrument-exact")
+                raise AssertionError("virtual instrument exact")
+
+            def at(self, *args, **kwargs):
+                touched.append("instrument-at")
+                raise AssertionError("virtual instrument at")
+
+        class HostileSource(ProviderResponseObservation):
+            @property
+            def evidence_ref(self):
+                touched.append("source-evidence")
+                raise AssertionError("virtual source evidence")
+
+            @property
+            def query_binding(self):
+                touched.append("source-query")
+                raise AssertionError("virtual source query")
+
+        class HostileBinding(AuthenticatedReadQueryBinding):
+            @property
+            def endpoint(self):
+                touched.append("binding-endpoint")
+                raise AssertionError("virtual binding endpoint")
+
+        class HostilePayload(dict):
+            def items(self):
+                touched.append("payload-items")
+                raise AssertionError("virtual payload items")
+
+            def __iter__(self):
+                touched.append("payload-iter")
+                raise AssertionError("virtual payload iteration")
+
+        class HostileScalar(str):
+            def __str__(self):
+                touched.append("scalar-str")
+                raise AssertionError("virtual scalar string")
+
+        def invoke(source, registry=None):
+            return resolve_authoritative_corporate_action(
+                legitimate.evidence_ref,
+                evidence_resolver=lambda _: source,
+                instrument_registry=(
+                    canonical_registry() if registry is None else registry
+                ),
+                expected_provider_id="BINANCE",
+                expected_account_id="acct-1",
+                expected_environment="PAPER",
+                allowed_endpoints=frozenset({ENDPOINT}),
+                permission_scope="ORDER.READ",
+            )
+
+        with self.assertRaisesRegex(TypeError, "exact InstrumentRegistry"):
+            invoke(
+                legitimate,
+                HostileRegistry(versions=(canonical_instrument(),)),
+            )
+        self.assertEqual(touched, [])
+
+        with self.assertRaisesRegex(
+            CorporateActionEvidenceError, "exact ProviderResponseObservation"
+        ):
+            invoke(object.__new__(HostileSource))
+        self.assertEqual(touched, [])
+
+        for corrupt, pattern in (
+            ("binding", "query binding must be exact"),
+            ("dict", "polymorphic JSON"),
+            ("scalar", "polymorphic JSON"),
+        ):
+            with self.subTest(corrupt=corrupt):
+                source = sealed_dividend()
+                if corrupt == "binding":
+                    object.__setattr__(
+                        source, "query_binding", object.__new__(HostileBinding)
+                    )
+                elif corrupt == "dict":
+                    object.__setattr__(
+                        source, "payload", HostilePayload(dict(source.payload))
+                    )
+                else:
+                    payload = dict(source.payload)
+                    payload["provider_revision"] = HostileScalar("1")
+                    object.__setattr__(
+                        source, "payload", MappingProxyType(payload)
+                    )
+                with self.assertRaisesRegex(
+                    CorporateActionEvidenceError, pattern
+                ):
+                    invoke(source)
+                self.assertEqual(touched, [])
+
+        # The exact canonical provider-decoder and registry path still works.
+        self.assertEqual(resolve(legitimate).event.kind, "CASH_DIVIDEND")
+
     def test_sealed_provider_evidence_creates_bound_corporate_event(self):
         source = sealed_dividend()
         accepted = resolve(source)
@@ -595,23 +701,15 @@ class DurableCorporateActionEvidenceStoreTests(unittest.TestCase):
             corrects="corp-1",
         )
 
-        changed_event = CorporateEvent.create(
-            event_id=correction.event.event_id,
-            instrument_id=correction.event.instrument_id,
-            instrument_version=correction.event.instrument_version,
+        # A legitimate second provider observation, not a synthetic copy
+        # of a resolver-issued dataclass with init=False issuance metadata.
+        changed = resolve(sealed_dividend(
+            external_event_id="corp-2",
+            revision="2",
+            observed_offset=3,
+            corrects="corp-1",
             kind="SPLIT",
-            effective_date=correction.event.effective_date,
-            effective_at=correction.event.effective_at,
-            source_revision=correction.event.source_revision,
-            source_sequence=correction.event.source_sequence,
-            payload={"numerator": "2", "denominator": "1"},
-        )
-        changed = type(correction)(
-            **{
-                **correction.__dict__,
-                "event": changed_event,
-            }
-        )
+        ))
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"
             journal, durable = self._store(path)

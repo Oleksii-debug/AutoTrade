@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
 import sqlite3
 import sys
@@ -118,6 +119,67 @@ class JournalStorePathIdentityRegressionTests(unittest.TestCase):
                 os.chdir(original_cwd)
         finally:
             os.chdir(original_cwd)
+
+    def test_windows_connect_forwards_primary_body_exception_to_authority_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite"
+            store = JournalStore(path)
+            observed = {}
+
+            @contextmanager
+            def recording_guard(database_path, *, create):
+                self.assertEqual(Path(database_path), Path(store.path))
+                self.assertFalse(create)
+                try:
+                    yield store.store_identity
+                except BaseException as primary:
+                    observed["primary"] = primary
+                    raise
+
+            primary = ValueError("injected sqlite body failure")
+            with patch(
+                "mvp.autotrade_mvp.persistence.guard_windows_database_authority",
+                new=recording_guard,
+            ):
+                with self.assertRaises(ValueError) as caught:
+                    with store._connect_windows():
+                        raise primary
+
+            self.assertIs(caught.exception, primary)
+            self.assertIs(observed["primary"], primary)
+
+    def test_windows_connect_preserves_authority_error_cause_on_body_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite"
+            store = JournalStore(path)
+            observed = {}
+
+            @contextmanager
+            def changing_guard(database_path, *, create):
+                self.assertEqual(Path(database_path), Path(store.path))
+                self.assertFalse(create)
+                try:
+                    yield store.store_identity
+                except BaseException as primary:
+                    observed["primary"] = primary
+                    raise RuntimeError(
+                        "injected authority changed while guarded"
+                    ) from primary
+
+            primary = ValueError("injected sqlite body failure")
+            with patch(
+                "mvp.autotrade_mvp.persistence.guard_windows_database_authority",
+                new=changing_guard,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "injected authority changed while guarded",
+                ) as caught:
+                    with store._connect_windows():
+                        raise primary
+
+            self.assertIs(observed["primary"], primary)
+            self.assertIs(caught.exception.__cause__, primary)
 
     @unittest.skipIf(
         sys.platform == "win32",

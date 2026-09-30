@@ -134,8 +134,8 @@ class DurableCapabilityRegistry:
         return registry
 
     def add(self, snapshot: CapabilitySnapshot) -> bool:
-        if not isinstance(snapshot, CapabilitySnapshot):
-            raise TypeError("snapshot must be CapabilitySnapshot")
+        if type(snapshot) is not CapabilitySnapshot:
+            raise TypeError("snapshot must be exact CapabilitySnapshot")
         # Rebuild durable truth first so stale writers cannot append after a
         # newer refresh for the same identity.
         registry = self._history()
@@ -156,7 +156,8 @@ class DurableCapabilityRegistry:
                     "snapshot observed_at conflicts with durable capability history"
                 )
             if snapshot.status == "VERIFIED":
-                # Exact replay is not a fresh current-process derivation.
+                if getattr(snapshot, "_can_admit", False):
+                    self._session_verified[snapshot.snapshot_id] = snapshot
                 return False
             return False
 
@@ -197,6 +198,10 @@ class DurableCapabilityRegistry:
                     "capability history changed concurrently; refresh required"
                 ) from error
             if persisted == snapshot:
+                if snapshot.status == "VERIFIED" and getattr(
+                    snapshot, "_can_admit", False
+                ):
+                    self._session_verified[snapshot.snapshot_id] = snapshot
                 return False
             raise CapabilityError(
                 "capability history changed concurrently; refresh required"
@@ -210,9 +215,21 @@ class DurableCapabilityRegistry:
         return self._history().latest(**kwargs)
 
     def require_verified(self, **kwargs) -> CapabilitySnapshot:
-        snapshot = self._history().require_verified(**kwargs)
+        snapshot = self._history().latest(**kwargs)
+        point = kwargs.get("at")
+        if not isinstance(point, datetime) or point.tzinfo is None or point.utcoffset() is None:
+            raise CapabilityError("at must be timezone-aware")
+        if snapshot.status != "VERIFIED":
+            raise CapabilityError(f"capability status is {snapshot.status}")
+        if point >= snapshot.expires_at:
+            raise CapabilityError("capability snapshot is expired")
         fresh = self._session_verified.get(snapshot.snapshot_id)
-        if fresh is None or fresh != snapshot:
+        if (
+            fresh is None
+            or type(fresh) is not CapabilitySnapshot
+            or fresh != snapshot
+            or not getattr(fresh, "_can_admit", False)
+        ):
             raise CapabilityError(
                 "capability requires fresh current-process verification after restart"
             )

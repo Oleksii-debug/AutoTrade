@@ -22,10 +22,11 @@ from mvp.autotrade_mvp.model_gateway import (
     RoutingPolicy,
     route_model,
 )
+from mvp.autotrade_mvp.durable_event_taxonomy import MODEL_BUDGET
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
 
 
-_AGGREGATE_TYPE = "model_budget"
+_AGGREGATE_TYPE = MODEL_BUDGET.aggregate_type
 _COMMAND_ACTOR = "autotrade-model-budget"
 _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 

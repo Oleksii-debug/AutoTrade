@@ -39,6 +39,7 @@ from urllib.request import (
 
 from .capabilities import CapabilityRegistry, CapabilitySnapshot
 from .dispatch import ExactJsonTransportResponse
+from .durable_event_taxonomy import PROVIDER_NONCE
 from .persistence import JournalStore, payload_digest
 from .kraken_spot import (
     spot_submission_requires_reconciliation,
@@ -1250,7 +1251,7 @@ class WhiteBitCredential:
 class _DurableProviderNonceAllocator:
     """Single journal-backed monotonic nonce authority shared by provider transports."""
 
-    AGGREGATE_TYPE = "provider_nonce"
+    AGGREGATE_TYPE = PROVIDER_NONCE.aggregate_type
     EVENT_TYPE = "ProviderNonceAllocated"
 
     def __init__(

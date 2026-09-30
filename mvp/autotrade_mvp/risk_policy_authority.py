@@ -24,6 +24,7 @@ from .exact_decimal import (
     canonical_decimal_text,
     parse_canonical_decimal_text,
 )
+from .durable_event_taxonomy import RISK_POLICY_REGISTRY
 from .persistence import JournalStore, canonical_json, payload_digest
 from .risk import RISK_ENVIRONMENTS, RiskPolicy
 
@@ -32,7 +33,7 @@ class RiskPolicyAuthorityError(ValueError):
     """Raised when durable quantitative-policy authority is invalid or ambiguous."""
 
 
-_AGGREGATE_TYPE = "risk_policy_registry"
+_AGGREGATE_TYPE = RISK_POLICY_REGISTRY.aggregate_type
 _REGISTER_EVENT = "RiskPolicyRegistered.v1"
 _ACTIVATE_EVENT = "RiskPolicyActivated.v1"
 _ACTIVATE_EVENT_V2 = "RiskPolicyActivated.v2"

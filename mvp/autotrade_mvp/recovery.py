@@ -15,6 +15,7 @@ from typing import Iterable
 from uuid import NAMESPACE_URL, uuid5
 
 from .dispatch import submission_attempt_aggregate_id
+from .durable_event_taxonomy import RECOVERY_OWNER, SUBMISSION_ATTEMPT
 from .persistence import JournalStore, payload_digest
 from .reconciliation_journal import load_reconciliation_checkpoint_for_readiness
 
@@ -135,7 +136,7 @@ class RecoveryController:
     the newer storage/clock/UNKNOWN recovery semantics.
     """
 
-    _OWNER_AGGREGATE_TYPE = "recovery_owner"
+    _OWNER_AGGREGATE_TYPE = RECOVERY_OWNER.aggregate_type
     _OWNER_EVENT_TYPE = "RecoveryOwnerChanged"
 
     def __init__(

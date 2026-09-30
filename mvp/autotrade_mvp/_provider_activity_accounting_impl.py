@@ -39,6 +39,12 @@ from .fill_accounting import (
     build_provider_fill_correction_transactions,
     build_provider_fill_financial_plan,
 )
+from .durable_event_taxonomy import (
+    ECONOMIC_BOOK,
+    PROVIDER_ACTIVITY,
+    PROVIDER_FILL_FINANCIAL_BINDING,
+    PROVIDER_FILL_RESERVATION_CORRECTION_BINDING,
+)
 from .persistence import JournalStore, canonical_json, payload_digest
 from .reconciliation import ProviderActivityEvidence, ProviderFillEvidence
 from .settlement import SettlementObligation
@@ -236,7 +242,7 @@ class PreparedEconomicBatch:
     already_committed: bool = False
 
 
-_PROVIDER_FILL_BINDING_AGGREGATE_TYPE = "provider_fill_financial_binding"
+_PROVIDER_FILL_BINDING_AGGREGATE_TYPE = PROVIDER_FILL_FINANCIAL_BINDING.aggregate_type
 _PROVIDER_FILL_BINDING_EVENT_TYPE = "ProviderFillFinancialPlanBound"
 
 
@@ -261,7 +267,7 @@ class PreparedProviderFillBinding:
 
 
 _PROVIDER_FILL_CORRECTION_BINDING_AGGREGATE_TYPE = (
-    "provider_fill_reservation_correction_binding"
+    PROVIDER_FILL_RESERVATION_CORRECTION_BINDING.aggregate_type
 )
 _PROVIDER_FILL_CORRECTION_BINDING_EVENT_TYPE = (
     "ProviderFillReservationCorrectionBound"
@@ -1206,7 +1212,7 @@ class DurableProviderEconomicBook(ScopedEconomicBook):
         envelope = {
             "event_id": event_identity,
             "event_type": self._BATCH_EVENT,
-            "aggregate_type": "economic_book",
+            "aggregate_type": ECONOMIC_BOOK.aggregate_type,
             "aggregate_id": self.book_id,
             "aggregate_version": str(next_version),
             "committed_at": when,
@@ -2268,13 +2274,13 @@ def book_external_provider_cash_activity(
         require_semantic_owner(
             existing_imported,
             event_type="ProviderActivityImported",
-            aggregate_type="provider_activity",
+            aggregate_type=PROVIDER_ACTIVITY.aggregate_type,
             aggregate_id=identity,
         )
         require_semantic_owner(
             existing_economic,
             event_type="EconomicTransactionBooked",
-            aggregate_type="economic_book",
+            aggregate_type=ECONOMIC_BOOK.aggregate_type,
             aggregate_id=book_id,
         )
 
@@ -2358,7 +2364,7 @@ def book_external_provider_cash_activity(
     imported_envelope = {
         "event_id": imported_event_id,
         "event_type": "ProviderActivityImported",
-        "aggregate_type": "provider_activity",
+        "aggregate_type": PROVIDER_ACTIVITY.aggregate_type,
         "aggregate_id": identity,
         "aggregate_version": str(activity_version),
         "committed_at": observed_text,
@@ -2377,7 +2383,7 @@ def book_external_provider_cash_activity(
     economic_envelope = {
         "event_id": economic_event_id,
         "event_type": "EconomicTransactionBooked",
-        "aggregate_type": "economic_book",
+        "aggregate_type": ECONOMIC_BOOK.aggregate_type,
         "aggregate_id": book_id,
         "aggregate_version": str(book_version),
         "committed_at": observed_text,

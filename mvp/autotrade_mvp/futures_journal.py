@@ -38,10 +38,11 @@ from .futures import (
     settle_and_book_inverse_variation_margin,
     settlement_identity_digest,
 )
+from .durable_event_taxonomy import FUTURES_VARIATION_MARGIN
 from .persistence import JournalStore, canonical_json, payload_digest
 
 
-_AGGREGATE_TYPE = "FUTURES_VARIATION_MARGIN"
+_AGGREGATE_TYPE = FUTURES_VARIATION_MARGIN.aggregate_type
 _EVENT_TYPE = "FuturesVariationMarginSettled"
 _ACTOR = "autotrade-futures-settlement"
 _SETTLEMENT_EVIDENCE_MEDIA_TYPE = (

@@ -26,14 +26,14 @@ from research.autotrade_research.io.strict_json import strict_json_loads
 
 from .dispatch import submission_attempt_aggregate_id
 from .persistence import JournalStore, canonical_json, payload_digest
-from .reservations import (
+from .durable_event_taxonomy import RESERVATION_BOOK\nfrom .reservations import (
     ReservationBook,
     ReservationConflict,
     ReservationSnapshot,
 )
 
 
-_AGGREGATE_TYPE = "reservation_book"
+_AGGREGATE_TYPE = RESERVATION_BOOK.aggregate_type
 _EVENT_TYPE = "ReservationMutationCommitted"
 _COMMAND_ACTOR = "autotrade-reservation-authority"
 _RESOLUTION_MEDIA_TYPE = "application/vnd.autotrade.reservation-resolution+json"

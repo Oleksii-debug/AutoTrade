@@ -18,7 +18,7 @@ from autotrade_numeric.exact_decimal import (
     parse_bounded_json_number_token,
 )
 
-from .persistence import JournalStore, canonical_json, payload_digest
+from .durable_event_taxonomy import SUBMISSION_ATTEMPT\nfrom .persistence import JournalStore, canonical_json, payload_digest
 from .provider_response_limits import require_provider_json_depth
 
 
@@ -527,7 +527,7 @@ def _envelope(
         "event_id": _event_id(scope_key, attempt_id, event_type, version),
         "event_type": event_type,
         "schema_version": "1.0.0",
-        "aggregate_type": "submission_attempt",
+        "aggregate_type": SUBMISSION_ATTEMPT.aggregate_type,
         "aggregate_id": aggregate_id,
         "aggregate_version": str(version),
         "host_id": "local-mvp",

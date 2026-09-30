@@ -23,6 +23,7 @@ import re
 
 from .corporate_actions import CorporateEvent
 from .instruments import InstrumentRegistry, InstrumentVersion
+from .durable_event_taxonomy import CORPORATE_ACTION_EVIDENCE
 from .persistence import JournalStore, payload_digest
 from .provider_core import ProviderResponseObservation, Surface
 
@@ -612,7 +613,7 @@ class DurableCorporateActionEvidenceStore:
     combine one retained evidence event with canonical economic-book mutation.
     """
 
-    _AGGREGATE_TYPE = "corporate_action_evidence"
+    _AGGREGATE_TYPE = CORPORATE_ACTION_EVIDENCE.aggregate_type
     _EVENT_TYPE = "CorporateActionEvidenceAccepted"
     _ACTOR = "corporate-action-evidence"
 

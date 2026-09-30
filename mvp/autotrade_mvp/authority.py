@@ -19,7 +19,7 @@ from .allocation import (
     revalidate_evidence_bound_allocation,
 )
 from .durable_reservations import DurableReservationBook
-from .persistence import JournalStore, canonical_json, payload_digest
+from .durable_event_taxonomy import AUTHORITY_STATE, RISK_DECISION\nfrom .persistence import JournalStore, canonical_json, payload_digest
 from .reconciliation_journal import load_account_resource_availability_evidence
 from .securities_borrow import (
     BorrowAvailabilityEvidence,
@@ -1092,7 +1092,7 @@ class AuthorityService:
         envelope = {
             "event_id": event_id,
             "event_type": event_type,
-            "aggregate_type": "authority_state",
+            "aggregate_type": AUTHORITY_STATE.aggregate_type,
             "aggregate_id": "canonical",
             "aggregate_version": str(self._journal_version + 1),
             "payload": payload,
@@ -3508,7 +3508,7 @@ class AuthorityService:
                 "RiskDecisionRecorded", risk_decision.decision_id
             ),
             "event_type": "RiskDecisionRecorded",
-            "aggregate_type": "risk_decision",
+            "aggregate_type": RISK_DECISION.aggregate_type,
             "aggregate_id": risk_decision.decision_id,
             "aggregate_version": "1",
             "payload": risk_payload,
@@ -3521,7 +3521,7 @@ class AuthorityService:
                 "AuthorityAdmissionRecorded", aid
             ),
             "event_type": "AuthorityAdmissionRecorded",
-            "aggregate_type": "authority_state",
+            "aggregate_type": AUTHORITY_STATE.aggregate_type,
             "aggregate_id": "canonical",
             "aggregate_version": str(self._journal_version + 1),
             "payload": admission_payload,

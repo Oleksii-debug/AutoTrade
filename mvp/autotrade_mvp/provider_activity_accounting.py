@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
+from .durable_event_taxonomy import ECONOMIC_BOOK, PROVIDER_ACTIVITY
 from . import _provider_activity_accounting_impl as _impl
 from ._provider_activity_accounting_impl import *  # noqa: F401,F403
 from .persistence import JournalStore
@@ -242,13 +243,13 @@ def book_external_provider_cash_activity(
         require_semantic_owner(
             existing_imported,
             event_type="ProviderActivityImported",
-            aggregate_type="provider_activity",
+            aggregate_type=PROVIDER_ACTIVITY.aggregate_type,
             aggregate_id=identity,
         )
         require_semantic_owner(
             existing_economic,
             event_type="EconomicTransactionBooked",
-            aggregate_type="economic_book",
+            aggregate_type=ECONOMIC_BOOK.aggregate_type,
             aggregate_id=book_id,
         )
 
@@ -336,7 +337,7 @@ def book_external_provider_cash_activity(
     imported_envelope = {
         "event_id": imported_event_id,
         "event_type": "ProviderActivityImported",
-        "aggregate_type": "provider_activity",
+        "aggregate_type": PROVIDER_ACTIVITY.aggregate_type,
         "aggregate_id": identity,
         "aggregate_version": str(activity_version),
         "committed_at": observed_text,
@@ -355,7 +356,7 @@ def book_external_provider_cash_activity(
     economic_envelope = {
         "event_id": economic_event_id,
         "event_type": "EconomicTransactionBooked",
-        "aggregate_type": "economic_book",
+        "aggregate_type": ECONOMIC_BOOK.aggregate_type,
         "aggregate_id": book_id,
         "aggregate_version": str(book_version),
         "committed_at": observed_text,

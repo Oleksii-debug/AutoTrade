@@ -20,11 +20,12 @@ from research.autotrade_research.artifacts.store import (
 )
 from research.autotrade_research.io.strict_json import strict_json_loads
 
+from .durable_event_taxonomy import SECURITIES_BORROW_RECALL
 from .persistence import JournalStore, canonical_json, payload_digest
 
 
 _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
-_AGGREGATE_TYPE = "securities_borrow_recall"
+_AGGREGATE_TYPE = SECURITIES_BORROW_RECALL.aggregate_type
 _RECALL_EVENT = "BorrowRecallObserved"
 _RESOLUTION_EVENT = "BorrowRecallResolved"
 BORROW_PROVIDER_EVIDENCE_MEDIA_TYPE = (

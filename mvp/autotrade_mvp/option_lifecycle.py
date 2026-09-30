@@ -30,6 +30,7 @@ from .options import (
     book_physical_option_settlement,
     physical_exercise_obligation,
 )
+from .durable_event_taxonomy import OPTION_LIFECYCLE
 from .persistence import JournalStore, payload_digest
 from .provider_activity_accounting import DurableProviderEconomicBook
 from .provider_core import ProviderResponseObservation, Surface
@@ -554,7 +555,7 @@ class DurableOptionLifecycleAuthority:
     """Exactly-once lifecycle-to-economics bridge over canonical authorities."""
 
     _ACTOR = "option-lifecycle-accounting"
-    _AGGREGATE_TYPE = "option_lifecycle"
+    _AGGREGATE_TYPE = OPTION_LIFECYCLE.aggregate_type
 
     def __init__(
         self,

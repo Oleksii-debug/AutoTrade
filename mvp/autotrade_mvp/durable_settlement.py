@@ -20,6 +20,7 @@ from research.autotrade_research.artifacts.store import (
 )
 from research.autotrade_research.io.strict_json import strict_json_loads
 
+from .durable_event_taxonomy import SETTLEMENT_BOOK
 from .persistence import JournalStore, canonical_json, payload_digest
 from .settlement import (
     SettlementAccountScope,
@@ -31,7 +32,7 @@ from .settlement import (
 )
 
 
-_AGGREGATE_TYPE = "settlement_book"
+_AGGREGATE_TYPE = SETTLEMENT_BOOK.aggregate_type
 _REGISTER_EVENT = "SettlementObligationsRegistered"
 _SETTLE_EVENT = "SettlementEvidenceApplied"
 _ACTOR = "settlement-provenance"

@@ -29,10 +29,10 @@ from .order_projection import (
     OrderProjectionConflict,
     OrderSnapshot,
 )
-from .persistence import JournalStore, canonical_json, payload_digest
+from .durable_event_taxonomy import ORDER_PROJECTION_BOOK\nfrom .persistence import JournalStore, canonical_json, payload_digest
 
 
-_AGGREGATE_TYPE = "order_projection_book"
+_AGGREGATE_TYPE = ORDER_PROJECTION_BOOK.aggregate_type
 _EVENT_TYPE = "OrderProjectionMutationCommitted"
 _OUTBOX_TOPIC = "autotrade.order-projection.events"
 _PROVIDER_EVIDENCE_OPERATIONS = frozenset(

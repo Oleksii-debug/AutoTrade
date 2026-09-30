@@ -14,6 +14,7 @@ from uuid import NAMESPACE_URL, uuid5
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 from .dispatch import submission_attempt_aggregate_id
+from .durable_event_taxonomy import ACCOUNT_RECONCILIATION, OPTION_LIFECYCLE, SETTLEMENT_BOOK
 from .persistence import JournalStore, canonical_json, payload_digest
 from .reconciliation import (
     ReconciliationResult,
@@ -328,7 +329,7 @@ def record_reconciliation_checkpoint(
         "event_id": event_id,
         "event_type": "AccountReconciled",
         "schema_version": "1.0.0",
-        "aggregate_type": "account_reconciliation",
+        "aggregate_type": ACCOUNT_RECONCILIATION.aggregate_type,
         "aggregate_id": aggregate_id,
         "aggregate_version": str(version),
         "host_id": host,
@@ -410,7 +411,7 @@ def load_latest_reconciliation_checkpoint_for_scope(
     )
     latest: dict[str, Any] | None = None
     latest_sequence = 0
-    for event in store.load_events_by_aggregate_type("account_reconciliation"):
+    for event in store.load_events_by_aggregate_type(ACCOUNT_RECONCILIATION.aggregate_type):
         if event.get("event_type") != "AccountReconciled":
             continue
         payload = event.get("payload")
@@ -557,7 +558,7 @@ def load_submission_resolution_evidence(
         raise KeyError(f"Unknown reconciliation checkpoint event: {event_id}")
     if checkpoint.get("event_type") != "AccountReconciled":
         raise ValueError("checkpoint event is not AccountReconciled")
-    if checkpoint.get("aggregate_type") != "account_reconciliation":
+    if checkpoint.get("aggregate_type") != ACCOUNT_RECONCILIATION.aggregate_type:
         raise ValueError("checkpoint event has invalid reconciliation aggregate type")
 
     payload = _require_checkpoint_scope(
@@ -691,7 +692,7 @@ def load_account_resource_availability_evidence(
         raise KeyError(f"Unknown reconciliation checkpoint event: {event_id}")
     if (
         checkpoint.get("event_type") != "AccountReconciled"
-        or checkpoint.get("aggregate_type") != "account_reconciliation"
+        or checkpoint.get("aggregate_type") != ACCOUNT_RECONCILIATION.aggregate_type
     ):
         raise ValueError("availability evidence requires AccountReconciled checkpoint")
 

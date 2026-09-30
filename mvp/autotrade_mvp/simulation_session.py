@@ -16,6 +16,7 @@ from .accounting import book_equity_fill, book_external_cash_flow
 from .authority import AuthoritativeRiskSnapshot, AuthorityPolicy, AuthorityService
 from .dispatch import GuardedDispatcher, stable_client_order_id
 from .durable_reservations import DurableReservationBook
+from .durable_event_taxonomy import CANONICAL_SIMULATION_SESSION
 from .persistence import JournalStore, payload_digest
 from .pipeline import MovingAverageStrategy
 from .provider_activity_accounting import (
@@ -84,9 +85,9 @@ def _event(store: JournalStore, kind: str, episode_id: str, payload: dict, now: 
         "event_id": _uuid(kind, episode_id),
         "event_type": kind,
         "schema_version": "1.0.0",
-        "aggregate_type": "canonical_simulation_session",
+        "aggregate_type": CANONICAL_SIMULATION_SESSION.aggregate_type,
         "aggregate_id": _AGGREGATE,
-        "aggregate_version": str(store.next_aggregate_version("canonical_simulation_session", _AGGREGATE)),
+        "aggregate_version": str(store.next_aggregate_version(CANONICAL_SIMULATION_SESSION.aggregate_type, _AGGREGATE)),
         "host_id": "local-simulation",
         "owner_epoch": "1",
         "environment": ENVIRONMENT,

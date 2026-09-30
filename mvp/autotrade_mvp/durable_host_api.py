@@ -23,6 +23,7 @@ from .host_api import (
     command_result_payload,
     scoped_host_operation_id,
 )
+from .durable_event_taxonomy import HOST_CONTROL
 from .persistence import JournalStore, payload_digest
 from .operator_authority_commands import (
     OperatorAuthorityConflict,
@@ -56,7 +57,7 @@ def _rehydrate_committed_event(
 class JournalBackedHostCommandStore:
     """Durable host API semantics over the canonical journal."""
 
-    AGGREGATE_TYPE = "HOST_CONTROL"
+    AGGREGATE_TYPE = HOST_CONTROL.aggregate_type
     LEGACY_AGGREGATE_ID = "host"
     TERMINAL_PHASES = {"SUCCEEDED", "FAILED", "CANCELLED"}
     UPDATE_PHASES = {"RUNNING", "WAITING_EXTERNAL", "UNKNOWN", *TERMINAL_PHASES}

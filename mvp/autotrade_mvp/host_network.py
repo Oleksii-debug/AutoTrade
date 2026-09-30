@@ -682,7 +682,11 @@ class _HostRequestHandler(BaseHTTPRequestHandler):
 class AuthenticatedHostServer(ThreadingHTTPServer):
     """Concrete loopback HTTP / remote TLS server for the canonical API routes."""
 
-    daemon_threads = True
+    # A 200/ACCEPTED response may precede durable authority completion.  Server
+    # close must therefore join request handlers before a caller can tear down
+    # the guarded JournalStore backing file.
+    daemon_threads = False
+    block_on_close = True
     allow_reuse_address = False
 
     def __init__(

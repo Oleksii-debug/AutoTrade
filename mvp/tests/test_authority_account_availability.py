@@ -90,6 +90,7 @@ def _install_risk_resolver(authority, *, context, risk_policy):
             account_id=request.account_id,
             environment=request.environment,
             provider_id=request.provider_id,
+            provider_environment=request.provider_environment,
             instrument_version=request.instrument_version,
             capability_snapshot_id=request.capability_snapshot_id,
             reconciliation_checkpoint_event_id=request.reconciliation_checkpoint_event_id,
@@ -123,13 +124,16 @@ def _checkpoint(
     reconciliation_id="availability-authority",
     snapshot_id="availability-snapshot",
     force_incomplete=False,
+    provider_id=PROVIDER_ID,
+    provider_environment=None,
 ):
     if available_cash is None:
         available_cash = cash
     result = reconcile_account(
-        provider_id=PROVIDER_ID,
+        provider_id=provider_id,
         account_id=ACCOUNT_ID,
         environment=ENVIRONMENT,
+        provider_environment=provider_environment,
         local_cash={"USD": cash},
         provider_cash={"USD": cash},
         local_positions={},
@@ -137,9 +141,10 @@ def _checkpoint(
         local_execution_ids=(),
         provider_fills=(),
         snapshot_consistency=SnapshotConsistencyEvidence(
-            provider_id=PROVIDER_ID,
+            provider_id=provider_id,
             account_id=ACCOUNT_ID,
             environment=ENVIRONMENT,
+            provider_environment=provider_environment,
             mode="ATOMIC",
             query_started_at="2026-09-24T18:00:00Z",
             query_completed_at="2026-09-24T18:00:30Z",
@@ -147,12 +152,13 @@ def _checkpoint(
         coverage_start="2026-09-24T18:00:00Z",
         coverage_end=NOW,
         pagination_complete=True,
-        provider_activity_provider_id=PROVIDER_ID,
+        provider_activity_provider_id=provider_id,
         provider_activity_account_id=ACCOUNT_ID,
         resource_availability=ResourceAvailabilityEvidence(
-            provider_id=PROVIDER_ID,
+            provider_id=provider_id,
             account_id=ACCOUNT_ID,
             environment=ENVIRONMENT,
+            provider_environment=provider_environment,
             snapshot_id=snapshot_id,
             query_started_at="2026-09-24T18:00:00Z",
             query_completed_at="2026-09-24T18:00:30Z",
@@ -191,6 +197,12 @@ def _dispatch(authority, record, *, now=NOW):
         action=record.action,
         now=now,
         capability_snapshot_id=record.capability_snapshot_id,
+        submission_scope={
+            "provider": record.provider_id,
+            "account_id": record.account_id,
+            "environment": record.environment,
+            "provider_environment": record.provider_environment,
+        },
     )
 
 
@@ -238,6 +250,203 @@ def _admit(authority, reservations, checkpoint, **overrides):
 
 
 class AuthorityAccountAvailabilityTests(unittest.TestCase):
+    def test_bybit_admission_cannot_reuse_testnet_capacity_as_demo(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = AuthorityService(store)
+            authority.register_policy(_policy())
+            checkpoint = _checkpoint(
+                store,
+                provider_id="BYBIT",
+                provider_environment="TESTNET",
+                reconciliation_id="bybit-testnet-capacity",
+            )
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "requires explicit reservation_provider_environment",
+            ):
+                _admit(
+                    authority,
+                    reservations,
+                    checkpoint,
+                    command_id="bybit-missing-env-command",
+                    idempotency_key="bybit-missing-env-command",
+                    admission_id="bybit-missing-env-admission",
+                    reservation_id="bybit-missing-env-reservation",
+                    reservation_provider_id="BYBIT",
+                )
+            self.assertEqual(
+                reservations.total_reserved("CASH:USD"),
+                Decimal("0"),
+            )
+
+            with self.assertRaises(ValueError):
+                _admit(
+                    authority,
+                    reservations,
+                    checkpoint,
+                    command_id="bybit-demo-command",
+                    idempotency_key="bybit-demo-command",
+                    admission_id="bybit-demo-admission",
+                    reservation_id="bybit-demo-reservation",
+                    reservation_provider_id="BYBIT",
+                    reservation_provider_environment="DEMO",
+                )
+            self.assertEqual(
+                reservations.total_reserved("CASH:USD"),
+                Decimal("0"),
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "does not match runtime environment",
+            ):
+                _admit(
+                    authority,
+                    reservations,
+                    checkpoint,
+                    command_id="bybit-mainnet-paper-command",
+                    idempotency_key="bybit-mainnet-paper-command",
+                    admission_id="bybit-mainnet-paper-admission",
+                    reservation_id="bybit-mainnet-paper-reservation",
+                    reservation_provider_id="BYBIT",
+                    reservation_provider_environment="MAINNET",
+                )
+            self.assertEqual(
+                reservations.total_reserved("CASH:USD"),
+                Decimal("0"),
+            )
+
+            record = _admit(
+                authority,
+                reservations,
+                checkpoint,
+                command_id="bybit-testnet-command",
+                idempotency_key="bybit-testnet-command",
+                admission_id="bybit-testnet-admission",
+                reservation_id="bybit-testnet-reservation",
+                reservation_provider_id="BYBIT",
+                reservation_provider_environment="TESTNET",
+            )
+            self.assertEqual(record.outcome, "ADMITTED")
+            self.assertEqual(record.provider_id, "BYBIT")
+            self.assertEqual(record.provider_environment, "TESTNET")
+            risk_events = store.load_events(
+                "risk_decision",
+                record.risk_decision_id,
+            )
+            self.assertEqual(len(risk_events), 1)
+            availability_evidence = risk_events[0]["payload"][
+                "reservation_availability_evidence"
+            ]
+            self.assertEqual(
+                availability_evidence["provider_environment"],
+                "TESTNET",
+            )
+
+            restarted_store = JournalStore(f"{directory}/journal.sqlite3")
+            restarted_authority = AuthorityService(restarted_store)
+            restarted_reservations = DurableReservationBook(
+                restarted_store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            replay = _admit(
+                restarted_authority,
+                restarted_reservations,
+                checkpoint,
+                command_id="bybit-testnet-command",
+                idempotency_key="bybit-testnet-command",
+                admission_id="bybit-testnet-admission",
+                reservation_id="bybit-testnet-reservation",
+                reservation_provider_id="BYBIT",
+                reservation_provider_environment="TESTNET",
+            )
+            self.assertEqual(replay.provider_id, "BYBIT")
+            self.assertEqual(replay.provider_environment, "TESTNET")
+            self.assertEqual(replay, record)
+
+            testnet_scope = {
+                "provider": "BYBIT",
+                "account_id": ACCOUNT_ID,
+                "environment": ENVIRONMENT,
+                "provider_environment": "TESTNET",
+            }
+            testnet_guard = authority.dispatch_guard(
+                record.admission_id,
+                account_id=record.account_id,
+                environment=record.environment,
+                instrument_id=record.instrument_version.instrument_id,
+                instrument_version=record.instrument_version.version,
+                action=record.action,
+                capability_snapshot_id=record.capability_snapshot_id,
+                submission_scope=testnet_scope,
+            )
+            self.assertEqual(
+                testnet_guard(record.intent_hash, NOW),
+                (True, "allowed"),
+            )
+            testnet_scope["provider_environment"] = "DEMO"
+            self.assertEqual(
+                testnet_guard(record.intent_hash, NOW),
+                (True, "allowed"),
+            )
+            demo_guard = authority.dispatch_guard(
+                record.admission_id,
+                account_id=record.account_id,
+                environment=record.environment,
+                instrument_id=record.instrument_version.instrument_id,
+                instrument_version=record.instrument_version.version,
+                action=record.action,
+                capability_snapshot_id=record.capability_snapshot_id,
+                submission_scope={
+                    "provider": "BYBIT",
+                    "account_id": ACCOUNT_ID,
+                    "environment": ENVIRONMENT,
+                    "provider_environment": "DEMO",
+                },
+            )
+            self.assertEqual(
+                demo_guard(record.intent_hash, NOW),
+                (False, "provider_domain_changed"),
+            )
+            self.assertEqual(
+                authority.dispatch_allowed(
+                    record.admission_id,
+                    intent_hash=record.intent_hash,
+                    account_id=record.account_id,
+                    environment=record.environment,
+                    instrument_id=record.instrument_version.instrument_id,
+                    instrument_version=record.instrument_version.version,
+                    action=record.action,
+                    now=NOW,
+                    capability_snapshot_id=record.capability_snapshot_id,
+                ),
+                (False, "provider_domain_required"),
+            )
+
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "scope changed for an existing financial command",
+            ):
+                _admit(
+                    authority,
+                    reservations,
+                    checkpoint,
+                    command_id="bybit-testnet-command",
+                    idempotency_key="bybit-testnet-command",
+                    admission_id="bybit-testnet-admission",
+                    reservation_id="bybit-testnet-reservation",
+                    reservation_provider_id="BYBIT",
+                    reservation_provider_environment="DEMO",
+                )
+
     def test_admission_uses_exact_reconciled_cash_and_survives_restart_retry(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

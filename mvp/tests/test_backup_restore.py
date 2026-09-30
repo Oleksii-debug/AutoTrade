@@ -93,6 +93,7 @@ def _reconciliation(
         provider_id="SIMULATED",
         account_id="paper-account",
         environment="PAPER",
+        provider_environment="PAPER",
         complete=complete,
         matched_execution_ids=tuple(
             execution_id

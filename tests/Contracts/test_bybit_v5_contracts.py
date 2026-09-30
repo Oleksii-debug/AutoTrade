@@ -124,6 +124,7 @@ def durable_submission(payload, *, intent_id):
                 "prepared_request_sha256": prepared.body_sha256,
                 "capability_snapshot_ids": list(prepared.capability_snapshot_ids),
                 "instrument_versions": list(prepared.instrument_versions),
+                "provider_environment": "MAINNET",
             },
         )
         if outcome.status != "SENT":
@@ -141,6 +142,7 @@ def durable_submission(payload, *, intent_id):
             prepared_request_sha256=prepared.body_sha256,
             capability_snapshot_ids=prepared.capability_snapshot_ids,
             instrument_versions=prepared.instrument_versions,
+            provider_environment="MAINNET",
         )
     return attempt_id, prepared, observation
 

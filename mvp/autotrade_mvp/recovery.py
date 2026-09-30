@@ -16,7 +16,10 @@ from uuid import NAMESPACE_URL, uuid5
 
 from .dispatch import submission_attempt_aggregate_id
 from .persistence import JournalStore, payload_digest
-from .reconciliation_journal import load_reconciliation_checkpoint_for_readiness
+from .reconciliation_journal import (
+    _provider_environment,
+    load_reconciliation_checkpoint_for_readiness,
+)
 
 
 class HostState(str, Enum):
@@ -161,7 +164,7 @@ class RecoveryController:
         ] = {}
         self._recovered_unknown_identities: dict[
             str,
-            tuple[str, str, str, str, str],
+            tuple[str, str, str, str, str, str],
         ] = {}
         self.storage_writable = True
         self.clock_trusted = True
@@ -486,6 +489,35 @@ class RecoveryController:
                 raise RuntimeError(
                     "Ambiguous submission lacks durable reconciliation identity"
                 )
+            normalized_provider = str(provider).strip().upper()
+            submission_scope = payload.get("submission_scope")
+            if not isinstance(submission_scope, dict):
+                raise RuntimeError(
+                    "Ambiguous submission lacks durable submission scope"
+                )
+            try:
+                recovered_provider_environment = _provider_environment(
+                    submission_scope.get("provider_environment"),
+                    environment=normalized_environment,
+                    provider_id=normalized_provider,
+                )
+            except ValueError:
+                if normalized_provider != "BYBIT":
+                    raise RuntimeError(
+                        "Ambiguous submission provider environment is invalid"
+                    ) from None
+                # TESTNET and DEMO both map to PAPER. A pre-provider-domain
+                # BYBIT send cannot safely inherit either domain after restart,
+                # so preserve it as an opaque sticky blocker rather than let a
+                # coarse PAPER reconciliation clear the external uncertainty.
+                opaque = "legacy_submission_domain:" + aggregate_id
+                self._unresolved_send_attempts.add(opaque)
+                self.unresolved_attempts.add(opaque)
+                recovered.add(opaque)
+                self.reason_codes.add(
+                    "legacy_submission_provider_environment_unrecoverable"
+                )
+                continue
             owner_epoch_raw = last.get("owner_epoch")
             if (
                 not isinstance(owner_epoch_raw, str)
@@ -511,8 +543,9 @@ class RecoveryController:
             self._recovered_unknown_identities[attempt_id] = (
                 str(intent_id).strip(),
                 str(client_order_id).strip(),
-                str(provider).strip().upper(),
+                normalized_provider,
                 normalized_environment,
+                recovered_provider_environment,
                 normalized_account,
             )
             self._unresolved_send_attempts.add(attempt_id)
@@ -532,6 +565,7 @@ class RecoveryController:
         provider_id: str,
         account_id: str,
         environment: str,
+        provider_environment: str | None = None,
     ) -> dict[str, object]:
         """Derive durable readiness only from current owner-bound provider truth.
 
@@ -553,15 +587,35 @@ class RecoveryController:
                 "Reconciliation cannot establish readiness without durable journal"
             )
 
-        checkpoint = load_reconciliation_checkpoint_for_readiness(
-            self._owner_store,
-            reconciliation_id=reconciliation_id,
-            provider_id=provider_id,
-            account_id=account_id,
-            environment=environment,
-            host_id=self.owner.owner_id,
-            owner_epoch=str(self.owner.epoch),
-        )
+        if (
+            isinstance(provider_id, str)
+            and provider_id.strip().upper() == "BYBIT"
+            and provider_environment is None
+        ):
+            self.provider_reconciled = False
+            self.reason_codes.add("startup_reconciliation_required")
+            self.reason_codes.add("provider_uncertainty")
+            self._recompute_state()
+            raise PermissionError(
+                "BYBIT readiness requires explicit provider_environment"
+            )
+        try:
+            checkpoint = load_reconciliation_checkpoint_for_readiness(
+                self._owner_store,
+                reconciliation_id=reconciliation_id,
+                provider_id=provider_id,
+                account_id=account_id,
+                environment=environment,
+                host_id=self.owner.owner_id,
+                owner_epoch=str(self.owner.epoch),
+                provider_environment=provider_environment,
+            )
+        except ValueError:
+            self.provider_reconciled = False
+            self.reason_codes.add("startup_reconciliation_required")
+            self.reason_codes.add("provider_uncertainty")
+            self._recompute_state()
+            raise
         if checkpoint is None:
             self.provider_reconciled = False
             self.reason_codes.add("startup_reconciliation_required")
@@ -578,6 +632,17 @@ class RecoveryController:
         resolutions = payload.get("submission_resolutions")
         if not isinstance(blocking, list) or not isinstance(resolutions, list):
             raise RuntimeError("Reconciliation checkpoint readiness fields are invalid")
+
+        try:
+            checkpoint_provider_environment = _provider_environment(
+                payload.get("provider_environment"),
+                environment=payload.get("environment"),
+                provider_id=payload.get("provider_id"),
+            )
+        except (TypeError, ValueError) as error:
+            raise RuntimeError(
+                "Reconciliation checkpoint provider environment is invalid"
+            ) from error
 
         reported_unresolved: set[str] = set()
         terminally_resolved_recovered: set[str] = set()
@@ -668,15 +733,22 @@ class RecoveryController:
                             "Reconciliation checkpoint duplicates recovered submission resolution"
                         )
                     recovered_resolution_seen.add(normalized_attempt)
-                    intent_id, client_order_id, provider, recovered_environment, recovered_account = (
-                        recovered_identity
-                    )
+                    (
+                        intent_id,
+                        client_order_id,
+                        provider,
+                        recovered_environment,
+                        recovered_provider_environment,
+                        recovered_account,
+                    ) = recovered_identity
                     if (
                         resolution.get("intent_id") != intent_id
                         or resolution.get("client_order_id") != client_order_id
                         or payload.get("provider_id", "").strip().upper() != provider
                         or payload.get("environment", "").strip().upper()
                         != recovered_environment
+                        or checkpoint_provider_environment
+                        != recovered_provider_environment
                         or payload.get("account_id", "").strip() != recovered_account
                     ):
                         raise RuntimeError(
@@ -740,6 +812,10 @@ class RecoveryController:
             "journal_sequence": journal_sequence,
             "owner_id": self.owner.owner_id,
             "owner_epoch": self.owner.epoch,
+            "provider_environment": payload.get(
+                "provider_environment",
+                payload.get("environment"),
+            ),
         }
 
     def record_reconciliation(self, *, consistent: bool, uncertainty: Iterable[str] = ()) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 import json
 from pathlib import Path
 import sqlite3
@@ -26,7 +27,13 @@ from .store_identity import (
     freeze_database_path,
     guard_windows_database_authority,
     require_database_identity,
+    require_exact_journal_store_identity,
 )
+
+_JOURNAL_OPERATION_AUTHORITY: ContextVar[
+    tuple[int, JournalStoreIdentity] | None
+] = ContextVar("autotrade_journal_operation_authority", default=None)
+
 
 
 def __getattr__(name: str):
@@ -75,9 +82,16 @@ class JournalStore(_JournalStoreImpl):
 
     @property
     def store_identity(self) -> JournalStoreIdentity:
-        identity = self._store_identity
+        state = _require_exact_journal_store_state(self, subject="canonical JournalStore")
+        if "_store_identity" not in state:
+            raise RuntimeError("journal store identity is not established")
+        identity = state["_store_identity"]
         if identity is None:
             raise RuntimeError("journal store identity is not established")
+        identity = require_exact_journal_store_identity(identity)
+        _require_exact_journal_store_path(
+            self, identity=identity, state=state, subject="canonical JournalStore"
+        )
         return identity
 
     def load_command_event_batch(
@@ -202,50 +216,77 @@ class JournalStore(_JournalStoreImpl):
 
     @contextmanager
     def _connect_windows(self):
-        expected = self._store_identity
+        state = _require_exact_journal_store_state(self, subject="canonical JournalStore")
+        expected = state.get("_store_identity")
+        if expected is not None:
+            expected = require_exact_journal_store_identity(
+                expected, subject="selected journal store identity"
+            )
+        operation_expected = _journal_operation_expected_identity(self)
+        if operation_expected is not None and expected != operation_expected:
+            raise RuntimeError(
+                "journal operation authority changed before connection"
+            )
+        path = _require_exact_journal_store_path(
+            self, identity=expected, state=state, subject="canonical JournalStore"
+        )
         with ExitStack() as stack:
             try:
                 guarded = stack.enter_context(
-                    guard_windows_database_authority(
-                        self.path,
-                        create=expected is None,
-                    )
+                    guard_windows_database_authority(path, create=expected is None)
                 )
             except OSError as error:
                 raise RuntimeError(
                     "journal backing file is missing or inaccessible"
                 ) from error
-
             if expected is not None and guarded != expected:
                 raise RuntimeError("journal backing file identity changed")
-
-            connection = sqlite3.connect(
-                self.path,
-                timeout=30,
-                isolation_level=None,
-            )
+            connection = sqlite3.connect(path, timeout=30, isolation_level=None)
             try:
                 connection.row_factory = sqlite3.Row
                 opened_path = connection_main_path(connection)
-                if opened_path != self.path:
+                if opened_path != path:
                     raise RuntimeError(
                         "SQLite main database path does not match canonical journal authority"
                     )
                 if expected is None:
                     self._store_identity = guarded
                     expected = guarded
-
                 connection.execute("PRAGMA foreign_keys=ON")
                 connection.execute("PRAGMA journal_mode=WAL")
                 connection.execute("PRAGMA synchronous=FULL")
                 yield connection
             finally:
                 try:
-                    opened_path = connection_main_path(connection)
-                    if opened_path != self.path:
-                        raise RuntimeError(
-                            "SQLite main database path changed while connection was active"
+                    # A first-open failure may occur before a store identity is
+                    # established.  Do not mask that primary fail-closed verdict
+                    # with a cleanup-only "identity was lost" error.
+                    if expected is not None:
+                        exit_state = _require_exact_journal_store_state(
+                            self, subject="canonical JournalStore"
                         )
+                        exit_identity = exit_state.get("_store_identity")
+                        if exit_identity is None:
+                            raise RuntimeError(
+                                "journal store identity was lost while connection was active"
+                            )
+                        exit_identity = require_exact_journal_store_identity(
+                            exit_identity, subject="selected journal store identity"
+                        )
+                        exit_path = _require_exact_journal_store_path(
+                            self,
+                            identity=exit_identity,
+                            state=exit_state,
+                            subject="canonical JournalStore",
+                        )
+                        if exit_path != path or exit_identity != expected:
+                            raise RuntimeError(
+                                "journal authority changed while connection was active"
+                            )
+                        if connection_main_path(connection) != path:
+                            raise RuntimeError(
+                                "SQLite main database path changed while connection was active"
+                            )
                 finally:
                     connection.close()
 
@@ -256,22 +297,31 @@ class JournalStore(_JournalStoreImpl):
                 yield connection
             return
 
-        expected = self._store_identity
+        state = _require_exact_journal_store_state(self, subject="canonical JournalStore")
+        expected = state.get("_store_identity")
+        if expected is not None:
+            expected = require_exact_journal_store_identity(
+                expected, subject="selected journal store identity"
+            )
+        operation_expected = _journal_operation_expected_identity(self)
+        if operation_expected is not None and expected != operation_expected:
+            raise RuntimeError(
+                "journal operation authority changed before connection"
+            )
+        path = _require_exact_journal_store_path(
+            self, identity=expected, state=state, subject="canonical JournalStore"
+        )
         first_open_anchor: JournalStoreIdentity | None = None
         if expected is None:
-            first_open_anchor = establish_database_anchor(self.path)
+            first_open_anchor = establish_database_anchor(path)
         else:
-            require_database_identity(self.path, expected)
+            require_database_identity(path, expected)
 
-        connection = sqlite3.connect(
-            self.path,
-            timeout=30,
-            isolation_level=None,
-        )
+        connection = sqlite3.connect(path, timeout=30, isolation_level=None)
         try:
             connection.row_factory = sqlite3.Row
             opened = connection_main_identity(connection)
-            if opened.canonical_path != str(self.path):
+            if opened.canonical_path != str(path):
                 raise RuntimeError(
                     "SQLite main database path does not match canonical journal authority"
                 )
@@ -291,13 +341,160 @@ class JournalStore(_JournalStoreImpl):
             yield connection
         finally:
             try:
-                identity = self._store_identity
-                if identity is not None:
-                    opened = connection_main_identity(connection)
-                    if opened != identity:
+                # Preserve the primary first-open/anchor error if establishment
+                # failed before any canonical store identity existed.
+                if expected is not None:
+                    exit_state = _require_exact_journal_store_state(
+                        self, subject="canonical JournalStore"
+                    )
+                    exit_identity = exit_state.get("_store_identity")
+                    if exit_identity is None:
+                        raise RuntimeError(
+                            "journal store identity was lost while connection was active"
+                        )
+                    exit_identity = require_exact_journal_store_identity(
+                        exit_identity, subject="selected journal store identity"
+                    )
+                    exit_path = _require_exact_journal_store_path(
+                        self,
+                        identity=exit_identity,
+                        state=exit_state,
+                        subject="canonical JournalStore",
+                    )
+                    if exit_path != path or exit_identity != expected:
+                        raise RuntimeError(
+                            "journal authority changed while connection was active"
+                        )
+                    if connection_main_identity(connection) != exit_identity:
                         raise RuntimeError(
                             "SQLite journal identity changed while connection was active"
                         )
-                    require_database_identity(self.path, identity)
+                    require_database_identity(path, exit_identity)
             finally:
                 connection.close()
+
+def _require_exact_journal_store_state(
+    value: object,
+    *,
+    subject: str,
+) -> dict[object, object]:
+    if not isinstance(value, JournalStore):
+        raise TypeError(f"{subject} must be a JournalStore")
+    state = vars(value)
+    state_keys = tuple(state)
+    if any(type(name) is not str for name in state_keys):
+        raise TypeError("canonical JournalStore instance state keys must be exact str")
+    return state
+
+
+def _reject_journal_store_instance_shadows(
+    state: dict[object, object],
+) -> None:
+    """Reject executable/class-member shadowing at external authority boundaries.
+
+    Internal JournalStore I/O still seals raw state keys, canonical path and
+    physical identity on every connection.  Shadow rejection belongs at the
+    consumer boundary that is about to dispatch authority-bearing operations
+    class-qualified; otherwise ordinary fault-injection wrappers around a bound
+    JournalStore method make the original implementation unusable even when it
+    is invoked explicitly.
+    """
+
+    class_owned_names = {
+        name for base in JournalStore.__mro__ for name in base.__dict__
+    }
+    if class_owned_names.intersection(tuple(state)):
+        raise TypeError("canonical JournalStore instance state is shadowed")
+
+
+def _journal_operation_expected_identity(
+    value: object,
+) -> JournalStoreIdentity | None:
+    binding = _JOURNAL_OPERATION_AUTHORITY.get()
+    if binding is None:
+        return None
+    selected_store_id, selected_identity = binding
+    if id(value) != selected_store_id:
+        raise RuntimeError("journal operation authority store changed")
+    return require_exact_journal_store_identity(
+        selected_identity,
+        subject="bound journal operation identity",
+    )
+
+
+def _require_exact_journal_store_path(
+    value: object,
+    *,
+    identity: JournalStoreIdentity | None,
+    state: dict[object, object] | None = None,
+    subject: str,
+) -> Path:
+    if state is None:
+        state = _require_exact_journal_store_state(value, subject=subject)
+    if "path" not in state:
+        raise TypeError(f"{subject} path state is unavailable")
+    path = state["path"]
+    if type(path) is not type(Path()):
+        raise TypeError(f"{subject} path must be exact platform Path")
+    if not path.is_absolute():
+        raise TypeError(f"{subject} path must be absolute")
+    if identity is not None:
+        identity = require_exact_journal_store_identity(
+            identity, subject=f"{subject} identity"
+        )
+        if identity.canonical_path != str(path):
+            raise RuntimeError(f"{subject} path and identity disagree")
+    return path
+
+
+def require_exact_journal_store_authority(
+    value: object,
+    *,
+    subject: str = "canonical JournalStore",
+) -> JournalStoreIdentity:
+    if type(value) is not JournalStore:
+        raise TypeError(f"{subject} must be exact JournalStore")
+    state = _require_exact_journal_store_state(value, subject=subject)
+    _reject_journal_store_instance_shadows(state)
+    if "_store_identity" not in state:
+        raise RuntimeError(f"{subject} identity state is unavailable")
+    identity = state["_store_identity"]
+    if identity is None:
+        raise RuntimeError(f"{subject} identity is not established")
+    identity = require_exact_journal_store_identity(
+        identity, subject=f"{subject} identity"
+    )
+    _require_exact_journal_store_path(
+        value, identity=identity, state=state, subject=subject
+    )
+    return identity
+
+
+@contextmanager
+def journal_store_authority_scope(
+    value: object,
+    expected_identity: JournalStoreIdentity,
+):
+    """Carry one selected physical store generation through actual SQLite I/O."""
+
+    expected = require_exact_journal_store_identity(
+        expected_identity,
+        subject="expected journal operation identity",
+    )
+    current = require_exact_journal_store_authority(
+        value,
+        subject="bound journal operation store",
+    )
+    if current != expected:
+        raise RuntimeError("journal operation authority changed before binding")
+
+    # ContextVar tokens form a strict stack: a deterministic concurrency
+    # interleave may perform another exact store operation and then return to
+    # this one. Each nested _connect() still validates its own expected identity.
+    binding = (id(value), expected)
+    token = _JOURNAL_OPERATION_AUTHORITY.set(binding)
+    try:
+        yield
+    finally:
+        _JOURNAL_OPERATION_AUTHORITY.reset(token)
+

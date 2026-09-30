@@ -17,15 +17,24 @@ from dataclasses import dataclass, fields
 from datetime import datetime, timezone
 from hashlib import sha256
 import re
+import threading
 from typing import Mapping
+import weakref
 
 from .exact_decimal import (
     ExactDecimalError,
     canonical_decimal_text,
     parse_canonical_decimal_text,
 )
-from .persistence import JournalStore, canonical_json, payload_digest
+from .persistence import (
+    JournalStore,
+    canonical_json,
+    journal_store_authority_scope,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
 from .risk import RISK_ENVIRONMENTS, RiskPolicy
+from .store_identity import JournalStoreIdentity, require_exact_journal_store_identity
 
 
 class RiskPolicyAuthorityError(ValueError):
@@ -41,6 +50,16 @@ _ACTIVATE_V2_SCHEMA_VERSION = "2.0.0"
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _ACTIVATION_EVENT_ID_RE = re.compile(r"^risk-policy-activate(?:-v2)?:[0-9a-f]{64}$")
 _ACTIVATION_REQUEST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+
+def _canonical_journal_authority_snapshot(
+    store: JournalStore,
+) -> JournalStoreIdentity:
+    """Consume the persistence-owned exact physical journal authority."""
+    return require_exact_journal_store_authority(
+        store,
+        subject="current risk policy journal",
+    )
 
 _DECIMAL_FIELDS = (
     "max_abs_position",
@@ -77,16 +96,15 @@ _POLICY_VALUE_FIELDS = frozenset(
     }
 )
 _POLICY_KEYS = frozenset({"schema_version", *_POLICY_VALUE_FIELDS})
-_SCOPE_KEYS = frozenset(
-    {
-        "provider_id",
-        "account_id",
-        "environment",
-        "provider_environment",
-        "entity_policy_id",
-        "instrument_family",
-    }
+_SCOPE_FIELDS = (
+    "provider_id",
+    "account_id",
+    "environment",
+    "provider_environment",
+    "entity_policy_id",
+    "instrument_family",
 )
+_SCOPE_KEYS = frozenset(_SCOPE_FIELDS)
 _IDENTITY_KEYS = frozenset({"policy_id", "version", "content_digest", "scope"})
 _REGISTER_KEYS = frozenset({"schema_version", "operation", "identity", "policy"})
 _ACTIVATE_KEYS = frozenset({"schema_version", "operation", "identity"})
@@ -172,13 +190,7 @@ def _strict_mapping(
 
 @dataclass(frozen=True, order=True)
 class RiskPolicyScope:
-    """Exact scope for one quantitative-policy authority aggregate.
-
-    ``provider_environment`` and ``entity_policy_id`` remain separate from the
-    runtime environment.  This deliberately does not infer provider-local
-    semantics (for example TESTNET vs DEMO); the canonical provider-domain owner
-    supplies those identities and this registry preserves exact equality.
-    """
+    """Exact scope for one quantitative-policy authority aggregate."""
 
     provider_id: str
     account_id: str
@@ -212,19 +224,35 @@ class RiskPolicyScope:
         object.__setattr__(self, "instrument_family", instrument_family)
 
     def payload(self) -> dict[str, str]:
-        return {
-            "provider_id": self.provider_id,
-            "account_id": self.account_id,
-            "environment": self.environment,
-            "provider_environment": self.provider_environment,
-            "entity_policy_id": self.entity_policy_id,
-            "instrument_family": self.instrument_family,
-        }
+        values = _require_canonical_scope(self)
+        return dict(zip(_SCOPE_FIELDS, values, strict=True))
 
     @property
     def aggregate_id(self) -> str:
         digest = sha256(canonical_json(self.payload()).encode("utf-8")).hexdigest()
         return "risk-policy-scope:" + digest
+
+
+def _require_canonical_scope(value: object) -> tuple[str, ...]:
+    """Return one callback-safe canonical scope snapshot for authority use."""
+
+    if type(value) is not RiskPolicyScope:
+        raise TypeError("scope must be exact RiskPolicyScope")
+    state = vars(value)
+    state_names = tuple(state)
+    if any(type(name) is not str for name in state_names):
+        raise RiskPolicyAuthorityError("risk policy scope state keys must be exact str")
+    if frozenset(state_names) != _SCOPE_KEYS:
+        raise RiskPolicyAuthorityError("risk policy scope state shape is non-canonical")
+    raw = tuple(state[name] for name in _SCOPE_FIELDS)
+    if any(type(item) is not str for item in raw):
+        raise RiskPolicyAuthorityError("risk policy scope fields must be exact text")
+    canonical = RiskPolicyScope(*raw)
+    canonical_state = vars(canonical)
+    canonical_values = tuple(canonical_state[name] for name in _SCOPE_FIELDS)
+    if raw != canonical_values:
+        raise RiskPolicyAuthorityError("risk policy scope is not canonical")
+    return raw
 
 
 @dataclass(frozen=True)
@@ -250,8 +278,8 @@ class RiskPolicyIdentity:
             "content_digest",
             _digest(self.content_digest, name="content_digest"),
         )
-        if type(self.scope) is not RiskPolicyScope:
-            raise TypeError("scope must be RiskPolicyScope")
+        canonical_scope = RiskPolicyScope(*_require_canonical_scope(self.scope))
+        object.__setattr__(self, "scope", canonical_scope)
 
     def payload(self) -> dict[str, object]:
         return {
@@ -336,16 +364,23 @@ def _require_complete_policy_schema() -> None:
 
 
 def risk_policy_payload(policy: RiskPolicy) -> dict[str, object]:
-    """Return context-independent canonical content for one validated RiskPolicy."""
+    """Return callback-safe canonical content for one validated RiskPolicy."""
 
     if type(policy) is not RiskPolicy:
         raise TypeError("policy must be exact RiskPolicy")
     _require_complete_policy_schema()
+    state = vars(policy)
+    state_names = tuple(state)
+    if any(type(name) is not str for name in state_names):
+        raise RiskPolicyAuthorityError("RiskPolicy state keys must be exact str")
+    if frozenset(state_names) != _POLICY_VALUE_FIELDS:
+        raise RiskPolicyAuthorityError("RiskPolicy state shape is non-canonical")
+
     payload: dict[str, object] = {"schema_version": _SCHEMA_VERSION}
     for name in _DECIMAL_FIELDS:
-        payload[name] = _decimal_text(getattr(policy, name), name=name)
+        payload[name] = _decimal_text(state[name], name=name)
 
-    labels = policy.required_stress_scenario_labels
+    labels = state["required_stress_scenario_labels"]
     if labels is not None:
         if type(labels) is not tuple or any(type(value) is not str for value in labels):
             raise RiskPolicyAuthorityError(
@@ -355,7 +390,7 @@ def risk_policy_payload(policy: RiskPolicy) -> dict[str, object]:
     else:
         payload["required_stress_scenario_labels"] = None
 
-    digests = policy.required_stress_scenario_digests
+    digests = state["required_stress_scenario_digests"]
     if digests is not None:
         if (
             type(digests) is not tuple
@@ -374,12 +409,12 @@ def risk_policy_payload(policy: RiskPolicy) -> dict[str, object]:
     else:
         payload["required_stress_scenario_digests"] = None
 
-    tail_digest = policy.required_tail_scenario_set_digest
+    tail_digest = state["required_tail_scenario_set_digest"]
     if tail_digest is not None:
         _digest(tail_digest, name="required_tail_scenario_set_digest")
     payload["required_tail_scenario_set_digest"] = tail_digest
 
-    actions = policy.allowed_actions
+    actions = state["allowed_actions"]
     if actions is not None:
         if type(actions) is not tuple or any(type(value) is not str for value in actions):
             raise RiskPolicyAuthorityError("RiskPolicy.allowed_actions is not canonical")
@@ -388,7 +423,7 @@ def risk_policy_payload(policy: RiskPolicy) -> dict[str, object]:
         payload["allowed_actions"] = None
 
     for name in ("require_settlement_evidence", "require_option_exercise_evidence"):
-        value = getattr(policy, name)
+        value = state[name]
         if type(value) is not bool:
             raise RiskPolicyAuthorityError(f"RiskPolicy.{name} must be boolean")
         payload[name] = value
@@ -493,6 +528,7 @@ def _identity_from_payload(
     *,
     expected_scope: RiskPolicyScope,
 ) -> RiskPolicyIdentity:
+    expected_scope_values = _require_canonical_scope(expected_scope)
     payload = _strict_mapping(value, name="risk policy identity", keys=_IDENTITY_KEYS)
     scope = _scope_from_payload(payload["scope"])
     identity = RiskPolicyIdentity(
@@ -503,7 +539,7 @@ def _identity_from_payload(
     )
     if identity.payload() != dict(payload):
         raise RiskPolicyAuthorityError("risk policy identity is not canonical")
-    if identity.scope != expected_scope:
+    if _require_canonical_scope(identity.scope) != expected_scope_values:
         raise RiskPolicyAuthorityError("risk policy event scope mismatch")
     return identity
 
@@ -527,17 +563,110 @@ class _ReplayState:
     activation_requests: dict[str, tuple[RiskPolicyIdentity, str | None, str, int]]
 
 
+# Callback-free weak references are deliberate. WeakKeyDictionary installs a
+# caller-discoverable removal callback on its key weakref; invoking that callback
+# manually can erase a live composition binding. Key by id instead, retain weak
+# refs with no callbacks, and prove referent identity at every use. Dead-id
+# entries are replaced lazily only when Python actually reuses that object id.
+_RISK_POLICY_REGISTRY_BINDINGS: dict[
+    int,
+    tuple[weakref.ReferenceType, weakref.ReferenceType, JournalStoreIdentity],
+] = {}
+_RISK_POLICY_REGISTRY_BINDINGS_LOCK = threading.RLock()
+
+
 class DurableRiskPolicyRegistry:
     """Append-only quantitative-policy registration and activation authority."""
 
+    __slots__ = ("_journal_store_identity", "store", "__weakref__")
+
+    def __init_subclass__(cls, **_kwargs) -> None:
+        raise TypeError("DurableRiskPolicyRegistry cannot be subclassed")
+
     def __init__(self, store: JournalStore) -> None:
-        # JournalStore is financial state authority. Accepting subclasses here
-        # would dispatch replay/write calls through caller-controlled overrides
-        # and let a forged chronology impersonate durable SQLite state.
-        # Keep this boundary exact until persistence issues a sealed capability.
-        if type(store) is not JournalStore:
-            raise TypeError("store must be exact JournalStore")
-        self.store = store
+        if type(self) is not DurableRiskPolicyRegistry:
+            raise TypeError("registry must be exact DurableRiskPolicyRegistry")
+        # Python permits explicit re-entry into __init__ on an existing object.
+        # Composition selection is one-shot financial authority: never inspect a
+        # replacement store, let alone overwrite the module-owned binding.
+        registry_id = id(self)
+        with _RISK_POLICY_REGISTRY_BINDINGS_LOCK:
+            existing = _RISK_POLICY_REGISTRY_BINDINGS.get(registry_id)
+            if existing is not None:
+                existing_registry = existing[0]()
+                if existing_registry is self:
+                    raise RiskPolicyAuthorityError(
+                        "risk policy registry composition is already initialized"
+                    )
+                if existing_registry is not None:
+                    raise RiskPolicyAuthorityError(
+                        "risk policy registry binding identity collision"
+                    )
+                # The prior registry is genuinely dead. Reuse of its Python id is
+                # the only supported transition; no weakref callback can erase a
+                # live binding.
+                _RISK_POLICY_REGISTRY_BINDINGS.pop(registry_id, None)
+            selected_identity = _canonical_journal_authority_snapshot(store)
+            # Keep the caller-visible diagnostic snapshot and the module-owned
+            # selected identity as detached values.  Mutating one cannot rewrite
+            # the other through a frozen-dataclass __dict__ alias.
+            visible_identity = require_exact_journal_store_identity(
+                selected_identity,
+                subject="selected risk policy journal identity",
+            )
+            module_identity = require_exact_journal_store_identity(
+                selected_identity,
+                subject="module-owned risk policy journal identity",
+            )
+            self._journal_store_identity = visible_identity
+            self.store = store
+            _RISK_POLICY_REGISTRY_BINDINGS[registry_id] = (
+                weakref.ref(self),
+                weakref.ref(store),
+                module_identity,
+            )
+
+    def _journal_store_authority(self) -> tuple[JournalStore, JournalStoreIdentity]:
+        if type(self) is not DurableRiskPolicyRegistry:
+            raise TypeError("registry must be exact DurableRiskPolicyRegistry")
+        with _RISK_POLICY_REGISTRY_BINDINGS_LOCK:
+            binding = _RISK_POLICY_REGISTRY_BINDINGS.get(id(self))
+        if binding is None:
+            raise RiskPolicyAuthorityError(
+                "risk policy registry lacks original journal composition"
+            )
+        selected_registry_ref, selected_store_ref, module_identity = binding
+        if selected_registry_ref() is not self:
+            raise RiskPolicyAuthorityError(
+                "risk policy registry binding identity changed"
+            )
+        selected_store = selected_store_ref()
+        if selected_store is None:
+            raise RiskPolicyAuthorityError(
+                "risk policy registry original journal is unavailable"
+            )
+        expected = require_exact_journal_store_identity(
+            module_identity,
+            subject="module-owned risk policy journal identity",
+        )
+        if self.store is not selected_store:
+            raise RiskPolicyAuthorityError(
+                "risk policy registry composition changed"
+            )
+        visible_identity = require_exact_journal_store_identity(
+            self._journal_store_identity,
+            subject="selected risk policy journal identity",
+        )
+        if visible_identity != expected:
+            raise RiskPolicyAuthorityError(
+                "risk policy registry composition changed"
+            )
+        identity = _canonical_journal_authority_snapshot(selected_store)
+        if identity != expected:
+            raise RiskPolicyAuthorityError(
+                "risk policy journal authority changed"
+            )
+        return selected_store, expected
 
     def _replay(
         self,
@@ -545,19 +674,27 @@ class DurableRiskPolicyRegistry:
         *,
         journal_sequence_cut: int,
     ) -> _ReplayState:
-        if type(scope) is not RiskPolicyScope:
-            raise TypeError("scope must be RiskPolicyScope")
+        scope = RiskPolicyScope(*_require_canonical_scope(scope))
         if type(journal_sequence_cut) is not int or journal_sequence_cut < 0:
             raise RiskPolicyAuthorityError(
                 "journal_sequence_cut must be a non-negative integer"
             )
-        current = self.store.current_journal_sequence()
+        store, expected_store_identity = (
+            DurableRiskPolicyRegistry._journal_store_authority(self)
+        )
+        with journal_store_authority_scope(store, expected_store_identity):
+            current = JournalStore.current_journal_sequence(store)
         if journal_sequence_cut > current:
             raise RiskPolicyAuthorityError(
                 "journal_sequence_cut cannot be newer than the durable journal"
             )
 
-        events = self.store.load_events(_AGGREGATE_TYPE, scope.aggregate_id)
+        with journal_store_authority_scope(store, expected_store_identity):
+            events = JournalStore.load_events(
+                store,
+                _AGGREGATE_TYPE,
+                scope.aggregate_id,
+            )
         registered: dict[
             tuple[str, int], tuple[RiskPolicyIdentity, RiskPolicy, str, int]
         ] = {}
@@ -724,8 +861,12 @@ class DurableRiskPolicyRegistry:
         )
 
     def _current_state(self, scope: RiskPolicyScope) -> tuple[int, _ReplayState]:
-        cut = self.store.current_journal_sequence()
-        return cut, self._replay(scope, journal_sequence_cut=cut)
+        store, expected_store_identity = (
+            DurableRiskPolicyRegistry._journal_store_authority(self)
+        )
+        with journal_store_authority_scope(store, expected_store_identity):
+            cut = JournalStore.current_journal_sequence(store)
+        return cut, DurableRiskPolicyRegistry._replay(self, scope, journal_sequence_cut=cut)
 
     def register(
         self,
@@ -738,14 +879,17 @@ class DurableRiskPolicyRegistry:
     ) -> bool:
         """Persist immutable policy content. Exact replay is idempotent."""
 
-        if type(scope) is not RiskPolicyScope:
-            raise TypeError("scope must be RiskPolicyScope")
+        scope = RiskPolicyScope(*_require_canonical_scope(scope))
         if type(policy) is not RiskPolicy:
             raise TypeError("policy must be exact RiskPolicy")
+        policy_payload = risk_policy_payload(policy)
+        canonical_policy = _policy_from_payload(policy_payload)
         policy_id = _text(policy_id, name="policy_id")
         version = _positive_int(version, name="version")
         committed_at_text = _utc_text(committed_at, name="committed_at")
-        content_digest = risk_policy_digest(policy)
+        content_digest = "sha256:" + sha256(
+            canonical_json(policy_payload).encode("utf-8")
+        ).hexdigest()
         identity = RiskPolicyIdentity(
             policy_id=policy_id,
             version=version,
@@ -753,11 +897,11 @@ class DurableRiskPolicyRegistry:
             scope=scope,
         )
 
-        _cut, state = self._current_state(scope)
+        _cut, state = DurableRiskPolicyRegistry._current_state(self, scope)
         key = (policy_id, version)
         existing = state.registered.get(key)
         if existing is not None:
-            if existing[0] == identity and existing[1] == policy:
+            if existing[0] == identity and existing[1] == canonical_policy:
                 return False
             raise RiskPolicyAuthorityError(
                 "risk policy identity already exists with different content"
@@ -769,7 +913,7 @@ class DurableRiskPolicyRegistry:
             "schema_version": _SCHEMA_VERSION,
             "operation": "REGISTER",
             "identity": identity.payload(),
-            "policy": risk_policy_payload(policy),
+            "policy": policy_payload,
         }
         envelope = {
             "event_id": _event_id("risk-policy-register", payload),
@@ -782,11 +926,15 @@ class DurableRiskPolicyRegistry:
             "committed_at": committed_at_text,
         }
         try:
-            return self.store.append_event(envelope).inserted
+            store, expected_store_identity = (
+                DurableRiskPolicyRegistry._journal_store_authority(self)
+            )
+            with journal_store_authority_scope(store, expected_store_identity):
+                return JournalStore.append_event(store, envelope).inserted
         except ValueError as error:
-            _cut, current = self._current_state(scope)
+            _cut, current = DurableRiskPolicyRegistry._current_state(self, scope)
             persisted = current.registered.get(key)
-            if persisted is not None and persisted[0] == identity and persisted[1] == policy:
+            if persisted is not None and persisted[0] == identity and persisted[1] == canonical_policy:
                 return False
             raise RiskPolicyAuthorityError(
                 "risk policy registry changed concurrently; registration must retry"
@@ -810,8 +958,7 @@ class DurableRiskPolicyRegistry:
         Historical no-intent callers retain first-activation compatibility,
         but cannot reselect an identity after a policy detour.
         """
-        if type(scope) is not RiskPolicyScope:
-            raise TypeError("scope must be RiskPolicyScope")
+        scope = RiskPolicyScope(*_require_canonical_scope(scope))
         policy_id = _text(policy_id, name="policy_id")
         version = _positive_int(version, name="version")
         committed_at_text = _utc_text(committed_at, name="committed_at")
@@ -828,7 +975,7 @@ class DurableRiskPolicyRegistry:
                 "activation predecessor requires explicit activation_request_id"
             )
 
-        _cut, state = self._current_state(scope)
+        _cut, state = DurableRiskPolicyRegistry._current_state(self, scope)
         key = (policy_id, version)
         registered = state.registered.get(key)
         if registered is None:
@@ -908,13 +1055,17 @@ class DurableRiskPolicyRegistry:
             "committed_at": committed_at_text,
         }
         try:
-            result = self.store.append_event(envelope)
+            store, expected_store_identity = (
+                DurableRiskPolicyRegistry._journal_store_authority(self)
+            )
+            with journal_store_authority_scope(store, expected_store_identity):
+                result = JournalStore.append_event(store, envelope)
             if result.inserted:
                 return True
         except ValueError as error:
             # A stale same-scope aggregate CAS or duplicate event ID never
             # implies success just because another request selected the same key.
-            _cut, current = self._current_state(scope)
+            _cut, current = DurableRiskPolicyRegistry._current_state(self, scope)
             if activation_request_id is not None:
                 persisted = current.activation_requests.get(activation_request_id)
                 if persisted is not None:
@@ -941,7 +1092,7 @@ class DurableRiskPolicyRegistry:
             ) from error
 
         # Defensive duplicate-result path for compatible JournalStore versions.
-        _cut, current = self._current_state(scope)
+        _cut, current = DurableRiskPolicyRegistry._current_state(self, scope)
         if activation_request_id is not None:
             persisted = current.activation_requests.get(activation_request_id)
             if persisted is not None:
@@ -977,11 +1128,14 @@ class DurableRiskPolicyRegistry:
         not re-resolve mutable current policy.
         """
 
-        if type(scope) is not RiskPolicyScope:
-            raise TypeError("scope must be RiskPolicyScope")
-        current = self.store.current_journal_sequence()
+        scope = RiskPolicyScope(*_require_canonical_scope(scope))
+        store, expected_store_identity = (
+            DurableRiskPolicyRegistry._journal_store_authority(self)
+        )
+        with journal_store_authority_scope(store, expected_store_identity):
+            current = JournalStore.current_journal_sequence(store)
         cut = current if journal_sequence_cut is None else journal_sequence_cut
-        state = self._replay(scope, journal_sequence_cut=cut)
+        state = DurableRiskPolicyRegistry._replay(self, scope, journal_sequence_cut=cut)
         if (
             state.active_key is None
             or state.activation_event_id is None

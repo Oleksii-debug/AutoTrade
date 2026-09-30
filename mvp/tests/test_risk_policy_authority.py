@@ -4,6 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
+import weakref
 
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.risk import RiskPolicy
@@ -56,6 +57,483 @@ def policy(*, max_gross_leverage="2", max_daily_loss="100"):
 
 
 class DurableRiskPolicyRegistryTests(unittest.TestCase):
+    def test_scope_use_time_seal_rejects_post_construction_mutation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            poisoned = scope()
+            object.__setattr__(poisoned, "provider_id", "bybit")
+            before = store.current_journal_sequence()
+            with self.assertRaisesRegex(
+                RiskPolicyAuthorityError, "scope is not canonical"
+            ):
+                registry.register(
+                    scope=poisoned,
+                    policy_id="core-risk",
+                    version=1,
+                    policy=policy(),
+                    committed_at=NOW,
+                )
+            self.assertEqual(store.current_journal_sequence(), before)
+
+    def test_scope_use_time_seal_applies_to_activate_and_resolve(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            exact_scope = scope()
+            registry.register(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                policy=policy(),
+                committed_at=NOW,
+            )
+            object.__setattr__(exact_scope, "instrument_family", " perpetual ")
+            before = store.current_journal_sequence()
+            with self.assertRaisesRegex(
+                RiskPolicyAuthorityError, "scope is not canonical"
+            ):
+                registry.activate(
+                    scope=exact_scope,
+                    policy_id="core-risk",
+                    version=1,
+                    committed_at=NOW + timedelta(seconds=1),
+                )
+            with self.assertRaisesRegex(
+                RiskPolicyAuthorityError, "scope is not canonical"
+            ):
+                registry.resolve_current(exact_scope)
+            self.assertEqual(store.current_journal_sequence(), before)
+
+    def test_scope_raw_state_key_is_rejected_before_callback(self):
+        touched = []
+
+        class PoisonKey:
+            def __hash__(self):
+                touched.append("hash")
+                return hash("provider_id")
+
+            def __eq__(self, other):
+                touched.append("eq")
+                return other == "provider_id"
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            poisoned = scope()
+            state = vars(poisoned)
+            provider_id = state.pop("provider_id")
+            key = PoisonKey()
+            state[key] = "poison"
+            state["provider_id"] = provider_id
+            touched.clear()
+            before = store.current_journal_sequence()
+            with self.assertRaisesRegex(
+                RiskPolicyAuthorityError, "scope state keys must be exact str"
+            ):
+                registry.register(
+                    scope=poisoned,
+                    policy_id="core-risk",
+                    version=1,
+                    policy=policy(),
+                    committed_at=NOW,
+                )
+            self.assertEqual(store.current_journal_sequence(), before)
+            self.assertEqual(touched, [])
+
+    def test_scope_hostile_text_subclass_is_rejected_before_callback(self):
+        touched = []
+
+        class PoisonText(str):
+            def strip(self):
+                touched.append("strip")
+                raise AssertionError("unexpected strip")
+
+            def upper(self):
+                touched.append("upper")
+                raise AssertionError("unexpected upper")
+
+            def __hash__(self):
+                touched.append("hash")
+                raise AssertionError("unexpected hash")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            poisoned = scope()
+            object.__setattr__(poisoned, "provider_id", PoisonText("BYBIT"))
+            before = store.current_journal_sequence()
+            with self.assertRaisesRegex(
+                RiskPolicyAuthorityError, "scope fields must be exact text"
+            ):
+                registry.register(
+                    scope=poisoned,
+                    policy_id="core-risk",
+                    version=1,
+                    policy=policy(),
+                    committed_at=NOW,
+                )
+            self.assertEqual(store.current_journal_sequence(), before)
+            self.assertEqual(touched, [])
+
+    def test_policy_raw_state_key_is_rejected_before_callback_or_write(self):
+        touched = []
+
+        class PoisonKey:
+            def __hash__(self):
+                touched.append("hash")
+                return hash("max_gross_leverage")
+
+            def __eq__(self, other):
+                touched.append("eq")
+                return other == "max_gross_leverage"
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            poisoned = policy()
+            state = vars(poisoned)
+            value = state.pop("max_gross_leverage")
+            key = PoisonKey()
+            state[key] = "poison"
+            state["max_gross_leverage"] = value
+            touched.clear()
+            before = store.current_journal_sequence()
+            with self.assertRaisesRegex(
+                RiskPolicyAuthorityError, "RiskPolicy state keys must be exact str"
+            ):
+                registry.register(
+                    scope=scope(),
+                    policy_id="core-risk",
+                    version=1,
+                    policy=poisoned,
+                    committed_at=NOW,
+                )
+            self.assertEqual(store.current_journal_sequence(), before)
+            self.assertEqual(touched, [])
+
+    def test_exact_journal_instance_shadow_cannot_intercept_risk_authority(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            touched = []
+
+            store.__dict__["append_event"] = lambda *_args, **_kwargs: touched.append(
+                "append"
+            )
+            with self.assertRaisesRegex(TypeError, "instance state is shadowed"):
+                registry.register(
+                    scope=scope(),
+                    policy_id="core-risk",
+                    version=1,
+                    policy=policy(),
+                    committed_at=NOW,
+                )
+            self.assertEqual(touched, [])
+            del store.__dict__["append_event"]
+
+            self.assertTrue(
+                registry.register(
+                    scope=scope(),
+                    policy_id="core-risk",
+                    version=1,
+                    policy=policy(),
+                    committed_at=NOW,
+                )
+            )
+            store.__dict__["load_events"] = lambda *_args, **_kwargs: touched.append(
+                "load"
+            )
+            with self.assertRaisesRegex(TypeError, "instance state is shadowed"):
+                registry.resolve_current(scope())
+            self.assertEqual(touched, [])
+            del store.__dict__["load_events"]
+
+            def forged_current_sequence(*_args, **_kwargs):
+                touched.append("sequence")
+                return 999999
+
+            store.__dict__["current_journal_sequence"] = forged_current_sequence
+            with self.assertRaisesRegex(TypeError, "instance state is shadowed"):
+                registry.resolve_current(scope())
+            self.assertEqual(touched, [])
+
+    def test_risk_registry_rejects_poisoned_saved_identity_before_equality(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            touched = []
+
+            class HostileIdentity:
+                def __eq__(self, _other):
+                    touched.append("eq")
+                    return True
+
+                def __ne__(self, _other):
+                    touched.append("ne")
+                    return False
+
+            registry._journal_store_identity = HostileIdentity()
+            with self.assertRaisesRegex(
+                TypeError,
+                "selected risk policy journal identity must be exact JournalStoreIdentity",
+            ):
+                registry.resolve_current(scope())
+            self.assertEqual(touched, [])
+
+    def test_risk_registry_rejects_selected_journal_generation_rebinding(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            other = JournalStore(Path(directory) / "other.sqlite3")
+            original_path = store.path
+            original_identity = store.store_identity
+            store.path = other.path
+            store._store_identity = other.store_identity
+            with self.assertRaisesRegex(
+                RiskPolicyAuthorityError,
+                "journal authority changed",
+            ):
+                registry.register(
+                    scope=scope(),
+                    policy_id="core-risk",
+                    version=1,
+                    policy=policy(),
+                    committed_at=NOW,
+                )
+            store.path = original_path
+            store._store_identity = original_identity
+            self.assertEqual(store.current_journal_sequence(), 0)
+
+    def test_bound_journal_write_rejects_rebind_after_registry_precheck(self):
+        with TemporaryDirectory() as directory:
+            path_a = Path(directory) / "a.sqlite3"
+            path_b = Path(directory) / "b.sqlite3"
+            store = JournalStore(path_a)
+            other = JournalStore(path_b)
+            registry = DurableRiskPolicyRegistry(store)
+            real_append = JournalStore.append_event
+            triggered = False
+
+            def rebind_then_append(target, envelope, *args, **kwargs):
+                nonlocal triggered
+                if target is store and not triggered:
+                    triggered = True
+                    store.path = other.path
+                    store._store_identity = other.store_identity
+                return real_append(target, envelope, *args, **kwargs)
+
+            with patch.object(
+                JournalStore,
+                "append_event",
+                new=rebind_then_append,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "journal operation authority changed before connection",
+                ):
+                    registry.register(
+                        scope=scope(),
+                        policy_id="core-risk",
+                        version=1,
+                        policy=policy(),
+                        committed_at=NOW,
+                    )
+
+            self.assertTrue(triggered)
+            self.assertEqual(JournalStore(path_a).current_journal_sequence(), 0)
+            self.assertEqual(JournalStore(path_b).current_journal_sequence(), 0)
+
+    def test_bound_journal_read_rejects_rebind_after_registry_precheck(self):
+        with TemporaryDirectory() as directory:
+            path_a = Path(directory) / "a.sqlite3"
+            path_b = Path(directory) / "b.sqlite3"
+            store = JournalStore(path_a)
+            other = JournalStore(path_b)
+            registry = DurableRiskPolicyRegistry(store)
+            exact_scope = scope()
+            registry.register(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                policy=policy(),
+                committed_at=NOW,
+            )
+            registry.activate(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                committed_at=NOW + timedelta(seconds=1),
+                activation_request_id="activate-v1",
+            )
+            real_current = JournalStore.current_journal_sequence
+            triggered = False
+
+            def rebind_then_read(target, *args, **kwargs):
+                nonlocal triggered
+                if target is store and not triggered:
+                    triggered = True
+                    store.path = other.path
+                    store._store_identity = other.store_identity
+                return real_current(target, *args, **kwargs)
+
+            with patch.object(
+                JournalStore,
+                "current_journal_sequence",
+                new=rebind_then_read,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "journal operation authority changed before connection",
+                ):
+                    registry.resolve_current(exact_scope)
+
+            self.assertTrue(triggered)
+            self.assertEqual(JournalStore(path_a).current_journal_sequence(), 2)
+            self.assertEqual(JournalStore(path_b).current_journal_sequence(), 0)
+
+    def test_registry_binding_cannot_be_erased_by_caller_invoked_weakref_callback(self):
+        with TemporaryDirectory() as directory:
+            store_a = JournalStore(Path(directory) / "a.sqlite3")
+            store_b = JournalStore(Path(directory) / "b.sqlite3")
+            registry = DurableRiskPolicyRegistry(store_a)
+
+            # WeakKeyDictionary-style authority is unsafe here: its internal key
+            # weakref exposes a removal callback through weakref.getweakrefs().
+            # Module-owned binding weakrefs must therefore have no callbacks a
+            # caller can invoke to make a live registry appear uninitialized.
+            refs = tuple(weakref.getweakrefs(registry))
+            self.assertTrue(refs)
+            callback_refs = [
+                (ref.__callback__, ref)
+                for ref in refs
+                if ref.__callback__ is not None
+            ]
+            for callback, ref in callback_refs:
+                callback(ref)
+            self.assertEqual(callback_refs, [])
+
+            with self.assertRaisesRegex(
+                RiskPolicyAuthorityError,
+                "composition is already initialized",
+            ):
+                DurableRiskPolicyRegistry.__init__(registry, store_b)
+
+            self.assertIs(registry.store, store_a)
+            self.assertEqual(store_b.current_journal_sequence(), 0)
+
+    def test_registry_reinitialization_cannot_replace_original_composition(self):
+        with TemporaryDirectory() as directory:
+            store_a = JournalStore(Path(directory) / "a.sqlite3")
+            store_b = JournalStore(Path(directory) / "b.sqlite3")
+            registry = DurableRiskPolicyRegistry(store_a)
+            visible_identity = registry._journal_store_identity
+            touched = []
+            real_snapshot = authority._canonical_journal_authority_snapshot
+
+            def watched_snapshot(selected_store):
+                if selected_store is store_b:
+                    touched.append("store-b")
+                return real_snapshot(selected_store)
+
+            with patch.object(
+                authority,
+                "_canonical_journal_authority_snapshot",
+                new=watched_snapshot,
+            ):
+                with self.assertRaisesRegex(
+                    RiskPolicyAuthorityError,
+                    "composition is already initialized",
+                ):
+                    DurableRiskPolicyRegistry.__init__(registry, store_b)
+
+            self.assertEqual(touched, [])
+            self.assertIs(registry.store, store_a)
+            self.assertIs(registry._journal_store_identity, visible_identity)
+            self.assertEqual(store_b.current_journal_sequence(), 0)
+            self.assertTrue(
+                registry.register(
+                    scope=scope(),
+                    policy_id="core-risk",
+                    version=1,
+                    policy=policy(),
+                    committed_at=NOW,
+                )
+            )
+            self.assertEqual(store_a.current_journal_sequence(), 1)
+            self.assertEqual(store_b.current_journal_sequence(), 0)
+
+    def test_registry_exact_store_pair_cannot_redirect_original_composition(self):
+        with TemporaryDirectory() as directory:
+            store_a = JournalStore(Path(directory) / "a.sqlite3")
+            store_b = JournalStore(Path(directory) / "b.sqlite3")
+            registry_a = DurableRiskPolicyRegistry(store_a)
+            registry_b = DurableRiskPolicyRegistry(store_b)
+            exact_scope = scope()
+
+            registry_b.register(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                policy=policy(),
+                committed_at=NOW,
+            )
+            registry_b.activate(
+                scope=exact_scope,
+                policy_id="core-risk",
+                version=1,
+                committed_at=NOW + timedelta(seconds=1),
+            )
+            before_b = store_b.current_journal_sequence()
+
+            # Both substituted values are individually genuine/canonical.  The
+            # registry must still remain bound to the composition selected at
+            # construction rather than accepting a self-consistent B/B pair.
+            registry_a.store = store_b
+            registry_a._journal_store_identity = store_b.store_identity
+
+            with self.assertRaisesRegex(
+                RiskPolicyAuthorityError, "registry composition changed"
+            ):
+                registry_a.resolve_current(exact_scope)
+            with self.assertRaisesRegex(
+                RiskPolicyAuthorityError, "registry composition changed"
+            ):
+                registry_a.register(
+                    scope=exact_scope,
+                    policy_id="redirected",
+                    version=1,
+                    policy=policy(),
+                    committed_at=NOW + timedelta(seconds=2),
+                )
+            with self.assertRaisesRegex(
+                RiskPolicyAuthorityError, "registry composition changed"
+            ):
+                registry_a.activate(
+                    scope=exact_scope,
+                    policy_id="core-risk",
+                    version=1,
+                    committed_at=NOW + timedelta(seconds=3),
+                )
+            self.assertEqual(store_b.current_journal_sequence(), before_b)
+            self.assertEqual(store_a.current_journal_sequence(), 0)
+
+    def test_registry_seals_method_shadow_and_subclass_surface(self):
+        with self.assertRaisesRegex(
+            TypeError, "DurableRiskPolicyRegistry cannot be subclassed"
+        ):
+            class HostileRegistry(DurableRiskPolicyRegistry):
+                pass
+
+        with TemporaryDirectory() as directory:
+            registry = DurableRiskPolicyRegistry(
+                JournalStore(Path(directory) / "journal.sqlite3")
+            )
+            with self.assertRaises(AttributeError):
+                registry._journal_store_authority = lambda: None
+            with self.assertRaises(AttributeError):
+                registry._current_state = lambda _scope: (0, None)
+
     def test_registration_is_content_addressed_idempotent_and_conflicts_on_reuse(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
@@ -374,12 +852,12 @@ class DurableRiskPolicyRegistryTests(unittest.TestCase):
                 policy=policy(max_gross_leverage="2"),
                 committed_at=NOW,
             )
-            original_append = store.append_event
+            real_append = JournalStore.append_event
             triggered = False
 
-            def append_after_concurrent_writer(envelope, *args, **kwargs):
+            def append_after_concurrent_writer(target, envelope, *args, **kwargs):
                 nonlocal triggered
-                if not triggered:
+                if target is store and not triggered:
                     triggered = True
                     concurrent.register(
                         scope=exact_scope,
@@ -388,12 +866,10 @@ class DurableRiskPolicyRegistryTests(unittest.TestCase):
                         policy=policy(max_gross_leverage="1.25"),
                         committed_at=NOW + timedelta(seconds=1),
                     )
-                return original_append(envelope, *args, **kwargs)
+                return real_append(target, envelope, *args, **kwargs)
 
             with patch.object(
-                store,
-                "append_event",
-                side_effect=append_after_concurrent_writer,
+                JournalStore, "append_event", new=append_after_concurrent_writer
             ):
                 with self.assertRaisesRegex(
                     RiskPolicyAuthorityError,
@@ -420,12 +896,12 @@ class DurableRiskPolicyRegistryTests(unittest.TestCase):
             concurrent = DurableRiskPolicyRegistry(concurrent_store)
             exact_scope = scope()
             other_scope = scope(provider_environment="DEMO")
-            original_append = store.append_event
+            real_append = JournalStore.append_event
             triggered = False
 
-            def append_after_unrelated_writer(envelope, *args, **kwargs):
+            def append_after_unrelated_writer(target, envelope, *args, **kwargs):
                 nonlocal triggered
-                if not triggered:
+                if target is store and not triggered:
                     triggered = True
                     concurrent.register(
                         scope=other_scope,
@@ -434,12 +910,10 @@ class DurableRiskPolicyRegistryTests(unittest.TestCase):
                         policy=policy(max_gross_leverage="1.25"),
                         committed_at=NOW,
                     )
-                return original_append(envelope, *args, **kwargs)
+                return real_append(target, envelope, *args, **kwargs)
 
             with patch.object(
-                store,
-                "append_event",
-                side_effect=append_after_unrelated_writer,
+                JournalStore, "append_event", new=append_after_unrelated_writer
             ):
                 self.assertTrue(
                     registry.register(
@@ -775,12 +1249,12 @@ class DurableRiskPolicyRegistryTests(unittest.TestCase):
                 activation_request_id="first", expected_previous_activation_event_id=None,
             )
             predecessor = registry.resolve_current(exact_scope).activation_event_id
-            original_append = store.append_event
+            real_append = JournalStore.append_event
             triggered = False
 
-            def interleaved_append(envelope, *args, **kwargs):
+            def interleaved_append(target, envelope, *args, **kwargs):
                 nonlocal triggered
-                if not triggered:
+                if target is store and not triggered:
                     triggered = True
                     rival.activate(
                         scope=exact_scope, policy_id="emergency", version=1,
@@ -788,9 +1262,9 @@ class DurableRiskPolicyRegistryTests(unittest.TestCase):
                         activation_request_id="rival",
                         expected_previous_activation_event_id=predecessor,
                     )
-                return original_append(envelope, *args, **kwargs)
+                return real_append(target, envelope, *args, **kwargs)
 
-            with patch.object(store, "append_event", side_effect=interleaved_append):
+            with patch.object(JournalStore, "append_event", new=interleaved_append):
                 with self.assertRaisesRegex(
                     RiskPolicyAuthorityError, "changed concurrently"
                 ):
@@ -900,15 +1374,17 @@ class DurableRiskPolicyRegistryTests(unittest.TestCase):
                     policy=policy(), committed_at=NOW,
                 )
             before = store.current_journal_sequence()
-            actual_append = store.append_event
+            real_append = JournalStore.append_event
 
-            def committed_but_reply_lost(envelope, *args, **kwargs):
-                result = actual_append(envelope, *args, **kwargs)
-                self.assertTrue(result.inserted)
-                raise ValueError("synthetic lost reply after durable append")
+            def committed_but_reply_lost(target, envelope, *args, **kwargs):
+                result = real_append(target, envelope, *args, **kwargs)
+                if target is store:
+                    self.assertTrue(result.inserted)
+                    raise ValueError("synthetic lost reply after durable append")
+                return result
 
             with patch.object(
-                store, "append_event", side_effect=committed_but_reply_lost,
+                JournalStore, "append_event", new=committed_but_reply_lost
             ):
                 self.assertFalse(registry.activate(
                     scope=exact_scope, policy_id="core", version=1,
@@ -1162,12 +1638,12 @@ class DurableRiskPolicyRegistryTests(unittest.TestCase):
                     scope=item, policy_id="core", version=1,
                     policy=policy(), committed_at=NOW,
                 )
-            actual_append = store.append_event
+            real_append = JournalStore.append_event
             triggered = False
 
-            def after_unrelated_activation(envelope, *args, **kwargs):
+            def after_unrelated_activation(target, envelope, *args, **kwargs):
                 nonlocal triggered
-                if not triggered:
+                if target is store and not triggered:
                     triggered = True
                     self.assertTrue(other.activate(
                         scope=demo, policy_id="core", version=1,
@@ -1175,10 +1651,10 @@ class DurableRiskPolicyRegistryTests(unittest.TestCase):
                         activation_request_id="demo-intent",
                         expected_previous_activation_event_id=None,
                     ))
-                return actual_append(envelope, *args, **kwargs)
+                return real_append(target, envelope, *args, **kwargs)
 
             with patch.object(
-                store, "append_event", side_effect=after_unrelated_activation
+                JournalStore, "append_event", new=after_unrelated_activation
             ):
                 self.assertTrue(registry.activate(
                     scope=exact_scope, policy_id="core", version=1,
@@ -1213,6 +1689,60 @@ class DurableRiskPolicyRegistryTests(unittest.TestCase):
                             expected_previous_activation_event_id=None,
                         )
                     self.assertEqual(store.current_journal_sequence(), unchanged)
+
+
+    def test_risk_policy_identity_detaches_caller_scope_state(self):
+        caller_scope = scope()
+        identity = RiskPolicyIdentity(
+            policy_id="core-risk",
+            version=1,
+            content_digest="sha256:" + "1" * 64,
+            scope=caller_scope,
+        )
+        object.__setattr__(caller_scope, "provider_environment", "DEMO")
+        self.assertEqual(identity.scope.provider_environment, "TESTNET")
+        self.assertEqual(identity.payload()["scope"]["provider_environment"], "TESTNET")
+
+    def test_registration_holds_canonical_policy_across_state_read(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            registry = DurableRiskPolicyRegistry(store)
+            exact_scope = scope()
+            caller_policy = policy(max_gross_leverage="2")
+            original_current_state = DurableRiskPolicyRegistry._current_state
+            mutated = False
+
+            def change_caller_after_snapshot(target, selected_scope):
+                nonlocal mutated
+                if target is registry and not mutated:
+                    mutated = True
+                    object.__setattr__(
+                        caller_policy,
+                        "max_gross_leverage",
+                        Decimal("9"),
+                    )
+                return original_current_state(target, selected_scope)
+
+            with patch.object(
+                DurableRiskPolicyRegistry,
+                "_current_state",
+                new=change_caller_after_snapshot,
+            ):
+                self.assertTrue(
+                    registry.register(
+                        scope=exact_scope,
+                        policy_id="core-risk",
+                        version=1,
+                        policy=caller_policy,
+                        committed_at=NOW,
+                    )
+                )
+
+            self.assertEqual(caller_policy.max_gross_leverage, Decimal("9"))
+            registered = registry._current_state(exact_scope)[1].registered[
+                ("core-risk", 1)
+            ][1]
+            self.assertEqual(registered.max_gross_leverage, Decimal("2"))
 
 
 if __name__ == "__main__":

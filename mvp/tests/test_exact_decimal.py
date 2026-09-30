@@ -13,11 +13,55 @@ from mvp.autotrade_mvp.exact_decimal import (
     exact_abs,
     exact_add,
     exact_multiply,
+    exact_subtract,
     exact_sum,
     is_exact_decimal_multiple,
     round_fraction_to_quantum,
     terminating_decimal,
 )
+
+
+class HostileDecimal(Decimal):
+    """Decimal subclass whose virtual methods must never become authority."""
+
+    def is_finite(self):
+        raise AssertionError("hostile Decimal.is_finite() was virtual-dispatched")
+
+    def as_tuple(self):
+        raise AssertionError("hostile Decimal.as_tuple() was virtual-dispatched")
+
+    def __format__(self, format_spec):
+        raise AssertionError("hostile Decimal.__format__() was virtual-dispatched")
+
+    def __eq__(self, other):
+        raise AssertionError("hostile Decimal.__eq__() was virtual-dispatched")
+
+
+class HostileFraction(Fraction):
+    """Fraction subclass whose rational properties must never be consulted."""
+
+    numerator_reads = 0
+    denominator_reads = 0
+
+    @property
+    def numerator(self):
+        type(self).numerator_reads += 1
+        raise AssertionError("hostile Fraction.numerator was virtual-dispatched")
+
+    @property
+    def denominator(self):
+        type(self).denominator_reads += 1
+        raise AssertionError("hostile Fraction.denominator was virtual-dispatched")
+
+
+class HostileRoundingMode(str):
+    """str subclass whose equality must never select rounding semantics."""
+
+    equality_checks = 0
+
+    def __eq__(self, other):
+        type(self).equality_checks += 1
+        raise AssertionError("hostile rounding-mode equality was virtual-dispatched")
 
 
 class ExactDecimalTests(unittest.TestCase):
@@ -78,6 +122,57 @@ class ExactDecimalTests(unittest.TestCase):
                         )
         with self.assertRaisesRegex(ExactDecimalError, "quantum must be positive"):
             is_exact_decimal_multiple(Decimal("1"), Decimal("0"))
+
+    def test_polymorphic_decimal_is_rejected_before_virtual_dispatch(self):
+        hostile = HostileDecimal("1.25")
+        operations = (
+            lambda: as_fraction(hostile),
+            lambda: canonical_decimal_text(hostile),
+            lambda: exact_abs(hostile),
+            lambda: exact_add(hostile, Decimal("1")),
+            lambda: exact_subtract(Decimal("1"), hostile),
+            lambda: exact_multiply(Decimal("2"), hostile),
+            lambda: exact_sum((Decimal("1"), hostile)),
+            lambda: exact_sum((Decimal("1"),), start=hostile),
+            lambda: is_exact_decimal_multiple(hostile, Decimal("0.25")),
+            lambda: is_exact_decimal_multiple(Decimal("1"), hostile),
+            lambda: round_fraction_to_quantum(
+                Fraction(1, 3), hostile, mode="FLOOR"
+            ),
+        )
+        for operation in operations:
+            with self.subTest(operation=operation):
+                with self.assertRaisesRegex(
+                    ExactDecimalError, "value must be a finite Decimal"
+                ):
+                    operation()
+
+    def test_polymorphic_fraction_is_rejected_before_property_dispatch(self):
+        HostileFraction.numerator_reads = 0
+        HostileFraction.denominator_reads = 0
+        hostile = HostileFraction(1, 3)
+        operations = (
+            lambda: bounded_fraction(hostile),
+            lambda: terminating_decimal(hostile),
+            lambda: round_fraction_to_quantum(
+                hostile, Decimal("0.01"), mode="FLOOR"
+            ),
+        )
+        for operation in operations:
+            with self.subTest(operation=operation):
+                with self.assertRaisesRegex(TypeError, "value must be Fraction"):
+                    operation()
+        self.assertEqual(HostileFraction.numerator_reads, 0)
+        self.assertEqual(HostileFraction.denominator_reads, 0)
+
+    def test_polymorphic_rounding_mode_is_rejected_before_equality_dispatch(self):
+        HostileRoundingMode.equality_checks = 0
+        hostile = HostileRoundingMode("FLOOR")
+        with self.assertRaisesRegex(ExactDecimalError, "unsupported rounding mode"):
+            round_fraction_to_quantum(
+                Fraction(1, 3), Decimal("0.01"), mode=hostile
+            )
+        self.assertEqual(HostileRoundingMode.equality_checks, 0)
 
     def test_fraction_rounding_is_context_independent_and_directional(self):
         value = Fraction(1, 3)

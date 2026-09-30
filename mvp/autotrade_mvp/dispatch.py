@@ -44,6 +44,12 @@ def _decode_exact_json_bytes(raw: bytes) -> Any:
 
     try:
         text = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        # Never expose the decoded provider bytes/stdlib error excerpt in
+        # a durable transport error or response validation diagnostic.
+        raise ValueError("provider response must be exact UTF-8 JSON bytes") from None
+
+    try:
         return json.loads(
             text,
             object_pairs_hook=no_duplicate_keys,
@@ -55,19 +61,20 @@ def _decode_exact_json_bytes(raw: bytes) -> Any:
                 )
             ),
         )
+    except json.JSONDecodeError:
+        # Must precede broad ValueError: JSONDecodeError derives from it.
+        # Suppress stdlib context so raw response excerpts cannot leak.
+        raise ValueError("provider response must be exact UTF-8 JSON bytes") from None
     except ExactDecimalError as error:
-        # After a provider SEND, the dispatch layer must not turn a malformed
-        # numeric response into financial success. The guarded dispatcher
-        # retains UNKNOWN + reconciliation on an exception after its barrier.
+        # This is already past SEND if the transport returned a provider
+        # response. Caller retains durable UNKNOWN/no blind retry.
         raise ValueError(
             "provider response contains invalid or oversized exact JSON number"
         ) from error
     except ValueError:
+        # Deliberate duplicate-key and parse_constant rejections already
+        # have stable, narrowly scoped provider transport errors.
         raise
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ValueError(
-            "provider response must be exact UTF-8 JSON bytes"
-        ) from error
 
 
 @dataclass(frozen=True)

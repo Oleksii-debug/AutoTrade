@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 import autotrade_numeric.exact_decimal as neutral_numeric
+import mvp.autotrade_mvp.dispatch as legacy_dispatch
 import mvp.autotrade_mvp.provider_core as provider_core_module
 
 from mvp.autotrade_mvp.dispatch import (
@@ -147,9 +148,21 @@ class ProviderCoreTests(unittest.TestCase):
 
     def test_invalid_response_cannot_become_authenticated_submission_observation(self):
         with TemporaryDirectory() as directory:
-            binding, request_sha = self._durable_submission_binding(
-                directory, raw=b'{"orderId":"provider-1","price":1e256}'
-            )
+            # Simulate a previously accepted response created by the
+            # historical transport-only JSON preview (stdlib floats). New
+            # dispatch hardening (#1137) intentionally stops such records
+            # *before* they can be newly persisted. The provider observation
+            # must still reject a legacy SHA-bound raw response on replay.
+            legacy_raw = b'{"orderId":"provider-1","price":1e256}'
+            with patch.object(
+                legacy_dispatch,
+                "_decode_exact_json_bytes",
+                side_effect=lambda raw: json.loads(raw.decode("utf-8")),
+            ):
+                binding, request_sha = self._durable_submission_binding(
+                    directory, raw=legacy_raw
+                )
+            self.assertEqual(binding.response_bytes, legacy_raw)
             with patch.object(
                 neutral_numeric,
                 "Decimal",

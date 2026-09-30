@@ -186,7 +186,7 @@ def financial_submission_scope(
         "account_id": account_id,
         "environment": environment,
         "provider_environment": provider_environment or environment,
-        "prepared_request_sha256": payload_digest(request),
+        "prepared_request_sha256": payload_digest(dict(request)),
     }
     scope.update(extra)
     return scope

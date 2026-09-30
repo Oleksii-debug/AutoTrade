@@ -184,6 +184,13 @@ def install_root_authority_failure_fix() -> None:
     artifact_store.read_authenticated_snapshot = _exceptional_root_fence(
         artifact_store.read_authenticated_snapshot
     )
+    # Root authority pins the terminal authenticated-read dispatch so later
+    # public-class rebinding cannot redirect issued readers. Refresh that pin
+    # only after this final exceptional-root wrapper is installed; otherwise
+    # trusted readers silently bypass the canonical failure-path root fence.
+    _root._CANONICAL_AUTHENTICATED_READ = (
+        artifact_store.read_authenticated_snapshot
+    )
     artifact_store.read_bytes = _exceptional_root_fence(artifact_store.read_bytes)
     artifact_store.audit = _exceptional_root_fence(artifact_store.audit)
     artifact_store.publish_bytes = _exceptional_root_fence(

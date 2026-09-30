@@ -132,10 +132,13 @@ def _within_decimal_envelope(
     )
     unsigned = value[1:] if value.startswith("-") else value
     integer_part, dot, fractional_part = unsigned.partition(".")
+    # Canonical zero and 0.x consume zero integer magnitude, but
+    # zero still consumes one significant coefficient digit.
+    integer_magnitude = 0 if integer_part == "0" else len(integer_part)
     coefficient = integer_part + fractional_part
     significant_digits = len(coefficient.lstrip("0")) or 1
     return (
-        len(integer_part) <= max_integer_digits
+        integer_magnitude <= max_integer_digits
         and (len(fractional_part) if dot else 0) <= max_scale
         and significant_digits <= max_significant_digits
     )

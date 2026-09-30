@@ -1,9 +1,12 @@
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
-import textwrap
+from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
@@ -25,6 +28,7 @@ from mvp.autotrade_mvp._generated_decimal_limits import (
     MAX_SCALE,
     MAX_SIGNIFICANT_DIGITS,
 )
+from tools import generate_common_scalar_corpus as corpus_generator
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -150,38 +154,77 @@ class CommonScalarConformanceTests(unittest.TestCase):
         self.assertFalse(is_valid_common_scalar("Decimal", value))
         self.assertFalse(mvp_is_valid_common_scalar("Decimal", value))
 
-    def test_shipped_exact_decimal_import_does_not_require_contracts_package(self):
-        code = textwrap.dedent(
-            """
-            import importlib.abc
-            import sys
+    def test_corpus_oracle_zero_integer_magnitude_matches_generated_contract(self):
+        # Use a synthetic zero integer ceiling so current max=256 cannot mask drift.
+        definition = self.common["$defs"]["Decimal"]
+        with patch.object(corpus_generator, "_decimal_envelope", return_value=(1, 1, 0)):
+            self.assertTrue(corpus_generator._within_decimal_envelope("0", definition))
+            self.assertTrue(corpus_generator._within_decimal_envelope("0.1", definition))
+            self.assertFalse(corpus_generator._within_decimal_envelope("1", definition))
+            self.assertFalse(corpus_generator._within_decimal_envelope("1.1", definition))
+            self.assertFalse(corpus_generator._within_decimal_envelope(0, definition))
 
-            class DenyContracts(importlib.abc.MetaPathFinder):
-                def find_spec(self, fullname, path=None, target=None):
-                    if fullname == "contracts" or fullname.startswith("contracts."):
-                        raise ImportError("contracts package deliberately denied")
-                    return None
-
-            for name in tuple(sys.modules):
-                if name == "contracts" or name.startswith("contracts."):
-                    del sys.modules[name]
-            sys.meta_path.insert(0, DenyContracts())
-            from mvp.autotrade_mvp.exact_decimal import parse_canonical_decimal_text
-            assert str(parse_canonical_decimal_text("1.25")) == "1.25"
-            """
-        )
-        result = subprocess.run(
-            [sys.executable, "-c", code],
-            cwd=ROOT,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        self.assertEqual(
-            result.returncode,
-            0,
-            msg=f"stdout={result.stdout}\nstderr={result.stderr}",
-        )
+    def test_shipped_scalar_component_is_hermetic_and_missing_scalar_fails_closed(self):
+        # Narrow component oracle; WP-43 must still qualify the whole installed host.
+        with TemporaryDirectory() as root_dir:
+            root = Path(root_dir)
+            stage = root / "stage"
+            package = stage / "mvp" / "autotrade_mvp"
+            package.mkdir(parents=True)
+            (stage / "mvp" / "__init__.py").write_text("", encoding="utf-8")
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            for filename in (
+                "_generated_common_scalars.py",
+                "_generated_decimal_limits.py",
+                "exact_decimal.py",
+            ):
+                shutil.copy2(ROOT / "mvp" / "autotrade_mvp" / filename, package / filename)
+            code = """
+import os
+import pathlib
+import sys
+assert sys.flags.isolated == 1 and sys.flags.no_site == 1
+stage = pathlib.Path(os.environ['AUTOTRADE_STAGED_SCALARS']).resolve(strict=True)
+sys.path.insert(0, str(stage))
+try:
+    from mvp.autotrade_mvp.exact_decimal import parse_canonical_decimal_text
+    from mvp.autotrade_mvp._generated_common_scalars import is_valid_common_scalar
+    if os.environ['AUTOTRADE_MISSING_SCALAR'] == '1':
+        raise AssertionError('missing generated scalar was imported')
+except ModuleNotFoundError as error:
+    assert os.environ['AUTOTRADE_MISSING_SCALAR'] == '1', error
+    assert error.name == 'mvp.autotrade_mvp._generated_common_scalars', error.name
+    print('MISSING_SCALAR_DENIED')
+else:
+    assert str(parse_canonical_decimal_text('0.1')) == '0.1'
+    assert is_valid_common_scalar('Environment', 'LIVE')
+    assert not is_valid_common_scalar('Decimal', '1.0')
+    for name, module in tuple(sys.modules.items()):
+        if name in ('mvp', 'mvp.autotrade_mvp') or name.startswith('mvp.autotrade_mvp.'):
+            path = pathlib.Path(module.__file__).resolve(strict=True)
+            assert path.is_relative_to(stage), (name, path)
+    assert not any(name == 'contracts' or name.startswith('contracts.') for name in sys.modules)
+    print('HERMETIC_SCALARS_OK')
+"""
+            environment = os.environ.copy()
+            environment["PYTHONPATH"] = str(ROOT)
+            environment["AUTOTRADE_STAGED_SCALARS"] = str(stage)
+            for missing, sentinel in ((False, "HERMETIC_SCALARS_OK"), (True, "MISSING_SCALAR_DENIED")):
+                with self.subTest(missing=missing):
+                    scalar = package / "_generated_common_scalars.py"
+                    if missing:
+                        scalar.unlink()
+                    environment["AUTOTRADE_MISSING_SCALAR"] = "1" if missing else "0"
+                    result = subprocess.run(
+                        [sys.executable, "-I", "-S", "-c", code],
+                        cwd=root,
+                        env=environment,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual(result.stdout.strip(), sentinel)
 
     def test_utc_instant_terminal_lf_and_crlf_fail_at_schema_boundary(self):
         validator = Draft202012Validator(

@@ -189,6 +189,48 @@ class CapabilityArtifactEvidenceTests(unittest.TestCase):
                     )
                 self.assertIsInstance(trusted_store, ArtifactStore)
 
+    def test_publication_store_subclass_is_rejected_before_verification(self):
+        class ForgedStore(ArtifactStore):
+            pass
+
+        with TemporaryDirectory() as directory:
+            canonical = ArtifactStore(directory)
+            _publish(canonical, "API")
+            forged = ForgedStore(directory)
+            with self.assertRaisesRegex(
+                TypeError,
+                "publication_store must be the canonical ArtifactStore",
+            ):
+                artifact_store_evidence_verifier(
+                    evidence_root=directory,
+                    publication_store=forged,
+                    issuer_verifiers=_trusted_issuer_verifiers(),
+                )
+
+    def test_caller_store_poisoning_before_capture_cannot_select_reader(self):
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            refs = {source: _publish(store, source) for source in SOURCES}
+
+            def forbidden(*_args, **_kwargs):
+                raise AssertionError("caller store authority must not be used")
+
+            store.load_manifest = forbidden
+            store.read_bytes = forbidden
+            store._read_verified_object_bytes = forbidden
+            store._decode_manifest_bytes = forbidden
+            store.root = Path(directory) / "caller-redirect-before-capture"
+
+            verifier = _verifier(directory, store)
+            snapshot = derive_capability_snapshot(
+                snapshot_id=SNAPSHOT,
+                claims=tuple(_claim(source, refs[source]) for source in SOURCES),
+                observed_at=NOW,
+                evidence_verifier=verifier,
+            )
+            self.assertEqual(snapshot.status, "VERIFIED")
+            self.assertEqual(snapshot.sources, frozenset(SOURCES))
+
     def test_caller_store_methods_cannot_redirect_captured_trusted_reader(self):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)

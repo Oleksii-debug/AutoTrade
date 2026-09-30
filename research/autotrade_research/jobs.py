@@ -25,7 +25,7 @@ FINAL_STATES = {"SUCCEEDED", "FAILED", "CANCELLED"}
 # Callers may disable retry for a safe kind, but cannot promote an arbitrary
 # research/external job into the retry-safe class.
 _REQUEUEABLE_JOB_KINDS = frozenset({"research.replay"})
-ALLOWED_STATES = {"QUEUED", "RUNNING", "WAITING_EXTERNAL", *FINAL_STATES}
+ALLOWED_STATES = {"QUEUED", "RUNNING", "WAITING_EXTERNAL", "PAUSED", *FINAL_STATES}
 
 
 class JobError(RuntimeError):
@@ -247,7 +247,7 @@ def _validate_budget(budget: dict[str, int | float]) -> dict[str, float]:
 
 
 class ResearchJobStore:
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -348,6 +348,20 @@ class ResearchJobStore:
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (4, _iso(datetime.now(timezone.utc))),
                 )
+                versions.append(4)
+            if 5 not in versions:
+                columns = {
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
+                }
+                if "submitted_by" not in columns:
+                    connection.execute(
+                        "ALTER TABLE jobs ADD COLUMN submitted_by TEXT"
+                    )
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (5, _iso(datetime.now(timezone.utc))),
+                )
             connection.commit()
 
     @staticmethod
@@ -366,6 +380,11 @@ class ResearchJobStore:
             "cancel_requested": bool(row["cancel_requested"]),
             "output_refs": json.loads(row["output_refs_json"]),
         }
+        if "submitted_by" in row.keys() and row["submitted_by"] is not None:
+            record["submitted_by"] = _require_text(
+                row["submitted_by"],
+                "submitted_by",
+            )
         if row["owner"] is not None:
             record["owner"] = row["owner"]
         if row["lease_until"] is not None:
@@ -395,12 +414,18 @@ class ResearchJobStore:
         resource_budget: dict[str, int | float],
         lease_requeueable: bool = False,
         job_id: str | None = None,
+        submitted_by: str | None = None,
         now: datetime | None = None,
     ) -> tuple[dict[str, Any], bool]:
         job_kind = _require_research_kind(kind)
         key = _require_text(dedupe_key, "dedupe_key")
         hashes = _validate_hashes(input_hashes)
         budget = _validate_budget(resource_budget)
+        submitter = (
+            None
+            if submitted_by is None
+            else _require_text(submitted_by, "submitted_by")
+        )
         if not isinstance(lease_requeueable, bool):
             raise ValueError("lease_requeueable must be boolean")
         if lease_requeueable and job_kind not in _REQUEUEABLE_JOB_KINDS:
@@ -419,6 +444,7 @@ class ResearchJobStore:
                     and json.loads(existing["input_hashes_json"]) == hashes
                     and json.loads(existing["resource_budget_json"]) == budget
                     and bool(existing["lease_requeueable"]) is lease_requeueable
+                    and existing["submitted_by"] == submitter
                 )
                 if not same:
                     connection.rollback()
@@ -432,8 +458,8 @@ class ResearchJobStore:
                     job_id, kind, dedupe_key, input_hashes_json, state, generation,
                     attempt, owner, lease_until, checkpoint_ref, resource_budget_json,
                     resource_usage_json, output_refs_json, error_json, created_at, updated_at,
-                    lease_requeueable
-                ) VALUES (?, ?, ?, ?, 'QUEUED', 1, 0, NULL, NULL, NULL, ?, '{}', '[]', NULL, ?, ?, ?)
+                    lease_requeueable, submitted_by
+                ) VALUES (?, ?, ?, ?, 'QUEUED', 1, 0, NULL, NULL, NULL, ?, '{}', '[]', NULL, ?, ?, ?, ?)
                 """,
                 (
                     identifier,
@@ -444,6 +470,7 @@ class ResearchJobStore:
                     _iso(current),
                     _iso(current),
                     1 if lease_requeueable else 0,
+                    submitter,
                 ),
             )
             row = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (identifier,)).fetchone()
@@ -879,6 +906,104 @@ class ResearchJobStore:
             now=now,
         )
         return manifest, record
+
+    def pause(self, job_id: str, *, now: datetime | None = None) -> bool:
+        """Pause retry-safe research work while fencing any live worker generation.
+
+        QUEUED work can pause immediately. RUNNING work can pause only when its
+        enqueue contract already qualifies lease replay as safe; the generation is
+        advanced so the displaced worker cannot checkpoint or publish afterward.
+        Ambiguous/non-requeueable external work must be reconciled, not paused.
+        """
+
+        identifier = str(UUID(_require_text(job_id, "job_id")))
+        current = _utc(now or datetime.now(timezone.utc))
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT state, lease_requeueable, cancel_requested, generation "
+                "FROM jobs WHERE job_id = ?",
+                (identifier,),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                raise KeyError(identifier)
+            state = str(row["state"])
+            if state == "PAUSED":
+                connection.commit()
+                return False
+            if state in FINAL_STATES:
+                connection.commit()
+                return False
+            if bool(row["cancel_requested"]):
+                connection.rollback()
+                raise JobConflictError(
+                    "job cancellation is already requested and cannot be paused"
+                )
+            if state in {"WAITING_EXTERNAL"} or (
+                state == "RUNNING" and not bool(row["lease_requeueable"])
+            ):
+                connection.rollback()
+                raise JobConflictError(
+                    "job cannot be paused without proven retry-safe execution"
+                )
+            if state not in {"QUEUED", "RUNNING"}:
+                connection.rollback()
+                raise JobConflictError("job state cannot be paused")
+            if state == "RUNNING":
+                connection.execute(
+                    """
+                    UPDATE jobs
+                    SET state='PAUSED', owner=NULL, lease_until=NULL,
+                        generation=generation+1, updated_at=?
+                    WHERE job_id=? AND state='RUNNING'
+                    """,
+                    (_iso(current), identifier),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE jobs
+                    SET state='PAUSED', owner=NULL, lease_until=NULL, updated_at=?
+                    WHERE job_id=? AND state='QUEUED'
+                    """,
+                    (_iso(current), identifier),
+                )
+            connection.commit()
+        return True
+
+    def resume(self, job_id: str, *, now: datetime | None = None) -> bool:
+        """Return explicitly paused research work to the durable queue."""
+
+        identifier = str(UUID(_require_text(job_id, "job_id")))
+        current = _utc(now or datetime.now(timezone.utc))
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT state, cancel_requested FROM jobs WHERE job_id = ?",
+                (identifier,),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                raise KeyError(identifier)
+            if row["state"] != "PAUSED":
+                connection.commit()
+                return False
+            if bool(row["cancel_requested"]):
+                connection.rollback()
+                raise JobConflictError(
+                    "cancel-requested job cannot return to the queue"
+                )
+            connection.execute(
+                """
+                UPDATE jobs
+                SET state='QUEUED', owner=NULL, lease_until=NULL, updated_at=?
+                WHERE job_id=? AND state='PAUSED'
+                """,
+                (_iso(current), identifier),
+            )
+            connection.commit()
+        return True
 
     def cancel(self, job_id: str, *, now: datetime | None = None) -> bool:
         identifier = str(UUID(_require_text(job_id, "job_id")))

@@ -762,35 +762,48 @@ class AccountingExactAuthorityTests(unittest.TestCase):
                         )
 
     def test_oversized_durable_split_ratio_is_rejected_before_decimal_parse(self):
-        oversized_numerator = "1" * (MAX_INTEGER_DIGITS + 1)
-        transaction = JournalTransaction(
-            transaction_id="oversized-split-ratio",
-            cause_event_id="oversized-split-ratio-cause",
-            postings=(
-                posting("POSITION:ABC", "ABC", "1"),
-                posting(
-                    "CORPORATE_ACTION_SPLIT_CLEARING:ABC:"
-                    + oversized_numerator
-                    + ":1",
-                    "ABC",
-                    "-1",
-                ),
-            ),
-        )
-        book = EconomicBook((transaction,))
-        before = book.transactions
+        oversized = "1" * (MAX_INTEGER_DIGITS + 1)
 
-        with self.assertRaisesRegex(
-            AccountingConflict,
-            "ratio identity is not canonical",
-        ):
-            project_equity_position(
-                book,
-                instrument="ABC",
-                settlement_currency="USD",
-            )
+        for numerator, denominator in ((oversized, "1"), ("1", oversized)):
+            with self.subTest(
+                numerator_length=len(numerator),
+                denominator_length=len(denominator),
+            ):
+                transaction = JournalTransaction(
+                    transaction_id=(
+                        "oversized-split-ratio-"
+                        + ("numerator" if numerator == oversized else "denominator")
+                    ),
+                    cause_event_id=(
+                        "oversized-split-ratio-cause-"
+                        + ("numerator" if numerator == oversized else "denominator")
+                    ),
+                    postings=(
+                        posting("POSITION:ABC", "ABC", "1"),
+                        posting(
+                            "CORPORATE_ACTION_SPLIT_CLEARING:ABC:"
+                            + numerator
+                            + ":"
+                            + denominator,
+                            "ABC",
+                            "-1",
+                        ),
+                    ),
+                )
+                book = EconomicBook((transaction,))
+                before = book.transactions
 
-        self.assertEqual(book.transactions, before)
+                with self.assertRaisesRegex(
+                    AccountingConflict,
+                    "ratio identity is not canonical",
+                ):
+                    project_equity_position(
+                        book,
+                        instrument="ABC",
+                        settlement_currency="USD",
+                    )
+
+                self.assertEqual(book.transactions, before)
 
 
 

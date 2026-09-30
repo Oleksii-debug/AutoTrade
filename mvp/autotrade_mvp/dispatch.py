@@ -551,7 +551,32 @@ class GuardedDispatcher:
     def _outcome_from_terminal(event: dict[str, Any], client_order_id: str) -> DispatchOutcome:
         payload = event["payload"]
         if event["event_type"] == "SubmissionSent":
-            return DispatchOutcome("SENT", client_order_id, payload.get("response"), "sent_confirmed")
+            if payload.get("response_encoding") == "utf-8-json":
+                # Raw SHA-bound bytes, never a binary-float diagnostic mirror,
+                # are the only replayable numeric authority. Replay returns
+                # UNKNOWN rather than inventing success if a historical exact
+                # journal row has missing, corrupt or now-invalid raw evidence.
+                response_text = payload.get("response_text")
+                response_hash = payload.get("response_sha256")
+                if type(response_text) is not str or type(response_hash) is not str:
+                    return DispatchOutcome(
+                        "UNKNOWN", client_order_id, None, "exact_response_unavailable"
+                    )
+                try:
+                    raw = response_text.encode("utf-8", errors="strict")
+                    if "sha256:" + sha256(raw).hexdigest() != response_hash:
+                        raise ValueError("SHA-bound exact response mismatch")
+                    exact_payload = _decode_exact_json_bytes(raw)
+                except (UnicodeError, ValueError, TypeError):
+                    return DispatchOutcome(
+                        "UNKNOWN", client_order_id, None, "exact_response_invalid"
+                    )
+                return DispatchOutcome(
+                    "SENT", client_order_id, exact_payload, "sent_confirmed"
+                )
+            return DispatchOutcome(
+                "SENT", client_order_id, payload.get("response"), "sent_confirmed"
+            )
         if event["event_type"] == "SubmissionBlocked":
             return DispatchOutcome("BLOCKED", client_order_id, None, payload.get("reason", "blocked"))
         if event["event_type"] == "SubmissionUnknown":
@@ -955,9 +980,13 @@ class GuardedDispatcher:
         terminal_reason = "sent_confirmed"
         try:
             if isinstance(response, ExactJsonTransportResponse):
+                # The exact raw bytes + digest are the durable source.
+                # The prior "response" JSON mirror could silently round
+                # decimals to float; persisting Decimal objects directly is
+                # not JSON-serializable and misclassified valid sends UNKNOWN.
+                # Keep the mirror out of exact response events altogether.
                 sent_payload = {
                     "client_order_id": client_order_id,
-                    "response": response.payload,
                     "response_text": response.response_text,
                     "response_sha256": response.response_sha256,
                     "response_encoding": "utf-8-json",

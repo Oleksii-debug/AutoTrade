@@ -70,10 +70,18 @@ class JournalStore(_JournalStoreImpl):
     @contextmanager
     def _connect_windows(self):
         expected = self._store_identity
-        with guard_windows_database_authority(
-            self.path,
-            create=expected is None,
-        ) as guarded:
+        try:
+            authority_guard = guard_windows_database_authority(
+                self.path,
+                create=expected is None,
+            )
+            guarded_context = authority_guard.__enter__()
+        except OSError as error:
+            raise RuntimeError(
+                "journal backing file is missing or inaccessible"
+            ) from error
+        try:
+            guarded = guarded_context
             if expected is not None and guarded != expected:
                 raise RuntimeError("journal backing file identity changed")
 
@@ -106,6 +114,8 @@ class JournalStore(_JournalStoreImpl):
                         )
                 finally:
                     connection.close()
+        finally:
+            authority_guard.__exit__(None, None, None)
 
     @contextmanager
     def _connect(self):

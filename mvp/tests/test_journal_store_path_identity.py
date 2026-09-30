@@ -37,6 +37,7 @@ class JournalStorePathIdentityRegressionTests(unittest.TestCase):
                     expected,
                     "changing process CWD must not retarget an already-constructed JournalStore",
                 )
+                os.chdir(original_cwd)
         finally:
             os.chdir(original_cwd)
 
@@ -69,6 +70,7 @@ class JournalStorePathIdentityRegressionTests(unittest.TestCase):
                     unexpected.exists(),
                     "construction-time CWD changes must not select a second journal authority",
                 )
+                os.chdir(original_cwd)
         finally:
             os.chdir(original_cwd)
 
@@ -92,6 +94,7 @@ class JournalStorePathIdentityRegressionTests(unittest.TestCase):
                     Path(second_store.path),
                     "equal caller path text in different CWDs must not alias two durable-state authorities",
                 )
+                os.chdir(original_cwd)
         finally:
             os.chdir(original_cwd)
 
@@ -112,6 +115,7 @@ class JournalStorePathIdentityRegressionTests(unittest.TestCase):
 
                 restarted = JournalStore(first / "state" / "journal.sqlite")
                 self.assertEqual(restarted.store_identity, identity)
+                os.chdir(original_cwd)
         finally:
             os.chdir(original_cwd)
 
@@ -163,8 +167,8 @@ class JournalStorePathIdentityRegressionTests(unittest.TestCase):
             observed = {"file": False, "parent": False}
 
             def guarded_connect(database, *args, **kwargs):
-                database_path = Path(database)
-                if database_path == path:
+                database_path = Path(database).resolve(strict=False)
+                if database_path == path.resolve(strict=False):
                     with self.assertRaises(OSError):
                         path.replace(moved_file)
                     observed["file"] = True

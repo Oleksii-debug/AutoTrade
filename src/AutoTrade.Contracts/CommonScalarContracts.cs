@@ -21,7 +21,7 @@ public static partial class CommonScalarContracts
 
         return kind switch
         {
-            "Decimal" => IsFullMatch(DecimalPattern(), value),
+            "Decimal" => value.Length <= 259 && IsFullMatch(DecimalPattern(), value) && IsWithinDecimalEnvelope(value, 256, 256, 256),
             "Sequence" => IsFullMatch(SequencePattern(), value),
             "Digest" => IsFullMatch(DigestPattern(), value),
             "CurrencyId" => value.Length >= 1 && value.Length <= 32 && IsFullMatch(CurrencyIdPattern(), value),
@@ -35,6 +35,42 @@ public static partial class CommonScalarContracts
     {
         var match = regex.Match(value);
         return match.Success && match.Index == 0 && match.Length == value.Length;
+    }
+
+    private static bool IsWithinDecimalEnvelope(
+        string value,
+        int maxSignificantDigits,
+        int maxScale,
+        int maxIntegerDigits)
+    {
+        var start = value.StartsWith("-", StringComparison.Ordinal) ? 1 : 0;
+        var dot = value.IndexOf('.', start);
+        var integerEnd = dot >= 0 ? dot : value.Length;
+        var integerDigits = integerEnd - start;
+        var integerMagnitude =
+            integerDigits == 1 && value[start] == '0' ? 0 : integerDigits;
+        var scale = dot >= 0 ? value.Length - dot - 1 : 0;
+        var coefficientDigits = value.Length - start - (dot >= 0 ? 1 : 0);
+        var leadingCoefficientZeros = 0;
+        for (var index = start; index < value.Length; index++)
+        {
+            if (value[index] == '.')
+            {
+                continue;
+            }
+            if (value[index] != '0')
+            {
+                break;
+            }
+            leadingCoefficientZeros++;
+        }
+        var significantDigits =
+            leadingCoefficientZeros == coefficientDigits
+                ? 1
+                : coefficientDigits - leadingCoefficientZeros;
+        return significantDigits <= maxSignificantDigits
+            && scale <= maxScale
+            && integerMagnitude <= maxIntegerDigits;
     }
 
     [GeneratedRegex(@"^(?:0|[1-9][0-9]*(?:\.[0-9]*[1-9])?|0\.[0-9]*[1-9]|-(?:[1-9][0-9]*(?:\.[0-9]*[1-9])?|0\.[0-9]*[1-9]))$(?![\s\S])", RegexOptions.CultureInvariant)]

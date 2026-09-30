@@ -6,7 +6,9 @@ Format-bearing values (for example UUID/date-time) and object definitions remain
 under their dedicated contract validators rather than being approximated here.
 
 CI runs --check so Python, C# and TypeScript cannot silently diverge from
-common.schema.json or contracts/manifest.json.
+common.schema.json or contracts/manifest.json. The shipped MVP Python runtime is
+rendered from the exact same source/template as the contract-facing Python
+binding so installed product code never depends on the repository contracts tree.
 """
 
 from __future__ import annotations
@@ -24,10 +26,42 @@ COMMON = ROOT / "contracts" / "jsonschema" / "common.schema.json"
 MANIFEST = ROOT / "contracts" / "manifest.json"
 OUTPUTS = {
     "python": ROOT / "contracts" / "bindings" / "python" / "common_scalars.py",
+    "mvp_python": ROOT / "mvp" / "autotrade_mvp" / "_generated_common_scalars.py",
     "typescript_decl": ROOT / "contracts" / "bindings" / "typescript" / "commonScalars.d.ts",
     "typescript_runtime": ROOT / "contracts" / "bindings" / "typescript" / "commonScalars.js",
     "csharp": ROOT / "src" / "AutoTrade.Contracts" / "CommonScalarContracts.cs",
+    "mvp_decimal_limits": ROOT / "mvp" / "autotrade_mvp" / "_generated_decimal_limits.py",
 }
+
+DECIMAL_ENVELOPE_KEY = "x-autotrade-decimal-envelope"
+DECIMAL_ENVELOPE_FIELDS = (
+    "max_significant_digits",
+    "max_scale",
+    "max_integer_digits",
+)
+
+
+def _decimal_envelope(
+    name: str,
+    definition: dict[str, object],
+) -> tuple[int, int, int] | None:
+    raw = definition.get(DECIMAL_ENVELOPE_KEY)
+    if raw is None:
+        if name == "Decimal":
+            raise ValueError("Decimal must define resource envelope metadata")
+        return None
+    if (
+        name != "Decimal"
+        or not isinstance(raw, dict)
+        or set(raw) != set(DECIMAL_ENVELOPE_FIELDS)
+    ):
+        raise ValueError(
+            "decimal envelope metadata is valid only on Decimal with canonical fields"
+        )
+    values = tuple(raw[field] for field in DECIMAL_ENVELOPE_FIELDS)
+    if any(type(value) is not int or value <= 0 for value in values):
+        raise ValueError("Decimal envelope limits must be positive integers")
+    return values  # type: ignore[return-value]
 
 
 def _load_source() -> tuple[str, dict[str, dict[str, object]]]:
@@ -72,6 +106,8 @@ def _load_source() -> tuple[str, dict[str, dict[str, object]]]:
 
     if not selected:
         raise ValueError("no mechanically generatable common scalar definitions found")
+    for name, definition in selected.items():
+        _decimal_envelope(name, definition)
     return version, selected
 
 
@@ -91,6 +127,37 @@ def _ordered(defs: dict[str, dict[str, object]]) -> list[str]:
     preferred = ["Decimal", "Sequence", "Digest", "CurrencyId", "UnitId", "Environment"]
     return [name for name in preferred if name in defs] + sorted(
         name for name in defs if name not in preferred
+    )
+
+
+def render_mvp_decimal_limits(
+    version: str,
+    defs: dict[str, dict[str, object]],
+) -> str:
+    definition = defs.get("Decimal")
+    if definition is None:
+        raise ValueError("Decimal definition is required for MVP runtime limits")
+    envelope = _decimal_envelope("Decimal", definition)
+    if envelope is None:
+        raise ValueError("Decimal resource envelope is required for MVP runtime limits")
+    _minimum, maximum = _limits(definition)
+    if maximum is None:
+        raise ValueError("Decimal maxLength is required for MVP runtime limits")
+    return "\n".join(
+        [
+            '"""AUTO-GENERATED Decimal resource limits. DO NOT EDIT.',
+            "",
+            "Generated from contracts/jsonschema/common.schema.json by",
+            "tools/generate_common_scalar_bindings.py.",
+            '"""',
+            "",
+            f'CONTRACT_VERSION = "{version}"',
+            f"MAX_DECIMAL_TEXT_LENGTH = {maximum}",
+            f"MAX_SIGNIFICANT_DIGITS = {envelope[0]}",
+            f"MAX_SCALE = {envelope[1]}",
+            f"MAX_INTEGER_DIGITS = {envelope[2]}",
+            "",
+        ]
     )
 
 
@@ -118,6 +185,11 @@ def render_python(version: str, defs: dict[str, dict[str, object]]) -> str:
         minimum, maximum = _limits(defs[name])
         if minimum is not None or maximum is not None:
             lines.append(f'    "{name}": ({minimum!r}, {maximum!r}),')
+    lines += ["}", "_DECIMAL_ENVELOPES = {"]
+    for name in pattern_names:
+        envelope = _decimal_envelope(name, defs[name])
+        if envelope is not None:
+            lines.append(f'    "{name}": {envelope!r},')
     lines += ["}", "_ENUMS = {"]
     for name in enum_names:
         values = ", ".join(repr(value) for value in defs[name]["enum"])
@@ -126,8 +198,25 @@ def render_python(version: str, defs: dict[str, dict[str, object]]) -> str:
         "}",
         "",
         "",
+        "def _within_decimal_envelope(",
+        "    value: str, limits: tuple[int, int, int]",
+        ") -> bool:",
+        "    max_significant_digits, max_scale, max_integer_digits = limits",
+        '    unsigned = value[1:] if value.startswith("-") else value',
+        '    integer_part, dot, fractional_part = unsigned.partition(".")',
+        '    integer_magnitude = 0 if integer_part == "0" else len(integer_part)',
+        "    scale = len(fractional_part) if dot else 0",
+        "    coefficient = integer_part + fractional_part",
+        '    significant_digits = len(coefficient.lstrip("0")) or 1',
+        "    return (",
+        "        significant_digits <= max_significant_digits",
+        "        and scale <= max_scale",
+        "        and integer_magnitude <= max_integer_digits",
+        "    )",
+        "",
+        "",
         "def is_valid_common_scalar(kind: str, value: object) -> bool:",
-        "    if not isinstance(value, str):",
+        "    if type(value) is not str:",
         "        return False",
         "    enum = _ENUMS.get(kind)",
         "    if enum is not None:",
@@ -142,7 +231,14 @@ def render_python(version: str, defs: dict[str, dict[str, object]]) -> str:
         "            return False",
         "        if maximum is not None and len(value) > maximum:",
         "            return False",
-        "    return pattern.fullmatch(value) is not None",
+        "    if pattern.fullmatch(value) is None:",
+        "        return False",
+        "    decimal_limits = _DECIMAL_ENVELOPES.get(kind)",
+        "    if decimal_limits is not None and not _within_decimal_envelope(",
+        "        value, decimal_limits",
+        "    ):",
+        "        return False",
+        "    return True",
         "",
     ]
     return "\n".join(lines)
@@ -174,12 +270,37 @@ def render_typescript_runtime(version: str, defs: dict[str, dict[str, object]]) 
             min_js = "null" if minimum is None else str(minimum)
             max_js = "null" if maximum is None else str(maximum)
             lines.append(f"  {name}: Object.freeze([{min_js}, {max_js}]),")
+    lines += ["});", "const decimalEnvelopes = Object.freeze({"]
+    for name in pattern_names:
+        envelope = _decimal_envelope(name, defs[name])
+        if envelope is not None:
+            lines.append(
+                f"  {name}: Object.freeze([{envelope[0]}, {envelope[1]}, {envelope[2]}]),"
+            )
     lines += ["});", "const enums = Object.freeze({"]
     for name in enum_names:
         values = ", ".join(json.dumps(v) for v in defs[name]["enum"])
         lines.append(f"  {name}: new Set([{values}]),")
     lines += [
         "});",
+        "",
+        "function withinDecimalEnvelope(value, limits) {",
+        "  const [maxSignificantDigits, maxScale, maxIntegerDigits] = limits;",
+        '  const unsigned = value.startsWith("-") ? value.slice(1) : value;',
+        '  const dotIndex = unsigned.indexOf(".");',
+        '  const integerPart = dotIndex === -1 ? unsigned : unsigned.slice(0, dotIndex);',
+        '  const fractionalPart = dotIndex === -1 ? "" : unsigned.slice(dotIndex + 1);',
+        '  const integerMagnitude = integerPart === "0" ? 0 : integerPart.length;',
+        "  const coefficient = integerPart + fractionalPart;",
+        "  const firstNonZero = coefficient.search(/[1-9]/);",
+        "  const significantDigits =",
+        "    firstNonZero === -1 ? 1 : coefficient.length - firstNonZero;",
+        "  return (",
+        "    significantDigits <= maxSignificantDigits &&",
+        "    fractionalPart.length <= maxScale &&",
+        "    integerMagnitude <= maxIntegerDigits",
+        "  );",
+        "}",
         "",
         "function isValidCommonScalar(kind, value) {",
         '  if (typeof value !== "string") return false;',
@@ -194,7 +315,11 @@ def render_typescript_runtime(version: str, defs: dict[str, dict[str, object]]) 
         "    if (maximum !== null && value.length > maximum) return false;",
         "  }",
         "  const match = pattern.exec(value);",
-        "  return match !== null && match.index === 0 && match[0].length === value.length;",
+        "  if (match === null || match.index !== 0 || match[0].length !== value.length) {",
+        "    return false;",
+        "  }",
+        "  const decimalLimits = decimalEnvelopes[kind];",
+        "  return !decimalLimits || withinDecimalEnvelope(value, decimalLimits);",
         "}",
         "",
         "module.exports = { CONTRACT_VERSION, isValidCommonScalar };",
@@ -274,6 +399,12 @@ def render_csharp(version: str, defs: dict[str, dict[str, object]]) -> str:
         if maximum is not None:
             checks.append(f"value.Length <= {maximum}")
         checks.append(f"IsFullMatch({_csharp_regex_method(name)}(), value)")
+        envelope = _decimal_envelope(name, definition)
+        if envelope is not None:
+            checks.append(
+                "IsWithinDecimalEnvelope("
+                f"value, {envelope[0]}, {envelope[1]}, {envelope[2]})"
+            )
         lines.append(f'            "{name}" => ' + " && ".join(checks) + ",")
     lines += [
         '            _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unsupported common scalar kind."),',
@@ -284,6 +415,42 @@ def render_csharp(version: str, defs: dict[str, dict[str, object]]) -> str:
         "    {",
         "        var match = regex.Match(value);",
         "        return match.Success && match.Index == 0 && match.Length == value.Length;",
+        "    }",
+        "",
+        "    private static bool IsWithinDecimalEnvelope(",
+        "        string value,",
+        "        int maxSignificantDigits,",
+        "        int maxScale,",
+        "        int maxIntegerDigits)",
+        "    {",
+        '        var start = value.StartsWith("-", StringComparison.Ordinal) ? 1 : 0;',
+        "        var dot = value.IndexOf('.', start);",
+        "        var integerEnd = dot >= 0 ? dot : value.Length;",
+        "        var integerDigits = integerEnd - start;",
+        "        var integerMagnitude =",
+        "            integerDigits == 1 && value[start] == '0' ? 0 : integerDigits;",
+        "        var scale = dot >= 0 ? value.Length - dot - 1 : 0;",
+        "        var coefficientDigits = value.Length - start - (dot >= 0 ? 1 : 0);",
+        "        var leadingCoefficientZeros = 0;",
+        "        for (var index = start; index < value.Length; index++)",
+        "        {",
+        "            if (value[index] == '.')",
+        "            {",
+        "                continue;",
+        "            }",
+        "            if (value[index] != '0')",
+        "            {",
+        "                break;",
+        "            }",
+        "            leadingCoefficientZeros++;",
+        "        }",
+        "        var significantDigits =",
+        "            leadingCoefficientZeros == coefficientDigits",
+        "                ? 1",
+        "                : coefficientDigits - leadingCoefficientZeros;",
+        "        return significantDigits <= maxSignificantDigits",
+        "            && scale <= maxScale",
+        "            && integerMagnitude <= maxIntegerDigits;",
         "    }",
         "",
     ]
@@ -300,11 +467,14 @@ def render_csharp(version: str, defs: dict[str, dict[str, object]]) -> str:
 
 def rendered_outputs() -> dict[str, str]:
     version, defs = _load_source()
+    python_runtime = render_python(version, defs)
     return {
-        "python": render_python(version, defs),
+        "python": python_runtime,
+        "mvp_python": python_runtime,
         "typescript_decl": render_typescript_decl(version, defs),
         "typescript_runtime": render_typescript_runtime(version, defs),
         "csharp": render_csharp(version, defs),
+        "mvp_decimal_limits": render_mvp_decimal_limits(version, defs),
     }
 
 

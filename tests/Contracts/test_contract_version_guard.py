@@ -118,6 +118,36 @@ class ContractVersionGuardTests(unittest.TestCase):
             errors = evaluate(Path(left), Path(right))
             self.assertTrue(any("without increasing" in item for item in errors))
 
+    def test_decimal_envelope_member_change_requires_major_increment(self):
+        with TemporaryDirectory() as left, TemporaryDirectory() as right:
+            base_defs = {
+                "Decimal": {
+                    "type": "string",
+                    "maxLength": 259,
+                    "pattern": r"^(?:0|[1-9][0-9]*)$",
+                    "x-autotrade-decimal-envelope": {
+                        "max_significant_digits": 256,
+                        "max_scale": 256,
+                        "max_integer_digits": 256,
+                    },
+                }
+            }
+            current_defs = json.loads(json.dumps(base_defs))
+            current_defs["Decimal"]["x-autotrade-decimal-envelope"][
+                "max_scale"
+            ] = 255
+            write_tree(Path(left), defs=base_defs)
+            write_tree(Path(right), version="1.1.0", defs=current_defs)
+            errors = evaluate(Path(left), Path(right))
+            self.assertTrue(
+                any(
+                    "breaking contract change requires a new major version" in item
+                    and "changed existing definitions" in item
+                    and "Decimal" in item
+                    for item in errors
+                )
+            )
+
     def test_added_required_member_requires_major_increment(self):
         with TemporaryDirectory() as left, TemporaryDirectory() as right:
             base_defs = {

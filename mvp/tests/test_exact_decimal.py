@@ -1,6 +1,7 @@
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 from fractions import Fraction
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.exact_decimal import (
     ExactDecimalError,
@@ -16,6 +17,7 @@ from mvp.autotrade_mvp.exact_decimal import (
     exact_subtract,
     exact_sum,
     is_exact_decimal_multiple,
+    parse_canonical_decimal_text,
     round_fraction_to_quantum,
     terminating_decimal,
 )
@@ -62,6 +64,11 @@ class HostileRoundingMode(str):
     def __eq__(self, other):
         type(self).equality_checks += 1
         raise AssertionError("hostile rounding-mode equality was virtual-dispatched")
+
+
+class HostileDecimalText(str):
+    def startswith(self, prefix, *args):
+        raise AssertionError("hostile str.startswith() was virtual-dispatched")
 
 
 class ExactDecimalTests(unittest.TestCase):
@@ -122,6 +129,63 @@ class ExactDecimalTests(unittest.TestCase):
                         )
         with self.assertRaisesRegex(ExactDecimalError, "quantum must be positive"):
             is_exact_decimal_multiple(Decimal("1"), Decimal("0"))
+
+    def test_canonical_decimal_text_parser_rejects_before_decimal_construction(self):
+        at_significant_limit = "9" * 128 + "." + "9" * 128
+        at_integer_limit = "9" * MAX_INTEGER_DIGITS
+        at_scale_limit = "0." + "0" * (MAX_SCALE - 1) + "1"
+        at_raw_length_limit = "-" + at_scale_limit
+        self.assertEqual(len(at_raw_length_limit), 259)
+        self.assertEqual(
+            parse_canonical_decimal_text(at_significant_limit),
+            Decimal(at_significant_limit),
+        )
+        self.assertEqual(
+            parse_canonical_decimal_text(at_integer_limit),
+            Decimal(at_integer_limit),
+        )
+        self.assertEqual(
+            parse_canonical_decimal_text(at_scale_limit),
+            Decimal(at_scale_limit),
+        )
+        self.assertEqual(
+            parse_canonical_decimal_text(at_raw_length_limit),
+            Decimal(at_raw_length_limit),
+        )
+
+        rejected = (
+            "9" * 129 + "." + "9" * 128,
+            "9" * (MAX_INTEGER_DIGITS + 1),
+            "0." + "0" * MAX_SCALE + "1",
+            "-0." + "0" * MAX_SCALE + "1",
+            "1e3",
+            "+1",
+            "-0",
+            "1.20",
+        )
+        for value in rejected:
+            with self.subTest(length=len(value)):
+                with self.assertRaisesRegex(
+                    ExactDecimalError, "canonical bounded Decimal text"
+                ):
+                    parse_canonical_decimal_text(value)
+
+        raw_length_over = "-0." + "0" * MAX_SCALE + "1"
+        self.assertEqual(len(raw_length_over), 260)
+        with patch(
+            "mvp.autotrade_mvp.exact_decimal.Decimal",
+            side_effect=AssertionError("Decimal construction must not run"),
+        ):
+            with self.assertRaisesRegex(
+                ExactDecimalError, "canonical bounded Decimal text"
+            ):
+                parse_canonical_decimal_text(raw_length_over)
+
+        hostile = HostileDecimalText("1.25")
+        with self.assertRaisesRegex(
+            ExactDecimalError, "canonical bounded Decimal text"
+        ):
+            parse_canonical_decimal_text(hostile)
 
     def test_polymorphic_decimal_is_rejected_before_virtual_dispatch(self):
         hostile = HostileDecimal("1.25")

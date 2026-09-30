@@ -37,6 +37,7 @@ _GIT_SHA = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _RELEASE_ARTIFACT_MEDIA_TYPE = "application/vnd.autotrade.release-artifact"
 _RECOVERY_EVIDENCE_MEDIA_TYPE = "application/vnd.autotrade.recovery-evidence"
+_RECOVERY_RAW_EVIDENCE_MEDIA_TYPE = "application/vnd.autotrade.recovery-raw-evidence"
 _QUALIFICATION_DOMAIN = "RECOVERY"
 _QUALIFICATION_GATE = "RELEASE"
 _QUALIFICATION_PACKAGE = "WP-59"
@@ -93,6 +94,15 @@ class RecoveryRawEvidenceRef:
             raise TypeError("raw evidence role must be exact RecoveryRawEvidenceRole")
         if type(self.artifact_ref) is not EvidenceArtifactRef:
             raise TypeError("raw evidence artifact_ref must be exact EvidenceArtifactRef")
+        expected_kind = "RECOVERY_" + self.role.value
+        if self.artifact_ref.evidence_kind != expected_kind:
+            raise ValueError(
+                "raw evidence artifact kind must match its recovery role"
+            )
+        if self.artifact_ref.media_type != _RECOVERY_RAW_EVIDENCE_MEDIA_TYPE:
+            raise ValueError(
+                "raw evidence media type must match the canonical recovery raw type"
+            )
         for name in (
             "release_artifact_id",
             "release_artifact_sha256",
@@ -215,6 +225,70 @@ def _snapshot_recovery_raw_evidence_ref(
 
 
 _REQUIRED_SCENARIOS = frozenset(RecoveryScenario)
+
+_BASE_REQUIRED_RAW_EVIDENCE_ROLES = frozenset(
+    {
+        RecoveryRawEvidenceRole.JOURNAL_INTEGRITY,
+        RecoveryRawEvidenceRole.BACKUP_INTEGRITY,
+        RecoveryRawEvidenceRole.RECONCILIATION,
+        RecoveryRawEvidenceRole.SENDER_FENCE,
+        RecoveryRawEvidenceRole.AUTHORITY_REACQUISITION,
+        RecoveryRawEvidenceRole.DATA_LOSS_AUDIT,
+        RecoveryRawEvidenceRole.DUPLICATE_EXTERNAL_ACTION_AUDIT,
+        RecoveryRawEvidenceRole.UNKNOWN_SUBMISSION_AUDIT,
+    }
+)
+_REQUIRED_RAW_EVIDENCE_ROLES_BY_SCENARIO = MappingProxyType(
+    {
+        scenario: (
+            _BASE_REQUIRED_RAW_EVIDENCE_ROLES
+            | (
+                frozenset({RecoveryRawEvidenceRole.UPGRADE_ROLLBACK})
+                if scenario is RecoveryScenario.UPGRADE_FAILURE
+                else frozenset()
+            )
+        )
+        for scenario in RecoveryScenario
+    }
+)
+
+
+def required_recovery_raw_evidence_roles(
+    scenario: RecoveryScenario,
+    *,
+    open_risk_present: bool,
+) -> frozenset[RecoveryRawEvidenceRole]:
+    """Return the exact raw proof classes required by the recovery protocol."""
+
+    if type(scenario) is not RecoveryScenario:
+        raise TypeError("scenario must be exact RecoveryScenario")
+    if type(open_risk_present) is not bool:
+        raise TypeError("open_risk_present must be exact bool")
+    roles = _REQUIRED_RAW_EVIDENCE_ROLES_BY_SCENARIO[scenario]
+    if open_risk_present:
+        roles = roles | frozenset({RecoveryRawEvidenceRole.PROTECTION_STATE})
+    return roles
+
+
+def recovery_raw_evidence_metadata(
+    ref: RecoveryRawEvidenceRef,
+) -> dict[str, object]:
+    """Bind one raw artifact to its exact recovery role and campaign scope."""
+
+    ref = _snapshot_recovery_raw_evidence_ref(ref)
+    return {
+        "evidence_kind": ref.artifact_ref.evidence_kind,
+        "recovery_scenario": ref.scenario.value,
+        "recovery_raw_role": ref.role.value,
+        "source_sha": ref.artifact_ref.source_sha,
+        "release_artifact_id": ref.release_artifact_id,
+        "release_artifact_sha256": ref.release_artifact_sha256,
+        "evidence_schema_version": ref.evidence_schema_version,
+        "protocol_id": ref.protocol_id,
+        "test_run_id": ref.test_run_id,
+    }
+
+
 
 
 def _text(value: str, *, name: str) -> str:
@@ -762,6 +836,124 @@ def recovery_evidence_receipt_bytes(
     ).encode("utf-8")
 
 
+def _artifact_ref_identity(
+    ref: EvidenceArtifactRef,
+) -> tuple[str, str, str, str, str]:
+    return (
+        ref.artifact_id,
+        ref.sha256,
+        ref.source_sha,
+        ref.media_type,
+        ref.evidence_kind,
+    )
+
+
+def _summary_evidence_ref_identity(
+    item: RecoveryScenarioEvidence,
+) -> tuple[str, str, str, str, str]:
+    return (
+        item.evidence_artifact_id,
+        item.evidence_artifact_sha256,
+        item.source_sha,
+        _RECOVERY_EVIDENCE_MEDIA_TYPE,
+        "RECOVERY_SCENARIO_EVIDENCE",
+    )
+
+
+def _expected_recovery_evidence_ref_identities(
+    evidence: Sequence[RecoveryScenarioEvidence],
+) -> set[tuple[str, str, str, str, str]]:
+    expected = {
+        _summary_evidence_ref_identity(item)
+        for item in evidence
+    }
+    for item in evidence:
+        expected.update(
+            _artifact_ref_identity(ref.artifact_ref)
+            for ref in item.raw_evidence_refs
+        )
+    return expected
+
+
+def _raw_evidence_identity_reused(
+    evidence: Sequence[RecoveryScenarioEvidence],
+) -> bool:
+    raw_ids: list[str] = []
+    raw_digests: list[str] = []
+    reserved_ids = {
+        item.evidence_artifact_id
+        for item in evidence
+    }
+    reserved_digests = {
+        item.evidence_artifact_sha256
+        for item in evidence
+    }
+    for item in evidence:
+        reserved_ids.add(item.release_artifact_id)
+        reserved_digests.add(item.release_artifact_sha256)
+        for ref in item.raw_evidence_refs:
+            artifact_id = ref.artifact_ref.artifact_id
+            digest = ref.artifact_ref.sha256
+            if artifact_id in reserved_ids or digest in reserved_digests:
+                return True
+            raw_ids.append(artifact_id)
+            raw_digests.append(digest)
+    return (
+        len(raw_ids) != len(set(raw_ids))
+        or len(raw_digests) != len(set(raw_digests))
+    )
+
+
+def _read_recovery_raw_evidence(
+    read_snapshot,
+    ref: RecoveryRawEvidenceRef,
+) -> bytes | None:
+    """Resolve one raw proof from the same authenticated evidence authority."""
+
+    ref = _snapshot_recovery_raw_evidence_ref(ref)
+    try:
+        manifest, raw = read_snapshot(ref.artifact_ref.artifact_id)
+        if type(raw) is not bytes:
+            return None
+        if type(manifest.get("manifest_hash")) is not str:
+            return None
+        if manifest.get("sha256") != ref.artifact_ref.sha256:
+            return None
+        if manifest.get("media_type") != ref.artifact_ref.media_type:
+            return None
+        if manifest.get("source_refs") != [f"git:{ref.artifact_ref.source_sha}"]:
+            return None
+        if manifest.get("metadata") != recovery_raw_evidence_metadata(ref):
+            return None
+        if "sha256:" + sha256(raw).hexdigest() != ref.artifact_ref.sha256:
+            return None
+    except (
+        ArtifactIntegrityError,
+        FileNotFoundError,
+        OSError,
+        TypeError,
+        ValueError,
+    ):
+        return None
+    return raw
+
+
+def _canonical_recovery_raw_semantics_verified(
+    ref: RecoveryRawEvidenceRef,
+    raw: bytes,
+) -> bool:
+    """Deny semantic authority until a canonical role verifier is composed.
+
+    ArtifactStore integrity plus a qualification signature establish exact bytes
+    and scope, not that a real journal/fence/backup/provider event occurred.
+    This function is intentionally not caller-injectable.  Role-specific
+    authorities must replace this deny-only implementation in source.
+    """
+
+    del ref, raw
+    return False
+
+
 def _store_artifact_matches(
     read_snapshot,
     *,
@@ -1069,7 +1261,23 @@ class RecoveryQualificationDecision:
                     "PASS recovery decision release artifact is not integrity verified"
                 )
 
+            if _raw_evidence_identity_reused(verification_evidence):
+                raise ValueError(
+                    "PASS recovery decision raw evidence identities must be globally unique"
+                )
+
             for item in verification_evidence:
+                expected_raw_roles = required_recovery_raw_evidence_roles(
+                    item.scenario,
+                    open_risk_present=item.open_risk_present,
+                )
+                actual_raw_roles = {
+                    ref.role for ref in item.raw_evidence_refs
+                }
+                if actual_raw_roles != expected_raw_roles:
+                    raise ValueError(
+                        "PASS recovery decision raw evidence role coverage is incomplete"
+                    )
                 if (
                     item.source_sha != self.source_sha
                     or item.release_artifact_id != self.release_artifact_id
@@ -1117,6 +1325,22 @@ class RecoveryQualificationDecision:
                     raise ValueError(
                         "PASS recovery decision evidence artifact is not integrity verified"
                     )
+                for raw_ref in item.raw_evidence_refs:
+                    raw = _read_recovery_raw_evidence(
+                        trusted_read,
+                        raw_ref,
+                    )
+                    if raw is None:
+                        raise ValueError(
+                            "PASS recovery decision raw evidence artifact is not integrity verified"
+                        )
+                    if not _canonical_recovery_raw_semantics_verified(
+                        raw_ref,
+                        raw,
+                    ):
+                        raise ValueError(
+                            "PASS recovery decision raw evidence semantic authority is unavailable"
+                        )
 
             try:
                 accepted = verify_canonical_qualification_attestation(
@@ -1141,24 +1365,11 @@ class RecoveryQualificationDecision:
                 raise ValueError(
                     "PASS recovery decision requires a canonical PASS attestation"
                 )
-            expected_refs = {
-                (
-                    item.evidence_artifact_id,
-                    item.evidence_artifact_sha256,
-                    item.source_sha,
-                    _RECOVERY_EVIDENCE_MEDIA_TYPE,
-                    "RECOVERY_SCENARIO_EVIDENCE",
-                )
-                for item in verification_evidence
-            }
+            expected_refs = _expected_recovery_evidence_ref_identities(
+                verification_evidence
+            )
             accepted_refs = {
-                (
-                    ref.artifact_id,
-                    ref.sha256,
-                    ref.source_sha,
-                    ref.media_type,
-                    ref.evidence_kind,
-                )
+                _artifact_ref_identity(ref)
                 for ref in accepted.evidence_refs
             }
             if accepted_refs != expected_refs:
@@ -1279,6 +1490,10 @@ def qualify_recovery_release(
         blockers.append(f"missing_scenario:{scenario}")
         inconclusive = True
 
+    if _raw_evidence_identity_reused(tuple(by_scenario.values())):
+        blockers.append("raw_evidence:identity_reused")
+        hard_failure = True
+
     release_artifact_verified = False
     if trusted_read is not None:
         release_artifact_verified = _store_artifact_matches(
@@ -1326,13 +1541,12 @@ def qualify_recovery_release(
             inconclusive = True
         else:
             signed_refs = {
-                (item.artifact_id, item.sha256)
+                _artifact_ref_identity(item)
                 for item in accepted.evidence_refs
             }
-            expected_refs = {
-                (item.evidence_artifact_id, item.evidence_artifact_sha256)
-                for item in by_scenario.values()
-            }
+            expected_refs = _expected_recovery_evidence_ref_identities(
+                tuple(by_scenario.values())
+            )
             if accepted.result == "FAIL":
                 blockers.append("independent_evidence_attestation_failed")
                 hard_failure = True
@@ -1364,6 +1578,52 @@ def qualify_recovery_release(
         if not integrity_verified:
             blockers.append(f"{prefix}:evidence_integrity_unverified")
             inconclusive = True
+
+        expected_raw_roles = required_recovery_raw_evidence_roles(
+            scenario,
+            open_risk_present=item.open_risk_present,
+        )
+        actual_raw_roles = {
+            ref.role for ref in item.raw_evidence_refs
+        }
+        missing_raw_roles = sorted(
+            expected_raw_roles - actual_raw_roles,
+            key=lambda role: role.value,
+        )
+        extra_raw_roles = sorted(
+            actual_raw_roles - expected_raw_roles,
+            key=lambda role: role.value,
+        )
+        for role in missing_raw_roles:
+            blockers.append(
+                f"{prefix}:raw_evidence_role_missing:{role.value}"
+            )
+            inconclusive = True
+        for role in extra_raw_roles:
+            blockers.append(
+                f"{prefix}:raw_evidence_role_unexpected:{role.value}"
+            )
+            hard_failure = True
+
+        for raw_ref in item.raw_evidence_refs:
+            raw = None
+            if trusted_read is not None:
+                raw = _read_recovery_raw_evidence(
+                    trusted_read,
+                    raw_ref,
+                )
+            if raw is None:
+                blockers.append(
+                    f"{prefix}:raw_evidence_integrity_unverified:{raw_ref.role.value}"
+                )
+                inconclusive = True
+            elif raw_ref.role in expected_raw_roles and not (
+                _canonical_recovery_raw_semantics_verified(raw_ref, raw)
+            ):
+                blockers.append(
+                    f"{prefix}:raw_evidence_semantics_unverified:{raw_ref.role.value}"
+                )
+                inconclusive = True
 
         if item.source_sha != policy.source_sha:
             blockers.append(f"{prefix}:source_sha_mismatch")

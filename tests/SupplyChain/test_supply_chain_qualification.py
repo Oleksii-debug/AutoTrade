@@ -561,7 +561,7 @@ class SupplyChainQualificationTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "FAIL")
         self.assertIn(
-            "SUPPLY_CHAIN.TRUST_SUBJECT_MISMATCH",
+            "SUPPLY_CHAIN.TRUST_ATTESTATION_INVALID",
             result.reason_codes,
         )
 
@@ -581,7 +581,7 @@ class SupplyChainQualificationTests(unittest.TestCase):
 
         self.assertEqual(result.status, "FAIL")
         self.assertIn(
-            "SUPPLY_CHAIN.TRUST_ATTESTATION_INVALID",
+            "SUPPLY_CHAIN.TRUST_SUBJECT_MISMATCH",
             result.reason_codes,
         )
         self.assertNotIn(

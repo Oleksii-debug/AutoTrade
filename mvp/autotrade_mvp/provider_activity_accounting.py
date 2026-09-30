@@ -1,2094 +1,29 @@
-"""Durable accounting bridge for confirmed external provider cash activity.
+"""Compatibility facade with atomic provider-cash replay authority.
 
-The bridge deliberately handles only provider-normalized DEPOSIT/WITHDRAWAL
-activity with MANUAL or EXTERNAL origin. Ambiguous/unknown activity remains a
-reconciliation blocker rather than being guessed into economic truth.
-
-Provider evidence and the corresponding economic transaction are committed in
-one JournalStore command transaction. Exact retries are idempotent; reuse of the
-same provider/account/activity identity with changed economic content fails
-closed.
+The established provider-accounting implementation remains byte-for-byte in
+_provider_activity_accounting_impl. Only the external provider cash bridge is
+overridden here so exact replay resolves command + EVENT_BATCH rows from one
+JournalStore snapshot rather than two independent event reads.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
-from hashlib import sha256
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
-from .accounting import (
-    AccountingConflict,
-    EconomicBook,
-    JournalTransaction,
-    Posting,
-    ScopedEconomicBook,
-    book_external_cash_flow,
-    canonical_transaction,
-)
-from .durable_reservations import (
-    DurableReservationBook,
-    reservation_snapshot_digest,
-)
-from .durable_settlement import DurableSettlementBook
-from .fill_accounting import (
-    ProjectedFillEvidence,
-    ProviderFillFinancialPlan,
-    build_provider_fill_correction_transactions,
-    build_provider_fill_financial_plan,
-)
-from .persistence import JournalStore, canonical_json, payload_digest
-from .reconciliation import ProviderActivityEvidence, ProviderFillEvidence
-from .settlement import SettlementObligation
+from . import _provider_activity_accounting_impl as _impl
+from ._provider_activity_accounting_impl import *  # noqa: F401,F403
+from .persistence import JournalStore
 
 
-_ALLOWED_EXTERNAL_CASH_TYPES = frozenset({"DEPOSIT", "WITHDRAWAL"})
-_ALLOWED_EXTERNAL_ORIGINS = frozenset({"MANUAL", "EXTERNAL"})
+def __getattr__(name: str):
+    """Preserve legacy access to private helpers from the retained implementation."""
 
+    return getattr(_impl, name)
 
-def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{name} is required")
-    return value.strip()
 
-
-def _environment(value: str) -> str:
-    environment = _text(value, name="environment").upper()
-    if environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
-        raise ValueError(
-            "environment must be REPLAY, SIMULATION, PAPER, or LIVE"
-        )
-    return environment
-
-
-def _decimal(value: Decimal | str | int, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise TypeError(f"{name} must use Decimal, string or integer input")
-    try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ValueError(f"{name} must be a finite decimal")
-    return result
-
-
-def _decimal_text(value: Decimal) -> str:
-    normalized = value.normalize()
-    return format(normalized, "f")
-
-
-def _instant(value: str, *, name: str) -> datetime:
-    text = _text(value, name=name)
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError as error:
-        raise ValueError(f"{name} must be an ISO timestamp") from error
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise ValueError(f"{name} must include timezone")
-    return parsed.astimezone(timezone.utc)
-
-
-def _instant_text(value: str, *, name: str) -> str:
-    return _instant(value, name=name).isoformat().replace("+00:00", "Z")
-
-
-def _scoped_identity(kind: str, *parts: str) -> str:
-    """Build an unambiguous durable identity from opaque external identifiers."""
-    normalized_kind = _text(kind, name="identity_kind").lower()
-    digest = sha256(canonical_json(list(parts)).encode("utf-8")).hexdigest()
-    return f"{normalized_kind}:{digest}"
-
-
-def _activity_identity(
-    *,
-    provider_id: str,
-    account_id: str,
-    environment: str,
-    activity_id: str,
-) -> str:
-    provider = _text(provider_id, name="provider_id").upper()
-    account = _text(account_id, name="account_id")
-    scope = _environment(environment)
-    activity = _text(activity_id, name="activity_id")
-    return _scoped_identity(
-        "provider-activity",
-        provider,
-        account,
-        scope,
-        activity,
-    )
-
-
-def _book_id(*, provider_id: str, account_id: str, environment: str) -> str:
-    provider = _text(provider_id, name="provider_id").upper()
-    account = _text(account_id, name="account_id")
-    scope = _environment(environment)
-    return _scoped_identity("economic-book", provider, account, scope)
-
-
-def _transaction_payload(transaction: JournalTransaction) -> dict[str, Any]:
-    """Serialize one economic fact using the canonical immutable transaction shape."""
-    return canonical_transaction(transaction)
-
-
-def _transaction_from_payload(value: Mapping[str, Any]) -> JournalTransaction:
-    """Restore canonical v1.2 transactions while retaining legacy journal readability."""
-    if not isinstance(value, Mapping):
-        raise ValueError("economic transaction payload must be an object")
-
-    schema_version = value.get("schema_version")
-    legacy_keys = {
-        "transaction_id",
-        "cause_event_id",
-        "reverses_transaction_id",
-        "postings",
-    }
-    canonical_keys = legacy_keys | {
-        "schema_version",
-        "economic_effective_at",
-        "economic_order_key",
-        "observed_at",
-        "corrects_transaction_id",
-    }
-    if schema_version is None:
-        if set(value) != legacy_keys:
-            raise ValueError("legacy economic transaction payload shape is invalid")
-    elif schema_version == "1.2.0":
-        if set(value) != canonical_keys:
-            raise ValueError("canonical economic transaction payload shape is invalid")
-    else:
-        raise ValueError("unsupported economic transaction schema_version")
-
-    postings = value.get("postings")
-    if not isinstance(postings, list):
-        raise ValueError("economic transaction postings must be a list")
-    parsed_postings: list[Posting] = []
-    for item in postings:
-        if not isinstance(item, Mapping) or set(item) != {
-            "ledger_account",
-            "asset_or_currency",
-            "signed_amount",
-        }:
-            raise ValueError("economic posting must use the canonical shape")
-        parsed_postings.append(
-            Posting(
-                ledger_account=_text(
-                    item.get("ledger_account"), name="ledger_account"
-                ),
-                asset_or_currency=_text(
-                    item.get("asset_or_currency"), name="asset_or_currency"
-                ),
-                signed_amount=_decimal(
-                    item.get("signed_amount"), name="signed_amount"
-                ),
-            )
-        )
-
-    def optional_text(name: str) -> str | None:
-        raw = value.get(name)
-        return _text(raw, name=name) if raw is not None else None
-
-    transaction = JournalTransaction(
-        transaction_id=_text(value.get("transaction_id"), name="transaction_id"),
-        cause_event_id=_text(value.get("cause_event_id"), name="cause_event_id"),
-        postings=tuple(parsed_postings),
-        reverses_transaction_id=optional_text("reverses_transaction_id"),
-        economic_effective_at=optional_text("economic_effective_at"),
-        economic_order_key=optional_text("economic_order_key"),
-        observed_at=optional_text("observed_at"),
-        corrects_transaction_id=optional_text("corrects_transaction_id"),
-    )
-    if schema_version == "1.2.0" and canonical_transaction(transaction) != dict(value):
-        raise ValueError("economic transaction payload is not canonical")
-    return transaction
-
-
-def _economic_batch_digest(
-    *,
-    provider_id: str,
-    account_id: str,
-    environment: str,
-    transactions: Iterable[JournalTransaction],
-) -> str:
-    material = {
-        "schema_version": "1.0.0",
-        "provider_id": _text(provider_id, name="provider_id").upper(),
-        "account_id": _text(account_id, name="account_id"),
-        "environment": _environment(environment),
-        "transactions": [_transaction_payload(item) for item in transactions],
-    }
-    return payload_digest(material)
-
-
-@dataclass(frozen=True)
-class PreparedEconomicBatch:
-    """One canonical economic batch prepared from a single durable journal cut."""
-
-    transactions: tuple[JournalTransaction, ...]
-    batch_digest: str
-    envelope: dict[str, Any] | None
-    request: dict[str, Any]
-    result: dict[str, Any]
-    aggregate_version: int
-    already_committed: bool = False
-
-
-_PROVIDER_FILL_BINDING_AGGREGATE_TYPE = "provider_fill_financial_binding"
-_PROVIDER_FILL_BINDING_EVENT_TYPE = "ProviderFillFinancialPlanBound"
-
-
-@dataclass(frozen=True)
-class PreparedProviderFillBinding:
-    """Immutable audit binding for one provider fill financial plan.
-
-    The binding is committed in the same JournalStore transaction as the
-    reservation consumption and economic batch. It owns no financial state; it
-    proves which provider execution produced which canonical plan so later
-    corrections cannot accidentally borrow aggregate reservation consumption
-    from an unrelated partial fill.
-    """
-
-    aggregate_id: str
-    envelope: dict[str, Any] | None
-    request: dict[str, Any]
-    result: dict[str, Any]
-    aggregate_version: int
-    already_committed: bool = False
-
-
-
-_PROVIDER_FILL_CORRECTION_BINDING_AGGREGATE_TYPE = (
-    "provider_fill_reservation_correction_binding"
-)
-_PROVIDER_FILL_CORRECTION_BINDING_EVENT_TYPE = (
-    "ProviderFillReservationCorrectionBound"
-)
-
-
-@dataclass(frozen=True)
-class PreparedProviderFillCorrectionBinding:
-    """Audit binding for conservative reservation effects of one fill correction.
-
-    Financial authority remains in DurableReservationBook and
-    DurableProviderEconomicBook. This append-only evidence records the
-    per-provider-execution conservative high-water mark so a correction can
-    consume additional capacity atomically without ever releasing authority.
-    """
-
-    aggregate_id: str
-    envelope: dict[str, Any] | None
-    request: dict[str, Any]
-    result: dict[str, Any]
-    aggregate_version: int
-    additional_usage_items: tuple[tuple[str, Decimal], ...]
-    reservation_cut_digest: str
-    already_committed: bool = False
-
-    @property
-    def additional_usage(self) -> Mapping[str, Decimal]:
-        return dict(self.additional_usage_items)
-
-
-def _provider_fill_binding_aggregate_id(
-    *,
-    provider_id: str,
-    account_id: str,
-    environment: str,
-    provider_execution_id: str,
-) -> str:
-    return _scoped_identity(
-        "provider-fill-financial-binding",
-        _text(provider_id, name="provider_id").upper(),
-        _text(account_id, name="account_id"),
-        _environment(environment),
-        _text(provider_execution_id, name="provider_execution_id"),
-    )
-
-
-def _projected_fill_binding_payload(
-    projected_fill: ProjectedFillEvidence,
-) -> dict[str, Any]:
-    return {
-        "fill_id": projected_fill.fill_id,
-        "provider_execution_id": projected_fill.provider_execution_id,
-        "intent_id": projected_fill.intent_id,
-        "client_order_id": projected_fill.client_order_id,
-        "side": projected_fill.side,
-        "position_side": getattr(projected_fill, "position_side", None),
-        "position_effect": getattr(projected_fill, "position_effect", None),
-        "quantity": _decimal_text(projected_fill.quantity),
-        "price": _decimal_text(projected_fill.price),
-        "provider_revision": projected_fill.provider_revision,
-        "correction_of": projected_fill.correction_of,
-    }
-
-
-def _provider_fill_binding_payload(
-    provider_fill: ProviderFillEvidence,
-) -> dict[str, Any]:
-    return {
-        "provider_id": provider_fill.provider_id,
-        "account_id": provider_fill.account_id,
-        "environment": provider_fill.environment,
-        "provider_execution_id": provider_fill.provider_execution_id,
-        "client_order_id": provider_fill.client_order_id,
-        "instrument": provider_fill.instrument,
-        "quantity": _decimal_text(provider_fill.quantity),
-        "price": _decimal_text(provider_fill.price),
-        "fee_amount": _decimal_text(provider_fill.fee_amount),
-        "fee_currency": provider_fill.fee_currency,
-        "trade_time": _instant_text(provider_fill.trade_time, name="trade_time"),
-        "side": provider_fill.side,
-        "position_side": provider_fill.position_side,
-        "position_effect": getattr(provider_fill, "position_effect", None),
-        "evidence_refs": list(provider_fill.evidence_refs),
-    }
-
-
-def _prepare_provider_fill_binding(
-    economic_book: "DurableProviderEconomicBook",
-    *,
-    plan: ProviderFillFinancialPlan,
-    projected_fill: ProjectedFillEvidence,
-    provider_fill: ProviderFillEvidence,
-    committed_at: str,
-) -> PreparedProviderFillBinding:
-    if not isinstance(plan, ProviderFillFinancialPlan):
-        raise TypeError("plan must be ProviderFillFinancialPlan")
-    if not isinstance(projected_fill, ProjectedFillEvidence):
-        raise TypeError("projected_fill must be ProjectedFillEvidence")
-    if not isinstance(provider_fill, ProviderFillEvidence):
-        raise TypeError("provider_fill must be ProviderFillEvidence")
-    if projected_fill.correction_of is not None:
-        raise AccountingConflict(
-            "initial provider fill binding cannot be created from correction evidence"
-        )
-    if plan.provider_execution_id != provider_fill.provider_execution_id:
-        raise AccountingConflict(
-            "provider fill binding execution identity changed"
-        )
-    if plan.intent_id != projected_fill.intent_id:
-        raise AccountingConflict("provider fill binding intent identity changed")
-
-    aggregate_id = _provider_fill_binding_aggregate_id(
-        provider_id=economic_book.provider_id,
-        account_id=economic_book.account_id,
-        environment=economic_book.environment,
-        provider_execution_id=provider_fill.provider_execution_id,
-    )
-    usage = {
-        key: _decimal_text(value)
-        for key, value in plan.usage_items
-    }
-    projected_payload = _projected_fill_binding_payload(projected_fill)
-    provider_payload = _provider_fill_binding_payload(provider_fill)
-    request = {
-        "schema_version": "1.1.0",
-        "provider_id": economic_book.provider_id,
-        "account_id": economic_book.account_id,
-        "environment": economic_book.environment,
-        "reservation_id": plan.reservation_id,
-        "intent_id": plan.intent_id,
-        "provider_execution_id": plan.provider_execution_id,
-        "fill_id": projected_fill.fill_id,
-        "provider_revision": projected_fill.provider_revision,
-        "projected_fill": projected_payload,
-        "projected_fill_digest": payload_digest(projected_payload),
-        "provider_fill": provider_payload,
-        "provider_fill_digest": payload_digest(provider_payload),
-        "reservation_cut_digest": plan.reservation_cut_digest,
-        "plan_digest": plan.plan_digest,
-        "transaction_id": plan.transaction.transaction_id,
-        "transaction_digest": payload_digest(
-            canonical_transaction(plan.transaction)
-        ),
-        "derived_usage": usage,
-    }
-    events = economic_book.store.load_events(
-        _PROVIDER_FILL_BINDING_AGGREGATE_TYPE,
-        aggregate_id,
-    )
-    for event in events:
-        if event.get("event_type") != _PROVIDER_FILL_BINDING_EVENT_TYPE:
-            raise AccountingConflict(
-                "provider fill financial binding contains unsupported event type"
-            )
-        payload = event.get("payload")
-        if not isinstance(payload, Mapping):
-            raise AccountingConflict(
-                "provider fill financial binding payload is invalid"
-            )
-        if (
-            payload.get("provider_id") != economic_book.provider_id
-            or payload.get("account_id") != economic_book.account_id
-            or payload.get("environment") != economic_book.environment
-            or payload.get("provider_execution_id") != plan.provider_execution_id
-        ):
-            raise AccountingConflict(
-                "provider fill financial binding scope is invalid"
-            )
-
-    if events:
-        if len(events) != 1:
-            raise AccountingConflict(
-                "provider fill financial binding identity is duplicated"
-            )
-        event = events[0]
-        payload = event["payload"]
-        stored_request = payload.get("request")
-        if not isinstance(stored_request, Mapping):
-            raise AccountingConflict(
-                "provider fill financial binding request is invalid"
-            )
-        if set(stored_request) != set(request):
-            raise AccountingConflict(
-                "provider fill financial binding request shape changed"
-            )
-        stored_request = dict(stored_request)
-        if payload.get("request_digest") != payload_digest(stored_request):
-            raise AccountingConflict(
-                "provider fill financial binding request digest is invalid"
-            )
-
-        stable_keys = set(request) - {
-            "reservation_cut_digest",
-            "plan_digest",
-        }
-        if any(
-            stored_request.get(key) != request.get(key)
-            for key in stable_keys
-        ):
-            raise AccountingConflict(
-                "provider execution already has a different financial binding"
-            )
-
-        stored_cut = stored_request.get("reservation_cut_digest")
-        if (
-            not isinstance(stored_cut, str)
-            or not stored_cut.startswith("sha256:")
-            or len(stored_cut) != 71
-            or any(ch not in "0123456789abcdef" for ch in stored_cut[7:])
-        ):
-            raise AccountingConflict(
-                "provider fill financial binding reservation cut is invalid"
-            )
-        stored_plan_digest = stored_request.get("plan_digest")
-        expected_plan_digest = payload_digest(
-            {
-                "schema_version": "1.1.0",
-                "provider_id": economic_book.provider_id,
-                "account_id": economic_book.account_id,
-                "environment": economic_book.environment,
-                "reservation_id": plan.reservation_id,
-                "intent_id": plan.intent_id,
-                "provider_execution_id": plan.provider_execution_id,
-                "reservation_cut_digest": stored_cut,
-                "transaction": canonical_transaction(plan.transaction),
-                "derived_usage": usage,
-            }
-        )
-        if stored_plan_digest != expected_plan_digest:
-            raise AccountingConflict(
-                "provider fill financial binding plan digest is invalid"
-            )
-        return PreparedProviderFillBinding(
-            aggregate_id=aggregate_id,
-            envelope=None,
-            request=stored_request,
-            result={
-                "binding_event_id": event["event_id"],
-                "plan_digest": stored_plan_digest,
-            },
-            aggregate_version=int(event["aggregate_version"]),
-            already_committed=True,
-        )
-
-    request_digest = payload_digest(request)
-    event_id = str(
-        uuid5(
-            NAMESPACE_URL,
-            "https://events.autotrade.local/provider-fill-financial-binding/"
-            + aggregate_id,
-        )
-    )
-    payload = {
-        "schema_version": "1.0.0",
-        "provider_id": economic_book.provider_id,
-        "account_id": economic_book.account_id,
-        "environment": economic_book.environment,
-        "provider_execution_id": plan.provider_execution_id,
-        "request_digest": request_digest,
-        "request": request,
-    }
-    envelope = {
-        "event_id": event_id,
-        "event_type": _PROVIDER_FILL_BINDING_EVENT_TYPE,
-        "aggregate_type": _PROVIDER_FILL_BINDING_AGGREGATE_TYPE,
-        "aggregate_id": aggregate_id,
-        "aggregate_version": "1",
-        "committed_at": _instant_text(committed_at, name="committed_at"),
-        "payload": payload,
-        "payload_hash": payload_digest(payload),
-    }
-    return PreparedProviderFillBinding(
-        aggregate_id=aggregate_id,
-        envelope=envelope,
-        request=request,
-        result={
-            "binding_event_id": event_id,
-            "plan_digest": plan.plan_digest,
-        },
-        aggregate_version=1,
-    )
-
-
-
-
-def _positive_usage_map(value: object, *, name: str) -> dict[str, Decimal]:
-    if not isinstance(value, Mapping) or not value:
-        raise AccountingConflict(f"{name} must be a non-empty resource mapping")
-    result: dict[str, Decimal] = {}
-    for raw_resource, raw_amount in value.items():
-        resource = _text(raw_resource, name=f"{name}.resource")
-        if resource in result:
-            raise AccountingConflict(f"{name} contains duplicate resource keys")
-        amount = _decimal(raw_amount, name=f"{name}[{resource}]")
-        if amount <= 0:
-            raise AccountingConflict(f"{name} amounts must be strictly positive")
-        result[resource] = amount
-    return dict(sorted(result.items()))
-
-
-def _usage_payload(usage: Mapping[str, Decimal]) -> dict[str, str]:
-    return {
-        key: _decimal_text(value)
-        for key, value in sorted(usage.items())
-    }
-
-
-def _cash_outflow_usage(transaction: JournalTransaction) -> dict[str, Decimal]:
-    """Derive conservative cash resource usage from canonical fill postings.
-
-    Only negative CASH postings consume reserved capacity. Positive cash from a
-    rebate never releases or manufactures authority.
-    """
-
-    if not isinstance(transaction, JournalTransaction):
-        raise TypeError("transaction must be JournalTransaction")
-    usage: dict[str, Decimal] = {}
-    for posting in transaction.postings:
-        expected_account = f"CASH:{posting.asset_or_currency}"
-        if posting.ledger_account != expected_account or posting.signed_amount >= 0:
-            continue
-        usage[expected_account] = (
-            usage.get(expected_account, Decimal("0")) - posting.signed_amount
-        )
-    if not usage:
-        raise AccountingConflict(
-            "provider fill correction has no conservative cash outflow usage"
-        )
-    return dict(sorted(usage.items()))
-
-
-def _provider_fill_correction_binding_aggregate_id(
-    *,
-    provider_id: str,
-    account_id: str,
-    environment: str,
-    provider_execution_id: str,
-) -> str:
-    return _scoped_identity(
-        "provider-fill-reservation-correction-binding",
-        _text(provider_id, name="provider_id").upper(),
-        _text(account_id, name="account_id"),
-        _environment(environment),
-        _text(provider_execution_id, name="provider_execution_id"),
-    )
-
-
-def _prepare_provider_fill_correction_binding(
-    economic_book: "DurableProviderEconomicBook",
-    reservation_book: DurableReservationBook,
-    *,
-    reservation_id: str,
-    original_projected_fill: ProjectedFillEvidence,
-    original_provider_fill: ProviderFillEvidence,
-    corrected_projected_fill: ProjectedFillEvidence,
-    corrected_provider_fill: ProviderFillEvidence,
-    replacement: JournalTransaction,
-    asset_family: str,
-    committed_at: str,
-) -> PreparedProviderFillCorrectionBinding:
-    """Prepare correction high-water evidence without mutating financial state."""
-
-    if not isinstance(economic_book, DurableProviderEconomicBook):
-        raise TypeError("economic_book must be DurableProviderEconomicBook")
-    if not isinstance(reservation_book, DurableReservationBook):
-        raise TypeError("reservation_book must be DurableReservationBook")
-    if economic_book.store is not reservation_book.store:
-        raise ValueError("economic and reservation books must share one JournalStore")
-    if (
-        economic_book.environment != reservation_book.environment
-        or economic_book.account_id != reservation_book.account_id
-    ):
-        raise ValueError(
-            "economic and reservation books must share account/environment scope"
-        )
-    if _text(asset_family, name="asset_family").upper() != "CASH_EQUITY":
-        raise AccountingConflict(
-            "provider fill correction reservation mapping is not qualified "
-            "for this asset family"
-        )
-    if corrected_provider_fill.side != "BUY":
-        raise AccountingConflict(
-            "cash-equity correction reservation mapping is qualified only for BUY fills"
-        )
-    if corrected_provider_fill.position_side is not None:
-        raise AccountingConflict(
-            "cash-equity correction reservation mapping rejects derivative position_side"
-        )
-
-    rid = _text(reservation_id, name="reservation_id")
-    execution_id = _text(
-        corrected_provider_fill.provider_execution_id,
-        name="provider_execution_id",
-    )
-    if original_provider_fill.provider_execution_id != execution_id:
-        raise AccountingConflict("correction provider execution identity changed")
-    if corrected_projected_fill.provider_execution_id != execution_id:
-        raise AccountingConflict("corrected projection execution identity changed")
-
-    initial_aggregate_id = _provider_fill_binding_aggregate_id(
-        provider_id=economic_book.provider_id,
-        account_id=economic_book.account_id,
-        environment=economic_book.environment,
-        provider_execution_id=execution_id,
-    )
-    initial_events = economic_book.store.load_events(
-        _PROVIDER_FILL_BINDING_AGGREGATE_TYPE,
-        initial_aggregate_id,
-    )
-    if len(initial_events) != 1:
-        raise AccountingConflict(
-            "provider fill correction requires exactly one initial financial binding"
-        )
-    initial_event = initial_events[0]
-    if (
-        initial_event.get("event_type") != _PROVIDER_FILL_BINDING_EVENT_TYPE
-        or int(initial_event.get("aggregate_version", 0)) != 1
-    ):
-        raise AccountingConflict("initial provider fill financial binding is invalid")
-    initial_payload = initial_event.get("payload")
-    if not isinstance(initial_payload, Mapping):
-        raise AccountingConflict("initial provider fill binding payload is invalid")
-    if payload_digest(initial_payload) != initial_event.get("payload_hash"):
-        raise AccountingConflict("initial provider fill binding payload hash is invalid")
-    initial_request = initial_payload.get("request")
-    if not isinstance(initial_request, Mapping):
-        raise AccountingConflict("initial provider fill binding request is invalid")
-    initial_request = dict(initial_request)
-    if initial_payload.get("request_digest") != payload_digest(initial_request):
-        raise AccountingConflict("initial provider fill binding request digest is invalid")
-    if (
-        initial_request.get("provider_id") != economic_book.provider_id
-        or initial_request.get("account_id") != economic_book.account_id
-        or initial_request.get("environment") != economic_book.environment
-        or initial_request.get("provider_execution_id") != execution_id
-        or initial_request.get("reservation_id") != rid
-        or initial_request.get("intent_id") != corrected_projected_fill.intent_id
-    ):
-        raise AccountingConflict(
-            "provider fill correction does not match the initial financial binding"
-        )
-    initial_provider = initial_request.get("provider_fill")
-    if (
-        not isinstance(initial_provider, Mapping)
-        or initial_provider.get("side") != "BUY"
-        or initial_provider.get("position_side") is not None
-    ):
-        raise AccountingConflict(
-            "initial provider fill binding is not qualified cash-equity BUY evidence"
-        )
-
-    snapshot = reservation_book.get(rid)
-    if snapshot.intent_id != corrected_projected_fill.intent_id:
-        raise AccountingConflict(
-            "provider fill correction intent does not match admitted reservation"
-        )
-    initial_usage = _positive_usage_map(
-        initial_request.get("derived_usage"),
-        name="initial provider fill usage",
-    )
-    for resource, amount in initial_usage.items():
-        if resource not in snapshot.original or amount > snapshot.original[resource]:
-            raise AccountingConflict(
-                "initial provider fill usage exceeds the admitted reservation envelope"
-            )
-
-    aggregate_id = _provider_fill_correction_binding_aggregate_id(
-        provider_id=economic_book.provider_id,
-        account_id=economic_book.account_id,
-        environment=economic_book.environment,
-        provider_execution_id=execution_id,
-    )
-    events = economic_book.store.load_events(
-        _PROVIDER_FILL_CORRECTION_BINDING_AGGREGATE_TYPE,
-        aggregate_id,
-    )
-    conservative_usage = dict(initial_usage)
-    active_fill_id = _text(initial_request.get("fill_id"), name="initial fill_id")
-    seen_fill_ids = {active_fill_id}
-    last_event: Mapping[str, Any] | None = None
-    last_request: dict[str, Any] | None = None
-
-    for expected_version, event in enumerate(events, 1):
-        if (
-            event.get("event_type") != _PROVIDER_FILL_CORRECTION_BINDING_EVENT_TYPE
-            or int(event.get("aggregate_version", 0)) != expected_version
-        ):
-            raise AccountingConflict(
-                "provider fill correction binding versions are invalid"
-            )
-        payload = event.get("payload")
-        if not isinstance(payload, Mapping):
-            raise AccountingConflict("provider fill correction binding payload is invalid")
-        if payload_digest(payload) != event.get("payload_hash"):
-            raise AccountingConflict(
-                "provider fill correction binding payload hash is invalid"
-            )
-        if (
-            payload.get("provider_id") != economic_book.provider_id
-            or payload.get("account_id") != economic_book.account_id
-            or payload.get("environment") != economic_book.environment
-            or payload.get("provider_execution_id") != execution_id
-        ):
-            raise AccountingConflict(
-                "provider fill correction binding scope is invalid"
-            )
-        request = payload.get("request")
-        if not isinstance(request, Mapping):
-            raise AccountingConflict("provider fill correction request is invalid")
-        request = dict(request)
-        if payload.get("request_digest") != payload_digest(request):
-            raise AccountingConflict(
-                "provider fill correction request digest is invalid"
-            )
-        if (
-            request.get("reservation_id") != rid
-            or request.get("intent_id") != corrected_projected_fill.intent_id
-            or request.get("provider_execution_id") != execution_id
-            or request.get("previous_fill_id") != active_fill_id
-        ):
-            raise AccountingConflict(
-                "provider fill correction binding chain is invalid"
-            )
-        previous_usage = _positive_usage_map(
-            request.get("previous_conservative_usage"),
-            name="previous conservative correction usage",
-        )
-        if previous_usage != conservative_usage:
-            raise AccountingConflict(
-                "provider fill correction conservative usage chain is invalid"
-            )
-        corrected_usage = _positive_usage_map(
-            request.get("corrected_active_usage"),
-            name="corrected active usage",
-        )
-        expected_resulting = {
-            resource: max(
-                conservative_usage.get(resource, Decimal("0")),
-                corrected_usage.get(resource, Decimal("0")),
-            )
-            for resource in set(conservative_usage) | set(corrected_usage)
-        }
-        expected_additional = {
-            resource: amount - conservative_usage.get(resource, Decimal("0"))
-            for resource, amount in expected_resulting.items()
-            if amount > conservative_usage.get(resource, Decimal("0"))
-        }
-        if _usage_payload(expected_resulting) != request.get(
-            "resulting_conservative_usage"
-        ):
-            raise AccountingConflict(
-                "provider fill correction resulting usage is invalid"
-            )
-        if _usage_payload(expected_additional) != request.get("additional_usage"):
-            raise AccountingConflict(
-                "provider fill correction additional usage is invalid"
-            )
-        corrected_fill_id = _text(
-            request.get("corrected_fill_id"), name="corrected_fill_id"
-        )
-        if corrected_fill_id in seen_fill_ids:
-            raise AccountingConflict(
-                "provider fill correction reuses an existing fill identity"
-            )
-        seen_fill_ids.add(corrected_fill_id)
-        active_fill_id = corrected_fill_id
-        conservative_usage = expected_resulting
-        last_event = event
-        last_request = request
-
-    original_payload = _projected_fill_binding_payload(original_projected_fill)
-    original_provider_payload = _provider_fill_binding_payload(original_provider_fill)
-    corrected_payload = _projected_fill_binding_payload(corrected_projected_fill)
-    corrected_provider_payload = _provider_fill_binding_payload(corrected_provider_fill)
-    replacement_digest = payload_digest(canonical_transaction(replacement))
-    stable_request = {
-        "previous_fill_id": original_projected_fill.fill_id,
-        "corrected_fill_id": corrected_projected_fill.fill_id,
-        "correction_of": corrected_projected_fill.correction_of,
-        "original_projected_fill_digest": payload_digest(original_payload),
-        "original_provider_fill_digest": payload_digest(original_provider_payload),
-        "corrected_projected_fill_digest": payload_digest(corrected_payload),
-        "corrected_provider_fill_digest": payload_digest(corrected_provider_payload),
-        "replacement_transaction_digest": replacement_digest,
-    }
-
-    if (
-        last_request is not None
-        and last_request.get("corrected_fill_id") == corrected_projected_fill.fill_id
-    ):
-        if any(last_request.get(key) != value for key, value in stable_request.items()):
-            raise AccountingConflict(
-                "existing provider fill correction binding conflicts with supplied evidence"
-            )
-        cut = _text(
-            last_request.get("reservation_cut_digest"),
-            name="reservation_cut_digest",
-        )
-        stored_additional_raw = last_request.get("additional_usage")
-        if not isinstance(stored_additional_raw, Mapping):
-            raise AccountingConflict(
-                "existing provider fill correction additional usage is invalid"
-            )
-        stored_additional = (
-            {}
-            if not stored_additional_raw
-            else _positive_usage_map(
-                stored_additional_raw,
-                name="existing provider fill correction additional usage",
-            )
-        )
-        return PreparedProviderFillCorrectionBinding(
-            aggregate_id=aggregate_id,
-            envelope=None,
-            request=last_request,
-            result={
-                "correction_binding_event_id": last_event["event_id"],
-                "resulting_conservative_usage": last_request[
-                    "resulting_conservative_usage"
-                ],
-            },
-            aggregate_version=len(events),
-            additional_usage_items=tuple(sorted(stored_additional.items())),
-            reservation_cut_digest=cut,
-            already_committed=True,
-        )
-
-    if active_fill_id != original_projected_fill.fill_id:
-        raise AccountingConflict(
-            "provider fill correction does not extend the active correction lineage"
-        )
-
-    corrected_usage = _cash_outflow_usage(replacement)
-    for resource, amount in corrected_usage.items():
-        if resource not in snapshot.original:
-            raise AccountingConflict(
-                f"provider fill correction requires unreserved resource {resource}"
-            )
-        if amount > snapshot.original[resource]:
-            raise AccountingConflict(
-                f"provider fill correction usage exceeds admitted reservation for {resource}"
-            )
-
-    resulting_usage = {
-        resource: max(
-            conservative_usage.get(resource, Decimal("0")),
-            corrected_usage.get(resource, Decimal("0")),
-        )
-        for resource in set(conservative_usage) | set(corrected_usage)
-    }
-    additional_usage = {
-        resource: amount - conservative_usage.get(resource, Decimal("0"))
-        for resource, amount in resulting_usage.items()
-        if amount > conservative_usage.get(resource, Decimal("0"))
-    }
-    reservation_cut = reservation_snapshot_digest(snapshot)
-    request = {
-        "schema_version": "1.0.0",
-        "provider_id": economic_book.provider_id,
-        "account_id": economic_book.account_id,
-        "environment": economic_book.environment,
-        "reservation_id": rid,
-        "intent_id": corrected_projected_fill.intent_id,
-        "provider_execution_id": execution_id,
-        **stable_request,
-        "original_projected_fill": original_payload,
-        "original_provider_fill": original_provider_payload,
-        "corrected_projected_fill": corrected_payload,
-        "corrected_provider_fill": corrected_provider_payload,
-        "reservation_cut_digest": reservation_cut,
-        "previous_conservative_usage": _usage_payload(conservative_usage),
-        "corrected_active_usage": _usage_payload(corrected_usage),
-        "resulting_conservative_usage": _usage_payload(resulting_usage),
-        "additional_usage": _usage_payload(additional_usage),
-    }
-    request_digest = payload_digest(request)
-    next_version = len(events) + 1
-    event_id = str(
-        uuid5(
-            NAMESPACE_URL,
-            "https://events.autotrade.local/provider-fill-reservation-correction/"
-            + aggregate_id
-            + "/"
-            + corrected_projected_fill.fill_id,
-        )
-    )
-    payload = {
-        "schema_version": "1.0.0",
-        "provider_id": economic_book.provider_id,
-        "account_id": economic_book.account_id,
-        "environment": economic_book.environment,
-        "provider_execution_id": execution_id,
-        "request_digest": request_digest,
-        "request": request,
-    }
-    envelope = {
-        "event_id": event_id,
-        "event_type": _PROVIDER_FILL_CORRECTION_BINDING_EVENT_TYPE,
-        "aggregate_type": _PROVIDER_FILL_CORRECTION_BINDING_AGGREGATE_TYPE,
-        "aggregate_id": aggregate_id,
-        "aggregate_version": str(next_version),
-        "committed_at": _instant_text(committed_at, name="committed_at"),
-        "payload": payload,
-        "payload_hash": payload_digest(payload),
-    }
-    return PreparedProviderFillCorrectionBinding(
-        aggregate_id=aggregate_id,
-        envelope=envelope,
-        request=request,
-        result={
-            "correction_binding_event_id": event_id,
-            "resulting_conservative_usage": _usage_payload(resulting_usage),
-        },
-        aggregate_version=next_version,
-        additional_usage_items=tuple(sorted(additional_usage.items())),
-        reservation_cut_digest=reservation_cut,
-    )
-
-
-class DurableProviderEconomicBook(ScopedEconomicBook):
-    """JournalStore-backed provider/account economic book.
-
-    This is a durable facade over the canonical ScopedEconomicBook, not a second
-    ledger. One EconomicTransactionBatchBooked event contains an entire
-    correction reversal+replacement group, so process failure cannot expose a
-    half-correction. Economic ordering remains inside JournalTransaction;
-    commit time is audit chronology only.
-    """
-
-    _BATCH_EVENT = "EconomicTransactionBatchBooked"
-    _SINGLE_EVENT = "EconomicTransactionBooked"
-    _ACTOR = "provider-economic-accounting"
-
-    def __init__(
-        self,
-        store: JournalStore,
-        *,
-        provider_id: str,
-        account_id: str,
-        environment: str,
-    ):
-        if not isinstance(store, JournalStore):
-            raise TypeError("store must be JournalStore")
-        self.store = store
-        self.provider_id = _text(provider_id, name="provider_id").upper()
-        super().__init__(environment=environment, account_id=account_id)
-        self.book_id = _book_id(
-            provider_id=self.provider_id,
-            account_id=self.account_id,
-            environment=self.environment,
-        )
-        self._reload()
-
-    def _events(self) -> list[dict[str, Any]]:
-        return self.store.load_events("economic_book", self.book_id)
-
-    def _replay(self, events: list[dict[str, Any]]) -> ScopedEconomicBook:
-        candidate = ScopedEconomicBook(
-            environment=self.environment,
-            account_id=self.account_id,
-        )
-        expected_version = 1
-        for event in events:
-            if event.get("aggregate_version") != expected_version:
-                raise AccountingConflict(
-                    "economic journal aggregate versions are not contiguous"
-                )
-            expected_version += 1
-            event_type = event.get("event_type")
-            if event_type not in {self._SINGLE_EVENT, self._BATCH_EVENT}:
-                raise AccountingConflict(
-                    "economic_book contains an unsupported durable event type"
-                )
-
-            payload = event.get("payload")
-            if not isinstance(payload, Mapping):
-                raise AccountingConflict(
-                    "economic durable event payload must be an object"
-                )
-            if (
-                payload.get("provider_id") != self.provider_id
-                or payload.get("account_id") != self.account_id
-                or payload.get("environment") != self.environment
-            ):
-                raise AccountingConflict(
-                    "economic durable event scope does not match provider book"
-                )
-
-            if event_type == self._SINGLE_EVENT:
-                transactions = (
-                    _transaction_from_payload(payload.get("transaction")),
-                )
-                candidate.append_batch(transactions)
-                continue
-            raw_transactions = payload.get("transactions")
-            if not isinstance(raw_transactions, list) or not raw_transactions:
-                raise AccountingConflict(
-                    "economic batch must contain canonical transactions"
-                )
-            transactions = tuple(
-                _transaction_from_payload(item) for item in raw_transactions
-            )
-            batch_digest = _economic_batch_digest(
-                provider_id=self.provider_id,
-                account_id=self.account_id,
-                environment=self.environment,
-                transactions=transactions,
-            )
-            if payload.get("batch_digest") != batch_digest:
-                raise AccountingConflict("economic batch digest is invalid")
-            if payload.get("previous_book_digest") != candidate.audit_digest():
-                raise AccountingConflict(
-                    "economic batch previous-book binding is invalid"
-                )
-            candidate.append_batch(transactions)
-            if payload.get("resulting_book_digest") != candidate.audit_digest():
-                raise AccountingConflict(
-                    "economic batch resulting-book binding is invalid"
-                )
-        return candidate
-
-    def _reload(self) -> None:
-        candidate = self._replay(self._events())
-        self._book = candidate._book
-
-    def prepare_batch_mutation(
-        self,
-        transactions: Iterable[JournalTransaction],
-        *,
-        committed_at: str | None = None,
-    ) -> PreparedEconomicBatch:
-        """Prepare one economic batch without mutating durable state.
-
-        The plan is derived from exactly one economic-book journal cut. A
-        caller may combine its event with other aggregate events in one
-        JournalStore.commit_command transaction; aggregate-version fencing then
-        rejects any concurrent economic writer before any member is committed.
-        """
-
-        batch = tuple(
-            _transaction_from_payload(_transaction_payload(item))
-            for item in transactions
-        )
-        if not batch:
-            raise ValueError("atomic transaction batch must not be empty")
-
-        events = self._events()
-        current = self._replay(events)
-        candidate = ScopedEconomicBook(
-            environment=self.environment,
-            account_id=self.account_id,
-            transactions=current.transactions,
-        )
-        inserted_locally = candidate.append_batch(batch)
-        transaction_payloads = [_transaction_payload(item) for item in batch]
-        batch_digest = _economic_batch_digest(
-            provider_id=self.provider_id,
-            account_id=self.account_id,
-            environment=self.environment,
-            transactions=batch,
-        )
-        request = {
-            "schema_version": "1.0.0",
-            "provider_id": self.provider_id,
-            "account_id": self.account_id,
-            "environment": self.environment,
-            "batch_digest": batch_digest,
-            "transactions": transaction_payloads,
-        }
-
-        if not inserted_locally:
-            matching_batches = [
-                event
-                for event in events
-                if event.get("event_type") == self._BATCH_EVENT
-                and isinstance(event.get("payload"), Mapping)
-                and event["payload"].get("batch_digest") == batch_digest
-                and event["payload"].get("transactions") == transaction_payloads
-            ]
-            matching_single = []
-            if len(batch) == 1:
-                matching_single = [
-                    event
-                    for event in events
-                    if event.get("event_type") == self._SINGLE_EVENT
-                    and isinstance(event.get("payload"), Mapping)
-                    and event["payload"].get("transaction") == transaction_payloads[0]
-                ]
-            matches = matching_batches + matching_single
-            if len(matches) != 1:
-                raise AccountingConflict(
-                    "economic transactions already exist without one canonical durable batch"
-                )
-            result = {
-                "batch_digest": batch_digest,
-                "transaction_ids": [item.transaction_id for item in batch],
-                "resulting_book_digest": current.audit_digest(),
-            }
-            return PreparedEconomicBatch(
-                transactions=batch,
-                batch_digest=batch_digest,
-                envelope=None,
-                request=request,
-                result=result,
-                aggregate_version=int(matches[0]["aggregate_version"]),
-                already_committed=True,
-            )
-
-        previous_digest = current.audit_digest()
-        resulting_digest = candidate.audit_digest()
-        next_version = (
-            1 if not events else int(events[-1]["aggregate_version"]) + 1
-        )
-        when = (
-            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-            if committed_at is None
-            else _instant_text(committed_at, name="committed_at")
-        )
-        event_identity = str(
-            uuid5(
-                NAMESPACE_URL,
-                "https://events.autotrade.local/economic-batch/"
-                + _scoped_identity(
-                    "economic-batch",
-                    self.provider_id,
-                    self.account_id,
-                    self.environment,
-                    batch_digest,
-                ),
-            )
-        )
-        payload = {
-            "schema_version": "1.0.0",
-            "provider_id": self.provider_id,
-            "account_id": self.account_id,
-            "environment": self.environment,
-            "batch_digest": batch_digest,
-            "previous_book_digest": previous_digest,
-            "resulting_book_digest": resulting_digest,
-            "transactions": transaction_payloads,
-        }
-        envelope = {
-            "event_id": event_identity,
-            "event_type": self._BATCH_EVENT,
-            "aggregate_type": "economic_book",
-            "aggregate_id": self.book_id,
-            "aggregate_version": str(next_version),
-            "committed_at": when,
-            "payload": payload,
-            "payload_hash": payload_digest(payload),
-        }
-        result = {
-            "batch_digest": batch_digest,
-            "transaction_ids": [item.transaction_id for item in batch],
-            "resulting_book_digest": resulting_digest,
-        }
-        return PreparedEconomicBatch(
-            transactions=batch,
-            batch_digest=batch_digest,
-            envelope=envelope,
-            request=request,
-            result=result,
-            aggregate_version=next_version,
-        )
-
-    def refresh(self) -> None:
-        """Reload the economic projection after an external atomic commit."""
-
-        self._reload()
-
-    def append(self, transaction: JournalTransaction) -> bool:
-        return self.append_batch((transaction,))
-
-    def append_batch(self, transactions: Iterable[JournalTransaction]) -> bool:
-        plan = self.prepare_batch_mutation(transactions)
-        if plan.already_committed:
-            self._reload()
-            return False
-        if plan.envelope is None:
-            raise AccountingConflict("fresh economic batch is missing its durable event")
-
-        command_identity = str(
-            uuid5(
-                NAMESPACE_URL,
-                "https://commands.autotrade.local/economic-batch/"
-                + _scoped_identity(
-                    "economic-batch-command",
-                    self.provider_id,
-                    self.account_id,
-                    self.environment,
-                    plan.batch_digest,
-                ),
-            )
-        )
-        try:
-            _, inserted, _ = self.store.commit_command(
-                command_id=command_identity,
-                actor=self._ACTOR,
-                environment=self.environment,
-                idempotency_key=f"economic-batch:{self.book_id}:{plan.batch_digest}",
-                request=plan.request,
-                result=plan.result,
-                state_version=plan.aggregate_version,
-                events=[(plan.envelope, "autotrade.economic.events")],
-            )
-        except Exception:
-            self._reload()
-            raise
-        self._reload()
-        return inserted
-
-
-def commit_economic_batch_with_reservation_consumption(
-    economic_book: DurableProviderEconomicBook,
-    reservation_book: DurableReservationBook,
-    *,
-    command_id: str,
-    idempotency_key: str,
-    reservation_id: str,
-    usage: Mapping[str, object],
-    transactions: Iterable[JournalTransaction],
-    reservation_expected_snapshot_digest: str | None = None,
-    committed_at: str | None = None,
-    settlement_book: DurableSettlementBook | None = None,
-    settlement_obligations: Iterable[SettlementObligation] = (),
-    provider_fill_binding: PreparedProviderFillBinding | None = None,
-) -> bool:
-    """Atomically commit canonical economics and reservation consumption.
-
-    This function is an integration barrier, not a new finance authority.
-    Reservation semantics remain owned by DurableReservationBook and economic
-    semantics remain owned by DurableProviderEconomicBook. Both prepared
-    events are inserted by one SQLite transaction, so a crash cannot make a
-    fill durable in only one of those projections.
-
-    The caller remains responsible for deriving the exact usage map from
-    independently validated provider/order evidence. This barrier guarantees
-    persistence atomicity and replay identity; it does not invent that mapping.
-    """
-
-    if not isinstance(economic_book, DurableProviderEconomicBook):
-        raise TypeError("economic_book must be DurableProviderEconomicBook")
-    if not isinstance(reservation_book, DurableReservationBook):
-        raise TypeError("reservation_book must be DurableReservationBook")
-    if economic_book.store is not reservation_book.store:
-        raise ValueError("economic and reservation books must share one JournalStore")
-    if (
-        economic_book.environment != reservation_book.environment
-        or economic_book.account_id != reservation_book.account_id
-    ):
-        raise ValueError(
-            "economic and reservation books must share account/environment scope"
-        )
-
-    if provider_fill_binding is not None:
-        if not isinstance(provider_fill_binding, PreparedProviderFillBinding):
-            raise TypeError(
-                "provider_fill_binding must be PreparedProviderFillBinding or None"
-            )
-        binding_request = provider_fill_binding.request
-        if (
-            binding_request.get("provider_id") != economic_book.provider_id
-            or binding_request.get("account_id") != economic_book.account_id
-            or binding_request.get("environment") != economic_book.environment
-            or binding_request.get("reservation_id") != _text(
-                reservation_id, name="reservation_id"
-            )
-        ):
-            raise AccountingConflict(
-                "provider fill financial binding scope does not match atomic fill"
-            )
-
-    settlement_items = tuple(settlement_obligations)
-    if settlement_book is None and settlement_items:
-        raise ValueError(
-            "settlement obligations require the canonical durable settlement book"
-        )
-    if settlement_book is not None:
-        if not isinstance(settlement_book, DurableSettlementBook):
-            raise TypeError("settlement_book must be DurableSettlementBook or None")
-        if settlement_book.store is not economic_book.store:
-            raise ValueError(
-                "economic, reservation and settlement books must share one JournalStore"
-            )
-        if (
-            settlement_book.scope.provider_id != economic_book.provider_id
-            or settlement_book.scope.account_id != economic_book.account_id
-            or settlement_book.scope.environment != economic_book.environment
-        ):
-            raise ValueError(
-                "settlement book must share provider/account/environment scope"
-            )
-        if not settlement_items:
-            raise ValueError(
-                "settlement_book requires explicit settlement obligations"
-            )
-
-    cid = _text(command_id, name="command_id")
-    idem = _text(idempotency_key, name="idempotency_key")
-    rid = _text(reservation_id, name="reservation_id")
-    when = (
-        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        if committed_at is None
-        else _instant_text(committed_at, name="committed_at")
-    )
-    reservation_component_key = _scoped_identity(
-        "atomic-fill-reservation",
-        economic_book.provider_id,
-        economic_book.account_id,
-        economic_book.environment,
-        idem,
-    )
-    reservation_plan = reservation_book.prepare_consume_mutation(
-        event_key=_scoped_identity(
-            "atomic-fill-reservation-event",
-            economic_book.provider_id,
-            economic_book.account_id,
-            economic_book.environment,
-            cid,
-        ),
-        idempotency_key=reservation_component_key,
-        reservation_id=rid,
-        usage=usage,
-        committed_at=when,
-        expected_snapshot_digest=reservation_expected_snapshot_digest,
-    )
-    economic_plan = economic_book.prepare_batch_mutation(
-        transactions,
-        committed_at=when,
-    )
-
-    settlement_plan = None
-    if settlement_book is not None:
-        batch_transaction_ids = {
-            item.transaction_id for item in economic_plan.transactions
-        }
-        expected_cash_legs: dict[tuple[str, str], Decimal] = {}
-        for transaction in economic_plan.transactions:
-            for posting in transaction.postings:
-                if (
-                    posting.ledger_account
-                    == f"CASH:{posting.asset_or_currency}"
-                ):
-                    key = (
-                        transaction.transaction_id,
-                        posting.asset_or_currency,
-                    )
-                    expected_cash_legs[key] = (
-                        expected_cash_legs.get(key, Decimal("0"))
-                        + posting.signed_amount
-                    )
-        expected_cash_legs = {
-            key: value
-            for key, value in expected_cash_legs.items()
-            if value != 0
-        }
-
-        bound_cash_legs: dict[tuple[str, str], Decimal] = {}
-        for obligation in settlement_items:
-            if not isinstance(obligation, SettlementObligation):
-                raise TypeError(
-                    "settlement_obligations must contain SettlementObligation"
-                )
-            if obligation.source_transaction_id not in batch_transaction_ids:
-                raise AccountingConflict(
-                    "settlement obligation source is absent from atomic economic batch"
-                )
-            key = (
-                obligation.source_transaction_id,
-                obligation.currency,
-            )
-            if key in bound_cash_legs:
-                raise AccountingConflict(
-                    "atomic fill has duplicate settlement coverage for one cash leg"
-                )
-            bound_cash_legs[key] = obligation.amount
-
-        if set(bound_cash_legs) != set(expected_cash_legs):
-            raise AccountingConflict(
-                "settlement obligations do not cover every atomic fill cash leg"
-            )
-        for key, expected_amount in expected_cash_legs.items():
-            if bound_cash_legs[key] != expected_amount:
-                raise AccountingConflict(
-                    "settlement obligation amount differs from atomic fill cash effect"
-                )
-
-        settlement_plan = settlement_book.prepare_register_mutation(
-            settlement_items,
-            committed_at=when,
-        )
-
-    commit_states = [
-        reservation_plan.already_committed,
-        economic_plan.already_committed,
-    ]
-    if settlement_plan is not None:
-        commit_states.append(settlement_plan.already_committed)
-    if provider_fill_binding is not None:
-        commit_states.append(provider_fill_binding.already_committed)
-    if any(commit_states) and not all(commit_states):
-        reservation_book.refresh()
-        economic_book.refresh()
-        if settlement_book is not None:
-            settlement_book.refresh()
-        raise AccountingConflict(
-            "reservation/economic/settlement fill state is only partially committed"
-        )
-    if all(commit_states):
-        reservation_book.refresh()
-        economic_book.refresh()
-        if settlement_book is not None:
-            settlement_book.refresh()
-        return False
-
-    if reservation_plan.envelope is None or economic_plan.envelope is None:
-        raise AccountingConflict("fresh atomic fill plan is missing durable events")
-    if settlement_plan is not None and settlement_plan.envelope is None:
-        raise AccountingConflict(
-            "fresh atomic fill settlement plan is missing durable event"
-        )
-    if (
-        provider_fill_binding is not None
-        and provider_fill_binding.envelope is None
-    ):
-        raise AccountingConflict(
-            "fresh provider fill financial binding is missing durable event"
-        )
-
-    request = {
-        "schema_version": "1.0.0",
-        "provider_id": economic_book.provider_id,
-        "account_id": economic_book.account_id,
-        "environment": economic_book.environment,
-        "reservation": reservation_plan.request,
-        "economic_batch": economic_plan.request,
-        "settlement": (
-            None if settlement_plan is None else settlement_plan.request
-        ),
-        "provider_fill_binding": (
-            None
-            if provider_fill_binding is None
-            else provider_fill_binding.request
-        ),
-    }
-    result = {
-        "reservation": reservation_plan.snapshot_payload,
-        "economic_batch": economic_plan.result,
-        "settlement": (
-            None if settlement_plan is None else settlement_plan.result
-        ),
-        "provider_fill_binding": (
-            None
-            if provider_fill_binding is None
-            else provider_fill_binding.result
-        ),
-    }
-    command_identity = str(
-        uuid5(
-            NAMESPACE_URL,
-            "https://commands.autotrade.local/atomic-fill/"
-            + _scoped_identity(
-                "atomic-fill-command",
-                economic_book.provider_id,
-                economic_book.account_id,
-                economic_book.environment,
-                cid,
-            ),
-        )
-    )
-    journal_idempotency_key = "atomic-fill:" + _scoped_identity(
-        "atomic-fill-idempotency",
-        economic_book.provider_id,
-        economic_book.account_id,
-        economic_book.environment,
-        idem,
-    )
-    try:
-        _, inserted, _ = economic_book.store.commit_command(
-            command_id=command_identity,
-            actor="atomic-fill-financial-integration",
-            environment=economic_book.environment,
-            idempotency_key=journal_idempotency_key,
-            request=request,
-            result=result,
-            state_version=max(
-                reservation_plan.aggregate_version,
-                economic_plan.aggregate_version,
-                0
-                if settlement_plan is None
-                else settlement_plan.aggregate_version,
-                0
-                if provider_fill_binding is None
-                else provider_fill_binding.aggregate_version,
-            ),
-            events=(
-                [
-                    (reservation_plan.envelope, None),
-                    (economic_plan.envelope, "autotrade.economic.events"),
-                ]
-                + (
-                    []
-                    if settlement_plan is None
-                    else [(settlement_plan.envelope, None)]
-                )
-                + (
-                    []
-                    if provider_fill_binding is None
-                    else [(provider_fill_binding.envelope, None)]
-                )
-            ),
-        )
-    except Exception:
-        reservation_book.refresh()
-        economic_book.refresh()
-        if settlement_book is not None:
-            settlement_book.refresh()
-        raise
-
-    reservation_book.refresh()
-    economic_book.refresh()
-    if settlement_book is not None:
-        settlement_book.refresh()
-    return inserted
-
-
-
-
-def commit_economic_correction_with_settlement_replacement(
-    economic_book: DurableProviderEconomicBook,
-    settlement_book: DurableSettlementBook,
-    *,
-    command_id: str,
-    idempotency_key: str,
-    reversal: JournalTransaction,
-    replacement: JournalTransaction,
-    settlement_obligations: Iterable[SettlementObligation],
-    committed_at: str | None = None,
-    reservation_book: DurableReservationBook | None = None,
-    reservation_id: str | None = None,
-    provider_fill_correction_binding: PreparedProviderFillCorrectionBinding | None = None,
-) -> bool:
-    """Atomically bind correction economics, settlement and conservative capacity.
-
-    The reversal cancels the prior trade-date economic fact; it is not a new
-    contractual cash settlement. Replacement settlement, any positive
-    reservation-consumption delta, and correction high-water evidence commit in
-    the same JournalStore transaction. A correction never releases reservation
-    capacity here.
-    """
-
-    if not isinstance(economic_book, DurableProviderEconomicBook):
-        raise TypeError("economic_book must be DurableProviderEconomicBook")
-    if not isinstance(settlement_book, DurableSettlementBook):
-        raise TypeError("settlement_book must be DurableSettlementBook")
-    if economic_book.store is not settlement_book.store:
-        raise ValueError(
-            "economic and settlement books must share one JournalStore"
-        )
-    if (
-        settlement_book.scope.provider_id != economic_book.provider_id
-        or settlement_book.scope.account_id != economic_book.account_id
-        or settlement_book.scope.environment != economic_book.environment
-    ):
-        raise ValueError(
-            "settlement book must share provider/account/environment scope"
-        )
-    if reservation_book is None:
-        if reservation_id is not None or provider_fill_correction_binding is not None:
-            raise ValueError(
-                "reservation correction arguments require reservation_book"
-            )
-    else:
-        if not isinstance(reservation_book, DurableReservationBook):
-            raise TypeError("reservation_book must be DurableReservationBook")
-        if economic_book.store is not reservation_book.store:
-            raise ValueError(
-                "economic, settlement and reservation books must share one JournalStore"
-            )
-        if (
-            reservation_book.account_id != economic_book.account_id
-            or reservation_book.environment != economic_book.environment
-        ):
-            raise ValueError(
-                "reservation book must share account/environment scope"
-            )
-        if provider_fill_correction_binding is None:
-            raise ValueError(
-                "reservation-aware correction requires correction binding evidence"
-            )
-        if not isinstance(
-            provider_fill_correction_binding,
-            PreparedProviderFillCorrectionBinding,
-        ):
-            raise TypeError(
-                "provider_fill_correction_binding has invalid type"
-            )
-        rid = _text(reservation_id, name="reservation_id")
-        binding_request = provider_fill_correction_binding.request
-        if (
-            binding_request.get("provider_id") != economic_book.provider_id
-            or binding_request.get("account_id") != economic_book.account_id
-            or binding_request.get("environment") != economic_book.environment
-            or binding_request.get("reservation_id") != rid
-        ):
-            raise AccountingConflict(
-                "provider fill correction binding scope does not match correction"
-            )
-
-    if not isinstance(reversal, JournalTransaction):
-        raise TypeError("reversal must be a JournalTransaction")
-    if not isinstance(replacement, JournalTransaction):
-        raise TypeError("replacement must be a JournalTransaction")
-    if reversal.reverses_transaction_id is None:
-        raise AccountingConflict(
-            "settlement-aware correction requires an explicit reversal"
-        )
-    if reversal.corrects_transaction_id is not None:
-        raise AccountingConflict(
-            "correction reversal cannot also be a replacement"
-        )
-    if replacement.reverses_transaction_id is not None:
-        raise AccountingConflict(
-            "correction replacement cannot also be a reversal"
-        )
-    if replacement.corrects_transaction_id != reversal.reverses_transaction_id:
-        raise AccountingConflict(
-            "correction replacement must target the transaction reversed in the same batch"
-        )
-
-    items = tuple(settlement_obligations)
-    if not items:
-        raise ValueError(
-            "correction replacement requires explicit settlement obligations"
-        )
-
-    cid = _text(command_id, name="command_id")
-    idem = _text(idempotency_key, name="idempotency_key")
-    when = (
-        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        if committed_at is None
-        else _instant_text(committed_at, name="committed_at")
-    )
-    economic_plan = economic_book.prepare_batch_mutation(
-        (reversal, replacement),
-        committed_at=when,
-    )
-    canonical_reversal, canonical_replacement = economic_plan.transactions
-    if (
-        canonical_reversal.reverses_transaction_id is None
-        or canonical_replacement.corrects_transaction_id
-        != canonical_reversal.reverses_transaction_id
-    ):
-        raise AccountingConflict(
-            "canonical correction batch lost reversal/replacement lineage"
-        )
-
-    expected_cash_legs: dict[tuple[str, str], Decimal] = {}
-    for posting in canonical_replacement.postings:
-        if posting.ledger_account == f"CASH:{posting.asset_or_currency}":
-            key = (
-                canonical_replacement.transaction_id,
-                posting.asset_or_currency,
-            )
-            expected_cash_legs[key] = (
-                expected_cash_legs.get(key, Decimal("0"))
-                + posting.signed_amount
-            )
-    expected_cash_legs = {
-        key: amount
-        for key, amount in expected_cash_legs.items()
-        if amount != 0
-    }
-    if not expected_cash_legs:
-        raise AccountingConflict(
-            "settlement-aware correction replacement has no active cash leg"
-        )
-
-    bound_cash_legs: dict[tuple[str, str], Decimal] = {}
-    for obligation in items:
-        if not isinstance(obligation, SettlementObligation):
-            raise TypeError(
-                "settlement_obligations must contain SettlementObligation"
-            )
-        if obligation.source_transaction_id != canonical_replacement.transaction_id:
-            raise AccountingConflict(
-                "correction settlement obligation must bind the replacement transaction"
-            )
-        key = (
-            obligation.source_transaction_id,
-            obligation.currency,
-        )
-        if key in bound_cash_legs:
-            raise AccountingConflict(
-                "correction has duplicate settlement coverage for one replacement cash leg"
-            )
-        bound_cash_legs[key] = obligation.amount
-
-    if set(bound_cash_legs) != set(expected_cash_legs):
-        raise AccountingConflict(
-            "correction settlement obligations do not cover every replacement cash leg"
-        )
-    for key, expected_amount in expected_cash_legs.items():
-        if bound_cash_legs[key] != expected_amount:
-            raise AccountingConflict(
-                "correction settlement obligation amount differs from replacement cash effect"
-            )
-
-    settlement_plan = settlement_book.prepare_register_mutation(
-        items,
-        committed_at=when,
-    )
-    reservation_plan = None
-    if reservation_book is not None and provider_fill_correction_binding is not None:
-        additional_usage = provider_fill_correction_binding.additional_usage
-        if additional_usage:
-            reservation_plan = reservation_book.prepare_consume_mutation(
-                event_key=_scoped_identity(
-                    "atomic-correction-reservation-event",
-                    economic_book.provider_id,
-                    economic_book.account_id,
-                    economic_book.environment,
-                    cid,
-                ),
-                idempotency_key=_scoped_identity(
-                    "atomic-correction-reservation",
-                    economic_book.provider_id,
-                    economic_book.account_id,
-                    economic_book.environment,
-                    idem,
-                ),
-                reservation_id=_text(reservation_id, name="reservation_id"),
-                usage=additional_usage,
-                committed_at=when,
-                expected_snapshot_digest=(
-                    provider_fill_correction_binding.reservation_cut_digest
-                ),
-            )
-
-    states = [
-        economic_plan.already_committed,
-        settlement_plan.already_committed,
-    ]
-    if reservation_plan is not None:
-        states.append(reservation_plan.already_committed)
-    if provider_fill_correction_binding is not None:
-        states.append(provider_fill_correction_binding.already_committed)
-    if any(states) and not all(states):
-        economic_book.refresh()
-        settlement_book.refresh()
-        if reservation_book is not None:
-            reservation_book.refresh()
-        raise AccountingConflict(
-            "economic/settlement/reservation correction state is only partially committed"
-        )
-    if all(states):
-        economic_book.refresh()
-        settlement_book.refresh()
-        if reservation_book is not None:
-            reservation_book.refresh()
-        return False
-    if economic_plan.envelope is None or settlement_plan.envelope is None:
-        raise AccountingConflict(
-            "fresh settlement-aware correction is missing durable events"
-        )
-    if reservation_plan is not None and reservation_plan.envelope is None:
-        raise AccountingConflict(
-            "fresh correction reservation plan is missing durable event"
-        )
-    if (
-        provider_fill_correction_binding is not None
-        and provider_fill_correction_binding.envelope is None
-    ):
-        raise AccountingConflict(
-            "fresh provider correction binding is missing durable event"
-        )
-
-    if provider_fill_correction_binding is None:
-        # Preserve the exact legacy durable command contract for upgrade-safe
-        # retry of economics+settlement corrections created before reservation
-        # correction binding existed.
-        request = {
-            "schema_version": "1.0.0",
-            "provider_id": economic_book.provider_id,
-            "account_id": economic_book.account_id,
-            "environment": economic_book.environment,
-            "economic_correction": economic_plan.request,
-            "replacement_settlement": settlement_plan.request,
-        }
-        result = {
-            "economic_correction": economic_plan.result,
-            "replacement_settlement": settlement_plan.result,
-        }
-    else:
-        request = {
-            "schema_version": "1.1.0",
-            "provider_id": economic_book.provider_id,
-            "account_id": economic_book.account_id,
-            "environment": economic_book.environment,
-            "economic_correction": economic_plan.request,
-            "replacement_settlement": settlement_plan.request,
-            "reservation_consumption": (
-                None if reservation_plan is None else reservation_plan.request
-            ),
-            "provider_fill_correction_binding": (
-                provider_fill_correction_binding.request
-            ),
-        }
-        result = {
-            "economic_correction": economic_plan.result,
-            "replacement_settlement": settlement_plan.result,
-            "reservation_consumption": (
-                None if reservation_plan is None else reservation_plan.snapshot_payload
-            ),
-            "provider_fill_correction_binding": (
-                provider_fill_correction_binding.result
-            ),
-        }
-    command_identity = str(
-        uuid5(
-            NAMESPACE_URL,
-            "https://commands.autotrade.local/atomic-settlement-correction/"
-            + _scoped_identity(
-                "atomic-settlement-correction-command",
-                economic_book.provider_id,
-                economic_book.account_id,
-                economic_book.environment,
-                cid,
-            ),
-        )
-    )
-    journal_idempotency_key = (
-        "atomic-settlement-correction:"
-        + _scoped_identity(
-            "atomic-settlement-correction-idempotency",
-            economic_book.provider_id,
-            economic_book.account_id,
-            economic_book.environment,
-            idem,
-        )
-    )
-    events: list[tuple[dict[str, Any], str | None]] = [
-        (economic_plan.envelope, "autotrade.economic.events"),
-        (settlement_plan.envelope, None),
-    ]
-    if reservation_plan is not None:
-        events.append((reservation_plan.envelope, None))
-    if provider_fill_correction_binding is not None:
-        events.append((provider_fill_correction_binding.envelope, None))
-
-    state_versions = [
-        economic_plan.aggregate_version,
-        settlement_plan.aggregate_version,
-    ]
-    if reservation_plan is not None:
-        state_versions.append(reservation_plan.aggregate_version)
-    if provider_fill_correction_binding is not None:
-        state_versions.append(provider_fill_correction_binding.aggregate_version)
-
-    try:
-        _, inserted, _ = economic_book.store.commit_command(
-            command_id=command_identity,
-            actor="atomic-settlement-correction-integration",
-            environment=economic_book.environment,
-            idempotency_key=journal_idempotency_key,
-            request=request,
-            result=result,
-            state_version=max(state_versions),
-            events=events,
-        )
-    except Exception:
-        economic_book.refresh()
-        settlement_book.refresh()
-        if reservation_book is not None:
-            reservation_book.refresh()
-        raise
-
-    economic_book.refresh()
-    settlement_book.refresh()
-    if reservation_book is not None:
-        reservation_book.refresh()
-    return inserted
-
-def commit_provider_fill_correction_with_settlement_replacement(
-    economic_book: DurableProviderEconomicBook,
-    settlement_book: DurableSettlementBook,
-    *,
-    reservation_book: DurableReservationBook,
-    reservation_id: str,
-    command_id: str,
-    idempotency_key: str,
-    original_projected_fill: ProjectedFillEvidence,
-    original_provider_fill: ProviderFillEvidence,
-    corrected_projected_fill: ProjectedFillEvidence,
-    corrected_provider_fill: ProviderFillEvidence,
-    expected_instrument: str,
-    settlement_currency: str,
-    correction_observed_at: str,
-    settlement_obligations: Iterable[SettlementObligation],
-    asset_family: str = "CASH_EQUITY",
-    committed_at: str | None = None,
-) -> bool:
-    """Atomically correct provider economics, settlement and reservation capacity.
-
-    Capacity is conservative: a corrected fill may consume an additional
-    evidence-derived delta, but a smaller correction never releases authority.
-    The per-execution high-water binding prevents repeated corrections from
-    double-consuming the same delta.
-    """
-
-    when = (
-        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        if committed_at is None
-        else _instant_text(committed_at, name="committed_at")
-    )
-    reversal, replacement = build_provider_fill_correction_transactions(
-        book=economic_book,
-        provider_id=economic_book.provider_id,
-        original_projected_fill=original_projected_fill,
-        original_provider_fill=original_provider_fill,
-        corrected_projected_fill=corrected_projected_fill,
-        corrected_provider_fill=corrected_provider_fill,
-        expected_instrument=expected_instrument,
-        settlement_currency=settlement_currency,
-        correction_observed_at=correction_observed_at,
-    )
-    binding = _prepare_provider_fill_correction_binding(
-        economic_book,
-        reservation_book,
-        reservation_id=reservation_id,
-        original_projected_fill=original_projected_fill,
-        original_provider_fill=original_provider_fill,
-        corrected_projected_fill=corrected_projected_fill,
-        corrected_provider_fill=corrected_provider_fill,
-        replacement=replacement,
-        asset_family=asset_family,
-        committed_at=when,
-    )
-    return commit_economic_correction_with_settlement_replacement(
-        economic_book,
-        settlement_book,
-        command_id=command_id,
-        idempotency_key=idempotency_key,
-        reversal=reversal,
-        replacement=replacement,
-        settlement_obligations=settlement_obligations,
-        committed_at=when,
-        reservation_book=reservation_book,
-        reservation_id=reservation_id,
-        provider_fill_correction_binding=binding,
-    )
-
-def commit_provider_fill_with_reservation_consumption(
-    economic_book: DurableProviderEconomicBook,
-    reservation_book: DurableReservationBook,
-    *,
-    command_id: str,
-    idempotency_key: str,
-    reservation_id: str,
-    projected_fill: ProjectedFillEvidence,
-    provider_fill: ProviderFillEvidence,
-    expected_instrument: str,
-    settlement_currency: str,
-    asset_family: str = "CASH_EQUITY",
-    observed_at: str | None = None,
-    committed_at: str | None = None,
-    settlement_book: DurableSettlementBook | None = None,
-    settlement_obligations: Iterable[SettlementObligation] = (),
-) -> bool:
-    """Atomically book one provider fill and consume only evidence-derived resources.
-
-    This is the provider-fill entrypoint for the shared atomic integration
-    barrier. It deliberately accepts no caller-authored transaction batch and
-    no caller-authored reservation usage map. Both are derived from the same
-    normalized provider/projected fill evidence and the admission-bound
-    reservation envelope before JournalStore mutation.
-    """
-
-    if not isinstance(economic_book, DurableProviderEconomicBook):
-        raise TypeError("economic_book must be DurableProviderEconomicBook")
-    if not isinstance(reservation_book, DurableReservationBook):
-        raise TypeError("reservation_book must be DurableReservationBook")
-    rid = _text(reservation_id, name="reservation_id")
-    snapshot = reservation_book.get(rid)
-    plan = build_provider_fill_financial_plan(
-        book=economic_book,
-        provider_id=economic_book.provider_id,
-        projected_fill=projected_fill,
-        provider_fill=provider_fill,
-        expected_instrument=expected_instrument,
-        settlement_currency=settlement_currency,
-        reservation_snapshot=snapshot,
-        asset_family=asset_family,
-        observed_at=observed_at,
-    )
-    if plan.reservation_id != rid:
-        raise AccountingConflict(
-            "provider fill financial plan reservation identity changed"
-        )
-
-    caller_idempotency = _text(idempotency_key, name="idempotency_key")
-    when = (
-        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        if committed_at is None
-        else _instant_text(committed_at, name="committed_at")
-    )
-    binding = _prepare_provider_fill_binding(
-        economic_book,
-        plan=plan,
-        projected_fill=projected_fill,
-        provider_fill=provider_fill,
-        committed_at=when,
-    )
-    return commit_economic_batch_with_reservation_consumption(
-        economic_book,
-        reservation_book,
-        command_id=command_id,
-        idempotency_key=f"{caller_idempotency}:provider-fill",
-        reservation_id=rid,
-        usage=plan.usage,
-        transactions=(plan.transaction,),
-        reservation_expected_snapshot_digest=plan.reservation_cut_digest,
-        committed_at=when,
-        settlement_book=settlement_book,
-        settlement_obligations=settlement_obligations,
-        provider_fill_binding=binding,
-    )
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(dir(_impl)))
 
 
 def book_external_provider_cash_activity(
@@ -2097,36 +32,36 @@ def book_external_provider_cash_activity(
     provider_id: str,
     account_id: str,
     environment: str,
-    activity: ProviderActivityEvidence,
+    activity: _impl.ProviderActivityEvidence,
     observed_at: str,
-) -> tuple[JournalTransaction, bool]:
+) -> tuple[_impl.JournalTransaction, bool]:
     """Atomically import one confirmed external cash activity and book economics.
 
-    This function is intentionally narrow. Only a provider-normalized DEPOSIT or
-    WITHDRAWAL may become an external equity flow. Fees, dividends, funding,
-    corrections, assignments and generic cash adjustments require their own
-    economic mappings and remain blocked until such a mapping is qualified.
+    Exact retries resolve the typed command authority and both financial events
+    from one held SQLite snapshot. A same-command commit racing after an initial
+    absence is re-resolved from that authority instead of being misclassified as
+    a partial financial effect.
     """
 
     if not isinstance(store, JournalStore):
         raise TypeError("store must be JournalStore")
-    if not isinstance(activity, ProviderActivityEvidence):
+    if not isinstance(activity, _impl.ProviderActivityEvidence):
         raise TypeError("activity must be ProviderActivityEvidence")
 
-    provider = _text(provider_id, name="provider_id").upper()
-    account = _text(account_id, name="account_id")
-    scope = _environment(environment)
+    provider = _impl._text(provider_id, name="provider_id").upper()
+    account = _impl._text(account_id, name="account_id")
+    scope = _impl._environment(environment)
     if activity.provider_id != provider:
         raise ValueError("provider activity evidence provider_id mismatch")
     if activity.account_id != account:
         raise ValueError("provider activity evidence account_id mismatch")
     if activity.environment != scope:
         raise ValueError("provider activity evidence environment mismatch")
-    if activity.origin not in _ALLOWED_EXTERNAL_ORIGINS:
+    if activity.origin not in _impl._ALLOWED_EXTERNAL_ORIGINS:
         raise ValueError(
             "only MANUAL or EXTERNAL provider activity may be booked as an external cash flow"
         )
-    if activity.activity_type not in _ALLOWED_EXTERNAL_CASH_TYPES:
+    if activity.activity_type not in _impl._ALLOWED_EXTERNAL_CASH_TYPES:
         raise ValueError(
             "provider activity type is not qualified for external cash-flow accounting"
         )
@@ -2159,19 +94,19 @@ def book_external_provider_cash_activity(
     if activity.activity_type == "WITHDRAWAL" and value >= 0:
         raise ValueError("WITHDRAWAL amount must be negative")
 
-    observed = _instant(observed_at, name="observed_at")
-    occurred = _instant(activity.occurred_at, name="occurred_at")
+    observed = _impl._instant(observed_at, name="observed_at")
+    occurred = _impl._instant(activity.occurred_at, name="occurred_at")
     if observed < occurred:
         raise ValueError("observed_at must not precede provider activity occurred_at")
     observed_text = observed.isoformat().replace("+00:00", "Z")
 
-    identity = _activity_identity(
+    identity = _impl._activity_identity(
         provider_id=provider,
         account_id=account,
         environment=scope,
         activity_id=activity.activity_id,
     )
-    book_id = _book_id(
+    book_id = _impl._book_id(
         provider_id=provider,
         account_id=account,
         environment=scope,
@@ -2183,13 +118,13 @@ def book_external_provider_cash_activity(
             f"https://events.autotrade.local/economic-transaction/{identity}",
         )
     )
-    transaction = book_external_cash_flow(
+    transaction = _impl.book_external_cash_flow(
         transaction_id=transaction_id,
         cause_event_id=cause_event_id,
         currency=activity.currency,
         amount=value,
     )
-    amount_text = _decimal_text(value)
+    amount_text = _impl._decimal_text(value)
 
     request = {
         "provider_id": provider,
@@ -2218,6 +153,175 @@ def book_external_provider_cash_activity(
         "currency": activity.currency,
     }
 
+    imported_event_id = str(
+        uuid5(
+            NAMESPACE_URL,
+            f"https://events.autotrade.local/provider-activity-import/{identity}",
+        )
+    )
+    economic_event_id = str(
+        uuid5(
+            NAMESPACE_URL,
+            f"https://events.autotrade.local/economic-booking/{identity}",
+        )
+    )
+    command_identity = str(
+        uuid5(
+            NAMESPACE_URL,
+            f"https://commands.autotrade.local/provider-cash-import/{identity}",
+        )
+    )
+    actor = "provider-activity-accounting"
+    journal_idempotency_key = f"provider-cash-import:{identity}"
+
+    def require_semantic_owner(
+        event: Mapping[str, object],
+        *,
+        event_type: str,
+        aggregate_type: str,
+        aggregate_id: str,
+    ) -> None:
+        if (
+            event.get("event_type") != event_type
+            or event.get("aggregate_type") != aggregate_type
+            or event.get("aggregate_id") != aggregate_id
+        ):
+            raise _impl.AccountingConflict(
+                "provider cash activity replay has invalid durable semantic owner"
+            )
+        version = event.get("aggregate_version")
+        if type(version) is not int or version <= 0:
+            raise _impl.AccountingConflict(
+                "provider cash activity replay has invalid aggregate version"
+            )
+
+    def resolve_existing_effect() -> tuple[_impl.JournalTransaction, bool] | None:
+        try:
+            snapshot = store.load_command_event_batch(
+                command_id=command_identity,
+                actor=actor,
+                environment=scope,
+                idempotency_key=journal_idempotency_key,
+                request=request,
+            )
+        except ValueError as error:
+            raise _impl.AccountingConflict(
+                "provider cash durable command/effect authority is invalid"
+            ) from error
+        if snapshot is None:
+            return None
+        if snapshot.get("result") != result:
+            raise _impl.AccountingConflict(
+                "provider cash durable command result conflicts with its financial effect"
+            )
+
+        raw_events = snapshot.get("events")
+        if not isinstance(raw_events, tuple) or len(raw_events) != 2:
+            raise _impl.AccountingConflict(
+                "provider cash durable command has an invalid financial effect cardinality"
+            )
+        events_by_id: dict[str, Mapping[str, Any]] = {}
+        for raw_event in raw_events:
+            if not isinstance(raw_event, Mapping):
+                raise _impl.AccountingConflict(
+                    "provider cash durable command contains an invalid event"
+                )
+            raw_event_id = raw_event.get("event_id")
+            if not isinstance(raw_event_id, str) or raw_event_id in events_by_id:
+                raise _impl.AccountingConflict(
+                    "provider cash durable command contains invalid event identity"
+                )
+            events_by_id[raw_event_id] = raw_event
+        if set(events_by_id) != {imported_event_id, economic_event_id}:
+            raise _impl.AccountingConflict(
+                "provider cash durable command is bound to unexpected financial effects"
+            )
+
+        existing_imported = events_by_id[imported_event_id]
+        existing_economic = events_by_id[economic_event_id]
+        require_semantic_owner(
+            existing_imported,
+            event_type="ProviderActivityImported",
+            aggregate_type="provider_activity",
+            aggregate_id=identity,
+        )
+        require_semantic_owner(
+            existing_economic,
+            event_type="EconomicTransactionBooked",
+            aggregate_type="economic_book",
+            aggregate_id=book_id,
+        )
+
+        imported_payload = existing_imported.get("payload")
+        economic_payload = existing_economic.get("payload")
+        if not isinstance(imported_payload, Mapping) or not isinstance(
+            economic_payload, Mapping
+        ):
+            raise _impl.AccountingConflict(
+                "provider cash activity replay found invalid durable payload"
+            )
+        if any(imported_payload.get(key) != value for key, value in request.items()):
+            raise _impl.AccountingConflict(
+                "provider cash activity replay conflicts with durable provider fact"
+            )
+        if (
+            imported_payload.get("economic_transaction_id") != transaction_id
+            or imported_payload.get("cause_event_id") != cause_event_id
+            or economic_payload.get("provider_id") != provider
+            or economic_payload.get("account_id") != account
+            or economic_payload.get("environment") != scope
+            or economic_payload.get("source_activity_identity") != identity
+            or economic_payload.get("transaction")
+            != _impl._transaction_payload(transaction)
+        ):
+            raise _impl.AccountingConflict(
+                "provider cash activity replay conflicts with durable economic effect"
+            )
+
+        def replay_envelope(event: Mapping[str, object]) -> dict[str, object]:
+            envelope = {
+                key: value
+                for key, value in event.items()
+                if key != "journal_sequence"
+            }
+            version = event.get("aggregate_version")
+            if type(version) is not int or version <= 0:
+                raise _impl.AccountingConflict(
+                    "provider cash activity replay has invalid aggregate version"
+                )
+            envelope["aggregate_version"] = str(version)
+            return envelope
+
+        saved_result, replay_inserted, _ = store.commit_command(
+            command_id=command_identity,
+            actor=actor,
+            environment=scope,
+            idempotency_key=journal_idempotency_key,
+            request=request,
+            result=result,
+            state_version=int(existing_economic["aggregate_version"]),
+            events=[
+                (replay_envelope(existing_imported), None),
+                (
+                    replay_envelope(existing_economic),
+                    "autotrade.economic.events",
+                ),
+            ],
+        )
+        if replay_inserted:
+            raise _impl.AccountingConflict(
+                "provider cash effects exist without their durable command authority"
+            )
+        if saved_result != result:
+            raise _impl.AccountingConflict(
+                "provider cash durable command result conflicts with its financial effect"
+            )
+        return transaction, False
+
+    resolved = resolve_existing_effect()
+    if resolved is not None:
+        return resolved
+
     activity_version = store.next_aggregate_version(
         "provider_activity", identity
     )
@@ -2229,12 +333,6 @@ def book_external_provider_cash_activity(
         "economic_transaction_id": transaction_id,
         "cause_event_id": cause_event_id,
     }
-    imported_event_id = str(
-        uuid5(
-            NAMESPACE_URL,
-            f"https://events.autotrade.local/provider-activity-import/{identity}",
-        )
-    )
     imported_envelope = {
         "event_id": imported_event_id,
         "event_type": "ProviderActivityImported",
@@ -2243,7 +341,7 @@ def book_external_provider_cash_activity(
         "aggregate_version": str(activity_version),
         "committed_at": observed_text,
         "payload": imported_payload,
-        "payload_hash": payload_digest(imported_payload),
+        "payload_hash": _impl.payload_digest(imported_payload),
     }
 
     economic_payload = {
@@ -2252,14 +350,8 @@ def book_external_provider_cash_activity(
         "environment": scope,
         "source_activity_identity": identity,
         "observed_at": observed_text,
-        "transaction": _transaction_payload(transaction),
+        "transaction": _impl._transaction_payload(transaction),
     }
-    economic_event_id = str(
-        uuid5(
-            NAMESPACE_URL,
-            f"https://events.autotrade.local/economic-booking/{identity}",
-        )
-    )
     economic_envelope = {
         "event_id": economic_event_id,
         "event_type": "EconomicTransactionBooked",
@@ -2268,44 +360,42 @@ def book_external_provider_cash_activity(
         "aggregate_version": str(book_version),
         "committed_at": observed_text,
         "payload": economic_payload,
-        "payload_hash": payload_digest(economic_payload),
+        "payload_hash": _impl.payload_digest(economic_payload),
     }
 
-    command_identity = str(
-        uuid5(
-            NAMESPACE_URL,
-            f"https://commands.autotrade.local/provider-cash-import/{identity}",
+    try:
+        saved_result, inserted, _ = store.commit_command(
+            command_id=command_identity,
+            actor=actor,
+            environment=scope,
+            idempotency_key=journal_idempotency_key,
+            request=request,
+            result=result,
+            state_version=book_version,
+            events=[
+                (imported_envelope, None),
+                (economic_envelope, "autotrade.economic.events"),
+            ],
         )
-    )
-    _, inserted, _ = store.commit_command(
-        command_id=command_identity,
-        actor="provider-activity-accounting",
-        environment=scope,
-        idempotency_key=f"provider-cash-import:{identity}",
-        request=request,
-        result=result,
-        state_version=book_version,
-        events=[
-            (imported_envelope, None),
-            (economic_envelope, "autotrade.economic.events"),
-        ],
-    )
-    return transaction, inserted
+    except ValueError:
+        # A same-command writer can commit after the initial held read and
+        # before our aggregate-version probes/commit. Re-resolve the exact
+        # durable command/effects from one post-race snapshot. If no such
+        # authority exists, preserve the original write conflict.
+        resolved = resolve_existing_effect()
+        if resolved is not None:
+            return resolved
+        raise
 
-
-def load_provider_account_economic_book(
-    store: JournalStore,
-    *,
-    provider_id: str,
-    account_id: str,
-    environment: str,
-) -> EconomicBook:
-    """Rebuild canonical economics from the one durable provider/account journal."""
-
-    durable = DurableProviderEconomicBook(
-        store,
-        provider_id=provider_id,
-        account_id=account_id,
-        environment=environment,
-    )
-    return EconomicBook(durable.transactions)
+    if saved_result != result:
+        raise _impl.AccountingConflict(
+            "provider cash durable command result conflicts with its financial effect"
+        )
+    if not inserted:
+        resolved = resolve_existing_effect()
+        if resolved is None:
+            raise _impl.AccountingConflict(
+                "provider cash durable command exists without its financial effects"
+            )
+        return resolved
+    return transaction, True

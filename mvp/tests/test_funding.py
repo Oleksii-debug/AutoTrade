@@ -1,10 +1,17 @@
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import (
+    Decimal,
+    ROUND_CEILING,
+    ROUND_FLOOR,
+    ROUND_HALF_EVEN,
+    localcontext,
+)
 import unittest
 
 from mvp.autotrade_mvp.accounting import EconomicBook
 from mvp.autotrade_mvp.funding import (
     FundingConflict,
+    FundingError,
     FundingEvent,
     FundingRevisionBook,
     book_funding_delta,
@@ -50,6 +57,29 @@ class FundingTests(unittest.TestCase):
             Decimal("0.1000"),
         )
 
+    def test_final_cash_flow_is_context_invariant_under_hostile_decimal_contexts(self):
+        notional = Decimal("1234567890123456789012345678.1")
+        rate = Decimal("0.0001")
+        expected = Decimal("123456789012345678901234.56781")
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as decimal_context:
+                        decimal_context.prec = precision
+                        decimal_context.rounding = rounding
+                        debit = canonical_funding_cash_flow(
+                            signed_notional=notional,
+                            rate=rate,
+                            sign_convention="POSITIVE_LONG_PAYS",
+                        )
+                        credit = canonical_funding_cash_flow(
+                            signed_notional=notional,
+                            rate=rate,
+                            sign_convention="POSITIVE_LONG_RECEIVES",
+                        )
+                    self.assertEqual(debit, -expected)
+                    self.assertEqual(credit, expected)
+
     def test_indicated_rate_never_creates_economic_posting(self):
         book = FundingRevisionBook()
         update = book.record(event(kind="INDICATED"))
@@ -88,6 +118,99 @@ class FundingTests(unittest.TestCase):
         )
         ledger = EconomicBook([tx1, tx2])
         self.assertEqual(ledger.cash("USD"), Decimal("-0.12000"))
+
+    def test_high_significance_correction_delta_is_context_invariant(self):
+        expected_first = Decimal("-100000000000000000000000000.0")
+        expected_final = Decimal("-100000000000000000000000001.0")
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as decimal_context:
+                        decimal_context.prec = precision
+                        decimal_context.rounding = rounding
+                        first_event = FundingEvent(
+                            funding_id="funding:precision",
+                            revision=1,
+                            kind="FINAL",
+                            effective_at=moment(8),
+                            available_at=moment(8),
+                            settlement_currency="USD",
+                            signed_notional=Decimal("1000000000000000000000000000000"),
+                            rate=Decimal("0.0001"),
+                            sign_convention="POSITIVE_LONG_PAYS",
+                            evidence_ref="artifact:precision-r1",
+                        )
+                        correction_event = FundingEvent(
+                            funding_id="funding:precision",
+                            revision=2,
+                            kind="FINAL",
+                            effective_at=moment(8),
+                            available_at=moment(9),
+                            settlement_currency="USD",
+                            signed_notional=Decimal("1000000000000000000000000000000"),
+                            rate=Decimal("0.000100000000000000000000000001"),
+                            sign_convention="POSITIVE_LONG_PAYS",
+                            evidence_ref="artifact:precision-r2",
+                        )
+                        book = FundingRevisionBook()
+                        first = book.record(first_event)
+                        correction = book.record(correction_event)
+                    self.assertEqual(first.economic_delta, expected_first)
+                    self.assertEqual(correction.current_final_cash_flow, expected_final)
+                    self.assertEqual(correction.economic_delta, Decimal("-1.0"))
+                    self.assertEqual(book.events, (first_event, correction_event))
+
+    def test_revision_delta_resource_failure_does_not_mutate_book(self):
+        first_event = FundingEvent(
+            funding_id="funding:resource-boundary",
+            revision=1,
+            kind="FINAL",
+            effective_at=moment(8),
+            available_at=moment(8),
+            settlement_currency="USD",
+            signed_notional=Decimal("1e255"),
+            rate=Decimal("1"),
+            sign_convention="POSITIVE_LONG_PAYS",
+            evidence_ref="artifact:resource-r1",
+        )
+        incompatible_correction = FundingEvent(
+            funding_id="funding:resource-boundary",
+            revision=2,
+            kind="FINAL",
+            effective_at=moment(8),
+            available_at=moment(9),
+            settlement_currency="USD",
+            signed_notional=Decimal("1e-256"),
+            rate=Decimal("1"),
+            sign_convention="POSITIVE_LONG_PAYS",
+            evidence_ref="artifact:resource-r2",
+        )
+        book = FundingRevisionBook()
+        first = book.record(first_event)
+        self.assertEqual(first.current_revision, 1)
+        before = book.events
+        with self.assertRaisesRegex(FundingError, "resource envelope"):
+            book.record(incompatible_correction)
+        self.assertEqual(book.events, before)
+        self.assertEqual(book.latest(first_event.funding_id), first_event)
+
+    def test_funding_posting_negation_is_context_invariant(self):
+        amount = Decimal("-100000000000000000000000001.0")
+        opposite = Decimal("100000000000000000000000001.0")
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as decimal_context:
+                        decimal_context.prec = precision
+                        decimal_context.rounding = rounding
+                        transaction = book_funding_delta(
+                            transaction_id=f"funding-{precision}-{rounding}",
+                            cause_event_id=f"funding-event-{precision}-{rounding}",
+                            settlement_currency="USD",
+                            economic_delta=amount,
+                        )
+                    self.assertEqual(transaction.postings[0].signed_amount, amount)
+                    self.assertEqual(transaction.postings[1].signed_amount, opposite)
 
     def test_indicated_revision_cannot_erase_final_charge(self):
         book = FundingRevisionBook()
@@ -162,8 +285,6 @@ class FundingTests(unittest.TestCase):
         )
         with self.assertRaises(FundingConflict):
             book.record(changed_sign)
-
-
 
     def test_restart_rehydrates_final_before_booking_only_correction_delta(self):
         first_event = event(revision=1, kind="FINAL", rate="0.0001")

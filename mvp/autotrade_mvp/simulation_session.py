@@ -194,9 +194,12 @@ def run_canonical_simulation(
     decision = MovingAverageStrategy().decide(values, Decimal("1"))
     if decision.side == "SELL":
         raise ValueError("this long-only simulation session supports BUY/HOLD prices")
+    # Preserve the durable #1107 input identity until #1112 owns the explicit
+    # versioned protocol/session migration. Decimal string form intentionally
+    # distinguishes prior accepted spellings such as "100" and "100.0".
     input_payload = {
         "episode_id": episode_id,
-        "prices": [canonical_decimal_text(value) for value in values],
+        "prices": [str(value) for value in values],
     }
     input_hash = payload_digest(input_payload)
     root = Path(state_dir)

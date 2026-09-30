@@ -4,6 +4,10 @@ from hashlib import sha256
 import json
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
+
+import autotrade_numeric.exact_decimal as neutral_numeric
+import mvp.autotrade_mvp.provider_core as provider_core_module
 
 from mvp.autotrade_mvp.dispatch import (
     ExactJsonTransportResponse,
@@ -40,6 +44,110 @@ class _NoOffsetTZ(tzinfo):
 
 
 class ProviderCoreTests(unittest.TestCase):
+    def test_raw_provider_json_keeps_exact_decimals_and_int_identity(self):
+        payload = provider_core_module._decode_exact_json(
+            b'{"price":65000.10,"fee":0.0100,"negative":-12,'
+            b'"negative_zero":-0,"sequence":12345678901234567890}'
+        )
+        self.assertEqual(
+            payload["price"].as_tuple(), Decimal("65000.10").as_tuple()
+        )
+        self.assertEqual(
+            payload["fee"].as_tuple(), Decimal("0.0100").as_tuple()
+        )
+        self.assertIs(type(payload["sequence"]), int)
+        self.assertEqual(payload["sequence"], 12345678901234567890)
+        self.assertEqual(payload["negative"], -12)
+        self.assertEqual(payload["negative_zero"], 0)
+
+    def test_raw_oversized_provider_tokens_reject_before_decimal_constructor(self):
+        invalid_raw = (
+            b'{"price":1e256}',
+            b'{"price":1e-257}',
+            b'{"price":' + b'9' * 257 + b'}',
+            b'{"price":0.' + b'0' * 256 + b'1}',
+            b'{"sequence":' + b'9' * 257 + b'}',
+        )
+        for raw in invalid_raw:
+            with self.subTest(length=len(raw), prefix=raw[:20]):
+                with patch.object(
+                    neutral_numeric,
+                    "Decimal",
+                    side_effect=AssertionError("Decimal constructed before token check"),
+                ):
+                    with self.assertRaisesRegex(
+                        ProviderCoreError, "invalid or oversized exact JSON number"
+                    ) as rejected:
+                        provider_core_module._decode_exact_json(raw)
+                self.assertIsInstance(
+                    rejected.exception.__cause__,
+                    neutral_numeric.ExactDecimalError,
+                )
+                self.assertNotIn("999999", str(rejected.exception))
+
+    def test_direct_provider_numeric_fields_share_single_bounded_policy(self):
+        accepted = provider_core_module._decimal("65000.10", "price")
+        self.assertEqual(
+            accepted.as_tuple(), Decimal("65000.10").as_tuple()
+        )
+        self.assertEqual(
+            provider_core_module._decimal("0e-99999999", "quantity"),
+            Decimal("0"),
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "cannot be negative"):
+            provider_core_module._decimal("-1", "quantity", non_negative=True)
+        for value in (
+            "1e256", "1e-257", "9" * 257, float("inf"), True,
+            Decimal("Infinity"),
+        ):
+            with self.subTest(value_type=type(value).__name__):
+                with self.assertRaises(ProviderCoreError):
+                    provider_core_module._decimal(value, "price")
+        class HostileDecimal(Decimal):
+            def as_tuple(self):
+                raise AssertionError("provider must not dispatch Decimal subclass")
+        class HostileString(str):
+            def __len__(self):
+                raise AssertionError("provider must not dispatch string subclass")
+        for value in (HostileDecimal("1.25"), HostileString("1.25")):
+            with self.subTest(hostile_type=type(value).__name__):
+                with self.assertRaises(ProviderCoreError):
+                    provider_core_module._decimal(value, "price")
+
+    def test_invalid_response_cannot_become_authenticated_submission_observation(self):
+        with TemporaryDirectory() as directory:
+            binding, request_sha = self._durable_submission_binding(
+                directory, raw=b'{"orderId":"provider-1","price":1e256}'
+            )
+            with patch.object(
+                neutral_numeric,
+                "Decimal",
+                side_effect=AssertionError("premature Decimal construction"),
+            ):
+                with self.assertRaisesRegex(
+                    ProviderCoreError, "invalid or oversized exact JSON number"
+                ):
+                    observe_submission_json_response(
+                        response_binding=binding,
+                        provider_id="BYBIT",
+                        endpoint="/v5/order/create",
+                        prepared_request_sha256=request_sha,
+                        capability_snapshot_ids=("cap-1",),
+                        instrument_versions=("BTCUSD:v1",),
+                    )
+
+    def test_provider_raw_json_keeps_duplicate_and_nonfinite_fences(self):
+        for invalid in (
+            b'{"price":1.25,"price":1.50}',
+            b'{"price":NaN}',
+            b'{"price":Infinity}',
+            b'{"price":-Infinity}',
+            b'{"price":1e256,"price":2}',
+        ):
+            with self.subTest(raw=invalid):
+                with self.assertRaises(ProviderCoreError):
+                    provider_core_module._decode_exact_json(invalid)
+
 
     def _durable_submission_binding(
         self,

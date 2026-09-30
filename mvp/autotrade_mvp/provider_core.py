@@ -18,6 +18,13 @@ from types import MappingProxyType
 from typing import Iterable, Literal, Mapping
 import re
 
+from autotrade_numeric.exact_decimal import (
+    ExactDecimalError,
+    parse_bounded_exact_decimal,
+    parse_bounded_json_integer_token,
+    parse_bounded_json_number_token,
+)
+
 from .capabilities import CapabilitySnapshot
 from .dispatch import SubmissionResponseBinding
 
@@ -49,14 +56,13 @@ def _text(value: str, name: str) -> str:
 
 
 def _decimal(value, name: str, *, non_negative: bool = False) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise ProviderCoreError(f"{name} must use exact decimal input")
+    # The single installed neutral exact-number TCB admits provider/domain
+    # presentation before Decimal construction or financial use. Do not grow a
+    # second adapter-local resource policy or coerce polymorphic authority.
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise ProviderCoreError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ProviderCoreError(f"{name} must be a finite decimal")
+        result = parse_bounded_exact_decimal(value)
+    except (ExactDecimalError, TypeError) as error:
+        raise ProviderCoreError(f"{name} must be a bounded finite decimal") from error
     if non_negative and result < 0:
         raise ProviderCoreError(f"{name} cannot be negative")
     return result
@@ -151,7 +157,8 @@ def _decode_exact_json(raw: bytes) -> object:
         decoded = json.loads(
             text,
             object_pairs_hook=no_duplicate_keys,
-            parse_float=Decimal,
+            parse_float=parse_bounded_json_number_token,
+            parse_int=parse_bounded_json_integer_token,
             parse_constant=lambda value: (_ for _ in ()).throw(
                 ProviderCoreError(
                     f"provider response contains non-finite JSON constant: {value}"
@@ -160,6 +167,12 @@ def _decode_exact_json(raw: bytes) -> object:
         )
     except ProviderCoreError:
         raise
+    except ExactDecimalError as error:
+        # A malformed/out-of-envelope numeric token must not turn into an
+        # accepted provider observation or a derived financial side effect.
+        raise ProviderCoreError(
+            "provider response contains invalid or oversized exact JSON number"
+        ) from error
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ProviderCoreError(
             "provider response must be exact UTF-8 JSON bytes"

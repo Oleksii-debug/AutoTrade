@@ -17,6 +17,120 @@ from mvp.autotrade_mvp.persistence import JournalStore
 
 
 class DispatchBoundedNumericTransportTests(unittest.TestCase):
+    def test_authoritative_submission_journal_rejects_subclass_before_callbacks(self):
+        touched = []
+
+        class HostileJournalStore(JournalStore):
+            def load_events(self, *_args, **_kwargs):
+                touched.append("load_events")
+                raise AssertionError("caller journal override executed")
+
+            def append_event(self, *_args, **_kwargs):
+                touched.append("append_event")
+                raise AssertionError("caller journal override executed")
+
+        with TemporaryDirectory() as directory:
+            hostile = HostileJournalStore(directory + "/journal.sqlite3")
+
+            with self.assertRaisesRegex(
+                TypeError, "canonical JournalStore"
+            ):
+                load_submission_response_binding(
+                    hostile,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    attempt_id="forged-attempt",
+                )
+
+            with self.assertRaisesRegex(
+                TypeError, "canonical JournalStore"
+            ):
+                GuardedDispatcher(
+                    hostile,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    owner_token="owner",
+                )
+
+        self.assertEqual(touched, [])
+
+    def test_exact_journal_instance_shadow_and_generation_replacement_fail_closed(self):
+        touched = []
+
+        def hostile_load(*_args, **_kwargs):
+            touched.append("load_events")
+            raise AssertionError("instance load override executed")
+
+        def hostile_append(*_args, **_kwargs):
+            touched.append("append_event")
+            raise AssertionError("instance append override executed")
+
+        def hostile_connect(*_args, **_kwargs):
+            touched.append("_connect")
+            raise AssertionError("instance connection override executed")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(directory + "/journal.sqlite3")
+            store.__dict__["load_events"] = hostile_load
+            with self.assertRaisesRegex(TypeError, "instance state is shadowed"):
+                load_submission_response_binding(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    attempt_id="shadowed-load",
+                )
+            del store.__dict__["load_events"]
+
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+
+            for name, callback in (
+                ("load_events", hostile_load),
+                ("_connect", hostile_connect),
+            ):
+                with self.subTest(name=name):
+                    store.__dict__[name] = callback
+                    with self.assertRaisesRegex(
+                        TypeError, "instance state is shadowed"
+                    ):
+                        dispatcher._events("shadowed-attempt")
+                    del store.__dict__[name]
+
+            store.__dict__["append_event"] = hostile_append
+            with self.assertRaisesRegex(TypeError, "instance state is shadowed"):
+                dispatcher._append(
+                    attempt_id="shadowed-attempt",
+                    event_type="SubmissionPrepared",
+                    version=1,
+                    payload={},
+                    now="2026-09-30T17:00:00Z",
+                )
+            del store.__dict__["append_event"]
+
+            other = JournalStore(directory + "/other.sqlite3")
+            original_path = store.path
+            original_identity = store.store_identity
+            store.path = other.path
+            store._store_identity = other.store_identity
+            with self.assertRaisesRegex(
+                PermissionError, "submission journal authority changed"
+            ):
+                dispatcher._events("mutated-generation")
+            store.path = original_path
+            store._store_identity = original_identity
+
+            dispatcher.store = other
+            with self.assertRaisesRegex(
+                PermissionError, "submission journal authority changed"
+            ):
+                dispatcher._events("wrong-generation")
+
+        self.assertEqual(touched, [])
+
     def test_shared_depth_boundary_and_parser_recursion_remain_redacted(self):
         at_limit = b"[" * 64 + b"0" + b"]" * 64
         too_deep = b"[" * 65 + b"0" + b"]" * 65

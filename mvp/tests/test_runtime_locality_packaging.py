@@ -21,10 +21,28 @@ ROOT = Path(__file__).resolve().parents[2]
 SOURCE_SHA = "a" * 40
 
 
+def _isolated_python(*, staging: Path, script: str, extra_env: dict[str, str] | None = None):
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    environment["AUTOTRADE_STAGING"] = str(staging)
+    if extra_env:
+        environment.update(extra_env)
+    return subprocess.run(
+        [sys.executable, "-I", "-c", script],
+        cwd=staging,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
 class ProductionRuntimeFilesystemPackagingTests(unittest.TestCase):
-    def test_journal_store_runs_from_production_staging_without_research_tree(self):
+    def test_journal_store_runs_from_hermetic_production_staging_without_research(self):
         with TemporaryDirectory() as directory:
-            staging = Path(directory) / "installed"
+            root = Path(directory)
+            staging = root / "installed"
             (staging / "mvp").mkdir(parents=True)
             shutil.copy2(ROOT / "mvp" / "__init__.py", staging / "mvp" / "__init__.py")
             shutil.copytree(
@@ -38,28 +56,32 @@ class ProductionRuntimeFilesystemPackagingTests(unittest.TestCase):
             self.assertFalse((staging / "research").exists())
             self.assertFalse((staging / "autotrade_local_filesystem.py").exists())
 
+            database = root / "journal.sqlite3"
             script = """
+import os
 from pathlib import Path
-from tempfile import TemporaryDirectory
+import sys
+
+staging = os.environ['AUTOTRADE_STAGING']
+sys.path.insert(0, staging)
+from autotrade_runtime.local_filesystem import require_qualified_local_filesystem_path
 from mvp.autotrade_mvp.persistence import JournalStore
 
-with TemporaryDirectory() as directory:
-    path = Path(directory) / 'journal.sqlite3'
-    store = JournalStore(path)
-    assert path.is_file()
-    assert store.store_identity.canonical_path == str(path.resolve())
+path = Path(os.environ['AUTOTRADE_TEST_DB'])
+require_qualified_local_filesystem_path(path)
+assert not path.exists()
+store = JournalStore(path)
+assert path.is_file()
+assert store.store_identity.canonical_path == str(path.resolve())
+for name in sys.modules:
+    assert name != 'research' and not name.startswith('research.')
+    assert name != 'autotrade_research' and not name.startswith('autotrade_research.')
 print('STAGED_JOURNAL_OK')
 """
-            environment = os.environ.copy()
-            environment["PYTHONPATH"] = str(staging)
-            completed = subprocess.run(
-                [sys.executable, "-c", script],
-                cwd=staging,
-                env=environment,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
+            completed = _isolated_python(
+                staging=staging,
+                script=script,
+                extra_env={"AUTOTRADE_TEST_DB": str(database)},
             )
             self.assertEqual(
                 completed.returncode,
@@ -71,6 +93,35 @@ print('STAGED_JOURNAL_OK')
                 ),
             )
             self.assertEqual(completed.stdout.strip(), "STAGED_JOURNAL_OK")
+            self.assertTrue(database.is_file())
+
+    def test_missing_runtime_package_fails_before_journal_creation_without_fallback(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            staging = root / "installed-without-runtime"
+            (staging / "mvp").mkdir(parents=True)
+            shutil.copy2(ROOT / "mvp" / "__init__.py", staging / "mvp" / "__init__.py")
+            shutil.copytree(
+                ROOT / "mvp" / "autotrade_mvp",
+                staging / "mvp" / "autotrade_mvp",
+            )
+            self.assertFalse((staging / "autotrade_runtime").exists())
+            database = root / "must-not-exist.sqlite3"
+            script = """
+import os
+import sys
+sys.path.insert(0, os.environ['AUTOTRADE_STAGING'])
+from mvp.autotrade_mvp.persistence import JournalStore
+JournalStore(os.environ['AUTOTRADE_TEST_DB'])
+"""
+            completed = _isolated_python(
+                staging=staging,
+                script=script,
+                extra_env={"AUTOTRADE_TEST_DB": str(database)},
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("autotrade_runtime", completed.stderr)
+            self.assertFalse(database.exists())
 
     def test_resource_lock_delegates_locality_to_production_runtime_authority(self):
         failure = LocalFilesystemQualificationError("remote path")

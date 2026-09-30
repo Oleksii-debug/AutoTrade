@@ -121,24 +121,37 @@ def _decimal_envelope(definition: dict[str, object]) -> tuple[int, int, int]:
     return values  # type: ignore[return-value]
 
 
+def _within_decimal_geometry(
+    value: object,
+    limits: tuple[int, int, int],
+) -> bool:
+    """Mirror generated binding geometry independently of schema extraction.
+
+    Zero has no integer magnitude, but its coefficient has one significant
+    digit. Keep this oracle independent of contract/runtime binding imports.
+    """
+    if type(value) is not str:
+        return False
+    max_significant_digits, max_scale, max_integer_digits = limits
+    unsigned = value[1:] if value.startswith("-") else value
+    integer_part, dot, fractional_part = unsigned.partition(".")
+    integer_magnitude = 0 if integer_part == "0" else len(integer_part)
+    coefficient = integer_part + fractional_part
+    significant_digits = len(coefficient.lstrip("0")) or 1
+    return (
+        significant_digits <= max_significant_digits
+        and (len(fractional_part) if dot else 0) <= max_scale
+        and integer_magnitude <= max_integer_digits
+    )
+
+
 def _within_decimal_envelope(
     value: object,
     definition: dict[str, object],
 ) -> bool:
     if type(value) is not str:
         return False
-    max_significant_digits, max_scale, max_integer_digits = _decimal_envelope(
-        definition
-    )
-    unsigned = value[1:] if value.startswith("-") else value
-    integer_part, dot, fractional_part = unsigned.partition(".")
-    coefficient = integer_part + fractional_part
-    significant_digits = len(coefficient.lstrip("0")) or 1
-    return (
-        len(integer_part) <= max_integer_digits
-        and (len(fractional_part) if dot else 0) <= max_scale
-        and significant_digits <= max_significant_digits
-    )
+    return _within_decimal_geometry(value, _decimal_envelope(definition))
 
 
 def generated_document() -> dict[str, object]:

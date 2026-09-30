@@ -35,8 +35,12 @@ class RiskPolicyAuthorityError(ValueError):
 _AGGREGATE_TYPE = "risk_policy_registry"
 _REGISTER_EVENT = "RiskPolicyRegistered.v1"
 _ACTIVATE_EVENT = "RiskPolicyActivated.v1"
+_ACTIVATE_EVENT_V2 = "RiskPolicyActivated.v2"
 _SCHEMA_VERSION = "1.0.0"
+_ACTIVATE_V2_SCHEMA_VERSION = "2.0.0"
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_ACTIVATION_EVENT_ID_RE = re.compile(r"^risk-policy-activate(?:-v2)?:[0-9a-f]{64}$")
+_ACTIVATION_REQUEST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 _DECIMAL_FIELDS = (
     "max_abs_position",
@@ -86,6 +90,10 @@ _SCOPE_KEYS = frozenset(
 _IDENTITY_KEYS = frozenset({"policy_id", "version", "content_digest", "scope"})
 _REGISTER_KEYS = frozenset({"schema_version", "operation", "identity", "policy"})
 _ACTIVATE_KEYS = frozenset({"schema_version", "operation", "identity"})
+_ACTIVATE_V2_KEYS = frozenset({
+    "schema_version", "operation", "identity", "activation_request_id",
+    "expected_previous_activation_event_id",
+})
 
 
 def _text(value: object, *, name: str, upper: bool = False) -> str:
@@ -93,6 +101,32 @@ def _text(value: object, *, name: str, upper: bool = False) -> str:
         raise RiskPolicyAuthorityError(f"{name} must be non-empty text")
     normalized = value.strip()
     return normalized.upper() if upper else normalized
+
+
+def _request_id(value: object) -> str:
+    """A bounded, exact operator intent: no implicit strip or normalization."""
+    if (
+        type(value) is not str
+        or len(value) > 128
+        or _ACTIVATION_REQUEST_RE.fullmatch(value) is None
+    ):
+        raise RiskPolicyAuthorityError(
+            "activation_request_id must be canonical non-empty ASCII intent"
+        )
+    return value
+
+
+def _predecessor_id(value: object) -> str | None:
+    if value is None:
+        return None
+    if (
+        type(value) is not str
+        or _ACTIVATION_EVENT_ID_RE.fullmatch(value) is None
+    ):
+        raise RiskPolicyAuthorityError(
+            "expected_previous_activation_event_id must be a canonical activation event id"
+        )
+    return value
 
 
 def _positive_int(value: object, *, name: str) -> int:
@@ -110,12 +144,12 @@ def _digest(value: object, *, name: str) -> str:
 
 
 def _utc_text(value: datetime, *, name: str) -> str:
-    if (
-        not isinstance(value, datetime)
-        or value.tzinfo is None
-        or value.utcoffset() is None
-    ):
-        raise RiskPolicyAuthorityError(f"{name} must be timezone-aware")
+    # Durable financial-authority timestamps must not dispatch through
+    # caller-controlled datetime/tzinfo subclasses while normalizing.
+    if type(value) is not datetime or type(value.tzinfo) is not timezone:
+        raise RiskPolicyAuthorityError(
+            f"{name} must be exact datetime with datetime.timezone"
+        )
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
@@ -489,6 +523,8 @@ class _ReplayState:
     max_version_by_policy_id: dict[str, int]
     max_activated_version_by_policy_id: dict[str, int]
     aggregate_version_at_cut: int
+    activated_keys: set[tuple[str, int]]
+    activation_requests: dict[str, tuple[RiskPolicyIdentity, str | None, str, int]]
 
 
 class DurableRiskPolicyRegistry:
@@ -531,6 +567,10 @@ class DurableRiskPolicyRegistry:
         activation_event_id: str | None = None
         activation_sequence: int | None = None
         aggregate_version_at_cut = 0
+        activated_keys: set[tuple[str, int]] = set()
+        activation_requests: dict[
+            str, tuple[RiskPolicyIdentity, str | None, str, int]
+        ] = {}
         expected_aggregate_version = 1
 
         for event in events:
@@ -598,14 +638,16 @@ class DurableRiskPolicyRegistry:
                     event["event_id"],
                     sequence,
                 )
-            elif event_type == _ACTIVATE_EVENT:
+            elif event_type in (_ACTIVATE_EVENT, _ACTIVATE_EVENT_V2):
+                is_v2 = event_type == _ACTIVATE_EVENT_V2
                 payload = _strict_mapping(
                     event.get("payload"),
                     name="risk policy activation",
-                    keys=_ACTIVATE_KEYS,
+                    keys=_ACTIVATE_V2_KEYS if is_v2 else _ACTIVATE_KEYS,
                 )
                 if (
-                    payload["schema_version"] != _SCHEMA_VERSION
+                    payload["schema_version"]
+                    != (_ACTIVATE_V2_SCHEMA_VERSION if is_v2 else _SCHEMA_VERSION)
                     or payload["operation"] != "ACTIVATE"
                 ):
                     raise RiskPolicyAuthorityError(
@@ -615,11 +657,29 @@ class DurableRiskPolicyRegistry:
                     payload["identity"],
                     expected_scope=scope,
                 )
-                expected_event_id = _event_id("risk-policy-activate", payload)
+                expected_event_id = _event_id(
+                    "risk-policy-activate-v2" if is_v2 else "risk-policy-activate",
+                    payload,
+                )
                 if event.get("event_id") != expected_event_id:
                     raise RiskPolicyAuthorityError(
                         "risk policy activation event identity mismatch"
                     )
+                request_id: str | None = None
+                predecessor: str | None = None
+                if is_v2:
+                    request_id = _request_id(payload["activation_request_id"])
+                    predecessor = _predecessor_id(
+                        payload["expected_previous_activation_event_id"]
+                    )
+                    if request_id in activation_requests:
+                        raise RiskPolicyAuthorityError(
+                            "duplicate durable activation_request_id in policy scope"
+                        )
+                    if predecessor != activation_event_id:
+                        raise RiskPolicyAuthorityError(
+                            "risk policy activation predecessor mismatch"
+                        )
                 key = (identity.policy_id, identity.version)
                 registered_value = registered.get(key)
                 if registered_value is None or registered_value[0] != identity:
@@ -638,9 +698,14 @@ class DurableRiskPolicyRegistry:
                     highest_activated,
                     identity.version,
                 )
+                activated_keys.add(key)
                 active_key = key
                 activation_event_id = event["event_id"]
                 activation_sequence = sequence
+                if request_id is not None:
+                    activation_requests[request_id] = (
+                        identity, predecessor, activation_event_id, sequence
+                    )
             else:
                 raise RiskPolicyAuthorityError(
                     "unsupported durable risk policy event type"
@@ -654,6 +719,8 @@ class DurableRiskPolicyRegistry:
             max_version_by_policy_id=max_version_by_policy_id,
             max_activated_version_by_policy_id=max_activated_version_by_policy_id,
             aggregate_version_at_cut=aggregate_version_at_cut,
+            activated_keys=activated_keys,
+            activation_requests=activation_requests,
         )
 
     def _current_state(self, scope: RiskPolicyScope) -> tuple[int, _ReplayState]:
@@ -732,14 +799,35 @@ class DurableRiskPolicyRegistry:
         policy_id: str,
         version: int,
         committed_at: datetime,
+        activation_request_id: str | None = None,
+        expected_previous_activation_event_id: str | None = None,
     ) -> bool:
-        """Select one registered immutable identity for new commands in ``scope``."""
+        """Select a policy through a durable, predecessor-bound activation episode.
 
+        A request ID is an operator-issued intent, not a fresh random retry key.
+        Exact accepted retries return False only while that *same episode* is
+        active. A superseded episode is never reissued after a lost response.
+        Historical no-intent callers retain first-activation compatibility,
+        but cannot reselect an identity after a policy detour.
+        """
         if type(scope) is not RiskPolicyScope:
             raise TypeError("scope must be RiskPolicyScope")
         policy_id = _text(policy_id, name="policy_id")
         version = _positive_int(version, name="version")
         committed_at_text = _utc_text(committed_at, name="committed_at")
+        if activation_request_id is not None:
+            activation_request_id = _request_id(activation_request_id)
+        expected_previous_activation_event_id = _predecessor_id(
+            expected_previous_activation_event_id
+        )
+        if (
+            activation_request_id is None
+            and expected_previous_activation_event_id is not None
+        ):
+            raise RiskPolicyAuthorityError(
+                "activation predecessor requires explicit activation_request_id"
+            )
+
         _cut, state = self._current_state(scope)
         key = (policy_id, version)
         registered = state.registered.get(key)
@@ -748,22 +836,70 @@ class DurableRiskPolicyRegistry:
                 "risk policy must be durably registered before activation"
             )
         identity = registered[0]
+        if activation_request_id is not None:
+            previous = state.activation_requests.get(activation_request_id)
+            if previous is not None:
+                if (
+                    previous[0] != identity
+                    or previous[1] != expected_previous_activation_event_id
+                ):
+                    raise RiskPolicyAuthorityError(
+                        "activation_request_id conflicts with persisted intent"
+                    )
+                if state.activation_event_id == previous[2]:
+                    return False
+                raise RiskPolicyAuthorityError(
+                    "activation_request_id belongs to a superseded episode"
+                )
+            if expected_previous_activation_event_id != state.activation_event_id:
+                raise RiskPolicyAuthorityError(
+                    "risk policy activation predecessor is stale"
+                )
         if state.active_key == key:
+            # A new explicit intent must be durably recorded or rejected.
+            # Reporting a no-op here would falsely acknowledge an unbound ID
+            # that could later be reused under a different episode chronology.
+            if activation_request_id is not None:
+                raise RiskPolicyAuthorityError(
+                    "fresh activation_request_id cannot select already-active policy"
+                )
             return False
+        # A monotonic downgrade violation is more specific than the legacy
+        # no-intent fallback and must retain its established fail-closed verdict.
         highest_activated = state.max_activated_version_by_policy_id.get(policy_id, 0)
         if version < highest_activated:
             raise RiskPolicyAuthorityError(
                 "risk policy activation cannot roll back a policy lineage"
             )
+        if activation_request_id is None and key in state.activated_keys:
+            raise RiskPolicyAuthorityError(
+                "legacy activation cannot reselect a historical episode; "
+                "explicit activation_request_id and predecessor required"
+            )
 
-        payload = {
-            "schema_version": _SCHEMA_VERSION,
-            "operation": "ACTIVATE",
-            "identity": identity.payload(),
-        }
+        if activation_request_id is None:
+            # Preserve v1 first-selection wire shape and historical read support.
+            payload = {
+                "schema_version": _SCHEMA_VERSION,
+                "operation": "ACTIVATE",
+                "identity": identity.payload(),
+            }
+            event_id = _event_id("risk-policy-activate", payload)
+            event_type = _ACTIVATE_EVENT
+        else:
+            payload = {
+                "schema_version": _ACTIVATE_V2_SCHEMA_VERSION,
+                "operation": "ACTIVATE",
+                "identity": identity.payload(),
+                "activation_request_id": activation_request_id,
+                "expected_previous_activation_event_id":
+                    expected_previous_activation_event_id,
+            }
+            event_id = _event_id("risk-policy-activate-v2", payload)
+            event_type = _ACTIVATE_EVENT_V2
         envelope = {
-            "event_id": _event_id("risk-policy-activate", payload),
-            "event_type": _ACTIVATE_EVENT,
+            "event_id": event_id,
+            "event_type": event_type,
             "aggregate_type": _AGGREGATE_TYPE,
             "aggregate_id": scope.aggregate_id,
             "aggregate_version": str(state.aggregate_version_at_cut + 1),
@@ -772,14 +908,60 @@ class DurableRiskPolicyRegistry:
             "committed_at": committed_at_text,
         }
         try:
-            return self.store.append_event(envelope).inserted
+            result = self.store.append_event(envelope)
+            if result.inserted:
+                return True
         except ValueError as error:
+            # A stale same-scope aggregate CAS or duplicate event ID never
+            # implies success just because another request selected the same key.
             _cut, current = self._current_state(scope)
-            if current.active_key == key:
+            if activation_request_id is not None:
+                persisted = current.activation_requests.get(activation_request_id)
+                if persisted is not None:
+                    if (
+                        persisted[0] != identity
+                        or persisted[1] != expected_previous_activation_event_id
+                    ):
+                        raise RiskPolicyAuthorityError(
+                            "activation_request_id conflicts with persisted intent"
+                        ) from error
+                    if current.activation_event_id == persisted[2]:
+                        return False
+                    raise RiskPolicyAuthorityError(
+                        "activation_request_id belongs to a superseded episode"
+                    ) from error
+            elif (
+                current.active_key == key
+                and current.activation_event_id == event_id
+            ):
                 return False
             raise RiskPolicyAuthorityError(
-                "risk policy registry changed concurrently; activation must retry"
+                "risk policy registry changed concurrently; activation must retry "
+                "with current predecessor and a new explicit request"
             ) from error
+
+        # Defensive duplicate-result path for compatible JournalStore versions.
+        _cut, current = self._current_state(scope)
+        if activation_request_id is not None:
+            persisted = current.activation_requests.get(activation_request_id)
+            if persisted is not None:
+                if (
+                    persisted[0] != identity
+                    or persisted[1] != expected_previous_activation_event_id
+                ):
+                    raise RiskPolicyAuthorityError(
+                        "activation_request_id conflicts with persisted intent"
+                    )
+                if current.activation_event_id == persisted[2]:
+                    return False
+                raise RiskPolicyAuthorityError(
+                    "activation_request_id belongs to a superseded episode"
+                )
+        elif current.active_key == key and current.activation_event_id == event_id:
+            return False
+        raise RiskPolicyAuthorityError(
+            "risk policy activation duplicate result has no current exact episode"
+        )
 
     def resolve_current(
         self,

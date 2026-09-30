@@ -1,5 +1,6 @@
 from datetime import timedelta, timezone
 import json
+from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -8,6 +9,7 @@ from mvp.autotrade_mvp.bybit_v5 import (
     prepare_order_submission,
 )
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher, stable_client_order_id
+from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_transport import (
     BYBIT_V5_ENDPOINT_POLICIES,
@@ -194,6 +196,64 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
         self.assertEqual(observation.query_binding.endpoint, "/v5/execution/list")
         self.assertEqual(observation.payload["retCode"], 0)
         self.assertEqual(len(wire.requests), 1)
+
+    def test_restart_history_blocks_before_secret_until_exact_fresh_rearm(self):
+        capability, binding = self.binding()
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            first = DurableCapabilityRegistry(JournalStore(path))
+            self.assertTrue(first.add(capability))
+            self.assertEqual(
+                len(first.store.load_events_by_aggregate_type("capability_history")),
+                1,
+            )
+
+            restarted = DurableCapabilityRegistry(JournalStore(path))
+            events = []
+            resolver = FakeSecretResolver(events)
+            wire = RecordingWire(
+                events,
+                response=b'{"retCode":0,"retMsg":"OK","result":{"list":[]}}',
+                http_status=200,
+            )
+            transport = BybitV5AuthenticatedReadTransport(
+                policy=BYBIT_V5_ENDPOINT_POLICIES["TESTNET"],
+                provider_environment="TESTNET",
+                account_id="paper-1",
+                capability_snapshot_id=capability.snapshot_id,
+                capability_registry=restarted,
+                secret_resolver=resolver,
+                credential_handle=read_handle(),
+                session_token="session-read",
+                origin="https://localhost",
+                execution_identity="host-owner",
+                clock_millis=lambda: 1700000000000,
+                clock_utc=lambda: READ_AT,
+                wire_client=wire,
+            )
+
+            with self.assertRaisesRegex(
+                ProviderTransportScopeError,
+                "current capability cannot be verified",
+            ):
+                transport(binding)
+            self.assertEqual(resolver.calls, [])
+            self.assertEqual(wire.requests, [])
+            self.assertEqual(events, [])
+
+            self.assertFalse(restarted.add(capability))
+            self.assertEqual(
+                len(restarted.store.load_events_by_aggregate_type("capability_history")),
+                1,
+            )
+            observation = transport(binding)
+            self.assertEqual(observation.provider_id, "BYBIT")
+            self.assertEqual(len(resolver.calls), 1)
+            self.assertEqual(len(wire.requests), 1)
+            self.assertEqual(
+                events,
+                ["resolve", "wire"],
+            )
 
     def test_read_capability_expiry_after_secret_resolution_blocks_wire_send(self):
         capability, binding = self.binding()

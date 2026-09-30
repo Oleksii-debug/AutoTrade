@@ -8,16 +8,36 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
+from decimal import (
+    Decimal,
+    DecimalException,
+    InvalidOperation,
+    ROUND_HALF_EVEN,
+    localcontext,
+)
+from fractions import Fraction
 from hashlib import sha256
 import json
+from pathlib import Path
 import re
-from typing import Iterable
+import threading
+from typing import Callable, Iterable
+import weakref
 
-from autotrade_research.artifacts.store import ArtifactStore
+from autotrade_numeric.exact_decimal import (
+    ExactDecimalError,
+    as_fraction,
+    terminating_decimal,
+    validate_fraction,
+)
+from autotrade_research.artifacts import ArtifactStore, trusted_authenticated_reader
 from autotrade_research.io.strict_json import strict_json_loads
 from autotrade_research.memory.episodes import ExperienceMemory
-from autotrade_research.science.registry import ScientificRegistry
+from autotrade_research.science.registry import (
+    ProtocolViolation,
+    RegisteredAblationDecisionPolicy,
+    ScientificRegistry,
+)
 
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -33,7 +53,102 @@ def _decimal(value: Decimal | int | str, field: str) -> Decimal:
         raise ValueError(f"{field} must be a finite decimal") from error
     if not number.is_finite():
         raise ValueError(f"{field} must be finite")
+    try:
+        as_fraction(number)
+    except ExactDecimalError as error:
+        raise ValueError(
+            f"{field} exceeds the shared exact numeric resource envelope"
+        ) from error
     return number
+
+
+_ABLATION_REPORT_QUANTUM = Decimal("1e-50")
+_ABLATION_REPORT_PRECISION = 384
+_ABLATION_REPORT_FAILURE_POLICY = (
+    "report-unavailable-preserve-exact-decision-v1"
+)
+_ABLATION_DECISION_RULE = "exact-rational-d2-sample-variance-v1"
+_REPORTING_AVAILABLE = "AVAILABLE"
+_REPORTING_UNAVAILABLE = "UNAVAILABLE"
+_REPORTING_NOT_APPLICABLE = "NOT_APPLICABLE"
+
+
+def _bounded(value: Fraction) -> Fraction:
+    return validate_fraction(value)
+
+
+def _fraction_add(left: Fraction, right: Fraction) -> Fraction:
+    return _bounded(left + right)
+
+
+def _fraction_subtract(left: Fraction, right: Fraction) -> Fraction:
+    return _bounded(left - right)
+
+
+def _fraction_multiply(left: Fraction, right: Fraction) -> Fraction:
+    return _bounded(left * right)
+
+
+def _fraction_divide(left: Fraction, right: Fraction) -> Fraction:
+    if right == 0:
+        raise ZeroDivisionError("exact rational divisor must be non-zero")
+    return _bounded(left / right)
+
+
+def _mean_fraction(values: list[Fraction]) -> Fraction | None:
+    if not values:
+        return None
+    total = Fraction(0, 1)
+    for value in values:
+        total = _fraction_add(total, value)
+    return _fraction_divide(total, Fraction(len(values), 1))
+
+
+def _report_fraction(value: Fraction) -> Decimal:
+    value = _bounded(value)
+    with localcontext() as context:
+        context.prec = _ABLATION_REPORT_PRECISION
+        context.rounding = ROUND_HALF_EVEN
+        projected = Decimal(value.numerator) / Decimal(value.denominator)
+        return projected.quantize(_ABLATION_REPORT_QUANTUM)
+
+
+def _report_sqrt(value: Fraction) -> Decimal:
+    value = _bounded(value)
+    if value < 0:
+        raise ValueError("cannot project square root of a negative rational")
+    with localcontext() as context:
+        context.prec = _ABLATION_REPORT_PRECISION
+        context.rounding = ROUND_HALF_EVEN
+        projected = (
+            Decimal(value.numerator) / Decimal(value.denominator)
+        ).sqrt()
+        return projected.quantize(_ABLATION_REPORT_QUANTUM)
+
+
+def _report_lower_bound(
+    mean: Fraction,
+    variance: Fraction,
+    multiplier: Fraction,
+    pair_count: int,
+) -> Decimal:
+    standard_error_squared = _fraction_divide(
+        variance,
+        Fraction(pair_count, 1),
+    )
+    with localcontext() as context:
+        context.prec = _ABLATION_REPORT_PRECISION
+        context.rounding = ROUND_HALF_EVEN
+        mean_decimal = Decimal(mean.numerator) / Decimal(mean.denominator)
+        multiplier_decimal = (
+            Decimal(multiplier.numerator) / Decimal(multiplier.denominator)
+        )
+        se_decimal = (
+            Decimal(standard_error_squared.numerator)
+            / Decimal(standard_error_squared.denominator)
+        ).sqrt()
+        lower = mean_decimal - multiplier_decimal * se_decimal
+        return lower.quantize(_ABLATION_REPORT_QUANTUM)
 
 
 def _digest(value: str, field: str) -> str:
@@ -285,19 +400,17 @@ class AblationPair:
     def utility_delta(self) -> Decimal | None:
         if not self.utility_comparable:
             return None
-        return self.full.utility - self.ablated.utility
+        return terminating_decimal(_pair_utility_fraction(self))
 
     @property
     def cost_delta(self) -> Decimal:
-        return self.full.cost - self.ablated.cost
+        return terminating_decimal(_pair_cost_fraction(self))
 
     @property
     def net_value_delta(self) -> Decimal | None:
         if not self.utility_comparable:
             return None
-        return (self.full.utility - self.full.cost) - (
-            self.ablated.utility - self.ablated.cost
-        )
+        return terminating_decimal(_pair_net_value_fraction(self))
 
     @property
     def latency_delta_ms(self) -> int:
@@ -314,9 +427,75 @@ class AblationSummary:
     full_deadline_misses: int
     ablated_deadline_misses: int
     mean_utility_delta: Decimal | None
-    mean_cost_delta: Decimal
-    mean_latency_delta_ms: Decimal
+    mean_cost_delta: Decimal | None
+    mean_latency_delta_ms: Decimal | None
     status: str
+    reporting_status: str
+
+
+@dataclass(frozen=True)
+class ExactAblationDecision:
+    """Exact rational operands that alone authorize the PASS/FAIL verdict."""
+
+    pair_count: int
+    mean: Fraction
+    sample_variance: Fraction
+    threshold_delta: Fraction
+    uncertainty_multiplier: Fraction
+    lhs: Fraction
+    rhs: Fraction
+    status: str
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.pair_count, int)
+            or isinstance(self.pair_count, bool)
+            or self.pair_count < 2
+        ):
+            raise ValueError("exact decision pair_count must be an integer >= 2")
+        for field_name in (
+            "mean",
+            "sample_variance",
+            "threshold_delta",
+            "uncertainty_multiplier",
+            "lhs",
+            "rhs",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, Fraction):
+                raise TypeError(f"{field_name} must be Fraction")
+            validate_fraction(value)
+        if self.sample_variance < 0:
+            raise ValueError("sample_variance must be non-negative")
+        if self.uncertainty_multiplier < 0:
+            raise ValueError("uncertainty_multiplier must be non-negative")
+        expected_lhs = _fraction_multiply(
+            self.threshold_delta,
+            self.threshold_delta,
+        )
+        expected_rhs = _fraction_multiply(
+            _fraction_multiply(
+                self.uncertainty_multiplier,
+                self.uncertainty_multiplier,
+            ),
+            _fraction_divide(
+                self.sample_variance,
+                Fraction(self.pair_count, 1),
+            ),
+        )
+        if self.lhs != expected_lhs or self.rhs != expected_rhs:
+            raise ValueError("exact decision comparison operands are inconsistent")
+        expected_status = (
+            "FAIL"
+            if self.threshold_delta < 0
+            else (
+                "PASS"
+                if self.uncertainty_multiplier == 0 or self.lhs >= self.rhs
+                else "FAIL"
+            )
+        )
+        if self.status != expected_status:
+            raise ValueError("exact decision status is inconsistent with operands")
 
 
 @dataclass(frozen=True)
@@ -330,6 +509,75 @@ class AblationEvaluation:
     uncertainty_multiplier: Decimal
     status: str
     reason: str
+    decision_exact: ExactAblationDecision | None = None
+    reporting_status: str = _REPORTING_NOT_APPLICABLE
+    qualification_population_digest: str | None = None
+    qualification_trial_log_digest: str | None = None
+    qualification_stopping_rule_digest: str | None = None
+    qualification_decision_policy_digest: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.reporting_status not in {
+            _REPORTING_AVAILABLE,
+            _REPORTING_UNAVAILABLE,
+            _REPORTING_NOT_APPLICABLE,
+        }:
+            raise ValueError("reporting_status is not canonical")
+        reports = (
+            self.mean_net_incremental_value,
+            self.sample_stddev,
+            self.lower_bound,
+        )
+        if self.status in {"PASS", "FAIL"}:
+            if self.decision_exact is None:
+                raise ValueError("terminal evaluation requires exact decision material")
+            if self.reporting_status == _REPORTING_AVAILABLE:
+                if any(value is None for value in reports):
+                    raise ValueError(
+                        "available reporting projection requires all report values"
+                    )
+            elif self.reporting_status == _REPORTING_UNAVAILABLE:
+                if any(value is not None for value in reports):
+                    raise ValueError(
+                        "unavailable reporting projection cannot carry report values"
+                    )
+            else:
+                raise ValueError(
+                    "terminal evaluation requires explicit reporting availability"
+                )
+        elif self.status == "INCONCLUSIVE":
+            if self.decision_exact is not None:
+                raise ValueError(
+                    "inconclusive evaluation cannot carry terminal exact decision"
+                )
+            if self.reporting_status != _REPORTING_NOT_APPLICABLE:
+                raise ValueError(
+                    "inconclusive evaluation reporting must be not applicable"
+                )
+        else:
+            raise ValueError("ablation evaluation status is not canonical")
+        qualification_digests = (
+            self.qualification_population_digest,
+            self.qualification_trial_log_digest,
+            self.qualification_stopping_rule_digest,
+            self.qualification_decision_policy_digest,
+        )
+        if any(value is not None for value in qualification_digests):
+            if any(value is None for value in qualification_digests):
+                raise ValueError(
+                    "qualification evidence digests must be supplied together"
+                )
+            for name in (
+                "qualification_population_digest",
+                "qualification_trial_log_digest",
+                "qualification_stopping_rule_digest",
+                "qualification_decision_policy_digest",
+            ):
+                object.__setattr__(
+                    self,
+                    name,
+                    _digest(getattr(self, name), name),
+                )
 
 
 def _validate_pairs(target_component: str, pairs: Iterable[AblationPair]) -> list[AblationPair]:
@@ -387,28 +635,127 @@ def _validate_pairs(target_component: str, pairs: Iterable[AblationPair]) -> lis
     return selected
 
 
+def _pair_utility_fraction(pair: AblationPair) -> Fraction:
+    return _fraction_subtract(
+        as_fraction(pair.full.utility),
+        as_fraction(pair.ablated.utility),
+    )
+
+
+def _pair_cost_fraction(pair: AblationPair) -> Fraction:
+    return _fraction_subtract(
+        as_fraction(pair.full.cost),
+        as_fraction(pair.ablated.cost),
+    )
+
+
+def _pair_net_value_fraction(pair: AblationPair) -> Fraction:
+    full_net = _fraction_subtract(
+        as_fraction(pair.full.utility),
+        as_fraction(pair.full.cost),
+    )
+    ablated_net = _fraction_subtract(
+        as_fraction(pair.ablated.utility),
+        as_fraction(pair.ablated.cost),
+    )
+    return _fraction_subtract(full_net, ablated_net)
+
+
+def _build_exact_decision(
+    values: list[Fraction],
+    *,
+    required: Decimal,
+    multiplier: Decimal,
+) -> ExactAblationDecision:
+    count = len(values)
+    mean = _mean_fraction(values)
+    if mean is None:
+        raise ValueError("exact decision requires at least one value")
+
+    squared_sum = Fraction(0, 1)
+    for value in values:
+        deviation = _fraction_subtract(value, mean)
+        squared_sum = _fraction_add(
+            squared_sum,
+            _fraction_multiply(deviation, deviation),
+        )
+    variance = _fraction_divide(
+        squared_sum,
+        Fraction(count - 1, 1),
+    )
+    required_fraction = as_fraction(required)
+    multiplier_fraction = as_fraction(multiplier)
+    threshold_delta = _fraction_subtract(mean, required_fraction)
+    lhs = _fraction_multiply(threshold_delta, threshold_delta)
+    standard_error_squared = _fraction_divide(
+        variance,
+        Fraction(count, 1),
+    )
+    multiplier_squared = _fraction_multiply(
+        multiplier_fraction,
+        multiplier_fraction,
+    )
+    rhs = _fraction_multiply(
+        multiplier_squared,
+        standard_error_squared,
+    )
+
+    if threshold_delta < 0:
+        status = "FAIL"
+    elif multiplier_fraction == 0:
+        status = "PASS"
+    else:
+        status = "PASS" if lhs >= rhs else "FAIL"
+
+    return ExactAblationDecision(
+        pair_count=count,
+        mean=mean,
+        sample_variance=variance,
+        threshold_delta=threshold_delta,
+        uncertainty_multiplier=multiplier_fraction,
+        lhs=lhs,
+        rhs=rhs,
+        status=status,
+    )
+
+
 def summarize_ablation(target_component: str, pairs: Iterable[AblationPair]) -> AblationSummary:
     target_component = target_component.strip() if isinstance(target_component, str) else target_component
     selected = _validate_pairs(target_component, pairs)
     comparable = [pair for pair in selected if pair.utility_comparable]
 
-    with localcontext() as context:
-        context.prec = 50
-        context.rounding = ROUND_HALF_EVEN
-
-        utility_deltas = [pair.utility_delta for pair in comparable]
-        concrete_utility = [value for value in utility_deltas if value is not None]
-
-        def mean(values: list[Decimal]) -> Decimal | None:
-            if not values:
-                return None
-            return sum(values, Decimal("0")) / Decimal(len(values))
-
-        cost_values = [pair.cost_delta for pair in selected]
-        latency_values = [Decimal(pair.latency_delta_ms) for pair in selected]
-        mean_cost = mean(cost_values) or Decimal("0")
-        mean_latency = mean(latency_values) or Decimal("0")
-        mean_utility = mean(concrete_utility)
+    mean_utility_report: Decimal | None = None
+    mean_cost_report: Decimal | None = None
+    mean_latency_report: Decimal | None = None
+    reporting_status = _REPORTING_AVAILABLE
+    try:
+        utility_fractions = [_pair_utility_fraction(pair) for pair in comparable]
+        cost_fractions = [_pair_cost_fraction(pair) for pair in selected]
+        latency_fractions = [
+            _bounded(Fraction(pair.latency_delta_ms, 1))
+            for pair in selected
+        ]
+        mean_utility_fraction = _mean_fraction(utility_fractions)
+        mean_cost_fraction = _mean_fraction(cost_fractions) or Fraction(0, 1)
+        mean_latency_fraction = (
+            _mean_fraction(latency_fractions) or Fraction(0, 1)
+        )
+        projected_utility_report = (
+            None
+            if mean_utility_fraction is None
+            else _report_fraction(mean_utility_fraction)
+        )
+        projected_cost_report = _report_fraction(mean_cost_fraction)
+        projected_latency_report = _report_fraction(mean_latency_fraction)
+    except (DecimalException, ExactDecimalError):
+        reporting_status = _REPORTING_UNAVAILABLE
+    else:
+        # Reporting is one diagnostic projection, not three independently
+        # authoritative fields. Publish it atomically only after every Decimal
+        # projection succeeds so UNAVAILABLE can never carry a partial report.
+        mean_utility_report = projected_utility_report
+        mean_cost_report = projected_cost_report
+        mean_latency_report = projected_latency_report
 
     return AblationSummary(
         target_component=target_component,
@@ -421,11 +768,13 @@ def summarize_ablation(target_component: str, pairs: Iterable[AblationPair]) -> 
         ),
         full_deadline_misses=sum(not pair.full.met_deadline for pair in selected),
         ablated_deadline_misses=sum(not pair.ablated.met_deadline for pair in selected),
-        mean_utility_delta=mean_utility,
-        mean_cost_delta=mean_cost,
-        mean_latency_delta_ms=mean_latency,
-        status="DESCRIPTIVE_ONLY" if concrete_utility else "INCONCLUSIVE",
+        mean_utility_delta=mean_utility_report,
+        mean_cost_delta=mean_cost_report,
+        mean_latency_delta_ms=mean_latency_report,
+        status="DESCRIPTIVE_ONLY" if comparable else "INCONCLUSIVE",
+        reporting_status=reporting_status,
     )
+
 
 
 def evaluate_incremental_value(
@@ -436,7 +785,7 @@ def evaluate_incremental_value(
     required_lower_bound: Decimal,
     uncertainty_multiplier: Decimal = Decimal("2"),
 ) -> AblationEvaluation:
-    """Measure conservative net marginal value without granting promotion authority."""
+    """Measure conservative net marginal value with an exact rational verdict."""
 
     if not isinstance(minimum_pairs, int) or isinstance(minimum_pairs, bool) or minimum_pairs < 2:
         raise ValueError("minimum_pairs must be an integer >= 2")
@@ -460,15 +809,25 @@ def evaluate_incremental_value(
             reason="missing_causal_input_evidence",
         )
 
-    with localcontext() as context:
-        context.prec = 50
-        context.rounding = ROUND_HALF_EVEN
-        values = [
-            pair.net_value_delta
+    try:
+        concrete = [
+            _pair_net_value_fraction(pair)
             for pair in selected
             if pair.utility_comparable
         ]
-        concrete = [value for value in values if value is not None]
+    except ExactDecimalError:
+        return AblationEvaluation(
+            target_component=target,
+            pair_count=0,
+            mean_net_incremental_value=None,
+            sample_stddev=None,
+            lower_bound=None,
+            required_lower_bound=required,
+            uncertainty_multiplier=multiplier,
+            status="INCONCLUSIVE",
+            reason="exact_numeric_resource_envelope_exceeded",
+        )
+
     if len(concrete) < minimum_pairs:
         return AblationEvaluation(
             target_component=target,
@@ -482,29 +841,56 @@ def evaluate_incremental_value(
             reason="insufficient_comparable_matched_pairs",
         )
 
-    with localcontext() as context:
-        context.prec = 50
-        context.rounding = ROUND_HALF_EVEN
-        count = Decimal(len(concrete))
-        mean = sum(concrete, Decimal("0")) / count
-        squared = sum(
-            ((value - mean) * (value - mean) for value in concrete),
-            Decimal("0"),
+    try:
+        decision = _build_exact_decision(
+            concrete,
+            required=required,
+            multiplier=multiplier,
         )
-        variance = squared / Decimal(len(concrete) - 1)
-        stddev = variance.sqrt()
-        standard_error = stddev / count.sqrt()
-        lower = mean - multiplier * standard_error
+    except ExactDecimalError:
+        return AblationEvaluation(
+            target_component=target,
+            pair_count=len(concrete),
+            mean_net_incremental_value=None,
+            sample_stddev=None,
+            lower_bound=None,
+            required_lower_bound=required,
+            uncertainty_multiplier=multiplier,
+            status="INCONCLUSIVE",
+            reason="exact_numeric_resource_envelope_exceeded",
+        )
+
+    reporting_status = _REPORTING_AVAILABLE
+    mean_report: Decimal | None = None
+    stddev_report: Decimal | None = None
+    lower_report: Decimal | None = None
+    try:
+        mean_report = _report_fraction(decision.mean)
+        stddev_report = _report_sqrt(decision.sample_variance)
+        lower_report = _report_lower_bound(
+            decision.mean,
+            decision.sample_variance,
+            decision.uncertainty_multiplier,
+            decision.pair_count,
+        )
+    except (DecimalException, ExactDecimalError):
+        reporting_status = _REPORTING_UNAVAILABLE
+        mean_report = None
+        stddev_report = None
+        lower_report = None
+
     return AblationEvaluation(
         target_component=target,
         pair_count=len(concrete),
-        mean_net_incremental_value=mean,
-        sample_stddev=stddev,
-        lower_bound=lower,
+        mean_net_incremental_value=mean_report,
+        sample_stddev=stddev_report,
+        lower_bound=lower_report,
         required_lower_bound=required,
         uncertainty_multiplier=multiplier,
-        status="PASS" if lower >= required else "FAIL",
-        reason="matched_causal_ablation_net_of_cost",
+        status=decision.status,
+        reason="matched_causal_ablation_net_of_cost_exact_rational",
+        decision_exact=decision,
+        reporting_status=reporting_status,
     )
 
 
@@ -569,6 +955,28 @@ class AblationEvidenceBundle:
             raise ValueError("evaluation uncertainty_multiplier must match the bundle")
         if self.evaluation.pair_count > self.pair_count:
             raise ValueError("evaluation pair_count cannot exceed locked pair_count")
+        decision = self.evaluation.decision_exact
+        if self.evaluation.status in {"PASS", "FAIL"}:
+            if decision is None:
+                raise ValueError("terminal evaluation requires exact decision material")
+            if decision.pair_count != self.evaluation.pair_count:
+                raise ValueError("exact decision pair_count must match evaluation")
+            if decision.status != self.evaluation.status:
+                raise ValueError("exact decision status must match evaluation")
+            if decision.uncertainty_multiplier != as_fraction(multiplier):
+                raise ValueError(
+                    "exact decision uncertainty multiplier must match evaluation"
+                )
+            expected_delta = _fraction_subtract(
+                decision.mean,
+                as_fraction(required),
+            )
+            if decision.threshold_delta != expected_delta:
+                raise ValueError(
+                    "exact decision threshold delta must match evaluation policy"
+                )
+        elif decision is not None:
+            raise ValueError("inconclusive evaluation cannot carry terminal exact decision")
         if not isinstance(self.payload, str) or not self.payload:
             raise ValueError("payload must be non-empty canonical JSON")
         object.__setattr__(
@@ -601,7 +1009,7 @@ class AblationEvidenceBundle:
             raise ValueError("payload evaluation does not match bundle evaluation")
         policy = decoded.get("evaluation_policy", {})
         if (
-            decoded.get("schema_version") != "1.0.0"
+            decoded.get("schema_version") != "2.0.0"
             or decoded.get("target_component") != self.target_component
             or decoded.get("source_revision") != self.source_revision
             or decoded.get("protocol_digest") != self.protocol_digest
@@ -610,6 +1018,12 @@ class AblationEvidenceBundle:
             or policy.get("minimum_pairs") != self.minimum_pairs
             or policy.get("required_lower_bound") != _canonical_decimal_text(required)
             or policy.get("uncertainty_multiplier") != _canonical_decimal_text(multiplier)
+            or policy.get("decision_rule") != _ABLATION_DECISION_RULE
+            or policy.get("reporting_projection") != {
+                "failure_policy": _ABLATION_REPORT_FAILURE_POLICY,
+                "precision": _ABLATION_REPORT_PRECISION,
+                "quantum": _canonical_decimal_text(_ABLATION_REPORT_QUANTUM),
+            }
         ):
             raise ValueError("payload metadata does not match bundle metadata")
 
@@ -621,6 +1035,33 @@ def _canonical_decimal_text(value: Decimal | None) -> str | None:
     if "." in rendered:
         rendered = rendered.rstrip("0").rstrip(".")
     return "0" if rendered in {"", "-0"} else rendered
+
+
+def _fraction_payload(value: Fraction) -> dict[str, str]:
+    value = _bounded(value)
+    return {
+        "denominator": str(value.denominator),
+        "numerator": str(value.numerator),
+    }
+
+
+def _exact_decision_payload(
+    decision: ExactAblationDecision | None,
+) -> dict[str, object] | None:
+    if decision is None:
+        return None
+    return {
+        "lhs": _fraction_payload(decision.lhs),
+        "mean": _fraction_payload(decision.mean),
+        "pair_count": decision.pair_count,
+        "rhs": _fraction_payload(decision.rhs),
+        "sample_variance": _fraction_payload(decision.sample_variance),
+        "status": decision.status,
+        "threshold_delta": _fraction_payload(decision.threshold_delta),
+        "uncertainty_multiplier": _fraction_payload(
+            decision.uncertainty_multiplier
+        ),
+    }
 
 
 def _canonical_utc_text(value: datetime) -> str:
@@ -658,14 +1099,31 @@ def _outcome_payload(item: AblationOutcome) -> dict[str, object]:
     }
 
 
+def _canonical_object_digest(payload: object) -> str:
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    return "sha256:" + sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _evaluation_payload(item: AblationEvaluation) -> dict[str, object]:
     return {
+        "decision_exact": _exact_decision_payload(item.decision_exact),
         "lower_bound": _canonical_decimal_text(item.lower_bound),
         "mean_net_incremental_value": _canonical_decimal_text(
             item.mean_net_incremental_value
         ),
         "pair_count": item.pair_count,
+        "qualification_decision_policy_digest": item.qualification_decision_policy_digest,
+        "qualification_population_digest": item.qualification_population_digest,
+        "qualification_stopping_rule_digest": item.qualification_stopping_rule_digest,
+        "qualification_trial_log_digest": item.qualification_trial_log_digest,
         "reason": item.reason,
+        "reporting_status": item.reporting_status,
         "required_lower_bound": _canonical_decimal_text(item.required_lower_bound),
         "sample_stddev": _canonical_decimal_text(item.sample_stddev),
         "status": item.status,
@@ -706,7 +1164,11 @@ def _parse_utc_text(value: object, field: str) -> datetime:
         parsed = datetime.fromisoformat(value[:-1] + "+00:00")
     except ValueError as error:
         raise ValueError(f"{field} must be canonical UTC text") from error
-    canonical = parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    canonical = (
+        parsed.astimezone(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
     if canonical != value:
         raise ValueError(f"{field} must be canonical UTC text")
     return parsed.astimezone(timezone.utc)
@@ -726,6 +1188,7 @@ class CanonicalAblationOutcomeEvidence:
     utility_evidence_digest: str
     cost_evidence_digest: str
     evidence_digest: str
+    causal_outcome_digest: str | None = None
     superseded_at_utc: datetime | None = None
 
     def __post_init__(self) -> None:
@@ -757,6 +1220,15 @@ class CanonicalAblationOutcomeEvidence:
             "evidence_digest",
         ):
             object.__setattr__(self, name, _digest(getattr(self, name), name))
+        if self.causal_outcome_digest is not None:
+            object.__setattr__(
+                self,
+                "causal_outcome_digest",
+                _digest(
+                    self.causal_outcome_digest,
+                    "causal_outcome_digest",
+                ),
+            )
         if self.superseded_at_utc is not None:
             superseded = _utc(self.superseded_at_utc, "superseded_at_utc")
             if superseded <= self.outcome_available_utc:
@@ -773,10 +1245,14 @@ class RegisteredAblationPopulation:
     protocol_digest: str
     population_digest: str
     stopping_rule_digest: str
+    trial_log_digest: str
     source_revision: str
     registered_at_utc: datetime
     evaluation_cutoff_utc: datetime
     population_unit_ids: tuple[str, ...]
+    trial_budget: int
+    recorded_trials: int
+    remaining_trial_budget: int
     complete: bool = True
 
     def __post_init__(self) -> None:
@@ -784,6 +1260,7 @@ class RegisteredAblationPopulation:
             "protocol_digest",
             "population_digest",
             "stopping_rule_digest",
+            "trial_log_digest",
         ):
             object.__setattr__(self, name, _digest(getattr(self, name), name))
         if not isinstance(self.source_revision, str) or _GIT_SHA.fullmatch(self.source_revision) is None:
@@ -808,11 +1285,64 @@ class RegisteredAblationPopulation:
         if len(set(normalized)) != len(normalized):
             raise ValueError("population_unit_ids must be unique")
         object.__setattr__(self, "population_unit_ids", normalized)
+        for name in (
+            "trial_budget",
+            "recorded_trials",
+            "remaining_trial_budget",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if self.trial_budget < 1:
+            raise ValueError("trial_budget must be positive")
+        if self.recorded_trials > self.trial_budget:
+            raise ValueError("recorded_trials cannot exceed trial_budget")
+        if self.remaining_trial_budget != self.trial_budget - self.recorded_trials:
+            raise ValueError(
+                "remaining_trial_budget must equal trial_budget - recorded_trials"
+            )
         if type(self.complete) is not bool:
             raise TypeError("complete must be a boolean")
+        if self.complete != (self.remaining_trial_budget == 0):
+            raise ValueError(
+                "complete must exactly reflect registered trial-budget exhaustion"
+            )
 
 
-class AblationQualificationAuthority:
+@dataclass(frozen=True)
+class _AblationQualificationState:
+    scientific_registry: ScientificRegistry
+    experience_memory: ExperienceMemory
+    read_artifact_snapshot: Callable[[str], tuple[dict[str, object], bytes]]
+    protocol_id: str
+    protocol_hash: str
+    source_revision: str
+    causal_cutoff: datetime
+    granted_permissions: frozenset[str]
+    task: str | None
+    instrument_family: str | None
+
+
+_ABLATION_AUTHORITY_LOCK = threading.RLock()
+_ABLATION_AUTHORITY_STATE: dict[int, _AblationQualificationState] = {}
+
+
+def _release_ablation_authority(authority_id: int) -> None:
+    with _ABLATION_AUTHORITY_LOCK:
+        _ABLATION_AUTHORITY_STATE.pop(authority_id, None)
+
+
+def _ablation_authority_state(authority: object) -> _AblationQualificationState:
+    if type(authority) is not AblationQualificationAuthority:
+        raise TypeError("qualification authority type is invalid")
+    with _ABLATION_AUTHORITY_LOCK:
+        state = _ABLATION_AUTHORITY_STATE.get(id(authority))
+    if state is None:
+        raise ValueError("qualification authority state is unavailable")
+    return state
+
+
+class AblationQualificationAuthority(str):
     """Resolve qualification evidence only through canonical persistent authorities.
 
     The authority never publishes evidence. It consumes an append-only scientific
@@ -821,12 +1351,15 @@ class AblationQualificationAuthority:
     canonical ArtifactStore.
     """
 
-    def __init__(
-        self,
+    __slots__ = ("__weakref__",)
+
+    def __new__(
+        cls,
         *,
         scientific_registry: ScientificRegistry,
         experience_memory: ExperienceMemory,
         artifact_store: ArtifactStore,
+        evidence_root: str | Path,
         protocol_id: str,
         protocol_hash: str,
         source_revision: str,
@@ -834,31 +1367,97 @@ class AblationQualificationAuthority:
         granted_permissions: set[str],
         task: str | None = None,
         instrument_family: str | None = None,
-    ) -> None:
-        if not isinstance(scientific_registry, ScientificRegistry):
-            raise TypeError("scientific_registry must be ScientificRegistry")
-        if not isinstance(experience_memory, ExperienceMemory):
-            raise TypeError("experience_memory must be ExperienceMemory")
-        if not isinstance(artifact_store, ArtifactStore):
-            raise TypeError("artifact_store must be ArtifactStore")
+    ):
+        if cls is not AblationQualificationAuthority:
+            raise TypeError("qualification authority type is sealed")
+        if type(scientific_registry) is not ScientificRegistry:
+            raise TypeError("scientific_registry must be the canonical ScientificRegistry")
+        if type(experience_memory) is not ExperienceMemory:
+            raise TypeError("experience_memory must be the canonical ExperienceMemory")
+        if type(artifact_store) is not ArtifactStore:
+            raise TypeError("artifact_store must be the canonical ArtifactStore")
         if not isinstance(protocol_id, str) or not protocol_id.strip():
             raise ValueError("protocol_id is required")
         if not isinstance(protocol_hash, str):
             raise TypeError("protocol_hash must be text")
-        if not isinstance(source_revision, str) or _GIT_SHA.fullmatch(source_revision) is None:
-            raise ValueError("source_revision must be an exact 40-character lowercase git SHA")
+        if (
+            not isinstance(source_revision, str)
+            or _GIT_SHA.fullmatch(source_revision) is None
+        ):
+            raise ValueError(
+                "source_revision must be an exact 40-character lowercase git SHA"
+            )
         if not isinstance(granted_permissions, set) or not granted_permissions:
             raise ValueError("granted_permissions must be a non-empty set")
-        self.scientific_registry = scientific_registry
-        self.experience_memory = experience_memory
-        self.artifact_store = artifact_store
-        self.protocol_id = protocol_id.strip()
-        self.protocol_hash = _digest(protocol_hash, "protocol_hash")
-        self.source_revision = source_revision
-        self.causal_cutoff = _utc(causal_cutoff, "causal_cutoff")
-        self.granted_permissions = set(granted_permissions)
-        self.task = task
-        self.instrument_family = instrument_family
+
+        # Snapshot caller-owned persistent handles into private exact instances.
+        # Later rebinding of the supplied registry/memory objects cannot change
+        # which database paths or methods terminal evaluation uses.
+        private_science = ScientificRegistry(Path(scientific_registry.path))
+        correction_resolver = object.__getattribute__(
+            experience_memory,
+            "_correction_evidence_resolver",
+        )
+        private_memory = ExperienceMemory(
+            Path(experience_memory.path),
+            correction_evidence_resolver=correction_resolver,
+        )
+        read_snapshot = trusted_authenticated_reader(
+            evidence_root,
+            publication_store=artifact_store,
+        )
+        state = _AblationQualificationState(
+            scientific_registry=private_science,
+            experience_memory=private_memory,
+            read_artifact_snapshot=read_snapshot,
+            protocol_id=protocol_id.strip(),
+            protocol_hash=_digest(protocol_hash, "protocol_hash"),
+            source_revision=source_revision,
+            causal_cutoff=_utc(causal_cutoff, "causal_cutoff"),
+            granted_permissions=frozenset(granted_permissions),
+            task=task,
+            instrument_family=instrument_family,
+        )
+
+        authority = str.__new__(
+            cls,
+            "autotrade-ablation-qualification-authority",
+        )
+        authority_id = id(authority)
+        try:
+            with _ABLATION_AUTHORITY_LOCK:
+                if authority_id in _ABLATION_AUTHORITY_STATE:
+                    raise ValueError("qualification authority identity collision")
+                _ABLATION_AUTHORITY_STATE[authority_id] = state
+            weakref.finalize(
+                authority,
+                _release_ablation_authority,
+                authority_id,
+            )
+            return authority
+        except BaseException:
+            with _ABLATION_AUTHORITY_LOCK:
+                _ABLATION_AUTHORITY_STATE.pop(authority_id, None)
+            raise
+
+    def __init__(self, **_kwargs) -> None:
+        # State is installed atomically by __new__; no caller-visible instance
+        # fields are populated.
+        pass
+
+    def registered_decision_policy(self) -> RegisteredAblationDecisionPolicy:
+        """Resolve the terminal rule only from module-owned authority state."""
+
+        state = _ablation_authority_state(self)
+        policy = ScientificRegistry.ablation_decision_policy(
+            state.scientific_registry,
+            state.protocol_id,
+        )
+        if policy.protocol_hash != state.protocol_hash:
+            raise ValueError(
+                "registered ablation decision policy does not match qualification binding"
+            )
+        return policy
 
     def _load_outcome(
         self,
@@ -866,14 +1465,14 @@ class AblationQualificationAuthority:
         *,
         population_root: str,
     ) -> CanonicalAblationOutcomeEvidence:
+        state = _ablation_authority_state(self)
         if not isinstance(reference, AblationOutcomeArtifactRef):
             raise TypeError("outcome_refs must contain AblationOutcomeArtifactRef")
-        manifest = self.artifact_store.load_manifest(reference.artifact_id)
+        manifest, data = state.read_artifact_snapshot(reference.artifact_id)
         if manifest.get("sha256") != reference.sha256:
             raise ValueError("ablation outcome artifact digest mismatch")
         if manifest.get("media_type") != _ABLATION_OUTCOME_MEDIA_TYPE:
             raise ValueError("ablation outcome artifact media type is not qualified")
-        data = self.artifact_store.read_bytes(reference.artifact_id)
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError as error:
@@ -884,12 +1483,7 @@ class AblationQualificationAuthority:
             raise ValueError("ablation outcome artifact JSON is invalid") from error
         required = {
             "schema_version",
-            "case_id",
-            "variant",
-            "population_unit_id",
-            "utility",
-            "cost",
-            "outcome_available_utc",
+            "outcome",
             "source_revision",
             "protocol_id",
             "protocol_hash",
@@ -900,8 +1494,31 @@ class AblationQualificationAuthority:
         }
         if not isinstance(payload, dict) or set(payload) != required:
             raise ValueError("ablation outcome artifact schema is not canonical")
-        if payload.get("schema_version") != 1:
+        if payload.get("schema_version") != 2:
             raise ValueError("ablation outcome artifact schema version is unsupported")
+        outcome_payload = payload.get("outcome")
+        expected_outcome_keys = {
+            "case_id",
+            "components",
+            "cost",
+            "deadline_ms",
+            "decision_utc",
+            "elapsed_ms",
+            "input_cutoff_utc",
+            "input_evidence",
+            "input_fingerprint",
+            "outcome_available_utc",
+            "population_unit_id",
+            "utility",
+            "variant",
+        }
+        if (
+            not isinstance(outcome_payload, dict)
+            or set(outcome_payload) != expected_outcome_keys
+        ):
+            raise ValueError(
+                "ablation outcome causal payload schema is not canonical"
+            )
         canonical = json.dumps(
             payload,
             sort_keys=True,
@@ -911,10 +1528,10 @@ class AblationQualificationAuthority:
         if canonical != text:
             raise ValueError("ablation outcome artifact JSON must be canonical")
         if (
-            payload.get("protocol_id") != self.protocol_id
-            or payload.get("protocol_hash") != self.protocol_hash
+            payload.get("protocol_id") != state.protocol_id
+            or payload.get("protocol_hash") != state.protocol_hash
             or payload.get("population_root") != population_root
-            or payload.get("source_revision") != self.source_revision
+            or payload.get("source_revision") != state.source_revision
         ):
             raise ValueError("ablation outcome artifact authority binding mismatch")
         superseded_raw = payload.get("superseded_at_utc")
@@ -924,19 +1541,20 @@ class AblationQualificationAuthority:
             else _parse_utc_text(superseded_raw, "superseded_at_utc")
         )
         return CanonicalAblationOutcomeEvidence(
-            case_id=payload.get("case_id"),
-            variant=payload.get("variant"),
-            population_unit_id=payload.get("population_unit_id"),
-            utility=payload.get("utility"),
-            cost=payload.get("cost"),
+            case_id=outcome_payload.get("case_id"),
+            variant=outcome_payload.get("variant"),
+            population_unit_id=outcome_payload.get("population_unit_id"),
+            utility=outcome_payload.get("utility"),
+            cost=outcome_payload.get("cost"),
             outcome_available_utc=_parse_utc_text(
-                payload.get("outcome_available_utc"),
+                outcome_payload.get("outcome_available_utc"),
                 "outcome_available_utc",
             ),
             source_revision=payload.get("source_revision"),
             utility_evidence_digest=payload.get("utility_evidence_digest"),
             cost_evidence_digest=payload.get("cost_evidence_digest"),
             evidence_digest=reference.sha256,
+            causal_outcome_digest=_canonical_object_digest(outcome_payload),
             superseded_at_utc=superseded,
         )
 
@@ -946,9 +1564,13 @@ class AblationQualificationAuthority:
         *,
         outcome_refs: Iterable[AblationOutcomeArtifactRef],
     ) -> tuple[RegisteredAblationPopulation, tuple[CanonicalAblationOutcomeEvidence, ...]]:
+        state = _ablation_authority_state(self)
         selected = tuple(pairs)
-        registration = self.scientific_registry.protocol_registration(self.protocol_id)
-        if registration.protocol_hash != self.protocol_hash:
+        registration = ScientificRegistry.protocol_registration(
+            state.scientific_registry,
+            state.protocol_id,
+        )
+        if registration.protocol_hash != state.protocol_hash:
             raise ValueError("registered protocol hash does not match qualification binding")
         try:
             registered_raw = datetime.fromisoformat(registration.created_at)
@@ -957,28 +1579,40 @@ class AblationQualificationAuthority:
         registered_at = _utc(registered_raw, "protocol registered_at")
         if registered_at.isoformat() != registration.created_at:
             raise ValueError("protocol registered_at is not canonical")
-        snapshot = self.experience_memory.coverage_population_snapshot(
-            causal_cutoff=self.causal_cutoff,
-            granted_permissions=set(self.granted_permissions),
-            task=self.task,
-            instrument_family=self.instrument_family,
+        snapshot = ExperienceMemory.coverage_population_snapshot(
+            state.experience_memory,
+            causal_cutoff=state.causal_cutoff,
+            granted_permissions=set(state.granted_permissions),
+            task=state.task,
+            instrument_family=state.instrument_family,
         )
         snapshot.verify_integrity()
-        completeness = self.scientific_registry.completeness(self.protocol_id)
+        completeness = ScientificRegistry.completeness(
+            state.scientific_registry,
+            state.protocol_id,
+        )
         population = RegisteredAblationPopulation(
-            protocol_digest=self.protocol_hash,
+            protocol_digest=state.protocol_hash,
             population_digest=snapshot.root_hash,
             stopping_rule_digest=completeness["stopping_rules_hash"],
-            source_revision=self.source_revision,
+            trial_log_digest=completeness["trial_log_hash"],
+            source_revision=state.source_revision,
             registered_at_utc=registered_at,
-            evaluation_cutoff_utc=self.causal_cutoff,
+            evaluation_cutoff_utc=state.causal_cutoff,
             population_unit_ids=tuple(
                 sorted(row["episode_id"] for row in snapshot.rows)
             ),
-            complete=True,
+            trial_budget=completeness["trial_budget"],
+            recorded_trials=completeness["recorded_trials"],
+            remaining_trial_budget=completeness["remaining_trial_budget"],
+            complete=completeness["remaining_trial_budget"] == 0,
         )
         outcomes = tuple(
-            self._load_outcome(reference, population_root=snapshot.root_hash)
+            AblationQualificationAuthority._load_outcome(
+                self,
+                reference,
+                population_root=snapshot.root_hash,
+            )
             for reference in outcome_refs
         )
         if selected:
@@ -989,11 +1623,15 @@ class AblationQualificationAuthority:
                     protocol_digest=population.protocol_digest,
                     population_digest=population.population_digest,
                     stopping_rule_digest=population.stopping_rule_digest,
+                    trial_log_digest=population.trial_log_digest,
                     source_revision=population.source_revision,
                     registered_at_utc=registered_at,
                     evaluation_cutoff_utc=population.evaluation_cutoff_utc,
                     population_unit_ids=population.population_unit_ids,
-                    complete=True,
+                    trial_budget=population.trial_budget,
+                    recorded_trials=population.recorded_trials,
+                    remaining_trial_budget=population.remaining_trial_budget,
+                    complete=population.complete,
                 )
         return population, outcomes
 
@@ -1041,16 +1679,62 @@ def evaluate_qualified_incremental_value(
     """
 
     selected_input = tuple(pairs)
+    target = (
+        target_component.strip()
+        if isinstance(target_component, str)
+        else target_component
+    )
+    selected = _validate_pairs(target, selected_input)
     trusted = authority is not None
+    registered_policy: RegisteredAblationDecisionPolicy | None = None
+
     if trusted:
-        if not isinstance(authority, AblationQualificationAuthority):
-            raise TypeError("authority must be AblationQualificationAuthority or None")
+        if type(authority) is not AblationQualificationAuthority:
+            raise TypeError(
+                "authority must be the canonical AblationQualificationAuthority or None"
+            )
         if population is not None or tuple(canonical_outcomes):
             raise ValueError(
                 "authority-backed qualification does not accept caller-authored population/outcomes"
             )
-        population, trusted_outcomes = authority.resolve(
-            selected_input,
+
+        # Terminal policy is selected before outcome artifacts are resolved.
+        # Caller-supplied thresholds remain diagnostic API compatibility only
+        # and have no authority in this branch.
+        try:
+            registered_policy = (
+                AblationQualificationAuthority.registered_decision_policy(
+                    authority
+                )
+            )
+            required = _decimal(
+                registered_policy.required_lower_bound,
+                "registered required_lower_bound",
+            )
+            multiplier = _decimal(
+                registered_policy.uncertainty_multiplier,
+                "registered uncertainty_multiplier",
+            )
+        except ProtocolViolation:
+            return _qualified_inconclusive(
+                target_component=target,
+                required_lower_bound=Decimal("0"),
+                uncertainty_multiplier=Decimal("0"),
+                reason="registered_ablation_decision_policy_unavailable",
+            )
+        if registered_policy.decision_rule != _ABLATION_DECISION_RULE:
+            return _qualified_inconclusive(
+                target_component=target,
+                required_lower_bound=required,
+                uncertainty_multiplier=multiplier,
+                reason="registered_ablation_decision_rule_unsupported",
+            )
+        minimum_pairs = registered_policy.minimum_pairs
+
+        # Do not grant terminal qualification through subclass virtual dispatch.
+        population, trusted_outcomes = AblationQualificationAuthority.resolve(
+            authority,
+            selected,
             outcome_refs=tuple(outcome_refs),
         )
         canonical_outcomes = trusted_outcomes
@@ -1061,13 +1745,16 @@ def evaluate_qualified_incremental_value(
             raise TypeError(
                 "population must be RegisteredAblationPopulation for diagnostic evaluation"
             )
-
-    required = _decimal(required_lower_bound, "required_lower_bound")
-    multiplier = _decimal(uncertainty_multiplier, "uncertainty_multiplier")
-    if multiplier < 0:
-        raise ValueError("uncertainty_multiplier must be non-negative")
-    target = target_component.strip() if isinstance(target_component, str) else target_component
-    selected = _validate_pairs(target, selected_input)
+        if (
+            not isinstance(minimum_pairs, int)
+            or isinstance(minimum_pairs, bool)
+            or minimum_pairs < 2
+        ):
+            raise ValueError("minimum_pairs must be an integer >= 2")
+        required = _decimal(required_lower_bound, "required_lower_bound")
+        multiplier = _decimal(uncertainty_multiplier, "uncertainty_multiplier")
+        if multiplier < 0:
+            raise ValueError("uncertainty_multiplier must be non-negative")
 
     def inconclusive(reason: str) -> AblationEvaluation:
         return _qualified_inconclusive(
@@ -1077,6 +1764,8 @@ def evaluate_qualified_incremental_value(
             reason=reason,
         )
 
+    if population.remaining_trial_budget > 0:
+        return inconclusive("registered_trial_budget_not_exhausted")
     if not population.complete:
         return inconclusive("incomplete_registered_population")
 
@@ -1088,6 +1777,13 @@ def evaluate_qualified_incremental_value(
         earliest_cutoff = min(pair.full.input_cutoff_utc for pair in selected)
         if population.registered_at_utc > earliest_cutoff:
             return inconclusive("post_hoc_population_or_protocol_registration")
+        if any(
+            item.input_cutoff_utc > population.evaluation_cutoff_utc
+            or item.decision_utc > population.evaluation_cutoff_utc
+            for pair in selected
+            for item in (pair.full, pair.ablated)
+        ):
+            return inconclusive("causal_pair_after_registered_evaluation_cutoff")
 
     evidence_index: dict[tuple[str, str], CanonicalAblationOutcomeEvidence] = {}
     for evidence in canonical_outcomes:
@@ -1111,6 +1807,11 @@ def evaluate_qualified_incremental_value(
                 or evidence.source_revision != population.source_revision
             ):
                 return inconclusive("canonical_outcome_identity_mismatch")
+            if trusted and (
+                evidence.causal_outcome_digest
+                != _canonical_object_digest(_outcome_payload(item))
+            ):
+                return inconclusive("canonical_outcome_causal_binding_mismatch")
             if (
                 evidence.utility != item.utility
                 or evidence.cost != item.cost
@@ -1159,6 +1860,14 @@ def evaluate_qualified_incremental_value(
         uncertainty_multiplier=base.uncertainty_multiplier,
         status=base.status,
         reason="qualified_registered_canonical_ablation_net_of_cost",
+        decision_exact=base.decision_exact,
+        reporting_status=base.reporting_status,
+        qualification_population_digest=population.population_digest,
+        qualification_trial_log_digest=population.trial_log_digest,
+        qualification_stopping_rule_digest=population.stopping_rule_digest,
+        qualification_decision_policy_digest=(
+            None if registered_policy is None else registered_policy.policy_digest
+        ),
     )
 
 
@@ -1197,7 +1906,13 @@ def build_ablation_evidence_bundle(
         "dataset_digest": dataset,
         "evaluation": _evaluation_payload(evaluation),
         "evaluation_policy": {
+            "decision_rule": _ABLATION_DECISION_RULE,
             "minimum_pairs": minimum_pairs,
+            "reporting_projection": {
+                "failure_policy": _ABLATION_REPORT_FAILURE_POLICY,
+                "precision": _ABLATION_REPORT_PRECISION,
+                "quantum": _canonical_decimal_text(_ABLATION_REPORT_QUANTUM),
+            },
             "required_lower_bound": _canonical_decimal_text(required),
             "uncertainty_multiplier": _canonical_decimal_text(multiplier),
         },
@@ -1211,7 +1926,7 @@ def build_ablation_evidence_bundle(
             for pair in selected
         ],
         "protocol_digest": protocol,
-        "schema_version": "1.0.0",
+        "schema_version": "2.0.0",
         "source_revision": source_revision,
         "target_component": target,
     }

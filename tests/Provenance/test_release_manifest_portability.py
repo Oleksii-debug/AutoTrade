@@ -65,10 +65,15 @@ class ReleaseManifestPortabilityTests(unittest.TestCase):
                 )
             )
 
-    def test_manifest_binds_research_dependency_entrypoint(self):
+    def test_manifest_binds_root_and_research_dependency_entrypoints(self):
         document = json.loads(rendered_manifest())
+        inventory = document["source_inventory"]
         self.assertEqual(
-            document["source_inventory"]["research_pyproject_blob_sha"],
+            inventory["root_pyproject_blob_sha"],
+            git_blob_sha(ROOT / "pyproject.toml"),
+        )
+        self.assertEqual(
+            inventory["research_pyproject_blob_sha"],
             git_blob_sha(ROOT / "research" / "pyproject.toml"),
         )
 

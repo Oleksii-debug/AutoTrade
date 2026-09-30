@@ -12,7 +12,14 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5, uuid4
 
+from autotrade_numeric.exact_decimal import (
+    ExactDecimalError,
+    parse_bounded_json_integer_token,
+    parse_bounded_json_number_token,
+)
+
 from .persistence import JournalStore, canonical_json, payload_digest
+from .provider_response_limits import require_provider_json_depth
 
 
 AuthorityCheck = Callable[[str, str], tuple[bool, str]]
@@ -20,39 +27,88 @@ SenderCheck = Callable[[str, int], None]
 TransportSend = Callable[[str, Mapping[str, Any], Callable[[], None]], Any]
 
 _SUBMISSION_RESPONSE_BINDING_TOKEN = object()
+_EXACT_RESPONSE_MARKERS = frozenset(
+    {"response_encoding", "response_text", "response_sha256"}
+)
+
+
+def _has_exact_response_markers(payload: Mapping[str, Any]) -> bool:
+    return any(marker in payload for marker in _EXACT_RESPONSE_MARKERS)
 
 
 def _decode_exact_json_bytes(raw: bytes) -> Any:
     if type(raw) is not bytes or not raw:
         raise ValueError("provider response bytes must be non-empty bytes")
 
+    # Consume the one shared #652 transport/consumer structural envelope
+    # BEFORE stdlib JSON can materialize an unbounded nested object graph.
+    # Translate only after leaving the helper error handler, preserving
+    # the existing redacted public exception boundary.
+    structural_failure = False
+    try:
+        require_provider_json_depth(raw)
+    except ValueError:
+        structural_failure = True
+    if structural_failure:
+        raise ValueError("provider response exceeds shared JSON resource budget")
+
     def no_duplicate_keys(pairs):
         result = {}
         for key, value in pairs:
             if key in result:
                 raise ValueError(
-                    f"provider response contains duplicate JSON key: {key}"
+                    "provider response contains duplicate JSON keys"
                 )
             result[key] = value
         return result
 
     try:
         text = raw.decode("utf-8", errors="strict")
-        return json.loads(
+    except UnicodeDecodeError:
+        text = None
+    if text is None:
+        # Raise outside the codec exception handler: suppressing display
+        # chaining alone still leaves raw bytes reachable via __context__.
+        raise ValueError("provider response must be exact UTF-8 JSON bytes")
+
+    json_failure = False
+    parser_recursion_failure = False
+    try:
+        decoded = json.loads(
             text,
             object_pairs_hook=no_duplicate_keys,
-            parse_constant=lambda value: (_ for _ in ()).throw(
+            parse_float=parse_bounded_json_number_token,
+            parse_int=parse_bounded_json_integer_token,
+            parse_constant=lambda _value: (_ for _ in ()).throw(
                 ValueError(
-                    f"provider response contains non-finite JSON constant: {value}"
+                    "provider response contains non-finite JSON constant"
                 )
             ),
         )
-    except ValueError:
-        raise
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+    except RecursionError:
+        # A defensive fallback: the shared scanner normally fails at depth
+        # 65 before stdlib parsing; future decoder changes must also remain
+        # deterministic and must not retain an untrusted parser exception.
+        parser_recursion_failure = True
+    except json.JSONDecodeError:
+        # JSONDecodeError retains the complete provider document. Translate
+        # only after leaving this handler so it cannot remain in __context__.
+        json_failure = True
+    except ExactDecimalError as error:
+        # The shared bounded numeric exception contains only fixed resource
+        # diagnostics and no provider token/document material.
         raise ValueError(
-            "provider response must be exact UTF-8 JSON bytes"
+            "provider response contains invalid or oversized exact JSON number"
         ) from error
+    except ValueError:
+        # Duplicate-key and parse_constant rejections are fixed diagnostics.
+        raise
+
+    if json_failure:
+        raise ValueError("provider response must be exact UTF-8 JSON bytes")
+    if parser_recursion_failure:
+        raise ValueError("provider response exceeds shared JSON resource budget")
+    return decoded
 
 
 @dataclass(frozen=True)
@@ -68,8 +124,7 @@ class ExactJsonTransportResponse:
         raw = self.response_bytes
         _decode_exact_json_bytes(raw)
         if self.http_status is not None and (
-            isinstance(self.http_status, bool)
-            or not isinstance(self.http_status, int)
+            type(self.http_status) is not int
             or self.http_status < 100
             or self.http_status > 599
         ):
@@ -78,7 +133,7 @@ class ExactJsonTransportResponse:
             raise TypeError("requires_reconciliation must be boolean")
         if self.requires_reconciliation:
             if (
-                not isinstance(self.ambiguity_reason, str)
+                type(self.ambiguity_reason) is not str
                 or not self.ambiguity_reason.strip()
             ):
                 raise ValueError(
@@ -158,8 +213,7 @@ class SubmissionResponseBinding:
             raise ValueError("durable provider response digest mismatch")
         _decode_exact_json_bytes(self.response_bytes)
         if self.http_status is not None and (
-            isinstance(self.http_status, bool)
-            or not isinstance(self.http_status, int)
+            type(self.http_status) is not int
             or self.http_status < 100
             or self.http_status > 599
         ):
@@ -536,7 +590,40 @@ class GuardedDispatcher:
     def _outcome_from_terminal(event: dict[str, Any], client_order_id: str) -> DispatchOutcome:
         payload = event["payload"]
         if event["event_type"] == "SubmissionSent":
-            return DispatchOutcome("SENT", client_order_id, payload.get("response"), "sent_confirmed")
+            if _has_exact_response_markers(payload):
+                # Any reserved exact marker commits the row to the SHA-bound
+                # evidence contract. Partial/mislabeled exact rows must never
+                # fall through to the historical response mirror.
+                if payload.get("response_encoding") != "utf-8-json":
+                    return DispatchOutcome(
+                        "UNKNOWN", client_order_id, None, "exact_response_invalid"
+                    )
+                response_text = payload.get("response_text")
+                response_hash = payload.get("response_sha256")
+                if (
+                    type(response_text) is not str
+                    or not response_text
+                    or type(response_hash) is not str
+                ):
+                    return DispatchOutcome(
+                        "UNKNOWN", client_order_id, None, "exact_response_unavailable"
+                    )
+                try:
+                    raw = response_text.encode("utf-8", errors="strict")
+                    if "sha256:" + sha256(raw).hexdigest() != response_hash:
+                        raise ValueError("SHA-bound exact response mismatch")
+                    exact_payload = _decode_exact_json_bytes(raw)
+                except (UnicodeError, ValueError, TypeError):
+                    return DispatchOutcome(
+                        "UNKNOWN", client_order_id, None, "exact_response_invalid"
+                    )
+                return DispatchOutcome(
+                    "SENT", client_order_id, exact_payload, "sent_confirmed"
+                )
+            # Only marker-free historical rows may use the legacy mirror.
+            return DispatchOutcome(
+                "SENT", client_order_id, payload.get("response"), "sent_confirmed"
+            )
         if event["event_type"] == "SubmissionBlocked":
             return DispatchOutcome("BLOCKED", client_order_id, None, payload.get("reason", "blocked"))
         if event["event_type"] == "SubmissionUnknown":
@@ -939,10 +1026,14 @@ class GuardedDispatcher:
         terminal_requires_reconciliation = False
         terminal_reason = "sent_confirmed"
         try:
-            if isinstance(response, ExactJsonTransportResponse):
+            if type(response) is ExactJsonTransportResponse:
+                # The exact raw bytes + digest are the durable source.
+                # The prior "response" JSON mirror could silently round
+                # decimals to float; persisting Decimal objects directly is
+                # not JSON-serializable and misclassified valid sends UNKNOWN.
+                # Keep the mirror out of exact response events altogether.
                 sent_payload = {
                     "client_order_id": client_order_id,
-                    "response": response.payload,
                     "response_text": response.response_text,
                     "response_sha256": response.response_sha256,
                     "response_encoding": "utf-8-json",
@@ -958,6 +1049,10 @@ class GuardedDispatcher:
                     )
                     sent_payload["reason"] = terminal_reason
                     sent_payload["retry_disposition"] = "RECONCILE_FIRST"
+            elif isinstance(response, ExactJsonTransportResponse):
+                # Caller-polymorphic post-SEND response getters are not evidence.
+                # A durable UNKNOWN retains the no-blind-retry property.
+                raise TypeError("exact provider response subtype is forbidden")
             else:
                 sent_payload = {
                     "client_order_id": client_order_id,

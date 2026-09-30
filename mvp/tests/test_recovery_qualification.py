@@ -342,6 +342,52 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
             policy().max_downtime_ms[target.scenario],
         )
 
+    def test_verifier_side_policy_mutation_cannot_change_detached_recovery_policy(self):
+        current_policy = policy()
+        requirement_before = recovery_policy_subject_requirement(current_policy)
+        replacement_tests = dict(REQUIRED_TESTS)
+        replacement_tests[RecoveryScenario.NETWORK_LOSS] = (
+            "recovery::impossible-post-callback-test",
+        )
+        replacement = policy(
+            limits={RecoveryScenario.POWER_LOSS: 0},
+            required_tests=replacement_tests,
+        )
+
+        def mutate_original_policy():
+            object.__setattr__(
+                current_policy,
+                "max_downtime_ms",
+                replacement.max_downtime_ms,
+            )
+            object.__setattr__(
+                current_policy,
+                "required_tests",
+                replacement.required_tests,
+            )
+
+        decision = qualify(
+            policy=current_policy,
+            evidence=complete_evidence(),
+            trusted=True,
+            mutate_during_verify=mutate_original_policy,
+        )
+
+        self.assertEqual(decision.status, RecoveryEvidenceStatus.PASS)
+        self.assertEqual(decision.blockers, ())
+        self.assertEqual(
+            decision.recovery_policy_requirement,
+            requirement_before,
+        )
+        self.assertNotEqual(
+            recovery_policy_subject_requirement(current_policy),
+            requirement_before,
+        )
+        self.assertEqual(
+            current_policy.max_downtime_ms[RecoveryScenario.POWER_LOSS],
+            0,
+        )
+
     def test_missing_or_corrupt_recovery_receipt_fails_closed(self):
         items = complete_evidence()
         target = items[0]

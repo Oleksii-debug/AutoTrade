@@ -20,6 +20,8 @@ import re
 
 from autotrade_numeric.exact_decimal import (
     ExactDecimalError,
+    exact_add,
+    exact_subtract,
     parse_bounded_exact_decimal,
     parse_bounded_json_integer_token,
     parse_bounded_json_number_token,
@@ -868,7 +870,10 @@ class QuotaBucket:
             raise ProviderCoreError("used quota cannot exceed capacity")
 
     def available(self) -> Decimal:
-        return self.capacity - self.used
+        try:
+            return exact_subtract(self.capacity, self.used)
+        except ExactDecimalError as error:
+            raise ProviderCoreError("provider quota exceeds exact arithmetic envelope") from error
 
     def acquire(self, cost, *, purpose: Literal["RECOVERY", "TRADING", "RESEARCH"]) -> None:
         amount = _decimal(cost, "quota cost", non_negative=True)
@@ -876,18 +881,28 @@ class QuotaBucket:
             raise ProviderCoreError("unknown quota purpose")
         if amount == 0:
             return
-        remaining = self.available()
-        if amount > remaining:
-            raise ProviderCoreError("provider quota exhausted")
-        if purpose != "RECOVERY" and remaining - amount < self.recovery_reserve:
+        # Resource authority must not depend on ambient Decimal precision.
+        # Calculate and validate the entire next state before mutating used.
+        try:
+            next_used = exact_add(self.used, amount)
+            if next_used > self.capacity:
+                raise ProviderCoreError("provider quota exhausted")
+            after = exact_subtract(self.capacity, next_used)
+        except ExactDecimalError as error:
+            raise ProviderCoreError("provider quota exceeds exact arithmetic envelope") from error
+        if purpose != "RECOVERY" and after < self.recovery_reserve:
             raise ProviderCoreError("recovery quota reserve is protected")
-        self.used += amount
+        self.used = next_used
 
     def release(self, cost) -> None:
         amount = _decimal(cost, "quota cost", non_negative=True)
         if amount > self.used:
             raise ProviderCoreError("cannot release more quota than was acquired")
-        self.used -= amount
+        try:
+            next_used = exact_subtract(self.used, amount)
+        except ExactDecimalError as error:
+            raise ProviderCoreError("provider quota exceeds exact arithmetic envelope") from error
+        self.used = next_used
 
     def reset(self) -> None:
         self.used = Decimal("0")

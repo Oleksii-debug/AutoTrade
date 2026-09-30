@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone, tzinfo
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 from hashlib import sha256
 import json
 from tempfile import TemporaryDirectory
@@ -405,6 +405,42 @@ class ProviderCoreTests(unittest.TestCase):
             bucket.acquire("15", purpose="RESEARCH")
         bucket.acquire("20", purpose="RECOVERY")
         self.assertEqual(bucket.available(), Decimal("10"))
+
+    def test_quota_recovery_reserve_is_context_independent_and_exact(self):
+        tiny = Decimal("1e-30")
+        capacity = Decimal("1.000000000000000000000000000001")
+        for rounding in (ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN):
+            with self.subTest(rounding=rounding), localcontext() as context:
+                context.prec = 6
+                context.rounding = rounding
+                bucket = QuotaBucket(
+                    capacity=capacity, recovery_reserve=tiny
+                )
+                bucket.acquire("1", purpose="TRADING")
+                self.assertEqual(bucket.used, Decimal("1"))
+                self.assertEqual(bucket.available(), tiny)
+                # No ambient rounding may erase the tiny recovery reserve.
+                with self.assertRaisesRegex(ProviderCoreError, "reserve"):
+                    bucket.acquire(tiny, purpose="RESEARCH")
+                self.assertEqual(bucket.used, Decimal("1"))
+                bucket.acquire(tiny, purpose="RECOVERY")
+                self.assertEqual(bucket.used, capacity)
+                self.assertEqual(bucket.available(), Decimal("0"))
+                bucket.release(tiny)
+                self.assertEqual(bucket.used, Decimal("1"))
+                self.assertEqual(bucket.available(), tiny)
+
+    def test_quota_insufficient_capacity_fails_without_partial_mutation(self):
+        with localcontext() as context:
+            context.prec = 6
+            context.rounding = ROUND_FLOOR
+            bucket = QuotaBucket(capacity="1", recovery_reserve="1e-30")
+            with self.assertRaisesRegex(ProviderCoreError, "reserve"):
+                bucket.acquire("1", purpose="TRADING")
+            self.assertEqual(bucket.used, Decimal("0"))
+            with self.assertRaisesRegex(ProviderCoreError, "exhausted"):
+                bucket.acquire("2", purpose="RECOVERY")
+            self.assertEqual(bucket.used, Decimal("0"))
 
     def test_clock_skew_blocks_authenticated_send(self):
         guard = ClockGuard(timedelta(seconds=2))

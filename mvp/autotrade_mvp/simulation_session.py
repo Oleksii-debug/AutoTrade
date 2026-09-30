@@ -52,6 +52,8 @@ INITIAL_CASH = Decimal("1000")
 FEE_RATE = Decimal("0.001")
 _AGGREGATE = "single-episode"
 _SOURCE_SHA = re.compile(r"^[0-9a-f]{40}$")
+_FAULT_NONE = "NONE"
+_FAULT_AFTER_ACCEPT_RESPONSE_LOST = "AFTER_ACCEPT_RESPONSE_LOST"
 
 CANONICAL_SIMULATION_PROTOCOL_VERSION = "2.0.0"
 _STRATEGY_CONFIG = {
@@ -140,6 +142,27 @@ def _protocol_identity(source_sha: str) -> tuple[dict[str, object], str]:
         "components": dict(_COMPONENT_CONFIG),
     }
     return payload, payload_digest(payload)
+
+
+def _creation_identity(timestamp: str, fault_after_send: bool) -> tuple[dict[str, object], str]:
+    profile = _FAULT_AFTER_ACCEPT_RESPONSE_LOST if fault_after_send else _FAULT_NONE
+    payload: dict[str, object] = {
+        "schema_version": "1.0.0",
+        "evidence_time": timestamp,
+        "transport_fault_profile": profile,
+    }
+    return payload, payload_digest(payload)
+
+
+def _session_identity(*, episode_id: str, input_hash: str, protocol_id: str,
+                      creation_id: str) -> str:
+    return payload_digest({
+        "schema_version": "2.0.0",
+        "episode_id": episode_id,
+        "input_hash": input_hash,
+        "protocol_id": protocol_id,
+        "creation_id": creation_id,
+    })
 
 
 def _uuid(kind: str, session_id: str) -> str:
@@ -308,27 +331,19 @@ def run_canonical_simulation(
         "schema_version": "1.0.0",
         "prices": [canonical_decimal_text(value) for value in values],
     })
-    session_id = payload_digest({
-        "schema_version": "1.0.0",
-        "episode_id": episode_id,
-        "input_hash": input_hash,
-        "protocol_id": protocol_id,
-    })
     root = Path(state_dir)
     root.mkdir(parents=True, exist_ok=True)
     with ResourceLock(root / ".canonical-simulation.lock"):
         return _run_locked(
-            root, episode_id=episode_id, input_hash=input_hash,
-            session_id=session_id, source_sha=source_sha,
-            protocol=protocol, protocol_id=protocol_id,
-            decision=decision, now=now, fault_after_send=fault_after_send,
+            root, episode_id=episode_id, input_hash=input_hash, source_sha=source_sha,
+            protocol=protocol, protocol_id=protocol_id, decision=decision,
+            now=now, fault_after_send=fault_after_send,
         )
 
 
 def _run_locked(root: Path, *, episode_id: str, input_hash: str,
-                session_id: str, source_sha: str, protocol: dict[str, object],
-                protocol_id: str, decision, now: str | None,
-                fault_after_send: bool) -> dict[str, object]:
+                source_sha: str, protocol: dict[str, object], protocol_id: str,
+                decision, now: str | None, fault_after_send: bool) -> dict[str, object]:
     store = JournalStore(root / "journal.sqlite3")
     prior = store.load_events("canonical_simulation_session", _AGGREGATE)
     if prior:
@@ -345,6 +360,24 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
             raise ValueError(
                 "durable simulation protocol/build identity is incompatible with this runtime"
             )
+        creation_identity = started_payload.get("creation_identity")
+        if type(creation_identity) is not dict:
+            raise ValueError("durable simulation creation identity is missing")
+        evidence_time = creation_identity.get("evidence_time")
+        fault_profile = creation_identity.get("transport_fault_profile")
+        if (
+            type(evidence_time) is not str
+            or _now(evidence_time) != evidence_time
+            or fault_profile not in {_FAULT_NONE, _FAULT_AFTER_ACCEPT_RESPONSE_LOST}
+        ):
+            raise ValueError("durable simulation creation identity is invalid")
+        creation_id = payload_digest(creation_identity)
+        if started_payload.get("creation_id") != creation_id:
+            raise ValueError("durable simulation creation identity digest is invalid")
+        session_id = _session_identity(
+            episode_id=episode_id, input_hash=input_hash, protocol_id=protocol_id,
+            creation_id=creation_id,
+        )
         if (
             started_payload.get("episode_id") != episode_id
             or started_payload.get("input_hash") != input_hash
@@ -356,6 +389,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
             if (
                 result.get("source_sha") != source_sha
                 or result.get("protocol_id") != protocol_id
+                or result.get("creation_id") != creation_id
                 or result.get("session_id") != session_id
             ):
                 raise ValueError("completed simulation provenance is incompatible")
@@ -374,11 +408,18 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
             "episode_id": episode_id, "session_id": session_id,
             "source_sha": source_sha, "protocol_id": protocol_id,
             "protocol_version": CANONICAL_SIMULATION_PROTOCOL_VERSION,
+            "creation_id": creation_id, "evidence_time": evidence_time,
             "reason": "incomplete_send_requires_reconciliation",
             "reconciled": False, "resumed": True, "new_outbound_requests": 0,
         }
 
     timestamp = _now(now)
+    creation_identity, creation_id = _creation_identity(timestamp, fault_after_send)
+    session_id = _session_identity(
+        episode_id=episode_id, input_hash=input_hash, protocol_id=protocol_id,
+        creation_id=creation_id,
+    )
+    fault_profile = creation_identity["transport_fault_profile"]
     future = (datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
               + timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
     provider = SimulatedProvider(
@@ -387,8 +428,8 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         transport_faults=({stable_client_order_id(
             "simulated", _uuid("intent", session_id),
             environment=ENVIRONMENT, account_id=ACCOUNT,
-        ): "AFTER_ACCEPT_RESPONSE_LOST"}
-                          if fault_after_send else None),
+        ): _FAULT_AFTER_ACCEPT_RESPONSE_LOST}
+                          if fault_profile == _FAULT_AFTER_ACCEPT_RESPONSE_LOST else None),
     )
     economic = DurableProviderEconomicBook(
         store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT,
@@ -430,6 +471,8 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         "protocol_version": CANONICAL_SIMULATION_PROTOCOL_VERSION,
         "protocol_id": protocol_id,
         "protocol": protocol,
+        "creation_id": creation_id,
+        "creation_identity": creation_identity,
         "decision": decision.side,
         "episode_id": episode_id,
         "environment": ENVIRONMENT,
@@ -441,6 +484,8 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         "protocol_version": CANONICAL_SIMULATION_PROTOCOL_VERSION,
         "protocol_id": protocol_id,
         "input_hash": input_hash,
+        "creation_id": creation_id,
+        "evidence_time": timestamp,
     }
     if decision.side == "HOLD":
         result = {

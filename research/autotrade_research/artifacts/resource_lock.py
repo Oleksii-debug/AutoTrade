@@ -6,6 +6,11 @@ import stat
 from pathlib import Path
 from typing import BinaryIO
 
+from autotrade_runtime.local_filesystem import (
+    LocalFilesystemQualificationError,
+    require_qualified_local_filesystem_path,
+)
+
 
 class ResourceLockError(RuntimeError):
     """Resource lock acquisition, integrity, or teardown failure."""
@@ -92,40 +97,16 @@ def _open_read_only_descriptor(path: Path) -> int:
         close_handle(kernel_handle)
         raise
 
+
 def _reject_known_remote_lock_path(path: Path) -> None:
-    """Fail closed for Windows UNC and mapped remote-drive lock paths."""
+    """Apply the shared production locality policy to ResourceLock paths."""
 
-    if os.name != "nt":
-        return
-
-    raw_path = os.fspath(path)
-    if raw_path.startswith(("\\\\", "//")):
+    try:
+        require_qualified_local_filesystem_path(path)
+    except LocalFilesystemQualificationError as error:
         raise ResourceLockError(
             "resource lock path must be on a qualified local filesystem"
-        )
-
-    absolute = os.path.abspath(raw_path)
-    drive, _ = os.path.splitdrive(absolute)
-    if not drive:
-        raise ResourceLockError(
-            "resource lock path has no qualified local Windows drive"
-        )
-
-    import ctypes
-    from ctypes import wintypes
-
-    get_drive_type = ctypes.WinDLL("kernel32", use_last_error=True).GetDriveTypeW
-    get_drive_type.argtypes = (wintypes.LPCWSTR,)
-    get_drive_type.restype = wintypes.UINT
-
-    drive_type = get_drive_type(drive + "\\")
-    # DRIVE_REMOVABLE=2, DRIVE_FIXED=3, DRIVE_CDROM=5, DRIVE_RAMDISK=6.
-    # DRIVE_UNKNOWN=0, DRIVE_NO_ROOT_DIR=1 and DRIVE_REMOTE=4 are not
-    # qualified for this local advisory-lock contract.
-    if drive_type not in {2, 3, 5, 6}:
-        raise ResourceLockError(
-            "resource lock path must be on a qualified local filesystem"
-        )
+        ) from error
 
 
 class ResourceLock:

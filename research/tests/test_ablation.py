@@ -486,115 +486,42 @@ class AblationTests(unittest.TestCase):
         )
         second = AblationPair(
             "agent",
-            replace(
-                second.full,
-                input_evidence=(
-                    second_base,
-                    replace(target, evidence_id="wire-story-b"),
-                ),
-            ),
+            replace(second.full, input_evidence=(second_base, replace(target, evidence_id="wire-story-b"))),
             replace(second.ablated, input_evidence=(second_base,)),
         )
         with self.assertRaisesRegex(ValueError, "duplicate target evidence content"):
-            evaluate_incremental_value(
-                "agent",
-                [first, second],
-                minimum_pairs=2,
-                required_lower_bound=Decimal("0"),
-            )
+            evaluate_incremental_value("agent", [first, second], minimum_pairs=2, required_lower_bound=Decimal("0"))
 
     def test_target_syndication_group_cannot_be_recounted_across_cases(self):
-        first_target = causal_evidence(
-            evidence_id="wire-story-a",
-            digest=FINGERPRINT_C,
-            component="agent",
-            syndication_group="wire-group-9",
-        )
-        second_target = causal_evidence(
-            evidence_id="wire-story-b",
-            digest=FINGERPRINT_D,
-            component="agent",
-            syndication_group="wire-group-9",
-        )
+        first_target = causal_evidence(evidence_id="wire-story-a", digest=FINGERPRINT_C, component="agent", syndication_group="wire-group-9")
+        second_target = causal_evidence(evidence_id="wire-story-b", digest=FINGERPRINT_D, component="agent", syndication_group="wire-group-9")
         first = pair("syndicated-a", "1")
         second = pair("syndicated-b", "1")
-        first = AblationPair(
-            "agent",
-            replace(first.full, input_evidence=(causal_evidence(), first_target)),
-            first.ablated,
-        )
-        second_base = causal_evidence(
-            evidence_id="base-b",
-            digest="sha256:" + ("e" * 64),
-        )
-        second = AblationPair(
-            "agent",
-            replace(second.full, input_evidence=(second_base, second_target)),
-            replace(second.ablated, input_evidence=(second_base,)),
-        )
+        first = AblationPair("agent", replace(first.full, input_evidence=(causal_evidence(), first_target)), first.ablated)
+        second_base = causal_evidence(evidence_id="base-b", digest="sha256:" + ("e" * 64))
+        second = AblationPair("agent", replace(second.full, input_evidence=(second_base, second_target)), replace(second.ablated, input_evidence=(second_base,)))
         with self.assertRaisesRegex(ValueError, "duplicate target syndication group"):
             summarize_ablation("agent", [first, second])
 
     def test_inferential_value_requires_causal_input_evidence(self):
         unbound = AblationPair(
             "agent",
-            outcome(
-                variant="FULL",
-                utility=1,
-                cost=0,
-                elapsed=10,
-                components=("base", "agent"),
-                input_evidence=(),
-            ),
-            outcome(
-                variant="ABLATED",
-                utility=0,
-                cost=0,
-                elapsed=10,
-                components=("base",),
-                input_evidence=(),
-            ),
+            outcome(variant="FULL", utility=1, cost=0, elapsed=10, components=("base", "agent"), input_evidence=()),
+            outcome(variant="ABLATED", utility=0, cost=0, elapsed=10, components=("base",), input_evidence=()),
         )
-        result = evaluate_incremental_value(
-            "agent",
-            [unbound],
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-        )
+        result = evaluate_incremental_value("agent", [unbound], minimum_pairs=2, required_lower_bound=Decimal("0"))
         self.assertEqual(result.status, "INCONCLUSIVE")
         self.assertEqual(result.reason, "missing_causal_input_evidence")
 
     def test_component_identity_whitespace_cannot_bypass_deduplication(self):
         with self.assertRaisesRegex(ValueError, "deduplicated canonical identities"):
-            outcome(
-                variant="FULL",
-                utility=1,
-                cost=1,
-                elapsed=10,
-                components=("base", "agent", " agent "),
-            )
+            outcome(variant="FULL", utility=1, cost=1, elapsed=10, components=("base", "agent", " agent "))
 
     def test_target_and_case_identity_are_canonicalized_before_matching(self):
         matched = AblationPair(
             " agent ",
-            outcome(
-                case_id=" case-1 ",
-                fingerprint=FINGERPRINT_A,
-                variant="FULL",
-                utility="0.2",
-                cost="0.01",
-                elapsed=10,
-                components=("base", " agent "),
-            ),
-            outcome(
-                case_id="case-1",
-                fingerprint=FINGERPRINT_A,
-                variant="ABLATED",
-                utility="0.1",
-                cost="0",
-                elapsed=10,
-                components=("base",),
-            ),
+            outcome(case_id=" case-1 ", fingerprint=FINGERPRINT_A, variant="FULL", utility="0.2", cost="0.01", elapsed=10, components=("base", " agent ")),
+            outcome(case_id="case-1", fingerprint=FINGERPRINT_A, variant="ABLATED", utility="0.1", cost="0", elapsed=10, components=("base",)),
         )
         summary = summarize_ablation("agent", [matched])
         self.assertEqual(matched.target_component, "agent")
@@ -606,256 +533,80 @@ class AblationTests(unittest.TestCase):
     def test_components_must_be_immutable_tuple(self):
         mutable = ["base", "agent"]
         with self.assertRaisesRegex(TypeError, "immutable tuple"):
-            AblationOutcome(
-                case_id="case-mutable-components",
-                input_fingerprint=FINGERPRINT_A,
-                variant="FULL",
-                utility=Decimal("0.1"),
-                cost=Decimal("0.01"),
-                elapsed_ms=10,
-                deadline_ms=100,
-                components=mutable,
-                input_cutoff_utc=CUT,
-                decision_utc=CUT,
-                outcome_available_utc=CUT + timedelta(hours=1),
-            )
+            AblationOutcome(case_id="case-mutable-components", input_fingerprint=FINGERPRINT_A, variant="FULL", utility=Decimal("0.1"), cost=Decimal("0.01"), elapsed_ms=10, deadline_ms=100, components=mutable, input_cutoff_utc=CUT, decision_utc=CUT, outcome_available_utc=CUT + timedelta(hours=1))
 
     def test_elapsed_and_deadline_reject_boolean_pseudo_integers(self):
         with self.assertRaisesRegex(TypeError, "must be integers"):
-            AblationOutcome(
-                case_id="case-bool-elapsed",
-                input_fingerprint=FINGERPRINT_A,
-                variant="FULL",
-                utility=Decimal("0.1"),
-                cost=Decimal("0.01"),
-                elapsed_ms=True,
-                deadline_ms=100,
-                components=("base",),
-                input_cutoff_utc=CUT,
-                decision_utc=CUT,
-                outcome_available_utc=CUT + timedelta(hours=1),
-            )
+            AblationOutcome(case_id="case-bool-elapsed", input_fingerprint=FINGERPRINT_A, variant="FULL", utility=Decimal("0.1"), cost=Decimal("0.01"), elapsed_ms=True, deadline_ms=100, components=("base",), input_cutoff_utc=CUT, decision_utc=CUT, outcome_available_utc=CUT + timedelta(hours=1))
         with self.assertRaisesRegex(TypeError, "must be integers"):
-            AblationOutcome(
-                case_id="case-bool-deadline",
-                input_fingerprint=FINGERPRINT_A,
-                variant="FULL",
-                utility=Decimal("0.1"),
-                cost=Decimal("0.01"),
-                elapsed_ms=10,
-                deadline_ms=True,
-                components=("base",),
-                input_cutoff_utc=CUT,
-                decision_utc=CUT,
-                outcome_available_utc=CUT + timedelta(hours=1),
-            )
+            AblationOutcome(case_id="case-bool-deadline", input_fingerprint=FINGERPRINT_A, variant="FULL", utility=Decimal("0.1"), cost=Decimal("0.01"), elapsed_ms=10, deadline_ms=True, components=("base",), input_cutoff_utc=CUT, decision_utc=CUT, outcome_available_utc=CUT + timedelta(hours=1))
 
     def test_case_identity_must_be_explicit_string(self):
         with self.assertRaisesRegex(ValueError, "case_id"):
-            AblationOutcome(
-                case_id=1,
-                input_fingerprint=FINGERPRINT_A,
-                variant="FULL",
-                utility=Decimal("0.1"),
-                cost=Decimal("0.01"),
-                elapsed_ms=10,
-                deadline_ms=100,
-                components=("base",),
-                input_cutoff_utc=CUT,
-                decision_utc=CUT,
-                outcome_available_utc=CUT + timedelta(hours=1),
-            )
+            AblationOutcome(case_id=1, input_fingerprint=FINGERPRINT_A, variant="FULL", utility=Decimal("0.1"), cost=Decimal("0.01"), elapsed_ms=10, deadline_ms=100, components=("base",), input_cutoff_utc=CUT, decision_utc=CUT, outcome_available_utc=CUT + timedelta(hours=1))
 
     def test_binary_float_utility_and_cost_are_rejected(self):
         with self.assertRaises(TypeError):
-            AblationOutcome(
-                case_id="case-float-utility",
-                input_fingerprint=FINGERPRINT_A,
-                variant="FULL",
-                utility=0.1,
-                cost=Decimal("0.01"),
-                elapsed_ms=10,
-                deadline_ms=100,
-                components=("base",),
-                input_cutoff_utc=CUT,
-                decision_utc=CUT,
-                outcome_available_utc=CUT + timedelta(hours=1),
-            )
+            AblationOutcome(case_id="case-float-utility", input_fingerprint=FINGERPRINT_A, variant="FULL", utility=0.1, cost=Decimal("0.01"), elapsed_ms=10, deadline_ms=100, components=("base",), input_cutoff_utc=CUT, decision_utc=CUT, outcome_available_utc=CUT + timedelta(hours=1))
         with self.assertRaises(TypeError):
-            AblationOutcome(
-                case_id="case-float-cost",
-                input_fingerprint=FINGERPRINT_A,
-                variant="FULL",
-                utility=Decimal("0.1"),
-                cost=0.01,
-                elapsed_ms=10,
-                deadline_ms=100,
-                components=("base",),
-                input_cutoff_utc=CUT,
-                decision_utc=CUT,
-                outcome_available_utc=CUT + timedelta(hours=1),
-            )
+            AblationOutcome(case_id="case-float-cost", input_fingerprint=FINGERPRINT_A, variant="FULL", utility=Decimal("0.1"), cost=0.01, elapsed_ms=10, deadline_ms=100, components=("base",), input_cutoff_utc=CUT, decision_utc=CUT, outcome_available_utc=CUT + timedelta(hours=1))
 
     def test_negative_cost_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "non-negative"):
-            outcome(
-                variant="FULL",
-                utility=1,
-                cost="-0.01",
-                elapsed=10,
-                components=("base",),
-            )
+            outcome(variant="FULL", utility=1, cost="-0.01", elapsed=10, components=("base",))
 
     def test_causal_timestamp_requires_real_utc_offset(self):
         invalid = datetime(2026, 9, 25, 0, 0, tzinfo=_NoOffsetTZ())
         with self.assertRaisesRegex(ValueError, "timezone-aware"):
-            outcome(
-                variant="FULL",
-                utility=1,
-                cost=0,
-                elapsed=10,
-                components=("base",),
-                cutoff=invalid,
-            )
+            outcome(variant="FULL", utility=1, cost=0, elapsed=10, components=("base",), cutoff=invalid)
 
     def test_future_leakage_is_rejected_when_cutoff_is_after_decision(self):
         with self.assertRaisesRegex(ValueError, "cannot precede"):
-            outcome(
-                variant="FULL",
-                utility=1,
-                cost=0,
-                elapsed=10,
-                components=("base",),
-                decision=CUT - timedelta(seconds=1),
-            )
+            outcome(variant="FULL", utility=1, cost=0, elapsed=10, components=("base",), decision=CUT - timedelta(seconds=1))
 
     def test_decision_after_frozen_input_cutoff_is_causally_valid(self):
-        item = outcome(
-            variant="FULL",
-            utility=1,
-            cost=0,
-            elapsed=10,
-            components=("base",),
-            decision=CUT + timedelta(seconds=1),
-        )
+        item = outcome(variant="FULL", utility=1, cost=0, elapsed=10, components=("base",), decision=CUT + timedelta(seconds=1))
         self.assertGreater(item.decision_utc, item.input_cutoff_utc)
 
     def test_outcome_must_be_after_input_cutoff(self):
         with self.assertRaisesRegex(ValueError, "strictly after"):
-            outcome(
-                variant="FULL",
-                utility=1,
-                cost=0,
-                elapsed=10,
-                components=("base",),
-                outcome_available=CUT,
-            )
+            outcome(variant="FULL", utility=1, cost=0, elapsed=10, components=("base",), outcome_available=CUT)
 
     def test_decision_cannot_happen_after_outcome_is_available(self):
-        with self.assertRaisesRegex(
-            ValueError,
-            "strictly before outcome availability",
-        ):
-            outcome(
-                variant="FULL",
-                utility=1,
-                cost=0,
-                elapsed=10,
-                components=("base",),
-                decision=CUT + timedelta(hours=2),
-                outcome_available=CUT + timedelta(hours=1),
-            )
+        with self.assertRaisesRegex(ValueError, "strictly before outcome availability"):
+            outcome(variant="FULL", utility=1, cost=0, elapsed=10, components=("base",), decision=CUT + timedelta(hours=2), outcome_available=CUT + timedelta(hours=1))
 
     def test_matched_pair_requires_same_causal_cutoff(self):
         with self.assertRaisesRegex(ValueError, "causal input cutoff"):
-            AblationPair(
-                "agent",
-                outcome(
-                    variant="FULL", utility=1, cost=0, elapsed=10,
-                    components=("base", "agent"),
-                ),
-                outcome(
-                    variant="ABLATED", utility=0, cost=0, elapsed=10,
-                    components=("base",),
-                    cutoff=CUT - timedelta(seconds=1),
-                ),
-            )
+            AblationPair("agent", outcome(variant="FULL", utility=1, cost=0, elapsed=10, components=("base", "agent")), outcome(variant="ABLATED", utility=0, cost=0, elapsed=10, components=("base",), cutoff=CUT - timedelta(seconds=1)))
 
     def test_insufficient_comparable_pairs_are_inconclusive(self):
-        result = evaluate_incremental_value(
-            "agent",
-            [pair("p1", "1")],
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-        )
+        result = evaluate_incremental_value("agent", [pair("p1", "1")], minimum_pairs=2, required_lower_bound=Decimal("0"))
         self.assertEqual(result.status, "INCONCLUSIVE")
         self.assertIsNone(result.lower_bound)
 
     def test_incremental_value_is_net_of_cost_with_lower_bound(self):
-        result = evaluate_incremental_value(
-            "agent",
-            [
-                pair("p1", "2", full_cost="0.5"),
-                pair("p2", "2", full_cost="0.5"),
-            ],
-            minimum_pairs=2,
-            required_lower_bound=Decimal("1.5"),
-        )
+        result = evaluate_incremental_value("agent", [pair("p1", "2", full_cost="0.5"), pair("p2", "2", full_cost="0.5")], minimum_pairs=2, required_lower_bound=Decimal("1.5"))
         self.assertEqual(result.status, "PASS")
         self.assertEqual(result.mean_net_incremental_value, Decimal("1.5"))
         self.assertEqual(result.lower_bound, Decimal("1.5"))
 
     def test_scientific_aggregation_is_independent_of_ambient_decimal_context(self):
-        pairs = [
-            pair("ctx-1", "1.234567890123456789", full_cost="0.111111111111111111"),
-            pair("ctx-2", "2.345678901234567891", full_cost="0.222222222222222222"),
-            pair("ctx-3", "0.987654321987654321", full_cost="0.033333333333333333"),
-        ]
+        pairs = [pair("ctx-1", "1.234567890123456789", full_cost="0.111111111111111111"), pair("ctx-2", "2.345678901234567891", full_cost="0.222222222222222222"), pair("ctx-3", "0.987654321987654321", full_cost="0.033333333333333333")]
         with localcontext() as context:
             context.prec = 7
-            low_precision = evaluate_incremental_value(
-                "agent",
-                pairs,
-                minimum_pairs=3,
-                required_lower_bound=Decimal("0"),
-            )
+            low_precision = evaluate_incremental_value("agent", pairs, minimum_pairs=3, required_lower_bound=Decimal("0"))
             low_summary = summarize_ablation("agent", pairs)
         with localcontext() as context:
             context.prec = 34
-            high_precision = evaluate_incremental_value(
-                "agent",
-                pairs,
-                minimum_pairs=3,
-                required_lower_bound=Decimal("0"),
-            )
+            high_precision = evaluate_incremental_value("agent", pairs, minimum_pairs=3, required_lower_bound=Decimal("0"))
             high_summary = summarize_ablation("agent", pairs)
-
         self.assertEqual(low_precision, high_precision)
         self.assertEqual(low_summary, high_summary)
 
     def test_huge_exact_negative_delta_cannot_round_into_pass(self):
-        cases = [
-            pair(
-                "huge-negative-a",
-                "1E100",
-                "1E100",
-                full_cost="2",
-                ablated_cost="1",
-            ),
-            pair(
-                "huge-negative-b",
-                "1E100",
-                "1E100",
-                full_cost="2",
-                ablated_cost="1",
-            ),
-        ]
-        result = evaluate_incremental_value(
-            "agent",
-            cases,
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-        )
+        cases = [pair("huge-negative-a", "1E100", "1E100", full_cost="2", ablated_cost="1"), pair("huge-negative-b", "1E100", "1E100", full_cost="2", ablated_cost="1")]
+        result = evaluate_incremental_value("agent", cases, minimum_pairs=2, required_lower_bound=Decimal("0"))
         self.assertEqual(result.status, "FAIL")
         self.assertEqual(result.mean_net_incremental_value, Decimal("-1"))
         self.assertIsNotNone(result.decision_exact)
@@ -863,151 +614,56 @@ class AblationTests(unittest.TestCase):
         self.assertEqual(result.decision_exact.mean.denominator, 1)
 
     def test_huge_exact_positive_delta_remains_positive(self):
-        cases = [
-            pair(
-                "huge-positive-a",
-                "1E100",
-                "1E100",
-                full_cost="1",
-                ablated_cost="2",
-            ),
-            pair(
-                "huge-positive-b",
-                "1E100",
-                "1E100",
-                full_cost="1",
-                ablated_cost="2",
-            ),
-        ]
-        result = evaluate_incremental_value(
-            "agent",
-            cases,
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-        )
+        cases = [pair("huge-positive-a", "1E100", "1E100", full_cost="1", ablated_cost="2"), pair("huge-positive-b", "1E100", "1E100", full_cost="1", ablated_cost="2")]
+        result = evaluate_incremental_value("agent", cases, minimum_pairs=2, required_lower_bound=Decimal("0"))
         self.assertEqual(result.status, "PASS")
         self.assertEqual(result.mean_net_incremental_value, Decimal("1"))
         self.assertEqual(result.decision_exact.mean.numerator, 1)
 
     def test_exact_uncertainty_boundary_is_inclusive_and_one_quantum_below_fails(self):
-        cases = [
-            pair("exact-boundary-a", "0"),
-            pair("exact-boundary-b", "2"),
-        ]
-        boundary = evaluate_incremental_value(
-            "agent",
-            cases,
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-            uncertainty_multiplier=Decimal("1"),
-        )
-        below = evaluate_incremental_value(
-            "agent",
-            cases,
-            minimum_pairs=2,
-            required_lower_bound=Decimal("1e-50"),
-            uncertainty_multiplier=Decimal("1"),
-        )
+        cases = [pair("exact-boundary-a", "0"), pair("exact-boundary-b", "2")]
+        boundary = evaluate_incremental_value("agent", cases, minimum_pairs=2, required_lower_bound=Decimal("0"), uncertainty_multiplier=Decimal("1"))
+        below = evaluate_incremental_value("agent", cases, minimum_pairs=2, required_lower_bound=Decimal("1e-50"), uncertainty_multiplier=Decimal("1"))
         self.assertEqual(boundary.status, "PASS")
         self.assertEqual(boundary.decision_exact.lhs, boundary.decision_exact.rhs)
         self.assertEqual(below.status, "FAIL")
         self.assertLess(below.decision_exact.lhs, below.decision_exact.rhs)
 
     def test_nonterminating_mean_has_exact_rational_decision_material(self):
-        cases = [
-            pair("third-a", "0"),
-            pair("third-b", "0"),
-            pair("third-c", "1"),
-        ]
+        cases = [pair("third-a", "0"), pair("third-b", "0"), pair("third-c", "1")]
         with localcontext() as context:
             context.prec = 6
-            first = evaluate_incremental_value(
-                "agent",
-                cases,
-                minimum_pairs=3,
-                required_lower_bound=Decimal("-1"),
-            )
+            first = evaluate_incremental_value("agent", cases, minimum_pairs=3, required_lower_bound=Decimal("-1"))
         with localcontext() as context:
             context.prec = 80
-            second = evaluate_incremental_value(
-                "agent",
-                cases,
-                minimum_pairs=3,
-                required_lower_bound=Decimal("-1"),
-            )
+            second = evaluate_incremental_value("agent", cases, minimum_pairs=3, required_lower_bound=Decimal("-1"))
         self.assertEqual(first, second)
         self.assertEqual(first.decision_exact.mean.numerator, 1)
         self.assertEqual(first.decision_exact.mean.denominator, 3)
 
     def test_ablation_decimal_inputs_fail_closed_outside_shared_envelope(self):
         with self.assertRaisesRegex(ValueError, "shared exact numeric resource envelope"):
-            outcome(
-                variant="FULL",
-                utility="1E257",
-                cost="0",
-                elapsed=10,
-                components=("base",),
-            )
+            outcome(variant="FULL", utility="1E257", cost="0", elapsed=10, components=("base",))
 
     def test_reporting_overflow_does_not_suppress_exact_terminal_decision(self):
-        cases = [
-            pair("report-overflow-a", "0"),
-            pair("report-overflow-b", "1E255"),
-        ]
-        result = evaluate_incremental_value(
-            "agent",
-            cases,
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-            uncertainty_multiplier=Decimal("1E255"),
-        )
+        cases = [pair("report-overflow-a", "0"), pair("report-overflow-b", "1E255")]
+        result = evaluate_incremental_value("agent", cases, minimum_pairs=2, required_lower_bound=Decimal("0"), uncertainty_multiplier=Decimal("1E255"))
         self.assertEqual(result.status, "FAIL")
         self.assertIsNotNone(result.decision_exact)
         self.assertEqual(result.reporting_status, "UNAVAILABLE")
         self.assertIsNone(result.mean_net_incremental_value)
         self.assertIsNone(result.sample_stddev)
         self.assertIsNone(result.lower_bound)
-
-        locked = build_ablation_evidence_bundle(
-            "agent",
-            cases,
-            source_revision="c" * 40,
-            protocol_digest=FINGERPRINT_C,
-            dataset_digest=FINGERPRINT_D,
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-            uncertainty_multiplier=Decimal("1E255"),
-        )
+        locked = build_ablation_evidence_bundle("agent", cases, source_revision="c" * 40, protocol_digest=FINGERPRINT_C, dataset_digest=FINGERPRINT_D, minimum_pairs=2, required_lower_bound=Decimal("0"), uncertainty_multiplier=Decimal("1E255"))
         decoded = json.loads(locked.payload)
         self.assertEqual(decoded["evaluation"]["status"], "FAIL")
-        self.assertEqual(
-            decoded["evaluation"]["reporting_status"],
-            "UNAVAILABLE",
-        )
+        self.assertEqual(decoded["evaluation"]["reporting_status"], "UNAVAILABLE")
         self.assertIsNone(decoded["evaluation"]["lower_bound"])
         self.assertTrue(verify_ablation_evidence_bundle(locked, cases))
 
     def test_descriptive_summary_reporting_overflow_is_explicit_not_exception(self):
         huge_elapsed = 10 ** 400
-        matched = AblationPair(
-            "agent",
-            outcome(
-                case_id="summary-overflow",
-                variant="FULL",
-                utility="1",
-                cost="0",
-                elapsed=huge_elapsed,
-                components=("base", "agent"),
-            ),
-            outcome(
-                case_id="summary-overflow",
-                variant="ABLATED",
-                utility="0",
-                cost="0",
-                elapsed=1,
-                components=("base",),
-            ),
-        )
+        matched = AblationPair("agent", outcome(case_id="summary-overflow", variant="FULL", utility="1", cost="0", elapsed=huge_elapsed, components=("base", "agent")), outcome(case_id="summary-overflow", variant="ABLATED", utility="0", cost="0", elapsed=1, components=("base",)))
         summary = summarize_ablation("agent", [matched])
         self.assertEqual(summary.reporting_status, "UNAVAILABLE")
         self.assertIsNone(summary.mean_utility_delta)
@@ -1015,504 +671,155 @@ class AblationTests(unittest.TestCase):
         self.assertIsNone(summary.mean_latency_delta_ms)
 
     def test_locked_bundle_v2_contains_and_authenticates_exact_decision_material(self):
-        cases = [
-            pair("exact-lock-a", "0"),
-            pair("exact-lock-b", "2"),
-        ]
-        locked = build_ablation_evidence_bundle(
-            "agent",
-            cases,
-            source_revision="6" * 40,
-            protocol_digest=FINGERPRINT_C,
-            dataset_digest=FINGERPRINT_D,
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-            uncertainty_multiplier=Decimal("1"),
-        )
+        cases = [pair("exact-lock-a", "0"), pair("exact-lock-b", "2")]
+        locked = build_ablation_evidence_bundle("agent", cases, source_revision="6" * 40, protocol_digest=FINGERPRINT_C, dataset_digest=FINGERPRINT_D, minimum_pairs=2, required_lower_bound=Decimal("0"), uncertainty_multiplier=Decimal("1"))
         decoded = json.loads(locked.payload)
         self.assertEqual(decoded["schema_version"], "2.0.0")
         policy = decoded["evaluation_policy"]
-        self.assertEqual(
-            policy["decision_rule"],
-            "exact-rational-d2-sample-variance-v1",
-        )
-        self.assertEqual(
-            policy["reporting_projection"],
-            {
-                "failure_policy": "report-unavailable-preserve-exact-decision-v1",
-                "precision": 384,
-                "quantum": "0.00000000000000000000000000000000000000000000000001",
-            },
-        )
+        self.assertEqual(policy["decision_rule"], "exact-rational-d2-sample-variance-v1")
+        self.assertEqual(policy["reporting_projection"], {"failure_policy": "report-unavailable-preserve-exact-decision-v1", "precision": 384, "quantum": "0.00000000000000000000000000000000000000000000000001"})
         decision = decoded["evaluation"]["decision_exact"]
         self.assertEqual(decision["lhs"], {"denominator": "1", "numerator": "1"})
         self.assertEqual(decision["rhs"], {"denominator": "1", "numerator": "1"})
         self.assertTrue(verify_ablation_evidence_bundle(locked, cases))
-
         decision["rhs"]["numerator"] = "2"
-        tampered_payload = json.dumps(
-            decoded,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-            allow_nan=False,
-        )
-        tampered_digest = "sha256:" + sha256(
-            tampered_payload.encode("utf-8")
-        ).hexdigest()
-        with self.assertRaisesRegex(
-            ValueError,
-            "payload evaluation does not match bundle evaluation",
-        ):
-            replace(
-                locked,
-                payload=tampered_payload,
-                content_digest=tampered_digest,
-            )
+        tampered_payload = json.dumps(decoded, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        tampered_digest = "sha256:" + sha256(tampered_payload.encode("utf-8")).hexdigest()
+        with self.assertRaisesRegex(ValueError, "payload evaluation does not match bundle evaluation"):
+            replace(locked, payload=tampered_payload, content_digest=tampered_digest)
 
     def test_coherently_rehashed_reporting_tamper_fails_rebuild_verification(self):
         cases = [pair("report-tamper-a", "0"), pair("report-tamper-b", "2")]
-        locked = build_ablation_evidence_bundle(
-            "agent",
-            cases,
-            source_revision="b" * 40,
-            protocol_digest=FINGERPRINT_C,
-            dataset_digest=FINGERPRINT_D,
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-            uncertainty_multiplier=Decimal("1"),
-        )
-        tampered_evaluation = replace(
-            locked.evaluation,
-            lower_bound=Decimal("999"),
-            mean_net_incremental_value=Decimal("999"),
-        )
+        locked = build_ablation_evidence_bundle("agent", cases, source_revision="b" * 40, protocol_digest=FINGERPRINT_C, dataset_digest=FINGERPRINT_D, minimum_pairs=2, required_lower_bound=Decimal("0"), uncertainty_multiplier=Decimal("1"))
+        tampered_evaluation = replace(locked.evaluation, lower_bound=Decimal("999"), mean_net_incremental_value=Decimal("999"))
         decoded = json.loads(locked.payload)
         decoded["evaluation"]["lower_bound"] = "999"
         decoded["evaluation"]["mean_net_incremental_value"] = "999"
-        tampered_payload = json.dumps(
-            decoded,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-            allow_nan=False,
-        )
-        tampered = replace(
-            locked,
-            evaluation=tampered_evaluation,
-            payload=tampered_payload,
-            content_digest=(
-                "sha256:" + sha256(tampered_payload.encode("utf-8")).hexdigest()
-            ),
-        )
+        tampered_payload = json.dumps(decoded, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        tampered = replace(locked, evaluation=tampered_evaluation, payload=tampered_payload, content_digest="sha256:" + sha256(tampered_payload.encode("utf-8")).hexdigest())
         self.assertEqual(tampered.evaluation.status, locked.evaluation.status)
         with self.assertRaisesRegex(ValueError, "locked ablation evidence"):
             verify_ablation_evidence_bundle(tampered, cases)
 
     def test_v1_bundle_metadata_cannot_be_reinterpreted_as_exact_authority(self):
         cases = [pair("legacy-a", "1"), pair("legacy-b", "1")]
-        locked = build_ablation_evidence_bundle(
-            "agent",
-            cases,
-            source_revision="a" * 40,
-            protocol_digest=FINGERPRINT_C,
-            dataset_digest=FINGERPRINT_D,
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-        )
+        locked = build_ablation_evidence_bundle("agent", cases, source_revision="a" * 40, protocol_digest=FINGERPRINT_C, dataset_digest=FINGERPRINT_D, minimum_pairs=2, required_lower_bound=Decimal("0"))
         decoded = json.loads(locked.payload)
         decoded["schema_version"] = "1.0.0"
-        legacy_payload = json.dumps(
-            decoded,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-            allow_nan=False,
-        )
-        legacy_digest = "sha256:" + sha256(
-            legacy_payload.encode("utf-8")
-        ).hexdigest()
+        legacy_payload = json.dumps(decoded, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        legacy_digest = "sha256:" + sha256(legacy_payload.encode("utf-8")).hexdigest()
         with self.assertRaisesRegex(ValueError, "payload metadata"):
-            replace(
-                locked,
-                payload=legacy_payload,
-                content_digest=legacy_digest,
-            )
+            replace(locked, payload=legacy_payload, content_digest=legacy_digest)
 
     def test_uncertain_mixed_result_fails_lower_bound(self):
-        result = evaluate_incremental_value(
-            "agent",
-            [
-                pair("p1", "3"),
-                pair("p2", "-1"),
-                pair("p3", "2"),
-            ],
-            minimum_pairs=3,
-            required_lower_bound=Decimal("0.5"),
-        )
+        result = evaluate_incremental_value("agent", [pair("p1", "3"), pair("p2", "-1"), pair("p3", "2")], minimum_pairs=3, required_lower_bound=Decimal("0.5"))
         self.assertEqual(result.status, "FAIL")
         self.assertLess(result.lower_bound, Decimal("0.5"))
 
-
     def test_locked_evidence_bundle_is_order_stable_and_self_verifying(self):
-        cases = [
-            pair("locked-a", "2", full_cost="0.25"),
-            pair("locked-b", "1.5", full_cost="0.10"),
-        ]
-        first = build_ablation_evidence_bundle(
-            "agent",
-            cases,
-            source_revision="1" * 40,
-            protocol_digest=FINGERPRINT_C,
-            dataset_digest=FINGERPRINT_D,
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-        )
-        second = build_ablation_evidence_bundle(
-            "agent",
-            list(reversed(cases)),
-            source_revision="1" * 40,
-            protocol_digest=FINGERPRINT_C,
-            dataset_digest=FINGERPRINT_D,
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0.000"),
-        )
+        cases = [pair("locked-a", "2", full_cost="0.25"), pair("locked-b", "1.5", full_cost="0.10")]
+        first = build_ablation_evidence_bundle("agent", cases, source_revision="1" * 40, protocol_digest=FINGERPRINT_C, dataset_digest=FINGERPRINT_D, minimum_pairs=2, required_lower_bound=Decimal("0"))
+        second = build_ablation_evidence_bundle("agent", list(reversed(cases)), source_revision="1" * 40, protocol_digest=FINGERPRINT_C, dataset_digest=FINGERPRINT_D, minimum_pairs=2, required_lower_bound=Decimal("0.000"))
         self.assertEqual(first.payload, second.payload)
         self.assertEqual(first.content_digest, second.content_digest)
         self.assertTrue(verify_ablation_evidence_bundle(first, cases))
 
     def test_locked_evidence_digest_changes_when_causal_result_changes(self):
-        baseline = [
-            pair("locked-a", "2", full_cost="0.25"),
-            pair("locked-b", "1.5", full_cost="0.10"),
-        ]
-        changed = [
-            pair("locked-a", "2.1", full_cost="0.25"),
-            pair("locked-b", "1.5", full_cost="0.10"),
-        ]
-        first = build_ablation_evidence_bundle(
-            "agent",
-            baseline,
-            source_revision="2" * 40,
-            protocol_digest=FINGERPRINT_C,
-            dataset_digest=FINGERPRINT_D,
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-        )
-        second = build_ablation_evidence_bundle(
-            "agent",
-            changed,
-            source_revision="2" * 40,
-            protocol_digest=FINGERPRINT_C,
-            dataset_digest=FINGERPRINT_D,
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-        )
+        baseline = [pair("locked-a", "2", full_cost="0.25"), pair("locked-b", "1.5", full_cost="0.10")]
+        changed = [pair("locked-a", "2.1", full_cost="0.25"), pair("locked-b", "1.5", full_cost="0.10")]
+        first = build_ablation_evidence_bundle("agent", baseline, source_revision="2" * 40, protocol_digest=FINGERPRINT_C, dataset_digest=FINGERPRINT_D, minimum_pairs=2, required_lower_bound=Decimal("0"))
+        second = build_ablation_evidence_bundle("agent", changed, source_revision="2" * 40, protocol_digest=FINGERPRINT_C, dataset_digest=FINGERPRINT_D, minimum_pairs=2, required_lower_bound=Decimal("0"))
         self.assertNotEqual(first.content_digest, second.content_digest)
         with self.assertRaisesRegex(ValueError, "locked ablation evidence"):
             verify_ablation_evidence_bundle(first, changed)
 
     def test_locked_evidence_binds_source_protocol_and_dataset_identity(self):
-        cases = [
-            pair("identity-a", "1"),
-            pair("identity-b", "1"),
-        ]
-        base = build_ablation_evidence_bundle(
-            "agent",
-            cases,
-            source_revision="3" * 40,
-            protocol_digest=FINGERPRINT_C,
-            dataset_digest=FINGERPRINT_D,
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-        )
-        changed_source = build_ablation_evidence_bundle(
-            "agent",
-            cases,
-            source_revision="4" * 40,
-            protocol_digest=FINGERPRINT_C,
-            dataset_digest=FINGERPRINT_D,
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-        )
-        changed_protocol = build_ablation_evidence_bundle(
-            "agent",
-            cases,
-            source_revision="3" * 40,
-            protocol_digest=FINGERPRINT_B,
-            dataset_digest=FINGERPRINT_D,
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-        )
+        cases = [pair("identity-a", "1"), pair("identity-b", "1")]
+        base = build_ablation_evidence_bundle("agent", cases, source_revision="3" * 40, protocol_digest=FINGERPRINT_C, dataset_digest=FINGERPRINT_D, minimum_pairs=2, required_lower_bound=Decimal("0"))
+        changed_source = build_ablation_evidence_bundle("agent", cases, source_revision="4" * 40, protocol_digest=FINGERPRINT_C, dataset_digest=FINGERPRINT_D, minimum_pairs=2, required_lower_bound=Decimal("0"))
+        changed_protocol = build_ablation_evidence_bundle("agent", cases, source_revision="3" * 40, protocol_digest=FINGERPRINT_B, dataset_digest=FINGERPRINT_D, minimum_pairs=2, required_lower_bound=Decimal("0"))
         self.assertNotEqual(base.content_digest, changed_source.content_digest)
         self.assertNotEqual(base.content_digest, changed_protocol.content_digest)
 
     def test_locked_evidence_preserves_inconclusive_negative_result(self):
-        locked = build_ablation_evidence_bundle(
-            "agent",
-            [pair("only-one", "1")],
-            source_revision="5" * 40,
-            protocol_digest=FINGERPRINT_C,
-            dataset_digest=FINGERPRINT_D,
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-        )
+        locked = build_ablation_evidence_bundle("agent", [pair("only-one", "1")], source_revision="5" * 40, protocol_digest=FINGERPRINT_C, dataset_digest=FINGERPRINT_D, minimum_pairs=2, required_lower_bound=Decimal("0"))
         self.assertEqual(locked.pair_count, 1)
         self.assertEqual(locked.evaluation.status, "INCONCLUSIVE")
-        self.assertEqual(
-            locked.evaluation.reason,
-            "insufficient_comparable_matched_pairs",
-        )
+        self.assertEqual(locked.evaluation.reason, "insufficient_comparable_matched_pairs")
         self.assertIn('"status":"INCONCLUSIVE"', locked.payload)
 
     def test_locked_evidence_rejects_non_exact_source_revision(self):
         with self.assertRaisesRegex(ValueError, "exact 40-character lowercase git SHA"):
-            build_ablation_evidence_bundle(
-                "agent",
-                [pair("bad-source-a", "1"), pair("bad-source-b", "1")],
-                source_revision="main",
-                protocol_digest=FINGERPRINT_C,
-                dataset_digest=FINGERPRINT_D,
-                minimum_pairs=2,
-                required_lower_bound=Decimal("0"),
-            )
-
+            build_ablation_evidence_bundle("agent", [pair("bad-source-a", "1"), pair("bad-source-b", "1")], source_revision="main", protocol_digest=FINGERPRINT_C, dataset_digest=FINGERPRINT_D, minimum_pairs=2, required_lower_bound=Decimal("0"))
 
     def test_locked_evidence_constructor_rejects_payload_evaluation_mismatch(self):
-        cases = [
-            pair("constructor-a", "2", full_cost="0.25"),
-            pair("constructor-b", "1.5", full_cost="0.10"),
-        ]
-        locked = build_ablation_evidence_bundle(
-            "agent",
-            cases,
-            source_revision="7" * 40,
-            protocol_digest=FINGERPRINT_C,
-            dataset_digest=FINGERPRINT_D,
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-        )
+        cases = [pair("constructor-a", "2", full_cost="0.25"), pair("constructor-b", "1.5", full_cost="0.10")]
+        locked = build_ablation_evidence_bundle("agent", cases, source_revision="7" * 40, protocol_digest=FINGERPRINT_C, dataset_digest=FINGERPRINT_D, minimum_pairs=2, required_lower_bound=Decimal("0"))
         decoded = json.loads(locked.payload)
         decoded["evaluation"]["reason"] = "tampered_reason"
-        tampered_payload = json.dumps(
-            decoded,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-            allow_nan=False,
-        )
-        tampered_digest = "sha256:" + sha256(
-            tampered_payload.encode("utf-8")
-        ).hexdigest()
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "payload evaluation does not match bundle evaluation",
-        ):
-            replace(
-                locked,
-                payload=tampered_payload,
-                content_digest=tampered_digest,
-            )
+        tampered_payload = json.dumps(decoded, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        tampered_digest = "sha256:" + sha256(tampered_payload.encode("utf-8")).hexdigest()
+        with self.assertRaisesRegex(ValueError, "payload evaluation does not match bundle evaluation"):
+            replace(locked, payload=tampered_payload, content_digest=tampered_digest)
 
     def test_locked_evidence_constructor_rejects_noncanonical_json(self):
-        cases = [
-            pair("canonical-a", "2", full_cost="0.25"),
-            pair("canonical-b", "1.5", full_cost="0.10"),
-        ]
-        locked = build_ablation_evidence_bundle(
-            "agent",
-            cases,
-            source_revision="8" * 40,
-            protocol_digest=FINGERPRINT_C,
-            dataset_digest=FINGERPRINT_D,
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-        )
-        noncanonical_payload = json.dumps(
-            json.loads(locked.payload),
-            indent=2,
-            ensure_ascii=False,
-        )
-        noncanonical_digest = "sha256:" + sha256(
-            noncanonical_payload.encode("utf-8")
-        ).hexdigest()
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "payload must use canonical JSON serialization",
-        ):
-            replace(
-                locked,
-                payload=noncanonical_payload,
-                content_digest=noncanonical_digest,
-            )
-
+        cases = [pair("canonical-a", "2", full_cost="0.25"), pair("canonical-b", "1.5", full_cost="0.10")]
+        locked = build_ablation_evidence_bundle("agent", cases, source_revision="8" * 40, protocol_digest=FINGERPRINT_C, dataset_digest=FINGERPRINT_D, minimum_pairs=2, required_lower_bound=Decimal("0"))
+        noncanonical_payload = json.dumps(json.loads(locked.payload), indent=2, ensure_ascii=False)
+        noncanonical_digest = "sha256:" + sha256(noncanonical_payload.encode("utf-8")).hexdigest()
+        with self.assertRaisesRegex(ValueError, "payload must use canonical JSON serialization"):
+            replace(locked, payload=noncanonical_payload, content_digest=noncanonical_digest)
 
     def test_qualified_pass_requires_canonical_outcome_evidence(self):
-        cases = [
-            pair("qualified-a", "2", population_unit="unit-a"),
-            pair("qualified-b", "2", population_unit="unit-b"),
-        ]
-        result = evaluate_qualified_incremental_value(
-            "agent",
-            cases,
-            population=registered_population(cases),
-            canonical_outcomes=(),
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-        )
+        cases = [pair("qualified-a", "2", population_unit="unit-a"), pair("qualified-b", "2", population_unit="unit-b")]
+        result = evaluate_qualified_incremental_value("agent", cases, population=registered_population(cases), canonical_outcomes=(), minimum_pairs=2, required_lower_bound=Decimal("0"))
         self.assertEqual(result.status, "INCONCLUSIVE")
         self.assertEqual(result.reason, "missing_canonical_outcome_evidence")
 
     def test_qualified_population_must_include_every_registered_unit(self):
-        cases = [
-            pair("qualified-a", "2", population_unit="unit-a"),
-            pair("qualified-b", "2", population_unit="unit-b"),
-        ]
-        evidence = tuple(
-            item
-            for matched in cases
-            for item in canonical_evidence(matched)
-        )
-        result = evaluate_qualified_incremental_value(
-            "agent",
-            cases,
-            population=registered_population(cases, extra_units=("unit-negative-null",)),
-            canonical_outcomes=evidence,
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-        )
+        cases = [pair("qualified-a", "2", population_unit="unit-a"), pair("qualified-b", "2", population_unit="unit-b")]
+        evidence = tuple(item for matched in cases for item in canonical_evidence(matched))
+        result = evaluate_qualified_incremental_value("agent", cases, population=registered_population(cases, extra_units=("unit-negative-null",)), canonical_outcomes=evidence, minimum_pairs=2, required_lower_bound=Decimal("0"))
         self.assertEqual(result.status, "INCONCLUSIVE")
         self.assertEqual(result.reason, "incomplete_registered_population")
 
     def test_qualified_stale_pre_cutoff_revision_is_inconclusive(self):
-        cases = [
-            pair("qualified-a", "2", population_unit="unit-a"),
-            pair("qualified-b", "2", population_unit="unit-b"),
-        ]
-        stale = canonical_evidence(
-            cases[0],
-            superseded_at=CUT + timedelta(hours=1, minutes=30),
-        )
+        cases = [pair("qualified-a", "2", population_unit="unit-a"), pair("qualified-b", "2", population_unit="unit-b")]
+        stale = canonical_evidence(cases[0], superseded_at=CUT + timedelta(hours=1, minutes=30))
         evidence = stale + canonical_evidence(cases[1])
-        result = evaluate_qualified_incremental_value(
-            "agent",
-            cases,
-            population=registered_population(cases),
-            canonical_outcomes=evidence,
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-        )
+        result = evaluate_qualified_incremental_value("agent", cases, population=registered_population(cases), canonical_outcomes=evidence, minimum_pairs=2, required_lower_bound=Decimal("0"))
         self.assertEqual(result.status, "INCONCLUSIVE")
         self.assertEqual(result.reason, "stale_canonical_outcome_revision")
 
     def test_qualified_post_cutoff_correction_does_not_rewrite_frozen_result(self):
-        cases = [
-            pair("qualified-a", "2", population_unit="unit-a"),
-            pair("qualified-b", "2", population_unit="unit-b"),
-        ]
-        evidence = (
-            canonical_evidence(
-                cases[0],
-                superseded_at=CUT + timedelta(hours=3),
-            )
-            + canonical_evidence(cases[1])
-        )
-        result = evaluate_qualified_incremental_value(
-            "agent",
-            cases,
-            population=registered_population(cases),
-            canonical_outcomes=evidence,
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-        )
+        cases = [pair("qualified-a", "2", population_unit="unit-a"), pair("qualified-b", "2", population_unit="unit-b")]
+        evidence = canonical_evidence(cases[0], superseded_at=CUT + timedelta(hours=3)) + canonical_evidence(cases[1])
+        result = evaluate_qualified_incremental_value("agent", cases, population=registered_population(cases), canonical_outcomes=evidence, minimum_pairs=2, required_lower_bound=Decimal("0"))
         self.assertEqual(result.status, "INCONCLUSIVE")
-        self.assertEqual(
-            result.reason,
-            "untrusted_caller_authored_qualification_evidence",
-        )
+        self.assertEqual(result.reason, "untrusted_caller_authored_qualification_evidence")
 
     def test_qualified_post_hoc_registration_cannot_pass(self):
-        cases = [
-            pair("qualified-a", "2", population_unit="unit-a"),
-            pair("qualified-b", "2", population_unit="unit-b"),
-        ]
-        evidence = tuple(
-            item
-            for matched in cases
-            for item in canonical_evidence(matched)
-        )
-        result = evaluate_qualified_incremental_value(
-            "agent",
-            cases,
-            population=registered_population(
-                cases,
-                registered_at=CUT + timedelta(seconds=1),
-            ),
-            canonical_outcomes=evidence,
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-        )
+        cases = [pair("qualified-a", "2", population_unit="unit-a"), pair("qualified-b", "2", population_unit="unit-b")]
+        evidence = tuple(item for matched in cases for item in canonical_evidence(matched))
+        result = evaluate_qualified_incremental_value("agent", cases, population=registered_population(cases, registered_at=CUT + timedelta(seconds=1)), canonical_outcomes=evidence, minimum_pairs=2, required_lower_bound=Decimal("0"))
         self.assertEqual(result.status, "INCONCLUSIVE")
-        self.assertEqual(
-            result.reason,
-            "post_hoc_population_or_protocol_registration",
-        )
+        self.assertEqual(result.reason, "post_hoc_population_or_protocol_registration")
 
     def test_qualified_evaluation_is_deterministic_for_exact_registered_population(self):
-        cases = [
-            pair("qualified-a", "2", full_cost="0.25", population_unit="unit-a"),
-            pair("qualified-b", "1.5", full_cost="0.10", population_unit="unit-b"),
-        ]
-        evidence = tuple(
-            item
-            for matched in cases
-            for item in canonical_evidence(matched)
-        )
+        cases = [pair("qualified-a", "2", full_cost="0.25", population_unit="unit-a"), pair("qualified-b", "1.5", full_cost="0.10", population_unit="unit-b")]
+        evidence = tuple(item for matched in cases for item in canonical_evidence(matched))
         population = registered_population(cases)
-        first = evaluate_qualified_incremental_value(
-            "agent",
-            cases,
-            population=population,
-            canonical_outcomes=evidence,
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-        )
-        second = evaluate_qualified_incremental_value(
-            "agent",
-            list(reversed(cases)),
-            population=population,
-            canonical_outcomes=tuple(reversed(evidence)),
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-        )
+        first = evaluate_qualified_incremental_value("agent", cases, population=population, canonical_outcomes=evidence, minimum_pairs=2, required_lower_bound=Decimal("0"))
+        second = evaluate_qualified_incremental_value("agent", list(reversed(cases)), population=population, canonical_outcomes=tuple(reversed(evidence)), minimum_pairs=2, required_lower_bound=Decimal("0"))
         self.assertEqual(first, second)
         self.assertEqual(first.status, "INCONCLUSIVE")
-        self.assertEqual(
-            first.reason,
-            "untrusted_caller_authored_qualification_evidence",
-        )
+        self.assertEqual(first.reason, "untrusted_caller_authored_qualification_evidence")
 
     def test_qualified_canonical_economics_must_match_scored_numbers(self):
-        cases = [
-            pair("qualified-a", "2", population_unit="unit-a"),
-            pair("qualified-b", "2", population_unit="unit-b"),
-        ]
-        evidence = list(
-            item
-            for matched in cases
-            for item in canonical_evidence(matched)
-        )
+        cases = [pair("qualified-a", "2", population_unit="unit-a"), pair("qualified-b", "2", population_unit="unit-b")]
+        evidence = list(item for matched in cases for item in canonical_evidence(matched))
         evidence[0] = replace(evidence[0], utility=Decimal("999"))
-        result = evaluate_qualified_incremental_value(
-            "agent",
-            cases,
-            population=registered_population(cases),
-            canonical_outcomes=evidence,
-            minimum_pairs=2,
-            required_lower_bound=Decimal("0"),
-        )
+        result = evaluate_qualified_incremental_value("agent", cases, population=registered_population(cases), canonical_outcomes=evidence, minimum_pairs=2, required_lower_bound=Decimal("0"))
         self.assertEqual(result.status, "INCONCLUSIVE")
         self.assertEqual(result.reason, "canonical_outcome_economic_mismatch")
 
@@ -1527,7 +834,7 @@ class AblationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(
             TypeError,
-            "qualification authority type is invalid",
+            "canonical AblationQualificationAuthority",
         ):
             evaluate_qualified_incremental_value(
                 "agent",
@@ -1560,19 +867,10 @@ class AblationTests(unittest.TestCase):
                 "causal_cutoff": CUT,
                 "granted_permissions": {"RESEARCH"},
             }
-
             with self.assertRaisesRegex(TypeError, "canonical ScientificRegistry"):
-                AblationQualificationAuthority(
-                    scientific_registry=forged_science,
-                    experience_memory=exact_memory,
-                    **common,
-                )
+                AblationQualificationAuthority(scientific_registry=forged_science, experience_memory=exact_memory, **common)
             with self.assertRaisesRegex(TypeError, "canonical ExperienceMemory"):
-                AblationQualificationAuthority(
-                    scientific_registry=exact_science,
-                    experience_memory=forged_memory,
-                    **common,
-                )
+                AblationQualificationAuthority(scientific_registry=exact_science, experience_memory=forged_memory, **common)
 
     def test_qualification_authority_rejects_foreign_publication_store_root(self):
         with TemporaryDirectory() as directory:
@@ -1582,22 +880,8 @@ class AblationTests(unittest.TestCase):
             authoritative_root = root / "authoritative-artifacts"
             ArtifactStore(authoritative_root)
             foreign_store = ArtifactStore(root / "foreign-artifacts")
-
-            with self.assertRaisesRegex(
-                ValueError,
-                "publication store does not match trusted artifact root",
-            ):
-                AblationQualificationAuthority(
-                    scientific_registry=science,
-                    experience_memory=memory,
-                    artifact_store=foreign_store,
-                    evidence_root=authoritative_root,
-                    protocol_id="11111111-1111-4111-8111-111111111111",
-                    protocol_hash="sha256:" + ("1" * 64),
-                    source_revision="9" * 40,
-                    causal_cutoff=CUT,
-                    granted_permissions={"RESEARCH"},
-                )
+            with self.assertRaisesRegex(ValueError, "publication store does not match trusted artifact root"):
+                AblationQualificationAuthority(scientific_registry=science, experience_memory=memory, artifact_store=foreign_store, evidence_root=authoritative_root, protocol_id="11111111-1111-4111-8111-111111111111", protocol_hash="sha256:" + ("1" * 64), source_revision="9" * 40, causal_cutoff=CUT, granted_permissions={"RESEARCH"})
 
     def test_terminal_qualification_requires_persistent_protocol_population_and_artifacts(self):
         with TemporaryDirectory() as directory:
@@ -1638,427 +922,115 @@ class AblationTests(unittest.TestCase):
                 "retention_tolerances": {"negative_results": "retain"},
                 "promotion_rule": "qualified-only",
             }
-            for suffix, hostile_decimal in (
-                ("1", "1E+100000000"),
-                ("2", "1E-100000000"),
-            ):
-                hostile = {
-                    **protocol_payload,
-                    "ablation_decision_policy": {
-                        **protocol_payload["ablation_decision_policy"],
-                        "required_lower_bound": hostile_decimal,
-                    },
-                }
-                with self.assertRaisesRegex(
-                    ProtocolViolation,
-                    "bounded canonical decimal resource envelope",
-                ):
-                    science.register_protocol(
-                        hostile,
-                        protocol_id=f"99999999-9999-4999-8999-99999999999{suffix}",
-                    )
-
+            for suffix, hostile_decimal in (("1", "1E+100000000"), ("2", "1E-100000000")):
+                hostile = {**protocol_payload, "ablation_decision_policy": {**protocol_payload["ablation_decision_policy"], "required_lower_bound": hostile_decimal}}
+                with self.assertRaisesRegex(ProtocolViolation, "bounded canonical decimal resource envelope"):
+                    science.register_protocol(hostile, protocol_id=f"99999999-9999-4999-8999-99999999999{suffix}")
             max_integer = "9" * 256
             max_scale = "0." + ("0" * 255) + "1"
-            for identifier, boundary in (
-                ("90000000-0000-4000-8000-000000000001", max_integer),
-                ("90000000-0000-4000-8000-000000000002", max_scale),
-            ):
-                admitted = {
-                    **protocol_payload,
-                    "minimum_practical_effect": boundary,
-                    "ablation_decision_policy": {
-                        **protocol_payload["ablation_decision_policy"],
-                        "required_lower_bound": boundary,
-                    },
-                }
+            for identifier, boundary in (("90000000-0000-4000-8000-000000000001", max_integer), ("90000000-0000-4000-8000-000000000002", max_scale)):
+                admitted = {**protocol_payload, "minimum_practical_effect": boundary, "ablation_decision_policy": {**protocol_payload["ablation_decision_policy"], "required_lower_bound": boundary}}
                 science.register_protocol(admitted, protocol_id=identifier)
-
-            for identifier, over_limit in (
-                ("90000000-0000-4000-8000-000000000003", "9" * 257),
-                ("90000000-0000-4000-8000-000000000004", "0." + ("0" * 256) + "1"),
-            ):
-                rejected = {
-                    **protocol_payload,
-                    "minimum_practical_effect": over_limit,
-                    "ablation_decision_policy": {
-                        **protocol_payload["ablation_decision_policy"],
-                        "required_lower_bound": over_limit,
-                    },
-                }
-                with self.assertRaisesRegex(
-                    ProtocolViolation,
-                    "bounded canonical decimal resource envelope",
-                ):
+            for identifier, over_limit in (("90000000-0000-4000-8000-000000000003", "9" * 257), ("90000000-0000-4000-8000-000000000004", "0." + ("0" * 256) + "1")):
+                rejected = {**protocol_payload, "minimum_practical_effect": over_limit, "ablation_decision_policy": {**protocol_payload["ablation_decision_policy"], "required_lower_bound": over_limit}}
+                with self.assertRaisesRegex(ProtocolViolation, "bounded canonical decimal resource envelope"):
                     science.register_protocol(rejected, protocol_id=identifier)
-
-            contradictory = {
-                **protocol_payload,
-                "ablation_decision_policy": {
-                    **protocol_payload["ablation_decision_policy"],
-                    "required_lower_bound": "1",
-                },
-            }
-            with self.assertRaisesRegex(
-                ProtocolViolation,
-                "required_lower_bound must equal minimum_practical_effect",
-            ):
-                science.register_protocol(
-                    contradictory,
-                    protocol_id="90000000-0000-4000-8000-000000000005",
-                )
-
-            registration = science.register_protocol(
-                protocol_payload,
-                protocol_id="11111111-1111-4111-8111-111111111111",
-            )
-            registered_policy = science.ablation_decision_policy(
-                registration.protocol_id
-            )
+            contradictory = {**protocol_payload, "ablation_decision_policy": {**protocol_payload["ablation_decision_policy"], "required_lower_bound": "1"}}
+            with self.assertRaisesRegex(ProtocolViolation, "required_lower_bound must equal minimum_practical_effect"):
+                science.register_protocol(contradictory, protocol_id="90000000-0000-4000-8000-000000000005")
+            registration = science.register_protocol(protocol_payload, protocol_id="11111111-1111-4111-8111-111111111111")
+            registered_policy = science.ablation_decision_policy(registration.protocol_id)
             self.assertEqual(registered_policy.protocol_hash, registration.protocol_hash)
             self.assertEqual(registered_policy.minimum_pairs, 2)
             self.assertEqual(registered_policy.required_lower_bound, "0")
             self.assertEqual(registered_policy.uncertainty_multiplier, "2")
-            self.assertEqual(
-                registered_policy.decision_rule,
-                "exact-rational-d2-sample-variance-v1",
-            )
-
+            self.assertEqual(registered_policy.decision_rule, "exact-rational-d2-sample-variance-v1")
             changed_policy_payload = dict(protocol_payload)
-            changed_policy_payload["ablation_decision_policy"] = {
-                **protocol_payload["ablation_decision_policy"],
-                "uncertainty_multiplier": "3",
-            }
-            changed_registration = science.register_protocol(
-                changed_policy_payload,
-                protocol_id="77777777-7777-4777-8777-777777777777",
-            )
-            changed_policy = science.ablation_decision_policy(
-                changed_registration.protocol_id
-            )
-            self.assertNotEqual(
-                changed_registration.protocol_hash,
-                registration.protocol_hash,
-            )
-            self.assertNotEqual(
-                changed_policy.policy_digest,
-                registered_policy.policy_digest,
-            )
-
+            changed_policy_payload["ablation_decision_policy"] = {**protocol_payload["ablation_decision_policy"], "uncertainty_multiplier": "3"}
+            changed_registration = science.register_protocol(changed_policy_payload, protocol_id="77777777-7777-4777-8777-777777777777")
+            changed_policy = science.ablation_decision_policy(changed_registration.protocol_id)
+            self.assertNotEqual(changed_registration.protocol_hash, registration.protocol_hash)
+            self.assertNotEqual(changed_policy.policy_digest, registered_policy.policy_digest)
             legacy_payload = dict(protocol_payload)
             legacy_payload.pop("ablation_decision_policy")
-            legacy_registration = science.register_protocol(
-                legacy_payload,
-                protocol_id="88888888-8888-4888-8888-888888888888",
-            )
-
+            legacy_registration = science.register_protocol(legacy_payload, protocol_id="88888888-8888-4888-8888-888888888888")
             registered_at = datetime.fromisoformat(registration.created_at)
             self.assertIsNotNone(registered_at.tzinfo)
             registered_at = registered_at.astimezone(timezone.utc)
             cutoff = registered_at + timedelta(hours=1)
             evaluation_cutoff = cutoff + timedelta(hours=2)
-            units = (
-                "22222222-2222-4222-8222-222222222222",
-                "33333333-3333-4333-8333-333333333333",
-            )
-            cases = [
-                pair(
-                    "qualified-authority-a",
-                    "2",
-                    population_unit=units[0],
-                    cutoff=cutoff,
-                ),
-                pair(
-                    "qualified-authority-b",
-                    "2",
-                    population_unit=units[1],
-                    cutoff=cutoff,
-                ),
-            ]
+            units = ("22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333")
+            cases = [pair("qualified-authority-a", "2", population_unit=units[0], cutoff=cutoff), pair("qualified-authority-b", "2", population_unit=units[1], cutoff=cutoff)]
             for unit, matched in zip(units, cases):
-                memory.append_episode(
-                    episode_id=unit,
-                    decision_time=matched.full.decision_utc,
-                    information_cutoff=matched.full.input_cutoff_utc,
-                    task="ablation-qualification",
-                    regime="test",
-                    instrument_family="EQUITY",
-                    permission_class="RESEARCH",
-                    payload={
-                        "evidence_refs": ["artifact:source"],
-                        "intended_action": {"case_id": matched.full.case_id},
-                        "actual_execution": {"fills": []},
-                        "outcome": {"status": "observed"},
-                        "costs": {"USD": "0"},
-                    },
-                )
-            population = memory.coverage_population_snapshot(
-                causal_cutoff=evaluation_cutoff,
-                granted_permissions={"RESEARCH"},
-                task="ablation-qualification",
-                instrument_family="EQUITY",
-            )
+                memory.append_episode(episode_id=unit, decision_time=matched.full.decision_utc, information_cutoff=matched.full.input_cutoff_utc, task="ablation-qualification", regime="test", instrument_family="EQUITY", permission_class="RESEARCH", payload={"evidence_refs": ["artifact:source"], "intended_action": {"case_id": matched.full.case_id}, "actual_execution": {"fills": []}, "outcome": {"status": "observed"}, "costs": {"USD": "0"}})
+            population = memory.coverage_population_snapshot(causal_cutoff=evaluation_cutoff, granted_permissions={"RESEARCH"}, task="ablation-qualification", instrument_family="EQUITY")
             refs = []
             source_revision = "9" * 40
             artifact_index = 0
             for matched in cases:
                 for item in (matched.full, matched.ablated):
                     artifact_index += 1
-                    artifact_id = str(
-                        UUID(int=0x44444444444440008000000000000000 + artifact_index)
-                    )
-                    payload = {
-                        "schema_version": 2,
-                        "outcome": canonical_outcome_payload(item),
-                        "source_revision": source_revision,
-                        "protocol_id": registration.protocol_id,
-                        "protocol_hash": registration.protocol_hash,
-                        "population_root": population.root_hash,
-                        "utility_evidence_digest": FINGERPRINT_B,
-                        "cost_evidence_digest": FINGERPRINT_C,
-                        "superseded_at_utc": None,
-                    }
-                    raw = json.dumps(
-                        payload,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                        ensure_ascii=False,
-                    ).encode("utf-8")
-                    manifest = artifacts.publish_bytes(
-                        artifact_id=artifact_id,
-                        data=raw,
-                        media_type="application/vnd.autotrade.ablation-outcome+json",
-                        rights={"storage": True, "export": False},
-                        source_refs=[f"protocol:{registration.protocol_id}"],
-                    )
-                    refs.append(
-                        AblationOutcomeArtifactRef(
-                            artifact_id=artifact_id,
-                            sha256=manifest["sha256"],
-                        )
-                    )
-            authority = AblationQualificationAuthority(
-                scientific_registry=science,
-                experience_memory=memory,
-                artifact_store=artifacts,
-                evidence_root=root / "artifacts",
-                protocol_id=registration.protocol_id,
-                protocol_hash=registration.protocol_hash,
-                source_revision=source_revision,
-                causal_cutoff=evaluation_cutoff,
-                granted_permissions={"RESEARCH"},
-                task="ablation-qualification",
-                instrument_family="EQUITY",
-            )
-            legacy_authority = AblationQualificationAuthority(
-                scientific_registry=science,
-                experience_memory=memory,
-                artifact_store=artifacts,
-                evidence_root=root / "artifacts",
-                protocol_id=legacy_registration.protocol_id,
-                protocol_hash=legacy_registration.protocol_hash,
-                source_revision=source_revision,
-                causal_cutoff=evaluation_cutoff,
-                granted_permissions={"RESEARCH"},
-                task="ablation-qualification",
-                instrument_family="EQUITY",
-            )
-            legacy_result = evaluate_qualified_incremental_value(
-                "agent",
-                cases,
-                authority=legacy_authority,
-                outcome_refs=(),
-                minimum_pairs=2,
-                required_lower_bound=Decimal("-999"),
-                uncertainty_multiplier=Decimal("0"),
-            )
+                    artifact_id = str(UUID(int=0x44444444444440008000000000000000 + artifact_index))
+                    payload = {"schema_version": 2, "outcome": canonical_outcome_payload(item), "source_revision": source_revision, "protocol_id": registration.protocol_id, "protocol_hash": registration.protocol_hash, "population_root": population.root_hash, "utility_evidence_digest": FINGERPRINT_B, "cost_evidence_digest": FINGERPRINT_C, "superseded_at_utc": None}
+                    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+                    manifest = artifacts.publish_bytes(artifact_id=artifact_id, data=raw, media_type="application/vnd.autotrade.ablation-outcome+json", rights={"storage": True, "export": False}, source_refs=[f"protocol:{registration.protocol_id}"])
+                    refs.append(AblationOutcomeArtifactRef(artifact_id=artifact_id, sha256=manifest["sha256"]))
+            authority = AblationQualificationAuthority(scientific_registry=science, experience_memory=memory, artifact_store=artifacts, evidence_root=root / "artifacts", protocol_id=registration.protocol_id, protocol_hash=registration.protocol_hash, source_revision=source_revision, causal_cutoff=evaluation_cutoff, granted_permissions={"RESEARCH"}, task="ablation-qualification", instrument_family="EQUITY")
+            legacy_authority = AblationQualificationAuthority(scientific_registry=science, experience_memory=memory, artifact_store=artifacts, evidence_root=root / "artifacts", protocol_id=legacy_registration.protocol_id, protocol_hash=legacy_registration.protocol_hash, source_revision=source_revision, causal_cutoff=evaluation_cutoff, granted_permissions={"RESEARCH"}, task="ablation-qualification", instrument_family="EQUITY")
+            legacy_result = evaluate_qualified_incremental_value("agent", cases, authority=legacy_authority, outcome_refs=(), minimum_pairs=2, required_lower_bound=Decimal("-999"), uncertainty_multiplier=Decimal("0"))
             self.assertEqual(legacy_result.status, "INCONCLUSIVE")
-            self.assertEqual(
-                legacy_result.reason,
-                "registered_ablation_decision_policy_unavailable",
-            )
-
+            self.assertEqual(legacy_result.reason, "registered_ablation_decision_policy_unavailable")
             def _caller_store_poison(*_args, **_kwargs):
                 raise AssertionError("caller ArtifactStore method must not execute")
-
             artifacts.load_manifest = _caller_store_poison
             artifacts.read_bytes = _caller_store_poison
             artifacts.read_authenticated_snapshot = _caller_store_poison
-
-            before_trials = evaluate_qualified_incremental_value(
-                "agent",
-                cases,
-                authority=authority,
-                outcome_refs=refs,
-                minimum_pairs=2,
-                required_lower_bound=Decimal("0"),
-            )
+            before_trials = evaluate_qualified_incremental_value("agent", cases, authority=authority, outcome_refs=refs, minimum_pairs=2, required_lower_bound=Decimal("0"))
             self.assertEqual(before_trials.status, "INCONCLUSIVE")
-            self.assertEqual(
-                before_trials.reason,
-                "registered_trial_budget_not_exhausted",
-            )
+            self.assertEqual(before_trials.reason, "registered_trial_budget_not_exhausted")
             self.assertEqual(science.completeness(registration.protocol_id)["recorded_trials"], 0)
-
-            science.record_trial(
-                registration.protocol_id,
-                status="COMPLETED",
-                payload={"case_id": cases[0].full.case_id, "variant": "MATCHED"},
-                trial_id="55555555-5555-4555-8555-555555555555",
-            )
-            science.record_trial(
-                registration.protocol_id,
-                status="COMPLETED",
-                payload={"case_id": cases[1].full.case_id, "variant": "MATCHED"},
-                trial_id="66666666-6666-4666-8666-666666666666",
-            )
+            science.record_trial(registration.protocol_id, status="COMPLETED", payload={"case_id": cases[0].full.case_id, "variant": "MATCHED"}, trial_id="55555555-5555-4555-8555-555555555555")
+            science.record_trial(registration.protocol_id, status="COMPLETED", payload={"case_id": cases[1].full.case_id, "variant": "MATCHED"}, trial_id="66666666-6666-4666-8666-666666666666")
             trial_state = science.completeness(registration.protocol_id)
             self.assertEqual(trial_state["remaining_trial_budget"], 0)
-
-            # The issued authority is a sealed token. Caller-visible source
-            # objects can be rebound after construction without changing the
-            # module-owned exact registry/memory/reader state.
             with self.assertRaises(AttributeError):
-                object.__setattr__(
-                    authority,
-                    "_load_outcome",
-                    lambda *_args, **_kwargs: (),
-                )
+                object.__setattr__(authority, "_load_outcome", lambda *_args, **_kwargs: ())
             with self.assertRaises(AttributeError):
-                object.__setattr__(
-                    authority,
-                    "_read_artifact_snapshot",
-                    lambda *_args, **_kwargs: ({}, b"forged"),
-                )
+                object.__setattr__(authority, "_read_artifact_snapshot", lambda *_args, **_kwargs: ({}, b"forged"))
             with self.assertRaises(AttributeError):
                 object.__setattr__(authority, "scientific_registry", science)
             with self.assertRaises(AttributeError):
                 object.__setattr__(authority, "experience_memory", memory)
-
-            memory.coverage_population_snapshot = (
-                lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                    AssertionError("caller ExperienceMemory method must not execute")
-                )
-            )
+            memory.coverage_population_snapshot = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("caller ExperienceMemory method must not execute"))
             memory.path = root / "attacker-memory.sqlite3"
-            science.protocol_registration = (
-                lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                    AssertionError("caller ScientificRegistry method must not execute")
-                )
-            )
+            science.protocol_registration = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("caller ScientificRegistry method must not execute"))
             science.path = root / "attacker-science.sqlite3"
-
-            result = evaluate_qualified_incremental_value(
-                "agent",
-                cases,
-                authority=authority,
-                outcome_refs=refs,
-                minimum_pairs=2,
-                required_lower_bound=Decimal("0"),
-            )
+            result = evaluate_qualified_incremental_value("agent", cases, authority=authority, outcome_refs=refs, minimum_pairs=2, required_lower_bound=Decimal("0"))
             self.assertEqual(result.status, "PASS")
-            self.assertEqual(
-                result.reason,
-                "qualified_registered_canonical_ablation_net_of_cost",
-            )
-            self.assertEqual(
-                result.qualification_population_digest,
-                population.root_hash,
-            )
-            self.assertEqual(
-                result.qualification_trial_log_digest,
-                trial_state["trial_log_hash"],
-            )
-            self.assertEqual(
-                result.qualification_stopping_rule_digest,
-                trial_state["stopping_rules_hash"],
-            )
-            self.assertEqual(
-                result.qualification_decision_policy_digest,
-                registered_policy.policy_digest,
-            )
+            self.assertEqual(result.reason, "qualified_registered_canonical_ablation_net_of_cost")
+            self.assertEqual(result.qualification_population_digest, population.root_hash)
+            self.assertEqual(result.qualification_trial_log_digest, trial_state["trial_log_hash"])
+            self.assertEqual(result.qualification_stopping_rule_digest, trial_state["stopping_rules_hash"])
+            self.assertEqual(result.qualification_decision_policy_digest, registered_policy.policy_digest)
             self.assertEqual(result.required_lower_bound, Decimal("0"))
             self.assertEqual(result.uncertainty_multiplier, Decimal("2"))
-
-            post_hoc_loosened = evaluate_qualified_incremental_value(
-                "agent",
-                cases,
-                authority=authority,
-                outcome_refs=refs,
-                minimum_pairs=2,
-                required_lower_bound=Decimal("-999"),
-                uncertainty_multiplier=Decimal("0"),
-            )
-            post_hoc_tightened = evaluate_qualified_incremental_value(
-                "agent",
-                cases,
-                authority=authority,
-                outcome_refs=refs,
-                minimum_pairs=999,
-                required_lower_bound=Decimal("999"),
-                uncertainty_multiplier=Decimal("999"),
-            )
+            post_hoc_loosened = evaluate_qualified_incremental_value("agent", cases, authority=authority, outcome_refs=refs, minimum_pairs=2, required_lower_bound=Decimal("-999"), uncertainty_multiplier=Decimal("0"))
+            post_hoc_tightened = evaluate_qualified_incremental_value("agent", cases, authority=authority, outcome_refs=refs, minimum_pairs=999, required_lower_bound=Decimal("999"), uncertainty_multiplier=Decimal("999"))
             self.assertEqual(post_hoc_loosened, result)
             self.assertEqual(post_hoc_tightened, result)
-
-            forged_first = AblationPair(
-                "agent",
-                replace(cases[0].full, input_fingerprint=FINGERPRINT_C),
-                replace(cases[0].ablated, input_fingerprint=FINGERPRINT_C),
-            )
-            forged_causal = evaluate_qualified_incremental_value(
-                "agent",
-                [forged_first, cases[1]],
-                authority=authority,
-                outcome_refs=refs,
-                minimum_pairs=2,
-                required_lower_bound=Decimal("0"),
-            )
+            forged_first = AblationPair("agent", replace(cases[0].full, input_fingerprint=FINGERPRINT_C), replace(cases[0].ablated, input_fingerprint=FINGERPRINT_C))
+            forged_causal = evaluate_qualified_incremental_value("agent", [forged_first, cases[1]], authority=authority, outcome_refs=refs, minimum_pairs=2, required_lower_bound=Decimal("0"))
             self.assertEqual(forged_causal.status, "INCONCLUSIVE")
-            self.assertEqual(
-                forged_causal.reason,
-                "canonical_outcome_causal_binding_mismatch",
-            )
-
+            self.assertEqual(forged_causal.reason, "canonical_outcome_causal_binding_mismatch")
             late_cutoff = evaluation_cutoff + timedelta(seconds=1)
-            late_first = pair(
-                "qualified-authority-a",
-                "2",
-                population_unit=units[0],
-                fingerprint=cases[0].full.input_fingerprint,
-                cutoff=late_cutoff,
-            )
-            late_causal = evaluate_qualified_incremental_value(
-                "agent",
-                [late_first, cases[1]],
-                authority=authority,
-                outcome_refs=refs,
-                minimum_pairs=2,
-                required_lower_bound=Decimal("0"),
-            )
+            late_first = pair("qualified-authority-a", "2", population_unit=units[0], fingerprint=cases[0].full.input_fingerprint, cutoff=late_cutoff)
+            late_causal = evaluate_qualified_incremental_value("agent", [late_first, cases[1]], authority=authority, outcome_refs=refs, minimum_pairs=2, required_lower_bound=Decimal("0"))
             self.assertEqual(late_causal.status, "INCONCLUSIVE")
-            self.assertEqual(
-                late_causal.reason,
-                "causal_pair_after_registered_evaluation_cutoff",
-            )
-
+            self.assertEqual(late_causal.reason, "causal_pair_after_registered_evaluation_cutoff")
             forged = canonical_evidence(cases[0]) + canonical_evidence(cases[1])
-            diagnostic = evaluate_qualified_incremental_value(
-                "agent",
-                cases,
-                population=registered_population(
-                    cases,
-                    evaluation_cutoff=evaluation_cutoff,
-                ),
-                canonical_outcomes=forged,
-                minimum_pairs=2,
-                required_lower_bound=Decimal("0"),
-            )
+            diagnostic = evaluate_qualified_incremental_value("agent", cases, population=registered_population(cases, evaluation_cutoff=evaluation_cutoff), canonical_outcomes=forged, minimum_pairs=2, required_lower_bound=Decimal("0"))
             self.assertEqual(diagnostic.status, "INCONCLUSIVE")
-            self.assertEqual(
-                diagnostic.reason,
-                "untrusted_caller_authored_qualification_evidence",
-            )
+            self.assertEqual(diagnostic.reason, "untrusted_caller_authored_qualification_evidence")
 
 
 if __name__ == "__main__":

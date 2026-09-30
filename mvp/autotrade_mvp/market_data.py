@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from hashlib import sha256
 import json
 import re
@@ -13,7 +13,11 @@ from typing import Any, Mapping
 from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from .exact_decimal import ExactDecimalError, canonical_decimal_text
+from .exact_decimal import (
+    ExactDecimalError,
+    canonical_decimal_text,
+    parse_bounded_exact_decimal,
+)
 from ._market_payload_snapshot import PayloadSnapshotError, snapshot_market_payload
 from .instruments import (
     InstrumentNotFound,
@@ -105,11 +109,11 @@ def _decimal(value: Decimal | str | int, field: str, *, positive: bool = False) 
     if isinstance(value, bool) or isinstance(value, float):
         raise MarketDataError(f"{field} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, ValueError, TypeError) as error:
-        raise MarketDataError(f"{field} must be a finite decimal") from error
-    if not result.is_finite():
-        raise MarketDataError(f"{field} must be a finite decimal")
+        result = parse_bounded_exact_decimal(value)
+    except (ExactDecimalError, ValueError, TypeError) as error:
+        raise MarketDataError(
+            f"{field} must be a finite decimal within the supported resource envelope"
+        ) from error
     if positive and result <= 0:
         raise MarketDataError(f"{field} must be positive")
     return result
@@ -373,8 +377,9 @@ class MarketNormalizer:
 
     @staticmethod
     def _price(instrument: InstrumentVersion, value: Any, field: str) -> str:
+        exact = _decimal(value, field)
         try:
-            return _decimal_text(instrument.validate_price(value))
+            return _decimal_text(instrument.validate_price(exact))
         except InstrumentRegistryError as error:
             raise MarketDataError(f"{field}: {error}") from error
 
@@ -534,6 +539,27 @@ class MarketNormalizer:
         raise MarketDataError("kind is unsupported")
 
     def normalize(self, update: RawMarketUpdate) -> NormalizedMarketEvent:
+        # Constructor-time validation is not a use-time authority seal.  Reject
+        # subclasses (whose inherited dataclass __init__ can dispatch a hostile
+        # __post_init__) and re-admit the exact current graph before any
+        # instrument lookup or normalizer-state mutation.
+        if type(update) is not RawMarketUpdate:
+            raise MarketDataError("update must be an exact RawMarketUpdate")
+        update = RawMarketUpdate(
+            provider_id=update.provider_id,
+            venue_id=update.venue_id,
+            provider_symbol=update.provider_symbol,
+            kind=update.kind,
+            source_event_at=update.source_event_at,
+            available_at=update.available_at,
+            ingested_at=update.ingested_at,
+            availability_basis=update.availability_basis,
+            revision=update.revision,
+            payload=update.payload,
+            raw_evidence_ref=update.raw_evidence_ref,
+            source_sequence=update.source_sequence,
+            sequence_stream=update.sequence_stream,
+        )
         try:
             instrument = self._registry.resolve(
                 update.provider_id,

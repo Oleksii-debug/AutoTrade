@@ -193,6 +193,28 @@ class ProviderCoreTests(unittest.TestCase):
                     provider_core_module._decode_exact_json(invalid)
 
 
+    def test_provider_decode_diagnostics_do_not_retain_untrusted_raw_material(self):
+        marker = "AUTOTRADE_SYNTHETIC_SECRET_MARKER_8c07"
+        hostile = (
+            ('{"' + marker + '":1,"' + marker + '":2}').encode("utf-8"),
+            ('{"' + marker + '":"bad",').encode("utf-8"),
+            ('{"' + marker + '":"bad-').encode("utf-8") + b"\xff" + b'"}',
+        )
+        for raw in hostile:
+            with self.subTest(raw_prefix=raw[:20]):
+                with self.assertRaises(ProviderCoreError) as caught:
+                    provider_core_module._decode_exact_json(raw)
+                current = caught.exception
+                visited = set()
+                while current is not None and id(current) not in visited:
+                    visited.add(id(current))
+                    self.assertNotIn(marker, str(current))
+                    self.assertNotIn(marker, repr(current))
+                    current = current.__cause__ or current.__context__
+                self.assertIsNone(caught.exception.__cause__)
+                self.assertIsNone(caught.exception.__context__)
+
+
     def _durable_submission_binding(
         self,
         directory,

@@ -149,36 +149,50 @@ def _decode_exact_json(raw: bytes) -> object:
         for key, value in pairs:
             if key in result:
                 raise ProviderCoreError(
-                    f"provider response contains duplicate JSON key: {key}"
+                    "provider response contains duplicate JSON keys"
                 )
             result[key] = value
         return result
 
     try:
         text = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        text = None
+    if text is None:
+        raise ProviderCoreError(
+            "provider response must be exact UTF-8 JSON bytes"
+        )
+
+    parse_failure = None
+    try:
         decoded = json.loads(
             text,
             object_pairs_hook=no_duplicate_keys,
             parse_float=parse_bounded_json_number_token,
             parse_int=parse_bounded_json_integer_token,
-            parse_constant=lambda value: (_ for _ in ()).throw(
+            parse_constant=lambda _value: (_ for _ in ()).throw(
                 ProviderCoreError(
-                    f"provider response contains non-finite JSON constant: {value}"
+                    "provider response contains non-finite JSON constant"
                 )
             ),
         )
     except ProviderCoreError:
         raise
-    except ExactDecimalError as error:
-        # A malformed/out-of-envelope numeric token must not turn into an
-        # accepted provider observation or a derived financial side effect.
+    except ExactDecimalError:
+        parse_failure = "numeric"
+    except json.JSONDecodeError:
+        parse_failure = "json"
+
+    # Translate after leaving the parser handler. Merely suppressing display
+    # chaining would still leave raw parser state reachable via __context__.
+    if parse_failure == "numeric":
         raise ProviderCoreError(
             "provider response contains invalid or oversized exact JSON number"
-        ) from error
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        )
+    if parse_failure == "json":
         raise ProviderCoreError(
             "provider response must be exact UTF-8 JSON bytes"
-        ) from error
+        )
     return _freeze_json(decoded)
 
 

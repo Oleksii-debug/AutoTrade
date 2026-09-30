@@ -7,7 +7,7 @@ import sqlite3
 import sys
 from typing import Any
 
-from autotrade_local_filesystem import (
+from autotrade_foundation.local_filesystem import (
     LocalFilesystemQualificationError,
     require_qualified_local_filesystem_path,
 )

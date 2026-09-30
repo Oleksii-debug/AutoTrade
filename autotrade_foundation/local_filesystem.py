@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import sys
 
 
@@ -14,10 +13,10 @@ def require_qualified_local_filesystem_path(
 ) -> None:
     """Reject Windows UNC and known non-local drive types before filesystem I/O.
 
-    This neutral production module is intentionally independent of research and
-    financial packages so installed runtimes can import the locality fence
-    without carrying the research source tree. POSIX remains unchanged: this
-    helper does not claim that pathname identity alone proves local storage.
+    This package is deliberately dependency-neutral so both product persistence
+    and research ResourceLock can consume one installed classifier. POSIX
+    remains unchanged: pathname identity alone is not claimed to prove local
+    storage there.
     """
 
     if sys.platform != "win32":

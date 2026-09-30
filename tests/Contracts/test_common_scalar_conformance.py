@@ -170,9 +170,20 @@ class CommonScalarConformanceTests(unittest.TestCase):
             root = Path(root_dir)
             stage = root / "stage"
             package = stage / "mvp" / "autotrade_mvp"
+            neutral = stage / "autotrade_numeric"
             package.mkdir(parents=True)
+            neutral.mkdir(parents=True)
             (stage / "mvp" / "__init__.py").write_text("", encoding="utf-8")
             (package / "__init__.py").write_text("", encoding="utf-8")
+            shutil.copy2(ROOT / "autotrade_numeric" / "__init__.py", neutral / "__init__.py")
+            for filename in (
+                "exact_decimal.py", "_generated_common_scalars.py", "_generated_decimal_limits.py",
+            ):
+                shutil.copy2(ROOT / "autotrade_numeric" / filename, neutral / filename)
+            self.assertEqual(
+                (neutral / "_generated_common_scalars.py").read_bytes(),
+                (ROOT / "mvp" / "autotrade_mvp" / "_generated_common_scalars.py").read_bytes(),
+            )
             for filename in (
                 "_generated_common_scalars.py",
                 "_generated_decimal_limits.py",
@@ -193,14 +204,14 @@ try:
         raise AssertionError('missing generated scalar was imported')
 except ModuleNotFoundError as error:
     assert os.environ['AUTOTRADE_MISSING_SCALAR'] == '1', error
-    assert error.name == 'mvp.autotrade_mvp._generated_common_scalars', error.name
+    assert error.name == 'autotrade_numeric._generated_common_scalars', error.name
     print('MISSING_SCALAR_DENIED')
 else:
     assert str(parse_canonical_decimal_text('0.1')) == '0.1'
     assert is_valid_common_scalar('Environment', 'LIVE')
     assert not is_valid_common_scalar('Decimal', '1.0')
     for name, module in tuple(sys.modules.items()):
-        if name in ('mvp', 'mvp.autotrade_mvp') or name.startswith('mvp.autotrade_mvp.'):
+        if name in ('mvp', 'mvp.autotrade_mvp', 'autotrade_numeric') or name.startswith(('mvp.autotrade_mvp.', 'autotrade_numeric.')):
             path = pathlib.Path(module.__file__).resolve(strict=True)
             assert path.is_relative_to(stage), (name, path)
     assert not any(name == 'contracts' or name.startswith('contracts.') for name in sys.modules)
@@ -211,7 +222,7 @@ else:
             environment["AUTOTRADE_STAGED_SCALARS"] = str(stage)
             for missing, sentinel in ((False, "HERMETIC_SCALARS_OK"), (True, "MISSING_SCALAR_DENIED")):
                 with self.subTest(missing=missing):
-                    scalar = package / "_generated_common_scalars.py"
+                    scalar = neutral / "_generated_common_scalars.py"
                     if missing:
                         scalar.unlink()
                     environment["AUTOTRADE_MISSING_SCALAR"] = "1" if missing else "0"

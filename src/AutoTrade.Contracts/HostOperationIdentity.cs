@@ -15,6 +15,16 @@ public static class HostOperationIdentity
     private static readonly Guid NamespaceUrl =
         Guid.Parse("6ba7b811-9dad-11d1-80b4-00c04fd430c8");
 
+    /// <summary>
+    /// Derives the canonical UUIDv5 operation identity for one scoped host command.
+    /// </summary>
+    /// <param name="accountId">Canonical non-empty account identity.</param>
+    /// <param name="environment">Canonical AutoTrade environment value.</param>
+    /// <param name="commandId">Non-empty durable command identity.</param>
+    /// <returns>The deterministic lowercase-hyphenated UUID operation identity.</returns>
+    /// <exception cref="ArgumentException">
+    /// Thrown when any supplied scope component is not canonical.
+    /// </exception>
     public static string Derive(
         string accountId,
         string environment,

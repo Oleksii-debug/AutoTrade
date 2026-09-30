@@ -1,5 +1,6 @@
 """Product entrypoint checks for the canonical network-free simulation session."""
 
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 import json
 import subprocess
 import sys
@@ -7,19 +8,22 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from mvp.autotrade_mvp.accounting import book_external_cash_flow
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
+from mvp.autotrade_mvp.exact_decimal import ExactDecimalError
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.pipeline import MovingAverageStrategy
+from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
 from mvp.autotrade_mvp.simulation_session import (
     ACCOUNT, ENVIRONMENT, INSTRUMENT, PROVIDER, run_canonical_simulation,
 )
-from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
-from mvp.autotrade_mvp.accounting import book_external_cash_flow
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 
 NOW = "2026-09-30T12:00:00Z"
 BUY = ["100", "101", "103"]
 HOLD = ["100", "101"]
+ROUNDINGS = (ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN)
 
 
 class CanonicalSimulationSessionTests(unittest.TestCase):
@@ -130,6 +134,124 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
                 reopened.load_events_by_aggregate_type("submission_attempt"),
                 submission,
             )
+
+    def test_strategy_decisions_are_identical_across_hostile_decimal_contexts(self):
+        cases = (
+            (["100", "101", "103"], "BUY"),
+            (["1", "1.0000000001", "1.00000000010001"], "BUY"),
+            (["103", "101", "100"], "SELL"),
+            (["100", "100", "100"], "HOLD"),
+        )
+        for precision in (1, 2, 6, 10, 28, 80):
+            for rounding in ROUNDINGS:
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        for raw_prices, expected in cases:
+                            decision = MovingAverageStrategy().decide(
+                                [Decimal(value) for value in raw_prices], Decimal("1")
+                            )
+                            self.assertEqual(decision.side, expected)
+
+    def test_buy_durable_identity_and_economics_are_context_independent(self):
+        expected_signature = None
+        for precision in (6, 10, 28, 80):
+            for rounding in ROUNDINGS:
+                with self.subTest(precision=precision, rounding=rounding):
+                    with TemporaryDirectory() as directory:
+                        with localcontext() as context:
+                            context.prec = precision
+                            context.rounding = rounding
+                            result = run_canonical_simulation(
+                                BUY, directory, episode_id="context-buy", now=NOW
+                            )
+                        store = JournalStore(Path(directory) / "journal.sqlite3")
+                        authority_events = store.load_events("authority_state", "canonical")
+                        admission = next(
+                            event for event in authority_events
+                            if event["event_type"] == "AuthorityAdmissionRecorded"
+                        )
+                        reservation = next(
+                            event for event in store.load_events_by_aggregate_type("reservation_book")
+                            if event["payload"]["operation"] == "RESERVE"
+                        )
+                        submission = store.load_events_by_aggregate_type("submission_attempt")
+                        sessions = store.load_events(
+                            "canonical_simulation_session", "single-episode"
+                        )
+                        self.assertEqual(admission["payload"]["notional"], "103")
+                        self.assertEqual(admission["payload"]["outcome"], "ADMITTED")
+                        self.assertEqual(
+                            reservation["payload"]["request"]["requirements"]["CASH:USD"],
+                            "103.103",
+                        )
+                        self.assertEqual(result["cash"], "896.897")
+                        self.assertEqual(result["position"], "1")
+                        self.assertEqual(result["new_outbound_requests"], 1)
+                        signature = (
+                            result["status"],
+                            result["cash"],
+                            result["position"],
+                            result["new_outbound_requests"],
+                            admission["event_id"],
+                            admission["payload"]["intent_hash"],
+                            admission["payload"]["notional"],
+                            admission["payload"]["outcome"],
+                            reservation["payload_hash"],
+                            tuple(
+                                (event["event_type"], event["event_id"], event["payload_hash"])
+                                for event in submission
+                            ),
+                            tuple(
+                                (event["event_type"], event["event_id"], event["payload_hash"])
+                                for event in sessions
+                            ),
+                        )
+                        if expected_signature is None:
+                            expected_signature = signature
+                        else:
+                            self.assertEqual(signature, expected_signature)
+
+    def test_low_precision_buy_keeps_exact_notional_and_active_reservation(self):
+        for precision in (1, 2):
+            for rounding in ROUNDINGS:
+                with self.subTest(precision=precision, rounding=rounding):
+                    with TemporaryDirectory() as directory:
+                        with localcontext() as context:
+                            context.prec = precision
+                            context.rounding = rounding
+                            result = run_canonical_simulation(
+                                BUY, directory, episode_id="low-precision",
+                                now=NOW, fault_after_send=True,
+                            )
+                        store = JournalStore(Path(directory) / "journal.sqlite3")
+                        admission = next(
+                            event for event in store.load_events("authority_state", "canonical")
+                            if event["event_type"] == "AuthorityAdmissionRecorded"
+                        )
+                        reservation = next(
+                            event for event in store.load_events_by_aggregate_type("reservation_book")
+                            if event["payload"]["operation"] == "RESERVE"
+                        )
+                        self.assertEqual(admission["payload"]["notional"], "103")
+                        self.assertEqual(admission["payload"]["outcome"], "ADMITTED")
+                        self.assertEqual(
+                            reservation["payload"]["request"]["requirements"]["CASH:USD"],
+                            "103.103",
+                        )
+                        self.assertEqual(result["status"], "UNKNOWN")
+                        self.assertEqual(result["new_outbound_requests"], 1)
+
+    def test_exact_resource_failure_precedes_session_mutation(self):
+        with TemporaryDirectory() as parent:
+            state_dir = Path(parent) / "session"
+            with self.assertRaises(ExactDecimalError):
+                run_canonical_simulation(
+                    ["1", "1", "1e256"], state_dir,
+                    episode_id="resource-envelope", now=NOW,
+                )
+            self.assertFalse(state_dir.exists())
 
     def test_cli_runs_canonical_session_and_returns_json(self):
         with TemporaryDirectory() as directory:

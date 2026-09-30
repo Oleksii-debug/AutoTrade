@@ -193,7 +193,8 @@ def render_typescript_runtime(version: str, defs: dict[str, dict[str, object]]) 
         "    if (minimum !== null && value.length < minimum) return false;",
         "    if (maximum !== null && value.length > maximum) return false;",
         "  }",
-        "  return pattern.test(value);",
+        "  const match = pattern.exec(value);",
+        "  return match !== null && match.index === 0 && match[0].length === value.length;",
         "}",
         "",
         "module.exports = { CONTRACT_VERSION, isValidCommonScalar };",
@@ -272,11 +273,17 @@ def render_csharp(version: str, defs: dict[str, dict[str, object]]) -> str:
             checks.append(f"value.Length >= {minimum}")
         if maximum is not None:
             checks.append(f"value.Length <= {maximum}")
-        checks.append(f"{_csharp_regex_method(name)}().IsMatch(value)")
+        checks.append(f"IsFullMatch({_csharp_regex_method(name)}(), value)")
         lines.append(f'            "{name}" => ' + " && ".join(checks) + ",")
     lines += [
         '            _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unsupported common scalar kind."),',
         "        };",
+        "    }",
+        "",
+        "    private static bool IsFullMatch(Regex regex, string value)",
+        "    {",
+        "        var match = regex.Match(value);",
+        "        return match.Success && match.Index == 0 && match.Length == value.Length;",
         "    }",
         "",
     ]

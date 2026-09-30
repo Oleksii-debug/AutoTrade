@@ -113,6 +113,12 @@ def _client_order_id(value: object) -> str:
     )
 
 
+def validate_futures_client_order_id(value: object) -> str:
+    """Expose the canonical Kraken Futures client-order identity validator."""
+
+    return _client_order_id(value)
+
+
 def _uuid_text(value: object, *, name: str) -> str:
     text = _text(value, name=name)
     try:
@@ -467,17 +473,81 @@ def parse_submission_response(
         raise ProviderCoreError(
             "Kraken Futures client identity does not match guarded request"
         )
-    provider_order_id = status.get("order_id")
-    if provider_order_id in (None, ""):
-        provider_order_id = status.get("orderId")
-    provider_order_id = _text(provider_order_id, name="sendStatus.order_id")
+
+    raw_operation_status = status.get("status")
+    if not isinstance(raw_operation_status, str) or not raw_operation_status.strip():
+        return {
+            "attempt_id": aid,
+            "outcome": "UNKNOWN",
+            "client_order_id": cid,
+            "reason_code": "KRAKEN_FUTURES_MISSING_SEND_STATUS",
+            "evidence": evidence,
+            "retry_disposition": "RECONCILE_FIRST",
+        }
+    operation_status = raw_operation_status.strip()
+    if raw_operation_status != operation_status:
+        return {
+            "attempt_id": aid,
+            "outcome": "UNKNOWN",
+            "client_order_id": cid,
+            "reason_code": "KRAKEN_FUTURES_NONCANONICAL_SEND_STATUS",
+            "evidence": evidence,
+            "retry_disposition": "RECONCILE_FIRST",
+        }
+
+    provider_order_id_value = status.get("order_id")
+    if provider_order_id_value in (None, ""):
+        provider_order_id_value = status.get("orderId")
+
+    if operation_status == "placed":
+        if provider_order_id_value in (None, ""):
+            return {
+                "attempt_id": aid,
+                "outcome": "UNKNOWN",
+                "client_order_id": cid,
+                "reason_code": "KRAKEN_FUTURES_PLACED_WITHOUT_ORDER_ID",
+                "evidence": evidence,
+                "retry_disposition": "RECONCILE_FIRST",
+            }
+        provider_order_id = _text(
+            provider_order_id_value,
+            name="sendStatus.order_id",
+        )
+        return {
+            "attempt_id": aid,
+            "outcome": "ACKNOWLEDGED",
+            "provider_order_id": provider_order_id,
+            "client_order_id": cid,
+            "evidence": evidence,
+            "retry_disposition": "NEVER",
+        }
+
+    if operation_status == "insufficientAvailableFunds":
+        if provider_order_id_value not in (None, ""):
+            return {
+                "attempt_id": aid,
+                "outcome": "UNKNOWN",
+                "client_order_id": cid,
+                "reason_code": "KRAKEN_FUTURES_INCONSISTENT_SEND_STATUS",
+                "evidence": evidence,
+                "retry_disposition": "RECONCILE_FIRST",
+            }
+        return {
+            "attempt_id": aid,
+            "outcome": "REJECTED",
+            "client_order_id": cid,
+            "reason_code": "KRAKEN_FUTURES_INSUFFICIENT_AVAILABLE_FUNDS",
+            "evidence": evidence,
+            "retry_disposition": "NEVER",
+        }
+
     return {
         "attempt_id": aid,
-        "outcome": "ACKNOWLEDGED",
-        "provider_order_id": provider_order_id,
+        "outcome": "UNKNOWN",
         "client_order_id": cid,
+        "reason_code": "KRAKEN_FUTURES_UNCLASSIFIED_SEND_STATUS",
         "evidence": evidence,
-        "retry_disposition": "NEVER",
+        "retry_disposition": "RECONCILE_FIRST",
     }
 
 

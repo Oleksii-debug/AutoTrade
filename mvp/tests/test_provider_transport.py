@@ -54,7 +54,9 @@ from mvp.autotrade_mvp.provider_transport import (
     UrllibJsonWireClient,
     _exact_trading_response,
     _binance_exact_trading_response,
+    KRAKEN_FUTURES_ENDPOINT_POLICIES,
     KRAKEN_SPOT_ENDPOINT_POLICIES,
+    KrakenFuturesSigner,
     KrakenSpotAuthenticatedReadSigner,
     KrakenSpotAuthenticatedReadTransport,
     KrakenSpotDurableNonceAllocator,
@@ -4073,6 +4075,114 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
                 self.assertEqual(len(wire.requests), 1)
 
 
+class KrakenFuturesSigningPrimitiveTests(unittest.TestCase):
+    @staticmethod
+    def credential_plaintext():
+        return json.dumps(
+            {
+                "api_key": "kraken-futures-key",
+                "api_secret": "dGVzdC1mdXR1cmVzLXNlY3JldA==",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def test_signer_matches_url_encoded_derivatives_vector(self):
+        request = KrakenFuturesSigner.sign(
+            policy=KRAKEN_FUTURES_ENDPOINT_POLICIES["LIVE"],
+            provider_environment="LIVE",
+            endpoint="/derivatives/api/v3/sendorder",
+            body={
+                "orderType": "lmt",
+                "symbol": "PF_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "cliOrdId": "client+id",
+                "limitPrice": "60000",
+                "reduceOnly": "true",
+            },
+            credential_plaintext=self.credential_plaintext(),
+            nonce=1_415_957_147_987,
+        )
+        exact_query = (
+            "cliOrdId=client%2Bid&limitPrice=60000&orderType=lmt&"
+            "reduceOnly=true&side=buy&size=1&symbol=PF_XBTUSD"
+        )
+        self.assertEqual(
+            request.url,
+            "https://futures.kraken.com/derivatives/api/v3/sendorder?"
+            + exact_query,
+        )
+        self.assertEqual(request.body, b"")
+        self.assertEqual(request.headers["APIKey"], "kraken-futures-key")
+        self.assertEqual(request.headers["Nonce"], "1415957147987")
+        self.assertEqual(
+            request.headers["Authent"],
+            "Dx7wkm8YwJNpIwhewi4P97983BAGM3iy5iLzUS1kGNPnWQUH6e21X4NjvXUj1FPNfhvEx39t8ZgzSoK4vj5K2Q==",
+        )
+        self.assertNotIn("Content-Type", request.headers)
+        self.assertNotIn("test-futures-secret", repr(request))
+        self.assertNotIn("dGVzdC1mdXR1cmVzLXNlY3JldA==", repr(request))
+
+    def test_signer_rejects_scope_payload_nonce_and_secret_ambiguity(self):
+        valid_body = {
+            "orderType": "mkt",
+            "symbol": "PF_XBTUSD",
+            "side": "buy",
+            "size": "1",
+            "cliOrdId": "client-1",
+        }
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "policy does not match exact provider environment",
+        ):
+            KrakenFuturesSigner.sign(
+                policy=KRAKEN_FUTURES_ENDPOINT_POLICIES["LIVE"],
+                provider_environment="DEMO",
+                endpoint="/derivatives/api/v3/sendorder",
+                body=valid_body,
+                credential_plaintext=self.credential_plaintext(),
+                nonce=1,
+            )
+        for bad_nonce in (True, 0, -1, (1 << 64), "1"):
+            with self.subTest(nonce=repr(bad_nonce)), self.assertRaisesRegex(
+                ProviderTransportScopeError,
+                "unsigned 64-bit positive integer",
+            ):
+                KrakenFuturesSigner.sign(
+                    policy=KRAKEN_FUTURES_ENDPOINT_POLICIES["LIVE"],
+                    provider_environment="LIVE",
+                    endpoint="/derivatives/api/v3/sendorder",
+                    body=valid_body,
+                    credential_plaintext=self.credential_plaintext(),
+                    nonce=bad_nonce,
+                )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "client order id must be canonical text",
+        ):
+            KrakenFuturesSigner.sign(
+                policy=KRAKEN_FUTURES_ENDPOINT_POLICIES["LIVE"],
+                provider_environment="LIVE",
+                endpoint="/derivatives/api/v3/sendorder",
+                body={**valid_body, "cliOrdId": " client-1 "},
+                credential_plaintext=self.credential_plaintext(),
+                nonce=1,
+            )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "canonical base64",
+        ):
+            KrakenFuturesSigner.sign(
+                policy=KRAKEN_FUTURES_ENDPOINT_POLICIES["LIVE"],
+                provider_environment="LIVE",
+                endpoint="/derivatives/api/v3/sendorder",
+                body=valid_body,
+                credential_plaintext='{"api_key":"key","api_secret":"not-base64!"}',
+                nonce=1,
+            )
+
+
 class SharedProviderWireResponseBudgetTests(unittest.TestCase):
     """Network-free bounded I/O tests for the selected shared wire client."""
 
@@ -4094,6 +4204,95 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
             self.assertEqual(len(selected), 1)
             self.assertEqual(selected[0].proxies, {})
         self.assertEqual(DEFAULT_MAX_PROVIDER_RESPONSE_BYTES, 8 * 1024 * 1024)
+
+    def test_signed_write_requires_exactly_one_payload_channel(self):
+        body_request = SignedHttpRequest(
+            method="POST",
+            url="https://api.example.test/v1/order",
+            headers={"Content-Type": "application/json"},
+            body=b"{}",
+            timeout_seconds=2,
+        )
+        self.assertEqual(body_request.body, b"{}")
+
+        query_request = SignedHttpRequest(
+            method="POST",
+            url="https://api.example.test/v1/order?symbol=PI_XBTUSD&size=1",
+            headers={"APIKey": "synthetic"},
+            body=b"",
+            timeout_seconds=2,
+        )
+        self.assertEqual(query_request.body, b"")
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "exactly one payload channel",
+        ):
+            SignedHttpRequest(
+                method="POST",
+                url="https://api.example.test/v1/order?symbol=PI_XBTUSD",
+                headers={"Content-Type": "application/json"},
+                body=b"{}",
+                timeout_seconds=2,
+            )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "exactly one payload channel",
+        ):
+            SignedHttpRequest(
+                method="POST",
+                url="https://api.example.test/v1/order",
+                headers={"APIKey": "synthetic"},
+                body=b"",
+                timeout_seconds=2,
+            )
+
+    def test_query_only_signed_write_preserves_exact_url_and_sends_no_body(self):
+        class Stream(BytesIO):
+            status = 200
+
+            def __init__(self):
+                super().__init__(b'{"result":"success"}')
+                self.read_sizes = []
+
+            def read(self, size=-1):
+                self.read_sizes.append(size)
+                return super().read(size)
+
+        captured = []
+        stream = Stream()
+
+        class Opener:
+            def open(self, request, *, timeout):
+                captured.append((request, timeout))
+                return stream
+
+        exact_url = (
+            "https://api.example.test/derivatives/api/v3/sendorder?"
+            "orderType=mkt&symbol=PI_XBTUSD&side=buy&size=1"
+        )
+        request = SignedHttpRequest(
+            method="POST",
+            url=exact_url,
+            headers={"APIKey": "synthetic", "Authent": "synthetic-signature"},
+            body=b"",
+            timeout_seconds=2,
+        )
+        client = UrllibJsonWireClient(max_response_bytes=128)
+        client._opener = Opener()
+
+        response = client.send(request)
+
+        self.assertEqual(len(captured), 1)
+        outbound, timeout = captured[0]
+        self.assertEqual(outbound.full_url, exact_url)
+        self.assertEqual(outbound.get_method(), "POST")
+        self.assertIsNone(outbound.data)
+        self.assertEqual(timeout, 2)
+        self.assertEqual(type(response), TradingWireResponse)
+        self.assertEqual(response.http_status, 200)
+        self.assertEqual(response.body, b'{"result":"success"}')
+        self.assertEqual(stream.read_sizes, [129])
 
     def test_config_exacts_and_shared_nonpolymorphic_byte_limits(self):
         class NumericSubtype(int):

@@ -328,6 +328,71 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                 self.assertEqual(result["retry_disposition"], "NEVER")
                 self.assertNotIn("fill", repr(result).lower())
 
+    def test_success_with_insufficient_available_funds_is_rejected(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {
+                "result": "success",
+                "sendStatus": {"status": "insufficientAvailableFunds"},
+            },
+            intent_id="hedge-insufficient-available-funds",
+            provider_environment="LIVE",
+        )
+        result = parse_submission_response(
+            attempt_id=attempt,
+            prepared_request=prepared,
+            observation=observation,
+        )
+        self.assertEqual(result["outcome"], "REJECTED")
+        self.assertEqual(
+            result["reason_code"],
+            "KRAKEN_FUTURES_INSUFFICIENT_AVAILABLE_FUNDS",
+        )
+        self.assertEqual(result["retry_disposition"], "NEVER")
+        self.assertNotIn("provider_order_id", result)
+
+    def test_unclassified_success_status_never_becomes_acknowledged(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {
+                "result": "success",
+                "sendStatus": {
+                    "status": "futureProviderStatus",
+                    "order_id": "must-not-mint-ack",
+                },
+            },
+            intent_id="hedge-unclassified-status",
+            provider_environment="LIVE",
+        )
+        result = parse_submission_response(
+            attempt_id=attempt,
+            prepared_request=prepared,
+            observation=observation,
+        )
+        self.assertEqual(result["outcome"], "UNKNOWN")
+        self.assertEqual(
+            result["reason_code"],
+            "KRAKEN_FUTURES_UNCLASSIFIED_SEND_STATUS",
+        )
+        self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
+        self.assertNotIn("provider_order_id", result)
+
+    def test_placed_without_provider_order_id_is_unknown(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {"result": "success", "sendStatus": {"status": "placed"}},
+            intent_id="hedge-placed-without-id",
+            provider_environment="LIVE",
+        )
+        result = parse_submission_response(
+            attempt_id=attempt,
+            prepared_request=prepared,
+            observation=observation,
+        )
+        self.assertEqual(result["outcome"], "UNKNOWN")
+        self.assertEqual(
+            result["reason_code"],
+            "KRAKEN_FUTURES_PLACED_WITHOUT_ORDER_ID",
+        )
+        self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
+
     def test_transport_ambiguity_is_unknown_and_never_blind_retried(self):
         prepared = prepared_futures_request("hedge-unknown")
         result = parse_submission_response(
@@ -372,7 +437,7 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
     def test_submission_evidence_preserves_exact_response_bytes(self):
         payload = {
             "result": "success",
-            "sendStatus": {"order_id": "provider-bind"},
+            "sendStatus": {"order_id": "provider-bind", "status": "placed"},
         }
         raw_a = futures_response_bytes(payload)
         raw_b = json.dumps(payload, indent=1).encode("utf-8")
@@ -417,6 +482,7 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                 "result": "success",
                 "sendStatus": {
                     "order_id": "provider-mismatch",
+                    "status": "placed",
                     "cliOrdId": wrong_client,
                 },
             },

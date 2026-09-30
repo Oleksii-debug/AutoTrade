@@ -15,11 +15,13 @@ from autotrade_foundation.local_filesystem import LocalFilesystemQualificationEr
 from research.autotrade_research.artifacts import resource_lock
 from tools.build_windows_bundle import build_bundle
 from tools.build_windows_install_manifest import build_installer_input_manifest
-from tools.stage_windows_foundation import stage_windows_foundation
+from tools.stage_windows_foundation import FoundationStagingError, stage_windows_foundation
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SOURCE_SHA = "a" * 40
+SOURCE_SHA = subprocess.check_output(("git", "rev-parse", "--verify", "HEAD"), cwd=ROOT, text=True).strip()
+if len(SOURCE_SHA) != 40 or any(ch not in "0123456789abcdef" for ch in SOURCE_SHA):
+    raise RuntimeError("integration oracle requires an exact checked-out Git commit")
 
 
 def _isolated_python(*, staging: Path, script: str, extra_env: dict[str, str] | None = None):
@@ -29,7 +31,7 @@ def _isolated_python(*, staging: Path, script: str, extra_env: dict[str, str] | 
     if extra_env:
         environment.update(extra_env)
     return subprocess.run(
-        [sys.executable, "-I", "-c", script],
+        [sys.executable, "-I", "-S", "-c", script],
         cwd=staging,
         env=environment,
         text=True,
@@ -73,19 +75,25 @@ class ProductionFoundationPackagingTests(unittest.TestCase):
 import os
 from pathlib import Path
 import sys
-staging = os.environ['AUTOTRADE_STAGING']
-sys.path.insert(0, staging)
+assert sys.flags.isolated == 1 and sys.flags.no_site == 1
+staging = Path(os.environ['AUTOTRADE_STAGING']).resolve(strict=True)
+sys.path.insert(0, str(staging))
 from autotrade_foundation.local_filesystem import require_qualified_local_filesystem_path
 from mvp.autotrade_mvp.persistence import JournalStore
 path = Path(os.environ['AUTOTRADE_TEST_DB'])
 require_qualified_local_filesystem_path(path)
 assert not path.exists()
+for name, module in tuple(sys.modules.items()):
+    if name in ('mvp', 'mvp.autotrade_mvp', 'autotrade_foundation') or name.startswith(
+        ('mvp.autotrade_mvp.', 'autotrade_foundation.')
+    ):
+        module_file = Path(module.__file__).resolve(strict=True)
+        assert module_file.is_relative_to(staging), (name, module_file)
+    assert name != 'research' and not name.startswith('research.')
+    assert name != 'autotrade_research' and not name.startswith('autotrade_research.')
 store = JournalStore(path)
 assert path.is_file()
 assert store.store_identity.canonical_path == str(path.resolve())
-for name in sys.modules:
-    assert name != 'research' and not name.startswith('research.')
-    assert name != 'autotrade_research' and not name.startswith('autotrade_research.')
 print('STAGED_JOURNAL_OK')
 """
             completed = _isolated_python(
@@ -115,17 +123,23 @@ print('STAGED_JOURNAL_OK')
             script = """
 import os
 import sys
+assert sys.flags.isolated == 1 and sys.flags.no_site == 1
 sys.path.insert(0, os.environ['AUTOTRADE_STAGING'])
-from mvp.autotrade_mvp.persistence import JournalStore
-JournalStore(os.environ['AUTOTRADE_TEST_DB'])
+try:
+    from mvp.autotrade_mvp.persistence import JournalStore
+except ModuleNotFoundError as error:
+    assert error.name == 'autotrade_foundation', error.name
+    print('MISSING_FOUNDATION_DENIED')
+else:
+    raise AssertionError('installed product imported without mandatory foundation')
 """
             completed = _isolated_python(
                 staging=staging,
                 script=script,
                 extra_env={"AUTOTRADE_TEST_DB": str(database)},
             )
-            self.assertNotEqual(completed.returncode, 0)
-            self.assertIn("autotrade_foundation", completed.stderr)
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertEqual(completed.stdout.strip(), "MISSING_FOUNDATION_DENIED")
             self.assertFalse(database.exists())
 
     def test_resource_lock_delegates_to_foundation_before_lock_file_creation(self):
@@ -240,6 +254,143 @@ JournalStore(os.environ['AUTOTRADE_TEST_DB'])
             components = {item["path"]: item for item in installed["components"]}
             self.assertEqual(files[runtime_path]["sha256"], source_digest)
             self.assertEqual(components[runtime_path]["sha256"], source_digest)
+
+
+@unittest.skipUnless(sys.platform == "win32", "native Windows junction and hardlink acceptance")
+class WindowsFoundationNoReparseTests(unittest.TestCase):
+    """Exact committed source positive and six native Windows no-alias failures."""
+
+    def _fixture(self, root):
+        repo = root / "tracked"
+        package = repo / "autotrade_foundation"
+        package.mkdir(parents=True)
+        for filename in ("__init__.py", "local_filesystem.py"):
+            shutil.copy2(ROOT / "autotrade_foundation" / filename, package / filename)
+        for command in (
+            ("git", "-C", str(repo), "init", "-q"),
+            ("git", "-C", str(repo), "add", "--",
+             "autotrade_foundation/__init__.py", "autotrade_foundation/local_filesystem.py"),
+            ("git", "-C", str(repo), "-c", "user.name=Fixture",
+             "-c", "user.email=fixture@example.invalid", "commit", "-qm", "committed bytes"),
+        ):
+            p = subprocess.run(command, text=True, capture_output=True, check=False)
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        sha = subprocess.check_output(("git", "-C", str(repo), "rev-parse", "HEAD"), text=True).strip()
+        self.assertRegex(sha, r"^[0-9a-f]{40}$")
+        staging = root / "stage"
+        composition = root / "composition.json"
+        composition.write_text(json.dumps({
+            "schema_version": "1.0.0", "product": "AutoTrade",
+            "source_sha": sha, "components": []}), encoding="utf-8")
+        return repo, staging, composition
+
+    def _junction(self, alias, real):
+        p = subprocess.run(
+            ("cmd.exe", "/d", "/c", f'mklink /J "{alias}" "{real}"'),
+            text=True, capture_output=True, check=False)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertTrue(alias.is_dir())
+
+    def _deny(self, source, stage, composition):
+        before = composition.read_bytes()
+        with self.assertRaises(FoundationStagingError):
+            stage_windows_foundation(staging=stage, composition_path=composition, source_root=source)
+        self.assertEqual(composition.read_bytes(), before)
+
+    def test_exact_committed_source_and_idempotent_restage(self):
+        with TemporaryDirectory() as directory:
+            source, stage, composition = self._fixture(Path(directory))
+            stage.mkdir()
+            result = stage_windows_foundation(staging=stage, composition_path=composition, source_root=source)
+            self.assertEqual(len(result), 2)
+            first = composition.read_bytes()
+            self.assertEqual(stage_windows_foundation(staging=stage, composition_path=composition, source_root=source), result)
+            self.assertEqual(first, composition.read_bytes())
+            self.assertEqual((stage / "autotrade_foundation" / "local_filesystem.py").read_bytes(),
+                             (source / "autotrade_foundation" / "local_filesystem.py").read_bytes())
+
+    def test_source_junction_cannot_counterfeit_committed_bytes(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, stage, composition = self._fixture(root)
+            stage.mkdir()
+            outside = root / "external-source"
+            shutil.copytree(source / "autotrade_foundation", outside)
+            shutil.rmtree(source / "autotrade_foundation")
+            self._junction(source / "autotrade_foundation", outside)
+            self._deny(source, stage, composition)
+            self.assertFalse((stage / "autotrade_foundation").exists())
+
+    def test_destination_junction_cannot_redirect_external_publication(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, stage, composition = self._fixture(root)
+            stage.mkdir()
+            outside = root / "external-destination"
+            outside.mkdir()
+            (outside / "sentinel").write_bytes(b"stable")
+            self._junction(stage / "autotrade_foundation", outside)
+            self._deny(source, stage, composition)
+            self.assertEqual(sorted(p.name for p in outside.iterdir()), ["sentinel"])
+            self.assertEqual((outside / "sentinel").read_bytes(), b"stable")
+
+    def test_staging_root_junction_is_rejected_before_mutation(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, stage, composition = self._fixture(root)
+            outside = root / "external-root"
+            outside.mkdir()
+            (outside / "sentinel").write_bytes(b"stable")
+            self._junction(stage, outside)
+            self._deny(source, stage, composition)
+            self.assertEqual(sorted(p.name for p in outside.iterdir()), ["sentinel"])
+
+    def test_equal_byte_hardlink_leaf_is_not_an_authoritative_destination(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, stage, composition = self._fixture(root)
+            (stage / "autotrade_foundation").mkdir(parents=True)
+            content = (source / "autotrade_foundation" / "local_filesystem.py").read_bytes()
+            outside = root / "external-leaf.py"
+            outside.write_bytes(content)
+            os.link(outside, stage / "autotrade_foundation" / "local_filesystem.py")
+            self._deny(source, stage, composition)
+            self.assertEqual(outside.read_bytes(), content)
+            self.assertFalse((stage / "autotrade_foundation" / "__init__.py").exists())
+
+    def test_hardlinked_authority_manifest_is_rejected_before_mutation(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, stage, composition = self._fixture(root)
+            stage.mkdir()
+            external = root / "external-composition.json"
+            composition.replace(external)
+            os.link(external, composition)
+            first = external.read_bytes()
+            self._deny(source, stage, composition)
+            self.assertEqual(external.read_bytes(), first)
+            self.assertFalse((stage / "autotrade_foundation").exists())
+
+    def test_second_component_conflict_preflights_before_first_write(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, stage, composition = self._fixture(root)
+            stage.mkdir()
+            components = [
+                ("autotrade-foundation-package", "runtime-foundation", "__init__.py"),
+                ("autotrade-foundation-local-filesystem", "wrong-kind", "local_filesystem.py"),
+            ]
+            record = json.loads(composition.read_text(encoding="utf-8"))
+            record["components"] = [{
+                "component_id": component_id, "kind": kind,
+                "path": "autotrade_foundation/" + name,
+                "version": "source-controlled",
+                "sha256": "sha256:" + sha256(
+                    (source / "autotrade_foundation" / name).read_bytes()).hexdigest()
+            } for component_id, kind, name in components]
+            composition.write_text(json.dumps(record), encoding="utf-8")
+            self._deny(source, stage, composition)
+            self.assertFalse((stage / "autotrade_foundation").exists())
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, tzinfo
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 import unittest
 
@@ -1109,6 +1109,83 @@ class CorporateActionExactArithmeticTests(unittest.TestCase):
                 settled_cash="1",
                 currency="USD",
             )
+
+
+
+
+class CorporateActionSemanticGraphAuthorityTests(unittest.TestCase):
+    def test_event_subclass_is_rejected_before_semantic_attribute_dispatch(self):
+        touched = []
+
+        class HostileEvent(CorporateEvent):
+            def __getattribute__(self, name):
+                if name not in {"__class__"}:
+                    touched.append(name)
+                    raise AssertionError("hostile event attribute dispatch")
+                return super().__getattribute__(name)
+
+        hostile = object.__new__(HostileEvent)
+        book = bound_book(state())
+        before_state = book.state
+        before_events = book.events
+
+        with self.assertRaisesRegex(TypeError, "exact CorporateEvent"):
+            book.apply(hostile)
+
+        self.assertEqual(touched, [])
+        self.assertEqual(book.state, before_state)
+        self.assertEqual(book.events, before_events)
+
+    def test_hostile_nested_timezone_is_rejected_without_callback(self):
+        touched = []
+
+        class HostileTz(tzinfo):
+            def utcoffset(self, dt):
+                touched.append("utcoffset")
+                raise AssertionError("hostile timezone callback")
+
+            def dst(self, dt):
+                touched.append("dst")
+                raise AssertionError("hostile timezone callback")
+
+            def fromutc(self, dt):
+                touched.append("fromutc")
+                raise AssertionError("hostile timezone callback")
+
+        hostile_time = datetime(2026, 1, 2, 12, tzinfo=HostileTz())
+        book = bound_book(state())
+        before_state = book.state
+        before_events = book.events
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "exact datetime with built-in timezone",
+        ):
+            corporate_event(
+                event_id="hostile-timezone",
+                kind="CASH_DIVIDEND",
+                effective_date=date(2026, 1, 2),
+                effective_at=hostile_time,
+                source_revision="r1",
+                payload={"per_share": "1", "currency": "USD"},
+            )
+
+        self.assertEqual(touched, [])
+        self.assertEqual(book.state, before_state)
+        self.assertEqual(book.events, before_events)
+
+    def test_builtin_fixed_offset_timezone_normalizes_deterministically(self):
+        fixed = timezone.utc
+        event = corporate_event(
+            event_id="builtin-timezone",
+            kind="CASH_DIVIDEND",
+            effective_date=date(2026, 1, 2),
+            effective_at=datetime(2026, 1, 2, 12, tzinfo=fixed),
+            source_revision="r1",
+            payload={"per_share": "1", "currency": "USD"},
+        )
+        self.assertEqual(event.effective_at.tzinfo, timezone.utc)
+        self.assertEqual(event.effective_at.hour, 12)
 
 
 

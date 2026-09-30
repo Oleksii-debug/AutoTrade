@@ -5,11 +5,16 @@ from __future__ import annotations
 from dataclasses import InitVar, dataclass
 from datetime import datetime, timezone
 import hashlib
+from pathlib import Path
 import re
 from types import MappingProxyType
 from typing import Callable, Iterable, Mapping
 from urllib.parse import urlsplit
 from uuid import UUID
+
+from research.autotrade_research.artifacts._root_authority import (
+    trusted_authenticated_reader,
+)
 
 
 class CapabilityError(ValueError):
@@ -216,21 +221,40 @@ _CAPABILITY_PRODUCER_TYPES = {
 
 
 def artifact_store_evidence_verifier(
-    store: object,
+    store: object | None = None,
     *,
+    evidence_root: str | Path | None = None,
+    publication_store: object | None = None,
     issuer_verifiers: Mapping[
         str,
         Callable[[CapabilityClaim, str, str], EvidenceVerification],
     ]
     | None = None,
 ) -> Callable[[CapabilityClaim], EvidenceVerification]:
-    """Verify artifact integrity and independent source-specific issuer authority.
+    """Bind capability evidence to one trusted authenticated ArtifactStore cut.
 
-    ArtifactStore is an immutable byte/integrity store, not an issuer trust
-    root. A capability source can verify only when the claim carries an
-    immutable issuer identity/digest and a separately supplied verifier for
-    that exact source validates the upstream authority record.
+    ``evidence_root`` is the trust input. ``publication_store`` is optional
+    provenance used only by the shared ArtifactStore root authority to prove it
+    retained the same root generation. Terminal reads are performed through a
+    private trusted reader captured at construction and never through caller
+    object methods. Source/issuer authenticity remains an independent gate.
+
+    ``store`` is a compatibility alias for ``publication_store`` only. It never
+    selects the trusted root and therefore cannot be used without an explicit
+    independently selected ``evidence_root``.
     """
+
+    if store is not None:
+        if publication_store is not None:
+            raise TypeError("pass either store or publication_store, not both")
+        publication_store = store
+    if evidence_root is None:
+        raise TypeError("evidence_root is required for trusted capability evidence")
+
+    read_authenticated_snapshot = trusted_authenticated_reader(
+        evidence_root,
+        publication_store=publication_store,
+    )
 
     normalized_issuers: dict[
         str,
@@ -251,10 +275,7 @@ def artifact_store_evidence_verifier(
         artifact_id = str(claim.evidence_ref["artifact_id"])
         expected_digest = str(claim.evidence_ref["sha256"])
         try:
-            load_manifest = getattr(store, "load_manifest")
-            read_bytes = getattr(store, "read_bytes")
-            manifest = load_manifest(artifact_id)
-            payload = read_bytes(artifact_id)
+            manifest, payload = read_authenticated_snapshot(artifact_id)
         except FileNotFoundError:
             return EvidenceVerification(
                 valid=False,
@@ -383,9 +404,7 @@ def artifact_store_evidence_verifier(
                 reason="trusted issuer provenance verification failed",
             )
         if not isinstance(issuer_result, EvidenceVerification):
-            raise TypeError(
-                "issuer verifier must return EvidenceVerification"
-            )
+            raise TypeError("issuer verifier must return EvidenceVerification")
         return issuer_result
 
     return verify

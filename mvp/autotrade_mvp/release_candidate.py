@@ -32,8 +32,10 @@ from .qualification_attestation import (
 )
 
 from .supply_chain_qualification import (
-    SupplyChainEvidence,
+    SUPPLY_CHAIN_PROOF_EVIDENCE_KIND,
+    SUPPLY_CHAIN_PROOF_MEDIA_TYPE,
     SupplyChainQualification,
+    parse_supply_chain_proof_bytes,
     qualify_supply_chain,
 )
 
@@ -491,15 +493,11 @@ class ReleaseCandidateDecision:
     qualification_trust_root_id: str | None = None
     _verification_store: InitVar[ArtifactStore | None] = None
     _verification_root: InitVar[str | Path | None] = None
-    _supply_chain_evidence: InitVar[SupplyChainEvidence | None] = None
-    _supply_chain_receipt: InitVar[SignedQualificationAttestation | None] = None
 
     def __post_init__(
         self,
         _verification_store: ArtifactStore | None,
         _verification_root: str | Path | None,
-        _supply_chain_evidence: SupplyChainEvidence | None,
-        _supply_chain_receipt: SignedQualificationAttestation | None,
     ) -> None:
         if self.status not in {"FROZEN", "BLOCKED"}:
             raise ReleaseCandidateError("unsupported release-candidate status")
@@ -859,23 +857,31 @@ class ReleaseCandidateDecision:
                 raise ReleaseCandidateError(
                     "frozen release candidate canonical qualification identity mismatch"
                 )
-            if (
-                type(_verification_store) is not ArtifactStore
-                or _verification_root is None
-                or type(_supply_chain_evidence) is not SupplyChainEvidence
-                or type(_supply_chain_receipt) is not SignedQualificationAttestation
-            ):
-                raise ReleaseCandidateError(
-                    "frozen release candidate requires canonical WP-64 replay context"
-                )
             try:
+                replay_read = trusted_authenticated_reader(
+                    _verification_root,
+                    publication_store=_verification_store,
+                )
+                replay_supply_evidence, replay_supply_receipt = (
+                    _load_supply_chain_proof(
+                        replay_read,
+                        dependency_rights,
+                    )
+                )
                 supply_result = qualify_supply_chain(
-                    _supply_chain_evidence,
+                    replay_supply_evidence,
                     evidence_store=_verification_store,
                     evidence_root=_verification_root,
-                    trust_receipt=_supply_chain_receipt,
+                    trust_receipt=replay_supply_receipt,
                 )
-            except (TypeError, ValueError) as error:
+            except (
+                ArtifactIntegrityError,
+                FileNotFoundError,
+                OSError,
+                ReleaseCandidateError,
+                TypeError,
+                ValueError,
+            ) as error:
                 raise ReleaseCandidateError(
                     "frozen release candidate WP-64 proof cannot be canonically replayed"
                 ) from error
@@ -987,33 +993,57 @@ def _canonical_manifest(
     )
 
 
+def _release_artifact_media_type(
+    artifact: ReleaseArtifactEvidence,
+) -> str:
+    return (
+        SUPPLY_CHAIN_PROOF_MEDIA_TYPE
+        if artifact.role == "DEPENDENCY_RIGHTS"
+        else _RELEASE_ARTIFACT_MEDIA_TYPE
+    )
+
+
+def _release_artifact_evidence_kind(
+    artifact: ReleaseArtifactEvidence,
+) -> str:
+    return (
+        SUPPLY_CHAIN_PROOF_EVIDENCE_KIND
+        if artifact.role == "DEPENDENCY_RIGHTS"
+        else _RELEASE_EVIDENCE_KIND
+    )
+
+
+def _release_artifact_metadata(
+    artifact: ReleaseArtifactEvidence,
+) -> dict[str, object]:
+    return {
+        "evidence_kind": _release_artifact_evidence_kind(artifact),
+        "role": artifact.role,
+        "source_sha": artifact.source_sha,
+        "signature_status": artifact.signature_status,
+        "evidence_status": artifact.evidence_status,
+    }
+
+
 def _stored_evidence_is_verified(
     read_snapshot,
     artifact: ReleaseArtifactEvidence,
 ) -> bool:
-    """Verify exact stored bytes and declared release-evidence bindings.
-
-    ArtifactStore is a content-integrity boundary. It does not authenticate who
-    produced the evidence or who asserted PASS/VERIFIED metadata.
-    """
+    """Verify one immutable release artifact including held-byte digest."""
 
     try:
-        manifest, _raw = read_snapshot(artifact.artifact_id)
+        manifest, raw = read_snapshot(artifact.artifact_id)
         if not isinstance(manifest.get("manifest_hash"), str):
             return False
         if manifest.get("sha256") != artifact.artifact_sha256:
             return False
-        if manifest.get("media_type") != _RELEASE_ARTIFACT_MEDIA_TYPE:
+        if "sha256:" + sha256(raw).hexdigest() != artifact.artifact_sha256:
+            return False
+        if manifest.get("media_type") != _release_artifact_media_type(artifact):
             return False
         if manifest.get("source_refs") != [f"git:{artifact.source_sha}"]:
             return False
-        if manifest.get("metadata") != {
-            "evidence_kind": _RELEASE_EVIDENCE_KIND,
-            "role": artifact.role,
-            "source_sha": artifact.source_sha,
-            "signature_status": artifact.signature_status,
-            "evidence_status": artifact.evidence_status,
-        }:
+        if manifest.get("metadata") != _release_artifact_metadata(artifact):
             return False
     except (
         ArtifactIntegrityError,
@@ -1024,6 +1054,34 @@ def _stored_evidence_is_verified(
     ):
         return False
     return True
+
+
+def _load_supply_chain_proof(
+    read_snapshot,
+    artifact: ReleaseArtifactEvidence,
+):
+    if artifact.role != "DEPENDENCY_RIGHTS":
+        raise ReleaseCandidateError(
+            "supply-chain proof must use DEPENDENCY_RIGHTS role"
+        )
+    if not _stored_evidence_is_verified(read_snapshot, artifact):
+        raise ReleaseCandidateError(
+            "canonical WP-64 proof artifact integrity is not verified"
+        )
+    try:
+        _manifest, raw = read_snapshot(artifact.artifact_id)
+        return parse_supply_chain_proof_bytes(raw)
+    except (
+        ArtifactIntegrityError,
+        FileNotFoundError,
+        OSError,
+        TypeError,
+        ValueError,
+        QualificationTrustError,
+    ) as error:
+        raise ReleaseCandidateError(
+            "canonical WP-64 proof artifact is malformed"
+        ) from error
 
 
 def _qualification_claims_cover_exact_candidate(
@@ -1043,8 +1101,8 @@ def _qualification_claims_cover_exact_candidate(
             artifact.artifact_id,
             artifact.artifact_sha256,
             artifact.source_sha,
-            _RELEASE_ARTIFACT_MEDIA_TYPE,
-            _RELEASE_EVIDENCE_KIND,
+            _release_artifact_media_type(artifact),
+            _release_artifact_evidence_kind(artifact),
         )
         for artifact in candidate.artifacts
     }
@@ -1100,8 +1158,6 @@ def freeze_release_candidate(
     evidence_store: ArtifactStore | None = None,
     evidence_root: str | Path | None = None,
     qualification_receipt: SignedQualificationAttestation | None = None,
-    supply_chain_evidence: SupplyChainEvidence | None = None,
-    supply_chain_receipt: SignedQualificationAttestation | None = None,
     qualification_policy: QualificationTrustPolicy | None = None,
     expected_policy_id: str | None = None,
     expected_policy_version: str | None = None,
@@ -1207,21 +1263,26 @@ def freeze_release_candidate(
     if (
         windows_package is None
         or dependency_rights is None
-        or supply_chain_evidence is None
-        or supply_chain_receipt is None
+        or trusted_read is None
         or evidence_store is None
         or evidence_root is None
     ):
         reasons.append("supply_chain_qualification_unavailable")
     else:
         try:
+            durable_supply_evidence, durable_supply_receipt = (
+                _load_supply_chain_proof(
+                    trusted_read,
+                    dependency_rights,
+                )
+            )
             supply_chain_qualification = qualify_supply_chain(
-                supply_chain_evidence,
+                durable_supply_evidence,
                 evidence_store=evidence_store,
                 evidence_root=evidence_root,
-                trust_receipt=supply_chain_receipt,
+                trust_receipt=durable_supply_receipt,
             )
-        except (TypeError, ValueError):
+        except (ReleaseCandidateError, TypeError, ValueError):
             reasons.append("supply_chain_qualification_invalid")
         else:
             supply_identity = (
@@ -1288,8 +1349,6 @@ def freeze_release_candidate(
         accepted is None
         or qualification_receipt is None
         or supply_chain_qualification is None
-        or supply_chain_evidence is None
-        or supply_chain_receipt is None
     ):
         raise ReleaseCandidateError(
             "release freeze reached terminal path without accepted qualification"
@@ -1311,6 +1370,4 @@ def freeze_release_candidate(
         qualification_trust_root_id=accepted.trust_root_id,
         _verification_store=evidence_store,
         _verification_root=evidence_root,
-        _supply_chain_evidence=supply_chain_evidence,
-        _supply_chain_receipt=supply_chain_receipt,
     )

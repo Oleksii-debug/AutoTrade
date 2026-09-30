@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import (
@@ -11,6 +12,8 @@ from research.autotrade_research.artifacts.store import (
     ArtifactStore,
 )
 
+import mvp.autotrade_mvp.release_candidate as release_candidate_module
+import mvp.autotrade_mvp.supply_chain_qualification as supply_chain_module
 from mvp.autotrade_mvp.qualification_attestation import (
     EvidenceArtifactRef,
     QualificationAttestation,
@@ -18,6 +21,7 @@ from mvp.autotrade_mvp.qualification_attestation import (
     QualificationTrustPolicy,
     SignedQualificationAttestation,
     TrustRoot,
+    verify_qualification_attestation,
 )
 from mvp.autotrade_mvp.release_candidate import (
     ReleaseArtifactEvidence,
@@ -25,6 +29,12 @@ from mvp.autotrade_mvp.release_candidate import (
     ReleaseCandidateInput,
     freeze_release_candidate,
     release_candidate_subject_requirement,
+)
+from mvp.autotrade_mvp.supply_chain_qualification import (
+    ComponentEvidence,
+    ModelDataRightsEvidence,
+    SupplyChainEvidence,
+    supply_chain_subject_requirement,
 )
 from mvp.autotrade_mvp.windows_update import (
     BackupEvidence,
@@ -96,7 +106,10 @@ def _trust_root():
         verifier_id="autotrade.trust.verifier",
         public_modulus_hex=format(_RSA_N, "x"),
         public_exponent=65537,
-        allowed_scopes=(QualificationScope("RELEASE", "FREEZE"),),
+        allowed_scopes=(
+            QualificationScope("RELEASE", "FREEZE"),
+            QualificationScope("SUPPLY_CHAIN", "RELEASE"),
+        ),
         valid_from="2026-09-01T00:00:00Z",
     )
 
@@ -116,6 +129,213 @@ def _sign(attestation):
     return base64.b64encode(signature).decode("ascii")
 
 
+def _publish_supply_artifact(
+    store,
+    *,
+    release_id,
+    source_sha,
+    label,
+    media_type,
+    metadata,
+):
+    identity = f"windows-update-wp64:{release_id}:{source_sha}:{label}"
+    artifact_id = str(uuid5(NAMESPACE_URL, identity))
+    data = identity.encode("utf-8")
+    digest = "sha256:" + sha256(data).hexdigest()
+    store.publish_bytes(
+        artifact_id=artifact_id,
+        data=data,
+        media_type=media_type,
+        rights={"storage": True, "export": False},
+        source_refs=[f"git:{source_sha}"],
+        metadata=metadata,
+    )
+    return artifact_id, digest
+
+
+def _supply_chain_fixture(
+    store,
+    *,
+    release_id,
+    source_sha,
+    windows_package,
+):
+    sbom_id, sbom_hash = _publish_supply_artifact(
+        store,
+        release_id=release_id,
+        source_sha=source_sha,
+        label="sbom",
+        media_type=supply_chain_module._SBOM_MEDIA_TYPE,
+        metadata={"evidence_kind": "SBOM", "release_sha": source_sha},
+    )
+    provenance_id, provenance_hash = _publish_supply_artifact(
+        store,
+        release_id=release_id,
+        source_sha=source_sha,
+        label="provenance",
+        media_type=supply_chain_module._PROVENANCE_MEDIA_TYPE,
+        metadata={"evidence_kind": "PROVENANCE", "release_sha": source_sha},
+    )
+    lock_id, lock_hash = _publish_supply_artifact(
+        store,
+        release_id=release_id,
+        source_sha=source_sha,
+        label="dependency-lock",
+        media_type=supply_chain_module._DEPENDENCY_LOCK_MEDIA_TYPE,
+        metadata={"evidence_kind": "DEPENDENCY_LOCK", "release_sha": source_sha},
+    )
+    component_id = "autotrade-core"
+    component_version = "1.0.0"
+    component_artifact_id, component_hash = _publish_supply_artifact(
+        store,
+        release_id=release_id,
+        source_sha=source_sha,
+        label="component",
+        media_type=supply_chain_module._COMPONENT_MEDIA_TYPE,
+        metadata={
+            "evidence_kind": "DISTRIBUTED_COMPONENT",
+            "component_id": component_id,
+            "version": component_version,
+            "release_sha": source_sha,
+        },
+    )
+    rights_scope = "distribution"
+    rights_id, rights_hash = _publish_supply_artifact(
+        store,
+        release_id=release_id,
+        source_sha=source_sha,
+        label="rights",
+        media_type=supply_chain_module._RIGHTS_MEDIA_TYPE,
+        metadata={
+            "evidence_kind": "MODEL_DATA_RIGHTS",
+            "use_scope": rights_scope,
+            "release_sha": source_sha,
+        },
+    )
+    component = ComponentEvidence(
+        component_id=component_id,
+        artifact_id=component_artifact_id,
+        version=component_version,
+        declared_artifact_hash=component_hash,
+        observed_artifact_hash=component_hash,
+        source_revision="git:" + source_sha,
+        license_status="APPROVED",
+        distribution_rights="APPROVED",
+        advisory_status="CLEAR",
+        notice_required=False,
+        notice_present=True,
+        reviewed_for_release_sha=source_sha,
+    )
+    rights = ModelDataRightsEvidence(
+        artifact_id=rights_id,
+        artifact_hash=rights_hash,
+        use_scope=rights_scope,
+        rights_status="APPROVED",
+        reviewed_for_release_sha=source_sha,
+    )
+    return SupplyChainEvidence(
+        release_commit_sha=source_sha,
+        built_from_commit_sha=source_sha,
+        sbom_artifact_id=sbom_id,
+        sbom_hash=sbom_hash,
+        provenance_artifact_id=provenance_id,
+        provenance_hash=provenance_hash,
+        dependency_lock_artifact_id=lock_id,
+        dependency_lock_hash=lock_hash,
+        sbom_reviewed_for_release_sha=source_sha,
+        provenance_reviewed_for_release_sha=source_sha,
+        dependency_lock_reviewed_for_release_sha=source_sha,
+        distributed_component_ids=(component_id,),
+        sbom_component_ids=(component_id,),
+        components=(component,),
+        model_data_rights=(rights,),
+        release_artifact_id=windows_package.artifact_id,
+        release_artifact_sha256=windows_package.artifact_sha256,
+    )
+
+
+def _supply_chain_receipt(evidence, trust_root):
+    source_sha = evidence.release_commit_sha
+    refs = [
+        EvidenceArtifactRef(
+            artifact_id=evidence.sbom_artifact_id,
+            sha256=evidence.sbom_hash,
+            media_type=supply_chain_module._SBOM_MEDIA_TYPE,
+            evidence_kind="SBOM",
+            source_sha=source_sha,
+        ),
+        EvidenceArtifactRef(
+            artifact_id=evidence.provenance_artifact_id,
+            sha256=evidence.provenance_hash,
+            media_type=supply_chain_module._PROVENANCE_MEDIA_TYPE,
+            evidence_kind="PROVENANCE",
+            source_sha=source_sha,
+        ),
+        EvidenceArtifactRef(
+            artifact_id=evidence.dependency_lock_artifact_id,
+            sha256=evidence.dependency_lock_hash,
+            media_type=supply_chain_module._DEPENDENCY_LOCK_MEDIA_TYPE,
+            evidence_kind="DEPENDENCY_LOCK",
+            source_sha=source_sha,
+        ),
+    ]
+    refs.extend(
+        EvidenceArtifactRef(
+            artifact_id=item.artifact_id,
+            sha256=item.observed_artifact_hash,
+            media_type=supply_chain_module._COMPONENT_MEDIA_TYPE,
+            evidence_kind="DISTRIBUTED_COMPONENT",
+            source_sha=source_sha,
+        )
+        for item in evidence.components
+    )
+    refs.extend(
+        EvidenceArtifactRef(
+            artifact_id=item.artifact_id,
+            sha256=item.artifact_hash,
+            media_type=supply_chain_module._RIGHTS_MEDIA_TYPE,
+            evidence_kind="MODEL_DATA_RIGHTS",
+            source_sha=source_sha,
+        )
+        for item in evidence.model_data_rights
+    )
+    attestation = QualificationAttestation(
+        attestation_id=str(
+            uuid5(
+                NAMESPACE_URL,
+                "windows-update-wp64:"
+                + evidence.release_artifact_id
+                + ":"
+                + evidence.release_artifact_sha256,
+            )
+        ),
+        source_sha=source_sha,
+        domain="SUPPLY_CHAIN",
+        gate="RELEASE",
+        package_id="WP-64",
+        protocol_id="supply-chain-review-v1",
+        protocol_version="1.0.0",
+        requirement_ids=(
+            "independent-supply-chain-review",
+            supply_chain_subject_requirement(evidence),
+        ),
+        evidence_refs=tuple(refs),
+        producer_id=trust_root.producer_id,
+        verifier_id=trust_root.verifier_id,
+        trust_root_id=trust_root.root_id,
+        runner_id="windows-update-wp64-runner",
+        harness_version="1.0.0",
+        started_at="2026-09-25T01:00:00Z",
+        completed_at="2026-09-25T01:10:00Z",
+        signed_at="2026-09-25T01:11:00Z",
+        result="PASS",
+        unresolved_limits=(),
+        release_artifact_id=evidence.release_artifact_id,
+        release_artifact_sha256=evidence.release_artifact_sha256,
+    )
+    return SignedQualificationAttestation(attestation, _sign(attestation))
+
+
 def frozen_release(
     store,
     evidence_root,
@@ -126,6 +346,7 @@ def frozen_release(
     digest_seed: int,
 ):
     artifacts = []
+    artifact_bytes = {}
     for index, role in enumerate(REQUIRED_ROLES):
         digest_char = hex((digest_seed + index) % 16)[2:]
         identity = (
@@ -134,36 +355,24 @@ def frozen_release(
         )
         artifact_id = str(uuid5(NAMESPACE_URL, identity))
         data = ("release-evidence:" + identity).encode("utf-8")
+        artifact_bytes[artifact_id] = data
         signature_status = (
             "VERIFIED"
             if role in {"HOST", "WEB", "DESKTOP", "WINDOWS_PACKAGE"}
             else "NOT_APPLICABLE"
         )
-        artifact = ReleaseArtifactEvidence.create(
-            role=role,
-            artifact_id=artifact_id,
-            artifact_sha256="sha256:" + sha256(data).hexdigest(),
-            source_sha=source_sha,
-            signature_status=signature_status,
-            evidence_status="PASS",
+        artifacts.append(
+            ReleaseArtifactEvidence.create(
+                role=role,
+                artifact_id=artifact_id,
+                artifact_sha256="sha256:" + sha256(data).hexdigest(),
+                source_sha=source_sha,
+                signature_status=signature_status,
+                evidence_status="PASS",
+            )
         )
-        store.publish_bytes(
-            artifact_id=artifact_id,
-            data=data,
-            media_type=RELEASE_MEDIA_TYPE,
-            rights={"storage": True, "export": False},
-            source_refs=[f"git:{source_sha}"],
-            metadata={
-                "evidence_kind": RELEASE_EVIDENCE_KIND,
-                "role": role,
-                "source_sha": source_sha,
-                "signature_status": signature_status,
-                "evidence_status": "PASS",
-            },
-        )
-        artifacts.append(artifact)
 
-    candidate = ReleaseCandidateInput.create(
+    provisional = ReleaseCandidateInput.create(
         release_id=release_id,
         source_sha=source_sha,
         baseline_hash=BASELINE,
@@ -171,12 +380,84 @@ def frozen_release(
         artifacts=tuple(artifacts),
         unresolved_blockers=(),
     )
+    windows_package = next(
+        item for item in provisional.artifacts if item.role == "WINDOWS_PACKAGE"
+    )
+    supply_evidence = _supply_chain_fixture(
+        store,
+        release_id=release_id,
+        source_sha=source_sha,
+        windows_package=windows_package,
+    )
+    supply_receipt = _supply_chain_receipt(supply_evidence, trust_root)
+    proof_bytes = supply_chain_module.canonical_supply_chain_proof_bytes(
+        supply_evidence,
+        supply_receipt,
+    )
+    dependency_rights = next(
+        item for item in provisional.artifacts
+        if item.role == "DEPENDENCY_RIGHTS"
+    )
+    bound_dependency_rights = ReleaseArtifactEvidence.create(
+        role=dependency_rights.role,
+        artifact_id=dependency_rights.artifact_id,
+        artifact_sha256="sha256:" + sha256(proof_bytes).hexdigest(),
+        source_sha=dependency_rights.source_sha,
+        signature_status=dependency_rights.signature_status,
+        evidence_status=dependency_rights.evidence_status,
+    )
+    artifact_bytes[dependency_rights.artifact_id] = proof_bytes
+    candidate = ReleaseCandidateInput.create(
+        release_id=provisional.release_id,
+        source_sha=provisional.source_sha,
+        baseline_hash=provisional.baseline_hash,
+        schema_contract_hash=provisional.schema_contract_hash,
+        artifacts=tuple(
+            bound_dependency_rights if item.role == "DEPENDENCY_RIGHTS" else item
+            for item in provisional.artifacts
+        ),
+        unresolved_blockers=provisional.unresolved_blockers,
+    )
+
+    for item in candidate.artifacts:
+        is_supply_chain_proof = item.role == "DEPENDENCY_RIGHTS"
+        store.publish_bytes(
+            artifact_id=item.artifact_id,
+            data=artifact_bytes[item.artifact_id],
+            media_type=(
+                supply_chain_module.SUPPLY_CHAIN_PROOF_MEDIA_TYPE
+                if is_supply_chain_proof
+                else RELEASE_MEDIA_TYPE
+            ),
+            rights={"storage": True, "export": False},
+            source_refs=[f"git:{source_sha}"],
+            metadata={
+                "evidence_kind": (
+                    supply_chain_module.SUPPLY_CHAIN_PROOF_EVIDENCE_KIND
+                    if is_supply_chain_proof
+                    else RELEASE_EVIDENCE_KIND
+                ),
+                "role": item.role,
+                "source_sha": source_sha,
+                "signature_status": item.signature_status,
+                "evidence_status": item.evidence_status,
+            },
+        )
+
     evidence_refs = tuple(
         EvidenceArtifactRef(
             artifact_id=item.artifact_id,
             sha256=item.artifact_sha256,
-            media_type=RELEASE_MEDIA_TYPE,
-            evidence_kind=RELEASE_EVIDENCE_KIND,
+            media_type=(
+                supply_chain_module.SUPPLY_CHAIN_PROOF_MEDIA_TYPE
+                if item.role == "DEPENDENCY_RIGHTS"
+                else RELEASE_MEDIA_TYPE
+            ),
+            evidence_kind=(
+                supply_chain_module.SUPPLY_CHAIN_PROOF_EVIDENCE_KIND
+                if item.role == "DEPENDENCY_RIGHTS"
+                else RELEASE_EVIDENCE_KIND
+            ),
             source_sha=item.source_sha,
         )
         for item in candidate.artifacts
@@ -215,15 +496,34 @@ def frozen_release(
         release_artifact_sha256=windows_package.artifact_sha256,
     )
     receipt = SignedQualificationAttestation(attestation, _sign(attestation))
-    decision = freeze_release_candidate(
-        candidate,
-        evidence_store=store,
-        evidence_root=evidence_root,
-        qualification_receipt=receipt,
-        qualification_policy=trust_policy,
-        expected_policy_id=trust_policy.policy_id,
-        expected_policy_version=trust_policy.policy_version,
-    )
+
+    def canonical_verify(receipt_arg, **kwargs):
+        return verify_qualification_attestation(
+            receipt_arg,
+            policy=trust_policy,
+            expected_policy_id=trust_policy.policy_id,
+            expected_policy_version=trust_policy.policy_version,
+            **kwargs,
+        )
+
+    with patch.object(
+        release_candidate_module,
+        "verify_canonical_qualification_attestation",
+        side_effect=canonical_verify,
+    ), patch.object(
+        supply_chain_module,
+        "verify_canonical_qualification_attestation",
+        side_effect=canonical_verify,
+    ):
+        decision = freeze_release_candidate(
+            candidate,
+            evidence_store=store,
+            evidence_root=evidence_root,
+            qualification_receipt=receipt,
+            qualification_policy=trust_policy,
+            expected_policy_id=trust_policy.policy_id,
+            expected_policy_version=trust_policy.policy_version,
+        )
     if decision.status != "FROZEN":
         raise AssertionError(decision.reasons)
     return decision
@@ -824,7 +1124,6 @@ class WindowsUpdatePlanTests(unittest.TestCase):
                 reconciliation_required_after_restore=True,
             )
 
-
     def test_checkpoint_enforces_order_and_exact_retry_is_idempotent(self):
         plan = build_windows_update_plan(
             current_release=self.current,
@@ -1027,7 +1326,6 @@ class WindowsUpdatePlanTests(unittest.TestCase):
             "|".join(payload["install_steps"]),
         )
 
-
     def test_checkpoint_serialization_roundtrip_is_restart_equivalent(self):
         plan = build_windows_update_plan(
             current_release=self.current,
@@ -1131,7 +1429,6 @@ class WindowsUpdatePlanTests(unittest.TestCase):
                 json.dumps(body, sort_keys=True, separators=(",", ":")),
             trust=self.trust,
             )
-
 
     def test_restart_assessment_uses_observed_state_not_checkpoint_hope(self):
         migration = MigrationEvidence(
@@ -1275,7 +1572,6 @@ class WindowsUpdatePlanTests(unittest.TestCase):
         )
         self.assertEqual(not_restored.disposition, "ROLLBACK_REQUIRED")
 
-
     def test_exact_identity_rejects_noncanonical_uppercase(self):
         with self.assertRaisesRegex(WindowsUpdateError, "lowercase"):
             BackupEvidence(
@@ -1294,7 +1590,6 @@ class WindowsUpdatePlanTests(unittest.TestCase):
                 verification_status="PASS",
                 rollback_mode="RESTORE_PRE_UPDATE_BACKUP",
             )
-
 
     def test_reversible_migration_requires_distinct_reverse_evidence(self):
         with self.assertRaisesRegex(
@@ -1367,7 +1662,6 @@ class WindowsUpdatePlanTests(unittest.TestCase):
                 rollback_mode="RESTORE_PRE_UPDATE_BACKUP",
                 reverse_evidence_sha256="sha256:" + "e" * 64,
             )
-
 
     def test_rehashed_backup_evidence_cannot_bypass_planner_gates(self):
         plan = build_windows_update_plan(

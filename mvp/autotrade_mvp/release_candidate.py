@@ -31,6 +31,12 @@ from .qualification_attestation import (
     verify_canonical_qualification_attestation,
 )
 
+from .supply_chain_qualification import (
+    SupplyChainEvidence,
+    SupplyChainQualification,
+    qualify_supply_chain,
+)
+
 
 class ReleaseCandidateError(ValueError):
     """Raised when release-candidate evidence is malformed."""
@@ -485,11 +491,15 @@ class ReleaseCandidateDecision:
     qualification_trust_root_id: str | None = None
     _verification_store: InitVar[ArtifactStore | None] = None
     _verification_root: InitVar[str | Path | None] = None
+    _supply_chain_evidence: InitVar[SupplyChainEvidence | None] = None
+    _supply_chain_receipt: InitVar[SignedQualificationAttestation | None] = None
 
     def __post_init__(
         self,
         _verification_store: ArtifactStore | None,
         _verification_root: str | Path | None,
+        _supply_chain_evidence: SupplyChainEvidence | None,
+        _supply_chain_receipt: SignedQualificationAttestation | None,
     ) -> None:
         if self.status not in {"FROZEN", "BLOCKED"}:
             raise ReleaseCandidateError("unsupported release-candidate status")
@@ -552,6 +562,7 @@ class ReleaseCandidateDecision:
                 "schema_contract_hash",
                 "artifacts",
                 "qualification",
+                "supply_chain",
             }:
                 raise ReleaseCandidateError(
                     "frozen release candidate manifest has unsupported structure"
@@ -645,6 +656,131 @@ class ReleaseCandidateDecision:
             if artifact_roles != sorted(artifact_roles):
                 raise ReleaseCandidateError(
                     "frozen release candidate artifacts are not in canonical role order"
+                )
+
+            windows_package = next(
+                item for item in parsed_artifacts
+                if item.role == "WINDOWS_PACKAGE"
+            )
+            dependency_rights = next(
+                item for item in parsed_artifacts
+                if item.role == "DEPENDENCY_RIGHTS"
+            )
+            supply_chain = manifest.get("supply_chain")
+            supply_fields = {
+                "qualification_id",
+                "attestation_id",
+                "attestation_digest",
+                "policy_id",
+                "trust_root_id",
+                "subject_requirement",
+                "release_artifact_id",
+                "release_artifact_sha256",
+                "dependency_rights_artifact_id",
+                "dependency_rights_artifact_sha256",
+            }
+            if type(supply_chain) is not dict or set(supply_chain) != supply_fields:
+                raise ReleaseCandidateError(
+                    "frozen release candidate requires canonical WP-64 proof identity"
+                )
+            supply_observed = {
+                "qualification_id": _text(
+                    supply_chain.get("qualification_id"),
+                    name="manifest.supply_chain.qualification_id",
+                ),
+                "attestation_id": _text(
+                    supply_chain.get("attestation_id"),
+                    name="manifest.supply_chain.attestation_id",
+                ),
+                "attestation_digest": _sha256(
+                    supply_chain.get("attestation_digest"),
+                    name="manifest.supply_chain.attestation_digest",
+                ),
+                "policy_id": _sha256(
+                    supply_chain.get("policy_id"),
+                    name="manifest.supply_chain.policy_id",
+                ),
+                "trust_root_id": _sha256(
+                    supply_chain.get("trust_root_id"),
+                    name="manifest.supply_chain.trust_root_id",
+                ),
+                "subject_requirement": _text(
+                    supply_chain.get("subject_requirement"),
+                    name="manifest.supply_chain.subject_requirement",
+                ),
+                "release_artifact_id": _artifact_id(
+                    supply_chain.get("release_artifact_id"),
+                    name="manifest.supply_chain.release_artifact_id",
+                ),
+                "release_artifact_sha256": _sha256(
+                    supply_chain.get("release_artifact_sha256"),
+                    name="manifest.supply_chain.release_artifact_sha256",
+                ),
+                "dependency_rights_artifact_id": _artifact_id(
+                    supply_chain.get("dependency_rights_artifact_id"),
+                    name="manifest.supply_chain.dependency_rights_artifact_id",
+                ),
+                "dependency_rights_artifact_sha256": _sha256(
+                    supply_chain.get("dependency_rights_artifact_sha256"),
+                    name="manifest.supply_chain.dependency_rights_artifact_sha256",
+                ),
+            }
+            if (
+                supply_observed["release_artifact_id"] != windows_package.artifact_id
+                or supply_observed["release_artifact_sha256"]
+                != windows_package.artifact_sha256
+            ):
+                raise ReleaseCandidateError(
+                    "frozen release candidate WP-64 proof is bound to a different Windows package"
+                )
+            if (
+                supply_observed["dependency_rights_artifact_id"]
+                != dependency_rights.artifact_id
+                or supply_observed["dependency_rights_artifact_sha256"]
+                != dependency_rights.artifact_sha256
+            ):
+                raise ReleaseCandidateError(
+                    "frozen release candidate dependency-rights artifact does not reference WP-64 proof"
+                )
+            if (
+                type(_verification_store) is not ArtifactStore
+                or _verification_root is None
+                or type(_supply_chain_evidence) is not SupplyChainEvidence
+                or type(_supply_chain_receipt) is not SignedQualificationAttestation
+            ):
+                raise ReleaseCandidateError(
+                    "frozen release candidate requires canonical WP-64 replay context"
+                )
+            try:
+                supply_result = qualify_supply_chain(
+                    _supply_chain_evidence,
+                    evidence_store=_verification_store,
+                    evidence_root=_verification_root,
+                    trust_receipt=_supply_chain_receipt,
+                )
+            except (TypeError, ValueError) as error:
+                raise ReleaseCandidateError(
+                    "frozen release candidate WP-64 proof cannot be canonically replayed"
+                ) from error
+            supply_expected = {
+                "qualification_id": supply_result.qualification_id,
+                "attestation_id": supply_result.accepted_attestation_id,
+                "attestation_digest": supply_result.accepted_attestation_digest,
+                "policy_id": supply_result.accepted_policy_id,
+                "trust_root_id": supply_result.accepted_trust_root_id,
+                "subject_requirement": supply_result.subject_requirement,
+                "release_artifact_id": supply_result.release_artifact_id,
+                "release_artifact_sha256": supply_result.release_artifact_sha256,
+                "dependency_rights_artifact_id": dependency_rights.artifact_id,
+                "dependency_rights_artifact_sha256": dependency_rights.artifact_sha256,
+            }
+            if (
+                supply_result.status != "PASS"
+                or supply_observed != supply_expected
+                or any(value is None for value in supply_expected.values())
+            ):
+                raise ReleaseCandidateError(
+                    "frozen release candidate WP-64 proof identity is not canonical"
                 )
 
             qualification = manifest.get("qualification")
@@ -790,12 +926,33 @@ class ReleaseCandidateDecision:
 def _canonical_manifest(
     candidate: ReleaseCandidateInput,
     accepted: AcceptedQualificationAttestation,
+    supply_chain: SupplyChainQualification,
 ) -> str:
     body = {
         "release_id": candidate.release_id,
         "source_sha": candidate.source_sha,
         "baseline_hash": candidate.baseline_hash,
         "schema_contract_hash": candidate.schema_contract_hash,
+        "supply_chain": {
+            "qualification_id": supply_chain.qualification_id,
+            "attestation_id": supply_chain.accepted_attestation_id,
+            "attestation_digest": supply_chain.accepted_attestation_digest,
+            "policy_id": supply_chain.accepted_policy_id,
+            "trust_root_id": supply_chain.accepted_trust_root_id,
+            "subject_requirement": supply_chain.subject_requirement,
+            "release_artifact_id": supply_chain.release_artifact_id,
+            "release_artifact_sha256": supply_chain.release_artifact_sha256,
+            "dependency_rights_artifact_id": next(
+                artifact.artifact_id
+                for artifact in candidate.artifacts
+                if artifact.role == "DEPENDENCY_RIGHTS"
+            ),
+            "dependency_rights_artifact_sha256": next(
+                artifact.artifact_sha256
+                for artifact in candidate.artifacts
+                if artifact.role == "DEPENDENCY_RIGHTS"
+            ),
+        },
         "qualification": {
             "attestation_id": accepted.attestation_id,
             "attestation_digest": accepted.attestation_digest,
@@ -943,6 +1100,8 @@ def freeze_release_candidate(
     evidence_store: ArtifactStore | None = None,
     evidence_root: str | Path | None = None,
     qualification_receipt: SignedQualificationAttestation | None = None,
+    supply_chain_evidence: SupplyChainEvidence | None = None,
+    supply_chain_receipt: SignedQualificationAttestation | None = None,
     qualification_policy: QualificationTrustPolicy | None = None,
     expected_policy_id: str | None = None,
     expected_policy_version: str | None = None,
@@ -976,6 +1135,7 @@ def freeze_release_candidate(
 
     reasons: list[str] = []
     accepted: AcceptedQualificationAttestation | None = None
+    supply_chain_qualification: SupplyChainQualification | None = None
     trusted_read = None
     if evidence_store is not None and evidence_root is not None:
         try:
@@ -1042,6 +1202,50 @@ def freeze_release_candidate(
                 ):
                     reasons.append("qualification_evidence_set_mismatch")
 
+    windows_package = by_role.get("WINDOWS_PACKAGE")
+    dependency_rights = by_role.get("DEPENDENCY_RIGHTS")
+    if (
+        windows_package is None
+        or dependency_rights is None
+        or supply_chain_evidence is None
+        or supply_chain_receipt is None
+        or evidence_store is None
+        or evidence_root is None
+    ):
+        reasons.append("supply_chain_qualification_unavailable")
+    else:
+        try:
+            supply_chain_qualification = qualify_supply_chain(
+                supply_chain_evidence,
+                evidence_store=evidence_store,
+                evidence_root=evidence_root,
+                trust_receipt=supply_chain_receipt,
+            )
+        except (TypeError, ValueError):
+            reasons.append("supply_chain_qualification_invalid")
+        else:
+            supply_identity = (
+                supply_chain_qualification.accepted_attestation_id,
+                supply_chain_qualification.accepted_attestation_digest,
+                supply_chain_qualification.accepted_policy_id,
+                supply_chain_qualification.accepted_trust_root_id,
+                supply_chain_qualification.subject_requirement,
+            )
+            if supply_chain_qualification.status != "PASS":
+                reasons.append(
+                    "supply_chain_qualification_not_pass:"
+                    + supply_chain_qualification.status
+                )
+            elif any(value is None for value in supply_identity):
+                reasons.append("supply_chain_qualification_identity_missing")
+            elif (
+                supply_chain_qualification.release_artifact_id
+                != windows_package.artifact_id
+                or supply_chain_qualification.release_artifact_sha256
+                != windows_package.artifact_sha256
+            ):
+                reasons.append("supply_chain_release_artifact_mismatch")
+
     for artifact in candidate.artifacts:
         if artifact.source_sha != candidate.source_sha:
             reasons.append(f"source_sha_mismatch:{artifact.role}")
@@ -1080,13 +1284,20 @@ def freeze_release_candidate(
             manifest_sha256=None,
         )
 
-    if accepted is None or qualification_receipt is None:
+    if (
+        accepted is None
+        or qualification_receipt is None
+        or supply_chain_qualification is None
+        or supply_chain_evidence is None
+        or supply_chain_receipt is None
+    ):
         raise ReleaseCandidateError(
             "release freeze reached terminal path without accepted qualification"
         )
     manifest = _canonical_manifest(
         candidate,
         accepted,
+        supply_chain_qualification,
     )
     digest = "sha256:" + sha256(manifest.encode("utf-8")).hexdigest()
     return ReleaseCandidateDecision(
@@ -1100,4 +1311,6 @@ def freeze_release_candidate(
         qualification_trust_root_id=accepted.trust_root_id,
         _verification_store=evidence_store,
         _verification_root=evidence_root,
+        _supply_chain_evidence=supply_chain_evidence,
+        _supply_chain_receipt=supply_chain_receipt,
     )

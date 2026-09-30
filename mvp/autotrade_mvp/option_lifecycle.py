@@ -21,6 +21,7 @@ from typing import Any, Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
 from .accounting import JournalTransaction, posting, reverse_transaction
+from .exact_decimal import ExactDecimalError, exact_abs, is_exact_decimal_multiple
 from .instruments import InstrumentRegistry, InstrumentVersion
 from .options import (
     DeliverableLeg,
@@ -421,6 +422,17 @@ def _bind_version(
         raise OptionLifecycleError("venue_id does not match instrument version")
     if version.asset_class != "OPTION":
         raise OptionLifecycleError("lifecycle event is not bound to an option")
+    try:
+        quantity = exact_abs(observation.signed_contracts)
+        aligned = is_exact_decimal_multiple(quantity, version.quantity_step)
+    except ExactDecimalError as error:
+        raise OptionLifecycleError(
+            "signed_contracts exceed canonical instrument quantity resource envelope"
+        ) from error
+    if not aligned:
+        raise OptionLifecycleError(
+            "signed_contracts are not aligned to canonical instrument quantity_step"
+        )
     return version
 
 

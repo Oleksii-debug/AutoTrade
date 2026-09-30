@@ -53,6 +53,17 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
             self.assertIsNotNone(first["fill_id"])
 
             reopened = JournalStore(Path(directory) / "journal.sqlite3")
+            submission = reopened.load_events_by_aggregate_type("submission_attempt")
+            self.assertEqual(submission[0]["event_type"], "SubmissionPrepared")
+            self.assertEqual(
+                submission[0]["payload"]["submission_scope"],
+                {
+                    "provider_id": PROVIDER,
+                    "provider_environment": ENVIRONMENT,
+                    "account_id": ACCOUNT,
+                    "environment": ENVIRONMENT,
+                },
+            )
             book = DurableProviderEconomicBook(
                 reopened, provider_id=PROVIDER, account_id=ACCOUNT,
                 environment=ENVIRONMENT,

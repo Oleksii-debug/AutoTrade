@@ -18,13 +18,20 @@ from mvp.autotrade_mvp.persistence import JournalStore
 NOW = datetime(2026, 9, 25, 20, 0, tzinfo=timezone.utc)
 
 
-def claim(source: str, *, observed_at: datetime) -> CapabilityClaim:
+def claim(
+    source: str,
+    *,
+    observed_at: datetime,
+    provider_id="simulated",
+    provider_environment=None,
+) -> CapabilityClaim:
     return CapabilityClaim(
         source=source,
-        provider_id="simulated",
+        provider_id=provider_id,
         account_id="paper-account",
         entity_id="entity-1",
         environment="PAPER",
+        provider_environment=provider_environment,
         instrument_version="instrument-v1",
         observed_at=observed_at,
         expires_at=observed_at + timedelta(minutes=10),
@@ -53,11 +60,22 @@ def claim(source: str, *, observed_at: datetime) -> CapabilityClaim:
     )
 
 
-def verified(snapshot_id: str, observed_at: datetime):
+def verified(
+    snapshot_id: str,
+    observed_at: datetime,
+    *,
+    provider_id="simulated",
+    provider_environment=None,
+):
     return derive_capability_snapshot(
         snapshot_id=snapshot_id,
         claims=tuple(
-            claim(source, observed_at=observed_at)
+            claim(
+                source,
+                observed_at=observed_at,
+                provider_id=provider_id,
+                provider_environment=provider_environment,
+            )
             for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
         ),
         observed_at=observed_at,
@@ -193,6 +211,103 @@ class DurableCapabilityRegistryTests(unittest.TestCase):
                     time_in_force="DAY",
                     permission_scope="ORDER.WRITE",
                 )
+            )
+
+    def test_bybit_testnet_and_demo_durable_histories_are_independent(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            registry = DurableCapabilityRegistry(JournalStore(path))
+            testnet = verified(
+                "11111111-1111-4111-8111-111111111111",
+                NOW,
+                provider_id="BYBIT",
+                provider_environment="TESTNET",
+            )
+            demo = verified(
+                "22222222-2222-4222-8222-222222222222",
+                NOW,
+                provider_id="BYBIT",
+                provider_environment="DEMO",
+            )
+            self.assertTrue(registry.add(testnet))
+            self.assertTrue(registry.add(demo))
+            events = registry.store.load_events_by_aggregate_type("capability_history")
+            self.assertEqual(len(events), 2)
+            self.assertEqual(len({event["aggregate_id"] for event in events}), 2)
+
+            self.assertEqual(
+                registry.require_verified(
+                    provider_id="BYBIT",
+                    account_id="paper-account",
+                    entity_id="entity-1",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    instrument_version="instrument-v1",
+                    at=NOW + timedelta(seconds=1),
+                ),
+                testnet,
+            )
+            self.assertEqual(
+                registry.require_verified(
+                    provider_id="BYBIT",
+                    account_id="paper-account",
+                    entity_id="entity-1",
+                    environment="PAPER",
+                    provider_environment="DEMO",
+                    instrument_version="instrument-v1",
+                    at=NOW + timedelta(seconds=1),
+                ),
+                demo,
+            )
+
+            restarted = DurableCapabilityRegistry(JournalStore(path))
+            with self.assertRaisesRegex(CapabilityError, "fresh current-process"):
+                restarted.require_verified(
+                    provider_id="BYBIT",
+                    account_id="paper-account",
+                    entity_id="entity-1",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    instrument_version="instrument-v1",
+                    at=NOW + timedelta(seconds=1),
+                )
+            with self.assertRaisesRegex(CapabilityError, "fresh current-process"):
+                restarted.require_verified(
+                    provider_id="BYBIT",
+                    account_id="paper-account",
+                    entity_id="entity-1",
+                    environment="PAPER",
+                    provider_environment="DEMO",
+                    instrument_version="instrument-v1",
+                    at=NOW + timedelta(seconds=1),
+                )
+
+            self.assertFalse(restarted.add(testnet))
+            self.assertEqual(
+                restarted.require_verified(
+                    provider_id="BYBIT",
+                    account_id="paper-account",
+                    entity_id="entity-1",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    instrument_version="instrument-v1",
+                    at=NOW + timedelta(seconds=1),
+                ),
+                testnet,
+            )
+            with self.assertRaisesRegex(CapabilityError, "fresh current-process"):
+                restarted.require_verified(
+                    provider_id="BYBIT",
+                    account_id="paper-account",
+                    entity_id="entity-1",
+                    environment="PAPER",
+                    provider_environment="DEMO",
+                    instrument_version="instrument-v1",
+                    at=NOW + timedelta(seconds=1),
+                )
+            self.assertEqual(
+                len(restarted.store.load_events_by_aggregate_type("capability_history")),
+                2,
             )
 
     def test_newer_unknown_refresh_persists_and_supersedes_verified_history(self):

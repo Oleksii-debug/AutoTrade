@@ -1,5 +1,5 @@
 from datetime import date, datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 import unittest
 
 from mvp.autotrade_mvp.corporate_actions import (
@@ -995,6 +995,120 @@ class CorporateSettlementTests(unittest.TestCase):
             first_run.applied_event_ids,
             ("split-before-rename", "symbol-change-after-split"),
         )
+
+
+
+
+class CorporateActionExactArithmeticTests(unittest.TestCase):
+    _PRECISIONS = (6, 10, 28, 80)
+    _ROUNDINGS = (ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN)
+
+    def test_dividend_economics_are_context_invariant(self):
+        expected_entitlement = Decimal("12345678902469135780.2469135780123456789")
+        expected_unsettled = Decimal("12345678902469135780.24691357801234567891")
+        event = corporate_event(
+            event_id="exact-dividend",
+            kind="CASH_DIVIDEND",
+            effective_date=date(2026, 1, 2),
+            source_revision="r1",
+            payload={"per_share": "1.0000000001", "currency": "USD"},
+        )
+
+        for precision in self._PRECISIONS:
+            for rounding in self._ROUNDINGS:
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        book = bound_book(
+                            state(
+                                quantity="12345678901234567890.123456789",
+                                unsettled_cash="0.00000000000000000001",
+                            )
+                        )
+                        result = book.apply(event)
+                        self.assertEqual(result.economic_pnl, expected_entitlement)
+                        self.assertEqual(result.after.unsettled_cash, expected_unsettled)
+
+    def test_split_quantity_is_context_invariant(self):
+        expected = Decimal("18518518351851851835.1851851835")
+        event = corporate_event(
+            event_id="exact-split",
+            kind="SPLIT",
+            effective_date=date(2026, 1, 2),
+            source_revision="r1",
+            payload={"numerator": "3", "denominator": "2"},
+        )
+
+        for precision in self._PRECISIONS:
+            for rounding in self._ROUNDINGS:
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        book = bound_book(
+                            state(quantity="12345678901234567890.123456789")
+                        )
+                        result = book.apply(event)
+                        self.assertEqual(result.after.quantity, expected)
+                        self.assertEqual(result.after.total_basis, Decimal("1000"))
+
+    def test_nonterminating_split_fails_before_book_mutation(self):
+        book = bound_book(state(quantity="1"))
+        before = book.state
+        event = corporate_event(
+            event_id="nonterminating-split",
+            kind="SPLIT",
+            effective_date=date(2026, 1, 2),
+            source_revision="r1",
+            payload={"numerator": "1", "denominator": "3"},
+        )
+
+        with self.assertRaisesRegex(ValueError, "not an exact terminating decimal"):
+            book.apply(event)
+
+        self.assertEqual(book.state, before)
+        self.assertEqual(book.applied_event_ids, ())
+
+    def test_settlement_helpers_preserve_high_significance_economics(self):
+        initial = state(
+            quantity="0",
+            total_basis="0",
+            settled_cash="12345678901234567890.123456789",
+            unsettled_cash="0.00000000000000000009",
+        )
+        expected_settled = Decimal("12345678901234567890.123456799")
+        expected_unsettled = Decimal("0.00000000000000000008")
+
+        for precision in self._PRECISIONS:
+            for rounding in self._ROUNDINGS:
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        result = settle_cash(
+                            initial,
+                            Decimal("0.00000000000000000001"),
+                        )
+                        self.assertEqual(result.settled_cash, expected_settled)
+                        self.assertEqual(result.unsettled_cash, expected_unsettled)
+
+    def test_decimal_subclasses_are_rejected_at_state_boundary(self):
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                raise AssertionError("virtual Decimal method must not run")
+
+            def as_tuple(self):
+                raise AssertionError("virtual Decimal method must not run")
+
+        with self.assertRaisesRegex(TypeError, "exact built-in Decimal"):
+            EquityState.create(
+                symbol="AAA",
+                quantity=HostileDecimal("1"),
+                total_basis="1",
+                settled_cash="1",
+                currency="USD",
+            )
 
 
 

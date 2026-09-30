@@ -14,16 +14,18 @@ from research.autotrade_research.artifacts.store import (
 
 
 class DurableReservationArtifactSnapshotTests(unittest.TestCase):
-    def test_terminal_release_snapshot_failure_is_pre_mutation_and_never_split_reads(self):
+    def test_terminal_release_missing_private_snapshot_is_pre_mutation_and_ignores_caller_store_methods(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             journal = JournalStore(root / "journal.sqlite")
-            artifacts = ArtifactStore(root / "artifacts")
+            artifact_root = root / "artifacts"
+            artifacts = ArtifactStore(artifact_root)
             book = DurableReservationBook(
                 journal,
                 environment="PAPER",
                 account_id="paper-account",
                 resolution_artifact_store=artifacts,
+                resolution_artifact_root=artifact_root,
             )
             book.reserve(
                 command_id="reserve",
@@ -75,9 +77,7 @@ class DurableReservationArtifactSnapshotTests(unittest.TestCase):
                         ),
                     )
 
-            snapshot_read.assert_called_once_with(
-                "11111111-1111-4111-8111-111111111111"
-            )
+            snapshot_read.assert_not_called()
             legacy_manifest.assert_not_called()
             legacy_body.assert_not_called()
             self.assertEqual(book.version, before_version)

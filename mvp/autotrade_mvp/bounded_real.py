@@ -16,6 +16,7 @@ import re
 from typing import FrozenSet, Iterable
 from uuid import UUID
 
+from research.autotrade_research.artifacts import trusted_authenticated_reader
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 from .qualification_attestation import (
@@ -286,12 +287,31 @@ class ArtifactStoreEvidenceVerifier:
 
     VERIFIER_ID = "AUTOTRADE_ARTIFACT_STORE_BOUNDED_REAL_V1"
 
-    def __init__(self, store: object):
+    def __init__(
+        self,
+        store: object,
+        *,
+        evidence_root: str | Path,
+    ):
         if type(store) is not ArtifactStore:
-            raise TypeError("bounded-real integrity verification requires canonical ArtifactStore")
+            raise TypeError(
+                "bounded-real integrity verification requires canonical ArtifactStore"
+            )
+        if not isinstance(evidence_root, (str, Path)):
+            raise TypeError("evidence_root must be a string or Path")
+        if isinstance(evidence_root, str) and not evidence_root.strip():
+            raise ValueError("evidence_root must be non-empty")
+        root = Path(evidence_root).absolute()
         self._store = store
-        root = str(Path(store.root).resolve())
-        self._store_identity = "sha256:" + hashlib.sha256(root.encode("utf-8")).hexdigest()
+        self._evidence_root = root
+        self._read_snapshot = trusted_authenticated_reader(
+            root,
+            publication_store=store,
+        )
+        self._store_identity = (
+            "sha256:"
+            + hashlib.sha256(str(root).encode("utf-8")).hexdigest()
+        )
 
     @property
     def identity(self) -> str:
@@ -300,6 +320,10 @@ class ArtifactStoreEvidenceVerifier:
     @property
     def store(self) -> ArtifactStore:
         return self._store
+
+    @property
+    def evidence_root(self) -> Path:
+        return self._evidence_root
 
     @staticmethod
     def _manifest_hash(manifest: dict) -> str:
@@ -317,8 +341,7 @@ class ArtifactStoreEvidenceVerifier:
 
     def verify(self, ref: ImmutableEvidenceRef) -> EvidenceVerification:
         try:
-            manifest = self._store.load_manifest(ref.artifact_id)
-            payload = self._store.read_bytes(ref.artifact_id)
+            manifest, payload = self._read_snapshot(ref.artifact_id)
         except FileNotFoundError:
             return EvidenceVerification(
                 valid=False,
@@ -395,10 +418,17 @@ class ArtifactStoreEvidenceVerifier:
         return EvidenceVerification(valid=True)
 
 
-def artifact_store_evidence_verifier(store: object) -> ArtifactStoreEvidenceVerifier:
+def artifact_store_evidence_verifier(
+    store: object,
+    *,
+    evidence_root: str | Path,
+) -> ArtifactStoreEvidenceVerifier:
     """Create the canonical bounded-real immutable-evidence integrity verifier."""
 
-    return ArtifactStoreEvidenceVerifier(store)
+    return ArtifactStoreEvidenceVerifier(
+        store,
+        evidence_root=evidence_root,
+    )
 
 
 @dataclass(frozen=True)
@@ -721,6 +751,7 @@ def assess_bounded_real_qualification(
                 qualification_receipt,
                 policy=qualification_policy,
                 evidence_store=evidence_verifier.store,
+                evidence_root=evidence_verifier.evidence_root,
                 expected_policy_id=expected_policy_id,
                 expected_policy_version=expected_policy_version,
                 expected_source_sha=envelope.source_sha,

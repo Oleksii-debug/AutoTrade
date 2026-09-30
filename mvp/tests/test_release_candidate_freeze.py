@@ -213,7 +213,11 @@ def freeze_with_integrity_store(
             object_path = store.objects / digest[:2] / digest
             object_path.write_bytes(b"corrupt")
         if not with_attestation and receipt_override is None:
-            return freeze_release_candidate(candidate, evidence_store=store)
+            return freeze_release_candidate(
+                candidate,
+                evidence_store=store,
+                evidence_root=directory,
+            )
         trust_root = _trust_root()
         trust_policy = (
             policy_override
@@ -231,6 +235,7 @@ def freeze_with_integrity_store(
         return freeze_release_candidate(
             candidate,
             evidence_store=store,
+            evidence_root=directory,
             qualification_receipt=receipt,
             qualification_policy=trust_policy,
             expected_policy_id=trust_policy.policy_id,

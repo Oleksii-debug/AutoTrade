@@ -8,7 +8,7 @@ same source revision.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -29,7 +29,11 @@ from mvp.autotrade_mvp.qualification_attestation import (
     parse_signed_qualification_attestation,
     verify_qualification_attestation,
 )
-from research.autotrade_research.artifacts.store import ArtifactStore
+from research.autotrade_research.artifacts import (
+    ArtifactIntegrityError,
+    ArtifactStore,
+    trusted_authenticated_reader,
+)
 from tools.check_nvda_qualification import (
     NvdaQualificationError,
     validate_release_artifact_binding,
@@ -92,16 +96,26 @@ _WHOLE_PRODUCT_PROTOCOL_VERSION = "1.0.0"
 @dataclass(frozen=True)
 class WholeProductEvidenceContext:
     evidence_store: ArtifactStore
+    evidence_root: Path
     policy: QualificationTrustPolicy
     expected_policy_id: str
     expected_policy_version: str
     nvda_receipt: SignedQualificationAttestation | None = None
     nvda_requirements_json: str | None = None
     nvda_release_artifact: Path | None = None
+    _read_authenticated_snapshot: Any = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.evidence_store, ArtifactStore):
             raise TypeError("evidence_store must be ArtifactStore")
+        if not isinstance(self.evidence_root, Path):
+            raise TypeError("evidence_root must be a Path")
+        if not self.evidence_root.is_dir():
+            raise ValueError("evidence_root must be an existing directory")
         if not isinstance(self.policy, QualificationTrustPolicy):
             raise TypeError("policy must be QualificationTrustPolicy")
         if not isinstance(self.expected_policy_id, str) or not self.expected_policy_id:
@@ -142,6 +156,14 @@ class WholeProductEvidenceContext:
             Path,
         ):
             raise TypeError("nvda_release_artifact must be a Path")
+        object.__setattr__(
+            self,
+            "_read_authenticated_snapshot",
+            trusted_authenticated_reader(
+                self.evidence_root,
+                publication_store=self.evidence_store,
+            ),
+        )
 
 
 class ProductCompletionError(ValueError):
@@ -262,7 +284,7 @@ def _terminal_nvda_status(
         return False
 
     try:
-        raw_evidence = evidence_context.evidence_store.read_bytes(
+        _manifest, raw_evidence = evidence_context._read_authenticated_snapshot(
             matching_refs[0].artifact_id
         )
         if (
@@ -294,10 +316,12 @@ def _terminal_nvda_status(
             receipt=receipt,
             policy=evidence_context.policy,
             evidence_store=evidence_context.evidence_store,
+            evidence_root=evidence_context.evidence_root,
             expected_policy_id=evidence_context.expected_policy_id,
             expected_policy_version=evidence_context.expected_policy_version,
         )
     except (
+        ArtifactIntegrityError,
         FileNotFoundError,
         NvdaQualificationError,
         QualificationTrustError,
@@ -344,6 +368,7 @@ def _independently_verified_evidence(
             receipt,
             policy=evidence_context.policy,
             evidence_store=evidence_context.evidence_store,
+            evidence_root=evidence_context.evidence_root,
             expected_policy_id=evidence_context.expected_policy_id,
             expected_policy_version=evidence_context.expected_policy_version,
             expected_source_sha=exact_source_sha,
@@ -605,6 +630,7 @@ def main() -> int:
     parser.add_argument("--nvda-release-artifact", type=Path)
     parser.add_argument("--source-sha")
     parser.add_argument("--evidence-store", type=Path)
+    parser.add_argument("--evidence-root", type=Path)
     parser.add_argument("--qualification-policy", type=Path)
     parser.add_argument("--expected-policy-id")
     parser.add_argument("--expected-policy-version")
@@ -615,6 +641,7 @@ def main() -> int:
         qualification = _load(args.qualification, name="qualification")
         trust_values = (
             args.evidence_store,
+            args.evidence_root,
             args.qualification_policy,
             args.expected_policy_id,
             args.expected_policy_version,
@@ -644,6 +671,10 @@ def main() -> int:
                 raise ProductCompletionError(
                     "whole-product evidence store must be an existing directory"
                 )
+            if not args.evidence_root.is_dir():
+                raise ProductCompletionError(
+                    "whole-product evidence root must be an existing directory"
+                )
             try:
                 policy = parse_qualification_trust_policy(
                     _load(args.qualification_policy, name="qualification trust policy")
@@ -665,6 +696,7 @@ def main() -> int:
                     )
                 evidence_context = WholeProductEvidenceContext(
                     evidence_store=ArtifactStore(args.evidence_store),
+                    evidence_root=args.evidence_root,
                     policy=policy,
                     expected_policy_id=args.expected_policy_id,
                     expected_policy_version=args.expected_policy_version,

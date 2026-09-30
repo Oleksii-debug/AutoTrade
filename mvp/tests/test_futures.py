@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 from fractions import Fraction
 import unittest
 
@@ -23,6 +23,7 @@ from mvp.autotrade_mvp.futures import (
     replay_variation_margin,
     settle_fraction,
     settle_and_book_inverse_variation_margin,
+    settlement_identity_digest,
     unrealized_inverse_after_variation,
     unrealized_after_variation,
 )
@@ -379,6 +380,24 @@ class FuturesLifecycleTests(unittest.TestCase):
             apply_variation_margin(after_s2, delayed)
         self.assertEqual(after_s2.last_settlement_price, Decimal("105"))
         self.assertEqual(after_s2.cumulative_variation_margin, Decimal("100"))
+
+    def test_settlement_identity_digest_is_context_independent(self):
+        contract = self._linear_contract()
+        observed = []
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING):
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        evidence = self._settlement(
+                            contract,
+                            "high-significance",
+                            "12345678901234567890.123456789",
+                            sequence=19,
+                        )
+                        observed.append(settlement_identity_digest(evidence))
+        self.assertTrue(all(digest == observed[0] for digest in observed))
 
     def test_same_settlement_identity_with_changed_economics_conflicts(self):
         contract = self._linear_contract()

@@ -266,6 +266,30 @@ class DeterministicStrategyTests(unittest.TestCase):
                 json.dumps(payload, sort_keys=True, separators=(",", ":"))
             )
 
+    def test_snapshot_restore_rejects_duplicate_and_noncanonical_json_before_replay(self):
+        strategy = ReturnThresholdBaseline(
+            lookback=2, threshold="0.01", proposal_quantity="1"
+        )
+        strategy.ingest(obs(0, "100"), simulation_time=BASE)
+        canonical = strategy.snapshot()
+        self.assertIn('"lookback":2', canonical)
+        self.assertIn('"price":"100"', canonical)
+
+        invalid = (
+            canonical.replace('"lookback":2', '"lookback":2,"lookback":2', 1),
+            canonical.replace('"price":"100"', '"price":"100","price":"100"', 1),
+            canonical.replace('"lookback":2', '"lookback":NaN', 1),
+            canonical.replace('"lookback":2', '"lookback":Infinity', 1),
+            canonical.replace('"lookback":2', '"lookback":2.0', 1),
+            canonical.replace('"lookback":2', '"lookback":' + "9" * 257, 1),
+            canonical.replace('"schema_version":5', '"schema_version":true', 1),
+        )
+        for index, raw in enumerate(invalid):
+            with self.subTest(index=index), self.assertRaises(ValueError):
+                ReturnThresholdBaseline.restore(raw)
+        restored = ReturnThresholdBaseline.restore(canonical)
+        self.assertEqual(restored.snapshot(), canonical)
+
     def test_schema_v1_snapshot_remains_readable(self):
         snapshot_v1 = json.dumps(
             {

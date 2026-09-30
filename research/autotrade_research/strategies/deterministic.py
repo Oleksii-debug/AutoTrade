@@ -22,6 +22,7 @@ from autotrade_numeric import (
     is_exact_decimal_multiple,
     round_fraction_to_quantum,
     parse_bounded_exact_decimal,
+    parse_bounded_json_integer_token,
 )
 
 
@@ -1310,11 +1311,34 @@ class ReturnThresholdBaseline:
 
     @classmethod
     def restore(cls, snapshot: str) -> "ReturnThresholdBaseline":
+        def unique_keys(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("strategy snapshot contains duplicate JSON keys")
+                result[key] = value
+            return result
+
+        def deny_noninteger_numeric(_text):
+            # Prices, threshold and quantity have canonical string authority;
+            # unexpected float/nonfinite JSON tokens cannot be reconstructed.
+            raise ValueError("strategy snapshot contains forbidden JSON numeric token")
+
         try:
-            payload = json.loads(snapshot)
-        except (TypeError, json.JSONDecodeError) as error:
+            payload = json.loads(
+                snapshot,
+                object_pairs_hook=unique_keys,
+                parse_int=parse_bounded_json_integer_token,
+                parse_float=deny_noninteger_numeric,
+                parse_constant=deny_noninteger_numeric,
+            )
+        except (TypeError, ValueError) as error:
             raise ValueError("strategy snapshot is invalid") from error
-        if not isinstance(payload, dict) or payload.get("schema_version") not in {1, 2, 3, 4, 5}:
+        if (
+            type(payload) is not dict
+            or type(payload.get("schema_version")) is not int
+            or payload["schema_version"] not in {1, 2, 3, 4, 5}
+        ):
             raise ValueError("unsupported strategy snapshot")
         version = payload["schema_version"]
         expected = {"schema_version", "lookback", "threshold", "proposal_quantity", "history"}

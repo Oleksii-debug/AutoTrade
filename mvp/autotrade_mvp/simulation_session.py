@@ -361,12 +361,20 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         _event(store, "SimulationSessionCompleted", episode_id, result, timestamp)
         return {**result, "resumed": False}
 
+    submission_scope = {
+        "provider_id": PROVIDER,
+        "provider_environment": ENVIRONMENT,
+        "account_id": ACCOUNT,
+        "environment": ENVIRONMENT,
+    }
+
     def final_check(candidate_hash, current_time):
         return authority.dispatch_allowed(
             admission_id, intent_hash=candidate_hash, account_id=ACCOUNT,
             environment=ENVIRONMENT, instrument_id=INSTRUMENT_ID,
             instrument_version=1, action="ORDER.SUBMIT", now=current_time,
             capability_snapshot_id="simulated-capability-v1",
+            submission_scope=submission_scope,
         )
 
     attempt_id = _uuid("attempt", episode_id)
@@ -382,6 +390,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         },
         now=timestamp, authority_check=final_check,
         transport_send=provider.transport_send,
+        submission_scope=submission_scope,
     )
     if dispatch.status != "SENT":
         return {

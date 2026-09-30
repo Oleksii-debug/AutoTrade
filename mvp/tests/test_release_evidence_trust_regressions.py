@@ -13,6 +13,7 @@ from mvp.autotrade_mvp.supply_chain_qualification import (
 
 
 SOURCE = "1" * 40
+OTHER_SOURCE = "2" * 40
 
 
 def _digest(char: str) -> str:
@@ -185,7 +186,12 @@ class ReleaseEvidenceTrustRegressionTests(unittest.TestCase):
                 return manifest, verified_bytes
             return manifest, replacement_bytes
 
-        parsed = (object(), object())
+        parsed_evidence = type(
+            "ParsedEvidence",
+            (),
+            {"release_commit_sha": SOURCE},
+        )()
+        parsed = (parsed_evidence, object())
         with patch.object(
             release_candidate_module,
             "parse_supply_chain_proof_bytes",
@@ -196,9 +202,56 @@ class ReleaseEvidenceTrustRegressionTests(unittest.TestCase):
                 artifact,
             )
 
-        self.assertIs(result, parsed)
+        self.assertEqual(result, parsed)
         self.assertEqual(reads, 1)
         parser.assert_called_once_with(verified_bytes)
+
+    def test_supply_chain_proof_rejects_cross_source_signed_payload(self):
+        verified_bytes = b"verified durable WP-64 proof for a different source"
+        artifact = ReleaseArtifactEvidence.create(
+            role="DEPENDENCY_RIGHTS",
+            artifact_id="ffffffff-ffff-4fff-8fff-ffffffffffff",
+            artifact_sha256=(
+                "sha256:" + sha256(verified_bytes).hexdigest()
+            ),
+            source_sha=SOURCE,
+            signature_status="NOT_APPLICABLE",
+            evidence_status="PASS",
+        )
+        manifest = {
+            "manifest_hash": _digest("e"),
+            "sha256": artifact.artifact_sha256,
+            "media_type": supply_chain_module.SUPPLY_CHAIN_PROOF_MEDIA_TYPE,
+            "source_refs": [f"git:{SOURCE}"],
+            "metadata": {
+                "evidence_kind": (
+                    supply_chain_module.SUPPLY_CHAIN_PROOF_EVIDENCE_KIND
+                ),
+                "role": artifact.role,
+                "source_sha": SOURCE,
+                "signature_status": artifact.signature_status,
+                "evidence_status": artifact.evidence_status,
+            },
+        }
+        wrong_source_evidence = type(
+            "ParsedEvidence",
+            (),
+            {"release_commit_sha": OTHER_SOURCE},
+        )()
+
+        with patch.object(
+            release_candidate_module,
+            "parse_supply_chain_proof_bytes",
+            return_value=(wrong_source_evidence, object()),
+        ):
+            with self.assertRaisesRegex(
+                release_candidate_module.ReleaseCandidateError,
+                "source SHA does not match dependency-rights artifact",
+            ):
+                release_candidate_module._load_supply_chain_proof(
+                    lambda _artifact_id: (manifest, verified_bytes),
+                    artifact,
+                )
 
 
 if __name__ == "__main__":

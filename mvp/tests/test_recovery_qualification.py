@@ -25,6 +25,8 @@ from mvp.autotrade_mvp.recovery_qualification import (
     recovery_evidence_receipt_bytes,
     recovery_evidence_receipt_metadata,
     recovery_policy_subject_requirement,
+    recovery_raw_evidence_metadata,
+    required_recovery_raw_evidence_roles,
 )
 from mvp.tests.test_qualification_attestation import (
     attestation,
@@ -91,8 +93,23 @@ def evidence(
     test_run_id=None,
     tests_run=None,
     unresolved_limits=(),
-    raw_evidence_refs=(),
+    raw_evidence_refs=None,
 ):
+    run_id = test_run_id or f"run-{scenario.value.lower()}-001"
+    if raw_evidence_refs is None:
+        raw_evidence_refs = tuple(
+            raw_ref(
+                scenario,
+                role,
+                source_sha=source_sha,
+                release_artifact_id=artifact_id,
+                release_artifact_sha256=artifact,
+                evidence_schema_version=evidence_schema_version,
+                protocol_id=protocol_id,
+                test_run_id=run_id,
+            )
+            for role in required_recovery_raw_evidence_roles(scenario)
+        )
     receipt_id = evidence_artifact_id or str(
         uuid5(
             NAMESPACE_URL,
@@ -110,7 +127,7 @@ def evidence(
         evidence_refs=(f"artifact://recovery/{scenario.value.lower()}",),
         evidence_schema_version=evidence_schema_version,
         protocol_id=protocol_id,
-        test_run_id=test_run_id or f"run-{scenario.value.lower()}-001",
+        test_run_id=run_id,
         tests_run=REQUIRED_TESTS[scenario] if tests_run is None else tests_run,
         unresolved_limits=unresolved_limits,
         downtime_ms=downtime_ms,
@@ -160,13 +177,13 @@ def raw_ref(
     protocol_id=PROTOCOL_ID,
     test_run_id=None,
 ):
+    run_id = test_run_id or f"run-{scenario.value.lower()}-001"
     label = artifact_label or f"{scenario.value.lower()}:{role.value.lower()}"
     aid = artifact_id_value or str(
         uuid5(NAMESPACE_URL, "autotrade-recovery-raw:" + label)
     )
-    digest = artifact_hash or "sha256:" + sha256(
-        ("raw:" + label).encode("utf-8")
-    ).hexdigest()
+    payload = f"raw:{scenario.value}:{role.value}:{run_id}".encode("utf-8")
+    digest = artifact_hash or "sha256:" + sha256(payload).hexdigest()
     return RecoveryRawEvidenceRef(
         scenario=scenario,
         role=role,
@@ -181,8 +198,14 @@ def raw_ref(
         release_artifact_sha256=release_artifact_sha256,
         evidence_schema_version=evidence_schema_version,
         protocol_id=protocol_id,
-        test_run_id=test_run_id or f"run-{scenario.value.lower()}-001",
+        test_run_id=run_id,
     )
+
+
+def _raw_bytes(ref):
+    return (
+        f"raw:{ref.scenario.value}:{ref.role.value}:{ref.test_run_id}"
+    ).encode("utf-8")
 
 
 def _receipt_bytes(item):
@@ -195,9 +218,12 @@ def qualify(
     evidence,
     omit_evidence_ids=(),
     corrupt_evidence_id=None,
+    omit_raw_evidence_ids=(),
+    corrupt_raw_evidence_id=None,
     omit_release_artifact=False,
     trusted=False,
     omit_attestation_scenarios=(),
+    omit_attestation_raw_ids=(),
     attested_policy=None,
     mutate_during_verify=None,
 ):
@@ -215,7 +241,24 @@ def qualify(
                     "source_sha": policy.source_sha,
                 },
             )
+        published_raw_ids = set()
         for item in evidence:
+            for raw in item.raw_evidence_refs:
+                artifact_ref = raw.artifact_ref
+                if (
+                    artifact_ref.artifact_id in omit_raw_evidence_ids
+                    or artifact_ref.artifact_id in published_raw_ids
+                ):
+                    continue
+                store.publish_bytes(
+                    artifact_id=artifact_ref.artifact_id,
+                    data=_raw_bytes(raw),
+                    media_type=artifact_ref.media_type,
+                    rights={"storage": True, "export": False},
+                    source_refs=[f"git:{artifact_ref.source_sha}"],
+                    metadata=recovery_raw_evidence_metadata(raw),
+                )
+                published_raw_ids.add(artifact_ref.artifact_id)
             if item.evidence_artifact_id in omit_evidence_ids:
                 continue
             store.publish_bytes(
@@ -230,6 +273,10 @@ def qualify(
             manifest = store.load_manifest(corrupt_evidence_id)
             digest = manifest["sha256"].removeprefix("sha256:")
             (store.objects / digest[:2] / digest).write_bytes(b"corrupt")
+        if corrupt_raw_evidence_id is not None:
+            manifest = store.load_manifest(corrupt_raw_evidence_id)
+            digest = manifest["sha256"].removeprefix("sha256:")
+            (store.objects / digest[:2] / digest).write_bytes(b"corrupt")
         trust_kwargs = {}
         canonical_policy = None
         if trusted:
@@ -238,16 +285,27 @@ def qualify(
             )
             canonical_policy = attestation_policy(trust_root)
             bound_policy = policy if attested_policy is None else attested_policy
+            omitted_scenarios = set(omit_attestation_scenarios)
+            omitted_raw_ids = set(omit_attestation_raw_ids)
             attested_refs = tuple(
-                EvidenceArtifactRef(
-                    artifact_id=item.evidence_artifact_id,
-                    sha256=item.evidence_artifact_sha256,
-                    media_type="application/vnd.autotrade.recovery-evidence",
-                    evidence_kind="RECOVERY_SCENARIO_EVIDENCE",
-                    source_sha=item.source_sha,
-                )
-                for item in evidence
-                if item.scenario not in set(omit_attestation_scenarios)
+                [
+                    EvidenceArtifactRef(
+                        artifact_id=item.evidence_artifact_id,
+                        sha256=item.evidence_artifact_sha256,
+                        media_type="application/vnd.autotrade.recovery-evidence",
+                        evidence_kind="RECOVERY_SCENARIO_EVIDENCE",
+                        source_sha=item.source_sha,
+                    )
+                    for item in evidence
+                    if item.scenario not in omitted_scenarios
+                ]
+                + [
+                    raw.artifact_ref
+                    for item in evidence
+                    if item.scenario not in omitted_scenarios
+                    for raw in item.raw_evidence_refs
+                    if raw.artifact_ref.artifact_id not in omitted_raw_ids
+                ]
             )
             signed = attestation(
                 trust_root,
@@ -459,6 +517,60 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
             metadata["raw_evidence_refs"][0]["artifact_ref"]["sha256"],
             typed.raw_evidence_refs[0].artifact_ref.sha256,
         )
+
+    def test_terminal_pass_requires_complete_raw_role_coverage(self):
+        items = complete_evidence()
+        target_index = next(
+            index
+            for index, item in enumerate(items)
+            if item.scenario is RecoveryScenario.NETWORK_LOSS
+        )
+        items[target_index] = evidence(
+            RecoveryScenario.NETWORK_LOSS,
+            raw_evidence_refs=(),
+        )
+        decision = qualify(
+            policy=policy(),
+            evidence=items,
+            trusted=True,
+        )
+        self.assertIs(decision.status, RecoveryEvidenceStatus.INCONCLUSIVE)
+        for role in required_recovery_raw_evidence_roles(
+            RecoveryScenario.NETWORK_LOSS
+        ):
+            self.assertIn(
+                f"network_loss:raw_evidence_missing:{role.value}",
+                decision.blockers,
+            )
+
+    def test_terminal_raw_evidence_must_resolve_from_trusted_store(self):
+        items = complete_evidence()
+        target = items[0].raw_evidence_refs[0]
+        decision = qualify(
+            policy=policy(),
+            evidence=items,
+            trusted=True,
+            omit_raw_evidence_ids=(target.artifact_ref.artifact_id,),
+        )
+        self.assertIsNot(decision.status, RecoveryEvidenceStatus.PASS)
+        self.assertIn(
+            f"{items[0].scenario.value.lower()}:raw_evidence_integrity_unverified:"
+            f"{target.role.value}",
+            decision.blockers,
+        )
+        self.assertIn("independent_evidence_trust_invalid", decision.blockers)
+
+    def test_terminal_attestation_must_cover_exact_raw_evidence_set(self):
+        items = complete_evidence()
+        target = items[0].raw_evidence_refs[0]
+        decision = qualify(
+            policy=policy(),
+            evidence=items,
+            trusted=True,
+            omit_attestation_raw_ids=(target.artifact_ref.artifact_id,),
+        )
+        self.assertIs(decision.status, RecoveryEvidenceStatus.FAIL)
+        self.assertIn("independent_evidence_set_mismatch", decision.blockers)
 
     def test_typed_raw_evidence_rejects_polymorphic_or_cross_scope_refs(self):
         scenario = RecoveryScenario.NETWORK_LOSS

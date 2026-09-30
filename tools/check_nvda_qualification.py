@@ -21,6 +21,7 @@ from mvp.autotrade_mvp.qualification_attestation import (
     QualificationTrustError,
     QualificationTrustPolicy,
     SignedQualificationAttestation,
+    load_canonical_nvda_requirements_bytes,
     parse_signed_qualification_attestation,
     verify_canonical_qualification_attestation,
 )
@@ -39,6 +40,7 @@ NVDA_PACKAGE_ID = "WP-53"
 NVDA_PROTOCOL_ID = "real-nvda-keyboard-v1"
 NVDA_PROTOCOL_VERSION = "1.0.0"
 NVDA_EVIDENCE_KIND = "NVDA_REAL_RUN"
+NVDA_REQUIREMENTS_REQUIREMENT_PREFIX = "nvda-requirements/sha256:"
 SIGNED_ATTESTATION_REQUIRED = "SIGNED_QUALIFICATION_ATTESTATION_REQUIRED"
 _MAX_RELEASE_BUNDLE_BYTES = 1024 * 1024 * 1024
 _MAX_RELEASE_MANIFEST_BYTES = 1024 * 1024
@@ -82,6 +84,34 @@ def _load_json_snapshot(
 def _load(path: Path, *, name: str) -> dict[str, object]:
     value, _, _ = _load_json_snapshot(path, name=name)
     return value
+
+
+def _canonical_nvda_requirements(
+    *,
+    source_sha: str,
+    supplied_requirements: dict[str, object],
+) -> tuple[dict[str, object], str, str]:
+    """Resolve the full physical protocol from exact source, never caller bytes."""
+
+    try:
+        raw = load_canonical_nvda_requirements_bytes(
+            expected_source_sha=source_sha,
+        )
+    except (QualificationTrustError, TypeError, ValueError) as error:
+        raise NvdaQualificationError(
+            "canonical NVDA requirements are unavailable for exact source"
+        ) from error
+    canonical = _parse_json_snapshot(raw, name="canonical NVDA requirements")
+    if canonical != supplied_requirements:
+        raise NvdaQualificationError(
+            "supplied NVDA requirements do not match exact-source canonical requirements"
+        )
+    digest = "sha256:" + sha256(raw).hexdigest()
+    return (
+        canonical,
+        digest,
+        NVDA_REQUIREMENTS_REQUIREMENT_PREFIX + digest.removeprefix("sha256:"),
+    )
 
 
 def _required_text(value: object, *, name: str) -> str:
@@ -377,21 +407,37 @@ def validate_trusted_nvda_qualification(
     select the terminal signer authority; policy/root identity comes exclusively
     from the AcceptedQualificationAttestation returned by the canonical verifier.
     """
-    result = validate_evidence(evidence, requirements)
+    source_sha = _required_text(evidence.get("source_sha"), name="source_sha")
+    if GIT_SHA.fullmatch(source_sha) is None:
+        raise NvdaQualificationError(
+            "source_sha must be an exact 40-character Git SHA"
+        )
+    (
+        canonical_requirements,
+        requirements_sha256,
+        requirements_requirement_id,
+    ) = _canonical_nvda_requirements(
+        source_sha=source_sha,
+        supplied_requirements=requirements,
+    )
+    result = validate_evidence(evidence, canonical_requirements)
     if SHA256.fullmatch(evidence_sha256) is None:
         raise NvdaQualificationError("evidence_sha256 must be canonical")
     if SHA256.fullmatch(release_artifact_sha256) is None:
         raise NvdaQualificationError("release artifact digest must be canonical")
-    required = requirements.get("workflows")
+    required = canonical_requirements.get("workflows")
     if not isinstance(required, list) or not required:
         raise NvdaQualificationError("requirements contain no workflows")
     if any(not isinstance(item, dict) for item in required):
         raise NvdaQualificationError("requirements.workflow must be an object")
-    requirement_ids = tuple(
+    workflow_requirement_ids = tuple(
         sorted(
             _required_text(item.get("id"), name="requirements.workflow.id")
             for item in required
         )
+    )
+    requirement_ids = tuple(
+        sorted((*workflow_requirement_ids, requirements_requirement_id))
     )
     release_artifact_id = _required_text(
         result.get("release_artifact_id"),
@@ -436,9 +482,9 @@ def validate_trusted_nvda_qualification(
             )
     if accepted is None:
         raise NvdaQualificationError("signed NVDA qualification has no requirements")
-    if tuple(accepted.requirement_ids) != requirement_ids:
+    if tuple(sorted(accepted.requirement_ids)) != requirement_ids:
         raise NvdaQualificationError(
-            "signed NVDA attestation requirements do not match the canonical workflow set"
+            "signed NVDA attestation requirements do not match the canonical requirements set"
         )
     if (
         accepted.release_artifact_id != release_artifact_id
@@ -471,6 +517,8 @@ def validate_trusted_nvda_qualification(
         "release_artifact_id": release_artifact_id,
         "artifact_sha256": release_artifact_sha256,
         "evidence_sha256": evidence_sha256,
+        "requirements_sha256": requirements_sha256,
+        "requirements_requirement_id": requirements_requirement_id,
     }
 
 

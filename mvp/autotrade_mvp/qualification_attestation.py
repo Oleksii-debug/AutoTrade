@@ -45,6 +45,8 @@ _QUALIFICATION_TRUST_SOURCE_ROOT = Path(__file__).resolve().parents[2]
 # packaged terminal trust is unavailable; callers cannot provide or override it.
 _CANONICAL_PACKAGED_QUALIFICATION_TRUST_POLICY_SHA256: str | None = None
 _MAX_QUALIFICATION_TRUST_POLICY_BYTES = 1_048_576
+_CANONICAL_NVDA_REQUIREMENTS_GIT_PATH = "qualification/nvda/requirements.json"
+_MAX_NVDA_REQUIREMENTS_BYTES = 1_048_576
 
 
 def canonical_packaged_qualification_trust_policy_digest() -> str | None:
@@ -994,17 +996,29 @@ def parse_qualification_trust_policy(
     )
 
 
-def _canonical_qualification_trust_policy_bytes(
-    *, expected_source_sha: str
+def _canonical_exact_source_blob_bytes(
+    *,
+    expected_source_sha: str,
+    relative_path: str,
+    max_bytes: int,
+    artifact_name: str,
 ) -> bytes:
-    """Read policy bytes from the exact trusted Git source object."""
+    """Read one bounded blob from the exact trusted Git source object."""
 
     source_sha = _git_sha(expected_source_sha, name="expected_source_sha")
+    if (
+        type(relative_path) is not str
+        or not relative_path
+        or relative_path.startswith("/")
+        or "\\" in relative_path
+        or ".." in relative_path.split("/")
+    ):
+        raise QualificationTrustError("exact-source blob path is not canonical")
+    if type(max_bytes) is not int or max_bytes <= 0:
+        raise QualificationTrustError("exact-source blob size bound is invalid")
+    artifact_name = _text(artifact_name, name="exact-source artifact_name")
+
     source_root = _QUALIFICATION_TRUST_SOURCE_ROOT.resolve()
-    # The Git object path is a source constant, not a filesystem-derived path.
-    # Resolving the working-tree policy path here would let a mutable symlink
-    # redirect exact-source lookup to a different blob in the same trusted commit.
-    relative_policy = _CANONICAL_QUALIFICATION_TRUST_POLICY_GIT_PATH
     git_executable = _trusted_git_executable(source_root=source_root)
     try:
         top_level = subprocess.run(
@@ -1062,7 +1076,7 @@ def _canonical_qualification_trust_policy_bytes(
 
     try:
         completed = subprocess.run(
-            [git_executable, "cat-file", "blob", f"{source_sha}:{relative_policy}"],
+            [git_executable, "cat-file", "blob", f"{source_sha}:{relative_path}"],
             cwd=source_root,
             check=False,
             stdout=subprocess.PIPE,
@@ -1072,13 +1086,48 @@ def _canonical_qualification_trust_policy_bytes(
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         raise QualificationTrustUnavailable(
-            "exact-source qualification trust policy is unavailable"
+            f"exact-source {artifact_name} is unavailable"
         ) from error
     if completed.returncode != 0:
         raise QualificationTrustUnavailable(
-            "canonical qualification trust policy is not present in exact trusted source"
+            f"{artifact_name} is not present in exact trusted source"
         )
-    return bytes(completed.stdout)
+    raw = bytes(completed.stdout)
+    if len(raw) > max_bytes:
+        raise QualificationTrustError(
+            f"{artifact_name} exceeds the bounded exact-source size"
+        )
+    return raw
+
+
+def _canonical_qualification_trust_policy_bytes(
+    *, expected_source_sha: str
+) -> bytes:
+    """Read policy bytes from the exact trusted Git source object."""
+
+    return _canonical_exact_source_blob_bytes(
+        expected_source_sha=expected_source_sha,
+        relative_path=_CANONICAL_QUALIFICATION_TRUST_POLICY_GIT_PATH,
+        max_bytes=_MAX_QUALIFICATION_TRUST_POLICY_BYTES,
+        artifact_name="canonical qualification trust policy",
+    )
+
+
+def load_canonical_nvda_requirements_bytes(
+    *, expected_source_sha: str
+) -> bytes:
+    """Load NVDA requirements only from the exact trusted source object.
+
+    Packaged/non-Git verification intentionally remains unavailable until the
+    separately authenticated installed-source authority is wired.
+    """
+
+    return _canonical_exact_source_blob_bytes(
+        expected_source_sha=expected_source_sha,
+        relative_path=_CANONICAL_NVDA_REQUIREMENTS_GIT_PATH,
+        max_bytes=_MAX_NVDA_REQUIREMENTS_BYTES,
+        artifact_name="canonical NVDA requirements",
+    )
 
 
 def _independently_authenticated_packaged_source_sha() -> str:

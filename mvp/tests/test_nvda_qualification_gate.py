@@ -20,10 +20,11 @@ from tools.check_nvda_qualification import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
-REQUIREMENTS = json.loads(
-    (ROOT / "qualification" / "nvda" / "requirements.json").read_text(
-        encoding="utf-8"
-    )
+REQUIREMENTS_PATH = ROOT / "qualification" / "nvda" / "requirements.json"
+REQUIREMENTS_BYTES = REQUIREMENTS_PATH.read_bytes()
+REQUIREMENTS = json.loads(REQUIREMENTS_BYTES.decode("utf-8"))
+REQUIREMENTS_REQUIREMENT_ID = (
+    "nvda-requirements/sha256:" + sha256(REQUIREMENTS_BYTES).hexdigest()
 )
 
 
@@ -130,8 +131,11 @@ class NvdaQualificationGateTests(unittest.TestCase):
 
     def test_signed_trust_adapter_binds_exact_workflows_and_raw_evidence(self):
         evidence = complete_evidence()
-        requirement_ids = tuple(
+        workflow_requirement_ids = tuple(
             sorted(item["id"] for item in REQUIREMENTS["workflows"])
+        )
+        requirement_ids = tuple(
+            sorted((*workflow_requirement_ids, REQUIREMENTS_REQUIREMENT_ID))
         )
         evidence_sha = "sha256:" + "e" * 64
         release_sha = evidence["artifact_sha256"]
@@ -166,10 +170,16 @@ class NvdaQualificationGateTests(unittest.TestCase):
                 ),
             ),
         )
-        with patch(
-            "tools.check_nvda_qualification.verify_canonical_qualification_attestation",
-            return_value=accepted,
-        ) as verify:
+        with (
+            patch(
+                "tools.check_nvda_qualification.load_canonical_nvda_requirements_bytes",
+                return_value=REQUIREMENTS_BYTES,
+            ),
+            patch(
+                "tools.check_nvda_qualification.verify_canonical_qualification_attestation",
+                return_value=accepted,
+            ) as verify,
+        ):
             result = validate_trusted_nvda_qualification(
                 evidence,
                 REQUIREMENTS,
@@ -185,6 +195,11 @@ class NvdaQualificationGateTests(unittest.TestCase):
         self.assertTrue(result["qualified"])
         self.assertEqual(result["attestation_id"], accepted.attestation_id)
         self.assertEqual(verify.call_count, len(requirement_ids))
+        verified_requirements = {
+            call.kwargs["expected_requirement_id"]
+            for call in verify.call_args_list
+        }
+        self.assertEqual(verified_requirements, set(requirement_ids))
 
         bad_accepted = SimpleNamespace(
             **{
@@ -194,10 +209,14 @@ class NvdaQualificationGateTests(unittest.TestCase):
         )
         with (
             patch(
+                "tools.check_nvda_qualification.load_canonical_nvda_requirements_bytes",
+                return_value=REQUIREMENTS_BYTES,
+            ),
+            patch(
                 "tools.check_nvda_qualification.verify_canonical_qualification_attestation",
                 return_value=bad_accepted,
             ),
-            self.assertRaisesRegex(NvdaQualificationError, "workflow set"),
+            self.assertRaisesRegex(NvdaQualificationError, "requirements set"),
         ):
             validate_trusted_nvda_qualification(
                 evidence,
@@ -220,6 +239,10 @@ class NvdaQualificationGateTests(unittest.TestCase):
         )
         with (
             patch(
+                "tools.check_nvda_qualification.load_canonical_nvda_requirements_bytes",
+                return_value=REQUIREMENTS_BYTES,
+            ),
+            patch(
                 "tools.check_nvda_qualification.verify_canonical_qualification_attestation",
                 return_value=wrong_release_accepted,
             ),
@@ -236,6 +259,81 @@ class NvdaQualificationGateTests(unittest.TestCase):
                 evidence_root=ROOT,
                 expected_policy_id="sha256:" + "4" * 64,
                 expected_policy_version="2026.09",
+            )
+
+    def test_terminal_nvda_rejects_weakened_caller_requirements_with_same_ids(self):
+        evidence = complete_evidence()
+        weakened = json.loads(json.dumps(REQUIREMENTS))
+        weakened["required_environment"]["input_mode"] = "mouse-and-keyboard"
+        weakened["evidence_method"] = "STATIC_MARKUP"
+        weakened["workflows"][0]["description"] = "weakened"
+        with (
+            patch(
+                "tools.check_nvda_qualification.load_canonical_nvda_requirements_bytes",
+                return_value=REQUIREMENTS_BYTES,
+            ),
+            patch(
+                "tools.check_nvda_qualification.verify_canonical_qualification_attestation"
+            ) as verify,
+            self.assertRaisesRegex(
+                NvdaQualificationError,
+                "do not match exact-source canonical requirements",
+            ),
+        ):
+            validate_trusted_nvda_qualification(
+                evidence,
+                weakened,
+                evidence_sha256="sha256:" + "e" * 64,
+                release_artifact_sha256=evidence["artifact_sha256"],
+                receipt=SimpleNamespace(),
+                evidence_store=SimpleNamespace(),
+                evidence_root=ROOT,
+            )
+        verify.assert_not_called()
+
+    def test_terminal_nvda_requires_full_requirements_digest_in_signed_subject(self):
+        evidence = complete_evidence()
+        workflow_requirement_ids = tuple(
+            sorted(item["id"] for item in REQUIREMENTS["workflows"])
+        )
+        evidence_sha = "sha256:" + "e" * 64
+        release_sha = evidence["artifact_sha256"]
+        accepted = SimpleNamespace(
+            result="PASS",
+            attestation_id="22222222-2222-4222-8222-222222222222",
+            attestation_digest="sha256:" + "1" * 64,
+            policy_id="sha256:" + "2" * 64,
+            trust_root_id="sha256:" + "3" * 64,
+            requirement_ids=workflow_requirement_ids,
+            release_artifact_id=evidence["release_artifact_id"],
+            release_artifact_sha256=release_sha,
+            evidence_refs=(
+                SimpleNamespace(
+                    sha256=evidence_sha,
+                    evidence_kind="NVDA_REAL_RUN",
+                    source_sha=evidence["source_sha"],
+                ),
+            ),
+        )
+        with (
+            patch(
+                "tools.check_nvda_qualification.load_canonical_nvda_requirements_bytes",
+                return_value=REQUIREMENTS_BYTES,
+            ),
+            patch(
+                "tools.check_nvda_qualification.verify_canonical_qualification_attestation",
+                return_value=accepted,
+            ),
+            self.assertRaisesRegex(NvdaQualificationError, "requirements set"),
+        ):
+            validate_trusted_nvda_qualification(
+                evidence,
+                REQUIREMENTS,
+                evidence_sha256=evidence_sha,
+                release_artifact_sha256=release_sha,
+                receipt=SimpleNamespace(),
+                evidence_store=SimpleNamespace(),
+                evidence_root=ROOT,
             )
 
     def test_workflow_evidence_is_bound_to_exact_requirement_revision(self):

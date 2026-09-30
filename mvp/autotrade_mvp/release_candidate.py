@@ -1025,26 +1025,26 @@ def _release_artifact_metadata(
     }
 
 
-def _stored_evidence_is_verified(
+def _read_verified_evidence(
     read_snapshot,
     artifact: ReleaseArtifactEvidence,
-) -> bool:
-    """Verify one immutable release artifact including held-byte digest."""
+) -> bytes | None:
+    """Return the exact bytes authenticated by one immutable snapshot read."""
 
     try:
         manifest, raw = read_snapshot(artifact.artifact_id)
         if not isinstance(manifest.get("manifest_hash"), str):
-            return False
+            return None
         if manifest.get("sha256") != artifact.artifact_sha256:
-            return False
+            return None
         if "sha256:" + sha256(raw).hexdigest() != artifact.artifact_sha256:
-            return False
+            return None
         if manifest.get("media_type") != _release_artifact_media_type(artifact):
-            return False
+            return None
         if manifest.get("source_refs") != [f"git:{artifact.source_sha}"]:
-            return False
+            return None
         if manifest.get("metadata") != _release_artifact_metadata(artifact):
-            return False
+            return None
     except (
         ArtifactIntegrityError,
         FileNotFoundError,
@@ -1052,8 +1052,17 @@ def _stored_evidence_is_verified(
         TypeError,
         ValueError,
     ):
-        return False
-    return True
+        return None
+    return raw
+
+
+def _stored_evidence_is_verified(
+    read_snapshot,
+    artifact: ReleaseArtifactEvidence,
+) -> bool:
+    """Verify one immutable release artifact including held-byte digest."""
+
+    return _read_verified_evidence(read_snapshot, artifact) is not None
 
 
 def _load_supply_chain_proof(
@@ -1064,12 +1073,12 @@ def _load_supply_chain_proof(
         raise ReleaseCandidateError(
             "supply-chain proof must use DEPENDENCY_RIGHTS role"
         )
-    if not _stored_evidence_is_verified(read_snapshot, artifact):
+    raw = _read_verified_evidence(read_snapshot, artifact)
+    if raw is None:
         raise ReleaseCandidateError(
             "canonical WP-64 proof artifact integrity is not verified"
         )
     try:
-        _manifest, raw = read_snapshot(artifact.artifact_id)
         return parse_supply_chain_proof_bytes(raw)
     except (
         ArtifactIntegrityError,

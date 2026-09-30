@@ -292,8 +292,14 @@ class DeterministicStrategyTests(unittest.TestCase):
 
     def test_snapshot_restore_normalizes_deep_json_recursion_failure(self):
         raw = "[" * 4000 + "0" + "]" * 4000
-        with self.assertRaisesRegex(ValueError, "strategy snapshot is invalid") as caught:
-            ReturnThresholdBaseline.restore(raw)
+        # Decoder recursion thresholds vary by Python build/platform. Force the
+        # exact fault at the installed JSON seam rather than assuming a depth.
+        with patch.object(
+            strategy_module.json, "loads",
+            side_effect=RecursionError("sensitive parser internals"),
+        ):
+            with self.assertRaisesRegex(ValueError, "strategy snapshot is invalid") as caught:
+                ReturnThresholdBaseline.restore(raw)
         cursor = caught.exception
         seen = set()
         while cursor is not None and id(cursor) not in seen:
@@ -1794,8 +1800,12 @@ class DeterministicStrategyTests(unittest.TestCase):
 
     def test_registered_receipt_normalizes_deep_json_recursion_failure(self):
         raw = "[" * 4000 + "0" + "]" * 4000
-        with self.assertRaisesRegex(ValueError, "registered run receipt is invalid JSON") as caught:
-            RegisteredStrategyRunReceipt.from_json(raw)
+        with patch.object(
+            strategy_module.json, "loads",
+            side_effect=RecursionError("sensitive parser internals"),
+        ):
+            with self.assertRaisesRegex(ValueError, "registered run receipt is invalid JSON") as caught:
+                RegisteredStrategyRunReceipt.from_json(raw)
         cursor = caught.exception
         seen = set()
         while cursor is not None and id(cursor) not in seen:

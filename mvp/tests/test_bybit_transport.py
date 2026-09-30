@@ -162,6 +162,56 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
         self.assertEqual(signed.headers["X-BAPI-TIMESTAMP"], "1700000000000")
         self.assertEqual(signed.headers["X-BAPI-RECV-WINDOW"], "5000")
 
+    def test_query_digest_and_signer_bind_exact_provider_domain(self):
+        shared_snapshot_id = "11111111-1111-4111-8111-111111111111"
+        testnet_capability = read_capability(
+            provider_environment="TESTNET",
+            snapshot_id=shared_snapshot_id,
+        )
+        demo_capability = read_capability(
+            provider_environment="DEMO",
+            snapshot_id=shared_snapshot_id,
+        )
+        _, testnet_binding = self.binding(testnet_capability)
+        _, demo_binding = self.binding(demo_capability)
+
+        self.assertEqual(testnet_binding.environment, "PAPER")
+        self.assertEqual(demo_binding.environment, "PAPER")
+        self.assertEqual(testnet_binding.capability_snapshot_id, shared_snapshot_id)
+        self.assertEqual(demo_binding.capability_snapshot_id, shared_snapshot_id)
+        self.assertEqual(testnet_binding.provider_environment, "TESTNET")
+        self.assertEqual(demo_binding.provider_environment, "DEMO")
+        self.assertNotEqual(testnet_binding.query_digest, demo_binding.query_digest)
+
+        credential = json.dumps(
+            {
+                "api_key": "api-key-SECRET",
+                "api_secret": "signing-SECRET",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "provider environment mismatch",
+        ):
+            BybitV5AuthenticatedReadSigner.sign(
+                policy=BYBIT_V5_ENDPOINT_POLICIES["DEMO"],
+                query_binding=testnet_binding,
+                credential_plaintext=credential,
+                timestamp_ms=1700000000000,
+            )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "provider environment mismatch",
+        ):
+            BybitV5AuthenticatedReadSigner.sign(
+                policy=BYBIT_V5_ENDPOINT_POLICIES["TESTNET"],
+                query_binding=demo_binding,
+                credential_plaintext=credential,
+                timestamp_ms=1700000000000,
+            )
+
     def test_execution_read_revalidates_capability_and_returns_bound_observation(self):
         capability, binding = self.binding()
         events = []

@@ -808,6 +808,11 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                 roots=(trust_root,),
             )
             receipt = _qualification(candidate, trust_root)
+            supply_chain_evidence = _supply_chain_fixture(candidate, store)
+            supply_chain_receipt = _supply_chain_receipt(
+                supply_chain_evidence,
+                trust_root,
+            )
 
             def canonical_verify(receipt_arg, **kwargs):
                 return verify_qualification_attestation(
@@ -822,12 +827,18 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                 release_candidate_module,
                 "verify_canonical_qualification_attestation",
                 side_effect=canonical_verify,
+            ), patch.object(
+                supply_chain_module,
+                "verify_canonical_qualification_attestation",
+                side_effect=canonical_verify,
             ):
                 original = freeze_release_candidate(
                     candidate,
                     evidence_store=store,
                     evidence_root=directory,
                     qualification_receipt=receipt,
+                    supply_chain_evidence=supply_chain_evidence,
+                    supply_chain_receipt=supply_chain_receipt,
                 )
                 rehydrated = ReleaseCandidateDecision(
                     status="FROZEN",
@@ -840,6 +851,8 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                     qualification_trust_root_id=original.qualification_trust_root_id,
                     _verification_store=store,
                     _verification_root=directory,
+                    _supply_chain_evidence=supply_chain_evidence,
+                    _supply_chain_receipt=supply_chain_receipt,
                 )
                 self.assertEqual(rehydrated, original)
 
@@ -880,6 +893,8 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                         ),
                         _verification_store=store,
                         _verification_root=directory,
+                        _supply_chain_evidence=supply_chain_evidence,
+                        _supply_chain_receipt=supply_chain_receipt,
                     )
 
     def test_structural_rehydration_rejects_changed_signed_artifact_binding(self):

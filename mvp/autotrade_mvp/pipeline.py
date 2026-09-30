@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Iterable
 from uuid import NAMESPACE_URL, uuid5
 
+from .exact_decimal import as_fraction, bounded_fraction, exact_sum
 from .persistence import JournalStore, payload_digest
 
 
@@ -39,6 +40,7 @@ def _exact_decimal(value: Decimal | str | int, *, name: str) -> Decimal:
 def _money(value: Decimal | str | int) -> Decimal:
     return _exact_decimal(value, name="money").quantize(MONEY_QUANTUM)
 
+
 def handle_market_data(prices: Iterable[float | str | Decimal]) -> list[Decimal]:
     normalized: list[Decimal] = []
     for value in prices:
@@ -56,31 +58,40 @@ def handle_market_data(prices: Iterable[float | str | Decimal]) -> list[Decimal]
         raise ValueError("At least one price is required")
     return normalized
 
+
 def handle_strategy(prices: list[Decimal], quantity: Decimal) -> Decision:
     return MovingAverageStrategy().decide(prices, quantity)
+
 
 def handle_risk(decision: Decision, current_position: Decimal, current_cash: Decimal, fee_rate: Decimal, max_abs_position: Decimal, max_notional: Decimal) -> tuple[bool, str]:
     return RiskGate(max_abs_position, max_notional).admit(decision, current_position, current_cash, fee_rate)
 
+
 def handle_durable_order_intent(intent: OrderIntent, root: Path) -> None:
     _persist_intent(root / "order-intents" / f"{intent.client_order_id}.json", intent)
+
 
 def handle_simulated_provider(intent: OrderIntent, fee_rate: Decimal, provider: SimulatedProvider) -> Fill:
     return provider.execute(intent, fee_rate)
 
+
 def handle_economic_ledger(fill: Fill, ledger: EconomicLedger) -> bool:
     return ledger.apply_fill(fill)
+
 
 def handle_reconciliation(provider: SimulatedProvider, ledger: EconomicLedger) -> bool:
     return _reconcile(provider, ledger)
 
+
 def handle_portfolio(ledger: EconomicLedger, last_price: Decimal) -> Decimal:
     return _money(ledger.cash + ledger.position * last_price)
+
 
 def handle_restart_recovery(state_dir: str | Path, initial_cash: Decimal) -> tuple[dict, bool]:
     root = Path(state_dir)
     checkpoint_path = root / "checkpoint.json"
     return _read_state(checkpoint_path, initial_cash)
+
 
 def handle_learning_evidence(evidence: dict, evidence_path: Path, evidence_ids: set, evidence_records: dict) -> bool:
     return _append_evidence(evidence_path, evidence)
@@ -207,11 +218,13 @@ class MovingAverageStrategy:
     def decide(self, prices: list[Decimal], quantity: Decimal) -> Decision:
         if len(prices) < self.slow:
             return Decision("HOLD", Decimal("0"), prices[-1], "insufficient_history")
-        fast_avg = sum(prices[-self.fast :]) / self.fast
-        slow_avg = sum(prices[-self.slow :]) / self.slow
-        if fast_avg > slow_avg:
+        fast_total = as_fraction(exact_sum(prices[-self.fast :]))
+        slow_total = as_fraction(exact_sum(prices[-self.slow :]))
+        fast_scaled = bounded_fraction(fast_total * self.slow)
+        slow_scaled = bounded_fraction(slow_total * self.fast)
+        if fast_scaled > slow_scaled:
             return Decision("BUY", quantity, prices[-1], "fast_above_slow")
-        if fast_avg < slow_avg:
+        if fast_scaled < slow_scaled:
             return Decision("SELL", quantity, prices[-1], "fast_below_slow")
         return Decision("HOLD", Decimal("0"), prices[-1], "averages_equal")
 

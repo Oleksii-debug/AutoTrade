@@ -177,7 +177,14 @@ def verified_evidence(store, trust_root):
     return records
 
 
-def verified_nvda_fixture(store, trust_root, trust_policy, release_artifact):
+def verified_nvda_fixture(
+    store,
+    trust_root,
+    trust_policy,
+    release_artifact,
+    *,
+    include_requirements_digest=True,
+):
     write_release_bundle(release_artifact, source_sha=SHA)
     evidence = complete_nvda_evidence()
     evidence["source_sha"] = SHA
@@ -209,8 +216,10 @@ def verified_nvda_fixture(store, trust_root, trust_policy, release_artifact):
     workflow_requirement_ids = tuple(
         sorted(item["id"] for item in NVDA_REQUIREMENTS["workflows"])
     )
-    requirement_ids = tuple(
-        sorted((*workflow_requirement_ids, NVDA_REQUIREMENTS_REQUIREMENT_ID))
+    requirement_ids = (
+        tuple(sorted((*workflow_requirement_ids, NVDA_REQUIREMENTS_REQUIREMENT_ID)))
+        if include_requirements_digest
+        else workflow_requirement_ids
     )
     attestation = QualificationAttestation(
         attestation_id=str(uuid5(NAMESPACE_URL, "whole-product-nvda-attestation")),
@@ -254,7 +263,11 @@ def verified_nvda_fixture(store, trust_root, trust_policy, release_artifact):
     return status, receipt
 
 
-def verified_completion_fixture(directory):
+def verified_completion_fixture(
+    directory,
+    *,
+    include_nvda_requirements_digest=True,
+):
     store = ArtifactStore(directory)
     trust_root = fixture_root(
         scopes=(
@@ -269,6 +282,7 @@ def verified_completion_fixture(directory):
         trust_root,
         trust_policy,
         release_artifact,
+        include_requirements_digest=include_nvda_requirements_digest,
     )
     context = WholeProductEvidenceContext(
         evidence_store=store,
@@ -397,6 +411,21 @@ class ProductCompletionGateTests(unittest.TestCase):
         self.assertEqual(report["nonpassing_evidence"], [])
         self.assertTrue(report["nvda_source_matches"])
         self.assertTrue(report["qualification_source_matches"])
+
+    def test_workflow_only_nvda_receipt_cannot_complete_without_requirements_digest(self):
+        with TemporaryDirectory() as directory:
+            qualification, evidence_context, nvda_status = verified_completion_fixture(
+                directory,
+                include_nvda_requirements_digest=False,
+            )
+            report = evaluate(
+                qualification=qualification,
+                nvda_status=nvda_status,
+                evidence_context=evidence_context,
+            )
+
+        self.assertFalse(report["complete"])
+        self.assertFalse(report["nvda_qualified"])
 
     def test_caller_selected_policy_cannot_select_terminal_whole_product_trust(self):
         with TemporaryDirectory() as directory:

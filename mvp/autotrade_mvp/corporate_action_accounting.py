@@ -34,7 +34,13 @@ from .corporate_action_evidence import (
     CorporateActionEvidenceConflict,
     DurableCorporateActionEvidenceStore,
 )
-from .corporate_actions import CorporateActionBook, CorporateEvent, EquityState, Transition
+from .corporate_actions import (
+    CorporateActionBook,
+    CorporateEvent,
+    EquityState,
+    Transition,
+    _require_exact_event,
+)
 from .exact_decimal import ExactDecimalError, exact_add, exact_subtract, exact_sum
 from .persistence import JournalStore, canonical_json, payload_digest
 from .provider_activity_accounting import DurableProviderEconomicBook
@@ -70,6 +76,49 @@ def _exact_sum_values(values) -> Decimal:
         raise AccountingConflict(
             "corporate-action arithmetic exceeds exact resource envelope"
         ) from error
+
+
+def _canonical_utc_cut(value: datetime, *, name: str) -> datetime:
+    if (
+        type(value) is not datetime
+        or value.tzinfo is None
+        or type(value.tzinfo) is not timezone
+    ):
+        raise TypeError(
+            f"{name} must use an exact datetime with built-in timezone"
+        )
+    return datetime.astimezone(value, timezone.utc)
+
+
+def _require_authoritative_action(accepted: AuthoritativeCorporateAction) -> None:
+    if type(accepted) is not AuthoritativeCorporateAction:
+        raise TypeError(
+            "accepted must be an exact AuthoritativeCorporateAction"
+        )
+    _require_exact_event(accepted.event)
+    values = (
+        accepted.evidence_ref,
+        accepted.provider_id,
+        accepted.account_id,
+        accepted.environment,
+        accepted.external_event_id,
+        accepted.provider_revision,
+        accepted.raw_evidence_digest,
+        accepted.query_digest,
+        accepted.capability_snapshot_id,
+        accepted.provider_instrument_version,
+        accepted.observed_at,
+        accepted.provenance_digest,
+    )
+    if any(type(value) is not str for value in values):
+        raise TypeError("accepted corporate-action identity must use exact strings")
+    if (
+        accepted.corrects_external_event_id is not None
+        and type(accepted.corrects_external_event_id) is not str
+    ):
+        raise TypeError(
+            "accepted correction identity must use an exact string"
+        )
 
 
 def _identity(kind: str, *parts: str) -> str:
@@ -281,16 +330,13 @@ def _canonical_entitlement_position_proof(
         raise AccountingConflict(
             "corporate-action entitlement requires exact economic effective cut"
         )
-    if (
-        not isinstance(activation_cut, datetime)
-        or activation_cut.tzinfo is None
-        or activation_cut.utcoffset() is None
-    ):
-        raise TypeError("activation_cut must be timezone-aware")
-    if not isinstance(excluded_order_key, str) or not excluded_order_key.strip():
+    observed_cut = _canonical_utc_cut(
+        activation_cut,
+        name="activation_cut",
+    )
+    if type(excluded_order_key) is not str or not excluded_order_key.strip():
         raise ValueError("excluded_order_key is required")
 
-    observed_cut = activation_cut.astimezone(timezone.utc)
     current_order_key = excluded_order_key.strip()
     symbol = version.provider_symbol
     settlement_currency = version.settlement_currency.upper()
@@ -422,8 +468,9 @@ def _candidate_book(
     book: CorporateActionBook,
     accepted: AuthoritativeCorporateAction,
 ) -> tuple[CorporateActionBook, Transition]:
-    if not isinstance(book, CorporateActionBook):
-        raise TypeError("corporate_book must be CorporateActionBook")
+    if type(book) is not CorporateActionBook:
+        raise TypeError("corporate_book must be an exact CorporateActionBook")
+    _require_authoritative_action(accepted)
 
     event = accepted.event
     events = list(book.events)
@@ -852,12 +899,9 @@ def commit_authoritative_corporate_action(
         )
     if not isinstance(economic_book, DurableProviderEconomicBook):
         raise TypeError("economic_book must be DurableProviderEconomicBook")
-    if not isinstance(corporate_book, CorporateActionBook):
-        raise TypeError("corporate_book must be CorporateActionBook")
-    if not isinstance(accepted, AuthoritativeCorporateAction):
-        raise TypeError(
-            "accepted must be AuthoritativeCorporateAction from sealed provider evidence"
-        )
+    if type(corporate_book) is not CorporateActionBook:
+        raise TypeError("corporate_book must be an exact CorporateActionBook")
+    _require_authoritative_action(accepted)
     if evidence_store.store is not store or economic_book.store is not store:
         raise ValueError(
             "corporate-action evidence and economics must share one JournalStore"
@@ -880,9 +924,7 @@ def commit_authoritative_corporate_action(
 
     cut = activation_at
     if cut is not None:
-        if not isinstance(cut, datetime) or cut.tzinfo is None:
-            raise TypeError("activation_at must be timezone-aware")
-        cut = cut.astimezone(timezone.utc)
+        cut = _canonical_utc_cut(cut, name="activation_at")
     activation_cut = observed_at if observed_at >= effective_at else cut
 
     if activation_cut is None or activation_cut < effective_at:

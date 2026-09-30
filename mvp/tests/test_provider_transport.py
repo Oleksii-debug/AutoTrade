@@ -15,7 +15,10 @@ from mvp.autotrade_mvp.capabilities import (
     derive_capability_snapshot,
 )
 
-from mvp.tests.capability_test_support import fresh_test_admission
+from mvp.tests.capability_test_support import (
+    fresh_test_admission,
+    register_fresh_test_snapshot,
+)
 from mvp.autotrade_mvp.alpaca import (
     AlpacaOrderIntent,
     guarded_order_projection as alpaca_guarded_order_projection,
@@ -2955,7 +2958,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
 
         if capability_registry is None:
             capability_registry = RecordingCapabilityRegistry(events)
-            capability_registry.add(final_capability)
+            register_fresh_test_snapshot(capability_registry, final_capability)
 
         transport = BinanceSpotAuthenticatedReadTransport(
             policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
@@ -3171,13 +3174,14 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
         wire = RecordingWire(events)
         capability = verified_read_capability()
         registry = RecordingCapabilityRegistry(events)
-        registry.add(capability)
-        registry.add(
+        register_fresh_test_snapshot(registry, capability)
+        register_fresh_test_snapshot(
+            registry,
             verified_read_capability(
                 snapshot_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
                 snapshot_observed_at=READ_NOW + timedelta(milliseconds=500),
                 data_entitlements=frozenset({"MARKET_DATA"}),
-            )
+            ),
         )
 
         transport, resolver = self.make_read_transport(
@@ -3201,7 +3205,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
         wire = RecordingWire(events)
         capability = verified_read_capability()
         registry = RecordingCapabilityRegistry(events)
-        registry.add(capability)
+        register_fresh_test_snapshot(registry, capability)
         replacement = verified_read_capability(
             snapshot_id="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
             snapshot_observed_at=READ_NOW + timedelta(milliseconds=500),
@@ -3209,7 +3213,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
         )
 
         def supersede():
-            registry.add(replacement)
+            register_fresh_test_snapshot(registry, replacement)
 
         secret_resolver = FakeSecretResolver(events, on_resolve=supersede)
         transport, secret_resolver = self.make_read_transport(
@@ -3405,7 +3409,7 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
         final_capability = capability or verified_kraken_read_capability()
         if capability_registry is None:
             capability_registry = RecordingCapabilityRegistry(events)
-            capability_registry.add(final_capability)
+            register_fresh_test_snapshot(capability_registry, final_capability)
         resolver = secret_resolver or FakeSecretResolver(
             events,
             credential_plaintext=self.credential_plaintext(),
@@ -3784,7 +3788,7 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
         events = []
         capability = verified_kraken_read_capability()
         registry = RecordingCapabilityRegistry(events)
-        registry.add(capability)
+        register_fresh_test_snapshot(registry, capability)
         replacement = verified_kraken_read_capability(
             snapshot_id="eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
             snapshot_observed_at=KRAKEN_READ_NOW + timedelta(milliseconds=500),
@@ -3792,7 +3796,7 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
         )
 
         def supersede():
-            registry.add(replacement)
+            register_fresh_test_snapshot(registry, replacement)
 
         resolver = FakeSecretResolver(
             events,

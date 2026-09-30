@@ -11,6 +11,8 @@ from mvp.autotrade_mvp.capabilities import (
     derive_capability_snapshot as _derive_capability_snapshot,
 )
 
+from mvp.tests.capability_test_support import fresh_test_admission
+
 
 NOW = datetime(2026, 9, 24, 16, 0, tzinfo=timezone.utc)
 SNAPSHOT_1 = "11111111-1111-4111-8111-111111111111"
@@ -23,7 +25,7 @@ def _trusted_test_evidence(_claim: CapabilityClaim) -> EvidenceVerification:
 
 def derive_capability_snapshot(**kwargs):
     kwargs.setdefault("evidence_verifier", _trusted_test_evidence)
-    return _derive_capability_snapshot(**kwargs)
+    return fresh_test_admission(_derive_capability_snapshot(**kwargs))
 
 
 def claim(
@@ -648,6 +650,34 @@ class CapabilityFoundationTests(unittest.TestCase):
             replace(unverified, sources={"DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT", "MODEL"})
         with self.assertRaisesRegex(CapabilityError, "must be a collection"):
             replace(unverified, permission_scopes="ORDER.WRITE")
+
+    def test_public_derivation_cannot_mint_fresh_admission_from_caller_verifier(self):
+        snapshot = _derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=complete_claims(),
+            observed_at=NOW,
+            evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+        )
+        self.assertEqual(snapshot.status, "VERIFIED")
+        self.assertFalse(
+            snapshot.admits(
+                at=NOW,
+                order_type="LIMIT",
+                time_in_force="DAY",
+                permission_scope="ORDER.WRITE",
+            )
+        )
+        registry = CapabilityRegistry()
+        registry.add(snapshot)
+        with self.assertRaisesRegex(CapabilityError, "fresh admission"):
+            registry.require_verified(
+                provider_id="simulated",
+                account_id="paper-account",
+                entity_id="entity-1",
+                environment="PAPER",
+                instrument_version="instrument-v1",
+                at=NOW,
+            )
 
     def test_claim_graph_is_detached_before_verifier_can_mutate_callers(self):
         originals = list(complete_claims())

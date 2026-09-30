@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Iterable
 from uuid import NAMESPACE_URL, uuid5
 
+from .exact_decimal import as_fraction, bounded_fraction
 from .persistence import JournalStore, payload_digest
 
 
@@ -207,11 +208,22 @@ class MovingAverageStrategy:
     def decide(self, prices: list[Decimal], quantity: Decimal) -> Decision:
         if len(prices) < self.slow:
             return Decision("HOLD", Decimal("0"), prices[-1], "insufficient_history")
-        fast_avg = sum(prices[-self.fast :]) / self.fast
-        slow_avg = sum(prices[-self.slow :]) / self.slow
-        if fast_avg > slow_avg:
+
+        fast_total = as_fraction(Decimal("0"))
+        for price in prices[-self.fast :]:
+            fast_total = bounded_fraction(fast_total + as_fraction(price))
+        slow_total = as_fraction(Decimal("0"))
+        for price in prices[-self.slow :]:
+            slow_total = bounded_fraction(slow_total + as_fraction(price))
+
+        # Compare the exact rational averages without materializing rounded
+        # Decimal divisions.  Cross-products are bounded after each material
+        # operation so the shared numeric resource envelope remains authoritative.
+        fast_scaled = bounded_fraction(fast_total * self.slow)
+        slow_scaled = bounded_fraction(slow_total * self.fast)
+        if fast_scaled > slow_scaled:
             return Decision("BUY", quantity, prices[-1], "fast_above_slow")
-        if fast_avg < slow_avg:
+        if fast_scaled < slow_scaled:
             return Decision("SELL", quantity, prices[-1], "fast_below_slow")
         return Decision("HOLD", Decimal("0"), prices[-1], "averages_equal")
 

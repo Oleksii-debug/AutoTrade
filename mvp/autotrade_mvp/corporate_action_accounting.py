@@ -35,6 +35,7 @@ from .corporate_action_evidence import (
     DurableCorporateActionEvidenceStore,
 )
 from .corporate_actions import CorporateActionBook, CorporateEvent, EquityState, Transition
+from .exact_decimal import ExactDecimalError, exact_add, exact_subtract, exact_sum
 from .persistence import JournalStore, canonical_json, payload_digest
 from .provider_activity_accounting import DurableProviderEconomicBook
 
@@ -42,6 +43,33 @@ from .provider_activity_accounting import DurableProviderEconomicBook
 _SUPPORTED_DURABLE_KINDS = frozenset({"CASH_DIVIDEND", "SPLIT"})
 _ACTIVATION_AGGREGATE_TYPE = "corporate_action_activation"
 _ACTIVATION_EVENT_TYPE = "CorporateActionFinancialActivated"
+
+
+def _exact_add_value(left: Decimal, right: Decimal) -> Decimal:
+    try:
+        return exact_add(left, right)
+    except ExactDecimalError as error:
+        raise AccountingConflict(
+            "corporate-action arithmetic exceeds exact resource envelope"
+        ) from error
+
+
+def _exact_subtract_value(left: Decimal, right: Decimal) -> Decimal:
+    try:
+        return exact_subtract(left, right)
+    except ExactDecimalError as error:
+        raise AccountingConflict(
+            "corporate-action arithmetic exceeds exact resource envelope"
+        ) from error
+
+
+def _exact_sum_values(values) -> Decimal:
+    try:
+        return exact_sum(values)
+    except ExactDecimalError as error:
+        raise AccountingConflict(
+            "corporate-action arithmetic exceeds exact resource envelope"
+        ) from error
 
 
 def _identity(kind: str, *parts: str) -> str:
@@ -316,9 +344,11 @@ def _canonical_entitlement_position_proof(
             if position_postings:
                 causal_position_transactions.append(transaction)
             if unsettled_postings:
-                unsettled_cash += sum(
-                    (posting.signed_amount for posting in unsettled_postings),
-                    Decimal("0"),
+                unsettled_cash = _exact_add_value(
+                    unsettled_cash,
+                    _exact_sum_values(
+                        posting.signed_amount for posting in unsettled_postings
+                    ),
                 )
             contributors.append(
                 {
@@ -468,7 +498,10 @@ def _dividend_transaction(
     economic_effective_at: str | None = None,
     observed_at: str | None = None,
 ) -> JournalTransaction | None:
-    amount = transition.after.unsettled_cash - transition.before.unsettled_cash
+    amount = _exact_subtract_value(
+        transition.after.unsettled_cash,
+        transition.before.unsettled_cash,
+    )
     if amount == 0:
         return None
     currency = transition.after.currency
@@ -482,7 +515,11 @@ def _dividend_transaction(
         ),
         postings=(
             Posting(f"UNSETTLED_CASH:{currency}", currency, amount),
-            Posting(f"CORPORATE_ACTION_INCOME:{currency}", currency, -amount),
+            Posting(
+                f"CORPORATE_ACTION_INCOME:{currency}",
+                currency,
+                _exact_subtract_value(Decimal("0"), amount),
+            ),
         ),
         economic_effective_at=(
             economic_effective_at

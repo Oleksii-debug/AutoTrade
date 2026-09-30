@@ -14,6 +14,11 @@ from mvp.autotrade_mvp.capabilities import (
     EvidenceVerification,
     derive_capability_snapshot,
 )
+
+from mvp.tests.capability_test_support import (
+    fresh_test_admission,
+    register_fresh_test_snapshot,
+)
 from mvp.autotrade_mvp.alpaca import (
     AlpacaOrderIntent,
     guarded_order_projection as alpaca_guarded_order_projection,
@@ -201,11 +206,13 @@ def verified_alpaca_capability():
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-    return derive_capability_snapshot(
-        snapshot_id=ALPACA_SNAPSHOT_ID,
-        claims=claims,
-        observed_at=ALPACA_NOW,
-        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    return fresh_test_admission(
+        derive_capability_snapshot(
+            snapshot_id=ALPACA_SNAPSHOT_ID,
+            claims=claims,
+            observed_at=ALPACA_NOW,
+            evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+        )
     )
 
 
@@ -357,22 +364,19 @@ def verified_read_capability(
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-    return derive_capability_snapshot(
-        snapshot_id=snapshot_id,
-        claims=claims,
-        observed_at=snapshot_observed_at,
-        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    return fresh_test_admission(
+        derive_capability_snapshot(
+            snapshot_id=snapshot_id,
+            claims=claims,
+            observed_at=snapshot_observed_at,
+            evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+        )
     )
 
 
-class RecordingCapabilityRegistry(CapabilityRegistry):
-    def __init__(self, events):
-        super().__init__()
-        self.events = events
-
-    def require_verified(self, **kwargs):
-        self.events.append("capability")
-        return super().require_verified(**kwargs)
+def RecordingCapabilityRegistry(_events):
+    """Return the exact canonical registry; transport tests observe only I/O effects."""
+    return CapabilityRegistry()
 
 
 def authenticated_read_binding(
@@ -453,11 +457,13 @@ def verified_kraken_read_capability(
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-    return derive_capability_snapshot(
-        snapshot_id=snapshot_id,
-        claims=claims,
-        observed_at=snapshot_observed_at,
-        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    return fresh_test_admission(
+        derive_capability_snapshot(
+            snapshot_id=snapshot_id,
+            claims=claims,
+            observed_at=snapshot_observed_at,
+            evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+        )
     )
 
 
@@ -2952,7 +2958,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
 
         if capability_registry is None:
             capability_registry = RecordingCapabilityRegistry(events)
-            capability_registry.add(final_capability)
+            register_fresh_test_snapshot(capability_registry, final_capability)
 
         transport = BinanceSpotAuthenticatedReadTransport(
             policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
@@ -3007,7 +3013,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
         binding = authenticated_read_binding()
         observation = transport(binding)
 
-        self.assertEqual(events, ["quota", "capability", "resolve", "capability", "wire"])
+        self.assertEqual(events, ["quota", "resolve", "wire"])
         self.assertEqual(len(wire.requests), 1)
         self.assertEqual(len(resolver.calls), 1)
         self.assertEqual(resolver.calls[0]["purpose"], "READ")
@@ -3074,7 +3080,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
         wire = RecordingWire(events)
         transport, resolver = self.make_read_transport(events=events, wire=wire)
         other_binding = prepare_authenticated_read_query(
-            capability=derive_capability_snapshot(
+            capability=fresh_test_admission(derive_capability_snapshot(
                 snapshot_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
                 claims=tuple(
                     CapabilityClaim(
@@ -3105,7 +3111,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
                 ),
                 observed_at=READ_NOW,
                 evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
-            ),
+            )),
             surface=Surface.AUTHENTICATED_READ,
             endpoint="/api/v3/account",
             query=None,
@@ -3159,7 +3165,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
             "cannot be verified",
         ):
             transport(authenticated_read_binding(capability=capability))
-        self.assertEqual(events, ["quota", "capability"])
+        self.assertEqual(events, ["quota"])
         self.assertEqual(resolver.calls, [])
         self.assertEqual(wire.requests, [])
 
@@ -3168,13 +3174,14 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
         wire = RecordingWire(events)
         capability = verified_read_capability()
         registry = RecordingCapabilityRegistry(events)
-        registry.add(capability)
-        registry.add(
+        register_fresh_test_snapshot(registry, capability)
+        register_fresh_test_snapshot(
+            registry,
             verified_read_capability(
                 snapshot_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
                 snapshot_observed_at=READ_NOW + timedelta(milliseconds=500),
                 data_entitlements=frozenset({"MARKET_DATA"}),
-            )
+            ),
         )
 
         transport, resolver = self.make_read_transport(
@@ -3189,7 +3196,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
             "no longer valid",
         ):
             transport(authenticated_read_binding(capability=capability))
-        self.assertEqual(events, ["capability"])
+        self.assertEqual(events, [])
         self.assertEqual(resolver.calls, [])
         self.assertEqual(wire.requests, [])
 
@@ -3198,7 +3205,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
         wire = RecordingWire(events)
         capability = verified_read_capability()
         registry = RecordingCapabilityRegistry(events)
-        registry.add(capability)
+        register_fresh_test_snapshot(registry, capability)
         replacement = verified_read_capability(
             snapshot_id="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
             snapshot_observed_at=READ_NOW + timedelta(milliseconds=500),
@@ -3206,7 +3213,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
         )
 
         def supersede():
-            registry.add(replacement)
+            register_fresh_test_snapshot(registry, replacement)
 
         secret_resolver = FakeSecretResolver(events, on_resolve=supersede)
         transport, secret_resolver = self.make_read_transport(
@@ -3222,7 +3229,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
             "no longer valid",
         ):
             transport(authenticated_read_binding(capability=capability))
-        self.assertEqual(events, ["capability", "resolve", "capability"])
+        self.assertEqual(events, ["resolve"])
         self.assertEqual(len(secret_resolver.calls), 1)
         self.assertEqual(wire.requests, [])
 
@@ -3280,7 +3287,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
             "no longer valid",
         ):
             transport(authenticated_read_binding(capability=capability))
-        self.assertEqual(events, ["capability"])
+        self.assertEqual(events, [])
         self.assertEqual(resolver.calls, [])
         self.assertEqual(wire.requests, [])
 
@@ -3298,7 +3305,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
                 "unexpected HTTP status",
             ):
                 transport(authenticated_read_binding())
-            self.assertEqual(events, ["capability", "resolve", "capability", "wire"])
+            self.assertEqual(events, ["resolve", "wire"])
             self.assertEqual(len(resolver.calls), 1)
             self.assertEqual(len(wire.requests), 1)
 
@@ -3369,7 +3376,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
             "duplicate JSON key",
         ):
             transport(authenticated_read_binding())
-        self.assertEqual(events, ["capability", "resolve", "capability", "wire"])
+        self.assertEqual(events, ["resolve", "wire"])
         self.assertEqual(len(wire.requests), 1)
         self.assertEqual(len(resolver.calls), 1)
 
@@ -3402,7 +3409,7 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
         final_capability = capability or verified_kraken_read_capability()
         if capability_registry is None:
             capability_registry = RecordingCapabilityRegistry(events)
-            capability_registry.add(final_capability)
+            register_fresh_test_snapshot(capability_registry, final_capability)
         resolver = secret_resolver or FakeSecretResolver(
             events,
             credential_plaintext=self.credential_plaintext(),
@@ -3491,7 +3498,7 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
 
             self.assertEqual(
                 events,
-                ["quota", "capability", "resolve", "nonce", "capability", "wire"],
+                ["quota", "resolve", "nonce", "wire"],
             )
             self.assertEqual(len(resolver.calls), 1)
             self.assertEqual(resolver.calls[0]["purpose"], "READ")
@@ -3781,7 +3788,7 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
         events = []
         capability = verified_kraken_read_capability()
         registry = RecordingCapabilityRegistry(events)
-        registry.add(capability)
+        register_fresh_test_snapshot(registry, capability)
         replacement = verified_kraken_read_capability(
             snapshot_id="eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
             snapshot_observed_at=KRAKEN_READ_NOW + timedelta(milliseconds=500),
@@ -3789,7 +3796,7 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
         )
 
         def supersede():
-            registry.add(replacement)
+            register_fresh_test_snapshot(registry, replacement)
 
         resolver = FakeSecretResolver(
             events,
@@ -3818,7 +3825,7 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
 
             self.assertEqual(
                 events,
-                ["capability", "resolve", "nonce", "capability"],
+                ["resolve", "nonce"],
             )
             self.assertEqual(len(resolver.calls), 1)
             self.assertEqual(wire.requests, [])
@@ -3881,7 +3888,7 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
                     transport(kraken_authenticated_read_binding())
                 self.assertEqual(
                     events,
-                    ["capability", "resolve", "nonce", "capability", "wire"],
+                    ["resolve", "nonce", "wire"],
                 )
                 self.assertEqual(len(resolver.calls), 1)
                 self.assertEqual(len(wire.requests), 1)

@@ -33,12 +33,20 @@ from mvp.autotrade_mvp.provider_core import (
     observe_submission_json_response,
     prepare_authenticated_read_query,
 )
+from mvp.tests.capability_test_support import fresh_test_admission
 
 
 READ_AT = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 
 
-def read_capability(*, account_id="paper-1", environment="PAPER", instrument_version="BTCUSDT@v1"):
+def read_capability(
+    *,
+    account_id="paper-1",
+    environment="PAPER",
+    provider_environment="TESTNET",
+    instrument_version="BTCUSDT@v1",
+    snapshot_id=None,
+):
     observed_at = READ_AT - timedelta(hours=1)
     claims = tuple(
         CapabilityClaim(
@@ -47,6 +55,7 @@ def read_capability(*, account_id="paper-1", environment="PAPER", instrument_ver
             account_id=account_id,
             entity_id="bybit-reconciliation",
             environment=environment,
+            provider_environment=provider_environment,
             instrument_version=instrument_version,
             observed_at=observed_at,
             expires_at=READ_AT + timedelta(hours=1),
@@ -66,11 +75,13 @@ def read_capability(*, account_id="paper-1", environment="PAPER", instrument_ver
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-    return derive_capability_snapshot(
-        snapshot_id=str(uuid4()),
-        claims=claims,
-        observed_at=READ_AT,
-        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    return fresh_test_admission(
+        derive_capability_snapshot(
+            snapshot_id=snapshot_id or str(uuid4()),
+            claims=claims,
+            observed_at=READ_AT,
+            evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+        )
     )
 
 
@@ -81,6 +92,7 @@ def write_capability(
     position_mode="HEDGE",
     account_id="bybit-account",
     environment="PAPER",
+    provider_environment="DEMO",
     instrument_version="BTCUSDT@1",
     expires_at=None,
     permission_scope=None,
@@ -99,6 +111,7 @@ def write_capability(
             account_id=account_id,
             entity_id="bybit-unified-account",
             environment=environment,
+            provider_environment=provider_environment,
             instrument_version=instrument_version,
             observed_at=observed_at,
             expires_at=expires_at or READ_AT + timedelta(minutes=5),
@@ -118,17 +131,20 @@ def write_capability(
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-    return derive_capability_snapshot(
-        snapshot_id=str(uuid4()),
-        claims=claims,
-        observed_at=READ_AT,
-        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    return fresh_test_admission(
+        derive_capability_snapshot(
+            snapshot_id=str(uuid4()),
+            claims=claims,
+            observed_at=READ_AT,
+            evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+        )
     )
 
 def submission_write_capability(
     *,
     account_id="bybit-account",
     environment="LIVE",
+    provider_environment="MAINNET",
     instrument_version="BTCUSDT@v1",
 ):
     observed_at = READ_AT - timedelta(hours=1)
@@ -139,6 +155,7 @@ def submission_write_capability(
             account_id=account_id,
             entity_id="bybit-order",
             environment=environment,
+            provider_environment=provider_environment,
             instrument_version=instrument_version,
             observed_at=observed_at,
             expires_at=READ_AT + timedelta(hours=1),
@@ -158,11 +175,13 @@ def submission_write_capability(
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-    return derive_capability_snapshot(
-        snapshot_id=str(uuid4()),
-        claims=claims,
-        observed_at=READ_AT,
-        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    return fresh_test_admission(
+        derive_capability_snapshot(
+            snapshot_id=str(uuid4()),
+            claims=claims,
+            observed_at=READ_AT,
+            evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+        )
     )
 
 
@@ -171,12 +190,14 @@ def bound_execution_response(
     *,
     account_id="paper-1",
     environment="PAPER",
+    provider_environment="TESTNET",
     instrument_version="BTCUSDT@v1",
 ):
     query = prepare_authenticated_read_query(
         capability=read_capability(
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_environment,
             instrument_version=instrument_version,
         ),
         surface=Surface.AUTHENTICATED_READ,
@@ -280,6 +301,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             capability=write_capability(
                 family="INVERSE_DERIVATIVES",
                 position_mode="ONE_WAY",
+                provider_environment="DEMO",
                 instrument_version="BTCUSD@1",
             ),
             capability_at=READ_AT,
@@ -513,6 +535,7 @@ class BybitV5AdapterTests(unittest.TestCase):
         capability = submission_write_capability(
             account_id=account_id,
             environment=runtime_environment,
+            provider_environment=provider_environment,
         )
         prepared = prepare_order_submission(
             capability=capability,
@@ -583,6 +606,28 @@ class BybitV5AdapterTests(unittest.TestCase):
                 instrument_versions=prepared.instrument_versions,
             )
         return attempt, prepared, observation
+
+    def test_prepared_submission_rejects_cross_domain_same_runtime_capability(self):
+        capability = submission_write_capability(
+            environment="PAPER",
+            provider_environment="DEMO",
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "provider_environment does not match",
+        ):
+            prepare_order_submission(
+                capability=capability,
+                at=READ_AT,
+                provider_environment="TESTNET",
+                product_family="SPOT",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="MARKET",
+                quantity="0.01",
+                client_order_id="domain-mismatch",
+                time_in_force="IOC",
+            )
 
     def test_success_response_is_acknowledgement_not_fill(self):
         attempt, prepared, observation = self._durable_write_observation(

@@ -1,5 +1,6 @@
 from datetime import timedelta, timezone
 import json
+from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -8,6 +9,7 @@ from mvp.autotrade_mvp.bybit_v5 import (
     prepare_order_submission,
 )
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher, stable_client_order_id
+from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_transport import (
     BYBIT_V5_ENDPOINT_POLICIES,
@@ -20,6 +22,7 @@ from mvp.autotrade_mvp.provider_transport import (
 from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
 from mvp.autotrade_mvp.provider_core import Surface, prepare_authenticated_read_query
 from mvp.tests.test_bybit_v5 import READ_AT, read_capability, write_capability
+from mvp.tests.capability_test_support import register_fresh_test_snapshot
 from mvp.tests.test_provider_transport import (
     FakeSecretResolver,
     RecordingCapabilityRegistry,
@@ -66,6 +69,7 @@ def prepared(client_order_id="bybit-order-1"):
         position_mode="HEDGE",
         account_id="bybit-account",
         environment="PAPER",
+        provider_environment="TESTNET",
         instrument_version="BTCUSDT@1",
         permission_scope="BYBIT.LINEAR.ORDER.WRITE",
         additional_permission_scopes=("ORDER_WRITE",),
@@ -109,13 +113,14 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
         wire=None,
         clock_utc=None,
         quota_gate=None,
+        provider_environment="TESTNET",
     ):
         registry = RecordingCapabilityRegistry(events)
-        registry.add(capability)
+        register_fresh_test_snapshot(registry, capability)
         resolver = FakeSecretResolver(events)
         transport = BybitV5AuthenticatedReadTransport(
-            policy=BYBIT_V5_ENDPOINT_POLICIES["TESTNET"],
-            provider_environment="TESTNET",
+            policy=BYBIT_V5_ENDPOINT_POLICIES[provider_environment],
+            provider_environment=provider_environment,
             account_id="paper-1",
             capability_snapshot_id=capability.snapshot_id,
             capability_registry=registry,
@@ -159,6 +164,56 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
         self.assertEqual(signed.headers["X-BAPI-TIMESTAMP"], "1700000000000")
         self.assertEqual(signed.headers["X-BAPI-RECV-WINDOW"], "5000")
 
+    def test_query_digest_and_signer_bind_exact_provider_domain(self):
+        shared_snapshot_id = "11111111-1111-4111-8111-111111111111"
+        testnet_capability = read_capability(
+            provider_environment="TESTNET",
+            snapshot_id=shared_snapshot_id,
+        )
+        demo_capability = read_capability(
+            provider_environment="DEMO",
+            snapshot_id=shared_snapshot_id,
+        )
+        _, testnet_binding = self.binding(testnet_capability)
+        _, demo_binding = self.binding(demo_capability)
+
+        self.assertEqual(testnet_binding.environment, "PAPER")
+        self.assertEqual(demo_binding.environment, "PAPER")
+        self.assertEqual(testnet_binding.capability_snapshot_id, shared_snapshot_id)
+        self.assertEqual(demo_binding.capability_snapshot_id, shared_snapshot_id)
+        self.assertEqual(testnet_binding.provider_environment, "TESTNET")
+        self.assertEqual(demo_binding.provider_environment, "DEMO")
+        self.assertNotEqual(testnet_binding.query_digest, demo_binding.query_digest)
+
+        credential = json.dumps(
+            {
+                "api_key": "api-key-SECRET",
+                "api_secret": "signing-SECRET",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "provider environment mismatch",
+        ):
+            BybitV5AuthenticatedReadSigner.sign(
+                policy=BYBIT_V5_ENDPOINT_POLICIES["DEMO"],
+                query_binding=testnet_binding,
+                credential_plaintext=credential,
+                timestamp_ms=1700000000000,
+            )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "provider environment mismatch",
+        ):
+            BybitV5AuthenticatedReadSigner.sign(
+                policy=BYBIT_V5_ENDPOINT_POLICIES["TESTNET"],
+                query_binding=demo_binding,
+                credential_plaintext=credential,
+                timestamp_ms=1700000000000,
+            )
+
     def test_execution_read_revalidates_capability_and_returns_bound_observation(self):
         capability, binding = self.binding()
         events = []
@@ -185,7 +240,7 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
 
         self.assertEqual(
             events,
-            ["quota", "capability", "resolve", "capability", "wire"],
+            ["quota", "resolve", "wire"],
         )
         self.assertEqual(len(resolver.calls), 1)
         self.assertEqual(observation.provider_id, "BYBIT")
@@ -194,6 +249,86 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
         self.assertEqual(observation.query_binding.endpoint, "/v5/execution/list")
         self.assertEqual(observation.payload["retCode"], 0)
         self.assertEqual(len(wire.requests), 1)
+
+    def test_restart_history_blocks_before_secret_until_exact_fresh_rearm(self):
+        capability, binding = self.binding()
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            first = DurableCapabilityRegistry(JournalStore(path))
+            self.assertTrue(register_fresh_test_snapshot(first, capability))
+            self.assertEqual(
+                len(first.store.load_events_by_aggregate_type("capability_history")),
+                1,
+            )
+
+            restarted = DurableCapabilityRegistry(JournalStore(path))
+            events = []
+            resolver = FakeSecretResolver(events)
+            wire = RecordingWire(
+                events,
+                response=b'{"retCode":0,"retMsg":"OK","result":{"list":[]}}',
+                http_status=200,
+            )
+            transport = BybitV5AuthenticatedReadTransport(
+                policy=BYBIT_V5_ENDPOINT_POLICIES["TESTNET"],
+                provider_environment="TESTNET",
+                account_id="paper-1",
+                capability_snapshot_id=capability.snapshot_id,
+                capability_registry=restarted,
+                secret_resolver=resolver,
+                credential_handle=read_handle(),
+                session_token="session-read",
+                origin="https://localhost",
+                execution_identity="host-owner",
+                clock_millis=lambda: 1700000000000,
+                clock_utc=lambda: READ_AT,
+                wire_client=wire,
+            )
+
+            with self.assertRaisesRegex(
+                ProviderTransportScopeError,
+                "current capability cannot be verified",
+            ):
+                transport(binding)
+            self.assertEqual(resolver.calls, [])
+            self.assertEqual(wire.requests, [])
+            self.assertEqual(events, [])
+
+            self.assertFalse(register_fresh_test_snapshot(restarted, capability))
+            self.assertEqual(
+                len(restarted.store.load_events_by_aggregate_type("capability_history")),
+                1,
+            )
+            observation = transport(binding)
+            self.assertEqual(observation.provider_id, "BYBIT")
+            self.assertEqual(len(resolver.calls), 1)
+            self.assertEqual(len(wire.requests), 1)
+            self.assertEqual(
+                events,
+                ["resolve", "wire"],
+            )
+
+    def test_testnet_capability_cannot_authorize_demo_read_before_secret(self):
+        capability, binding = self.binding(
+            read_capability(provider_environment="TESTNET")
+        )
+        events = []
+        wire = RecordingWire(events)
+        transport, resolver, _registry = self.make_transport(
+            capability=capability,
+            events=events,
+            wire=wire,
+            provider_environment="DEMO",
+        )
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "current capability cannot be verified",
+        ):
+            transport(binding)
+        self.assertEqual(resolver.calls, [])
+        self.assertEqual(wire.requests, [])
+        self.assertEqual(events, [])
 
     def test_read_capability_expiry_after_secret_resolution_blocks_wire_send(self):
         capability, binding = self.binding()
@@ -270,7 +405,7 @@ class BybitV5SharedTransportTests(unittest.TestCase):
         on_resolve=None,
     ):
         registry = RecordingCapabilityRegistry(events)
-        registry.add(capability)
+        register_fresh_test_snapshot(registry, capability)
         resolver = FakeSecretResolver(events, on_resolve=on_resolve)
         transport = BybitV5HttpTransport(
             policy=(
@@ -371,7 +506,7 @@ class BybitV5SharedTransportTests(unittest.TestCase):
         self.assertEqual(response.payload["retCode"], 0)
         self.assertEqual(
             events,
-            ["quota", "capability", "resolve", "capability", "guard", "wire"],
+            ["quota", "resolve", "guard", "wire"],
         )
         self.assertEqual(len(resolver.calls), 1)
         self.assertEqual(len(wire.requests), 1)
@@ -460,7 +595,7 @@ class BybitV5SharedTransportTests(unittest.TestCase):
                 lambda: events.append("guard"),
             )
 
-        self.assertEqual(events, ["capability"])
+        self.assertEqual(events, [])
         self.assertEqual(resolver.calls, [])
         self.assertEqual(wire.requests, [])
 
@@ -493,7 +628,7 @@ class BybitV5SharedTransportTests(unittest.TestCase):
 
         self.assertEqual(
             events,
-            ["capability", "resolve", "capability"],
+            ["resolve"],
         )
         self.assertEqual(len(resolver.calls), 1)
         self.assertEqual(wire.requests, [])
@@ -520,7 +655,7 @@ class BybitV5SharedTransportTests(unittest.TestCase):
             )
         self.assertEqual(
             events,
-            ["capability", "resolve", "capability", "guard"],
+            ["resolve", "guard"],
         )
         self.assertEqual(len(resolver.calls), 1)
         self.assertEqual(wire.requests, [])

@@ -1,4 +1,5 @@
 from contextlib import closing
+from hashlib import sha256
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -12,19 +13,30 @@ from mvp.autotrade_mvp.capabilities import (
     derive_capability_snapshot,
 )
 from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
+from mvp.tests.capability_test_support import (
+    fresh_test_admission,
+    register_fresh_test_snapshot,
+)
 
 
 NOW = datetime(2026, 9, 25, 20, 0, tzinfo=timezone.utc)
 
 
-def claim(source: str, *, observed_at: datetime) -> CapabilityClaim:
+def claim(
+    source: str,
+    *,
+    observed_at: datetime,
+    provider_id="simulated",
+    provider_environment=None,
+) -> CapabilityClaim:
     return CapabilityClaim(
         source=source,
-        provider_id="simulated",
+        provider_id=provider_id,
         account_id="paper-account",
         entity_id="entity-1",
         environment="PAPER",
+        provider_environment=provider_environment,
         instrument_version="instrument-v1",
         observed_at=observed_at,
         expires_at=observed_at + timedelta(minutes=10),
@@ -53,15 +65,28 @@ def claim(source: str, *, observed_at: datetime) -> CapabilityClaim:
     )
 
 
-def verified(snapshot_id: str, observed_at: datetime):
-    return derive_capability_snapshot(
-        snapshot_id=snapshot_id,
-        claims=tuple(
-            claim(source, observed_at=observed_at)
-            for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
-        ),
-        observed_at=observed_at,
-        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+def verified(
+    snapshot_id: str,
+    observed_at: datetime,
+    *,
+    provider_id="simulated",
+    provider_environment=None,
+):
+    return fresh_test_admission(
+        derive_capability_snapshot(
+            snapshot_id=snapshot_id,
+            claims=tuple(
+                claim(
+                    source,
+                    observed_at=observed_at,
+                    provider_id=provider_id,
+                    provider_environment=provider_environment,
+                )
+                for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+            ),
+            observed_at=observed_at,
+            evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+        )
     )
 
 
@@ -74,7 +99,7 @@ class DurableCapabilityRegistryTests(unittest.TestCase):
                 "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
                 NOW,
             )
-            self.assertTrue(first.add(snapshot))
+            self.assertTrue(register_fresh_test_snapshot(first, snapshot))
             self.assertEqual(
                 first.require_verified(
                     provider_id="simulated",
@@ -123,7 +148,7 @@ class DurableCapabilityRegistryTests(unittest.TestCase):
                 "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
                 refreshed_at,
             )
-            self.assertTrue(restarted.add(refreshed))
+            self.assertTrue(register_fresh_test_snapshot(restarted, refreshed))
             admitted = restarted.require_verified(
                 provider_id="simulated",
                 account_id="paper-account",
@@ -140,6 +165,156 @@ class DurableCapabilityRegistryTests(unittest.TestCase):
                     time_in_force="DAY",
                     permission_scope="ORDER.WRITE",
                 )
+            )
+
+    def test_identical_fresh_reverification_rearms_without_duplicate_event(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            first = DurableCapabilityRegistry(JournalStore(path))
+            original = verified(
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                NOW,
+            )
+            self.assertTrue(register_fresh_test_snapshot(first, original))
+            before = first.store.load_events_by_aggregate_type("capability_history")
+            self.assertEqual(len(before), 1)
+
+            restarted = DurableCapabilityRegistry(JournalStore(path))
+            with self.assertRaisesRegex(
+                CapabilityError,
+                "fresh current-process verification",
+            ):
+                restarted.require_verified(
+                    provider_id="simulated",
+                    account_id="paper-account",
+                    entity_id="entity-1",
+                    environment="PAPER",
+                    instrument_version="instrument-v1",
+                    at=NOW + timedelta(seconds=1),
+                )
+
+            freshly_reverified = verified(
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                NOW,
+            )
+            self.assertEqual(freshly_reverified, original)
+            self.assertFalse(register_fresh_test_snapshot(restarted, freshly_reverified))
+            after = restarted.store.load_events_by_aggregate_type("capability_history")
+            self.assertEqual(len(after), 1)
+
+            admitted = restarted.require_verified(
+                provider_id="simulated",
+                account_id="paper-account",
+                entity_id="entity-1",
+                environment="PAPER",
+                instrument_version="instrument-v1",
+                at=NOW + timedelta(seconds=1),
+            )
+            self.assertEqual(admitted, freshly_reverified)
+            self.assertTrue(
+                admitted.admits(
+                    at=NOW + timedelta(seconds=1),
+                    order_type="LIMIT",
+                    time_in_force="DAY",
+                    permission_scope="ORDER.WRITE",
+                )
+            )
+
+    def test_bybit_testnet_and_demo_durable_histories_are_independent(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            registry = DurableCapabilityRegistry(JournalStore(path))
+            testnet = verified(
+                "11111111-1111-4111-8111-111111111111",
+                NOW,
+                provider_id="BYBIT",
+                provider_environment="TESTNET",
+            )
+            demo = verified(
+                "22222222-2222-4222-8222-222222222222",
+                NOW,
+                provider_id="BYBIT",
+                provider_environment="DEMO",
+            )
+            self.assertTrue(register_fresh_test_snapshot(registry, testnet))
+            self.assertTrue(register_fresh_test_snapshot(registry, demo))
+            events = registry.store.load_events_by_aggregate_type("capability_history")
+            self.assertEqual(len(events), 2)
+            self.assertEqual(len({event["aggregate_id"] for event in events}), 2)
+
+            self.assertEqual(
+                registry.require_verified(
+                    provider_id="BYBIT",
+                    account_id="paper-account",
+                    entity_id="entity-1",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    instrument_version="instrument-v1",
+                    at=NOW + timedelta(seconds=1),
+                ),
+                testnet,
+            )
+            self.assertEqual(
+                registry.require_verified(
+                    provider_id="BYBIT",
+                    account_id="paper-account",
+                    entity_id="entity-1",
+                    environment="PAPER",
+                    provider_environment="DEMO",
+                    instrument_version="instrument-v1",
+                    at=NOW + timedelta(seconds=1),
+                ),
+                demo,
+            )
+
+            restarted = DurableCapabilityRegistry(JournalStore(path))
+            with self.assertRaisesRegex(CapabilityError, "fresh current-process"):
+                restarted.require_verified(
+                    provider_id="BYBIT",
+                    account_id="paper-account",
+                    entity_id="entity-1",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    instrument_version="instrument-v1",
+                    at=NOW + timedelta(seconds=1),
+                )
+            with self.assertRaisesRegex(CapabilityError, "fresh current-process"):
+                restarted.require_verified(
+                    provider_id="BYBIT",
+                    account_id="paper-account",
+                    entity_id="entity-1",
+                    environment="PAPER",
+                    provider_environment="DEMO",
+                    instrument_version="instrument-v1",
+                    at=NOW + timedelta(seconds=1),
+                )
+
+            self.assertFalse(register_fresh_test_snapshot(restarted, testnet))
+            self.assertEqual(
+                restarted.require_verified(
+                    provider_id="BYBIT",
+                    account_id="paper-account",
+                    entity_id="entity-1",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    instrument_version="instrument-v1",
+                    at=NOW + timedelta(seconds=1),
+                ),
+                testnet,
+            )
+            with self.assertRaisesRegex(CapabilityError, "fresh current-process"):
+                restarted.require_verified(
+                    provider_id="BYBIT",
+                    account_id="paper-account",
+                    entity_id="entity-1",
+                    environment="PAPER",
+                    provider_environment="DEMO",
+                    instrument_version="instrument-v1",
+                    at=NOW + timedelta(seconds=1),
+                )
+            self.assertEqual(
+                len(restarted.store.load_events_by_aggregate_type("capability_history")),
+                2,
             )
 
     def test_newer_unknown_refresh_persists_and_supersedes_verified_history(self):
@@ -183,6 +358,74 @@ class DurableCapabilityRegistryTests(unittest.TestCase):
                     environment="PAPER",
                     instrument_version="instrument-v1",
                     at=observed + timedelta(seconds=1),
+                )
+
+    def test_legacy_bybit_v1_without_provider_domain_is_non_replayable(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            snapshot = verified(
+                "11111111-1111-4111-8111-111111111111",
+                NOW,
+                provider_id="BYBIT",
+                provider_environment="TESTNET",
+            )
+            raw = dict(snapshot.to_contract_dict())
+            raw.pop("provider_environment")
+            payload = {
+                "schema_version": "1.0.0",
+                "snapshot": raw,
+                "sources": sorted(snapshot.sources),
+            }
+            legacy_identity = [
+                snapshot.provider_id,
+                snapshot.account_id,
+                snapshot.entity_id,
+                snapshot.environment,
+                snapshot.instrument_version,
+            ]
+            aggregate_id = "capability:" + sha256(
+                canonical_json(legacy_identity).encode("utf-8")
+            ).hexdigest()
+            store.append_event(
+                {
+                    "event_id": "legacy-bybit-capability-v1",
+                    "event_type": "CapabilitySnapshotObserved.v1",
+                    "aggregate_type": "capability_history",
+                    "aggregate_id": aggregate_id,
+                    "aggregate_version": "1",
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                    "committed_at": NOW.isoformat(),
+                }
+            )
+
+            restarted = DurableCapabilityRegistry(JournalStore(path))
+            with self.assertRaisesRegex(
+                CapabilityError,
+                "legacy BYBIT capability lacks exact provider_environment",
+            ):
+                restarted.latest(
+                    provider_id="BYBIT",
+                    account_id="paper-account",
+                    entity_id="entity-1",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    instrument_version="instrument-v1",
+                    at=NOW + timedelta(seconds=1),
+                )
+            with self.assertRaisesRegex(
+                CapabilityError,
+                "legacy BYBIT capability lacks exact provider_environment",
+            ):
+                restarted.latest(
+                    provider_id="BYBIT",
+                    account_id="paper-account",
+                    entity_id="entity-1",
+                    environment="PAPER",
+                    provider_environment="DEMO",
+                    instrument_version="instrument-v1",
+                    at=NOW + timedelta(seconds=1),
                 )
 
     def test_tampered_durable_snapshot_fails_closed(self):

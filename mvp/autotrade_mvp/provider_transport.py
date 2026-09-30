@@ -37,6 +37,8 @@ from urllib.request import (
 )
 
 from .capabilities import CapabilityRegistry, CapabilitySnapshot
+from .durable_capabilities import DurableCapabilityRegistry
+from .provider_domain import normalize_provider_environment
 from .dispatch import ExactJsonTransportResponse
 from .persistence import JournalStore, payload_digest
 from .kraken_spot import (
@@ -2144,9 +2146,9 @@ class KrakenSpotAuthenticatedReadSigner:
         credential_plaintext: object,
         nonce: object,
     ) -> AuthenticatedReadHttpRequest:
-        if not isinstance(query_binding, AuthenticatedReadQueryBinding):
+        if type(query_binding) is not AuthenticatedReadQueryBinding:
             raise TypeError(
-                "query_binding must be AuthenticatedReadQueryBinding"
+                "query_binding must be exact AuthenticatedReadQueryBinding"
             )
         if policy.provider_id != "KRAKEN" or policy.environment != "LIVE":
             raise ProviderTransportScopeError(
@@ -2479,7 +2481,7 @@ class KrakenSpotAuthenticatedReadTransport:
         policy: ProviderEndpointPolicy,
         account_id: str,
         capability_snapshot_id: str,
-        capability_registry: CapabilityRegistry,
+        capability_registry: CapabilityRegistry | DurableCapabilityRegistry,
         secret_resolver: ProviderSecretResolver,
         credential_handle: PersistentCredentialHandle,
         session_token: str,
@@ -2517,8 +2519,10 @@ class KrakenSpotAuthenticatedReadTransport:
             capability_snapshot_id,
             name="capability_snapshot_id",
         )
-        if not isinstance(capability_registry, CapabilityRegistry):
-            raise TypeError("capability_registry must be CapabilityRegistry")
+        if type(capability_registry) not in {CapabilityRegistry, DurableCapabilityRegistry}:
+            raise TypeError(
+                "capability_registry must be an exact canonical capability registry"
+            )
         if not hasattr(secret_resolver, "resolve_for_execution"):
             raise TypeError(
                 "secret_resolver must implement resolve_for_execution"
@@ -2591,7 +2595,7 @@ class KrakenSpotAuthenticatedReadTransport:
             raise ProviderTransportScopeError(
                 "authenticated-read current capability cannot be verified"
             ) from error
-        if not isinstance(current, CapabilitySnapshot):
+        if type(current) is not CapabilitySnapshot:
             raise ProviderTransportScopeError(
                 "capability registry must return CapabilitySnapshot"
             )
@@ -3103,7 +3107,7 @@ class BybitV5HttpTransport:
         provider_environment: str,
         account_id: str,
         capability_snapshot_id: str,
-        capability_registry: CapabilityRegistry,
+        capability_registry: CapabilityRegistry | DurableCapabilityRegistry,
         secret_resolver: ProviderSecretResolver,
         credential_handle: PersistentCredentialHandle,
         session_token: str,
@@ -3146,8 +3150,10 @@ class BybitV5HttpTransport:
             raise ProviderTransportScopeError(
                 "credential handle account mismatch"
             )
-        if not isinstance(capability_registry, CapabilityRegistry):
-            raise TypeError("capability_registry must be CapabilityRegistry")
+        if type(capability_registry) not in {CapabilityRegistry, DurableCapabilityRegistry}:
+            raise TypeError(
+                "capability_registry must be an exact canonical capability registry"
+            )
         if not hasattr(secret_resolver, "resolve_for_execution"):
             raise TypeError(
                 "secret_resolver must implement resolve_for_execution"
@@ -3318,18 +3324,20 @@ class BybitV5HttpTransport:
                 environment=self.policy.environment,
                 instrument_version=instrument_version,
                 at=point,
+                provider_environment=self.provider_environment,
             )
         except Exception as error:
             raise ProviderTransportScopeError(
                 "Bybit write current capability cannot be verified"
             ) from error
         if (
-            not isinstance(current, CapabilitySnapshot)
+            type(current) is not CapabilitySnapshot
             or current.snapshot_id != self.capability_snapshot_id
             or current.provider_id != "BYBIT"
             or current.account_id != self.account_id
             or current.entity_id != entity_id
             or current.environment != self.policy.environment
+            or current.provider_environment != self.provider_environment
             or current.instrument_version != instrument_version
             or current.status != "VERIFIED"
             or not (current.observed_at <= point < current.expires_at)
@@ -3458,6 +3466,18 @@ class BybitV5AuthenticatedReadSigner:
             raise ProviderTransportScopeError(
                 "authenticated-read binding provider/environment mismatch"
             )
+        matching_domains = tuple(
+            name
+            for name, candidate in BYBIT_V5_ENDPOINT_POLICIES.items()
+            if candidate == policy
+        )
+        if (
+            len(matching_domains) != 1
+            or query_binding.provider_environment != matching_domains[0]
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read binding provider environment mismatch"
+            )
         _bybit_authenticated_read_rule(query_binding)
         if (
             isinstance(timestamp_ms, bool)
@@ -3532,7 +3552,7 @@ class BybitV5AuthenticatedReadTransport:
         provider_environment: str,
         account_id: str,
         capability_snapshot_id: str,
-        capability_registry: CapabilityRegistry,
+        capability_registry: CapabilityRegistry | DurableCapabilityRegistry,
         secret_resolver: ProviderSecretResolver,
         credential_handle: PersistentCredentialHandle,
         session_token: str,
@@ -3571,8 +3591,10 @@ class BybitV5AuthenticatedReadTransport:
             raise ProviderTransportScopeError(
                 "credential handle account mismatch"
             )
-        if not isinstance(capability_registry, CapabilityRegistry):
-            raise TypeError("capability_registry must be CapabilityRegistry")
+        if type(capability_registry) not in {CapabilityRegistry, DurableCapabilityRegistry}:
+            raise TypeError(
+                "capability_registry must be an exact canonical capability registry"
+            )
         if not hasattr(secret_resolver, "resolve_for_execution"):
             raise TypeError(
                 "secret_resolver must implement resolve_for_execution"
@@ -3638,18 +3660,20 @@ class BybitV5AuthenticatedReadTransport:
                 environment=self.policy.environment,
                 instrument_version=query_binding.instrument_version,
                 at=point,
+                provider_environment=self.provider_environment,
             )
         except Exception as error:
             raise ProviderTransportScopeError(
                 "Bybit authenticated-read current capability cannot be verified"
             ) from error
         if (
-            not isinstance(current, CapabilitySnapshot)
+            type(current) is not CapabilitySnapshot
             or current.snapshot_id != self.capability_snapshot_id
             or current.provider_id != "BYBIT"
             or current.account_id != self.account_id
             or current.entity_id != query_binding.entity_id
             or current.environment != self.policy.environment
+            or current.provider_environment != self.provider_environment
             or current.instrument_version != query_binding.instrument_version
             or current.status != "VERIFIED"
             or not (current.observed_at <= point < current.expires_at)
@@ -3673,6 +3697,7 @@ class BybitV5AuthenticatedReadTransport:
             query_binding.provider_id != "BYBIT"
             or query_binding.account_id != self.account_id
             or query_binding.environment != self.policy.environment
+            or query_binding.provider_environment != self.provider_environment
             or query_binding.capability_snapshot_id != self.capability_snapshot_id
         ):
             raise ProviderTransportScopeError(
@@ -4126,7 +4151,7 @@ class BinanceSpotAuthenticatedReadTransport:
         policy: ProviderEndpointPolicy,
         account_id: str,
         capability_snapshot_id: str,
-        capability_registry: CapabilityRegistry,
+        capability_registry: CapabilityRegistry | DurableCapabilityRegistry,
         secret_resolver: ProviderSecretResolver,
         credential_handle: PersistentCredentialHandle,
         session_token: str,
@@ -4165,8 +4190,10 @@ class BinanceSpotAuthenticatedReadTransport:
             capability_snapshot_id,
             name="capability_snapshot_id",
         )
-        if not isinstance(capability_registry, CapabilityRegistry):
-            raise TypeError("capability_registry must be CapabilityRegistry")
+        if type(capability_registry) not in {CapabilityRegistry, DurableCapabilityRegistry}:
+            raise TypeError(
+                "capability_registry must be an exact canonical capability registry"
+            )
         if not hasattr(secret_resolver, "resolve_for_execution"):
             raise TypeError(
                 "secret_resolver must implement resolve_for_execution"
@@ -4190,6 +4217,11 @@ class BinanceSpotAuthenticatedReadTransport:
             )
 
         self.policy = policy
+        self.provider_environment = normalize_provider_environment(
+            provider_id=policy.provider_id,
+            environment=policy.environment,
+            provider_environment=None,
+        )
         self.account_id = account
         self.capability_snapshot_id = capability
         self.capability_registry = capability_registry
@@ -4233,12 +4265,13 @@ class BinanceSpotAuthenticatedReadTransport:
                 environment=self.policy.environment,
                 instrument_version=query_binding.instrument_version,
                 at=point,
+                provider_environment=self.provider_environment,
             )
         except Exception as error:
             raise ProviderTransportScopeError(
                 "authenticated-read current capability cannot be verified"
             ) from error
-        if not isinstance(current, CapabilitySnapshot):
+        if type(current) is not CapabilitySnapshot:
             raise ProviderTransportScopeError(
                 "capability registry must return CapabilitySnapshot"
             )
@@ -4248,6 +4281,7 @@ class BinanceSpotAuthenticatedReadTransport:
             or current.account_id != self.account_id
             or current.entity_id != query_binding.entity_id
             or current.environment != self.policy.environment
+            or current.provider_environment != self.provider_environment
             or current.instrument_version != query_binding.instrument_version
             or current.status != "VERIFIED"
             or not (current.observed_at <= point < current.expires_at)
@@ -4271,6 +4305,7 @@ class BinanceSpotAuthenticatedReadTransport:
             query_binding.provider_id != self.policy.provider_id
             or query_binding.account_id != self.account_id
             or query_binding.environment != self.policy.environment
+            or query_binding.provider_environment != self.provider_environment
             or query_binding.capability_snapshot_id != self.capability_snapshot_id
         ):
             raise ProviderTransportScopeError(

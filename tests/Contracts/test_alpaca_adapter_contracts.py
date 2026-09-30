@@ -9,6 +9,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry, Resource
 
 from mvp.autotrade_mvp.alpaca import (
+    AlpacaAdapterError,
     AlpacaOrderIntent,
     parse_submission_response,
     prepare_order_request,
@@ -26,6 +27,7 @@ from mvp.autotrade_mvp.dispatch import (
 )
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import observe_submission_json_response
+from mvp.tests.capability_test_support import fresh_test_admission
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -33,7 +35,7 @@ SCHEMAS = ROOT / "contracts" / "jsonschema"
 NOW = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 
 
-def capability():
+def derived_capability():
     observed = NOW - timedelta(hours=1)
     claims = tuple(
         CapabilityClaim(
@@ -66,6 +68,13 @@ def capability():
         observed_at=NOW,
         evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
     )
+
+
+def capability():
+    # Production derivation is diagnostic/non-admitting. This test-only helper
+    # stands in for the future issuer-owned fresh-admission path so contract
+    # fixtures can exercise post-issuance adapter behavior without weakening it.
+    return fresh_test_admission(derived_capability())
 
 
 def prepared(client_order_id: str):
@@ -171,6 +180,29 @@ class AlpacaAdapterContractTests(unittest.TestCase):
             registry=self.registry,
             format_checker=FormatChecker(),
         ).validate(value)
+
+    def test_plain_derived_capability_cannot_admit_order(self):
+        intent = AlpacaOrderIntent.create(
+            instrument_version="AAPL:v1",
+            asset_class="EQUITY",
+            symbol="AAPL",
+            side="BUY",
+            order_type="MARKET",
+            time_in_force="DAY",
+            quantity="1",
+        )
+        with self.assertRaisesRegex(
+            AlpacaAdapterError,
+            "exact capability evidence does not admit this order",
+        ):
+            prepare_order_request(
+                intent,
+                client_order_id="plain-derived-non-admitting",
+                account_id="contract-account",
+                environment="PAPER",
+                capability=derived_capability(),
+                at=NOW,
+            )
 
     def test_submission_matches_canonical_provider_contract(self):
         attempt_id, request, observation = durable_observation(

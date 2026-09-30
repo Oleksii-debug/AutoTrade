@@ -848,6 +848,17 @@ def evaluate_gates(
         "immutable scientific evidence bundle is missing, corrupt, mismatched, or not independently authorized",
         "immutable scientific evidence bundle lacks independent trusted authorization",
     )
+    # #1116: graph/root/reviewer integrity is necessary but does not establish
+    # that PASS-critical trial/holdout/causal/financial/retention facts came
+    # from their canonical owning authorities. Until the accepted semantic-owner
+    # composition exists, terminal PASS must remain unavailable rather than
+    # promoting caller-authored EvaluationEvidence.
+    check(
+        "semantic_owner_evidence",
+        None,
+        "",
+        "terminal scientific/economic owner evidence has not been reconstructed from canonical authorities",
+    )
     check(
         "profile_lock",
         evidence.profile_unchanged_after_results,

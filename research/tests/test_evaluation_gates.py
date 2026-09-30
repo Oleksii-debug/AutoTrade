@@ -229,10 +229,14 @@ class EvaluationGateTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "regime_coverage"):
             EvaluationEvidence(**{**base, "regime_coverage": frozenset({"normal", 7})})
 
-    def test_complete_registered_evidence_can_pass(self):
+    def test_reviewed_graph_without_semantic_owner_evidence_is_inconclusive(self):
         decision = evaluate_with_verified_bundle(profile(), evidence())
-        self.assertEqual(decision.status, "PASS")
+        self.assertEqual(decision.status, "INCONCLUSIVE")
         self.assertEqual(decision.checks["evidence_bundle"], "PASS")
+        self.assertEqual(
+            decision.checks["semantic_owner_evidence"],
+            "INCONCLUSIVE",
+        )
         self.assertTrue(decision.provenance["evidence_graph_digest"].startswith("sha256:"))
 
     def test_locked_evaluation_and_walk_forward_are_required_for_terminal_pass(self):
@@ -253,7 +257,7 @@ class EvaluationGateTests(unittest.TestCase):
                 valid_sequential_evaluation_passed=True,
             ),
         )
-        self.assertEqual(sequential.status, "PASS")
+        self.assertEqual(sequential.status, "INCONCLUSIVE")
         self.assertEqual(sequential.checks["locked_evaluation"], "PASS")
 
         walk_forward = evaluate_with_verified_bundle(
@@ -438,7 +442,7 @@ class EvaluationGateTests(unittest.TestCase):
         self.assertEqual(decision.checks["uncertainty_consistency"], "FAIL")
         self.assertIn("lower bound exceeds", " ".join(decision.reasons))
 
-    def test_consistent_lower_bound_and_point_estimate_can_pass(self):
+    def test_consistent_lower_bound_and_point_estimate_pass_check_but_not_terminal_gate(self):
         decision = evaluate_with_verified_bundle(
             profile(),
             evidence(
@@ -447,7 +451,7 @@ class EvaluationGateTests(unittest.TestCase):
             ),
         )
         self.assertEqual(decision.checks["uncertainty_consistency"], "PASS")
-        self.assertEqual(decision.status, "PASS")
+        self.assertEqual(decision.status, "INCONCLUSIVE")
 
     def test_missing_uncertainty_is_inconclusive_not_pass(self):
         self.assertEqual(
@@ -610,7 +614,7 @@ class EvaluationGateTests(unittest.TestCase):
 
     def test_gate_decision_checks_are_immutable_after_evaluation(self):
         decision = evaluate_with_verified_bundle(profile(), evidence())
-        self.assertEqual(decision.status, "PASS")
+        self.assertEqual(decision.status, "INCONCLUSIVE")
         with self.assertRaises(TypeError):
             decision.checks["net_advantage"] = "FAIL"
         self.assertEqual(decision.checks["net_advantage"], "PASS")
@@ -813,7 +817,7 @@ class EvaluationGateTests(unittest.TestCase):
                     expected_source_sha=SOURCE_SHA,
                 )
 
-            self.assertEqual(decision_a.status, "PASS")
+            self.assertEqual(decision_a.status, "INCONCLUSIVE")
             self.assertEqual(decision_b.status, "FAIL")
             self.assertEqual(len(observed_requirements), 2)
             self.assertNotEqual(observed_requirements[0], observed_requirements[1])
@@ -843,7 +847,7 @@ class EvaluationGateTests(unittest.TestCase):
                     evidence_root=directory,
                     expected_source_sha=SOURCE_SHA,
                 )
-            self.assertEqual(decision.status, "PASS")
+            self.assertEqual(decision.status, "INCONCLUSIVE")
 
     def test_hostile_decimal_subclass_is_rejected_before_gate_dispatch(self):
         class HostileDecimal(Decimal):

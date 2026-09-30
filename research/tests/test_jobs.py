@@ -1547,6 +1547,126 @@ class ResearchJobStoreTests(unittest.TestCase):
             self.assertIn("submitted_by", columns)
 
 
+    def test_result_acceptance_ignores_poisoned_publication_store_helpers_and_root(self):
+        with TemporaryDirectory() as directory:
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            job, _ = self._enqueue(store, "rooted-result-reader")
+            claimed = store.claim("worker-a", now=self.now, lease_seconds=30)
+            generation = int(claimed["generation"])
+            authoritative_root = Path(directory) / "artifacts"
+            artifacts = ArtifactStore(authoritative_root)
+            output_ref = result_artifact(
+                artifacts,
+                job_id=job["job_id"],
+                generation=generation,
+                input_hashes=job["input_hashes"],
+            )
+
+            artifacts.root = Path(directory) / "poisoned-public-root"
+            with (
+                patch.object(
+                    artifacts,
+                    "load_manifest",
+                    side_effect=AssertionError("publication load_manifest used"),
+                ),
+                patch.object(
+                    artifacts,
+                    "read_bytes",
+                    side_effect=AssertionError("publication read_bytes used"),
+                ),
+                patch.object(
+                    artifacts,
+                    "read_authenticated_snapshot",
+                    side_effect=AssertionError("publication snapshot helper used"),
+                ),
+            ):
+                self.assertTrue(
+                    store.succeed(
+                        job["job_id"],
+                        worker_id="worker-a",
+                        generation=generation,
+                        output_refs=[output_ref],
+                        artifact_store=artifacts,
+                        artifact_root=authoritative_root,
+                        now=self.now + timedelta(seconds=1),
+                    )
+                )
+            self.assertEqual(store.get(job["job_id"])["state"], "SUCCEEDED")
+
+    def test_checkpoint_foreign_root_fails_before_job_mutation(self):
+        with TemporaryDirectory() as directory:
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            job, _ = self._enqueue(store, "foreign-root-checkpoint")
+            claimed = store.claim("worker-a", now=self.now, lease_seconds=30)
+            generation = int(claimed["generation"])
+            authoritative_root = Path(directory) / "artifacts"
+            artifacts = ArtifactStore(authoritative_root)
+            checkpoint = checkpoint_artifact(
+                artifacts,
+                job_id=job["job_id"],
+                generation=generation,
+                input_hashes=job["input_hashes"],
+                payload="checkpoint",
+            )
+            before = store.get(job["job_id"])
+
+            with self.assertRaisesRegex(JobConflictError, "job-bound immutable"):
+                store.checkpoint(
+                    job["job_id"],
+                    worker_id="worker-a",
+                    generation=generation,
+                    checkpoint_ref=checkpoint,
+                    resource_usage={"wall_seconds": 1},
+                    artifact_store=artifacts,
+                    artifact_root=Path(directory) / "foreign-artifacts",
+                    now=self.now + timedelta(seconds=1),
+                )
+
+            after = store.get(job["job_id"])
+            self.assertEqual(after["state"], "RUNNING")
+            self.assertNotIn("checkpoint_ref", after)
+            self.assertEqual(after["resource_usage"], before["resource_usage"])
+
+    def test_external_resolution_foreign_root_fails_before_transition(self):
+        with TemporaryDirectory() as directory:
+            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            job, _ = store.enqueue(
+                kind="research.external_annotation",
+                dedupe_key="foreign-root-external-resolution",
+                input_hashes=[digest("dataset")],
+                resource_budget={"wall_seconds": 60},
+                now=self.now,
+            )
+            store.claim("worker-a", now=self.now, lease_seconds=10)
+            store.requeue_expired(now=self.now + timedelta(seconds=11))
+            generation = int(store.get(job["job_id"])["generation"])
+            artifact_store, evidence = resolution_proof(
+                directory,
+                job_id=job["job_id"],
+                generation=generation,
+                verdict="PROVEN_NOT_RUN",
+            )
+
+            with self.assertRaisesRegex(
+                JobConflictError,
+                "matching immutable artifact evidence",
+            ):
+                store.resolve_waiting_external(
+                    job["job_id"],
+                    generation=generation,
+                    verdict="PROVEN_NOT_RUN",
+                    evidence_ref=evidence,
+                    artifact_store=artifact_store,
+                    artifact_root=Path(directory) / "foreign-evidence-root",
+                    now=self.now + timedelta(seconds=12),
+                )
+
+            after = store.get(job["job_id"])
+            self.assertEqual(after["state"], "WAITING_EXTERNAL")
+            self.assertNotIn("external_resolution", after)
+
+
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,7 +11,7 @@ import unittest
 from mvp.autotrade_mvp.accounting import book_external_cash_flow
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.exact_decimal import ExactDecimalError
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.pipeline import MovingAverageStrategy
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
 from mvp.autotrade_mvp.simulation_session import (
@@ -24,6 +24,16 @@ NOW = "2026-09-30T12:00:00Z"
 BUY = ["100", "101", "103"]
 HOLD = ["100", "101"]
 ROUNDINGS = (ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN)
+
+
+class HostileDecimal(Decimal):
+    """Decimal subclass whose virtual methods must never become strategy authority."""
+
+    def is_finite(self):
+        raise AssertionError("hostile Decimal.is_finite() was virtual-dispatched")
+
+    def as_tuple(self):
+        raise AssertionError("hostile Decimal.as_tuple() was virtual-dispatched")
 
 
 class CanonicalSimulationSessionTests(unittest.TestCase):
@@ -134,6 +144,47 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
                 reopened.load_events_by_aggregate_type("submission_attempt"),
                 submission,
             )
+
+    def test_strategy_exact_boundary_precedes_every_result_path(self):
+        strategy = MovingAverageStrategy()
+        with self.assertRaisesRegex(ExactDecimalError, "finite Decimal"):
+            strategy.decide([HostileDecimal("100")], Decimal("1"))
+        with self.assertRaisesRegex(ExactDecimalError, "finite Decimal"):
+            strategy.decide([Decimal("100")], HostileDecimal("1"))
+        with self.assertRaisesRegex(ExactDecimalError, "maximum scale"):
+            strategy.decide([Decimal("1e-257")], Decimal("1"))
+        with self.assertRaisesRegex(ExactDecimalError, "maximum integer digits"):
+            strategy.decide([Decimal("100")], Decimal("1e256"))
+        with self.assertRaisesRegex(ValueError, "At least one price"):
+            strategy.decide([], Decimal("1"))
+
+    def test_canonical_session_preserves_pre_protocol_input_hash_spelling(self):
+        episode_id = "legacy-spelling"
+        with TemporaryDirectory() as directory:
+            first = run_canonical_simulation(
+                ["100.0", "101.0"], directory,
+                episode_id=episode_id, now=NOW,
+            )
+            self.assertEqual(first["status"], "HOLD")
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            started = store.load_events(
+                "canonical_simulation_session", "single-episode"
+            )[0]
+            self.assertEqual(
+                started["payload"]["input_hash"],
+                payload_digest({
+                    "episode_id": episode_id,
+                    "prices": ["100.0", "101.0"],
+                }),
+            )
+            again = run_canonical_simulation(
+                ["100.0", "101.0"], directory, episode_id=episode_id
+            )
+            self.assertTrue(again["resumed"])
+            with self.assertRaisesRegex(ValueError, "another simulation input"):
+                run_canonical_simulation(
+                    ["100", "101"], directory, episode_id=episode_id
+                )
 
     def test_strategy_decisions_are_identical_across_hostile_decimal_contexts(self):
         cases = (

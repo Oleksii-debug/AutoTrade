@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from hashlib import sha256
 import json
 import re
@@ -16,28 +16,25 @@ from typing import Iterable
 from uuid import UUID
 
 from autotrade_numeric import (
-    MAX_INTEGER_DIGITS,
+    ExactDecimalError,
     as_fraction,
     bounded_fraction,
     is_exact_decimal_multiple,
     round_fraction_to_quantum,
+    parse_bounded_exact_decimal,
 )
-from autotrade_numeric._generated_decimal_limits import MAX_DECIMAL_TEXT_LENGTH
 
 
 def _decimal(value, *, name: str) -> Decimal:
-    # Reject caller-polymorphic inputs before virtual methods or text rendering.
+    # Preserve the exact built-in fence before invoking the shared pre-construction
+    # resource validator: virtual subclass methods cannot influence authority.
     if type(value) not in (Decimal, str, int):
         raise TypeError(f"{name} must use exact built-in Decimal, string or integer input")
-    if type(value) is str and len(value) > MAX_DECIMAL_TEXT_LENGTH:
-        raise ValueError(f"{name} exceeds decimal text admission envelope")
-    if type(value) is int and value.bit_length() > MAX_INTEGER_DIGITS * 4 + 1:
-        raise ValueError(f"{name} exceeds integer admission envelope")
     try:
-        result = value if type(value) is Decimal else Decimal(value)
-    except (InvalidOperation, ValueError, TypeError) as error:
-        raise ValueError(f"{name} must be a finite decimal") from error
-    # The neutral v5 converter owns bounds, without consulting ambient Context.
+        result = parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise ValueError(f"{name} must be a finite bounded decimal") from error
+    # Downstream arithmetic has its own independent rational resource budget.
     as_fraction(result)
     return result
 

@@ -3,6 +3,10 @@ from decimal import Decimal
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
+
+from autotrade_numeric import exact_decimal as neutral_decimal
+from research.autotrade_research.strategies import deterministic as strategy_module
 
 from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry, Resource
@@ -1459,6 +1463,66 @@ class DeterministicStrategyTests(unittest.TestCase):
                 lookback=2, threshold="1e99999",
                 proposal_quantity="1", descriptor=self.descriptor(),
             )
+
+    def test_bounded_numeric_ingress_denies_hostile_tokens_before_decimal_construction(self):
+        # The neutral parser must reject adverse input *before* Decimal(value).
+        # A later as_fraction() bound check alone is insufficient.
+        hostile = (
+            "1e" + "9" * 120,
+            "9" * 257,
+            "0." + "0" * 256 + "1",
+            "1e256",
+            "1e-257",
+            10 ** 300,
+        )
+        for value in hostile:
+            with self.subTest(value=str(value)[:24]):
+                with patch.object(
+                    neutral_decimal,
+                    "Decimal",
+                    side_effect=AssertionError("unbounded Decimal constructed"),
+                ) as constructor:
+                    with self.assertRaises(ValueError):
+                        strategy_module._decimal(value, name="risk_input")
+                    constructor.assert_not_called()
+
+    def test_bounded_numeric_ingress_accepts_exact_limit_boundaries(self):
+        # Geometry limits come from the installed neutral numeric authority.
+        from autotrade_numeric import (
+            MAX_INTEGER_DIGITS, MAX_SCALE, MAX_SIGNIFICANT_DIGITS,
+        )
+        for text in (
+            "9" * MAX_SIGNIFICANT_DIGITS,
+            "1e" + str(MAX_INTEGER_DIGITS - 1),
+            "1e-" + str(MAX_SCALE),
+            "0." + "0" * (MAX_SCALE - 1) + "1",
+        ):
+            with self.subTest(value=text[:30]):
+                self.assertEqual(
+                    strategy_module._decimal(text, name="quantity"),
+                    Decimal(text),
+                )
+        self.assertEqual(
+            CausalObservation.create(
+                event_id="at-boundary",
+                symbol="AAA",
+                available_at=BASE,
+                price="1e-" + str(MAX_SCALE),
+            ).price,
+            Decimal("1e-" + str(MAX_SCALE)),
+        )
+
+    def test_bounded_numeric_ingress_rejects_subclass_without_virtual_calls(self):
+        class HostileText(str):
+            def __len__(self):
+                raise AssertionError("caller len invoked")
+        class HostileInt(int):
+            def bit_length(self):
+                raise AssertionError("caller bit_length invoked")
+        for hostile in (HostileText("1.2"), HostileInt(12)):
+            with self.subTest(type=type(hostile).__name__):
+                with self.assertRaises(TypeError):
+                    strategy_module._decimal(hostile, name="quantity")
 
     def test_economics_lot_floor_is_context_independent_and_never_expands_risk(self):
         from decimal import ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN, localcontext

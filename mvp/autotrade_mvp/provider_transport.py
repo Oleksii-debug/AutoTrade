@@ -3318,6 +3318,7 @@ class BybitV5HttpTransport:
                 environment=self.policy.environment,
                 instrument_version=instrument_version,
                 at=point,
+                provider_environment=self.provider_environment,
             )
         except Exception as error:
             raise ProviderTransportScopeError(
@@ -3330,6 +3331,7 @@ class BybitV5HttpTransport:
             or current.account_id != self.account_id
             or current.entity_id != entity_id
             or current.environment != self.policy.environment
+            or current.provider_environment != self.provider_environment
             or current.instrument_version != instrument_version
             or current.status != "VERIFIED"
             or not (current.observed_at <= point < current.expires_at)
@@ -3638,6 +3640,7 @@ class BybitV5AuthenticatedReadTransport:
                 environment=self.policy.environment,
                 instrument_version=query_binding.instrument_version,
                 at=point,
+                provider_environment=self.provider_environment,
             )
         except Exception as error:
             raise ProviderTransportScopeError(
@@ -3650,6 +3653,7 @@ class BybitV5AuthenticatedReadTransport:
             or current.account_id != self.account_id
             or current.entity_id != query_binding.entity_id
             or current.environment != self.policy.environment
+            or current.provider_environment != self.provider_environment
             or current.instrument_version != query_binding.instrument_version
             or current.status != "VERIFIED"
             or not (current.observed_at <= point < current.expires_at)
@@ -4233,6 +4237,7 @@ class BinanceSpotAuthenticatedReadTransport:
                 environment=self.policy.environment,
                 instrument_version=query_binding.instrument_version,
                 at=point,
+                provider_environment=self.provider_environment,
             )
         except Exception as error:
             raise ProviderTransportScopeError(
@@ -4248,6 +4253,7 @@ class BinanceSpotAuthenticatedReadTransport:
             or current.account_id != self.account_id
             or current.entity_id != query_binding.entity_id
             or current.environment != self.policy.environment
+            or current.provider_environment != self.provider_environment
             or current.instrument_version != query_binding.instrument_version
             or current.status != "VERIFIED"
             or not (current.observed_at <= point < current.expires_at)

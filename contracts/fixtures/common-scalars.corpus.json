@@ -1,6 +1,6 @@
 {
-  "corpus_version": "3.0.1",
-  "contract_version": "3.0.1",
+  "corpus_version": "5.0.0",
+  "contract_version": "5.0.0",
   "scope": "common-scalar-subset",
   "cases": [
     {
@@ -46,6 +46,84 @@
       "expected": false
     },
     {
+      "name": "decimal-final-lf",
+      "type": "Decimal",
+      "value": "1\n",
+      "expected": false
+    },
+    {
+      "name": "decimal-final-crlf",
+      "type": "Decimal",
+      "value": "1\r\n",
+      "expected": false
+    },
+    {
+      "name": "decimal-significant-at-limit",
+      "type": "Decimal",
+      "value": "99999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999.99999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999",
+      "expected": true
+    },
+    {
+      "name": "decimal-significant-over-limit",
+      "type": "Decimal",
+      "value": "999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999.99999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999",
+      "expected": false
+    },
+    {
+      "name": "decimal-integer-at-limit",
+      "type": "Decimal",
+      "value": "9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999",
+      "expected": true
+    },
+    {
+      "name": "decimal-integer-over-limit",
+      "type": "Decimal",
+      "value": "99999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999",
+      "expected": false
+    },
+    {
+      "name": "decimal-scale-at-limit",
+      "type": "Decimal",
+      "value": "0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+      "expected": true
+    },
+    {
+      "name": "decimal-scale-over-limit",
+      "type": "Decimal",
+      "value": "0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+      "expected": false
+    },
+    {
+      "name": "decimal-mixed-significant-over-limit",
+      "type": "Decimal",
+      "value": "999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999.99999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999",
+      "expected": false
+    },
+    {
+      "name": "decimal-negative-integer-at-limit",
+      "type": "Decimal",
+      "value": "-9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999",
+      "expected": true
+    },
+    {
+      "name": "decimal-negative-scale-at-limit",
+      "type": "Decimal",
+      "value": "-0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+      "expected": true
+    },
+    {
+      "name": "decimal-raw-length-at-limit",
+      "type": "Decimal",
+      "value": "-0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+      "expected": true
+    },
+    {
+      "name": "decimal-raw-length-over-limit",
+      "type": "Decimal",
+      "value": "-0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+      "expected": false
+    },
+    {
       "name": "sequence-zero",
       "type": "Sequence",
       "value": "0",
@@ -76,6 +154,18 @@
       "expected": false
     },
     {
+      "name": "sequence-final-lf",
+      "type": "Sequence",
+      "value": "1\n",
+      "expected": false
+    },
+    {
+      "name": "sequence-final-crlf",
+      "type": "Sequence",
+      "value": "1\r\n",
+      "expected": false
+    },
+    {
       "name": "digest-valid",
       "type": "Digest",
       "value": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -91,6 +181,18 @@
       "name": "digest-wrong-length",
       "type": "Digest",
       "value": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": false
+    },
+    {
+      "name": "digest-final-lf",
+      "type": "Digest",
+      "value": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+      "expected": false
+    },
+    {
+      "name": "digest-final-crlf",
+      "type": "Digest",
+      "value": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n",
       "expected": false
     },
     {
@@ -142,6 +244,18 @@
       "expected": false
     },
     {
+      "name": "currency-final-lf",
+      "type": "CurrencyId",
+      "value": "USD\n",
+      "expected": false
+    },
+    {
+      "name": "currency-final-crlf",
+      "type": "CurrencyId",
+      "value": "USD\r\n",
+      "expected": false
+    },
+    {
       "name": "unit-simple",
       "type": "UnitId",
       "value": "shares",
@@ -163,6 +277,18 @@
       "name": "unit-too-long",
       "type": "UnitId",
       "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "expected": false
+    },
+    {
+      "name": "unit-final-lf",
+      "type": "UnitId",
+      "value": "shares\n",
+      "expected": false
+    },
+    {
+      "name": "unit-final-crlf",
+      "type": "UnitId",
+      "value": "shares\r\n",
       "expected": false
     },
     {

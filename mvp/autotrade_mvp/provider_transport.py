@@ -33,6 +33,7 @@ from urllib.parse import urlencode, urlsplit
 from urllib.request import (
     HTTPRedirectHandler,
     Request,
+    ProxyHandler,
     build_opener,
 )
 
@@ -55,6 +56,11 @@ from .provider_core import (
     observe_authenticated_json_response,
 )
 from .windows_secrets import PersistentCredentialHandle
+from .provider_response_limits import (
+    DEFAULT_MAX_PROVIDER_RESPONSE_BYTES,
+    HARD_MAX_PROVIDER_RESPONSE_BYTES,
+    require_provider_response_bytes,
+)
 
 
 class ProviderTransportError(RuntimeError):
@@ -946,10 +952,10 @@ class TradingWireResponse:
             or self.http_status > 599
         ):
             raise ProviderTransportScopeError("HTTP status must be an integer 100..599")
-        if type(self.body) is not bytes or not self.body:
-            raise ProviderTransportError(
-                "provider returned an empty or non-byte trading response"
-            )
+        try:
+            require_provider_response_bytes(self.body, max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES)
+        except (TypeError, ValueError) as error:
+            raise ProviderTransportError("invalid or oversized trading response") from error
 
 
 @dataclass(frozen=True)
@@ -965,10 +971,10 @@ class AuthenticatedReadWireResponse:
             or self.http_status > 599
         ):
             raise ProviderTransportScopeError("HTTP status must be an integer 100..599")
-        if type(self.body) is not bytes or not self.body:
-            raise ProviderTransportError(
-                "provider returned an empty or non-byte authenticated-read response"
-            )
+        try:
+            require_provider_response_bytes(self.body, max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES)
+        except (TypeError, ValueError) as error:
+            raise ProviderTransportError("invalid or oversized authenticated-read response") from error
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):
@@ -979,8 +985,31 @@ class _NoRedirectHandler(HTTPRedirectHandler):
 class UrllibJsonWireClient:
     """One-shot TLS client with redirects and automatic retries disabled."""
 
-    def __init__(self) -> None:
-        self._opener = build_opener(_NoRedirectHandler())
+    def __init__(self, *, max_response_bytes: int = DEFAULT_MAX_PROVIDER_RESPONSE_BYTES) -> None:
+        if type(max_response_bytes) is not int or not 1 <= max_response_bytes <= HARD_MAX_PROVIDER_RESPONSE_BYTES:
+            raise ProviderTransportScopeError("provider response byte budget is invalid")
+        self.max_response_bytes = max_response_bytes
+        # urllib otherwise discovers process/OS proxies implicitly. The
+        # production shared client is direct-only; proxies require separate
+        # explicit network-policy authority, not ambient environment variables.
+        self._opener = build_opener(ProxyHandler({}), _NoRedirectHandler())
+
+    def _response_budget(self) -> int:
+        budget = self.max_response_bytes
+        if (
+            type(budget) is not int
+            or not 1 <= budget <= HARD_MAX_PROVIDER_RESPONSE_BYTES
+        ):
+            raise ProviderTransportScopeError(
+                "provider response byte budget is invalid"
+            )
+        return budget
+
+    def _bounded_body(self, raw: bytes, *, max_bytes: int) -> bytes:
+        try:
+            return require_provider_response_bytes(raw, max_bytes=max_bytes)
+        except (TypeError, ValueError) as error:
+            raise ProviderTransportError("invalid or oversized provider HTTP response") from error
 
     def send(
         self,
@@ -1009,6 +1038,9 @@ class UrllibJsonWireClient:
             request,
             AuthenticatedReadHttpRequest,
         )
+        # Capture one exact validated budget before any response-body read.
+        # Mutating the client during I/O cannot widen this send's read envelope.
+        response_budget = self._response_budget()
         http_status: int | None = None
         try:
             with self._opener.open(
@@ -1016,7 +1048,10 @@ class UrllibJsonWireClient:
                 timeout=request.timeout_seconds,
             ) as response:
                 http_status = int(response.status)
-                raw = response.read()
+                raw = self._bounded_body(
+                    response.read(response_budget + 1),
+                    max_bytes=response_budget,
+                )
         except HTTPError as error:
             # Redirects are prohibited for both reads and writes. For reads,
             # preserve non-redirect HTTP status as a typed outcome so an error
@@ -1025,7 +1060,10 @@ class UrllibJsonWireClient:
                 raise ProviderTransportError(
                     "provider redirect is prohibited"
                 ) from error
-            raw = error.read()
+            raw = self._bounded_body(
+                error.read(response_budget + 1),
+                max_bytes=response_budget,
+            )
             if type(raw) is not bytes or not raw:
                 raise ProviderTransportError(
                     "provider returned an empty HTTP error response"
@@ -1071,12 +1109,20 @@ def _exact_trading_response(
     UrllibJsonWireClient always returns TradingWireResponse for guarded writes.
     """
     if isinstance(value, TradingWireResponse):
+        try:
+            raw = require_provider_response_bytes(value.body, max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES)
+        except (TypeError, ValueError) as error:
+            raise ProviderTransportError("invalid or oversized trading response") from error
         return ExactJsonTransportResponse(
-            value.body,
+            raw,
             http_status=value.http_status,
         )
     if type(value) is bytes:
-        return ExactJsonTransportResponse(value)
+        try:
+            raw = require_provider_response_bytes(value, max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES)
+        except (TypeError, ValueError) as error:
+            raise ProviderTransportError("invalid or oversized trading response") from error
+        return ExactJsonTransportResponse(raw)
     raise ProviderTransportError(
         "trading wire client returned an unsupported response contract"
     )

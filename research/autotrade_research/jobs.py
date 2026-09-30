@@ -13,13 +13,22 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import sqlite3
+from threading import RLock
 from typing import Any
 from uuid import UUID, uuid4, uuid5
+from weakref import WeakKeyDictionary
 
 from .artifacts import ArtifactIntegrityError, ArtifactStore, trusted_authenticated_reader
 
 
 FINAL_STATES = {"SUCCEEDED", "FAILED", "CANCELLED"}
+
+# Process-TCB registry for product-selected research evidence authority.  The
+# caller-owned ResearchJobStore object exposes no root/reader replacement field;
+# lifetime cleanup follows the store object's weak reference.  Installed module
+# code is already inside the product TCB, matching the sealed WP-06 reader model.
+_EVIDENCE_AUTHORITY_LOCK = RLock()
+_EVIDENCE_AUTHORITIES = WeakKeyDictionary()
 
 # Automatic lease retry is code-reviewed capability, never caller authority.
 # Callers may disable retry for a safe kind, but cannot promote an arbitrary
@@ -89,9 +98,9 @@ def _require_immutable_artifact_ref(value: Any, name: str) -> str:
 
 def _trusted_reader(
     authoritative_root: str | Path | None,
-    publication_store: ArtifactStore | None,
+    publication_store: ArtifactStore | None = None,
 ):
-    if authoritative_root is None or publication_store is None:
+    if authoritative_root is None:
         return None
     try:
         return trusted_authenticated_reader(
@@ -106,6 +115,18 @@ def _trusted_reader(
         ValueError,
     ):
         return None
+
+
+def _bind_evidence_authority(store: object, reader: object) -> None:
+    with _EVIDENCE_AUTHORITY_LOCK:
+        if store in _EVIDENCE_AUTHORITIES:
+            raise JobError("research evidence authority is already bound")
+        _EVIDENCE_AUTHORITIES[store] = reader
+
+
+def _bound_evidence_authority(store: object):
+    with _EVIDENCE_AUTHORITY_LOCK:
+        return _EVIDENCE_AUTHORITIES.get(store)
 
 
 def _authenticated_artifact_snapshot(
@@ -274,10 +295,36 @@ def _validate_budget(budget: dict[str, int | float]) -> dict[str, float]:
 class ResearchJobStore:
     SCHEMA_VERSION = 5
 
-    def __init__(self, path: str | Path):
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        authoritative_artifact_root: str | Path | None = None,
+        publication_store: ArtifactStore | None = None,
+    ):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if authoritative_artifact_root is None and publication_store is not None:
+            raise ValueError(
+                "publication_store cannot select research evidence authority"
+            )
+        reader = _trusted_reader(
+            authoritative_artifact_root,
+            publication_store,
+        )
+        if authoritative_artifact_root is not None and reader is None:
+            raise JobError("research evidence authority could not be configured")
+        if reader is not None:
+            _bind_evidence_authority(self, reader)
         self._initialize()
+
+    def _require_artifact_reader(self):
+        reader = _bound_evidence_authority(self)
+        if reader is None:
+            raise JobConflictError(
+                "research job evidence authority is not configured"
+            )
+        return reader
 
     @contextmanager
     def _connect(self):
@@ -609,8 +656,6 @@ class ResearchJobStore:
         generation: int,
         verdict: str,
         evidence_ref: str,
-        artifact_store: ArtifactStore | None = None,
-        artifact_root: str | Path | None = None,
         output_refs: list[str] | None = None,
         now: datetime | None = None,
     ) -> bool:
@@ -693,8 +738,8 @@ class ResearchJobStore:
                     "job is not waiting for the supplied external resolution"
                 )
 
-            read_snapshot = _trusted_reader(artifact_root, artifact_store)
-            if read_snapshot is None or not _verify_external_resolution_artifact(
+            read_snapshot = self._require_artifact_reader()
+            if not _verify_external_resolution_artifact(
                 read_snapshot=read_snapshot,
                 evidence_ref=evidence,
                 job_id=identifier,
@@ -811,8 +856,6 @@ class ResearchJobStore:
         generation: int,
         checkpoint_ref: str,
         resource_usage: dict[str, int | float],
-        artifact_store: ArtifactStore,
-        artifact_root: str | Path,
         now: datetime | None = None,
     ) -> dict[str, Any]:
         identifier = str(UUID(_require_text(job_id, "job_id")))
@@ -829,8 +872,8 @@ class ResearchJobStore:
             row = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (identifier,)).fetchone()
             self._require_live_lease(row, worker, generation, current)
             input_hashes = json.loads(row["input_hashes_json"])
-            read_snapshot = _trusted_reader(artifact_root, artifact_store)
-            if read_snapshot is None or not _verify_job_checkpoint_artifact(
+            read_snapshot = self._require_artifact_reader()
+            if not _verify_job_checkpoint_artifact(
                 read_snapshot=read_snapshot,
                 checkpoint_ref=checkpoint,
                 job_id=identifier,
@@ -871,7 +914,6 @@ class ResearchJobStore:
         worker_id: str,
         generation: int,
         artifact_store: ArtifactStore,
-        artifact_root: str | Path,
         data: bytes,
         media_type: str,
         rights: dict[str, Any],
@@ -932,8 +974,6 @@ class ResearchJobStore:
             generation=generation,
             checkpoint_ref=checkpoint_ref,
             resource_usage=resource_usage,
-            artifact_store=artifact_store,
-            artifact_root=artifact_root,
             now=now,
         )
         return manifest, record
@@ -1086,8 +1126,6 @@ class ResearchJobStore:
         worker_id: str,
         generation: int,
         output_refs: list[str],
-        artifact_store: ArtifactStore | None = None,
-        artifact_root: str | Path | None = None,
         now: datetime | None = None,
     ) -> bool:
         identifier = str(UUID(_require_text(job_id, "job_id")))
@@ -1129,8 +1167,8 @@ class ResearchJobStore:
                 connection.rollback()
                 raise ValueError("output_refs must not contain duplicates")
             input_hashes = json.loads(row["input_hashes_json"])
-            read_snapshot = _trusted_reader(artifact_root, artifact_store)
-            if read_snapshot is None or any(
+            read_snapshot = self._require_artifact_reader()
+            if any(
                 not _verify_job_output_artifact(
                     read_snapshot=read_snapshot,
                     output_ref=output_ref,
@@ -1163,7 +1201,6 @@ class ResearchJobStore:
         worker_id: str,
         generation: int,
         artifact_store: ArtifactStore,
-        artifact_root: str | Path,
         data: bytes,
         media_type: str,
         rights: dict[str, Any],
@@ -1216,8 +1253,6 @@ class ResearchJobStore:
             worker_id=worker,
             generation=generation,
             output_refs=[output_ref],
-            artifact_store=artifact_store,
-            artifact_root=artifact_root,
             now=now,
         )
         return manifest, accepted

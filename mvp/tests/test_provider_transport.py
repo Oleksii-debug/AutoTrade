@@ -2,6 +2,10 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
+from io import BytesIO
+from unittest.mock import patch
+from urllib.error import HTTPError
+from urllib.request import ProxyHandler
 import subprocess
 import sys
 from threading import Event
@@ -46,6 +50,9 @@ from mvp.autotrade_mvp.provider_transport import (
     ProviderTransportError,
     ProviderTransportScopeError,
     TradingWireResponse,
+    SignedHttpRequest,
+    UrllibJsonWireClient,
+    _exact_trading_response,
     KRAKEN_SPOT_ENDPOINT_POLICIES,
     KrakenSpotAuthenticatedReadSigner,
     KrakenSpotAuthenticatedReadTransport,
@@ -58,6 +65,13 @@ from mvp.autotrade_mvp.provider_transport import (
     _DurableProviderNonceAllocator,
 )
 from mvp.autotrade_mvp.whitebit import WhiteBitPreparedRequest
+from mvp.autotrade_mvp.provider_response_limits import (
+    HARD_MAX_PROVIDER_RESPONSE_BYTES,
+    DEFAULT_MAX_PROVIDER_RESPONSE_BYTES,
+    require_provider_response_bytes,
+    require_provider_json_depth,
+    MAX_PROVIDER_JSON_DEPTH,
+)
 from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
 
 
@@ -2935,6 +2949,79 @@ class ProviderTransportTests(unittest.TestCase):
             self.assertEqual(wire.requests, [])
 
 
+    def test_oversized_real_http_body_after_send_is_durable_unknown_and_never_resends(self):
+        class OversizeStream:
+            status = 200
+            def __enter__(self):
+                return self
+            def __exit__(self, *_):
+                return False
+            def read(self, size):
+                self.read_sizes.append(size)
+                return b"x" * size
+            def __init__(self):
+                self.read_sizes = []
+
+        class OversizeWire:
+            def __init__(self):
+                self.calls = 0
+                self.streams = []
+            def send(self, request):
+                self.calls += 1
+                client = UrllibJsonWireClient(max_response_bytes=8)
+                stream = OversizeStream()
+                self.streams.append(stream)
+                class FakeOpener:
+                    def open(self, *_args, **_kwargs):
+                        return stream
+                client._opener = FakeOpener()
+                return client.send(request)
+
+        with TemporaryDirectory() as directory:
+            events = []
+            wire = OversizeWire()
+            transport, _resolver = self.make_transport(events=events, wire=wire)
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store, environment="PAPER", account_id="acct-1", owner_token="owner-1"
+            )
+            intent_id = "intent-http-byte-budget"
+            client_id = stable_client_order_id(
+                "BINANCE", intent_id, environment="PAPER", account_id="acct-1"
+            )
+            arguments = dict(
+                attempt_id="attempt-http-byte-budget",
+                intent_id=intent_id,
+                intent_hash="intent-http-byte-budget-hash",
+                provider="BINANCE",
+                request=prepared_request(client_id),
+                now="2026-09-25T10:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=transport,
+                sender_check=lambda _owner, _epoch: None,
+                final_barrier_clock=lambda: "2026-09-25T10:00:01Z",
+                submission_scope={
+                    "capability_snapshot_id": "cap-1",
+                    "provider": "BINANCE",
+                    "account_id": "acct-1",
+                    "environment": "PAPER",
+                },
+            )
+            result = dispatcher.dispatch(**arguments)
+            self.assertEqual(result.status, "UNKNOWN")
+            self.assertEqual(wire.calls, 1)
+            self.assertEqual(wire.streams[0].read_sizes, [9])
+            self.assertEqual(
+                [x["event_type"] for x in dispatcher._events("attempt-http-byte-budget")],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
+            )
+            repeated = dispatcher.dispatch(**arguments)
+            self.assertEqual(repeated.status, "UNKNOWN")
+            self.assertEqual(wire.calls, 1)
+
+
+
+
 class AuthenticatedReadTransportTests(unittest.TestCase):
     def make_read_transport(
         self,
@@ -3885,6 +3972,230 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
                 )
                 self.assertEqual(len(resolver.calls), 1)
                 self.assertEqual(len(wire.requests), 1)
+
+
+class SharedProviderWireResponseBudgetTests(unittest.TestCase):
+    """Network-free bounded I/O tests for the selected shared wire client."""
+
+    @staticmethod
+    def request():
+        return SignedHttpRequest(
+            method="POST",
+            url="https://api.example.test/v1/order",
+            headers={"Content-Type": "application/json"},
+            body=b"{}",
+            timeout_seconds=2,
+        )
+
+    def test_production_client_disables_ambient_process_os_proxy_discovery(self):
+        with patch("mvp.autotrade_mvp.provider_transport.build_opener") as factory:
+            UrllibJsonWireClient()
+            handlers = factory.call_args.args
+            selected = [x for x in handlers if type(x) is ProxyHandler]
+            self.assertEqual(len(selected), 1)
+            self.assertEqual(selected[0].proxies, {})
+        self.assertEqual(DEFAULT_MAX_PROVIDER_RESPONSE_BYTES, 8 * 1024 * 1024)
+
+    def test_config_exacts_and_shared_nonpolymorphic_byte_limits(self):
+        class NumericSubtype(int):
+            pass
+        for bad in (0, True, "8", NumericSubtype(8), HARD_MAX_PROVIDER_RESPONSE_BYTES + 1):
+            with self.subTest(bad=repr(bad)), self.assertRaises((ValueError, TypeError)):
+                UrllibJsonWireClient(max_response_bytes=bad)
+        with self.assertRaisesRegex(ValueError, "byte budget"):
+            require_provider_response_bytes(b"x" * 9, max_bytes=8)
+        self.assertEqual(require_provider_response_bytes(b"x" * 8, max_bytes=8), b"x" * 8)
+        self.assertEqual(UrllibJsonWireClient(max_response_bytes=8).max_response_bytes, 8)
+
+
+    def test_mutated_response_budget_is_revalidated_before_read_and_snapshotted(self):
+        class Stream:
+            status = 200
+
+            def __init__(self, client, body, mutate_to):
+                self.client = client
+                self.body = body
+                self.mutate_to = mutate_to
+                self.sizes = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self, size=-1):
+                self.sizes.append(size)
+                self.client.max_response_bytes = self.mutate_to
+                return self.body[:size]
+
+        class Opener:
+            def __init__(self, stream):
+                self.stream = stream
+                self.calls = 0
+
+            def open(self, *_args, **_kwargs):
+                self.calls += 1
+                return self.stream
+
+        client = UrllibJsonWireClient(max_response_bytes=8)
+        stream = Stream(client, b"x" * 8, 8)
+        opener = Opener(stream)
+        client._opener = opener
+        client.max_response_bytes = HARD_MAX_PROVIDER_RESPONSE_BYTES + 1
+        with self.assertRaisesRegex(ProviderTransportScopeError, "byte budget"):
+            client.send(self.request())
+        self.assertEqual(opener.calls, 0)
+        self.assertEqual(stream.sizes, [])
+
+        # A concurrent field mutation cannot widen the captured four-byte limit.
+        client = UrllibJsonWireClient(max_response_bytes=4)
+        stream = Stream(client, b"x" * 5, 8)
+        opener = Opener(stream)
+        client._opener = opener
+        with self.assertRaisesRegex(ProviderTransportError, "oversized"):
+            client.send(self.request())
+        self.assertEqual(opener.calls, 1)
+        self.assertEqual(stream.sizes, [5])
+
+    def test_http_error_uses_same_captured_budget_when_live_field_mutates_during_read(self):
+        class MutatingBytesIO(BytesIO):
+            def __init__(self, client, data, mutate_to):
+                super().__init__(data)
+                self.client = client
+                self.mutate_to = mutate_to
+                self.read_sizes = []
+
+            def read(self, size=-1):
+                self.read_sizes.append(size)
+                self.client.max_response_bytes = self.mutate_to
+                return super().read(size)
+
+        class FailingOpener:
+            def __init__(self, client):
+                self.stream = MutatingBytesIO(client, b"x" * 5, 8)
+                self.error = HTTPError(
+                    "https://api.example.test/v1/order",
+                    429,
+                    "error",
+                    {},
+                    self.stream,
+                )
+                self.calls = 0
+
+            def open(self, *_args, **_kwargs):
+                self.calls += 1
+                raise self.error
+
+        client = UrllibJsonWireClient(max_response_bytes=4)
+        opener = FailingOpener(client)
+        client._opener = opener
+        with self.assertRaisesRegex(ProviderTransportError, "oversized"):
+            client.send(self.request())
+        self.assertEqual(opener.calls, 1)
+        self.assertEqual(opener.stream.read_sizes, [5])
+        self.assertEqual(client.max_response_bytes, 8)
+
+    def test_http_success_reads_at_most_limit_plus_one_and_rejects_overlimit(self):
+        class Stream:
+            def __init__(self, body):
+                self.body = body
+                self.status = 200
+                self.sizes = []
+            def __enter__(self):
+                return self
+            def __exit__(self, *_):
+                return False
+            def read(self, size=-1):
+                self.sizes.append(size)
+                return self.body[:size]
+        class Opener:
+            def __init__(self, stream):
+                self.stream = stream
+                self.calls = 0
+            def open(self, *_args, **_kwargs):
+                self.calls += 1
+                return self.stream
+        for body, ok in ((b"x" * 8, True), (b"x" * 9, False)):
+            with self.subTest(ok=ok):
+                client = UrllibJsonWireClient(max_response_bytes=8)
+                stream = Stream(body)
+                client._opener = Opener(stream)
+                if ok:
+                    result = client.send(self.request())
+                    self.assertEqual(result.body, body)
+                else:
+                    with self.assertRaisesRegex(ProviderTransportError, "oversized"):
+                        client.send(self.request())
+                self.assertEqual(stream.sizes, [9])
+                self.assertEqual(client._opener.calls, 1)
+
+    def test_pure_json_structure_gate_prevents_parser_recursion_before_allocation(self):
+        inside_quoted_string = json.dumps(
+            {"message": "[" * 150 + "\\\"" + "]" * 150},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.assertIs(require_provider_json_depth(inside_quoted_string), inside_quoted_string)
+        at_limit = b"[" * MAX_PROVIDER_JSON_DEPTH + b"0" + b"]" * MAX_PROVIDER_JSON_DEPTH
+        one_over = b"[" * (MAX_PROVIDER_JSON_DEPTH + 1) + b"0" + b"]" * (MAX_PROVIDER_JSON_DEPTH + 1)
+        self.assertEqual(require_provider_json_depth(at_limit), at_limit)
+        # Preserve the existing provider_core._freeze_json(depth=0) geometry:
+        # 65 *empty* nested containers finish at depth 64, while placing a
+        # primitive inside the deepest one would recurse to forbidden depth 65.
+        empty_65 = b"[" * 65 + b"]" * 65
+        empty_66 = b"[" * 66 + b"]" * 66
+        self.assertEqual(require_provider_json_depth(empty_65), empty_65)
+        with self.assertRaisesRegex(ValueError, "structural depth"):
+            require_provider_json_depth(empty_66)
+        with self.assertRaisesRegex(ValueError, "structural depth"):
+            require_provider_json_depth(one_over)
+        with self.assertRaisesRegex(ValueError, "structural depth"):
+            require_provider_json_depth(at_limit, max_depth=63)
+        with self.assertRaisesRegex(ValueError, "structural depth budget is invalid"):
+            require_provider_json_depth(at_limit, max_depth=True)
+        with self.assertRaisesRegex(ValueError, "invalid structural nesting"):
+            require_provider_json_depth(b"}")
+        with self.assertRaises(ValueError):
+            require_provider_json_depth(b"x" * (HARD_MAX_PROVIDER_RESPONSE_BYTES + 1))
+
+
+    def test_http_error_body_uses_same_limit_and_redirect_never_reads_body(self):
+        class TrackingBytesIO(BytesIO):
+            def __init__(self, data):
+                super().__init__(data)
+                self.read_sizes = []
+            def read(self, size=-1):
+                self.read_sizes.append(size)
+                return super().read(size)
+        class FailingOpener:
+            def __init__(self, status, body):
+                self.stream = TrackingBytesIO(body)
+                self.error = HTTPError("https://api.example.test/v1/order", status, "error", {}, self.stream)
+                self.calls = 0
+            def open(self, *_args, **_kwargs):
+                self.calls += 1
+                raise self.error
+        for status, body, ok in ((429, b"x" * 8, True), (429, b"x" * 9, False), (302, b"x" * 9, False)):
+            with self.subTest(status=status, ok=ok):
+                client = UrllibJsonWireClient(max_response_bytes=8)
+                client._opener = FailingOpener(status, body)
+                if ok:
+                    result = client.send(self.request())
+                    self.assertEqual(result.http_status, 429)
+                    self.assertEqual(result.body, body)
+                else:
+                    with self.assertRaises(ProviderTransportError):
+                        client.send(self.request())
+                self.assertEqual(client._opener.calls, 1)
+                self.assertEqual(client._opener.stream.read_sizes, [] if status == 302 else [9])
+
+    def test_injected_typed_and_raw_wire_values_cannot_exceed_absolute_ceiling(self):
+        too_large = b"x" * (HARD_MAX_PROVIDER_RESPONSE_BYTES + 1)
+        for response in (TradingWireResponse, AuthenticatedReadWireResponse):
+            with self.subTest(contract=response.__name__), self.assertRaises(ProviderTransportError):
+                response(http_status=200, body=too_large)
+        with self.assertRaises(ProviderTransportError):
+            _exact_trading_response(too_large)
 
 
 if __name__ == "__main__":

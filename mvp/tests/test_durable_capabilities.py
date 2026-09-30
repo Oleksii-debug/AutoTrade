@@ -14,6 +14,7 @@ from mvp.autotrade_mvp.capabilities import (
 )
 from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
+from mvp.tests.capability_test_support import fresh_test_admission
 
 
 NOW = datetime(2026, 9, 25, 20, 0, tzinfo=timezone.utc)
@@ -68,19 +69,21 @@ def verified(
     provider_id="simulated",
     provider_environment=None,
 ):
-    return derive_capability_snapshot(
-        snapshot_id=snapshot_id,
-        claims=tuple(
-            claim(
-                source,
-                observed_at=observed_at,
-                provider_id=provider_id,
-                provider_environment=provider_environment,
-            )
-            for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
-        ),
-        observed_at=observed_at,
-        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    return fresh_test_admission(
+        derive_capability_snapshot(
+            snapshot_id=snapshot_id,
+            claims=tuple(
+                claim(
+                    source,
+                    observed_at=observed_at,
+                    provider_id=provider_id,
+                    provider_environment=provider_environment,
+                )
+                for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+            ),
+            observed_at=observed_at,
+            evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+        )
     )
 
 

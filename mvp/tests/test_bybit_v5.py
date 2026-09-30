@@ -33,6 +33,7 @@ from mvp.autotrade_mvp.provider_core import (
     observe_submission_json_response,
     prepare_authenticated_read_query,
 )
+from mvp.tests.capability_test_support import fresh_test_admission
 
 
 READ_AT = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
@@ -74,11 +75,13 @@ def read_capability(
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-    return derive_capability_snapshot(
-        snapshot_id=snapshot_id or str(uuid4()),
-        claims=claims,
-        observed_at=READ_AT,
-        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    return fresh_test_admission(
+        derive_capability_snapshot(
+            snapshot_id=snapshot_id or str(uuid4()),
+            claims=claims,
+            observed_at=READ_AT,
+            evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+        )
     )
 
 
@@ -108,6 +111,7 @@ def write_capability(
             account_id=account_id,
             entity_id="bybit-unified-account",
             environment=environment,
+            provider_environment=provider_environment,
             instrument_version=instrument_version,
             observed_at=observed_at,
             expires_at=expires_at or READ_AT + timedelta(minutes=5),
@@ -127,11 +131,13 @@ def write_capability(
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-    return derive_capability_snapshot(
-        snapshot_id=str(uuid4()),
-        claims=claims,
-        observed_at=READ_AT,
-        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    return fresh_test_admission(
+        derive_capability_snapshot(
+            snapshot_id=str(uuid4()),
+            claims=claims,
+            observed_at=READ_AT,
+            evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+        )
     )
 
 def submission_write_capability(
@@ -149,6 +155,7 @@ def submission_write_capability(
             account_id=account_id,
             entity_id="bybit-order",
             environment=environment,
+            provider_environment=provider_environment,
             instrument_version=instrument_version,
             observed_at=observed_at,
             expires_at=READ_AT + timedelta(hours=1),
@@ -168,11 +175,13 @@ def submission_write_capability(
         )
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
-    return derive_capability_snapshot(
-        snapshot_id=str(uuid4()),
-        claims=claims,
-        observed_at=READ_AT,
-        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    return fresh_test_admission(
+        derive_capability_snapshot(
+            snapshot_id=str(uuid4()),
+            claims=claims,
+            observed_at=READ_AT,
+            evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+        )
     )
 
 

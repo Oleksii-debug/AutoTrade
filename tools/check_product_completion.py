@@ -27,7 +27,7 @@ from mvp.autotrade_mvp.qualification_attestation import (
     SignedQualificationAttestation,
     parse_qualification_trust_policy,
     parse_signed_qualification_attestation,
-    verify_qualification_attestation,
+    verify_canonical_qualification_attestation,
 )
 from research.autotrade_research.artifacts import (
     ArtifactIntegrityError,
@@ -349,9 +349,15 @@ def _terminal_nvda_status(
     )
 
 
+def _signed_requirement_id(kind: str, requirement_id: str) -> str:
+    """Bind the signed assertion to both completion namespace and identity."""
+    return f"{kind}/{requirement_id}"
+
+
 def _independently_verified_evidence(
     item: dict[str, Any],
     *,
+    kind: str,
     requirement_id: str,
     exact_source_sha: str | None,
     evidence_context: WholeProductEvidenceContext | None,
@@ -360,31 +366,29 @@ def _independently_verified_evidence(
         return False
     receipt_payload = item.get("receipt")
     evidence_ref = item.get("evidence_ref")
+    signed_requirement_id = _signed_requirement_id(kind, requirement_id)
     try:
         receipt = parse_signed_qualification_attestation(receipt_payload)
         if evidence_ref != receipt.attestation.attestation_id:
             return False
-        accepted = verify_qualification_attestation(
+        accepted = verify_canonical_qualification_attestation(
             receipt,
-            policy=evidence_context.policy,
             evidence_store=evidence_context.evidence_store,
             evidence_root=evidence_context.evidence_root,
-            expected_policy_id=evidence_context.expected_policy_id,
-            expected_policy_version=evidence_context.expected_policy_version,
             expected_source_sha=exact_source_sha,
             expected_domain=_WHOLE_PRODUCT_DOMAIN,
             expected_gate=_WHOLE_PRODUCT_GATE,
             expected_package_id=_WHOLE_PRODUCT_PACKAGE,
             expected_protocol_id=_WHOLE_PRODUCT_PROTOCOL,
             expected_protocol_version=_WHOLE_PRODUCT_PROTOCOL_VERSION,
-            expected_requirement_id=requirement_id,
+            expected_requirement_id=signed_requirement_id,
         )
     except (QualificationTrustError, TypeError, ValueError):
         return False
     return (
         accepted.result == "PASS"
         and accepted.source_sha == exact_source_sha
-        and accepted.requirement_id == requirement_id
+        and accepted.requirement_id == signed_requirement_id
         and accepted.attestation_id == evidence_ref
     )
 
@@ -394,11 +398,13 @@ def _evidence_matrix(
     *,
     exact_source_sha: str | None,
     evidence_context: WholeProductEvidenceContext | None,
-) -> tuple[list[str], list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str], list[str]]:
     required = {
         ("PRODUCT_SECTION", section) for section in EXPECTED_SECTION_IDS
     } | {
         ("WORK_PACKAGE", package) for package in EXPECTED_PACKAGE_IDS
+    } | {
+        ("QUALIFICATION_GATE", gate) for gate in EXPECTED_GATE_NAMES
     }
     raw = qualification.get("whole_product_evidence")
     if raw is None:
@@ -444,6 +450,11 @@ def _evidence_matrix(
         for package in EXPECTED_PACKAGE_IDS
         if ("WORK_PACKAGE", package) not in by_key
     ]
+    missing_gates = [
+        gate
+        for gate in sorted(EXPECTED_GATE_NAMES)
+        if ("QUALIFICATION_GATE", gate) not in by_key
+    ]
     nonpassing: list[str] = []
     for (kind, requirement_id), item in sorted(by_key.items()):
         if item.get("status") != "PASS":
@@ -452,6 +463,7 @@ def _evidence_matrix(
             nonpassing.append(f"{kind}:{requirement_id}:source_sha")
         if not _independently_verified_evidence(
             item,
+            kind=kind,
             requirement_id=requirement_id,
             exact_source_sha=exact_source_sha,
             evidence_context=evidence_context,
@@ -459,7 +471,7 @@ def _evidence_matrix(
             nonpassing.append(
                 f"{kind}:{requirement_id}:independent_verification"
             )
-    return missing_sections, missing_packages, nonpassing
+    return missing_sections, missing_packages, missing_gates, nonpassing
 
 
 def evaluate_completion(
@@ -542,7 +554,12 @@ def evaluate_completion(
     qualification_source_matches = (
         source_sha is not None and qualification_source_sha == source_sha
     )
-    missing_sections, missing_evidence_packages, nonpassing_evidence = _evidence_matrix(
+    (
+        missing_sections,
+        missing_evidence_packages,
+        missing_evidence_gates,
+        nonpassing_evidence,
+    ) = _evidence_matrix(
         qualification,
         exact_source_sha=source_sha,
         evidence_context=evidence_context,
@@ -588,6 +605,10 @@ def evaluate_completion(
         blockers.append(
             f"{len(missing_evidence_packages)} work packages lack exact-source PASS evidence"
         )
+    if missing_evidence_gates:
+        blockers.append(
+            f"{len(missing_evidence_gates)} qualification gates lack exact-source PASS evidence"
+        )
     if nonpassing_evidence:
         blockers.append(
             f"{len(nonpassing_evidence)} whole-product evidence checks are nonpassing or stale"
@@ -613,6 +634,7 @@ def evaluate_completion(
         "nonterminal_gates": nonterminal_gates,
         "missing_section_evidence": missing_sections,
         "missing_package_evidence": missing_evidence_packages,
+        "missing_gate_evidence": missing_evidence_gates,
         "nonpassing_evidence": nonpassing_evidence,
         "nvda_qualified": nvda_qualified,
         "nvda_source_matches": nvda_source_matches,

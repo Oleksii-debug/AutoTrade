@@ -9,6 +9,7 @@ from uuid import NAMESPACE_URL, uuid5
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 import mvp.autotrade_mvp.release_candidate as release_candidate_module
+import mvp.autotrade_mvp.supply_chain_qualification as supply_chain_module
 from mvp.autotrade_mvp.qualification_attestation import (
     EvidenceArtifactRef,
     QualificationAttestation,
@@ -24,6 +25,12 @@ from mvp.autotrade_mvp.release_candidate import (
     ReleaseCandidateError,
     ReleaseCandidateInput,
     freeze_release_candidate,
+)
+from mvp.autotrade_mvp.supply_chain_qualification import (
+    ComponentEvidence,
+    ModelDataRightsEvidence,
+    SupplyChainEvidence,
+    supply_chain_subject_requirement,
 )
 
 
@@ -112,7 +119,10 @@ def _trust_root():
         verifier_id="autotrade.trust.verifier",
         public_modulus_hex=format(_RSA_N, "x"),
         public_exponent=65537,
-        allowed_scopes=(QualificationScope("RELEASE", "FREEZE"),),
+        allowed_scopes=(
+            QualificationScope("RELEASE", "FREEZE"),
+            QualificationScope("SUPPLY_CHAIN", "RELEASE"),
+        ),
         valid_from="2026-09-01T00:00:00Z",
     )
 
@@ -177,6 +187,196 @@ def _qualification(candidate, trust_root, *, artifacts=None, result="PASS"):
     return SignedQualificationAttestation(value, _sign(value))
 
 
+def _publish_supply_artifact(
+    store,
+    *,
+    label,
+    media_type,
+    metadata,
+):
+    artifact_id = str(uuid5(NAMESPACE_URL, "wp64-artifact:" + label))
+    data = ("wp64-artifact:" + label).encode("utf-8")
+    digest = "sha256:" + sha256(data).hexdigest()
+    store.publish_bytes(
+        artifact_id=artifact_id,
+        data=data,
+        media_type=media_type,
+        rights={"storage": True, "export": False},
+        source_refs=[f"git:{SOURCE}"],
+        metadata=metadata,
+    )
+    return artifact_id, digest
+
+
+def _supply_chain_fixture(candidate, store):
+    windows = next(
+        item for item in candidate.artifacts if item.role == "WINDOWS_PACKAGE"
+    )
+    sbom_id, sbom_hash = _publish_supply_artifact(
+        store,
+        label="sbom",
+        media_type=supply_chain_module._SBOM_MEDIA_TYPE,
+        metadata={"evidence_kind": "SBOM", "release_sha": SOURCE},
+    )
+    provenance_id, provenance_hash = _publish_supply_artifact(
+        store,
+        label="provenance",
+        media_type=supply_chain_module._PROVENANCE_MEDIA_TYPE,
+        metadata={"evidence_kind": "PROVENANCE", "release_sha": SOURCE},
+    )
+    lock_id, lock_hash = _publish_supply_artifact(
+        store,
+        label="dependency-lock",
+        media_type=supply_chain_module._DEPENDENCY_LOCK_MEDIA_TYPE,
+        metadata={"evidence_kind": "DEPENDENCY_LOCK", "release_sha": SOURCE},
+    )
+    component_id = "autotrade-core"
+    component_version = "1.0.0"
+    component_artifact_id, component_hash = _publish_supply_artifact(
+        store,
+        label="component",
+        media_type=supply_chain_module._COMPONENT_MEDIA_TYPE,
+        metadata={
+            "evidence_kind": "DISTRIBUTED_COMPONENT",
+            "component_id": component_id,
+            "version": component_version,
+            "release_sha": SOURCE,
+        },
+    )
+    rights_scope = "distribution"
+    rights_id, rights_hash = _publish_supply_artifact(
+        store,
+        label="rights",
+        media_type=supply_chain_module._RIGHTS_MEDIA_TYPE,
+        metadata={
+            "evidence_kind": "MODEL_DATA_RIGHTS",
+            "use_scope": rights_scope,
+            "release_sha": SOURCE,
+        },
+    )
+    component = ComponentEvidence(
+        component_id=component_id,
+        artifact_id=component_artifact_id,
+        version=component_version,
+        declared_artifact_hash=component_hash,
+        observed_artifact_hash=component_hash,
+        source_revision="git:" + SOURCE,
+        license_status="APPROVED",
+        distribution_rights="APPROVED",
+        advisory_status="CLEAR",
+        notice_required=False,
+        notice_present=True,
+        reviewed_for_release_sha=SOURCE,
+    )
+    rights = ModelDataRightsEvidence(
+        artifact_id=rights_id,
+        artifact_hash=rights_hash,
+        use_scope=rights_scope,
+        rights_status="APPROVED",
+        reviewed_for_release_sha=SOURCE,
+    )
+    return SupplyChainEvidence(
+        release_commit_sha=SOURCE,
+        built_from_commit_sha=SOURCE,
+        sbom_artifact_id=sbom_id,
+        sbom_hash=sbom_hash,
+        provenance_artifact_id=provenance_id,
+        provenance_hash=provenance_hash,
+        dependency_lock_artifact_id=lock_id,
+        dependency_lock_hash=lock_hash,
+        sbom_reviewed_for_release_sha=SOURCE,
+        provenance_reviewed_for_release_sha=SOURCE,
+        dependency_lock_reviewed_for_release_sha=SOURCE,
+        distributed_component_ids=(component_id,),
+        sbom_component_ids=(component_id,),
+        components=(component,),
+        model_data_rights=(rights,),
+        release_artifact_id=windows.artifact_id,
+        release_artifact_sha256=windows.artifact_sha256,
+    )
+
+
+def _supply_chain_receipt(evidence, trust_root):
+    refs = [
+        EvidenceArtifactRef(
+            artifact_id=evidence.sbom_artifact_id,
+            sha256=evidence.sbom_hash,
+            media_type=supply_chain_module._SBOM_MEDIA_TYPE,
+            evidence_kind="SBOM",
+            source_sha=SOURCE,
+        ),
+        EvidenceArtifactRef(
+            artifact_id=evidence.provenance_artifact_id,
+            sha256=evidence.provenance_hash,
+            media_type=supply_chain_module._PROVENANCE_MEDIA_TYPE,
+            evidence_kind="PROVENANCE",
+            source_sha=SOURCE,
+        ),
+        EvidenceArtifactRef(
+            artifact_id=evidence.dependency_lock_artifact_id,
+            sha256=evidence.dependency_lock_hash,
+            media_type=supply_chain_module._DEPENDENCY_LOCK_MEDIA_TYPE,
+            evidence_kind="DEPENDENCY_LOCK",
+            source_sha=SOURCE,
+        ),
+    ]
+    refs.extend(
+        EvidenceArtifactRef(
+            artifact_id=item.artifact_id,
+            sha256=item.observed_artifact_hash,
+            media_type=supply_chain_module._COMPONENT_MEDIA_TYPE,
+            evidence_kind="DISTRIBUTED_COMPONENT",
+            source_sha=SOURCE,
+        )
+        for item in evidence.components
+    )
+    refs.extend(
+        EvidenceArtifactRef(
+            artifact_id=item.artifact_id,
+            sha256=item.artifact_hash,
+            media_type=supply_chain_module._RIGHTS_MEDIA_TYPE,
+            evidence_kind="MODEL_DATA_RIGHTS",
+            source_sha=SOURCE,
+        )
+        for item in evidence.model_data_rights
+    )
+    value = QualificationAttestation(
+        attestation_id=str(
+            uuid5(
+                NAMESPACE_URL,
+                "wp64:"
+                + evidence.release_artifact_id
+                + ":"
+                + evidence.release_artifact_sha256,
+            )
+        ),
+        source_sha=SOURCE,
+        domain="SUPPLY_CHAIN",
+        gate="RELEASE",
+        package_id="WP-64",
+        protocol_id="supply-chain-review-v1",
+        protocol_version="1.0.0",
+        requirement_ids=(
+            "independent-supply-chain-review",
+            supply_chain_subject_requirement(evidence),
+        ),
+        evidence_refs=tuple(refs),
+        producer_id=trust_root.producer_id,
+        verifier_id=trust_root.verifier_id,
+        trust_root_id=trust_root.root_id,
+        runner_id="supply-chain-review-runner",
+        harness_version="1.0.0",
+        started_at="2026-09-25T01:00:00Z",
+        completed_at="2026-09-25T01:10:00Z",
+        signed_at="2026-09-25T01:11:00Z",
+        result="PASS",
+        unresolved_limits=(),
+        release_artifact_id=evidence.release_artifact_id,
+        release_artifact_sha256=evidence.release_artifact_sha256,
+    )
+    return SignedQualificationAttestation(value, _sign(value))
+
+
 def freeze_with_integrity_store(
     candidate,
     *,
@@ -186,6 +386,8 @@ def freeze_with_integrity_store(
     receipt_override=None,
     policy_override=None,
     before_canonical_verify=None,
+    supply_chain_evidence_override=None,
+    supply_chain_receipt_override=None,
 ):
     with TemporaryDirectory() as directory:
         store = ArtifactStore(directory)
@@ -222,6 +424,16 @@ def freeze_with_integrity_store(
                 evidence_root=directory,
             )
         trust_root = _trust_root()
+        supply_chain_evidence = (
+            supply_chain_evidence_override
+            if supply_chain_evidence_override is not None
+            else _supply_chain_fixture(candidate, store)
+        )
+        supply_chain_receipt = (
+            supply_chain_receipt_override
+            if supply_chain_receipt_override is not None
+            else _supply_chain_receipt(supply_chain_evidence, trust_root)
+        )
         canonical_policy = QualificationTrustPolicy(
             policy_version="2026.09",
             roots=(trust_root,),
@@ -252,12 +464,18 @@ def freeze_with_integrity_store(
             release_candidate_module,
             "verify_canonical_qualification_attestation",
             side_effect=canonical_verify,
+        ), patch.object(
+            supply_chain_module,
+            "verify_canonical_qualification_attestation",
+            side_effect=canonical_verify,
         ):
             return freeze_release_candidate(
                 candidate,
                 evidence_store=store,
                 evidence_root=directory,
                 qualification_receipt=receipt,
+                supply_chain_evidence=supply_chain_evidence,
+                supply_chain_receipt=supply_chain_receipt,
                 qualification_policy=caller_policy,
                 expected_policy_id=caller_policy.policy_id,
                 expected_policy_version=caller_policy.policy_version,

@@ -27,6 +27,7 @@ from mvp.tests.test_qualification_attestation import (
     root as fixture_root,
     sign as fixture_sign,
 )
+import tools.check_nvda_qualification as nvda_qualification
 from tools.check_product_completion import (
     EXPECTED_GATE_NAMES,
     EXPECTED_PACKAGE_IDS,
@@ -42,6 +43,10 @@ SPEC = (ROOT / "docs/product/PRODUCT_SPEC_CANONICAL.txt").read_text(encoding="ut
 SHA = "a" * 40
 EVIDENCE_MEDIA_TYPE = "application/vnd.autotrade.whole-product-evidence"
 EVIDENCE_KIND = "WHOLE_PRODUCT_QUALIFICATION"
+NVDA_REQUIREMENTS_BYTES = (ROOT / "qualification/nvda/requirements.json").read_bytes()
+NVDA_REQUIREMENTS_REQUIREMENT_ID = (
+    "nvda-requirements/sha256:" + sha256(NVDA_REQUIREMENTS_BYTES).hexdigest()
+)
 
 
 def complete_bank():
@@ -109,10 +114,7 @@ def verified_evidence(store, trust_root):
     ]
     for kind, requirement_id in requirements:
         artifact_id = str(
-            uuid5(
-                NAMESPACE_URL,
-                f"whole-product-artifact:{kind}:{requirement_id}",
-            )
+            uuid5(NAMESPACE_URL, f"whole-product-artifact:{kind}:{requirement_id}")
         )
         payload = f"verified:{kind}:{requirement_id}".encode("utf-8")
         manifest = store.publish_bytes(
@@ -204,8 +206,11 @@ def verified_nvda_fixture(store, trust_root, trust_policy, release_artifact):
         evidence_kind="NVDA_REAL_RUN",
         source_sha=SHA,
     )
-    requirement_ids = tuple(
+    workflow_requirement_ids = tuple(
         sorted(item["id"] for item in NVDA_REQUIREMENTS["workflows"])
+    )
+    requirement_ids = tuple(
+        sorted((*workflow_requirement_ids, NVDA_REQUIREMENTS_REQUIREMENT_ID))
     )
     attestation = QualificationAttestation(
         attestation_id=str(uuid5(NAMESPACE_URL, "whole-product-nvda-attestation")),
@@ -328,10 +333,17 @@ def evaluate(
     }
     if evidence_context is None:
         return evaluate_completion(*args, **kwargs)
-    with patch.object(
-        qualification_trust,
-        "load_canonical_qualification_trust_policy",
-        return_value=evidence_context.policy,
+    with (
+        patch.object(
+            qualification_trust,
+            "load_canonical_qualification_trust_policy",
+            return_value=evidence_context.policy,
+        ),
+        patch.object(
+            nvda_qualification,
+            "load_canonical_nvda_requirements_bytes",
+            return_value=NVDA_REQUIREMENTS_BYTES,
+        ),
     ):
         return evaluate_completion(*args, **kwargs)
 
@@ -369,11 +381,9 @@ class ProductCompletionGateTests(unittest.TestCase):
 
     def test_only_independently_verified_exact_matrix_can_report_complete(self):
         with TemporaryDirectory() as directory:
-            (
-                qualification,
-                evidence_context,
-                nvda_status,
-            ) = verified_completion_fixture(directory)
+            qualification, evidence_context, nvda_status = verified_completion_fixture(
+                directory
+            )
             report = evaluate(
                 qualification=qualification,
                 nvda_status=nvda_status,
@@ -390,11 +400,9 @@ class ProductCompletionGateTests(unittest.TestCase):
 
     def test_caller_selected_policy_cannot_select_terminal_whole_product_trust(self):
         with TemporaryDirectory() as directory:
-            (
-                qualification,
-                evidence_context,
-                nvda_status,
-            ) = verified_completion_fixture(directory)
+            qualification, evidence_context, nvda_status = verified_completion_fixture(
+                directory
+            )
             canonical_root = fixture_root(
                 scopes=(QualificationScope("RELEASE", "FREEZE"),)
             )
@@ -412,7 +420,6 @@ class ProductCompletionGateTests(unittest.TestCase):
                     exact_source_sha=SHA,
                     evidence_context=evidence_context,
                 )
-
         self.assertFalse(report["complete"])
         self.assertFalse(report["nvda_qualified"])
         self.assertTrue(report["nonpassing_evidence"])
@@ -425,12 +432,9 @@ class ProductCompletionGateTests(unittest.TestCase):
 
     def test_completion_ignores_post_capture_publication_store_poisoning(self):
         with TemporaryDirectory() as directory:
-            (
-                qualification,
-                evidence_context,
-                nvda_status,
-            ) = verified_completion_fixture(directory)
-
+            qualification, evidence_context, nvda_status = verified_completion_fixture(
+                directory
+            )
             attacker_root = Path(directory) / "attacker"
             object.__setattr__(evidence_context.evidence_store, "root", attacker_root)
             object.__setattr__(
@@ -443,13 +447,11 @@ class ProductCompletionGateTests(unittest.TestCase):
                 "read_bytes",
                 lambda _artifact_id: b"forged evidence",
             )
-
             report = evaluate(
                 qualification=qualification,
                 nvda_status=nvda_status,
                 evidence_context=evidence_context,
             )
-
         self.assertTrue(report["complete"])
         self.assertTrue(report["nvda_qualified"])
         self.assertEqual(report["nonpassing_evidence"], [])
@@ -462,12 +464,10 @@ class ProductCompletionGateTests(unittest.TestCase):
             ArtifactStore(authoritative_root)
             attacker_store = ArtifactStore(attacker_root)
             object.__setattr__(attacker_store, "root", authoritative_root)
-
             trust_root = fixture_root(
                 scopes=(QualificationScope("WHOLE_PRODUCT", "COMPLETION"),)
             )
             trust_policy = fixture_policy(trust_root)
-
             with self.assertRaisesRegex(
                 ValueError,
                 "publication store does not match trusted artifact root",
@@ -482,12 +482,9 @@ class ProductCompletionGateTests(unittest.TestCase):
 
     def test_well_formed_but_unverified_nvda_identity_cannot_complete(self):
         with TemporaryDirectory() as directory:
-            (
-                qualification,
-                evidence_context,
-                valid_nvda,
-            ) = verified_completion_fixture(directory)
-
+            qualification, evidence_context, valid_nvda = verified_completion_fixture(
+                directory
+            )
             forged = nvda()
             report = evaluate(
                 qualification=qualification,
@@ -528,7 +525,6 @@ class ProductCompletionGateTests(unittest.TestCase):
         marker = "28. Accessible desktop and web interfaces"
         prefix, separator, suffix = SPEC.rpartition(marker)
         self.assertTrue(separator)
-
         missing_body = prefix + suffix
         with self.assertRaisesRegex(
             ProductCompletionError,
@@ -541,7 +537,6 @@ class ProductCompletionGateTests(unittest.TestCase):
                 spec_text=missing_body,
                 exact_source_sha=SHA,
             )
-
         renamed_body = prefix + "28. Renamed inaccessible body section" + suffix
         with self.assertRaisesRegex(
             ProductCompletionError,
@@ -591,7 +586,6 @@ class ProductCompletionGateTests(unittest.TestCase):
             "unsupported work-package bank schema_version",
         ):
             evaluate(bank=bank)
-
         qualification = complete_qualification()
         qualification["schema_version"] = "9.0.0"
         with self.assertRaisesRegex(
@@ -599,7 +593,6 @@ class ProductCompletionGateTests(unittest.TestCase):
             "unsupported qualification schema_version",
         ):
             evaluate(qualification=qualification)
-
         legacy_in_progress = complete_qualification()
         legacy_in_progress["schema_version"] = "1.0.0"
         legacy_in_progress["overall_status"] = (
@@ -607,7 +600,6 @@ class ProductCompletionGateTests(unittest.TestCase):
         )
         report = evaluate(qualification=legacy_in_progress)
         self.assertFalse(report["complete"])
-
         legacy_terminal = complete_qualification()
         legacy_terminal["schema_version"] = "1.0.0"
         with self.assertRaisesRegex(
@@ -615,13 +607,10 @@ class ProductCompletionGateTests(unittest.TestCase):
             "FULL_PRODUCT_QUALIFIED requires qualification schema_version",
         ):
             evaluate(qualification=legacy_terminal)
-
         with TemporaryDirectory() as directory:
-            (
-                qualification,
-                evidence_context,
-                status,
-            ) = verified_completion_fixture(directory)
+            qualification, evidence_context, status = verified_completion_fixture(
+                directory
+            )
             status["schema_version"] = "9.0.0"
             report = evaluate(
                 qualification=qualification,
@@ -653,7 +642,6 @@ class ProductCompletionGateTests(unittest.TestCase):
         missing["packages"].pop()
         with self.assertRaisesRegex(ProductCompletionError, "exactly WP-01"):
             evaluate(bank=missing)
-
         duplicated = complete_bank()
         duplicated["packages"].append(dict(duplicated["packages"][0]))
         with self.assertRaisesRegex(ProductCompletionError, "duplicate"):
@@ -678,10 +666,7 @@ class ProductCompletionGateTests(unittest.TestCase):
         report = evaluate(qualification=qualification)
         self.assertFalse(report["complete"])
         self.assertIn("SECTION-07", report["missing_section_evidence"])
-        self.assertIn(
-            "WORK_PACKAGE:WP-33:source_sha",
-            report["nonpassing_evidence"],
-        )
+        self.assertIn("WORK_PACKAGE:WP-33:source_sha", report["nonpassing_evidence"])
 
     def test_duplicate_or_unknown_requirement_evidence_is_protocol_error(self):
         qualification = complete_qualification()
@@ -690,7 +675,6 @@ class ProductCompletionGateTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ProductCompletionError, "duplicate"):
             evaluate(qualification=qualification)
-
         qualification = complete_qualification()
         qualification["whole_product_evidence"][0]["requirement_id"] = "SECTION-99"
         with self.assertRaisesRegex(ProductCompletionError, "unknown requirement"):
@@ -700,18 +684,15 @@ class ProductCompletionGateTests(unittest.TestCase):
         report = evaluate(nvda_status={"qualified": "true", "source_sha": SHA})
         self.assertFalse(report["complete"])
         self.assertFalse(report["nvda_qualified"])
-
         report = evaluate(nvda_status=nvda(source_sha="b" * 40))
         self.assertFalse(report["complete"])
         self.assertFalse(report["nvda_source_matches"])
 
     def test_nvda_completion_requires_signed_release_identity(self):
         with TemporaryDirectory() as directory:
-            (
-                qualification,
-                evidence_context,
-                valid_status,
-            ) = verified_completion_fixture(directory)
+            qualification, evidence_context, valid_status = verified_completion_fixture(
+                directory
+            )
             required_fields = (
                 "release_artifact_id",
                 "artifact_sha256",
@@ -731,7 +712,6 @@ class ProductCompletionGateTests(unittest.TestCase):
                         evidence_context=evidence_context,
                     )
                     self.assertFalse(report["nvda_qualified"])
-
             status = dict(valid_status)
             status["reason"] = "QUALIFIED"
             report = evaluate(
@@ -759,7 +739,6 @@ class ProductCompletionGateTests(unittest.TestCase):
             "qualification source SHA is missing, non-canonical, or not the exact source SHA",
             report["blockers"],
         )
-
         qualification["source_sha"] = "NOT_A_SHA"
         report = evaluate(qualification=qualification, source_sha=SHA)
         self.assertFalse(report["qualification_source_matches"])

@@ -28,8 +28,12 @@ class StoreIdentityTests(unittest.TestCase):
                 os.chdir(first)
                 frozen = freeze_database_path("state/journal.sqlite")
                 os.chdir(second)
-                self.assertEqual(frozen, first / "state" / "journal.sqlite")
+                self.assertEqual(
+                    frozen,
+                    (first / "state" / "journal.sqlite").resolve(strict=False),
+                )
                 self.assertTrue(frozen.is_absolute())
+                os.chdir(original_cwd)
         finally:
             os.chdir(original_cwd)
 

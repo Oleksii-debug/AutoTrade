@@ -360,6 +360,152 @@ class BoundedRealQualificationTests(unittest.TestCase):
             result.qualification_trust_root_id.startswith("sha256:")
         )
 
+    def test_terminal_assessment_uses_one_detached_graph_across_verifier_callbacks(self):
+        phase = {"mutated": False}
+
+        class HostileRef(ImmutableEvidenceRef):
+            def __getattribute__(self, name):
+                if phase["mutated"]:
+                    if name == "provider_id":
+                        return "attacker-provider"
+                    if name == "evidence_kind":
+                        return "ATTACKER_KIND"
+                return super().__getattribute__(name)
+
+        class HostileEvidence(QualificationEvidence):
+            def __getattribute__(self, name):
+                if phase["mutated"]:
+                    if name == "passed":
+                        return False
+                    if name == "unresolved_blockers":
+                        return ("late-caller-blocker",)
+                return super().__getattribute__(name)
+
+        class HostileObservations(BoundedRealObservations):
+            def __getattribute__(self, name):
+                if phase["mutated"]:
+                    if name == "observed_partial_fill":
+                        return False
+                    if name == "unauthorized_action_count":
+                        return 1
+                    if name == "unresolved_unknown_count":
+                        return 1
+                return super().__getattribute__(name)
+
+        bounded = envelope()
+        base_prerequisites = prerequisites()
+        hostile_prerequisites = []
+        for index, item in enumerate(base_prerequisites):
+            evidence_ref = item.evidence_ref
+            if index == 0:
+                evidence_ref = HostileRef(
+                    artifact_id=evidence_ref.artifact_id,
+                    sha256=evidence_ref.sha256,
+                    evidence_kind=evidence_ref.evidence_kind,
+                    source_sha=evidence_ref.source_sha,
+                    envelope_id=evidence_ref.envelope_id,
+                    envelope_digest=evidence_ref.envelope_digest,
+                    provider_id=evidence_ref.provider_id,
+                    account_id=evidence_ref.account_id,
+                )
+                item = HostileEvidence(
+                    evidence_id=item.evidence_id,
+                    evidence_kind=item.evidence_kind,
+                    source_sha=item.source_sha,
+                    envelope_id=item.envelope_id,
+                    envelope_digest=item.envelope_digest,
+                    passed=item.passed,
+                    evidence_ref=evidence_ref,
+                    unresolved_blockers=item.unresolved_blockers,
+                )
+            hostile_prerequisites.append(item)
+
+        base_observed = observations()
+        hostile_observed = HostileObservations(
+            source_sha=base_observed.source_sha,
+            envelope_id=base_observed.envelope_id,
+            envelope_digest=base_observed.envelope_digest,
+            provider_id=base_observed.provider_id,
+            account_id=base_observed.account_id,
+            observed_fill_count=base_observed.observed_fill_count,
+            observed_partial_fill=base_observed.observed_partial_fill,
+            all_fills_reconciled=base_observed.all_fills_reconciled,
+            fees_reconciled=base_observed.fees_reconciled,
+            revocation_verified=base_observed.revocation_verified,
+            protection_verified=base_observed.protection_verified,
+            unauthorized_action_count=base_observed.unauthorized_action_count,
+            unresolved_unknown_count=base_observed.unresolved_unknown_count,
+            evidence_refs=base_observed.evidence_refs,
+        )
+        refs = _all_refs(hostile_prerequisites, hostile_observed)
+        receipt, trust_policy = _signed_bounded_receipt(bounded, refs)
+
+        original_verify = ArtifactStoreEvidenceVerifier.verify
+
+        def mutate_after_first_verify(verifier, evidence_ref):
+            verification = original_verify(verifier, evidence_ref)
+            phase["mutated"] = True
+            return verification
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            _populate_bundle(store, hostile_prerequisites, hostile_observed)
+            with _canonical_policy_fixture(trust_policy), patch.object(
+                ArtifactStoreEvidenceVerifier,
+                "verify",
+                new=mutate_after_first_verify,
+            ):
+                result = assess_bounded_real_qualification(
+                    envelope=bounded,
+                    prerequisite_evidence=hostile_prerequisites,
+                    observations=hostile_observed,
+                    evidence_store=store,
+                    evidence_root=directory,
+                    qualification_receipt=receipt,
+                )
+
+        self.assertTrue(phase["mutated"])
+        self.assertTrue(result.complete)
+        self.assertEqual(result.reason_codes, ())
+        self.assertEqual(result.exact_source_sha, SHA)
+        self.assertEqual(result.envelope_digest, bounded.envelope_digest)
+
+    def test_terminal_assessment_rejects_nonexact_observation_ref_container(self):
+        class HostileObservations(BoundedRealObservations):
+            def __getattribute__(self, name):
+                value = super().__getattribute__(name)
+                if name == "evidence_refs":
+                    return list(value)
+                return value
+
+        base = observations()
+        hostile = HostileObservations(
+            source_sha=base.source_sha,
+            envelope_id=base.envelope_id,
+            envelope_digest=base.envelope_digest,
+            provider_id=base.provider_id,
+            account_id=base.account_id,
+            observed_fill_count=base.observed_fill_count,
+            observed_partial_fill=base.observed_partial_fill,
+            all_fills_reconciled=base.all_fills_reconciled,
+            fees_reconciled=base.fees_reconciled,
+            revocation_verified=base.revocation_verified,
+            protection_verified=base.protection_verified,
+            unauthorized_action_count=base.unauthorized_action_count,
+            unresolved_unknown_count=base.unresolved_unknown_count,
+            evidence_refs=base.evidence_refs,
+        )
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "observations.evidence_refs must be an exact tuple",
+        ):
+            assess_bounded_real_qualification(
+                envelope=envelope(),
+                prerequisite_evidence=prerequisites(),
+                observations=hostile,
+            )
+
     def test_caller_self_signed_policy_cannot_select_terminal_trust_root(self):
         bounded = envelope()
         prerequisite_items = prerequisites()

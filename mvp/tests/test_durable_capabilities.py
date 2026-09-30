@@ -1,4 +1,5 @@
 from contextlib import closing
+from hashlib import sha256
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -12,7 +13,7 @@ from mvp.autotrade_mvp.capabilities import (
     derive_capability_snapshot,
 )
 from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
 
 
 NOW = datetime(2026, 9, 25, 20, 0, tzinfo=timezone.utc)
@@ -351,6 +352,74 @@ class DurableCapabilityRegistryTests(unittest.TestCase):
                     environment="PAPER",
                     instrument_version="instrument-v1",
                     at=observed + timedelta(seconds=1),
+                )
+
+    def test_legacy_bybit_v1_without_provider_domain_is_non_replayable(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            snapshot = verified(
+                "11111111-1111-4111-8111-111111111111",
+                NOW,
+                provider_id="BYBIT",
+                provider_environment="TESTNET",
+            )
+            raw = dict(snapshot.to_contract_dict())
+            raw.pop("provider_environment")
+            payload = {
+                "schema_version": "1.0.0",
+                "snapshot": raw,
+                "sources": sorted(snapshot.sources),
+            }
+            legacy_identity = [
+                snapshot.provider_id,
+                snapshot.account_id,
+                snapshot.entity_id,
+                snapshot.environment,
+                snapshot.instrument_version,
+            ]
+            aggregate_id = "capability:" + sha256(
+                canonical_json(legacy_identity).encode("utf-8")
+            ).hexdigest()
+            store.append_event(
+                {
+                    "event_id": "legacy-bybit-capability-v1",
+                    "event_type": "CapabilitySnapshotObserved.v1",
+                    "aggregate_type": "capability_history",
+                    "aggregate_id": aggregate_id,
+                    "aggregate_version": "1",
+                    "payload": payload,
+                    "payload_hash": payload_digest(payload),
+                    "committed_at": NOW.isoformat(),
+                }
+            )
+
+            restarted = DurableCapabilityRegistry(JournalStore(path))
+            with self.assertRaisesRegex(
+                CapabilityError,
+                "legacy BYBIT capability lacks exact provider_environment",
+            ):
+                restarted.latest(
+                    provider_id="BYBIT",
+                    account_id="paper-account",
+                    entity_id="entity-1",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    instrument_version="instrument-v1",
+                    at=NOW + timedelta(seconds=1),
+                )
+            with self.assertRaisesRegex(
+                CapabilityError,
+                "legacy BYBIT capability lacks exact provider_environment",
+            ):
+                restarted.latest(
+                    provider_id="BYBIT",
+                    account_id="paper-account",
+                    entity_id="entity-1",
+                    environment="PAPER",
+                    provider_environment="DEMO",
+                    instrument_version="instrument-v1",
+                    at=NOW + timedelta(seconds=1),
                 )
 
     def test_tampered_durable_snapshot_fails_closed(self):

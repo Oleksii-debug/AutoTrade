@@ -277,6 +277,63 @@ def _invoke_authority_check(
     return authority_check(intent_hash, now)
 
 
+def _financial_submission_scope_reason(
+    *,
+    environment: str,
+    account_id: str,
+    provider: str,
+    request_hash: str,
+    submission_scope: Mapping[str, Any],
+) -> str | None:
+    """Cross-bind PAPER/LIVE financial scope to the concrete send tuple."""
+
+    if environment not in {"PAPER", "LIVE"}:
+        return None
+
+    def scope_text(key: str) -> str | None:
+        value = submission_scope.get(key)
+        if not isinstance(value, str) or not value.strip():
+            return None
+        return value.strip()
+
+    provider_id = scope_text("provider_id")
+    provider_alias = scope_text("provider")
+    if provider_id is None and provider_alias is None:
+        return "submission_scope_provider_required"
+    if (
+        provider_id is not None
+        and provider_alias is not None
+        and provider_id.upper() != provider_alias.upper()
+    ):
+        return "submission_scope_provider_mismatch"
+    scope_provider = provider_id if provider_id is not None else provider_alias
+    if scope_provider is None or scope_provider.upper() != provider.strip().upper():
+        return "submission_scope_provider_mismatch"
+
+    scope_account = scope_text("account_id")
+    if scope_account is None:
+        return "submission_scope_account_required"
+    if scope_account != account_id:
+        return "submission_scope_account_mismatch"
+
+    scope_environment = scope_text("environment")
+    if scope_environment is None:
+        return "submission_scope_environment_required"
+    if scope_environment.upper() != environment:
+        return "submission_scope_environment_mismatch"
+
+    if scope_text("provider_environment") is None:
+        return "submission_scope_provider_environment_required"
+
+    prepared_request_sha256 = scope_text("prepared_request_sha256")
+    if prepared_request_sha256 is None:
+        return "submission_scope_request_digest_required"
+    if prepared_request_sha256 != request_hash:
+        return "submission_scope_request_digest_mismatch"
+
+    return None
+
+
 @dataclass(frozen=True)
 class DispatchOutcome:
     status: str
@@ -689,6 +746,21 @@ class GuardedDispatcher:
             "sha256:" + sha256(scope_canonical.encode("utf-8")).hexdigest()
         )
         prepared_submission_scope = _freeze_json(scope_dict)
+        financial_preflight_reason: str | None = None
+        if self.environment in {"PAPER", "LIVE"}:
+            if not isinstance(
+                authority_check,
+                PreparedSubmissionAuthorityCheck,
+            ):
+                financial_preflight_reason = "prepared_scope_authority_required"
+            else:
+                financial_preflight_reason = _financial_submission_scope_reason(
+                    environment=self.environment,
+                    account_id=self.account_id,
+                    provider=provider,
+                    request_hash=request_hash,
+                    submission_scope=prepared_submission_scope,
+                )
         client_order_id = stable_client_order_id(
             provider,
             intent_id,
@@ -747,6 +819,24 @@ class GuardedDispatcher:
                 attempt_id=attempt_id,
                 client_order_id=client_order_id,
                 now=now,
+            )
+
+        if financial_preflight_reason is not None:
+            self._append(
+                attempt_id=attempt_id,
+                event_type="SubmissionBlocked",
+                version=2,
+                payload={
+                    "client_order_id": client_order_id,
+                    "reason": financial_preflight_reason,
+                },
+                now=now,
+            )
+            return DispatchOutcome(
+                "BLOCKED",
+                client_order_id,
+                None,
+                financial_preflight_reason,
             )
 
         try:

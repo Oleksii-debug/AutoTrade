@@ -151,6 +151,8 @@ class SupplyChainEvidence:
     sbom_component_ids: tuple[str, ...]
     components: tuple[ComponentEvidence, ...]
     model_data_rights: tuple[ModelDataRightsEvidence, ...]
+    release_artifact_id: str | None = None
+    release_artifact_sha256: str | None = None
 
     def __post_init__(self) -> None:
         _git_sha(self.release_commit_sha, "release_commit_sha")
@@ -161,6 +163,18 @@ class SupplyChainEvidence:
         _sha256(self.sbom_hash, "sbom_hash")
         _sha256(self.provenance_hash, "provenance_hash")
         _sha256(self.dependency_lock_hash, "dependency_lock_hash")
+        if (self.release_artifact_id is None) != (
+            self.release_artifact_sha256 is None
+        ):
+            raise ValueError(
+                "release_artifact_id and release_artifact_sha256 must be supplied together"
+            )
+        if self.release_artifact_id is not None:
+            _artifact_id(self.release_artifact_id, "release_artifact_id")
+            _sha256(
+                self.release_artifact_sha256,
+                "release_artifact_sha256",
+            )
         _git_sha(self.sbom_reviewed_for_release_sha, "sbom_reviewed_for_release_sha")
         _git_sha(self.provenance_reviewed_for_release_sha, "provenance_reviewed_for_release_sha")
         _git_sha(
@@ -310,6 +324,13 @@ def _snapshot_supply_chain_evidence(
             object.__getattribute__(evidence, field),
             name=f"supply_chain.{field}",
         )
+    for field in ("release_artifact_id", "release_artifact_sha256"):
+        current = object.__getattribute__(evidence, field)
+        if current is not None and type(current) is not str:
+            raise TypeError(
+                f"supply_chain.{field} must be None or exact str"
+            )
+        values[field] = current
 
     distributed = object.__getattribute__(
         evidence, "distributed_component_ids"
@@ -357,6 +378,14 @@ def supply_chain_subject_requirement(evidence: SupplyChainEvidence) -> str:
     subject = {
         "release_commit_sha": evidence.release_commit_sha,
         "built_from_commit_sha": evidence.built_from_commit_sha,
+        "release_artifact": (
+            None
+            if evidence.release_artifact_id is None
+            else {
+                "artifact_id": evidence.release_artifact_id,
+                "sha256": evidence.release_artifact_sha256,
+            }
+        ),
         "sbom": {
             "artifact_id": evidence.sbom_artifact_id,
             "sha256": evidence.sbom_hash,
@@ -444,10 +473,12 @@ def _store_artifact_matches(
     """Verify exact immutable bytes and declared bindings through ArtifactStore.\n\n    ArtifactStore is an integrity boundary, not an independent trust anchor: the\n    caller that opens a store may also have populated it. Producer/authenticator\n    trust is therefore evaluated separately and must remain fail-closed until a\n    qualified attestation boundary exists.\n    """
 
     try:
-        manifest, _raw = read_snapshot(artifact_id)
+        manifest, raw = read_snapshot(artifact_id)
         if not isinstance(manifest.get("manifest_hash"), str):
             return False
         if manifest.get("sha256") != artifact_hash:
+            return False
+        if "sha256:" + sha256(raw).hexdigest() != artifact_hash:
             return False
         if manifest.get("media_type") != media_type:
             return False
@@ -648,6 +679,12 @@ def qualify_supply_chain(
             _INCONCLUSIVE,
             "SUPPLY_CHAIN.TRUST_EVIDENCE_ROOT_INCOMPLETE",
         )
+    elif evidence.release_artifact_id is None:
+        record(
+            "independent_evidence_trust",
+            _INCONCLUSIVE,
+            "SUPPLY_CHAIN.DELIVERED_RELEASE_IDENTITY_MISSING",
+        )
     else:
         try:
             accepted_review = verify_canonical_qualification_attestation(
@@ -661,6 +698,8 @@ def qualify_supply_chain(
                 expected_protocol_id="supply-chain-review-v1",
                 expected_protocol_version="1.0.0",
                 expected_requirement_id="independent-supply-chain-review",
+                expected_release_artifact_id=evidence.release_artifact_id,
+                expected_release_artifact_sha256=evidence.release_artifact_sha256,
             )
             accepted_subject = verify_canonical_qualification_attestation(
                 trust_receipt,
@@ -673,6 +712,8 @@ def qualify_supply_chain(
                 expected_protocol_id="supply-chain-review-v1",
                 expected_protocol_version="1.0.0",
                 expected_requirement_id=subject_requirement,
+                expected_release_artifact_id=evidence.release_artifact_id,
+                expected_release_artifact_sha256=evidence.release_artifact_sha256,
             )
             accepted_trust = accepted_review
             review_identity = (
@@ -856,6 +897,8 @@ def qualify_supply_chain(
         {
             "release": evidence.release_commit_sha,
             "built_from": evidence.built_from_commit_sha,
+            "release_artifact_id": evidence.release_artifact_id,
+            "release_artifact_sha256": evidence.release_artifact_sha256,
             "sbom_artifact_id": evidence.sbom_artifact_id,
             "sbom": evidence.sbom_hash,
             "provenance_artifact_id": evidence.provenance_artifact_id,

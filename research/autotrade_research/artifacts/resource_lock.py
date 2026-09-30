@@ -6,7 +6,7 @@ import stat
 from pathlib import Path
 from typing import BinaryIO
 
-from autotrade_runtime.local_filesystem import (
+from autotrade_foundation.local_filesystem import (
     LocalFilesystemQualificationError,
     require_qualified_local_filesystem_path,
 )
@@ -97,18 +97,6 @@ def _open_read_only_descriptor(path: Path) -> int:
         close_handle(kernel_handle)
         raise
 
-
-def _reject_known_remote_lock_path(path: Path) -> None:
-    """Apply the shared production locality policy to ResourceLock paths."""
-
-    try:
-        require_qualified_local_filesystem_path(path)
-    except LocalFilesystemQualificationError as error:
-        raise ResourceLockError(
-            "resource lock path must be on a qualified local filesystem"
-        ) from error
-
-
 class ResourceLock:
     """Crash-releasing advisory lock for cooperating local workers.
 
@@ -131,7 +119,12 @@ class ResourceLock:
     def acquire(self) -> None:
         if self._handle is not None:
             raise ResourceLockError("resource lock is already held by this lock object")
-        _reject_known_remote_lock_path(self.path)
+        try:
+            require_qualified_local_filesystem_path(self.path)
+        except LocalFilesystemQualificationError as error:
+            raise ResourceLockError(
+                "resource lock path must be on a qualified local filesystem"
+            ) from error
         self.path.parent.mkdir(parents=True, exist_ok=True)
         handle = self._open_lock_handle()
         try:

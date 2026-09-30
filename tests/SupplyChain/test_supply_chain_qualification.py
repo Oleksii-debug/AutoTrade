@@ -46,6 +46,10 @@ COMPONENT_ID = artifact_id("component:example")
 RIGHTS_ID = artifact_id("rights:model-local")
 EXCEPTION_ID = artifact_id("exception:risk-acceptance-17")
 EXCEPTION_ID_2 = artifact_id("exception:risk-acceptance-18")
+RELEASE_ID = artifact_id("release:windows-a")
+RELEASE_SHA = "sha256:" + sha256(b"release-windows-a").hexdigest()
+RELEASE_ID_B = artifact_id("release:windows-b")
+RELEASE_SHA_B = "sha256:" + sha256(b"release-windows-b").hexdigest()
 
 
 def component(**overrides):
@@ -98,6 +102,8 @@ def evidence(comp=None, model_rights=None, **overrides):
         sbom_component_ids=(comp.component_id,),
         components=(comp,),
         model_data_rights=(rights(),) if model_rights is None else tuple(model_rights),
+        release_artifact_id=RELEASE_ID,
+        release_artifact_sha256=RELEASE_SHA,
     )
     values.update(overrides)
     return SupplyChainEvidence(**values)
@@ -365,6 +371,8 @@ def _signed_review(value, *, refs=None, result="PASS", root=None):
         signed_at="2026-09-25T20:06:00Z",
         result=result,
         unresolved_limits=() if result == "PASS" else ("review incomplete",),
+        release_artifact_id=value.release_artifact_id,
+        release_artifact_sha256=value.release_artifact_sha256,
     )
     return (
         SignedQualificationAttestation(attestation, _sign_attestation(attestation)),
@@ -553,7 +561,7 @@ class SupplyChainQualificationTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "FAIL")
         self.assertIn(
-            "SUPPLY_CHAIN.TRUST_ATTESTATION_INVALID",
+            "SUPPLY_CHAIN.TRUST_SUBJECT_MISMATCH",
             result.reason_codes,
         )
 
@@ -580,6 +588,78 @@ class SupplyChainQualificationTests(unittest.TestCase):
             "SUPPLY_CHAIN.ARTIFACT_HASH_MISMATCH:"
             + mutated.components[0].component_id,
             result.reason_codes,
+        )
+
+    def test_missing_delivered_release_identity_keeps_review_nonterminal(self):
+        value = evidence(
+            release_artifact_id=None,
+            release_artifact_sha256=None,
+        )
+        receipt, canonical_policy = _signed_review(value)
+
+        result = qualify_signed(
+            value,
+            receipt=receipt,
+            canonical_policy=canonical_policy,
+        )
+
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertIn(
+            "SUPPLY_CHAIN.DELIVERED_RELEASE_IDENTITY_MISSING",
+            result.reason_codes,
+        )
+
+    def test_release_identity_must_be_supplied_as_exact_pair(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "release_artifact_id and release_artifact_sha256",
+        ):
+            evidence(release_artifact_sha256=None)
+
+    def test_signed_review_for_release_a_cannot_qualify_release_b(self):
+        reviewed = evidence()
+        receipt, canonical_policy = _signed_review(reviewed)
+        other_release = evidence(
+            release_artifact_id=RELEASE_ID_B,
+            release_artifact_sha256=RELEASE_SHA_B,
+        )
+
+        result = qualify_signed(
+            other_release,
+            receipt=receipt,
+            canonical_policy=canonical_policy,
+        )
+
+        self.assertEqual(result.status, "FAIL")
+        self.assertIn(
+            "SUPPLY_CHAIN.TRUST_ATTESTATION_INVALID",
+            result.reason_codes,
+        )
+
+    def test_held_authenticated_bytes_are_rehashed_against_declared_digest(self):
+        manifest = {
+            "manifest_hash": "sha256:" + "f" * 64,
+            "sha256": H,
+            "media_type": "application/vnd.autotrade.sbom",
+            "source_refs": [f"git:{R}"],
+            "metadata": {
+                "evidence_kind": "SBOM",
+                "release_sha": R,
+            },
+        }
+
+        self.assertFalse(
+            supply_chain_module._store_artifact_matches(
+                lambda _artifact_id: (manifest, b"different-held-bytes"),
+                artifact_id=SBOM_ID,
+                artifact_hash=H,
+                media_type="application/vnd.autotrade.sbom",
+                release_sha=R,
+                metadata={
+                    "evidence_kind": "SBOM",
+                    "release_sha": R,
+                },
+            )
         )
 
     def test_signed_review_must_cover_exact_supply_chain_evidence_set(self):

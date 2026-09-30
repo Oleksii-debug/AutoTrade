@@ -24,9 +24,11 @@ from mvp.autotrade_mvp.dispatch import (
     load_submission_response_binding,
     stable_client_order_id,
 )
-from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_core import observe_submission_json_response
-from tests.Contracts.financial_authority_fixture import canonical_financial_dispatch_guard
+from tests.Contracts.financial_authority_fixture import (
+    canonical_financial_dispatch_guard,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]

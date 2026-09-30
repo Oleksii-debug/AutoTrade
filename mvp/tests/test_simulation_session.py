@@ -321,6 +321,69 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
                 submissions,
             )
 
+    def test_prepared_only_crash_recovers_as_zero_wire_blocked_without_send(self):
+        with TemporaryDirectory() as directory:
+            original_append_event = JournalStore.append_event
+
+            def crash_after_prepared(store, envelope, *, outbox_topic=None):
+                result = original_append_event(
+                    store, envelope, outbox_topic=outbox_topic
+                )
+                if envelope.get("event_type") == "SubmissionPrepared":
+                    raise RuntimeError("simulated crash after durable prepare")
+                return result
+
+            with patch.object(JournalStore, "append_event", new=crash_after_prepared):
+                with self.assertRaisesRegex(RuntimeError, "after durable prepare"):
+                    run_canonical_simulation(
+                        BUY, directory, episode_id="prepared-crash",
+                        source_sha=SOURCE_SHA, now=NOW,
+                    )
+
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            submissions_before = store.load_events_by_aggregate_type("submission_attempt")
+            self.assertEqual(
+                [event["event_type"] for event in submissions_before],
+                ["SubmissionPrepared"],
+            )
+            reservations = DurableReservationBook(
+                store, environment=ENVIRONMENT, account_id=ACCOUNT,
+                resolution_artifact_store=ArtifactStore(Path(directory) / "artifacts"),
+                resolution_artifact_root=Path(directory) / "artifacts",
+            )
+            self.assertEqual(len(reservations.active()), 1)
+            self.assertEqual(reservations.active()[0].state, "WORKING")
+
+            recovered = run_canonical_simulation(
+                BUY, directory, episode_id="prepared-crash",
+                source_sha=SOURCE_SHA, now=NOW,
+            )
+            self.assertEqual(recovered["status"], "BLOCKED")
+            self.assertTrue(recovered["resumed"])
+            self.assertEqual(recovered["new_outbound_requests"], 0)
+            self.assertEqual(recovered["zero_wire_evidence"], "SUBMISSION_PREPARED")
+            self.assertEqual(
+                store.load_events_by_aggregate_type("submission_attempt"),
+                submissions_before,
+            )
+            self.assertEqual(
+                [event["event_type"] for event in store.load_events(
+                    "canonical_simulation_session", "single-episode"
+                )],
+                [
+                    "SimulationSessionOwned",
+                    "SimulationSessionStarted",
+                    "SimulationSessionCompleted",
+                ],
+            )
+            active_after = DurableReservationBook(
+                store, environment=ENVIRONMENT, account_id=ACCOUNT,
+                resolution_artifact_store=ArtifactStore(Path(directory) / "artifacts"),
+                resolution_artifact_root=Path(directory) / "artifacts",
+            ).active()
+            self.assertEqual(len(active_after), 1)
+            self.assertEqual(active_after[0].state, "WORKING")
+
     def test_ambiguous_send_blocks_restart_without_duplicate_exposure(self):
         with TemporaryDirectory() as directory:
             first = run_canonical_simulation(

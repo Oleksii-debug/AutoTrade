@@ -216,6 +216,18 @@ class MovingAverageStrategy:
         self.fast, self.slow = fast, slow
 
     def decide(self, prices: list[Decimal], quantity: Decimal) -> Decision:
+        # This public seam is shared by the legacy vertical slice and canonical
+        # simulation. Admit every scalar that can affect the decision/result
+        # through the shared exact built-in Decimal authority before any HOLD,
+        # BUY or SELL path can return. Only the bounded strategy window is
+        # consumed so validation cost remains independent of irrelevant history.
+        as_fraction(quantity)
+        if not prices:
+            raise ValueError("At least one price is required")
+        consumed_prices = prices if len(prices) < self.slow else prices[-self.slow :]
+        for price in consumed_prices:
+            as_fraction(price)
+
         if len(prices) < self.slow:
             return Decision("HOLD", Decimal("0"), prices[-1], "insufficient_history")
         fast_total = as_fraction(exact_sum(prices[-self.fast :]))

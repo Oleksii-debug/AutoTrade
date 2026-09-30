@@ -1,6 +1,6 @@
-"""Compatibility exports for the single shared installed v5 exact-numeric authority."""
+"""Shared installed v5 exact-number semantics for product and research."""
 
-from autotrade_numeric.exact_decimal import (
+from .exact_decimal import (
     ExactDecimalError,
     RoundingMode,
     MAX_SIGNIFICANT_DIGITS,

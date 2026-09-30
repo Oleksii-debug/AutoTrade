@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -9,6 +9,8 @@ from unittest.mock import patch
 from mvp.autotrade_mvp.accounting import (
     AccountingConflict,
     EconomicBook,
+    JournalTransaction,
+    Posting,
     book_equity_fill,
     project_equity_position,
 )
@@ -1127,6 +1129,77 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
                 1,
             )
             self.assertEqual(len(economics.transactions), 2)
+
+    def test_durable_unsettled_cash_and_dividend_are_context_invariant(self):
+        precisions = (6, 10, 28, 80)
+        roundings = (ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN)
+        expected_pre_action = Decimal("1e-30")
+        expected_after = Decimal("12.500000000000000000000000000001")
+
+        for precision in precisions:
+            for rounding in roundings:
+                with self.subTest(precision=precision, rounding=rounding):
+                    with TemporaryDirectory() as directory:
+                        with localcontext() as context:
+                            context.prec = precision
+                            context.rounding = rounding
+                            store = JournalStore(Path(directory) / "journal.sqlite3")
+                            durable_evidence = evidence_store(store)
+                            economics = economic_book(store)
+                            accepted = resolve_action(sealed_action(per_share="1.25"))
+                            effective = (
+                                READ_NOW - timedelta(minutes=10)
+                            ).isoformat().replace("+00:00", "Z")
+                            observed = (
+                                READ_NOW - timedelta(minutes=9)
+                            ).isoformat().replace("+00:00", "Z")
+                            for suffix, amount, opposite in (
+                                ("large-in", "1e30", "-1e30"),
+                                ("tiny-in", "1e-30", "-1e-30"),
+                                ("large-out", "-1e30", "1e30"),
+                            ):
+                                economics.append(
+                                    JournalTransaction(
+                                        transaction_id="prior-unsettled-" + suffix,
+                                        cause_event_id="prior-unsettled-cause-" + suffix,
+                                        postings=(
+                                            Posting(
+                                                "UNSETTLED_CASH:USDT",
+                                                "USDT",
+                                                Decimal(amount),
+                                            ),
+                                            Posting(
+                                                "CORPORATE_ACTION_INCOME:USDT",
+                                                "USDT",
+                                                Decimal(opposite),
+                                            ),
+                                        ),
+                                        economic_effective_at=effective,
+                                        economic_order_key="prior-unsettled:" + suffix,
+                                        observed_at=observed,
+                                    )
+                                )
+
+                            result = commit_authoritative_corporate_action(
+                                store=store,
+                                evidence_store=durable_evidence,
+                                economic_book=economics,
+                                corporate_book=pure_book(quantity="999"),
+                                accepted=accepted,
+                            )
+
+                            self.assertEqual(
+                                result.transition.before.unsettled_cash,
+                                expected_pre_action,
+                            )
+                            self.assertEqual(
+                                result.next_state.unsettled_cash,
+                                expected_after,
+                            )
+                            self.assertEqual(
+                                economics.balance("UNSETTLED_CASH:USDT", "USDT"),
+                                expected_after,
+                            )
 
     def test_caller_quantity_cannot_override_canonical_entitlement_position(self):
         with TemporaryDirectory() as directory:

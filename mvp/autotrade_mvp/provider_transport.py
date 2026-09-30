@@ -36,7 +36,7 @@ from urllib.request import (
     build_opener,
 )
 
-from .capabilities import CapabilityRegistry, CapabilitySnapshot
+from .capabilities import CapabilityLookup, CapabilitySnapshot
 from .dispatch import ExactJsonTransportResponse
 from .persistence import JournalStore, payload_digest
 from .kraken_spot import (
@@ -2479,7 +2479,7 @@ class KrakenSpotAuthenticatedReadTransport:
         policy: ProviderEndpointPolicy,
         account_id: str,
         capability_snapshot_id: str,
-        capability_registry: CapabilityRegistry,
+        capability_registry: CapabilityLookup,
         secret_resolver: ProviderSecretResolver,
         credential_handle: PersistentCredentialHandle,
         session_token: str,
@@ -2517,8 +2517,8 @@ class KrakenSpotAuthenticatedReadTransport:
             capability_snapshot_id,
             name="capability_snapshot_id",
         )
-        if not isinstance(capability_registry, CapabilityRegistry):
-            raise TypeError("capability_registry must be CapabilityRegistry")
+        if not isinstance(capability_registry, CapabilityLookup):
+            raise TypeError("capability_registry must implement CapabilityLookup")
         if not hasattr(secret_resolver, "resolve_for_execution"):
             raise TypeError(
                 "secret_resolver must implement resolve_for_execution"
@@ -2591,7 +2591,7 @@ class KrakenSpotAuthenticatedReadTransport:
             raise ProviderTransportScopeError(
                 "authenticated-read current capability cannot be verified"
             ) from error
-        if not isinstance(current, CapabilitySnapshot):
+        if type(current) is not CapabilitySnapshot:
             raise ProviderTransportScopeError(
                 "capability registry must return CapabilitySnapshot"
             )
@@ -3103,7 +3103,7 @@ class BybitV5HttpTransport:
         provider_environment: str,
         account_id: str,
         capability_snapshot_id: str,
-        capability_registry: CapabilityRegistry,
+        capability_registry: CapabilityLookup,
         secret_resolver: ProviderSecretResolver,
         credential_handle: PersistentCredentialHandle,
         session_token: str,
@@ -3146,8 +3146,8 @@ class BybitV5HttpTransport:
             raise ProviderTransportScopeError(
                 "credential handle account mismatch"
             )
-        if not isinstance(capability_registry, CapabilityRegistry):
-            raise TypeError("capability_registry must be CapabilityRegistry")
+        if not isinstance(capability_registry, CapabilityLookup):
+            raise TypeError("capability_registry must implement CapabilityLookup")
         if not hasattr(secret_resolver, "resolve_for_execution"):
             raise TypeError(
                 "secret_resolver must implement resolve_for_execution"
@@ -3324,7 +3324,7 @@ class BybitV5HttpTransport:
                 "Bybit write current capability cannot be verified"
             ) from error
         if (
-            not isinstance(current, CapabilitySnapshot)
+            type(current) is not CapabilitySnapshot
             or current.snapshot_id != self.capability_snapshot_id
             or current.provider_id != "BYBIT"
             or current.account_id != self.account_id
@@ -3532,7 +3532,7 @@ class BybitV5AuthenticatedReadTransport:
         provider_environment: str,
         account_id: str,
         capability_snapshot_id: str,
-        capability_registry: CapabilityRegistry,
+        capability_registry: CapabilityLookup,
         secret_resolver: ProviderSecretResolver,
         credential_handle: PersistentCredentialHandle,
         session_token: str,
@@ -3571,8 +3571,8 @@ class BybitV5AuthenticatedReadTransport:
             raise ProviderTransportScopeError(
                 "credential handle account mismatch"
             )
-        if not isinstance(capability_registry, CapabilityRegistry):
-            raise TypeError("capability_registry must be CapabilityRegistry")
+        if not isinstance(capability_registry, CapabilityLookup):
+            raise TypeError("capability_registry must implement CapabilityLookup")
         if not hasattr(secret_resolver, "resolve_for_execution"):
             raise TypeError(
                 "secret_resolver must implement resolve_for_execution"
@@ -3644,7 +3644,7 @@ class BybitV5AuthenticatedReadTransport:
                 "Bybit authenticated-read current capability cannot be verified"
             ) from error
         if (
-            not isinstance(current, CapabilitySnapshot)
+            type(current) is not CapabilitySnapshot
             or current.snapshot_id != self.capability_snapshot_id
             or current.provider_id != "BYBIT"
             or current.account_id != self.account_id
@@ -4126,7 +4126,7 @@ class BinanceSpotAuthenticatedReadTransport:
         policy: ProviderEndpointPolicy,
         account_id: str,
         capability_snapshot_id: str,
-        capability_registry: CapabilityRegistry,
+        capability_registry: CapabilityLookup,
         secret_resolver: ProviderSecretResolver,
         credential_handle: PersistentCredentialHandle,
         session_token: str,
@@ -4165,8 +4165,8 @@ class BinanceSpotAuthenticatedReadTransport:
             capability_snapshot_id,
             name="capability_snapshot_id",
         )
-        if not isinstance(capability_registry, CapabilityRegistry):
-            raise TypeError("capability_registry must be CapabilityRegistry")
+        if not isinstance(capability_registry, CapabilityLookup):
+            raise TypeError("capability_registry must implement CapabilityLookup")
         if not hasattr(secret_resolver, "resolve_for_execution"):
             raise TypeError(
                 "secret_resolver must implement resolve_for_execution"
@@ -4238,7 +4238,7 @@ class BinanceSpotAuthenticatedReadTransport:
             raise ProviderTransportScopeError(
                 "authenticated-read current capability cannot be verified"
             ) from error
-        if not isinstance(current, CapabilitySnapshot):
+        if type(current) is not CapabilitySnapshot:
             raise ProviderTransportScopeError(
                 "capability registry must return CapabilitySnapshot"
             )

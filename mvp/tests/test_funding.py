@@ -38,6 +38,43 @@ def event(*, revision=1, kind="FINAL", rate="0.0001", available_hour=8):
     )
 
 
+class HostileDecimal(Decimal):
+    virtual_calls = 0
+
+    def is_finite(self):
+        type(self).virtual_calls += 1
+        raise AssertionError("hostile Decimal.is_finite was dispatched")
+
+    def as_tuple(self):
+        type(self).virtual_calls += 1
+        raise AssertionError("hostile Decimal.as_tuple was dispatched")
+
+
+class HostileFundingEvent(FundingEvent):
+    economic_reads = 0
+
+    @property
+    def economic_cash_flow(self):
+        type(self).economic_reads += 1
+        raise AssertionError("hostile FundingEvent economic property was dispatched")
+
+
+class HostileText(str):
+    virtual_calls = 0
+
+    def strip(self, *args, **kwargs):
+        type(self).virtual_calls += 1
+        raise AssertionError("hostile str.strip was dispatched")
+
+    def upper(self):
+        type(self).virtual_calls += 1
+        raise AssertionError("hostile str.upper was dispatched")
+
+    def __eq__(self, other):
+        type(self).virtual_calls += 1
+        raise AssertionError("hostile str equality was dispatched")
+
+
 class FundingTests(unittest.TestCase):
     def test_canonical_long_funding_fixture_is_debit(self):
         self.assertEqual(
@@ -80,6 +117,75 @@ class FundingTests(unittest.TestCase):
                         )
                     self.assertEqual(debit, expected_debit)
                     self.assertEqual(credit, expected_credit)
+
+    def test_decimal_subclasses_are_rejected_before_virtual_scalar_dispatch(self):
+        HostileDecimal.virtual_calls = 0
+        hostile = HostileDecimal("1000")
+        with self.assertRaisesRegex(FundingError, "exact built-in Decimal"):
+            canonical_funding_cash_flow(
+                signed_notional=hostile,
+                rate=Decimal("0.0001"),
+                sign_convention="POSITIVE_LONG_PAYS",
+            )
+        with self.assertRaisesRegex(FundingError, "exact built-in Decimal"):
+            FundingEvent(
+                funding_id="funding:hostile-decimal",
+                revision=1,
+                kind="FINAL",
+                effective_at=moment(8),
+                available_at=moment(8),
+                settlement_currency="USD",
+                signed_notional=Decimal("1000"),
+                rate=hostile,
+                sign_convention="POSITIVE_LONG_PAYS",
+                evidence_ref="artifact:hostile-decimal",
+            )
+        self.assertEqual(HostileDecimal.virtual_calls, 0)
+
+    def test_terminal_revision_rejects_event_subclass_before_economic_property(self):
+        HostileFundingEvent.economic_reads = 0
+        hostile = HostileFundingEvent(
+            funding_id="funding:hostile-event",
+            revision=1,
+            kind="FINAL",
+            effective_at=moment(8),
+            available_at=moment(8),
+            settlement_currency="USD",
+            signed_notional=Decimal("1000"),
+            rate=Decimal("0.0001"),
+            sign_convention="POSITIVE_LONG_PAYS",
+            evidence_ref="artifact:hostile-event",
+        )
+        book = FundingRevisionBook()
+        with self.assertRaisesRegex(TypeError, "exact FundingEvent"):
+            book.record(hostile)
+        self.assertEqual(HostileFundingEvent.economic_reads, 0)
+        self.assertEqual(book.events, ())
+        self.assertIsNone(book.latest("funding:hostile-event"))
+
+    def test_event_authority_rejects_polymorphic_text_before_dispatch(self):
+        HostileText.virtual_calls = 0
+        hostile = HostileText("POSITIVE_LONG_PAYS")
+        with self.assertRaisesRegex(FundingError, "unsupported funding sign convention"):
+            canonical_funding_cash_flow(
+                signed_notional=Decimal("1000"),
+                rate=Decimal("0.0001"),
+                sign_convention=hostile,
+            )
+        with self.assertRaisesRegex(FundingError, "funding_id is required"):
+            FundingEvent(
+                funding_id=HostileText("funding:hostile-text"),
+                revision=1,
+                kind="FINAL",
+                effective_at=moment(8),
+                available_at=moment(8),
+                settlement_currency="USD",
+                signed_notional=Decimal("1000"),
+                rate=Decimal("0.0001"),
+                sign_convention="POSITIVE_LONG_PAYS",
+                evidence_ref="artifact:hostile-text",
+            )
+        self.assertEqual(HostileText.virtual_calls, 0)
 
     def test_indicated_rate_never_creates_economic_posting(self):
         book = FundingRevisionBook()

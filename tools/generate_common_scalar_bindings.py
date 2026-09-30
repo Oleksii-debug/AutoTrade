@@ -27,10 +27,12 @@ MANIFEST = ROOT / "contracts" / "manifest.json"
 OUTPUTS = {
     "python": ROOT / "contracts" / "bindings" / "python" / "common_scalars.py",
     "mvp_python": ROOT / "mvp" / "autotrade_mvp" / "_generated_common_scalars.py",
+    "neutral_python": ROOT / "autotrade_numeric" / "_generated_common_scalars.py",
     "typescript_decl": ROOT / "contracts" / "bindings" / "typescript" / "commonScalars.d.ts",
     "typescript_runtime": ROOT / "contracts" / "bindings" / "typescript" / "commonScalars.js",
     "csharp": ROOT / "src" / "AutoTrade.Contracts" / "CommonScalarContracts.cs",
     "mvp_decimal_limits": ROOT / "mvp" / "autotrade_mvp" / "_generated_decimal_limits.py",
+    "neutral_decimal_limits": ROOT / "autotrade_numeric" / "_generated_decimal_limits.py",
 }
 
 DECIMAL_ENVELOPE_KEY = "x-autotrade-decimal-envelope"
@@ -471,10 +473,12 @@ def rendered_outputs() -> dict[str, str]:
     return {
         "python": python_runtime,
         "mvp_python": python_runtime,
+        "neutral_python": python_runtime,
         "typescript_decl": render_typescript_decl(version, defs),
         "typescript_runtime": render_typescript_runtime(version, defs),
         "csharp": render_csharp(version, defs),
         "mvp_decimal_limits": render_mvp_decimal_limits(version, defs),
+        "neutral_decimal_limits": render_mvp_decimal_limits(version, defs),
     }
 
 

@@ -84,6 +84,7 @@ def authority_service(store: JournalStore) -> AuthorityService:
             account_id=request.account_id,
             environment=request.environment,
             provider_id=request.provider_id,
+            provider_environment=request.provider_environment,
             instrument_version=request.instrument_version,
             capability_snapshot_id=request.capability_snapshot_id,
             reconciliation_checkpoint_event_id=request.reconciliation_checkpoint_event_id,
@@ -266,18 +267,22 @@ class WholeSimulatorFlowTests(unittest.TestCase):
             )
             self.assertEqual(len(journal.pending_outbox()), 1)
 
-            def final_authority_check(candidate_hash, current_time):
-                return authority.dispatch_allowed(
-                    "admission-1",
-                    intent_hash=candidate_hash,
-                    account_id="sim-account",
-                    environment="SIMULATION",
-                    instrument_id=AUTHORITY_INSTRUMENT_ID,
-                    instrument_version=1,
-                    action="ORDER.SUBMIT",
-                    now=current_time,
-                    capability_snapshot_id=CAPABILITY_SNAPSHOT_ID,
-                )
+            submission_scope = {
+                "provider": "SIMULATED",
+                "account_id": "sim-account",
+                "environment": "SIMULATION",
+                "provider_environment": "SIMULATION",
+            }
+            final_authority_check = authority.dispatch_guard(
+                "admission-1",
+                account_id="sim-account",
+                environment="SIMULATION",
+                instrument_id=AUTHORITY_INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                capability_snapshot_id=CAPABILITY_SNAPSHOT_ID,
+                submission_scope=submission_scope,
+            )
 
             attempt_id = str(uuid4())
             dispatcher = GuardedDispatcher(
@@ -302,6 +307,7 @@ class WholeSimulatorFlowTests(unittest.TestCase):
                 now=NOW,
                 authority_check=final_authority_check,
                 transport_send=provider.transport_send,
+                submission_scope=submission_scope,
             )
             self.assertEqual(dispatched.status, "SENT")
             self.assertEqual(dispatched.response["outcome"], "ACKNOWLEDGED")

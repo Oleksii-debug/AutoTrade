@@ -1,10 +1,13 @@
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.reconciliation import SubmissionResolution
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
 from mvp.tests.test_reconciliation_journal import reconciliation
 from mvp.autotrade_mvp.recovery import (
@@ -83,6 +86,337 @@ class DurableReconciliationAuthorityTests(unittest.TestCase):
                 )
             self.assertEqual(restarted.state, HostState.RECOVERING)
             self.assertFalse(restarted.provider_reconciled)
+
+    def test_bybit_recovery_readiness_requires_exact_provider_environment(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            controller = RecoveryController(
+                owner_store=store,
+                owner_scope="PAPER:bybit-account",
+            )
+            owner = controller.start("host-bybit")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="bybit-runtime-readiness",
+                result=reconciliation(
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                ),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id=owner.owner_id,
+                owner_epoch=str(owner.epoch),
+            )
+
+            with self.assertRaisesRegex(
+                PermissionError,
+                "requires explicit provider_environment",
+            ):
+                controller.record_reconciliation_checkpoint(
+                    reconciliation_id="bybit-runtime-readiness",
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                )
+            self.assertEqual(controller.state, HostState.RECOVERING)
+            self.assertFalse(controller.provider_reconciled)
+
+            with self.assertRaisesRegex(
+                PermissionError,
+                "bound to this recovery owner",
+            ):
+                controller.record_reconciliation_checkpoint(
+                    reconciliation_id="bybit-runtime-readiness",
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="DEMO",
+                )
+            self.assertEqual(controller.state, HostState.RECOVERING)
+            self.assertFalse(controller.provider_reconciled)
+
+            evidence = controller.record_reconciliation_checkpoint(
+                reconciliation_id="bybit-runtime-readiness",
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            self.assertEqual(controller.state, HostState.READY)
+            self.assertTrue(controller.provider_reconciled)
+            self.assertEqual(evidence["event_id"], checkpoint["event_id"])
+            self.assertEqual(evidence["provider_environment"], "TESTNET")
+
+    def test_recovered_bybit_unknown_requires_matching_provider_environment(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            first = RecoveryController(
+                owner_store=store,
+                owner_scope="PAPER:bybit-account",
+            )
+            owner_one = first.start("host-a")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="bybit-account",
+                owner_token=owner_one.owner_id,
+                owner_epoch=owner_one.epoch,
+            )
+
+            def transport(_client_id, _request, final_guard):
+                final_guard()
+                raise TimeoutError("provider outcome is ambiguous")
+
+            outcome = dispatcher.dispatch(
+                attempt_id="bybit-unknown-1",
+                intent_id="bybit-intent-1",
+                intent_hash="sha256:intent",
+                provider="BYBIT",
+                request={"symbol": "BTCUSDT"},
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda _intent_hash, _now: (True, "allowed"),
+                transport_send=transport,
+                sender_check=lambda _owner, _epoch: None,
+                submission_scope={"provider_environment": "TESTNET"},
+            )
+            self.assertEqual(outcome.status, "UNKNOWN")
+
+            restarted = RecoveryController(
+                owner_store=JournalStore(path),
+                owner_scope="PAPER:bybit-account",
+            )
+            owner_two = restarted.start("host-b")
+            self.assertIn("bybit-unknown-1", restarted.unresolved_attempts)
+
+            terminal = SubmissionResolution(
+                attempt_id="bybit-unknown-1",
+                intent_id="bybit-intent-1",
+                client_order_id=outcome.client_order_id,
+                outcome="PROVEN_ABSENT",
+                evidence_reason="complete provider absence proof",
+            )
+            demo_result = replace(
+                reconciliation(
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="DEMO",
+                ),
+                submission_resolutions=(terminal,),
+            )
+            record_reconciliation_checkpoint(
+                JournalStore(path),
+                reconciliation_id="bybit-demo-terminal",
+                result=demo_result,
+                observed_at="2026-09-24T19:00:00Z",
+                host_id=owner_two.owner_id,
+                owner_epoch=str(owner_two.epoch),
+            )
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "identity conflicts with recovered submission",
+            ):
+                restarted.record_reconciliation_checkpoint(
+                    reconciliation_id="bybit-demo-terminal",
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="DEMO",
+                )
+            self.assertIn("bybit-unknown-1", restarted.unresolved_attempts)
+            self.assertFalse(restarted.provider_reconciled)
+            self.assertEqual(restarted.state, HostState.DEGRADED)
+
+            testnet_result = replace(
+                reconciliation(
+                    provider_id="BYBIT",
+                    account_id="bybit-account",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                ),
+                submission_resolutions=(terminal,),
+            )
+            record_reconciliation_checkpoint(
+                JournalStore(path),
+                reconciliation_id="bybit-testnet-terminal",
+                result=testnet_result,
+                observed_at="2026-09-24T19:00:01Z",
+                host_id=owner_two.owner_id,
+                owner_epoch=str(owner_two.epoch),
+            )
+            restarted.record_reconciliation_checkpoint(
+                reconciliation_id="bybit-testnet-terminal",
+                provider_id="BYBIT",
+                account_id="bybit-account",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            self.assertNotIn("bybit-unknown-1", restarted.unresolved_attempts)
+            self.assertTrue(restarted.provider_reconciled)
+            self.assertEqual(restarted.state, HostState.READY)
+
+    def test_legacy_bybit_unknown_without_provider_domain_stays_opaque(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            first = RecoveryController(
+                owner_store=store,
+                owner_scope="PAPER:legacy-bybit-account",
+            )
+            owner_one = first.start("host-a")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="legacy-bybit-account",
+                owner_token=owner_one.owner_id,
+                owner_epoch=owner_one.epoch,
+            )
+
+            def transport(_client_id, _request, final_guard):
+                final_guard()
+                raise TimeoutError("provider outcome is ambiguous")
+
+            outcome = dispatcher.dispatch(
+                attempt_id="legacy-bybit-unknown",
+                intent_id="legacy-bybit-intent",
+                intent_hash="sha256:legacy",
+                provider="BYBIT",
+                request={"symbol": "BTCUSDT"},
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda _intent_hash, _now: (True, "allowed"),
+                transport_send=transport,
+                sender_check=lambda _owner, _epoch: None,
+                submission_scope={},
+            )
+            self.assertEqual(outcome.status, "UNKNOWN")
+
+            restarted = RecoveryController(
+                owner_store=JournalStore(path),
+                owner_scope="PAPER:legacy-bybit-account",
+            )
+            restarted.start("host-b")
+            opaque = [
+                item
+                for item in restarted.unresolved_attempts
+                if item.startswith("legacy_submission_domain:")
+            ]
+            self.assertEqual(len(opaque), 1)
+            self.assertIn(
+                "legacy_submission_provider_environment_unrecoverable",
+                restarted.reason_codes,
+            )
+            self.assertFalse(restarted.provider_reconciled)
+            self.assertEqual(restarted.state, HostState.DEGRADED)
+
+    def test_mixed_domain_recovered_unknowns_are_resolved_all_or_nothing(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            first = RecoveryController(
+                owner_store=store,
+                owner_scope="PAPER:bybit-mixed-account",
+            )
+            owner_one = first.start("host-a")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="PAPER",
+                account_id="bybit-mixed-account",
+                owner_token=owner_one.owner_id,
+                owner_epoch=owner_one.epoch,
+            )
+
+            def transport(_client_id, _request, final_guard):
+                final_guard()
+                raise TimeoutError("provider outcome is ambiguous")
+
+            outcomes = {}
+            for suffix, provider_environment in (
+                ("testnet", "TESTNET"),
+                ("demo", "DEMO"),
+            ):
+                outcomes[suffix] = dispatcher.dispatch(
+                    attempt_id=f"mixed-{suffix}",
+                    intent_id=f"intent-{suffix}",
+                    intent_hash=f"sha256:{suffix}",
+                    provider="BYBIT",
+                    request={"symbol": "BTCUSDT", "domain": suffix},
+                    now="2026-09-24T18:00:00Z",
+                    authority_check=lambda _intent_hash, _now: (
+                        True,
+                        "allowed",
+                    ),
+                    transport_send=transport,
+                    sender_check=lambda _owner, _epoch: None,
+                    submission_scope={
+                        "provider_environment": provider_environment
+                    },
+                )
+                self.assertEqual(outcomes[suffix].status, "UNKNOWN")
+
+            restarted = RecoveryController(
+                owner_store=JournalStore(path),
+                owner_scope="PAPER:bybit-mixed-account",
+            )
+            owner_two = restarted.start("host-b")
+            self.assertTrue(
+                {"mixed-testnet", "mixed-demo"}.issubset(
+                    restarted.unresolved_attempts
+                )
+            )
+            resolutions = (
+                SubmissionResolution(
+                    attempt_id="mixed-testnet",
+                    intent_id="intent-testnet",
+                    client_order_id=outcomes["testnet"].client_order_id,
+                    outcome="PROVEN_ABSENT",
+                    evidence_reason="complete provider absence proof",
+                ),
+                SubmissionResolution(
+                    attempt_id="mixed-demo",
+                    intent_id="intent-demo",
+                    client_order_id=outcomes["demo"].client_order_id,
+                    outcome="PROVEN_ABSENT",
+                    evidence_reason="complete provider absence proof",
+                ),
+            )
+            malformed = replace(
+                reconciliation(
+                    provider_id="BYBIT",
+                    account_id="bybit-mixed-account",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                ),
+                submission_resolutions=resolutions,
+            )
+            record_reconciliation_checkpoint(
+                JournalStore(path),
+                reconciliation_id="mixed-domain-terminal",
+                result=malformed,
+                observed_at="2026-09-24T19:00:00Z",
+                host_id=owner_two.owner_id,
+                owner_epoch=str(owner_two.epoch),
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "identity conflicts with recovered submission",
+            ):
+                restarted.record_reconciliation_checkpoint(
+                    reconciliation_id="mixed-domain-terminal",
+                    provider_id="BYBIT",
+                    account_id="bybit-mixed-account",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                )
+            self.assertTrue(
+                {"mixed-testnet", "mixed-demo"}.issubset(
+                    restarted.unresolved_attempts
+                )
+            )
+            self.assertFalse(restarted.provider_reconciled)
+            self.assertEqual(restarted.state, HostState.DEGRADED)
 
     def test_invalid_checkpoint_identity_cannot_mutate_controller_ready(self):
         with TemporaryDirectory() as directory:

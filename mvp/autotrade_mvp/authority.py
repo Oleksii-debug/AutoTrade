@@ -20,6 +20,7 @@ from .allocation import (
 )
 from .durable_reservations import DurableReservationBook
 from .persistence import JournalStore, canonical_json, payload_digest
+from .provider_core import ProviderCoreError, normalize_provider_environment
 from .reconciliation_journal import load_account_resource_availability_evidence
 from .securities_borrow import (
     BorrowAvailabilityEvidence,
@@ -294,6 +295,8 @@ class AdmissionRecord:
     risk_valid_until: str | None = None
     policy_version: int | None = None
     financial_command_id: str | None = None
+    provider_id: str | None = None
+    provider_environment: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -366,6 +369,10 @@ class AdmissionRecord:
             self.financial_command_id,
         )
         if any(value is not None for value in evidence_values):
+            if self.provider_id is None or self.provider_environment is None:
+                raise ValueError(
+                    "financial admission requires durable provider-domain identity"
+                )
             if outcome == "ADMITTED" and any(value is None for value in evidence_values):
                 raise ValueError(
                     "admitted financial record requires complete risk/reservation evidence"
@@ -596,6 +603,83 @@ def _risk_policy_fingerprint(policy: RiskPolicy) -> str:
     return _risk_object_fingerprint(policy)
 
 
+def _provider_domain(
+    *,
+    provider_id: str,
+    environment: str,
+    provider_environment: str | None,
+    name: str,
+) -> str:
+    try:
+        return normalize_provider_environment(
+            provider_id=provider_id,
+            environment=environment,
+            provider_environment=provider_environment,
+        )
+    except ProviderCoreError as error:
+        raise ValueError(f"{name} {error}") from error
+
+
+def _dispatch_provider_domain(
+    submission_scope: Mapping[str, Any] | None,
+    *,
+    account_id: str,
+    environment: str,
+) -> tuple[str | None, str | None]:
+    """Read provider-domain identity only from the canonical submission scope."""
+
+    if submission_scope is None:
+        return None, None
+    if not isinstance(submission_scope, Mapping):
+        raise ValueError("submission_scope must be a mapping")
+    try:
+        scope = json.loads(canonical_json(dict(submission_scope)))
+    except (TypeError, ValueError) as error:
+        raise ValueError("submission_scope must be canonical JSON") from error
+    raw_provider = scope.get("provider_id")
+    alternate_provider = scope.get("provider")
+    if raw_provider is not None and alternate_provider is not None:
+        primary = _text(raw_provider, name="submission_scope provider_id").upper()
+        alternate = _text(
+            alternate_provider, name="submission_scope provider"
+        ).upper()
+        if primary != alternate:
+            raise ValueError("submission_scope provider identities disagree")
+        provider = primary
+    elif raw_provider is not None:
+        provider = _text(
+            raw_provider, name="submission_scope provider_id"
+        ).upper()
+    elif alternate_provider is not None:
+        provider = _text(
+            alternate_provider, name="submission_scope provider"
+        ).upper()
+    else:
+        if scope.get("provider_environment") is not None:
+            raise ValueError(
+                "submission_scope provider_environment requires provider identity"
+            )
+        return None, None
+
+    account = _text(account_id, name="account_id")
+    runtime_environment = _text(environment, name="environment").upper()
+    if scope.get("account_id") is not None and _text(
+        scope["account_id"], name="submission_scope account_id"
+    ) != account:
+        raise ValueError("submission_scope account_id mismatch")
+    if scope.get("environment") is not None and _text(
+        scope["environment"], name="submission_scope environment"
+    ).upper() != runtime_environment:
+        raise ValueError("submission_scope environment mismatch")
+    provider_environment = _provider_domain(
+        provider_id=provider,
+        environment=runtime_environment,
+        provider_environment=scope.get("provider_environment"),
+        name="submission_scope",
+    )
+    return provider, provider_environment
+
+
 @dataclass(frozen=True)
 class RiskAuthorityRequest:
     """Scope presented to the service-owned authoritative risk resolver.
@@ -617,6 +701,7 @@ class RiskAuthorityRequest:
     authority_policy_id: str
     authority_policy_version: int
     evaluated_at: str
+    provider_environment: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.risk_intent, RiskIntent):
@@ -630,6 +715,12 @@ class RiskAuthorityRequest:
         provider = _text(
             self.provider_id, name="risk authority provider_id"
         ).upper()
+        provider_environment = _provider_domain(
+            provider_id=provider,
+            environment=environment,
+            provider_environment=self.provider_environment,
+            name="risk authority",
+        )
         if type(self.journal_sequence_cut) is not int or self.journal_sequence_cut < 0:
             raise ValueError("journal_sequence_cut must be a non-negative integer")
         if type(self.reservation_version) is not int or self.reservation_version < 0:
@@ -644,6 +735,9 @@ class RiskAuthorityRequest:
         object.__setattr__(self, "account_id", account)
         object.__setattr__(self, "environment", environment)
         object.__setattr__(self, "provider_id", provider)
+        object.__setattr__(
+            self, "provider_environment", provider_environment
+        )
         object.__setattr__(
             self,
             "instrument_version",
@@ -707,6 +801,7 @@ class AuthoritativeRiskSnapshot:
     evaluated_at: str
     valid_until: str
     evidence_refs: Mapping[str, str]
+    provider_environment: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.context, RiskContext):
@@ -723,6 +818,12 @@ class AuthoritativeRiskSnapshot:
         provider = _text(
             self.provider_id, name="authoritative risk provider_id"
         ).upper()
+        provider_environment = _provider_domain(
+            provider_id=provider,
+            environment=environment,
+            provider_environment=self.provider_environment,
+            name="authoritative risk",
+        )
         if type(self.journal_sequence_cut) is not int or self.journal_sequence_cut < 0:
             raise ValueError("journal_sequence_cut must be a non-negative integer")
         if type(self.reservation_version) is not int or self.reservation_version < 0:
@@ -806,6 +907,9 @@ class AuthoritativeRiskSnapshot:
         object.__setattr__(self, "environment", environment)
         object.__setattr__(self, "provider_id", provider)
         object.__setattr__(
+            self, "provider_environment", provider_environment
+        )
+        object.__setattr__(
             self,
             "instrument_version",
             _instrument_identity(
@@ -861,6 +965,7 @@ class AuthoritativeRiskSnapshot:
             "account_id": self.account_id,
             "environment": self.environment,
             "provider_id": self.provider_id,
+            "provider_environment": self.provider_environment,
             "instrument": {
                 "instrument_id": self.instrument_version.instrument_id,
                 "version": self.instrument_version.version,
@@ -971,6 +1076,7 @@ class AuthorityService:
             request.account_id,
             request.environment,
             request.provider_id,
+            request.provider_environment,
             request.instrument_version,
             request.capability_snapshot_id,
             request.reconciliation_checkpoint_event_id,
@@ -985,6 +1091,7 @@ class AuthorityService:
             snapshot.account_id,
             snapshot.environment,
             snapshot.provider_id,
+            snapshot.provider_environment,
             snapshot.instrument_version,
             snapshot.capability_snapshot_id,
             snapshot.reconciliation_checkpoint_event_id,
@@ -1043,6 +1150,8 @@ class AuthorityService:
             "intent_hash": record.intent_hash,
             "account_id": record.account_id,
             "environment": record.environment,
+            "provider_id": record.provider_id,
+            "provider_environment": record.provider_environment,
             "instrument": cls._instrument_payload(record.instrument_version),
             "action": record.action,
             "notional": _canonical_decimal_text(record.notional),
@@ -1271,6 +1380,8 @@ class AuthorityService:
                     intent_hash=payload["intent_hash"],
                     account_id=payload["account_id"],
                     environment=payload["environment"],
+                    provider_id=payload.get("provider_id"),
+                    provider_environment=payload.get("provider_environment"),
                     instrument_version=InstrumentVersionIdentity(
                         instrument["instrument_id"], instrument["version"]
                     ),
@@ -1407,6 +1518,8 @@ class AuthorityService:
             record.risk_valid_until,
             record.policy_version,
             record.financial_command_id,
+            record.provider_id,
+            record.provider_environment,
         )
         if any(value is None for value in required):
             raise AuthorityConflict(
@@ -1478,6 +1591,10 @@ class AuthorityService:
                 authoritative_snapshot.get("account_id") != record.account_id
                 or authoritative_snapshot.get("environment")
                 != record.environment
+                or authoritative_snapshot.get("provider_id")
+                != record.provider_id
+                or authoritative_snapshot.get("provider_environment")
+                != record.provider_environment
                 or authoritative_snapshot.get("capability_snapshot_id")
                 != record.capability_snapshot_id
                 or authoritative_snapshot.get("authority_policy_id")
@@ -1578,6 +1695,14 @@ class AuthorityService:
             raise AuthorityConflict(
                 "durable admission lacks reservation availability evidence"
             )
+        if (
+            availability_evidence.get("provider_id") != record.provider_id
+            or availability_evidence.get("provider_environment")
+            != record.provider_environment
+        ):
+            raise AuthorityConflict(
+                "durable reservation availability provider domain does not match admission"
+            )
         try:
             regenerated_availability = (
                 load_account_resource_availability_evidence(
@@ -1592,6 +1717,15 @@ class AuthorityService:
                     ),
                     account_id=record.account_id,
                     environment=record.environment,
+                    provider_environment=(
+                        _text(
+                            availability_evidence.get("provider_environment"),
+                            name="provider_environment",
+                        )
+                        if availability_evidence.get("provider_environment")
+                        is not None
+                        else None
+                    ),
                     resources=tuple(sorted(risk_requirements)),
                     now=record.admitted_at,
                     max_age_seconds=availability_evidence.get(
@@ -1830,6 +1964,8 @@ class AuthorityService:
             "intent_hash": record.intent_hash,
             "account_id": record.account_id,
             "environment": record.environment,
+            "provider_id": record.provider_id,
+            "provider_environment": record.provider_environment,
             "instrument_id": record.instrument_version.instrument_id,
             "instrument_version": record.instrument_version.version,
             "action": record.action,
@@ -2565,6 +2701,7 @@ class AuthorityService:
         reservation_provider_id: str,
         reservation_max_age_seconds,
         now: str,
+        reservation_provider_environment: str | None = None,
         confirmation_id: str | None = None,
         risk_reducing: bool = False,
         allocation_result: EvidenceBoundObjectiveAllocationResult | None = None,
@@ -2607,6 +2744,39 @@ class AuthorityService:
             reservation_provider_id,
             name="reservation_provider_id",
         ).upper()
+        snapshot_provider_environment = (
+            _text(environment, name="environment").upper()
+            if reservation_provider_environment is None
+            else _text(
+                reservation_provider_environment,
+                name="reservation_provider_environment",
+            ).upper()
+        )
+        if (
+            snapshot_provider_id == "BYBIT"
+            and reservation_provider_environment is None
+        ):
+            raise ValueError(
+                "BYBIT admission requires explicit reservation_provider_environment"
+            )
+        if snapshot_provider_id == "BYBIT":
+            if snapshot_provider_environment not in {"MAINNET", "TESTNET", "DEMO"}:
+                raise ValueError(
+                    "BYBIT reservation_provider_environment must be MAINNET, TESTNET or DEMO"
+                )
+            runtime_environment = _text(
+                environment, name="environment"
+            ).upper()
+            if (
+                runtime_environment == "LIVE"
+                and snapshot_provider_environment != "MAINNET"
+            ) or (
+                runtime_environment == "PAPER"
+                and snapshot_provider_environment not in {"TESTNET", "DEMO"}
+            ):
+                raise ValueError(
+                    "BYBIT reservation_provider_environment does not match runtime environment"
+                )
         snapshot_checkpoint_event_id = _text(
             reservation_checkpoint_event_id,
             name="reservation_checkpoint_event_id",
@@ -2629,6 +2799,7 @@ class AuthorityService:
                 account_id=account_id,
                 environment=environment,
                 provider_id=snapshot_provider_id,
+                provider_environment=snapshot_provider_environment,
                 instrument_version=snapshot_instrument,
                 capability_snapshot_id=capability,
                 reconciliation_checkpoint_event_id=(
@@ -2728,6 +2899,8 @@ class AuthorityService:
                 != _text(account_id, name="account_id")
                 or durable_snapshot.get("environment")
                 != _text(environment, name="environment").upper()
+                or durable_snapshot.get("provider_environment")
+                != snapshot_provider_environment
                 or durable_snapshot.get("capability_snapshot_id") != capability
                 or durable_snapshot.get("reconciliation_checkpoint_event_id")
                 != snapshot_checkpoint_event_id
@@ -2883,6 +3056,8 @@ class AuthorityService:
                     durable_evidence.get("checkpoint_event_id")
                     != checkpoint_event_id
                     or durable_evidence.get("provider_id") != provider_id
+                    or durable_evidence.get("provider_environment")
+                    != snapshot_provider_environment
                     or durable_evidence.get("max_age_seconds")
                     != normalized_max_age
                 ):
@@ -2898,6 +3073,7 @@ class AuthorityService:
                         provider_id=provider_id,
                         account_id=account_id,
                         environment=environment,
+                        provider_environment=snapshot_provider_environment,
                         resources=tuple(
                             resource
                             for resource, _amount in normalized_requirements
@@ -3110,6 +3286,7 @@ class AuthorityService:
                 account_id=account_id,
                 environment=environment,
                 provider_id=snapshot_provider_id,
+                provider_environment=snapshot_provider_environment,
                 instrument_version=snapshot_instrument,
                 capability_snapshot_id=capability,
                 reconciliation_checkpoint_event_id=(
@@ -3159,6 +3336,8 @@ class AuthorityService:
             allocation_binding=allocation_binding,
             authoritative_risk_snapshot=risk_snapshot_payload,
             journal_sequence_cut=journal_sequence_cut,
+            provider_id=snapshot_provider_id,
+            provider_environment=snapshot_provider_environment,
             confirmation_id=confirmation_id,
             risk_reducing=risk_reducing,
         )
@@ -3190,6 +3369,8 @@ class AuthorityService:
         allocation_binding: Mapping[str, Any] | None = None,
         authoritative_risk_snapshot: Mapping[str, Any] | None = None,
         journal_sequence_cut: int | None = None,
+        provider_id: str,
+        provider_environment: str,
         confirmation_id: str | None = None,
         risk_reducing: bool = False,
     ) -> AdmissionRecord:
@@ -3220,6 +3401,13 @@ class AuthorityService:
         ihash = _text(intent_hash, name="intent_hash")
         account = _text(account_id, name="account_id")
         env = _text(environment, name="environment").upper()
+        provider = _text(provider_id, name="provider_id").upper()
+        exact_provider_environment = _provider_domain(
+            provider_id=provider,
+            environment=env,
+            provider_environment=provider_environment,
+            name="financial admission",
+        )
         capability = _text(
             capability_snapshot_id, name="capability_snapshot_id"
         )
@@ -3318,6 +3506,8 @@ class AuthorityService:
                 and existing.intent_hash == ihash
                 and existing.account_id == account
                 and existing.environment == env
+                and existing.provider_id == provider
+                and existing.provider_environment == exact_provider_environment
                 and existing.instrument_version == expected_instrument
                 and existing.action == _text(action, name="action").upper()
                 and existing.notional == _decimal(notional, name="notional")
@@ -3433,6 +3623,8 @@ class AuthorityService:
             "intent_hash": ihash,
             "account_id": account,
             "environment": env,
+            "provider_id": provider,
+            "provider_environment": exact_provider_environment,
             "instrument_id": candidate.instrument_version.instrument_id,
             "instrument_version": candidate.instrument_version.version,
             "action": candidate.action,
@@ -3467,6 +3659,8 @@ class AuthorityService:
             risk_valid_until=risk_decision.valid_until,
             policy_version=policy.version,
             financial_command_id=cid,
+            provider_id=provider,
+            provider_environment=exact_provider_environment,
         )
 
         risk_payload = {
@@ -3599,6 +3793,7 @@ class AuthorityService:
         action: str,
         now: str,
         capability_snapshot_id: str | None = None,
+        submission_scope: Mapping[str, Any] | None = None,
     ) -> tuple[bool, str]:
         record = self._admissions.get(_text(admission_id, name="admission_id"))
         if record is None:
@@ -3623,6 +3818,27 @@ class AuthorityService:
         )
         if scope != recorded_scope:
             return False, "admission_scope_changed"
+        try:
+            dispatch_provider, dispatch_provider_environment = (
+                _dispatch_provider_domain(
+                    submission_scope,
+                    account_id=scope[0],
+                    environment=scope[1],
+                )
+            )
+        except ValueError:
+            return False, "provider_domain_invalid"
+        if record.provider_id is not None or record.provider_environment is not None:
+            if (
+                dispatch_provider is None
+                or dispatch_provider_environment is None
+            ):
+                return False, "provider_domain_required"
+            if (
+                dispatch_provider != record.provider_id
+                or dispatch_provider_environment != record.provider_environment
+            ):
+                return False, "provider_domain_changed"
         if (
             self.is_new_exposure_blocked(record.account_id, record.environment)
             and not record.risk_reducing
@@ -3724,6 +3940,15 @@ class AuthorityService:
                     ),
                     account_id=record.account_id,
                     environment=record.environment,
+                    provider_environment=(
+                        _text(
+                            availability_evidence.get("provider_environment"),
+                            name="provider_environment",
+                        )
+                        if availability_evidence.get("provider_environment")
+                        is not None
+                        else None
+                    ),
                     resources=tuple(sorted(risk_requirements)),
                     now=now,
                     max_age_seconds=availability_evidence.get(
@@ -3813,8 +4038,9 @@ class AuthorityService:
         instrument_version: int,
         action: str,
         capability_snapshot_id: str | None = None,
+        submission_scope: Mapping[str, Any] | None = None,
     ) -> Callable[[str, str], tuple[bool, str]]:
-        """Bind one admitted versioned scope to the dispatcher's final barrier."""
+        """Bind admitted scope and immutable submission domain to final send."""
         aid = _text(admission_id, name="admission_id")
         account = _text(account_id, name="account_id")
         env = _text(environment, name="environment").upper()
@@ -3825,6 +4051,27 @@ class AuthorityService:
             if capability_snapshot_id is None
             else _text(capability_snapshot_id, name="capability_snapshot_id")
         )
+        if submission_scope is None:
+            frozen_submission_scope = None
+        else:
+            if not isinstance(submission_scope, Mapping):
+                raise ValueError("submission_scope must be a mapping")
+            try:
+                canonical_submission_scope = json.loads(
+                    canonical_json(dict(submission_scope))
+                )
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    "submission_scope must be canonical JSON"
+                ) from error
+            _dispatch_provider_domain(
+                canonical_submission_scope,
+                account_id=account,
+                environment=env,
+            )
+            frozen_submission_scope = MappingProxyType(
+                canonical_submission_scope
+            )
 
         def check(intent_hash: str, now: str) -> tuple[bool, str]:
             return self.dispatch_allowed(
@@ -3837,6 +4084,7 @@ class AuthorityService:
                 action=normalized_action,
                 now=now,
                 capability_snapshot_id=capability,
+                submission_scope=frozen_submission_scope,
             )
 
         return check
@@ -3900,6 +4148,8 @@ class AuthorityService:
                     "intent_hash": record.intent_hash,
                     "account_id": record.account_id,
                     "environment": record.environment,
+                    "provider_id": record.provider_id,
+                    "provider_environment": record.provider_environment,
                     "instrument": instrument(record.instrument_version),
                     "action": record.action,
                     "notional": _canonical_decimal_text(record.notional),
@@ -4092,6 +4342,8 @@ class AuthorityService:
                 intent_hash=_text(item.get("intent_hash"), name="intent_hash"),
                 account_id=_text(item.get("account_id"), name="account_id"),
                 environment=_text(item.get("environment"), name="environment").upper(),
+                provider_id=item.get("provider_id"),
+                provider_environment=item.get("provider_environment"),
                 instrument_version=identity,
                 action=_text(item.get("action"), name="action").upper(),
                 notional=amount,

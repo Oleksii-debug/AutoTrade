@@ -27,7 +27,7 @@ from .accounting import (
 )
 from .durable_reservations import reservation_snapshot_digest
 from .persistence import JournalStore, payload_digest
-from .reconciliation import ProviderFillEvidence, provider_fill_identity_payload
+from .reconciliation import ProviderFillEvidence
 from .reconciliation_journal import require_current_reconciliation_checkpoint
 from .reservations import ReservationSnapshot
 
@@ -61,10 +61,79 @@ def _utc_text(value: str, *, name: str) -> str:
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _economic_order_key(provider: str, provider_execution_id: str) -> str:
+def _economic_order_key(
+    provider: str,
+    provider_execution_id: str,
+    *,
+    environment: str | None = None,
+    provider_environment: str | None = None,
+) -> str:
+    provider_id = _text(provider, name="provider_id").upper()
+    execution_id = _text(
+        provider_execution_id, name="provider_execution_id"
+    )
+    prefix = f"provider:{provider_id}:"
+    if provider_environment is not None:
+        if environment is None:
+            raise ValueError(
+                "environment is required when provider_environment is supplied"
+            )
+        runtime_environment = _text(environment, name="environment").upper()
+        exact_provider_environment = _text(
+            provider_environment, name="provider_environment"
+        ).upper()
+        if exact_provider_environment != runtime_environment:
+            prefix += (
+                f"provider_environment:{exact_provider_environment}:"
+            )
+    return prefix + f"execution:{execution_id}"
+
+
+def _provider_execution_cause_id(
+    *,
+    provider: str,
+    environment: str,
+    provider_environment: str,
+    account_id: str,
+    provider_execution_id: str,
+) -> str:
+    provider_id = _text(provider, name="provider_id").upper()
+    runtime_environment = _text(environment, name="environment").upper()
+    exact_provider_environment = _text(
+        provider_environment, name="provider_environment"
+    ).upper()
+    scope = (
+        f"provider:{provider_id}:environment:{runtime_environment}:"
+    )
+    if exact_provider_environment != runtime_environment:
+        scope += f"provider_environment:{exact_provider_environment}:"
     return (
-        f"provider:{_text(provider, name='provider_id').upper()}:"
-        f"execution:{_text(provider_execution_id, name='provider_execution_id')}"
+        scope
+        + f"account:{_text(account_id, name='account_id')}:execution:"
+        + _text(provider_execution_id, name="provider_execution_id")
+    )
+
+
+def _provider_correction_cause_prefix(
+    *,
+    provider: str,
+    environment: str,
+    provider_environment: str,
+    account_id: str,
+    correction_digest: str,
+) -> str:
+    provider_id = _text(provider, name="provider_id").upper()
+    runtime_environment = _text(environment, name="environment").upper()
+    exact_provider_environment = _text(
+        provider_environment, name="provider_environment"
+    ).upper()
+    prefix = f"provider:{provider_id}:environment:{runtime_environment}:"
+    if exact_provider_environment != runtime_environment:
+        prefix += f"provider_environment:{exact_provider_environment}:"
+    return (
+        prefix
+        + f"account:{_text(account_id, name='account_id')}:correction:"
+        + _text(correction_digest, name="correction_digest")
     )
 
 
@@ -215,6 +284,13 @@ def _validated_fill_evidence(
         raise AccountingConflict(
             "provider fill environment scope does not match economic book"
         )
+    economic_provider_environment = getattr(
+        book, "provider_environment", book.environment
+    )
+    if provider_fill.provider_environment != economic_provider_environment:
+        raise AccountingConflict(
+            "provider fill provider_environment scope does not match economic book"
+        )
     if provider_fill.side is None:
         raise AccountingConflict(
             "provider fill direction is not independently evidenced"
@@ -296,6 +372,8 @@ def _validated_fill_evidence(
         "trade_time": provider_fill.trade_time,
         "provider_revision": projected_fill.provider_revision,
     }
+    if economic_provider_environment != book.environment:
+        evidence["provider_environment"] = economic_provider_environment
     return provider, instrument, settlement, evidence
 
 
@@ -317,6 +395,7 @@ def _current_unexpected_execution_checkpoint(
         provider_id=provider_fill.provider_id,
         account_id=provider_fill.account_id,
         environment=provider_fill.environment,
+        provider_environment=provider_fill.provider_environment,
     )
     payload = checkpoint.get("payload")
     if not isinstance(payload, dict):
@@ -338,60 +417,6 @@ def _current_unexpected_execution_checkpoint(
         raise AccountingConflict(
             "provider execution is not proven unexpected by current reconciliation checkpoint"
         )
-
-    raw_bindings = payload.get("unexpected_provider_fill_bindings")
-    if not isinstance(raw_bindings, list):
-        raise AccountingConflict(
-            "reconciliation checkpoint does not bind exact unexpected provider fill evidence"
-        )
-    binding: dict[str, object] | None = None
-    seen_binding_ids: set[str] = set()
-    for raw_binding in raw_bindings:
-        if not isinstance(raw_binding, dict):
-            raise AccountingConflict(
-                "reconciliation checkpoint provider fill binding is invalid"
-            )
-        execution_id = raw_binding.get("provider_execution_id")
-        if not isinstance(execution_id, str) or not execution_id.strip():
-            raise AccountingConflict(
-                "reconciliation checkpoint provider fill binding identity is invalid"
-            )
-        execution_id = execution_id.strip()
-        if execution_id in seen_binding_ids:
-            raise AccountingConflict(
-                "reconciliation checkpoint provider fill bindings are not unique"
-            )
-        seen_binding_ids.add(execution_id)
-        identity = raw_binding.get("identity")
-        identity_digest = raw_binding.get("identity_digest")
-        if (
-            not isinstance(identity, dict)
-            or not isinstance(identity_digest, str)
-            or not identity_digest.startswith("sha256:")
-            or len(identity_digest) != 71
-            or payload_digest(identity) != identity_digest
-            or identity.get("provider_execution_id") != execution_id
-        ):
-            raise AccountingConflict(
-                "reconciliation checkpoint provider fill binding integrity is invalid"
-            )
-        if execution_id == provider_fill.provider_execution_id:
-            binding = raw_binding
-
-    if binding is None:
-        raise AccountingConflict(
-            "reconciliation checkpoint does not bind exact unexpected provider fill evidence"
-        )
-    expected_identity = provider_fill_identity_payload(provider_fill)
-    expected_identity_digest = payload_digest(expected_identity)
-    if (
-        binding.get("identity_digest") != expected_identity_digest
-        or binding.get("identity") != expected_identity
-    ):
-        raise AccountingConflict(
-            "provider fill does not match checkpoint-bound reconciliation evidence"
-        )
-
     payload_hash = checkpoint.get("payload_hash")
     journal_sequence = checkpoint.get("journal_sequence")
     if (
@@ -410,7 +435,6 @@ def _current_unexpected_execution_checkpoint(
         "event_id": _text(checkpoint.get("event_id"), name="checkpoint_event_id"),
         "payload_hash": payload_hash,
         "journal_sequence": journal_sequence,
-        "provider_fill_identity_digest": expected_identity_digest,
     }
 
 
@@ -452,6 +476,8 @@ def build_unexpected_provider_fill_transaction(
     if (
         book.account_id != provider_fill.account_id
         or book.environment != provider_fill.environment
+        or getattr(book, "provider_environment", book.environment)
+        != provider_fill.provider_environment
     ):
         raise AccountingConflict(
             "unexpected provider fill scope does not match economic book"
@@ -482,9 +508,6 @@ def build_unexpected_provider_fill_transaction(
         "reconciliation_checkpoint_event_id": checkpoint["event_id"],
         "reconciliation_checkpoint_payload_hash": checkpoint["payload_hash"],
         "reconciliation_checkpoint_journal_sequence": checkpoint["journal_sequence"],
-        "reconciliation_provider_fill_identity_digest": checkpoint[
-            "provider_fill_identity_digest"
-        ],
         "provider_id": provider,
         "environment": provider_fill.environment,
         "account_id": provider_fill.account_id,
@@ -501,15 +524,19 @@ def build_unexpected_provider_fill_transaction(
         "trade_time": provider_fill.trade_time,
         "evidence_refs": list(provider_fill.evidence_refs),
     }
+    if provider_fill.provider_environment != provider_fill.environment:
+        evidence["provider_environment"] = provider_fill.provider_environment
     evidence_digest = payload_digest(evidence)
     return book_equity_fill(
         transaction_id=(
             "external-provider-fill:" + evidence_digest.removeprefix("sha256:")
         ),
-        cause_event_id=(
-            f"provider:{provider}:environment:{provider_fill.environment}:"
-            f"account:{provider_fill.account_id}:execution:"
-            f"{provider_fill.provider_execution_id}"
+        cause_event_id=_provider_execution_cause_id(
+            provider=provider,
+            environment=provider_fill.environment,
+            provider_environment=provider_fill.provider_environment,
+            account_id=provider_fill.account_id,
+            provider_execution_id=provider_fill.provider_execution_id,
         ),
         instrument=provider_fill.instrument,
         settlement_currency=settlement,
@@ -522,6 +549,8 @@ def build_unexpected_provider_fill_transaction(
         economic_order_key=_economic_order_key(
             provider,
             provider_fill.provider_execution_id,
+            environment=provider_fill.environment,
+            provider_environment=provider_fill.provider_environment,
         ),
         observed_at=(
             _utc_text(observed_at, name="observed_at")
@@ -574,9 +603,12 @@ def build_provider_fill_transaction(
     )
     evidence_digest = payload_digest(evidence)
     transaction_id = "provider-fill:" + evidence_digest.removeprefix("sha256:")
-    cause_event_id = (
-        f"provider:{provider}:environment:{book.environment}:"
-        f"account:{book.account_id}:execution:{provider_fill.provider_execution_id}"
+    cause_event_id = _provider_execution_cause_id(
+        provider=provider,
+        environment=book.environment,
+        provider_environment=provider_fill.provider_environment,
+        account_id=book.account_id,
+        provider_execution_id=provider_fill.provider_execution_id,
     )
     return book_equity_fill(
         transaction_id=transaction_id,
@@ -592,6 +624,8 @@ def build_provider_fill_transaction(
         economic_order_key=_economic_order_key(
             provider,
             provider_fill.provider_execution_id,
+            environment=book.environment,
+            provider_environment=provider_fill.provider_environment,
         ),
         observed_at=(
             _utc_text(observed_at, name="observed_at")
@@ -716,6 +750,8 @@ def build_provider_fill_financial_plan(
             for key, value in usage_items
         },
     }
+    if provider_fill.provider_environment != provider_fill.environment:
+        material["provider_environment"] = provider_fill.provider_environment
     return ProviderFillFinancialPlan(
         reservation_id=reservation_snapshot.reservation_id,
         intent_id=reservation_snapshot.intent_id,
@@ -813,6 +849,8 @@ def build_provider_fill_correction_transactions(
     order_key = _economic_order_key(
         provider,
         original_provider_fill.provider_execution_id,
+        environment=book.environment,
+        provider_environment=original_provider_fill.provider_environment,
     )
     reversed_ids = {
         item.reverses_transaction_id
@@ -886,10 +924,17 @@ def build_provider_fill_correction_transactions(
                 "correction_of": corrected_projected_fill.correction_of,
             },
         }
+        if original_provider_fill.provider_environment != book.environment:
+            retry_evidence["provider_environment"] = (
+                original_provider_fill.provider_environment
+            )
         retry_digest = payload_digest(retry_evidence).removeprefix("sha256:")
-        retry_prefix = (
-            f"provider:{provider}:environment:{book.environment}:"
-            f"account:{book.account_id}:correction:{retry_digest}"
+        retry_prefix = _provider_correction_cause_prefix(
+            provider=provider,
+            environment=book.environment,
+            provider_environment=original_provider_fill.provider_environment,
+            account_id=book.account_id,
+            correction_digest=retry_digest,
         )
         if (
             reversal.transaction_id
@@ -927,10 +972,17 @@ def build_provider_fill_correction_transactions(
             "correction_of": corrected_projected_fill.correction_of,
         },
     }
+    if original_provider_fill.provider_environment != book.environment:
+        correction_evidence["provider_environment"] = (
+            original_provider_fill.provider_environment
+        )
     correction_digest = payload_digest(correction_evidence).removeprefix("sha256:")
-    cause_prefix = (
-        f"provider:{provider}:environment:{book.environment}:"
-        f"account:{book.account_id}:correction:{correction_digest}"
+    cause_prefix = _provider_correction_cause_prefix(
+        provider=provider,
+        environment=book.environment,
+        provider_environment=original_provider_fill.provider_environment,
+        account_id=book.account_id,
+        correction_digest=correction_digest,
     )
     reversal = reverse_transaction(
         committed_original,

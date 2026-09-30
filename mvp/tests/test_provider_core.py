@@ -21,6 +21,7 @@ from mvp.autotrade_mvp.provider_core import (
     QuotaBucket,
     WriteOutcome,
     classify_write_outcome,
+    normalize_provider_environment,
     observe_submission_json_response,
     provider_definition,
 )
@@ -41,6 +42,80 @@ class _NoOffsetTZ(tzinfo):
 
 class ProviderCoreTests(unittest.TestCase):
 
+    def test_provider_environment_authority_is_canonical(self):
+        self.assertEqual(
+            normalize_provider_environment(
+                provider_id="BYBIT", environment="PAPER",
+                provider_environment="TESTNET",
+            ),
+            "TESTNET",
+        )
+        self.assertEqual(
+            normalize_provider_environment(
+                provider_id="BYBIT", environment="PAPER",
+                provider_environment="DEMO",
+            ),
+            "DEMO",
+        )
+        self.assertEqual(
+            normalize_provider_environment(
+                provider_id="BYBIT", environment="LIVE",
+                provider_environment="MAINNET",
+            ),
+            "MAINNET",
+        )
+        self.assertEqual(
+            normalize_provider_environment(
+                provider_id="KRAKEN", environment="PAPER",
+                provider_environment=None,
+            ),
+            "PAPER",
+        )
+        self.assertEqual(
+            normalize_provider_environment(
+                provider_id="TEST_PROVIDER", environment="SIMULATION",
+                provider_environment="SIMULATION",
+            ),
+            "SIMULATION",
+        )
+        for environment, provider_environment in (
+            ("PAPER", "MAINNET"),
+            ("LIVE", "TESTNET"),
+            ("LIVE", "DEMO"),
+        ):
+            with self.subTest(
+                environment=environment,
+                provider_environment=provider_environment,
+            ), self.assertRaisesRegex(
+                ProviderCoreError, "does not match runtime environment"
+            ):
+                normalize_provider_environment(
+                    provider_id="BYBIT",
+                    environment=environment,
+                    provider_environment=provider_environment,
+                )
+        with self.assertRaisesRegex(
+            ProviderCoreError, "requires explicit provider_environment"
+        ):
+            normalize_provider_environment(
+                provider_id="BYBIT", environment="PAPER",
+                provider_environment=None,
+            )
+        self.assertEqual(
+            normalize_provider_environment(
+                provider_id="KRAKEN", environment="PAPER",
+                provider_environment="DEMO",
+            ),
+            "DEMO",
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError, "not canonical"
+        ):
+            normalize_provider_environment(
+                provider_id="KRAKEN", environment="PAPER",
+                provider_environment="bad domain",
+            )
+
     def _durable_submission_binding(
         self,
         directory,
@@ -52,7 +127,7 @@ class ProviderCoreTests(unittest.TestCase):
         store = JournalStore(f"{directory}/journal.sqlite3")
         dispatcher = GuardedDispatcher(
             store,
-            environment="SIMULATION",
+            environment="PAPER",
             account_id="acct",
             owner_token="owner",
         )
@@ -70,6 +145,7 @@ class ProviderCoreTests(unittest.TestCase):
             "prepared_request_sha256": request_sha,
             "capability_snapshot_ids": list(capability_snapshot_ids),
             "instrument_versions": list(instrument_versions),
+            "provider_environment": "TESTNET",
         }
 
         def transport(_client_id, _request, guard):
@@ -85,13 +161,14 @@ class ProviderCoreTests(unittest.TestCase):
             now="2026-09-24T18:00:00Z",
             authority_check=lambda _hash, _now: (True, "allowed"),
             transport_send=transport,
+            sender_check=lambda _owner, _epoch: None,
             submission_scope=scope,
         )
         self.assertEqual(outcome.status, "SENT")
         return (
             load_submission_response_binding(
                 store,
-                environment="SIMULATION",
+                environment="PAPER",
                 account_id="acct",
                 attempt_id="provider-evidence-a1",
             ),
@@ -108,6 +185,7 @@ class ProviderCoreTests(unittest.TestCase):
                 prepared_request_sha256=request_sha,
                 capability_snapshot_ids=("cap-1",),
                 instrument_versions=("BTCUSD:v1",),
+                provider_environment="TESTNET",
             )
             self.assertIsInstance(observation, ProviderSubmissionObservation)
             self.assertEqual(observation.payload["orderId"], "provider-1")
@@ -120,7 +198,8 @@ class ProviderCoreTests(unittest.TestCase):
                 capability_snapshot_ids=("cap-1",),
                 instrument_versions=("BTCUSD:v1",),
                 account_id="acct",
-                environment="SIMULATION",
+                environment="PAPER",
+                provider_environment="TESTNET",
                 client_order_id=binding.client_order_id,
             )
 
@@ -133,6 +212,7 @@ class ProviderCoreTests(unittest.TestCase):
                 {"prepared_request_sha256": "sha256:" + "0" * 64},
                 {"capability_snapshot_ids": ("cap-2",)},
                 {"instrument_versions": ("ETHUSD:v1",)},
+                {"provider_environment": "DEMO"},
             ):
                 values = {
                     "response_binding": binding,
@@ -141,6 +221,7 @@ class ProviderCoreTests(unittest.TestCase):
                     "prepared_request_sha256": request_sha,
                     "capability_snapshot_ids": ("cap-1",),
                     "instrument_versions": ("BTCUSD:v1",),
+                    "provider_environment": "TESTNET",
                 }
                 values.update(kwargs)
                 with self.subTest(kwargs=kwargs), self.assertRaises(ProviderCoreError):

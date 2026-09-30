@@ -236,6 +236,24 @@ class EquityState:
         )
 
 
+def _canonical_state(value: EquityState) -> EquityState:
+    if type(value) is not EquityState:
+        raise TypeError("state must be an exact EquityState")
+    # Reconstruct once from exact built-in scalars so a forged base dataclass
+    # cannot bypass EquityState's invariants.
+    return EquityState.create(
+        symbol=value.symbol,
+        quantity=value.quantity,
+        total_basis=value.total_basis,
+        settled_cash=value.settled_cash,
+        unsettled_cash=value.unsettled_cash,
+        currency=value.currency,
+        borrowed_quantity=value.borrowed_quantity,
+        accrued_financing=value.accrued_financing,
+        recalled_quantity=value.recalled_quantity,
+    )
+
+
 @dataclass(frozen=True)
 class CorporateEvent:
     event_id: str
@@ -375,8 +393,26 @@ class Transition:
 def _require_exact_event(event: CorporateEvent) -> None:
     if type(event) is not CorporateEvent:
         raise TypeError("event must be an exact CorporateEvent")
+    if (
+        type(event.event_id) is not str
+        or type(event.instrument_id) is not str
+        or type(event.instrument_version) is not int
+        or type(event.kind) is not str
+        or type(event.effective_date) is not date
+        or type(event.source_revision) is not str
+    ):
+        raise TypeError("corporate event scalar graph must use exact built-in types")
+    if event.source_sequence is not None and type(event.source_sequence) is not int:
+        raise TypeError("corporate event source_sequence must be an exact integer")
+    if event.effective_at is not None:
+        _utc_instant(event.effective_at, name="effective_at")
     if type(event.payload) is not dict:
         raise TypeError("corporate event payload must be an exact dict")
+    for key, value in event.payload.items():
+        if type(key) is not str or type(value) is not str:
+            raise TypeError(
+                "corporate event payload must contain exact built-in strings"
+            )
 
 
 def _require_exact_transition(transition: Transition) -> None:
@@ -384,8 +420,8 @@ def _require_exact_transition(transition: Transition) -> None:
         raise TypeError("checkpoint transition must be an exact Transition")
     if type(transition.event_id) is not str:
         raise TypeError("checkpoint transition event_id must be an exact string")
-    if type(transition.before) is not EquityState or type(transition.after) is not EquityState:
-        raise TypeError("checkpoint transition states must be exact EquityState values")
+    _canonical_state(transition.before)
+    _canonical_state(transition.after)
     if type(transition.economic_pnl) is not Decimal:
         raise TypeError("checkpoint transition P&L must be an exact Decimal")
     if type(transition.reason) is not str:
@@ -411,8 +447,8 @@ class CorporateActionCheckpoint:
             "checkpoint_id",
             _text(self.checkpoint_id, name="checkpoint_id"),
         )
-        if type(self.state) is not EquityState:
-            raise TypeError("checkpoint state must be an exact EquityState")
+        canonical_state = _canonical_state(self.state)
+        object.__setattr__(self, "state", canonical_state)
         if type(self.instrument_version) is not InstrumentVersion:
             raise TypeError(
                 "checkpoint instrument_version must be an exact InstrumentVersion"
@@ -457,8 +493,7 @@ class CorporateActionBook:
         instrument_version: InstrumentVersion,
         registry: InstrumentRegistry,
     ):
-        if type(state) is not EquityState:
-            raise TypeError("state must be an exact EquityState")
+        state = _canonical_state(state)
         if type(instrument_version) is not InstrumentVersion:
             raise TypeError("instrument_version must be an exact InstrumentVersion")
         if type(registry) is not InstrumentRegistry:

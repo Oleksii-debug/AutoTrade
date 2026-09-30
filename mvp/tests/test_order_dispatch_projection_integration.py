@@ -1,4 +1,5 @@
 from decimal import Decimal
+from hashlib import sha256
 import json
 from tempfile import TemporaryDirectory
 import unittest
@@ -209,6 +210,43 @@ class DispatchOrderProjectionIntegrationTests(unittest.TestCase):
 
             with patch.object(
                 store, "load_events", side_effect=corrupt_exact_source
+            ):
+                with self.assertRaisesRegex(
+                    OrderProjectionConflict,
+                    "exact submission response evidence is invalid",
+                ):
+                    orders.sync_submission_attempt(attempt_id=attempt_id)
+            self.assertEqual(
+                orders.order(client_order_id).snapshot().state,
+                "SEND_STARTED",
+            )
+            self.assertEqual(
+                orders.order(client_order_id).snapshot().filled_quantity,
+                Decimal("0"),
+            )
+
+            # A structurally inadmissible but internally SHA-consistent
+            # replacement response must not turn durable Sending into ACK.
+            invalid_nested = b"[" * 65 + b"0" + b"]" * 65
+            def structural_invalid_source(aggregate_type, selected_id, *args, **kwargs):
+                events = original_load_events(
+                    aggregate_type, selected_id, *args, **kwargs
+                )
+                if aggregate_type != "submission_attempt" or selected_id != aggregate_id:
+                    return events
+                forged = list(events)
+                sent = dict(forged[-1])
+                sent_payload = dict(sent["payload"])
+                sent_payload["response_text"] = invalid_nested.decode("ascii")
+                sent_payload["response_sha256"] = (
+                    "sha256:" + sha256(invalid_nested).hexdigest()
+                )
+                sent["payload"] = sent_payload
+                forged[-1] = sent
+                return forged
+
+            with patch.object(
+                store, "load_events", side_effect=structural_invalid_source
             ):
                 with self.assertRaisesRegex(
                     OrderProjectionConflict,

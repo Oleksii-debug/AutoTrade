@@ -19,6 +19,7 @@ from autotrade_numeric.exact_decimal import (
 )
 
 from .persistence import JournalStore, canonical_json, payload_digest
+from .provider_response_limits import require_provider_json_depth
 
 
 AuthorityCheck = Callable[[str, str], tuple[bool, str]]
@@ -38,6 +39,18 @@ def _has_exact_response_markers(payload: Mapping[str, Any]) -> bool:
 def _decode_exact_json_bytes(raw: bytes) -> Any:
     if type(raw) is not bytes or not raw:
         raise ValueError("provider response bytes must be non-empty bytes")
+
+    # Consume the one shared #652 transport/consumer structural envelope
+    # BEFORE stdlib JSON can materialize an unbounded nested object graph.
+    # Translate only after leaving the helper error handler, preserving
+    # the existing redacted public exception boundary.
+    structural_failure = False
+    try:
+        require_provider_json_depth(raw)
+    except ValueError:
+        structural_failure = True
+    if structural_failure:
+        raise ValueError("provider response exceeds shared JSON resource budget")
 
     def no_duplicate_keys(pairs):
         result = {}
@@ -59,6 +72,7 @@ def _decode_exact_json_bytes(raw: bytes) -> Any:
         raise ValueError("provider response must be exact UTF-8 JSON bytes")
 
     json_failure = False
+    parser_recursion_failure = False
     try:
         decoded = json.loads(
             text,
@@ -71,6 +85,11 @@ def _decode_exact_json_bytes(raw: bytes) -> Any:
                 )
             ),
         )
+    except RecursionError:
+        # A defensive fallback: the shared scanner normally fails at depth
+        # 65 before stdlib parsing; future decoder changes must also remain
+        # deterministic and must not retain an untrusted parser exception.
+        parser_recursion_failure = True
     except json.JSONDecodeError:
         # JSONDecodeError retains the complete provider document. Translate
         # only after leaving this handler so it cannot remain in __context__.
@@ -87,6 +106,8 @@ def _decode_exact_json_bytes(raw: bytes) -> Any:
 
     if json_failure:
         raise ValueError("provider response must be exact UTF-8 JSON bytes")
+    if parser_recursion_failure:
+        raise ValueError("provider response exceeds shared JSON resource budget")
     return decoded
 
 

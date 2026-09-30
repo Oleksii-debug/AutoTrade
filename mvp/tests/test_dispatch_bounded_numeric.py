@@ -17,6 +17,89 @@ from mvp.autotrade_mvp.persistence import JournalStore
 
 
 class DispatchBoundedNumericTransportTests(unittest.TestCase):
+    def test_shared_depth_boundary_and_parser_recursion_remain_redacted(self):
+        at_limit = b"[" * 64 + b"0" + b"]" * 64
+        too_deep = b"[" * 65 + b"0" + b"]" * 65
+        self.assertEqual(ExactJsonTransportResponse(at_limit).payload, 
+                         __import__("json").loads(at_limit))
+        for raw in (too_deep, b'{"v":' + b"[" * 65 + b"0" + b"]" * 65 + b"}"):
+            with self.subTest(raw_length=len(raw)), self.assertRaisesRegex(
+                ValueError, "shared JSON resource budget"
+            ) as denied:
+                ExactJsonTransportResponse(raw)
+            self.assertIsNone(denied.exception.__cause__)
+            self.assertIsNone(denied.exception.__context__)
+        marker = "SYNTHETIC_SECRET_NOT_FOR_DIAGNOSTICS"
+        with patch(
+            "mvp.autotrade_mvp.dispatch.json.loads",
+            side_effect=RecursionError(marker),
+        ):
+            with self.assertRaisesRegex(
+                ValueError, "shared JSON resource budget"
+            ) as denied:
+                ExactJsonTransportResponse(b'{"value":1}')
+        self.assertNotIn(marker, str(denied.exception))
+        self.assertIsNone(denied.exception.__cause__)
+        self.assertIsNone(denied.exception.__context__)
+
+    def test_deep_post_send_remains_durable_unknown_with_no_second_wire(self):
+        raw = b'{"price":' + b"[" * 65 + b"0" + b"]" * 65 + b"}"
+        with TemporaryDirectory() as directory:
+            store = JournalStore(directory + "/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store, environment="SIMULATION", account_id="acct", owner_token="owner"
+            )
+            calls = []
+            def after_barrier(_cid, _request, guard):
+                guard()
+                calls.append("wire")
+                return ExactJsonTransportResponse(raw)
+            args = {
+                "attempt_id": "overdepth-after-send",
+                "intent_id": "overdepth-intent",
+                "intent_hash": "overdepth-financial-intent",
+                "provider": "BYBIT",
+                "request": {"symbol": "BTCUSD", "qty": "1"},
+                "now": "2026-09-24T18:00:00Z",
+                "authority_check": lambda _hash, _now: (True, "allowed"),
+            }
+            outcome = dispatcher.dispatch(**args, transport_send=after_barrier)
+            self.assertEqual(outcome.status, "UNKNOWN")
+            self.assertEqual(calls, ["wire"])
+            aggregate_id = submission_attempt_aggregate_id(
+                environment="SIMULATION", account_id="acct",
+                attempt_id="overdepth-after-send",
+            )
+            events = store.load_events("submission_attempt", aggregate_id)
+            self.assertEqual(
+                [e["event_type"] for e in events],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
+            )
+            restart = GuardedDispatcher(
+                JournalStore(directory + "/journal.sqlite3"),
+                environment="SIMULATION", account_id="acct", owner_token="owner",
+            )
+            again = restart.dispatch(
+                **args, transport_send=lambda *_: self.fail("blind wire retry")
+            )
+            self.assertEqual(again.status, "UNKNOWN")
+            self.assertEqual(calls, ["wire"])
+
+    def test_structurally_inadmissible_exact_replay_is_unknown(self):
+        raw = b"[" * 65 + b"0" + b"]" * 65
+        event = {
+            "event_type": "SubmissionSent",
+            "payload": {
+                "response_encoding": "utf-8-json",
+                "response_text": raw.decode("ascii"),
+                "response_sha256": "sha256:" + sha256(raw).hexdigest(),
+            },
+        }
+        outcome = GuardedDispatcher._outcome_from_terminal(event, "client-order")
+        self.assertEqual(outcome.status, "UNKNOWN")
+        self.assertIsNone(outcome.response)
+
+
     def test_transport_preview_and_durable_response_are_both_exact(self):
         raw = (
             b'{"price":65000.10,"fee":0.0100,"integer":12345678901234567890,'

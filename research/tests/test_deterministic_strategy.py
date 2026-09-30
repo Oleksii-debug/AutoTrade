@@ -1460,6 +1460,65 @@ class DeterministicStrategyTests(unittest.TestCase):
                 proposal_quantity="1", descriptor=self.descriptor(),
             )
 
+    def test_economics_lot_floor_is_context_independent_and_never_expands_risk(self):
+        from decimal import ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN, localcontext
+        observed = []
+        for precision in (6, 10, 28, 80):
+            for rounding in (ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN):
+                with localcontext() as context:
+                    context.prec, context.rounding = precision, rounding
+                    proposal, receipt = run_registered_baseline(
+                        ReturnThresholdBaseline(
+                            lookback=2, threshold="0.01",
+                            proposal_quantity="1.000000000000000001",
+                            descriptor=self.descriptor(),
+                        ),
+                        [obs(0, "100"), obs(1, "102")],
+                        decision_time=BASE + timedelta(minutes=1), symbol="AAA",
+                        instrument_version="instrument:aaa@7",
+                    )
+                    economics = economics_binding(
+                        proposal,
+                        instrument_version="instrument:aaa@7",
+                        registered_run_receipt=receipt,
+                        max_feasible_quantity="1.000000000000000001",
+                        lot_size="0.000000000000000003",
+                    )
+                    bound = bind_strategy_economics(
+                        proposal, economics, instrument_version="instrument:aaa@7",
+                        registered_run_receipt=receipt,
+                    )
+                    self.assertEqual(bound.action, "BUY")
+                    self.assertEqual(bound.quantity, Decimal("0.999999999999999999"))
+                    self.assertLessEqual(bound.quantity, economics.max_feasible_quantity)
+                    projected = to_decision_proposal(
+                        proposal,
+                        proposal_id="00000000-0000-0000-0000-000000000001",
+                        instrument_version="instrument:aaa@7",
+                        economics_binding=economics,
+                        exit_policy_ref="exit:1", compute_cost_currency="USD",
+                        registered_run_receipt=receipt,
+                    )
+                    self.assertEqual(
+                        projected["confidence_basis"]["effective_quantity"],
+                        "0.999999999999999999",
+                    )
+                    too_small = economics_binding(
+                        proposal,
+                        instrument_version="instrument:aaa@7",
+                        registered_run_receipt=receipt,
+                        max_feasible_quantity="0.000000000000000002",
+                        lot_size="0.000000000000000003",
+                    )
+                    hold = bind_strategy_economics(
+                        proposal, too_small, instrument_version="instrument:aaa@7",
+                        registered_run_receipt=receipt,
+                    )
+                    self.assertEqual(hold.action, "HOLD")
+                    self.assertEqual(hold.quantity, Decimal("0"))
+                    observed.append((bound.fingerprint, receipt.fingerprint, hold.fingerprint))
+        self.assertEqual(observed, [observed[0]] * len(observed))
+
     def test_registered_run_receipt_replays_and_roundtrips(self):
         descriptor = self.descriptor()
         proposal, receipt = run_registered_baseline(

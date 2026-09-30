@@ -8,6 +8,7 @@ then the in-memory OrderBookProjection is rebuilt from that immutable history.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Mapping, Sequence
@@ -18,7 +19,11 @@ from research.autotrade_research.artifacts.store import (
     ArtifactStore,
 )
 
-from .dispatch import submission_attempt_aggregate_id
+from .dispatch import (
+    _decode_exact_json_bytes,
+    _has_exact_response_markers,
+    submission_attempt_aggregate_id,
+)
 from .order_projection import (
     OrderBookProjection,
     OrderProjectionConflict,
@@ -816,11 +821,42 @@ class DurableOrderBookProjection:
                     )
                 terminal_seen = True
                 payload = event.get("payload")
-                response = (
-                    payload.get("response")
-                    if isinstance(payload, dict)
-                    else None
-                )
+                # Shared dispatch now stores SHA-bound raw provider bytes,
+                # not a lossy float/Decimal-incompatible JSON response mirror.
+                # Reconstruct the exact typed response at the projection
+                # boundary and check the digest before any ACK state mutation.
+                if isinstance(payload, dict) and _has_exact_response_markers(payload):
+                    if payload.get("response_encoding") != "utf-8-json":
+                        raise OrderProjectionConflict(
+                            "exact submission response evidence is invalid"
+                        )
+                    raw_text = payload.get("response_text")
+                    expected_hash = payload.get("response_sha256")
+                    if (
+                        type(raw_text) is not str
+                        or not raw_text
+                        or type(expected_hash) is not str
+                    ):
+                        raise OrderProjectionConflict(
+                            "exact submission response evidence is unavailable"
+                        )
+                    try:
+                        raw = raw_text.encode("utf-8", errors="strict")
+                        if "sha256:" + sha256(raw).hexdigest() != expected_hash:
+                            raise ValueError("exact submission response SHA mismatch")
+                        response = _decode_exact_json_bytes(raw)
+                    except (UnicodeError, ValueError, TypeError) as error:
+                        raise OrderProjectionConflict(
+                            "exact submission response evidence is invalid"
+                        ) from error
+                else:
+                    # Only a marker-free historical row may use its legacy
+                    # response mirror; partial exact evidence is fail-closed.
+                    response = (
+                        payload.get("response")
+                        if isinstance(payload, dict)
+                        else None
+                    )
                 if not isinstance(response, Mapping):
                     raise OrderProjectionConflict(
                         "submission sent response must be an object"

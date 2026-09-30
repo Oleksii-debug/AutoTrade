@@ -1,8 +1,11 @@
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import textwrap
+from tempfile import TemporaryDirectory
 import unittest
 
 from jsonschema import Draft202012Validator
@@ -210,38 +213,105 @@ class CommonScalarConformanceTests(unittest.TestCase):
         self.assertFalse(is_valid_common_scalar("Decimal", value))
         self.assertFalse(mvp_is_valid_common_scalar("Decimal", value))
 
-    def test_shipped_exact_decimal_import_does_not_require_contracts_package(self):
-        code = textwrap.dedent(
-            """
-            import importlib.abc
-            import sys
+    def _staged_exact_decimal_probe(self, *, include_scalar: bool) -> subprocess.CompletedProcess:
+        """Exercise only shipped numeric components, never the checkout or site.
 
-            class DenyContracts(importlib.abc.MetaPathFinder):
-                def find_spec(self, fullname, path=None, target=None):
-                    if fullname == "contracts" or fullname.startswith("contracts."):
-                        raise ImportError("contracts package deliberately denied")
-                    return None
+        The real installed-host distribution oracle remains a separate WP-43
+        gate; this guards the numeric component's direct import dependency.
+        """
+        with TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            staging = temporary / "installed-component"
+            package = staging / "mvp" / "autotrade_mvp"
+            package.mkdir(parents=True)
+            # The full MVP package initializer loads product runtime modules;
+            # this component test deliberately has only synthetic package
+            # markers and the exact three shipped first-party source files.
+            (staging / "mvp" / "__init__.py").write_text("", encoding="utf-8")
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            source = ROOT / "mvp" / "autotrade_mvp"
+            filenames = ["exact_decimal.py", "_generated_decimal_limits.py"]
+            if include_scalar:
+                filenames.append("_generated_common_scalars.py")
+            for name in filenames:
+                shutil.copy2(source / name, package / name)
 
-            for name in tuple(sys.modules):
-                if name == "contracts" or name.startswith("contracts."):
-                    del sys.modules[name]
-            sys.meta_path.insert(0, DenyContracts())
-            from mvp.autotrade_mvp.exact_decimal import parse_canonical_decimal_text
-            assert str(parse_canonical_decimal_text("1.25")) == "1.25"
-            """
-        )
-        result = subprocess.run(
-            [sys.executable, "-c", code],
-            cwd=ROOT,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        self.assertEqual(
-            result.returncode,
-            0,
-            msg=f"stdout={result.stdout}\nstderr={result.stderr}",
-        )
+            script = textwrap.dedent(
+                """
+                import importlib.abc
+                import os
+                from pathlib import Path
+                import sys
+
+                assert sys.flags.isolated == 1
+                assert sys.flags.no_site == 1
+                staging = Path(os.environ["AUTOTRADE_STAGING"]).resolve(strict=True)
+                sys.path.insert(0, str(staging))
+
+                class DenyContracts(importlib.abc.MetaPathFinder):
+                    def find_spec(self, fullname, path=None, target=None):
+                        if fullname == "contracts" or fullname.startswith("contracts."):
+                            raise AssertionError("checkout contracts package was accessed")
+                        return None
+
+                sys.meta_path.insert(0, DenyContracts())
+                for name in tuple(sys.modules):
+                    assert name != "contracts" and not name.startswith("contracts.")
+
+                missing_scalar = os.environ["AUTOTRADE_MISSING_SCALAR"] == "1"
+                try:
+                    from mvp.autotrade_mvp.exact_decimal import parse_canonical_decimal_text
+                except ModuleNotFoundError as error:
+                    if missing_scalar and error.name == (
+                        "mvp.autotrade_mvp._generated_common_scalars"
+                    ):
+                        print("MISSING_SCALAR_FAIL_CLOSED")
+                        sys.exit(0)
+                    raise
+                if missing_scalar:
+                    raise AssertionError("missing shipped scalar fell back to another install")
+
+                from mvp.autotrade_mvp._generated_common_scalars import (
+                    is_valid_common_scalar,
+                )
+                assert is_valid_common_scalar("Decimal", "0.1")
+                assert str(parse_canonical_decimal_text("1.25")) == "1.25"
+                for name, module in tuple(sys.modules.items()):
+                    if name == "mvp" or name.startswith("mvp."):
+                        filename = getattr(module, "__file__", None)
+                        assert filename is not None, name
+                        origin = Path(filename).resolve(strict=True)
+                        assert origin.is_relative_to(staging), (name, origin, staging)
+                    assert name != "contracts" and not name.startswith("contracts.")
+                print("STAGED_SCALAR_HERMETIC_OK")
+                """
+            )
+            environment = os.environ.copy()
+            # Deliberately poison the ambient import path. -I -S must ignore it.
+            environment["PYTHONPATH"] = str(ROOT)
+            environment.pop("PYTHONHOME", None)
+            environment["AUTOTRADE_STAGING"] = str(staging)
+            environment["AUTOTRADE_MISSING_SCALAR"] = (
+                "0" if include_scalar else "1"
+            )
+            return subprocess.run(
+                [sys.executable, "-I", "-S", "-c", script],
+                cwd=temporary,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+    def test_shipped_scalar_import_is_hermetic_without_checkout_or_site(self):
+        result = self._staged_exact_decimal_probe(include_scalar=True)
+        self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "STAGED_SCALAR_HERMETIC_OK")
+
+    def test_missing_shipped_scalar_cannot_fall_back_to_checkout_or_site(self):
+        result = self._staged_exact_decimal_probe(include_scalar=False)
+        self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "MISSING_SCALAR_FAIL_CLOSED")
 
     def test_utc_instant_terminal_lf_and_crlf_fail_at_schema_boundary(self):
         validator = Draft202012Validator(

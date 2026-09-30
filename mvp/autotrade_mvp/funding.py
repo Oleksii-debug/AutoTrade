@@ -12,6 +12,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Iterable, Literal
 
 from .accounting import JournalTransaction, posting, validate_transaction
+from .exact_decimal import ExactDecimalError, exact_multiply, exact_subtract
 
 
 class FundingError(ValueError):
@@ -54,16 +55,26 @@ def canonical_funding_cash_flow(
 ) -> Decimal:
     """Return account cash flow in the explicitly supplied settlement unit.
 
-    Positive signed_notional is long; negative is short.
+    Positive signed_notional is long; negative is short. Economic arithmetic is
+    context-independent and consumes the shared bounded exact-decimal authority.
     """
 
     notional = _decimal(signed_notional, "signed_notional")
     funding_rate = _decimal(rate, "rate")
-    if sign_convention == "POSITIVE_LONG_PAYS":
-        return -(notional * funding_rate)
-    if sign_convention == "POSITIVE_LONG_RECEIVES":
-        return notional * funding_rate
-    raise FundingError("unsupported funding sign convention")
+    if sign_convention not in {
+        "POSITIVE_LONG_PAYS",
+        "POSITIVE_LONG_RECEIVES",
+    }:
+        raise FundingError("unsupported funding sign convention")
+    try:
+        cash_flow = exact_multiply(notional, funding_rate)
+        if sign_convention == "POSITIVE_LONG_PAYS":
+            return exact_subtract(Decimal("0"), cash_flow)
+        return cash_flow
+    except ExactDecimalError as error:
+        raise FundingError(
+            "funding cash flow exceeds exact arithmetic resource envelope"
+        ) from error
 
 
 @dataclass(frozen=True)
@@ -170,16 +181,24 @@ class FundingRevisionBook:
                 raise FundingConflict("funding revision cannot change sign convention")
 
         old_final = self._final_cash_flow.get(event.funding_id, Decimal("0"))
-        new_final = event.economic_cash_flow if event.kind == "FINAL" else old_final
         # A later indicated estimate must not erase a previously evidenced final charge.
         if previous is not None and previous.kind == "FINAL" and event.kind == "INDICATED":
             raise FundingConflict("an indicated revision cannot supersede a final funding charge")
+        new_final = event.economic_cash_flow if event.kind == "FINAL" else old_final
+        try:
+            delta = exact_subtract(new_final, old_final)
+        except ExactDecimalError as error:
+            # Exact arithmetic failure must occur before any revision state mutates;
+            # otherwise restart/retry could observe a revision whose economic delta
+            # was never authoritatively established.
+            raise FundingError(
+                "funding revision delta exceeds exact arithmetic resource envelope"
+            ) from error
 
         self._latest[event.funding_id] = event
         if event.kind == "FINAL":
             self._final_cash_flow[event.funding_id] = new_final
         self._history.append(event)
-        delta = new_final - old_final
         return FundingUpdate(
             accepted=True,
             economic_delta=delta,
@@ -199,12 +218,18 @@ def book_funding_delta(
     if amount == 0:
         raise FundingError("zero funding delta has no economic posting")
     currency = _text(settlement_currency, "settlement_currency").upper()
+    try:
+        balancing_amount = exact_subtract(Decimal("0"), amount)
+    except ExactDecimalError as error:
+        raise FundingError(
+            "funding posting exceeds exact arithmetic resource envelope"
+        ) from error
     transaction = JournalTransaction(
         transaction_id=_text(transaction_id, "transaction_id"),
         cause_event_id=_text(cause_event_id, "cause_event_id"),
         postings=(
             posting(f"CASH:{currency}", currency, amount),
-            posting(f"FUNDING_PNL:{currency}", currency, -amount),
+            posting(f"FUNDING_PNL:{currency}", currency, balancing_amount),
         ),
     )
     validate_transaction(transaction)

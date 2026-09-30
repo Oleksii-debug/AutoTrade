@@ -29,7 +29,8 @@ from .order_projection import (
     OrderProjectionConflict,
     OrderSnapshot,
 )
-from .durable_event_taxonomy import ORDER_PROJECTION_BOOK\nfrom .persistence import JournalStore, canonical_json, payload_digest
+from .durable_event_taxonomy import ORDER_PROJECTION_BOOK
+from .persistence import JournalStore, canonical_json, payload_digest
 
 
 _AGGREGATE_TYPE = ORDER_PROJECTION_BOOK.aggregate_type

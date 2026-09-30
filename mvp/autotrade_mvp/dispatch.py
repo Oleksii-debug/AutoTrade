@@ -18,7 +18,8 @@ from autotrade_numeric.exact_decimal import (
     parse_bounded_json_number_token,
 )
 
-from .durable_event_taxonomy import SUBMISSION_ATTEMPT\nfrom .persistence import JournalStore, canonical_json, payload_digest
+from .durable_event_taxonomy import SUBMISSION_ATTEMPT
+from .persistence import JournalStore, canonical_json, payload_digest
 from .provider_response_limits import require_provider_json_depth
 
 

@@ -17,7 +17,8 @@ from .capabilities import (
     CapabilitySnapshot,
     _DERIVED_SNAPSHOT_TOKEN,
 )
-from .durable_event_taxonomy import CAPABILITY_HISTORY\nfrom .persistence import JournalStore, canonical_json, payload_digest
+from .durable_event_taxonomy import CAPABILITY_HISTORY
+from .persistence import JournalStore, canonical_json, payload_digest
 
 
 _AGGREGATE_TYPE = CAPABILITY_HISTORY.aggregate_type

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from mvp.autotrade_mvp.authority import AuthorityService
-from mvp.autotrade_mvp.durable_event_taxonomy import FINANCIAL_AUTHORITY\nfrom mvp.autotrade_mvp.persistence import JournalStore, payload_digest
+from mvp.autotrade_mvp.durable_event_taxonomy import FINANCIAL_AUTHORITY
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 
 
 AUTHORITY_AGGREGATE_TYPE = FINANCIAL_AUTHORITY.aggregate_type

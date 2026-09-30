@@ -19,7 +19,8 @@ from .allocation import (
     revalidate_evidence_bound_allocation,
 )
 from .durable_reservations import DurableReservationBook
-from .durable_event_taxonomy import AUTHORITY_STATE, RISK_DECISION\nfrom .persistence import JournalStore, canonical_json, payload_digest
+from .durable_event_taxonomy import AUTHORITY_STATE, RISK_DECISION
+from .persistence import JournalStore, canonical_json, payload_digest
 from .reconciliation_journal import load_account_resource_availability_evidence
 from .securities_borrow import (
     BorrowAvailabilityEvidence,

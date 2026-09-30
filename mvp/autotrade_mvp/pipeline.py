@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Iterable
 from uuid import NAMESPACE_URL, uuid5
 
-from .exact_decimal import as_fraction, bounded_fraction, exact_sum
+from .exact_decimal import as_fraction, bounded_fraction, exact_sum, terminating_decimal
 from .persistence import JournalStore, payload_digest
 
 
@@ -217,28 +217,36 @@ class MovingAverageStrategy:
 
     def decide(self, prices: list[Decimal], quantity: Decimal) -> Decision:
         # This public seam is shared by the legacy vertical slice and canonical
-        # simulation. Admit every scalar that can affect the decision/result
-        # through the shared exact built-in Decimal authority before any HOLD,
-        # BUY or SELL path can return. Only the bounded strategy window is
-        # consumed so validation cost remains independent of irrelevant history.
-        as_fraction(quantity)
+        # simulation. Detach each semantically consumed scalar through the
+        # shared exact authority before it can escape in a Decision. Validation
+        # is limited to the bounded strategy window, not an irrelevant prefix.
         if not prices:
             raise ValueError("At least one price is required")
-        consumed_prices = prices if len(prices) < self.slow else prices[-self.slow :]
-        for price in consumed_prices:
-            as_fraction(price)
-
+        admitted_quantity = terminating_decimal(as_fraction(quantity))
         if len(prices) < self.slow:
-            return Decision("HOLD", Decimal("0"), prices[-1], "insufficient_history")
-        fast_total = as_fraction(exact_sum(prices[-self.fast :]))
-        slow_total = as_fraction(exact_sum(prices[-self.slow :]))
+            admitted_price = terminating_decimal(as_fraction(prices[-1]))
+            return Decision(
+                "HOLD", Decimal("0"), admitted_price, "insufficient_history"
+            )
+
+        admitted_window = tuple(
+            terminating_decimal(as_fraction(value))
+            for value in prices[-self.slow :]
+        )
+        fast_total = as_fraction(exact_sum(admitted_window[-self.fast :]))
+        slow_total = as_fraction(exact_sum(admitted_window))
         fast_scaled = bounded_fraction(fast_total * self.slow)
         slow_scaled = bounded_fraction(slow_total * self.fast)
+        admitted_price = admitted_window[-1]
         if fast_scaled > slow_scaled:
-            return Decision("BUY", quantity, prices[-1], "fast_above_slow")
+            return Decision(
+                "BUY", admitted_quantity, admitted_price, "fast_above_slow"
+            )
         if fast_scaled < slow_scaled:
-            return Decision("SELL", quantity, prices[-1], "fast_below_slow")
-        return Decision("HOLD", Decimal("0"), prices[-1], "averages_equal")
+            return Decision(
+                "SELL", admitted_quantity, admitted_price, "fast_below_slow"
+            )
+        return Decision("HOLD", Decimal("0"), admitted_price, "averages_equal")
 
 
 class RiskGate:

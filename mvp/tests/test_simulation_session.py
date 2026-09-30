@@ -158,6 +158,41 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "At least one price"):
             strategy.decide([], Decimal("1"))
 
+    def test_strategy_detaches_consumed_values_and_ignores_unused_prefix(self):
+        strategy = MovingAverageStrategy()
+        decision = strategy.decide(
+            [
+                HostileDecimal("999"),
+                Decimal("100.0"),
+                Decimal("101.00"),
+                Decimal("103.000"),
+            ],
+            Decimal("1.000"),
+        )
+        self.assertEqual(decision.side, "BUY")
+        self.assertIs(type(decision.quantity), Decimal)
+        self.assertIs(type(decision.price), Decimal)
+        self.assertEqual(decision.quantity, Decimal("1"))
+        self.assertEqual(decision.price, Decimal("103"))
+
+        hold = strategy.decide(
+            [HostileDecimal("999"), Decimal("100.0")], Decimal("1.000")
+        )
+        self.assertEqual(hold.side, "HOLD")
+        self.assertIs(type(hold.price), Decimal)
+        self.assertEqual(hold.price, Decimal("100"))
+
+        with self.assertRaisesRegex(ExactDecimalError, "finite Decimal"):
+            strategy.decide(
+                [Decimal("100"), HostileDecimal("101"), Decimal("103")],
+                Decimal("1"),
+            )
+        with self.assertRaisesRegex(ExactDecimalError, "maximum integer digits"):
+            strategy.decide(
+                [Decimal("100"), Decimal("101"), Decimal("1e256")],
+                Decimal("1"),
+            )
+
     def test_canonical_session_preserves_pre_protocol_input_hash_spelling(self):
         episode_id = "legacy-spelling"
         with TemporaryDirectory() as directory:

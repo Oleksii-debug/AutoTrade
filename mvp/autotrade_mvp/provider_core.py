@@ -20,6 +20,7 @@ import re
 
 from .capabilities import CapabilitySnapshot
 from .dispatch import SubmissionResponseBinding
+from .provider_domain import ProviderDomainError, normalize_provider_environment
 
 
 class ProviderCoreError(ValueError):
@@ -175,6 +176,7 @@ class AuthenticatedReadQueryBinding:
     account_id: str
     entity_id: str
     environment: str
+    provider_environment: str
     capability_snapshot_id: str
     instrument_version: str
     surface: Surface
@@ -201,6 +203,15 @@ class AuthenticatedReadQueryBinding:
             "environment",
             _text(self.environment, "environment").upper(),
         )
+        try:
+            provider_environment = normalize_provider_environment(
+                provider_id=provider,
+                environment=self.environment,
+                provider_environment=self.provider_environment,
+            )
+        except ProviderDomainError as error:
+            raise ProviderCoreError(str(error)) from error
+        object.__setattr__(self, "provider_environment", provider_environment)
         object.__setattr__(
             self,
             "capability_snapshot_id",
@@ -256,6 +267,7 @@ class AuthenticatedReadQueryBinding:
         endpoint: str,
         account_id: str | None = None,
         environment: str | None = None,
+        provider_environment: str | None = None,
     ) -> None:
         if _text(provider_id, "provider_id").upper() != self.provider_id:
             raise ProviderCoreError("provider-read provenance provider mismatch")
@@ -270,6 +282,12 @@ class AuthenticatedReadQueryBinding:
             and _text(environment, "environment").upper() != self.environment
         ):
             raise ProviderCoreError("provider-read provenance environment mismatch")
+        if (
+            provider_environment is not None
+            and _text(provider_environment, "provider_environment").upper()
+            != self.provider_environment
+        ):
+            raise ProviderCoreError("provider-read provenance provider environment mismatch")
 
 
 def prepare_authenticated_read_query(
@@ -287,12 +305,13 @@ def prepare_authenticated_read_query(
     from the VERIFIED capability snapshot before any provider response exists.
     """
 
-    if not isinstance(capability, CapabilitySnapshot):
-        raise TypeError("capability must be CapabilitySnapshot")
+    if type(capability) is not CapabilitySnapshot:
+        raise TypeError("capability must be exact CapabilitySnapshot")
     point = _utc(at, "at")
     scope = _text(permission_scope, "permission_scope")
     if (
         capability.status != "VERIFIED"
+        or not getattr(capability, "_can_admit", False)
         or not (capability.observed_at <= point < capability.expires_at)
         or scope not in capability.permission_scopes
     ):
@@ -314,6 +333,7 @@ def prepare_authenticated_read_query(
         "account_id": capability.account_id,
         "entity_id": capability.entity_id,
         "environment": capability.environment,
+        "provider_environment": capability.provider_environment,
         "capability_snapshot_id": capability.snapshot_id,
         "instrument_version": capability.instrument_version,
         "surface": surface.value if isinstance(surface, Surface) else str(surface),
@@ -334,6 +354,7 @@ def prepare_authenticated_read_query(
         account_id=capability.account_id,
         entity_id=capability.entity_id,
         environment=capability.environment,
+        provider_environment=capability.provider_environment,
         capability_snapshot_id=capability.snapshot_id,
         instrument_version=capability.instrument_version,
         surface=surface,
@@ -363,9 +384,9 @@ class ProviderResponseObservation:
             raise ProviderCoreError(
                 "provider response observations must come from exact response bytes"
             )
-        if not isinstance(self.query_binding, AuthenticatedReadQueryBinding):
+        if type(self.query_binding) is not AuthenticatedReadQueryBinding:
             raise TypeError(
-                "query_binding must be AuthenticatedReadQueryBinding"
+                "query_binding must be exact AuthenticatedReadQueryBinding"
             )
         if (
             isinstance(self.http_status, bool)
@@ -422,6 +443,10 @@ class ProviderResponseObservation:
     def environment(self) -> str:
         return self.query_binding.environment
 
+    @property
+    def provider_environment(self) -> str:
+        return self.query_binding.provider_environment
+
     def require_scope(
         self,
         *,
@@ -430,6 +455,7 @@ class ProviderResponseObservation:
         endpoint: str,
         account_id: str | None = None,
         environment: str | None = None,
+        provider_environment: str | None = None,
     ) -> None:
         self.query_binding.require_scope(
             provider_id=provider_id,
@@ -437,6 +463,7 @@ class ProviderResponseObservation:
             endpoint=endpoint,
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_environment,
         )
 
 
@@ -447,8 +474,8 @@ def observe_authenticated_json_response(
     response_bytes: bytes,
     observed_at: datetime,
 ) -> ProviderResponseObservation:
-    if not isinstance(query_binding, AuthenticatedReadQueryBinding):
-        raise TypeError("query_binding must be AuthenticatedReadQueryBinding")
+    if type(query_binding) is not AuthenticatedReadQueryBinding:
+        raise TypeError("query_binding must be exact AuthenticatedReadQueryBinding")
     if (
         isinstance(http_status, bool)
         or not isinstance(http_status, int)

@@ -111,13 +111,14 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
         wire=None,
         clock_utc=None,
         quota_gate=None,
+        provider_environment="TESTNET",
     ):
         registry = RecordingCapabilityRegistry(events)
         registry.add(capability)
         resolver = FakeSecretResolver(events)
         transport = BybitV5AuthenticatedReadTransport(
-            policy=BYBIT_V5_ENDPOINT_POLICIES["TESTNET"],
-            provider_environment="TESTNET",
+            policy=BYBIT_V5_ENDPOINT_POLICIES[provider_environment],
+            provider_environment=provider_environment,
             account_id="paper-1",
             capability_snapshot_id=capability.snapshot_id,
             capability_registry=registry,
@@ -254,6 +255,28 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
                 events,
                 ["resolve", "wire"],
             )
+
+    def test_testnet_capability_cannot_authorize_demo_read_before_secret(self):
+        capability, binding = self.binding(
+            read_capability(provider_environment="TESTNET")
+        )
+        events = []
+        wire = RecordingWire(events)
+        transport, resolver, _registry = self.make_transport(
+            capability=capability,
+            events=events,
+            wire=wire,
+            provider_environment="DEMO",
+        )
+
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "current capability cannot be verified",
+        ):
+            transport(binding)
+        self.assertEqual(resolver.calls, [])
+        self.assertEqual(wire.requests, [])
+        self.assertEqual(events, [])
 
     def test_read_capability_expiry_after_secret_resolution_blocks_wire_send(self):
         capability, binding = self.binding()

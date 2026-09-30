@@ -16,6 +16,8 @@ from research.autotrade_research.artifacts._root_authority import (
     trusted_authenticated_reader,
 )
 
+from .provider_domain import ProviderDomainError, normalize_provider_environment
+
 
 class CapabilityError(ValueError):
     """Raised when capability evidence cannot safely admit an action."""
@@ -150,6 +152,7 @@ class CapabilityClaim:
     rate_limit_policy_id: str
     data_entitlements: frozenset[str]
     evidence_ref: Mapping[str, object]
+    provider_environment: str | None = None
 
     def __post_init__(self) -> None:
         source = _text(self.source, "source").upper()
@@ -162,6 +165,15 @@ class CapabilityClaim:
         if environment not in ENVIRONMENTS:
             raise CapabilityError("environment is unsupported")
         object.__setattr__(self, "environment", environment)
+        try:
+            provider_environment = normalize_provider_environment(
+                provider_id=self.provider_id,
+                environment=environment,
+                provider_environment=self.provider_environment,
+            )
+        except ProviderDomainError as error:
+            raise CapabilityError(str(error)) from error
+        object.__setattr__(self, "provider_environment", provider_environment)
         observed = _instant(self.observed_at, "observed_at")
         expires = _instant(self.expires_at, "expires_at")
         if expires <= observed:
@@ -209,6 +221,7 @@ def _snapshot_capability_claim(claim: CapabilityClaim) -> CapabilityClaim:
         "instrument_version",
         "position_mode",
         "rate_limit_policy_id",
+        "provider_environment",
     ):
         current = object.__getattribute__(claim, field)
         if type(current) is not str:
@@ -379,6 +392,7 @@ def artifact_store_evidence_verifier(
             "account_id": claim.account_id,
             "entity_id": claim.entity_id,
             "environment": claim.environment,
+            "provider_environment": claim.provider_environment,
             "instrument_version": claim.instrument_version,
             "observed_at": claim.evidence_ref["observed_at"],
         }
@@ -485,6 +499,7 @@ class CapabilitySnapshot:
     evidence: tuple[Mapping[str, object], ...]
     status: str
     sources: frozenset[str]
+    provider_environment: str | None = None
     _verification_token: InitVar[object | None] = None
     _admission_token: InitVar[object | None] = None
 
@@ -503,6 +518,15 @@ class CapabilitySnapshot:
         if environment not in ENVIRONMENTS:
             raise CapabilityError("environment is unsupported")
         object.__setattr__(self, "environment", environment)
+        try:
+            provider_environment = normalize_provider_environment(
+                provider_id=self.provider_id,
+                environment=environment,
+                provider_environment=self.provider_environment,
+            )
+        except ProviderDomainError as error:
+            raise CapabilityError(str(error)) from error
+        object.__setattr__(self, "provider_environment", provider_environment)
         observed = _instant(self.observed_at, "observed_at")
         expires = _instant(self.expires_at, "expires_at")
         if expires < observed:
@@ -563,12 +587,13 @@ class CapabilitySnapshot:
         )
 
     @property
-    def identity(self) -> tuple[str, str, str, str, str]:
+    def identity(self) -> tuple[str, str, str, str, str, str]:
         return (
             self.provider_id,
             self.account_id,
             self.entity_id,
             self.environment,
+            self.provider_environment,
             self.instrument_version,
         )
 
@@ -597,6 +622,7 @@ class CapabilitySnapshot:
             "account_id": self.account_id,
             "entity_id": self.entity_id,
             "environment": self.environment,
+            "provider_environment": self.provider_environment,
             "instrument_version": self.instrument_version,
             "observed_at": self.observed_at.isoformat().replace("+00:00", "Z"),
             "expires_at": self.expires_at.isoformat().replace("+00:00", "Z"),
@@ -625,6 +651,7 @@ class CapabilityLookup(Protocol):
         environment: str,
         instrument_version: str,
         at: datetime,
+        provider_environment: str | None = None,
     ) -> CapabilitySnapshot: ...
 
 
@@ -660,6 +687,7 @@ def derive_capability_snapshot(
         first.account_id,
         first.entity_id,
         first.environment,
+        first.provider_environment,
         first.instrument_version,
     )
     for claim in records[1:]:
@@ -668,6 +696,7 @@ def derive_capability_snapshot(
             claim.account_id,
             claim.entity_id,
             claim.environment,
+            claim.provider_environment,
             claim.instrument_version,
         )
         if other != identity:
@@ -753,7 +782,8 @@ def derive_capability_snapshot(
         account_id=identity[1],
         entity_id=identity[2],
         environment=identity[3],
-        instrument_version=identity[4],
+        provider_environment=identity[4],
+        instrument_version=identity[5],
         observed_at=point,
         expires_at=expires_at,
         supported_order_types=order_types,
@@ -778,7 +808,7 @@ class CapabilityRegistry:
 
     def __init__(self) -> None:
         self._by_id: dict[str, CapabilitySnapshot] = {}
-        self._by_identity: dict[tuple[str, str, str, str, str], list[CapabilitySnapshot]] = {}
+        self._by_identity: dict[tuple[str, str, str, str, str, str], list[CapabilitySnapshot]] = {}
 
     def add(self, snapshot: CapabilitySnapshot) -> None:
         if type(snapshot) is not CapabilitySnapshot:
@@ -803,13 +833,25 @@ class CapabilityRegistry:
         environment: str,
         instrument_version: str,
         at: datetime,
+        provider_environment: str | None = None,
     ) -> CapabilitySnapshot:
         point = _instant(at, "at")
+        provider = _text(provider_id, "provider_id")
+        runtime_environment = _text(environment, "environment").upper()
+        try:
+            provider_domain = normalize_provider_environment(
+                provider_id=provider,
+                environment=runtime_environment,
+                provider_environment=provider_environment,
+            )
+        except ProviderDomainError as error:
+            raise CapabilityError(str(error)) from error
         identity = (
-            _text(provider_id, "provider_id"),
+            provider,
             _text(account_id, "account_id"),
             _text(entity_id, "entity_id"),
-            _text(environment, "environment").upper(),
+            runtime_environment,
+            provider_domain,
             _text(instrument_version, "instrument_version"),
         )
         history = self._by_identity.get(identity, ())

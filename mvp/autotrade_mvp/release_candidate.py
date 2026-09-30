@@ -331,13 +331,114 @@ class ReleaseCandidateInput:
         )
 
 
+
+def _exact_snapshot_text(value: object, *, name: str) -> str:
+    """Require an exact built-in string at a terminal snapshot boundary."""
+
+    if type(value) is not str:
+        raise ReleaseCandidateError(f"{name} must be an exact built-in string")
+    return value
+
+
+def _snapshot_release_artifact(
+    artifact: ReleaseArtifactEvidence,
+) -> ReleaseArtifactEvidence:
+    """Detach one caller artifact into an exact base, scalar-only snapshot."""
+
+    if not isinstance(artifact, ReleaseArtifactEvidence):
+        raise ReleaseCandidateError(
+            "every artifact must be ReleaseArtifactEvidence"
+        )
+    role = artifact.role
+    artifact_id = artifact.artifact_id
+    artifact_sha256 = artifact.artifact_sha256
+    source_sha = artifact.source_sha
+    signature_status = artifact.signature_status
+    evidence_status = artifact.evidence_status
+    values = {
+        "role": _exact_snapshot_text(role, name="artifact.role"),
+        "artifact_id": _exact_snapshot_text(
+            artifact_id,
+            name="artifact.artifact_id",
+        ),
+        "artifact_sha256": _exact_snapshot_text(
+            artifact_sha256,
+            name="artifact.artifact_sha256",
+        ),
+        "source_sha": _exact_snapshot_text(
+            source_sha,
+            name="artifact.source_sha",
+        ),
+        "signature_status": _exact_snapshot_text(
+            signature_status,
+            name="artifact.signature_status",
+        ),
+        "evidence_status": _exact_snapshot_text(
+            evidence_status,
+            name="artifact.evidence_status",
+        ),
+    }
+    return ReleaseArtifactEvidence.create(**values)
+
+
+def _snapshot_release_candidate(
+    candidate: ReleaseCandidateInput,
+) -> ReleaseCandidateInput:
+    """Detach the complete caller graph before any authority callback executes."""
+
+    if not isinstance(candidate, ReleaseCandidateInput):
+        raise TypeError("candidate must be ReleaseCandidateInput")
+
+    release_id = candidate.release_id
+    source_sha = candidate.source_sha
+    baseline_hash = candidate.baseline_hash
+    schema_contract_hash = candidate.schema_contract_hash
+    artifacts = candidate.artifacts
+    unresolved_blockers = candidate.unresolved_blockers
+
+    if type(artifacts) is not tuple:
+        raise ReleaseCandidateError(
+            "candidate.artifacts must be an exact tuple at the terminal boundary"
+        )
+    if type(unresolved_blockers) is not tuple:
+        raise ReleaseCandidateError(
+            "candidate.unresolved_blockers must be an exact tuple at the terminal boundary"
+        )
+    exact_blockers = tuple(
+        _exact_snapshot_text(value, name="candidate.unresolved_blocker")
+        for value in unresolved_blockers
+    )
+    exact_artifacts = tuple(
+        _snapshot_release_artifact(artifact)
+        for artifact in artifacts
+    )
+    return ReleaseCandidateInput.create(
+        release_id=_exact_snapshot_text(
+            release_id,
+            name="candidate.release_id",
+        ),
+        source_sha=_exact_snapshot_text(
+            source_sha,
+            name="candidate.source_sha",
+        ),
+        baseline_hash=_exact_snapshot_text(
+            baseline_hash,
+            name="candidate.baseline_hash",
+        ),
+        schema_contract_hash=_exact_snapshot_text(
+            schema_contract_hash,
+            name="candidate.schema_contract_hash",
+        ),
+        artifacts=exact_artifacts,
+        unresolved_blockers=exact_blockers,
+    )
+
 def release_candidate_subject_requirement(
     candidate: ReleaseCandidateInput,
 ) -> str:
     """Return the signed requirement binding every release-authority claim."""
 
-    if not isinstance(candidate, ReleaseCandidateInput):
-        raise TypeError("candidate must be ReleaseCandidateInput")
+    candidate = _snapshot_release_candidate(candidate)
     subject = {
         "release_id": candidate.release_id,
         "source_sha": candidate.source_sha,
@@ -855,8 +956,7 @@ def freeze_release_candidate(
     every candidate artifact.
     """
 
-    if not isinstance(candidate, ReleaseCandidateInput):
-        raise TypeError("candidate must be ReleaseCandidateInput")
+    candidate = _snapshot_release_candidate(candidate)
     if evidence_store is not None and type(evidence_store) is not ArtifactStore:
         raise TypeError(
             "evidence_store must be ArtifactStore (canonical exact type required)"

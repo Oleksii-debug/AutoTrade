@@ -29,6 +29,7 @@ from autotrade_numeric.exact_decimal import (
 
 from .capabilities import CapabilitySnapshot
 from .dispatch import SubmissionResponseBinding
+from .provider_response_limits import require_provider_json_depth
 
 
 class ProviderCoreError(ValueError):
@@ -140,36 +141,6 @@ def _freeze_json(value: object, *, depth: int = 0) -> object:
     raise ProviderCoreError("provider response contains unsupported JSON value")
 
 
-def _require_bounded_json_nesting(text: str) -> None:
-    """Enforce _freeze_json's existing depth contract before JSON parsing.
-
-    Root container depth is zero in _freeze_json. A 65th empty nested
-    container can be valid at depth 64; a 66th cannot. This check is
-    structural only; transport byte limits remain at the wire boundary.
-    """
-    depth = 0
-    in_string = False
-    escaped = False
-    for character in text:
-        if in_string:
-            if escaped:
-                escaped = False
-            elif character == "\\":
-                escaped = True
-            elif character == '"':
-                in_string = False
-        elif character == '"':
-            in_string = True
-        elif character in "[{":
-            depth += 1
-            if depth > 65:
-                raise ProviderCoreError(
-                    "provider response exceeds maximum JSON depth"
-                )
-        elif character in "]}":
-            depth -= 1
-
-
 def _decode_exact_json(raw: bytes) -> object:
     if type(raw) is not bytes or not raw:
         raise ProviderCoreError("provider response bytes must be non-empty bytes")
@@ -193,7 +164,17 @@ def _decode_exact_json(raw: bytes) -> object:
             "provider response must be exact UTF-8 JSON bytes"
         )
 
-    _require_bounded_json_nesting(text)
+    # Consume one shared #652 byte/depth resource budget before recursive
+    # JSON materialization; avoid retaining the raw helper error context.
+    resource_failure = False
+    try:
+        require_provider_json_depth(raw)
+    except ValueError:
+        resource_failure = True
+    if resource_failure:
+        raise ProviderCoreError(
+            "provider response exceeds maximum JSON depth or resource budget"
+        )
 
     parse_failure = None
     try:

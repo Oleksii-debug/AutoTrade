@@ -212,6 +212,14 @@ class ProviderCoreTests(unittest.TestCase):
                 ProviderCoreError, "maximum JSON depth"
             ):
                 provider_core_module._decode_exact_json(too_deep)
+            # A scalar at child depth 65 is inadmissible even when the
+            # 65-nested empty-container document above is valid.
+            with self.assertRaisesRegex(
+                ProviderCoreError, "maximum JSON depth"
+            ):
+                provider_core_module._decode_exact_json(
+                    b"[" * 65 + b"0" + b"]" * 65
+                )
         # A document exceeding CPython recursion is also rejected before
         # recursive parser invocation, even on retained/replayed bytes.
         much_deeper = b"[" * 4000 + b"]" * 4000

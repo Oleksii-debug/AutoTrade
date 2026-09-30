@@ -12,7 +12,7 @@ from mvp.autotrade_mvp.authority import (
     AuthorityService,
 )
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.reconciliation import (
     ResourceAvailabilityEvidence,
     SnapshotConsistencyEvidence,
@@ -388,13 +388,33 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                 capability_snapshot_id=record.capability_snapshot_id,
                 submission_scope=testnet_scope,
             )
+            prepared_testnet_scope = dict(testnet_scope)
             self.assertEqual(
-                testnet_guard(record.intent_hash, NOW),
+                testnet_guard(
+                    record.intent_hash,
+                    NOW,
+                    prepared_testnet_scope,
+                    payload_digest(prepared_testnet_scope),
+                ),
                 (True, "allowed"),
             )
             testnet_scope["provider_environment"] = "DEMO"
             self.assertEqual(
-                testnet_guard(record.intent_hash, NOW),
+                testnet_guard(
+                    record.intent_hash,
+                    NOW,
+                    testnet_scope,
+                    payload_digest(testnet_scope),
+                ),
+                (False, "submission_scope_changed"),
+            )
+            self.assertEqual(
+                testnet_guard(
+                    record.intent_hash,
+                    NOW,
+                    prepared_testnet_scope,
+                    payload_digest(prepared_testnet_scope),
+                ),
                 (True, "allowed"),
             )
             demo_guard = authority.dispatch_guard(
@@ -412,8 +432,19 @@ class AuthorityAccountAvailabilityTests(unittest.TestCase):
                     "provider_environment": "DEMO",
                 },
             )
+            demo_scope = {
+                "provider": "BYBIT",
+                "account_id": ACCOUNT_ID,
+                "environment": ENVIRONMENT,
+                "provider_environment": "DEMO",
+            }
             self.assertEqual(
-                demo_guard(record.intent_hash, NOW),
+                demo_guard(
+                    record.intent_hash,
+                    NOW,
+                    demo_scope,
+                    payload_digest(demo_scope),
+                ),
                 (False, "provider_domain_changed"),
             )
             self.assertEqual(

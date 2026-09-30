@@ -56,7 +56,12 @@ def _integer_digit_count(value: int, *, limit: int) -> int:
 
 
 def _validate_decimal_envelope(value: Decimal) -> tuple[int, tuple[int, ...], int]:
-    if not isinstance(value, Decimal) or not value.is_finite():
+    # Decimal is subclassable and methods such as is_finite(), as_tuple(), and
+    # __format__ are virtual on subclasses. Financial authority therefore
+    # accepts only the exact built-in scalar before consulting any Decimal
+    # semantics; otherwise a caller-controlled subclass could choose the
+    # coefficient/exponent or canonical identity consumed below.
+    if type(value) is not Decimal or not value.is_finite():
         raise ExactDecimalError("value must be a finite Decimal")
     sign, digits, exponent = value.as_tuple()
     if not isinstance(exponent, int):
@@ -128,6 +133,7 @@ def is_exact_decimal_multiple(value: Decimal, quantum: Decimal) -> bool:
     units = value_fraction / quantum_fraction
     _validate_fraction_intermediate(units)
     return units.denominator == 1
+
 
 def _decimal_from_scaled_integer(coefficient: int, scale: int) -> Decimal:
     if scale < 0:

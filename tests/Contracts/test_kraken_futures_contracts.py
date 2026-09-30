@@ -16,6 +16,7 @@ from mvp.autotrade_mvp.capabilities import (
 from mvp.autotrade_mvp.dispatch import (
     ExactJsonTransportResponse,
     GuardedDispatcher,
+    PreparedSubmissionAuthorityCheck,
     load_submission_response_binding,
     stable_client_order_id,
 )
@@ -23,7 +24,7 @@ from mvp.autotrade_mvp.kraken_futures import (
     parse_submission_response,
     prepare_order_request,
 )
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_core import observe_submission_json_response
 
 
@@ -103,6 +104,24 @@ def durable_observation(payload, *, intent_id: str):
             account_id="contract-account",
             owner_token="owner",
         )
+        submission_scope = {
+            "provider": "KRAKEN",
+            "account_id": "contract-account",
+            "environment": "PAPER",
+            "provider_environment": "DEMO",
+            "endpoint": request.endpoint,
+            "prepared_request_sha256": request.body_sha256,
+            "capability_snapshot_ids": [request.capability_snapshot_id],
+            "instrument_versions": [request.instrument_version],
+        }
+
+        def contract_authority(_intent, _now, prepared_scope, prepared_scope_hash):
+            if dict(prepared_scope) != submission_scope:
+                return False, "prepared_scope_mismatch"
+            if prepared_scope_hash != payload_digest(submission_scope):
+                return False, "prepared_scope_hash_mismatch"
+            return True, "allowed"
+
         outcome = dispatcher.dispatch(
             attempt_id=attempt,
             intent_id=intent_id,
@@ -110,7 +129,7 @@ def durable_observation(payload, *, intent_id: str):
             provider="KRAKEN",
             request=request.body,
             now=NOW,
-            authority_check=lambda _hash, _now: (True, "allowed"),
+            authority_check=PreparedSubmissionAuthorityCheck(contract_authority),
             transport_send=lambda _cid, _request, guard: (
                 guard(),
                 ExactJsonTransportResponse(raw),
@@ -118,12 +137,7 @@ def durable_observation(payload, *, intent_id: str):
             client_id_max_length=36,
             client_id_format="UUID",
             sender_check=lambda _owner, _epoch: None,
-            submission_scope={
-                "endpoint": request.endpoint,
-                "prepared_request_sha256": request.body_sha256,
-                "capability_snapshot_ids": [request.capability_snapshot_id],
-                "instrument_versions": [request.instrument_version],
-            },
+            submission_scope=submission_scope,
         )
         if outcome.status != "SENT":
             raise AssertionError("contract fixture submission was not SENT")
@@ -140,6 +154,7 @@ def durable_observation(payload, *, intent_id: str):
             prepared_request_sha256=request.body_sha256,
             capability_snapshot_ids=(request.capability_snapshot_id,),
             instrument_versions=(request.instrument_version,),
+            provider_environment="DEMO",
         )
     return attempt, request, observation
 

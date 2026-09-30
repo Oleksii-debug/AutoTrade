@@ -2597,11 +2597,13 @@ class AuthorityTests(unittest.TestCase):
                 reservation_id="scope-bind-reservation",
                 **public_financial_kwargs(store),
             )
+            request = {}
             admitted_scope = {
                 "provider_id": admitted.provider_id,
                 "provider_environment": admitted.provider_environment,
                 "account_id": admitted.account_id,
                 "environment": admitted.environment,
+                "prepared_request_sha256": payload_digest(request),
             }
             wrong_scope = dict(admitted_scope)
             wrong_scope["provider_id"] = "OTHER_PROVIDER"
@@ -2627,14 +2629,24 @@ class AuthorityTests(unittest.TestCase):
                 nonlocal outbound
                 final_guard()
                 outbound += 1
-                return {"provider_order_id": "must-not-send"}
+                return {"provider_order_id": "sent"}
+
+            self.assertEqual(
+                guard(
+                    PUBLIC_INTENT_HASH,
+                    "2026-09-24T18:01:15Z",
+                    wrong_scope,
+                    payload_digest(wrong_scope),
+                ),
+                (False, "submission_scope_changed"),
+            )
 
             result = dispatcher.dispatch(
                 attempt_id="scope-bind-attempt",
                 intent_id="scope-bind-intent",
                 intent_hash=PUBLIC_INTENT_HASH,
-                provider="test-provider",
-                request={},
+                provider=admitted.provider_id,
+                request=request,
                 now="2026-09-24T18:01:15Z",
                 authority_check=guard,
                 transport_send=transport,
@@ -2642,33 +2654,85 @@ class AuthorityTests(unittest.TestCase):
                 submission_scope=wrong_scope,
             )
             self.assertEqual(result.status, "BLOCKED")
-            self.assertEqual(result.reason, "submission_scope_changed")
+            self.assertEqual(result.reason, "submission_scope_provider_mismatch")
             self.assertEqual(outbound, 0)
 
-            uncaptured_guard = authority.dispatch_guard(
-                admitted.admission_id,
-                account_id=admitted.account_id,
-                environment=admitted.environment,
-                instrument_id=INSTRUMENT_ID,
-                instrument_version=1,
-                action="ORDER.SUBMIT",
-                capability_snapshot_id=PUBLIC_CAPABILITY_SNAPSHOT_ID,
-            )
-            second = dispatcher.dispatch(
-                attempt_id="scope-bind-attempt-2",
+            request_mismatch = dispatcher.dispatch(
+                attempt_id="scope-bind-request-mismatch",
                 intent_id="scope-bind-intent",
                 intent_hash=PUBLIC_INTENT_HASH,
-                provider="test-provider",
-                request={},
+                provider=admitted.provider_id,
+                request={"different": True},
                 now="2026-09-24T18:01:15Z",
-                authority_check=uncaptured_guard,
+                authority_check=guard,
                 transport_send=transport,
                 sender_check=lambda _owner, _epoch: None,
-                submission_scope=wrong_scope,
+                submission_scope=admitted_scope,
             )
-            self.assertEqual(second.status, "BLOCKED")
-            self.assertEqual(second.reason, "provider_domain_changed")
+            self.assertEqual(request_mismatch.status, "BLOCKED")
+            self.assertEqual(
+                request_mismatch.reason,
+                "submission_scope_request_digest_mismatch",
+            )
             self.assertEqual(outbound, 0)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "requires exact submission_scope",
+            ):
+                authority.dispatch_guard(
+                    admitted.admission_id,
+                    account_id=admitted.account_id,
+                    environment=admitted.environment,
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    capability_snapshot_id=PUBLIC_CAPABILITY_SNAPSHOT_ID,
+                )
+
+            missing_request_scope = dict(admitted_scope)
+            missing_request_scope.pop("prepared_request_sha256")
+            with self.assertRaisesRegex(
+                ValueError,
+                "prepared_request_sha256",
+            ):
+                authority.dispatch_guard(
+                    admitted.admission_id,
+                    account_id=admitted.account_id,
+                    environment=admitted.environment,
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                    capability_snapshot_id=PUBLIC_CAPABILITY_SNAPSHOT_ID,
+                    submission_scope=missing_request_scope,
+                )
+
+            sent = dispatcher.dispatch(
+                attempt_id="scope-bind-exact",
+                intent_id="scope-bind-intent",
+                intent_hash=PUBLIC_INTENT_HASH,
+                provider=admitted.provider_id,
+                request=request,
+                now="2026-09-24T18:01:15Z",
+                authority_check=guard,
+                transport_send=transport,
+                sender_check=lambda _owner, _epoch: None,
+                submission_scope=admitted_scope,
+            )
+            self.assertEqual(sent.status, "SENT")
+            self.assertEqual(outbound, 1)
+            events = store.load_events(
+                "submission_attempt",
+                dispatcher._aggregate_id("scope-bind-exact"),
+            )
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionSent"],
+            )
+            self.assertEqual(
+                events[0]["payload"]["submission_scope_hash"],
+                payload_digest(admitted_scope),
+            )
 
 
     def test_public_dispatch_blocks_after_other_reservation_advances_book(self):

@@ -562,7 +562,7 @@ class ResearchJobStoreTests(unittest.TestCase):
 
     def test_valid_looking_self_asserted_resolution_ref_cannot_requeue(self):
         with TemporaryDirectory() as directory:
-            store = ResearchJobStore(Path(directory) / "jobs.sqlite3")
+            store = ResearchJobStore(\n                Path(directory) / "jobs.sqlite3",\n                authoritative_artifact_root=Path(directory) / "artifacts",\n            )
             job, _ = store.enqueue(
                 kind="research.external_annotation",
                 dedupe_key="self-asserted-proof",
@@ -1573,7 +1573,7 @@ class ResearchJobStoreTests(unittest.TestCase):
                 generation=int(lease["generation"]),
                 input_hashes=job["input_hashes"],
             )
-            with self.assertRaisesRegex(JobConflictError, "verified job-bound"):
+            with self.assertRaisesRegex(JobConflictError, "authority is not configured"):
                 store.succeed(
                     job["job_id"],
                     worker_id="worker-a",

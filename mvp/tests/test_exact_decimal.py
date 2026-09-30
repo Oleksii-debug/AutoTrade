@@ -173,7 +173,7 @@ class ExactDecimalTests(unittest.TestCase):
         raw_length_over = "-0." + "0" * MAX_SCALE + "1"
         self.assertEqual(len(raw_length_over), 260)
         with patch(
-            "mvp.autotrade_mvp.exact_decimal.Decimal",
+            "autotrade_numeric.exact_decimal.Decimal",
             side_effect=AssertionError("Decimal construction must not run"),
         ):
             with self.assertRaisesRegex(

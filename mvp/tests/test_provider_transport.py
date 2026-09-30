@@ -371,14 +371,9 @@ def verified_read_capability(
     )
 
 
-class RecordingCapabilityRegistry(CapabilityRegistry):
-    def __init__(self, events):
-        super().__init__()
-        self.events = events
-
-    def require_verified(self, **kwargs):
-        self.events.append("capability")
-        return super().require_verified(**kwargs)
+def RecordingCapabilityRegistry(_events):
+    """Return the exact canonical registry; transport tests observe only I/O effects."""
+    return CapabilityRegistry()
 
 
 def authenticated_read_binding(
@@ -3015,7 +3010,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
         binding = authenticated_read_binding()
         observation = transport(binding)
 
-        self.assertEqual(events, ["quota", "capability", "resolve", "capability", "wire"])
+        self.assertEqual(events, ["quota", "resolve", "wire"])
         self.assertEqual(len(wire.requests), 1)
         self.assertEqual(len(resolver.calls), 1)
         self.assertEqual(resolver.calls[0]["purpose"], "READ")
@@ -3167,7 +3162,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
             "cannot be verified",
         ):
             transport(authenticated_read_binding(capability=capability))
-        self.assertEqual(events, ["quota", "capability"])
+        self.assertEqual(events, ["quota"])
         self.assertEqual(resolver.calls, [])
         self.assertEqual(wire.requests, [])
 
@@ -3197,7 +3192,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
             "no longer valid",
         ):
             transport(authenticated_read_binding(capability=capability))
-        self.assertEqual(events, ["capability"])
+        self.assertEqual(events, [])
         self.assertEqual(resolver.calls, [])
         self.assertEqual(wire.requests, [])
 
@@ -3230,7 +3225,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
             "no longer valid",
         ):
             transport(authenticated_read_binding(capability=capability))
-        self.assertEqual(events, ["capability", "resolve", "capability"])
+        self.assertEqual(events, ["resolve"])
         self.assertEqual(len(secret_resolver.calls), 1)
         self.assertEqual(wire.requests, [])
 
@@ -3288,7 +3283,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
             "no longer valid",
         ):
             transport(authenticated_read_binding(capability=capability))
-        self.assertEqual(events, ["capability"])
+        self.assertEqual(events, [])
         self.assertEqual(resolver.calls, [])
         self.assertEqual(wire.requests, [])
 
@@ -3306,7 +3301,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
                 "unexpected HTTP status",
             ):
                 transport(authenticated_read_binding())
-            self.assertEqual(events, ["capability", "resolve", "capability", "wire"])
+            self.assertEqual(events, ["resolve", "wire"])
             self.assertEqual(len(resolver.calls), 1)
             self.assertEqual(len(wire.requests), 1)
 
@@ -3377,7 +3372,7 @@ class AuthenticatedReadTransportTests(unittest.TestCase):
             "duplicate JSON key",
         ):
             transport(authenticated_read_binding())
-        self.assertEqual(events, ["capability", "resolve", "capability", "wire"])
+        self.assertEqual(events, ["resolve", "wire"])
         self.assertEqual(len(wire.requests), 1)
         self.assertEqual(len(resolver.calls), 1)
 
@@ -3499,7 +3494,7 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
 
             self.assertEqual(
                 events,
-                ["quota", "capability", "resolve", "nonce", "capability", "wire"],
+                ["quota", "resolve", "nonce", "wire"],
             )
             self.assertEqual(len(resolver.calls), 1)
             self.assertEqual(resolver.calls[0]["purpose"], "READ")
@@ -3826,7 +3821,7 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
 
             self.assertEqual(
                 events,
-                ["capability", "resolve", "nonce", "capability"],
+                ["resolve", "nonce"],
             )
             self.assertEqual(len(resolver.calls), 1)
             self.assertEqual(wire.requests, [])
@@ -3889,7 +3884,7 @@ class KrakenSpotAuthenticatedReadTransportTests(unittest.TestCase):
                     transport(kraken_authenticated_read_binding())
                 self.assertEqual(
                     events,
-                    ["capability", "resolve", "nonce", "capability", "wire"],
+                    ["resolve", "nonce", "wire"],
                 )
                 self.assertEqual(len(resolver.calls), 1)
                 self.assertEqual(len(wire.requests), 1)

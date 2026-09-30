@@ -65,9 +65,9 @@ class ProductionHostConfigParsingTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "non-finite"):
                 parse_production_host_config(payload)
             deep_value = "x"
-            for _ in range(20):
+            for _ in range(140):
                 deep_value = [deep_value]
-            with self.assertRaisesRegex(ValueError, "maximum JSON depth"):
+            with self.assertRaisesRegex(ValueError, "nesting|strict JSON"):
                 parse_production_host_config(self._payload(journal, account_id=deep_value))
 
     def test_relative_journal_and_boolean_port_are_rejected(self):

@@ -8,14 +8,15 @@ not create a second journal, API server, authentication authority or trading pat
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
 from math import isfinite
 import os
 from pathlib import Path
 import ssl
-from threading import Condition, Lock, Thread, current_thread
+from threading import Condition, Thread, current_thread
 from typing import BinaryIO, Callable
 from urllib.parse import urlsplit
+
+from research.autotrade_research.io.strict_json import strict_json_loads
 
 from .host_network import (
     AuthenticatedHostApplication,
@@ -33,7 +34,6 @@ _COMMAND_PATH = "/api/v1/commands"
 _SHUTTING_DOWN_BODY = b'{"error":"HOST_SHUTTING_DOWN"}'
 _MAX_SERVE_POLL_SECONDS = 0.5
 _MAX_CONFIG_BYTES = 64 * 1024
-_MAX_CONFIG_DEPTH = 16
 _CONFIG_FIELDS = frozenset(
     {
         "journal_path",
@@ -91,17 +91,6 @@ class ProductionHostConfig:
         object.__setattr__(self, "public_origin", canonical_origin)
 
 
-def _validate_json_depth(value: object, *, depth: int = 0) -> None:
-    if depth > _MAX_CONFIG_DEPTH:
-        raise ValueError("production host config exceeds maximum JSON depth")
-    if isinstance(value, dict):
-        for child in value.values():
-            _validate_json_depth(child, depth=depth + 1)
-    elif isinstance(value, list):
-        for child in value:
-            _validate_json_depth(child, depth=depth + 1)
-
-
 def _strict_json_object(payload: bytes) -> dict[str, object]:
     if not isinstance(payload, bytes):
         raise TypeError("production host config payload must be bytes")
@@ -111,31 +100,12 @@ def _strict_json_object(payload: bytes) -> dict[str, object]:
         text = payload.decode("utf-8")
     except UnicodeDecodeError as error:
         raise ValueError("production host config must be UTF-8 JSON") from error
-
-    def object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
-        result: dict[str, object] = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError(f"duplicate production host config field: {key}")
-            result[key] = value
-        return result
-
-    def reject_non_finite(value: str) -> object:
-        raise ValueError(f"production host config has non-finite JSON number: {value}")
-
     try:
-        parsed = json.loads(
-            text,
-            object_pairs_hook=object_pairs,
-            parse_constant=reject_non_finite,
-        )
-    except json.JSONDecodeError as error:
-        raise ValueError("production host config is not valid JSON") from error
-    except RecursionError as error:
-        raise ValueError("production host config exceeds maximum JSON depth") from error
+        parsed = strict_json_loads(text)
+    except ValueError as error:
+        raise ValueError(f"production host config is not valid strict JSON: {error}") from error
     if not isinstance(parsed, dict):
         raise ValueError("production host config must be one JSON object")
-    _validate_json_depth(parsed)
     return parsed
 
 

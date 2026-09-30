@@ -180,12 +180,14 @@ def bound_execution_response(
     *,
     account_id="paper-1",
     environment="PAPER",
+    provider_environment="TESTNET",
     instrument_version="BTCUSDT@v1",
 ):
     query = prepare_authenticated_read_query(
         capability=read_capability(
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_environment,
             instrument_version=instrument_version,
         ),
         surface=Surface.AUTHENTICATED_READ,
@@ -289,6 +291,7 @@ class BybitV5AdapterTests(unittest.TestCase):
             capability=write_capability(
                 family="INVERSE_DERIVATIVES",
                 position_mode="ONE_WAY",
+                provider_environment="DEMO",
                 instrument_version="BTCUSD@1",
             ),
             capability_at=READ_AT,
@@ -522,6 +525,7 @@ class BybitV5AdapterTests(unittest.TestCase):
         capability = submission_write_capability(
             account_id=account_id,
             environment=runtime_environment,
+            provider_environment=provider_environment,
         )
         prepared = prepare_order_submission(
             capability=capability,

@@ -7,6 +7,7 @@ from mvp.autotrade_mvp.dispatch import (
     DispatchBlocked,
     ExactJsonTransportResponse,
     GuardedDispatcher,
+    PreparedSubmissionAuthorityCheck,
 )
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.recovery import HostState, RecoveryController
@@ -315,16 +316,29 @@ class DurableUnknownRestartTests(unittest.TestCase):
                     ambiguity_reason="provider-deadline",
                 )
 
+            request = {"side": "BUY"}
             outcome = dispatcher.dispatch(
                 attempt_id="attempt-response-unknown",
                 intent_id="intent-response-unknown",
                 intent_hash="intent-hash-response-unknown",
                 provider="provider",
-                request={"side": "BUY"},
+                request=request,
                 now="2026-09-25T20:00:00Z",
-                authority_check=lambda _intent_hash, _now: (True, "allowed"),
+                authority_check=PreparedSubmissionAuthorityCheck(
+                    lambda _intent_hash, _now, _scope, _scope_hash: (
+                        True,
+                        "allowed",
+                    )
+                ),
                 transport_send=transport,
                 sender_check=lambda _owner_token, _owner_epoch: None,
+                submission_scope={
+                    "provider": "provider",
+                    "account_id": "acct",
+                    "environment": "LIVE",
+                    "provider_environment": "LIVE",
+                    "prepared_request_sha256": payload_digest(request),
+                },
             )
 
             self.assertEqual(outcome.status, "UNKNOWN")

@@ -290,6 +290,17 @@ class DeterministicStrategyTests(unittest.TestCase):
         restored = ReturnThresholdBaseline.restore(canonical)
         self.assertEqual(restored.snapshot(), canonical)
 
+    def test_snapshot_restore_normalizes_deep_json_recursion_failure(self):
+        raw = "[" * 4000 + "0" + "]" * 4000
+        with self.assertRaisesRegex(ValueError, "strategy snapshot is invalid") as caught:
+            ReturnThresholdBaseline.restore(raw)
+        cursor = caught.exception
+        seen = set()
+        while cursor is not None and id(cursor) not in seen:
+            seen.add(id(cursor))
+            self.assertNotIsInstance(cursor, RecursionError)
+            cursor = cursor.__cause__ or cursor.__context__
+
     def test_schema_v1_snapshot_remains_readable(self):
         snapshot_v1 = json.dumps(
             {
@@ -1780,6 +1791,17 @@ class DeterministicStrategyTests(unittest.TestCase):
             RegisteredStrategyRunReceipt.from_json(raw).fingerprint,
             receipt.fingerprint,
         )
+
+    def test_registered_receipt_normalizes_deep_json_recursion_failure(self):
+        raw = "[" * 4000 + "0" + "]" * 4000
+        with self.assertRaisesRegex(ValueError, "registered run receipt is invalid JSON") as caught:
+            RegisteredStrategyRunReceipt.from_json(raw)
+        cursor = caught.exception
+        seen = set()
+        while cursor is not None and id(cursor) not in seen:
+            seen.add(id(cursor))
+            self.assertNotIsInstance(cursor, RecursionError)
+            cursor = cursor.__cause__ or cursor.__context__
 
     def test_forged_registered_looking_proposal_without_receipt_cannot_bind(self):
         descriptor = self.descriptor()

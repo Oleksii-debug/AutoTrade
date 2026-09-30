@@ -93,13 +93,21 @@ def _read_strict_strategy_json(value: str) -> object:
 
     if type(value) is not str:
         raise TypeError("strategy JSON must be an exact string")
-    return json.loads(
-        value,
-        object_pairs_hook=unique_keys,
-        parse_int=parse_bounded_json_integer_token,
-        parse_float=deny_noninteger_numeric,
-        parse_constant=deny_noninteger_numeric,
-    )
+    # Normalize recursive decoder exhaustion at the existing evidence
+    # boundary without retaining its raw parser exception/context.
+    structural_failure = False
+    try:
+        return json.loads(
+            value,
+            object_pairs_hook=unique_keys,
+            parse_int=parse_bounded_json_integer_token,
+            parse_float=deny_noninteger_numeric,
+            parse_constant=deny_noninteger_numeric,
+        )
+    except RecursionError:
+        structural_failure = True
+    if structural_failure:
+        raise ValueError("strategy evidence exceeds structural JSON limits")
 
 
 @dataclass(frozen=True)

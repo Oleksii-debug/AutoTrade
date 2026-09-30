@@ -390,8 +390,8 @@ def _supply_chain_evidence_payload(
         "sbom_reviewed_for_release_sha": evidence.sbom_reviewed_for_release_sha,
         "provenance_reviewed_for_release_sha": evidence.provenance_reviewed_for_release_sha,
         "dependency_lock_reviewed_for_release_sha": evidence.dependency_lock_reviewed_for_release_sha,
-        "distributed_component_ids": list(evidence.distributed_component_ids),
-        "sbom_component_ids": list(evidence.sbom_component_ids),
+        "distributed_component_ids": sorted(evidence.distributed_component_ids),
+        "sbom_component_ids": sorted(evidence.sbom_component_ids),
         "components": [
             {
                 "component_id": item.component_id,
@@ -409,7 +409,10 @@ def _supply_chain_evidence_payload(
                 "advisory_exception_id": item.advisory_exception_id,
                 "advisory_exception_hash": item.advisory_exception_hash,
             }
-            for item in evidence.components
+            for item in sorted(
+                evidence.components,
+                key=lambda value: value.component_id,
+            )
         ],
         "model_data_rights": [
             {
@@ -419,7 +422,10 @@ def _supply_chain_evidence_payload(
                 "rights_status": item.rights_status,
                 "reviewed_for_release_sha": item.reviewed_for_release_sha,
             }
-            for item in evidence.model_data_rights
+            for item in sorted(
+                evidence.model_data_rights,
+                key=lambda value: value.artifact_id,
+            )
         ],
         "release_artifact_id": evidence.release_artifact_id,
         "release_artifact_sha256": evidence.release_artifact_sha256,

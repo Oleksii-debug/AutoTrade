@@ -38,7 +38,13 @@ from mvp.autotrade_mvp.provider_core import (
 READ_AT = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 
 
-def read_capability(*, account_id="paper-1", environment="PAPER", instrument_version="BTCUSDT@v1"):
+def read_capability(
+    *,
+    account_id="paper-1",
+    environment="PAPER",
+    provider_environment="TESTNET",
+    instrument_version="BTCUSDT@v1",
+):
     observed_at = READ_AT - timedelta(hours=1)
     claims = tuple(
         CapabilityClaim(
@@ -47,6 +53,7 @@ def read_capability(*, account_id="paper-1", environment="PAPER", instrument_ver
             account_id=account_id,
             entity_id="bybit-reconciliation",
             environment=environment,
+            provider_environment=provider_environment,
             instrument_version=instrument_version,
             observed_at=observed_at,
             expires_at=READ_AT + timedelta(hours=1),
@@ -81,6 +88,7 @@ def write_capability(
     position_mode="HEDGE",
     account_id="bybit-account",
     environment="PAPER",
+    provider_environment="TESTNET",
     instrument_version="BTCUSDT@1",
     expires_at=None,
     permission_scope=None,
@@ -129,6 +137,7 @@ def submission_write_capability(
     *,
     account_id="bybit-account",
     environment="LIVE",
+    provider_environment="MAINNET",
     instrument_version="BTCUSDT@v1",
 ):
     observed_at = READ_AT - timedelta(hours=1)

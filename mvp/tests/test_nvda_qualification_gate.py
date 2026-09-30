@@ -479,7 +479,6 @@ class NvdaQualificationGateTests(unittest.TestCase):
             ):
                 validate_evidence(evidence, REQUIREMENTS)
 
-
     def test_release_evidence_identities_must_be_canonical_lowercase(self):
         cases = (
             ("source_sha", "A" * 40, "40-character"),
@@ -498,6 +497,7 @@ class NvdaQualificationGateTests(unittest.TestCase):
         evidence["workflows"][0]["evidence_ref"] = "sha256:" + "C" * 64
         with self.assertRaisesRegex(NvdaQualificationError, "immutable sha256"):
             validate_evidence(evidence, REQUIREMENTS)
+
     def test_qualified_status_cannot_escape_nvda_evidence_directory(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -591,10 +591,7 @@ class NvdaQualificationGateTests(unittest.TestCase):
             trust = (
                 SimpleNamespace(),
                 SimpleNamespace(),
-                SimpleNamespace(),
                 evidence_root,
-                policy_id,
-                "2026.09",
             )
             with (
                 patch.object(nvda_module, "ROOT", fake_root),
@@ -721,7 +718,6 @@ class NvdaQualificationGateTests(unittest.TestCase):
             with self.assertRaisesRegex(NvdaQualificationError, "does not match"):
                 validate_release_artifact_binding(evidence, release)
 
-
     def test_release_bundle_source_sha_must_match_nvda_evidence(self):
         with TemporaryDirectory() as directory:
             release = Path(directory) / "AutoTrade-release.zip"
@@ -735,7 +731,6 @@ class NvdaQualificationGateTests(unittest.TestCase):
                 "source SHA does not match",
             ):
                 validate_release_artifact_binding(evidence, release)
-
 
     def test_release_bundle_source_identity_is_not_case_normalized(self):
         with TemporaryDirectory() as directory:
@@ -758,6 +753,7 @@ class NvdaQualificationGateTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(NvdaQualificationError, "lowercase hex"):
                 validate_release_artifact_binding(evidence, release)
+
     def test_diagnostics_or_ineligible_bundle_cannot_be_nvda_release_evidence(self):
         for mode, eligible, message in (
             ("diagnostics", False, "release-mode"),

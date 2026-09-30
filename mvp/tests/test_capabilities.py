@@ -511,6 +511,106 @@ class CapabilityFoundationTests(unittest.TestCase):
         with self.assertRaisesRegex(CapabilityError, "must be a collection"):
             replace(unverified, permission_scopes="ORDER.WRITE")
 
+    def test_claim_graph_is_detached_before_verifier_can_mutate_callers(self):
+        originals = list(complete_claims())
+        original_by_source = {item.source: item for item in originals}
+        verified_claims = []
+
+        def hostile_verifier(detached):
+            verified_claims.append(detached)
+            original = original_by_source[detached.source]
+            object.__setattr__(original, "provider_id", "mutated-provider")
+            object.__setattr__(
+                original,
+                "supported_order_types",
+                frozenset({"MARKET"}),
+            )
+            object.__setattr__(
+                original,
+                "permission_scopes",
+                frozenset({"ORDER.READ"}),
+            )
+            object.__setattr__(
+                original,
+                "expires_at",
+                NOW - timedelta(seconds=1),
+            )
+            object.__setattr__(
+                original,
+                "evidence_ref",
+                {
+                    "artifact_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                    "sha256": "sha256:" + "f" * 64,
+                    "observed_at": "2026-09-24T15:59:00Z",
+                },
+            )
+            return EvidenceVerification(valid=True)
+
+        snapshot = _derive_capability_snapshot(
+            snapshot_id=SNAPSHOT_1,
+            claims=tuple(originals),
+            observed_at=NOW,
+            evidence_verifier=hostile_verifier,
+        )
+
+        self.assertEqual(snapshot.status, "VERIFIED")
+        self.assertEqual(snapshot.provider_id, "simulated")
+        self.assertEqual(
+            snapshot.supported_order_types,
+            frozenset({"LIMIT", "MARKET"}),
+        )
+        self.assertIn("ORDER.WRITE", snapshot.permission_scopes)
+        self.assertEqual(snapshot.expires_at, NOW + timedelta(minutes=10))
+        self.assertEqual(
+            {item["sha256"] for item in snapshot.evidence},
+            {"sha256:" + "a" * 64},
+        )
+        self.assertEqual(len(verified_claims), 4)
+        self.assertTrue(
+            all(
+                detached is not original_by_source[detached.source]
+                for detached in verified_claims
+            )
+        )
+
+    def test_capability_claim_subclass_is_rejected_before_verifier(self):
+        class ForgedClaim(CapabilityClaim):
+            pass
+
+        base = claim("DOCUMENTED")
+        forged = ForgedClaim(
+            source=base.source,
+            provider_id=base.provider_id,
+            account_id=base.account_id,
+            entity_id=base.entity_id,
+            environment=base.environment,
+            instrument_version=base.instrument_version,
+            observed_at=base.observed_at,
+            expires_at=base.expires_at,
+            supported_order_types=base.supported_order_types,
+            time_in_force=base.time_in_force,
+            permission_scopes=base.permission_scopes,
+            position_mode=base.position_mode,
+            native_protection=base.native_protection,
+            rate_limit_policy_id=base.rate_limit_policy_id,
+            data_entitlements=base.data_entitlements,
+            evidence_ref=base.evidence_ref,
+        )
+        calls = []
+
+        def verifier(item):
+            calls.append(item)
+            return EvidenceVerification(valid=True)
+
+        with self.assertRaisesRegex(TypeError, "exact CapabilityClaim"):
+            _derive_capability_snapshot(
+                snapshot_id=SNAPSHOT_1,
+                claims=(forged,),
+                observed_at=NOW,
+                evidence_verifier=verifier,
+            )
+        self.assertEqual(calls, [])
+
     def test_old_evidence_cannot_be_relabelled_as_fresh_claim(self):
         original = claim(
             "ACCOUNT",

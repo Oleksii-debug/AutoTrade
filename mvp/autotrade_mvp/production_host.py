@@ -307,6 +307,12 @@ class _CommandAdmissionGate:
                 if self._active == 0:
                     self._condition.notify_all()
 
+    def stop_accepting(self) -> None:
+        """Commit the shutdown admission cut without waiting for active commands."""
+
+        with self._condition:
+            self._accepting = False
+
     def stop_and_drain(self) -> None:
         with self._condition:
             self._accepting = False
@@ -392,6 +398,10 @@ class ProductionHostRuntime:
                 if self._serve_error is None:
                     self._serve_error = exc
                 if self._serve_state not in _TERMINAL_STATES:
+                    # Admission closes before CLOSING is visible. Dispatch only
+                    # takes the gate lock, so lifecycle -> gate is the sole
+                    # cross-lock order and cannot be inverted by command paths.
+                    self._admission_gate.stop_accepting()
                     self._serve_state = "CLOSING"
                 self._lifecycle_condition.notify_all()
         finally:
@@ -416,6 +426,10 @@ class ProductionHostRuntime:
                         break
                     self._lifecycle_condition.wait()
                     continue
+                # Close financial command admission before publishing CLOSING.
+                # An already accepted handler that has not crossed the gate yet
+                # will therefore observe the same shutdown cut and get 503.
+                self._admission_gate.stop_accepting()
                 self._serve_state = "CLOSING"
                 self._teardown_owner = owner
                 self._lifecycle_condition.notify_all()

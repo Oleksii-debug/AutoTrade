@@ -19,6 +19,8 @@ from autotrade_numeric import (
     MAX_INTEGER_DIGITS,
     as_fraction,
     bounded_fraction,
+    is_exact_decimal_multiple,
+    round_fraction_to_quantum,
 )
 from autotrade_numeric._generated_decimal_limits import MAX_DECIMAL_TEXT_LENGTH
 
@@ -904,7 +906,7 @@ class EconomicsBoundProposal:
                 raise ValueError(
                     "economics-bound quantity exceeds frozen capacity"
                 )
-            if quantity % economics.lot_size != 0:
+            if not is_exact_decimal_multiple(quantity, economics.lot_size):
                 raise ValueError(
                     "economics-bound quantity must be an executable lot multiple"
                 )
@@ -1035,8 +1037,12 @@ def bind_strategy_economics(
         )
 
     capped = min(proposal.quantity, economics.max_feasible_quantity)
-    lots = capped // economics.lot_size
-    quantity = lots * economics.lot_size
+    # Exact non-expansive floor to the accepted instrument lot. The neutral
+    # runtime avoids ambient Decimal division/multiplication and rejects
+    # out-of-budget arithmetic instead of rounding an exposure upward.
+    quantity = round_fraction_to_quantum(
+        as_fraction(capped), economics.lot_size, mode="FLOOR"
+    )
     if quantity <= 0:
         return EconomicsBoundProposal(
             gross_proposal=proposal,

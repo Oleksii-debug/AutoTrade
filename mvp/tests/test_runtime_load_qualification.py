@@ -105,7 +105,15 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
             self.assertEqual(first.start_journal_sequence, 1)
             self.assertEqual(first.end_journal_sequence, 4)
             self.assertEqual(first.recovered_financial_event_ids, ("fin-1", "fin-2"))
-            self.assertEqual(evaluate_runtime_campaign(spec, first).status, "PASS")
+            observation = first.to_observation(spec)
+            self.assertEqual(observation.expected_financial_event_ids, ("fin-1", "fin-2"))
+            self.assertEqual(observation.recovered_financial_event_ids, ("fin-1", "fin-2"))
+            self.assertEqual(observation.financial_latency_event_ids, ())
+            self.assertEqual(observation.financial_staleness_event_ids, ())
+            decision = evaluate_runtime_campaign(spec, first)
+            self.assertEqual(decision.status, "INCONCLUSIVE")
+            self.assertIn("unbound_financial_latency_samples", decision.reasons)
+            self.assertIn("unbound_financial_staleness_samples", decision.reasons)
 
             reopened = JournalStore(path)
             second = collect_runtime_campaign_evidence(journal=reopened, **kwargs)
@@ -194,6 +202,7 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
             decision = evaluate_runtime_campaign(spec, evidence)
             self.assertEqual(decision.status, "FAIL")
             self.assertIn("financial_event_loss", decision.reasons)
+            self.assertIn("missing_expected_financial_event_ids", decision.reasons)
             self.assertEqual(decision.metrics["expected_financial_events"], 2)
             self.assertEqual(decision.metrics["recovered_financial_events"], 1)
 
@@ -221,6 +230,59 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
                     resource_evidence_hash=RESOURCE,
                     resource_metrics={"cpu_peak_millis": 500},
                 )
+
+    def test_anonymous_measurement_arrays_cannot_be_promoted_to_bound_coverage(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(samples=1)
+            current_plan = plan(spec, "fin-1")
+            cut = begin_runtime_campaign(journal=journal, spec=spec, plan=current_plan)
+            journal.append_event(envelope("fin-1"))
+
+            evidence = collect_runtime_campaign_evidence(
+                journal=journal,
+                spec=spec,
+                plan=current_plan,
+                cut=cut,
+                financial_latency_us=(1,),
+                financial_staleness_us=(1,),
+                research_interference_us=(0,),
+                resource_evidence_hash=RESOURCE,
+                resource_metrics={"cpu_peak_millis": 1},
+            )
+            observation = evidence.to_observation(spec)
+            self.assertEqual(observation.recovered_financial_event_ids, ("fin-1",))
+            self.assertEqual(observation.financial_latency_event_ids, ())
+            self.assertEqual(observation.financial_staleness_event_ids, ())
+            self.assertEqual(evaluate_runtime_campaign(spec, evidence).status, "INCONCLUSIVE")
+
+    def test_correct_event_ids_with_fabricated_scalars_are_not_measurement_authority(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec()
+            current_plan = plan(spec, "fin-1", "fin-2")
+            cut = begin_runtime_campaign(journal=journal, spec=spec, plan=current_plan)
+            journal.append_event(envelope("fin-1"))
+            journal.append_event(envelope("fin-2"))
+
+            with self.assertRaisesRegex(
+                RuntimeBudgetError,
+                "caller-authored financial measurement event bindings",
+            ):
+                collect_runtime_campaign_evidence(
+                    journal=journal,
+                    spec=spec,
+                    plan=current_plan,
+                    cut=cut,
+                    financial_latency_us=(1, 1),
+                    financial_latency_event_ids=("fin-1", "fin-2"),
+                    financial_staleness_us=(1, 1),
+                    financial_staleness_event_ids=("fin-1", "fin-2"),
+                    research_interference_us=(0,),
+                    resource_evidence_hash=RESOURCE,
+                    resource_metrics={"cpu_peak_millis": 1},
+                )
+
 
     def test_undeclared_financial_event_cannot_be_hidden_from_campaign_cut(self):
         with TemporaryDirectory() as directory:
@@ -322,6 +384,37 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
                 financial_aggregate_types="financial",
             )
 
+    def test_campaign_collector_rejects_non_sequence_measurements_before_canonicalization(self):
+        with TemporaryDirectory() as directory:
+            journal = JournalStore(f"{directory}/journal.sqlite3")
+            spec = runtime_spec(samples=1)
+            current_plan = plan(spec, "fin-1")
+            cut = begin_runtime_campaign(journal=journal, spec=spec, plan=current_plan)
+            journal.append_event(envelope("fin-1"))
+
+            common = dict(
+                journal=journal,
+                spec=spec,
+                plan=current_plan,
+                cut=cut,
+                financial_latency_us=(100,),
+                financial_staleness_us=(80,),
+                research_interference_us=(50,),
+                resource_evidence_hash=RESOURCE,
+                resource_metrics={"cpu_peak_millis": 500},
+            )
+            cases = (
+                ("financial_latency_us", (value for value in (100,))),
+                ("financial_staleness_us", {80}),
+                ("research_interference_us", {"sample": 50}),
+            )
+            for field, bad in cases:
+                with self.subTest(field=field):
+                    values = dict(common)
+                    values[field] = bad
+                    with self.assertRaisesRegex(RuntimeBudgetError, f"{field} must be a sequence"):
+                        collect_runtime_campaign_evidence(**values)
+
     def test_campaign_evidence_cannot_be_directly_self_asserted(self):
         spec = runtime_spec(samples=1)
         with self.assertRaisesRegex(
@@ -341,7 +434,9 @@ class RuntimeLoadQualificationTests(unittest.TestCase):
                 expected_financial_event_ids=("fin-1",),
                 recovered_financial_event_bindings=(),
                 financial_latency_us=(100,),
+                financial_latency_event_ids=(),
                 financial_staleness_us=(80,),
+                financial_staleness_event_ids=(),
                 research_interference_us=(50,),
                 reconnect_backlog_remaining=0,
                 resource_evidence_hash=RESOURCE,

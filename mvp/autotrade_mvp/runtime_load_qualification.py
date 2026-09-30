@@ -64,6 +64,16 @@ def _series(values: Sequence[int], *, name: str) -> tuple[int, ...]:
     )
 
 
+def _ordered_text_sequence(
+    values: Sequence[str],
+    *,
+    name: str,
+) -> tuple[str, ...]:
+    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+        raise RuntimeBudgetError(f"{name} must be a sequence")
+    return tuple(_text(value, name=name) for value in values)
+
+
 def _sorted_unique_text(values: Sequence[str], *, name: str) -> tuple[str, ...]:
     if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
         raise RuntimeBudgetError(f"{name} must be a sequence")
@@ -266,7 +276,9 @@ class RuntimeCampaignEvidence:
     expected_financial_event_ids: tuple[str, ...]
     recovered_financial_event_bindings: tuple[tuple[str, str, int], ...]
     financial_latency_us: tuple[int, ...]
+    financial_latency_event_ids: tuple[str, ...]
     financial_staleness_us: tuple[int, ...]
+    financial_staleness_event_ids: tuple[str, ...]
     research_interference_us: tuple[int, ...]
     reconnect_backlog_remaining: int
     resource_evidence_hash: str
@@ -362,14 +374,35 @@ class RuntimeCampaignEvidence:
             self.financial_staleness_us,
             name="financial_staleness_us",
         )
+        latency_ids = _ordered_text_sequence(
+            self.financial_latency_event_ids,
+            name="financial_latency_event_ids",
+        )
+        staleness_ids = _ordered_text_sequence(
+            self.financial_staleness_event_ids,
+            name="financial_staleness_event_ids",
+        )
+        recovered_ids = tuple(value[0] for value in bindings)
         recovered_count = len(bindings)
         if len(latency) != recovered_count or len(staleness) != recovered_count:
             raise RuntimeBudgetError(
                 "financial latency/staleness samples must bind one-to-one "
                 "to recovered financial events in journal order"
             )
+        # Anonymous legacy measurements may be retained as incomplete evidence,
+        # but they can never be promoted into event-bound qualification.
+        for name, measurement_ids in (
+            ("financial_latency_event_ids", latency_ids),
+            ("financial_staleness_event_ids", staleness_ids),
+        ):
+            if measurement_ids and measurement_ids != recovered_ids:
+                raise RuntimeBudgetError(
+                    f"{name} must exactly match recovered financial events in journal order"
+                )
         object.__setattr__(self, "financial_latency_us", latency)
+        object.__setattr__(self, "financial_latency_event_ids", latency_ids)
         object.__setattr__(self, "financial_staleness_us", staleness)
+        object.__setattr__(self, "financial_staleness_event_ids", staleness_ids)
         object.__setattr__(
             self,
             "research_interference_us",
@@ -429,7 +462,9 @@ class RuntimeCampaignEvidence:
                     in self.recovered_financial_event_bindings
                 ],
                 "financial_latency_us": list(self.financial_latency_us),
+                "financial_latency_event_ids": list(self.financial_latency_event_ids),
                 "financial_staleness_us": list(self.financial_staleness_us),
+                "financial_staleness_event_ids": list(self.financial_staleness_event_ids),
                 "research_interference_us": list(self.research_interference_us),
                 "reconnect_backlog_remaining": self.reconnect_backlog_remaining,
                 "resource_evidence_hash": self.resource_evidence_hash,
@@ -447,6 +482,7 @@ class RuntimeCampaignEvidence:
             or spec.host_fingerprint != self.host_fingerprint
         ):
             raise RuntimeBudgetError("campaign evidence identity does not match runtime budget spec")
+        recovered_ids = self.recovered_financial_event_ids
         return RuntimeLoadObservation.create(
             scenario_id=spec.scenario_id,
             spec_digest=spec.digest,
@@ -461,6 +497,10 @@ class RuntimeCampaignEvidence:
             reconnect_backlog_remaining=self.reconnect_backlog_remaining,
             declared_duration_us=self.declared_duration_us,
             observed_duration_us=self.observed_duration_us,
+            expected_financial_event_ids=self.expected_financial_event_ids,
+            recovered_financial_event_ids=recovered_ids,
+            financial_latency_event_ids=self.financial_latency_event_ids,
+            financial_staleness_event_ids=self.financial_staleness_event_ids,
         )
 
 
@@ -508,6 +548,8 @@ def collect_runtime_campaign_evidence(
     financial_latency_us: Sequence[int],
     financial_staleness_us: Sequence[int],
     research_interference_us: Sequence[int],
+    financial_latency_event_ids: Sequence[str] = (),
+    financial_staleness_event_ids: Sequence[str] = (),
     resource_evidence_hash: str,
     resource_metrics: Mapping[str, int],
     monotonic_ns: Callable[[], int] = time.monotonic_ns,
@@ -523,6 +565,30 @@ def collect_runtime_campaign_evidence(
         raise TypeError("cut must be RuntimeCampaignCut")
     if cut.plan_digest != plan.digest or cut.spec_digest != spec.digest:
         raise RuntimeBudgetError("campaign cut belongs to another plan or spec")
+
+    # Preserve the public Sequence contract instead of tuple-canonicalizing
+    # arbitrary iterables before validation.
+    normalized_latency = _series(financial_latency_us, name="financial_latency_us")
+    normalized_staleness = _series(financial_staleness_us, name="financial_staleness_us")
+    normalized_latency_ids = _ordered_text_sequence(
+        financial_latency_event_ids,
+        name="financial_latency_event_ids",
+    )
+    normalized_staleness_ids = _ordered_text_sequence(
+        financial_staleness_event_ids,
+        name="financial_staleness_event_ids",
+    )
+    if normalized_latency_ids or normalized_staleness_ids:
+        raise RuntimeBudgetError(
+            "caller-authored financial measurement event bindings are not "
+            "qualification authority; independently derived measurement "
+            "provenance is required"
+        )
+    normalized_research = _series(
+        research_interference_us,
+        name="research_interference_us",
+    )
+
     ended_monotonic_ns = _positive_int(
         monotonic_ns(),
         name="ended_monotonic_ns",
@@ -582,9 +648,11 @@ def collect_runtime_campaign_evidence(
         end_journal_sequence=end_sequence,
         expected_financial_event_ids=plan.expected_financial_event_ids,
         recovered_financial_event_bindings=tuple(recovered),
-        financial_latency_us=tuple(financial_latency_us),
-        financial_staleness_us=tuple(financial_staleness_us),
-        research_interference_us=tuple(research_interference_us),
+        financial_latency_us=normalized_latency,
+        financial_latency_event_ids=normalized_latency_ids,
+        financial_staleness_us=normalized_staleness,
+        financial_staleness_event_ids=normalized_staleness_ids,
+        research_interference_us=normalized_research,
         reconnect_backlog_remaining=backlog_remaining,
         resource_evidence_hash=resource_evidence_hash,
         resource_metrics=resource_metrics,

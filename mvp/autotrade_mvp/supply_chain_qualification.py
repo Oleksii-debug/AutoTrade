@@ -194,6 +194,160 @@ class SupplyChainEvidence:
             raise ValueError("model/data rights evidence contains duplicate ids")
 
 
+def _exact_text(value: object, *, name: str) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{name} must use exact str")
+    return value
+
+
+def _snapshot_component_evidence(
+    item: ComponentEvidence,
+) -> ComponentEvidence:
+    if type(item) is not ComponentEvidence:
+        raise TypeError(
+            "components must contain exact ComponentEvidence values"
+        )
+    values = {
+        "component_id": object.__getattribute__(item, "component_id"),
+        "artifact_id": object.__getattribute__(item, "artifact_id"),
+        "version": object.__getattribute__(item, "version"),
+        "declared_artifact_hash": object.__getattribute__(
+            item, "declared_artifact_hash"
+        ),
+        "observed_artifact_hash": object.__getattribute__(
+            item, "observed_artifact_hash"
+        ),
+        "source_revision": object.__getattribute__(item, "source_revision"),
+        "license_status": object.__getattribute__(item, "license_status"),
+        "distribution_rights": object.__getattribute__(
+            item, "distribution_rights"
+        ),
+        "advisory_status": object.__getattribute__(item, "advisory_status"),
+        "notice_required": object.__getattribute__(item, "notice_required"),
+        "notice_present": object.__getattribute__(item, "notice_present"),
+        "reviewed_for_release_sha": object.__getattribute__(
+            item, "reviewed_for_release_sha"
+        ),
+        "advisory_exception_id": object.__getattribute__(
+            item, "advisory_exception_id"
+        ),
+        "advisory_exception_hash": object.__getattribute__(
+            item, "advisory_exception_hash"
+        ),
+    }
+    for field in (
+        "component_id",
+        "artifact_id",
+        "version",
+        "declared_artifact_hash",
+        "observed_artifact_hash",
+        "source_revision",
+        "license_status",
+        "distribution_rights",
+        "advisory_status",
+        "reviewed_for_release_sha",
+    ):
+        values[field] = _exact_text(values[field], name=f"component.{field}")
+    for field in ("notice_required", "notice_present"):
+        if type(values[field]) is not bool:
+            raise TypeError(f"component.{field} must use exact bool")
+    for field in ("advisory_exception_id", "advisory_exception_hash"):
+        if values[field] is not None and type(values[field]) is not str:
+            raise TypeError(
+                f"component.{field} must be None or exact str"
+            )
+    return ComponentEvidence(**values)
+
+
+def _snapshot_model_data_rights_evidence(
+    item: ModelDataRightsEvidence,
+) -> ModelDataRightsEvidence:
+    if type(item) is not ModelDataRightsEvidence:
+        raise TypeError(
+            "model_data_rights must contain exact ModelDataRightsEvidence values"
+        )
+    values = {
+        "artifact_id": object.__getattribute__(item, "artifact_id"),
+        "artifact_hash": object.__getattribute__(item, "artifact_hash"),
+        "use_scope": object.__getattribute__(item, "use_scope"),
+        "rights_status": object.__getattribute__(item, "rights_status"),
+        "reviewed_for_release_sha": object.__getattribute__(
+            item, "reviewed_for_release_sha"
+        ),
+    }
+    for field in tuple(values):
+        values[field] = _exact_text(
+            values[field],
+            name=f"model_data_rights.{field}",
+        )
+    return ModelDataRightsEvidence(**values)
+
+
+def _snapshot_supply_chain_evidence(
+    evidence: SupplyChainEvidence,
+) -> SupplyChainEvidence:
+    """Detach one complete release evidence graph before trust callbacks."""
+
+    if type(evidence) is not SupplyChainEvidence:
+        raise TypeError("evidence must be exact SupplyChainEvidence")
+    scalar_fields = (
+        "release_commit_sha",
+        "built_from_commit_sha",
+        "sbom_artifact_id",
+        "sbom_hash",
+        "provenance_artifact_id",
+        "provenance_hash",
+        "dependency_lock_artifact_id",
+        "dependency_lock_hash",
+        "sbom_reviewed_for_release_sha",
+        "provenance_reviewed_for_release_sha",
+        "dependency_lock_reviewed_for_release_sha",
+    )
+    values: dict[str, object] = {}
+    for field in scalar_fields:
+        values[field] = _exact_text(
+            object.__getattribute__(evidence, field),
+            name=f"supply_chain.{field}",
+        )
+
+    distributed = object.__getattribute__(
+        evidence, "distributed_component_ids"
+    )
+    sbom = object.__getattribute__(evidence, "sbom_component_ids")
+    components = object.__getattribute__(evidence, "components")
+    rights = object.__getattribute__(evidence, "model_data_rights")
+    for current, name in (
+        (distributed, "distributed_component_ids"),
+        (sbom, "sbom_component_ids"),
+    ):
+        if type(current) is not tuple or any(
+            type(value) is not str for value in current
+        ):
+            raise TypeError(
+                f"supply_chain.{name} must use exact tuple[str]"
+            )
+    if type(components) is not tuple:
+        raise TypeError(
+            "supply_chain.components must use exact tuple"
+        )
+    if type(rights) is not tuple:
+        raise TypeError(
+            "supply_chain.model_data_rights must use exact tuple"
+        )
+
+    values["distributed_component_ids"] = tuple(distributed)
+    values["sbom_component_ids"] = tuple(sbom)
+    values["components"] = tuple(
+        _snapshot_component_evidence(item)
+        for item in components
+    )
+    values["model_data_rights"] = tuple(
+        _snapshot_model_data_rights_evidence(item)
+        for item in rights
+    )
+    return SupplyChainEvidence(**values)
+
+
 @dataclass(frozen=True)
 class SupplyChainQualification:
     qualification_id: str
@@ -244,8 +398,7 @@ def qualify_supply_chain(
     evidence_root: str | Path | None = None,
     trust_receipt: SignedQualificationAttestation | None = None,
 ) -> SupplyChainQualification:
-    if not isinstance(evidence, SupplyChainEvidence):
-        raise TypeError("evidence must be SupplyChainEvidence")
+    evidence = _snapshot_supply_chain_evidence(evidence)
     if evidence_store is not None and type(evidence_store) is not ArtifactStore:
         raise TypeError(
             "evidence_store must be ArtifactStore (canonical exact type required)"

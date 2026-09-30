@@ -2144,9 +2144,9 @@ class KrakenSpotAuthenticatedReadSigner:
         credential_plaintext: object,
         nonce: object,
     ) -> AuthenticatedReadHttpRequest:
-        if not isinstance(query_binding, AuthenticatedReadQueryBinding):
+        if type(query_binding) is not AuthenticatedReadQueryBinding:
             raise TypeError(
-                "query_binding must be AuthenticatedReadQueryBinding"
+                "query_binding must be exact AuthenticatedReadQueryBinding"
             )
         if policy.provider_id != "KRAKEN" or policy.environment != "LIVE":
             raise ProviderTransportScopeError(
@@ -3460,6 +3460,18 @@ class BybitV5AuthenticatedReadSigner:
             raise ProviderTransportScopeError(
                 "authenticated-read binding provider/environment mismatch"
             )
+        matching_domains = tuple(
+            name
+            for name, candidate in BYBIT_V5_ENDPOINT_POLICIES.items()
+            if candidate == policy
+        )
+        if (
+            len(matching_domains) != 1
+            or query_binding.provider_environment != matching_domains[0]
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read binding provider environment mismatch"
+            )
         _bybit_authenticated_read_rule(query_binding)
         if (
             isinstance(timestamp_ms, bool)
@@ -3677,6 +3689,7 @@ class BybitV5AuthenticatedReadTransport:
             query_binding.provider_id != "BYBIT"
             or query_binding.account_id != self.account_id
             or query_binding.environment != self.policy.environment
+            or query_binding.provider_environment != self.provider_environment
             or query_binding.capability_snapshot_id != self.capability_snapshot_id
         ):
             raise ProviderTransportScopeError(

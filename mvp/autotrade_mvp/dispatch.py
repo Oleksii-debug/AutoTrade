@@ -8,7 +8,7 @@ from hashlib import sha256
 import json
 import re
 from pathlib import Path
-from types import MappingProxyType
+from types import FunctionType, MappingProxyType
 from typing import Any, Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5, uuid4
 
@@ -19,6 +19,53 @@ AuthorityCheck = Callable[[str, str], tuple[bool, str]]
 PreparedAuthorityCheck = Callable[
     [str, str, Mapping[str, Any], str], tuple[bool, str]
 ]
+
+
+def _is_canonical_prepared_authority_callback(callback: Any) -> bool:
+    """Accept only the exact AuthorityService.dispatch_guard closure.
+
+    PAPER/LIVE financial authority must execute the canonical AuthorityService
+    admission/risk/reservation checks. PreparedSubmissionAuthorityCheck is a
+    calling-convention wrapper, not authority by itself; arbitrary callbacks,
+    subclasses, proxies and delegates must not acquire send authority merely by
+    matching its public signature.
+    """
+
+    if type(callback) is not FunctionType:
+        return False
+    try:
+        from .authority import AuthorityService
+    except ImportError:
+        return False
+
+    expected_qualname = f"{AuthorityService.dispatch_guard.__qualname__}.<locals>.check"
+    if (
+        callback.__module__ != AuthorityService.__module__
+        or callback.__qualname__ != expected_qualname
+    ):
+        return False
+
+    code_type = type(callback.__code__)
+    expected_codes = tuple(
+        constant
+        for constant in AuthorityService.dispatch_guard.__code__.co_consts
+        if isinstance(constant, code_type)
+        and getattr(constant, "co_qualname", None) == expected_qualname
+    )
+    if len(expected_codes) != 1 or callback.__code__ is not expected_codes[0]:
+        return False
+
+    closure = callback.__closure__
+    if closure is None or len(closure) != len(callback.__code__.co_freevars):
+        return False
+    try:
+        closed = {
+            name: cell.cell_contents
+            for name, cell in zip(callback.__code__.co_freevars, closure)
+        }
+    except ValueError:
+        return False
+    return type(closed.get("self")) is AuthorityService
 
 
 @dataclass(frozen=True)
@@ -50,6 +97,13 @@ class PreparedSubmissionAuthorityCheck:
             submission_scope,
             submission_scope_hash,
         )
+
+
+def _is_canonical_prepared_authority_check(value: Any) -> bool:
+    return (
+        type(value) is PreparedSubmissionAuthorityCheck
+        and _is_canonical_prepared_authority_callback(value.callback)
+    )
 
 
 SenderCheck = Callable[[str, int], None]
@@ -267,7 +321,7 @@ def _invoke_authority_check(
 ) -> tuple[bool, str]:
     """Invoke prepared-scope-aware authority without weakening legacy test seams."""
 
-    if isinstance(authority_check, PreparedSubmissionAuthorityCheck):
+    if type(authority_check) is PreparedSubmissionAuthorityCheck:
         return authority_check(
             intent_hash,
             now,
@@ -748,10 +802,7 @@ class GuardedDispatcher:
         prepared_submission_scope = _freeze_json(scope_dict)
         financial_preflight_reason: str | None = None
         if self.environment in {"PAPER", "LIVE"}:
-            if not isinstance(
-                authority_check,
-                PreparedSubmissionAuthorityCheck,
-            ):
+            if not _is_canonical_prepared_authority_check(authority_check):
                 financial_preflight_reason = "prepared_scope_authority_required"
             else:
                 financial_preflight_reason = _financial_submission_scope_reason(

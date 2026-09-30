@@ -37,7 +37,7 @@ def _decode_exact_json_bytes(raw: bytes) -> Any:
         for key, value in pairs:
             if key in result:
                 raise ValueError(
-                    f"provider response contains duplicate JSON key: {key}"
+                    "provider response contains duplicate JSON keys"
                 )
             result[key] = value
         return result
@@ -45,36 +45,42 @@ def _decode_exact_json_bytes(raw: bytes) -> Any:
     try:
         text = raw.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
-        # Never expose the decoded provider bytes/stdlib error excerpt in
-        # a durable transport error or response validation diagnostic.
-        raise ValueError("provider response must be exact UTF-8 JSON bytes") from None
+        text = None
+    if text is None:
+        # Raise outside the codec exception handler: suppressing display
+        # chaining alone still leaves raw bytes reachable via __context__.
+        raise ValueError("provider response must be exact UTF-8 JSON bytes")
 
+    json_failure = False
     try:
-        return json.loads(
+        decoded = json.loads(
             text,
             object_pairs_hook=no_duplicate_keys,
             parse_float=parse_bounded_json_number_token,
             parse_int=parse_bounded_json_integer_token,
-            parse_constant=lambda value: (_ for _ in ()).throw(
+            parse_constant=lambda _value: (_ for _ in ()).throw(
                 ValueError(
-                    f"provider response contains non-finite JSON constant: {value}"
+                    "provider response contains non-finite JSON constant"
                 )
             ),
         )
     except json.JSONDecodeError:
-        # Must precede broad ValueError: JSONDecodeError derives from it.
-        # Suppress stdlib context so raw response excerpts cannot leak.
-        raise ValueError("provider response must be exact UTF-8 JSON bytes") from None
+        # JSONDecodeError retains the complete provider document. Translate
+        # only after leaving this handler so it cannot remain in __context__.
+        json_failure = True
     except ExactDecimalError as error:
-        # This is already past SEND if the transport returned a provider
-        # response. Caller retains durable UNKNOWN/no blind retry.
+        # The shared bounded numeric exception contains only fixed resource
+        # diagnostics and no provider token/document material.
         raise ValueError(
             "provider response contains invalid or oversized exact JSON number"
         ) from error
     except ValueError:
-        # Deliberate duplicate-key and parse_constant rejections already
-        # have stable, narrowly scoped provider transport errors.
+        # Duplicate-key and parse_constant rejections are fixed diagnostics.
         raise
+
+    if json_failure:
+        raise ValueError("provider response must be exact UTF-8 JSON bytes")
+    return decoded
 
 
 @dataclass(frozen=True)

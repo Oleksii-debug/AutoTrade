@@ -269,6 +269,72 @@ class DispatchBoundedNumericTransportTests(unittest.TestCase):
                     "provider response must be exact UTF-8 JSON bytes",
                 )
                 self.assertNotIn("dont-print-me", str(caught.exception))
+                self.assertNotIn("dont-print-me", repr(caught.exception))
+                self.assertIsNone(caught.exception.__cause__)
+                self.assertIsNone(caught.exception.__context__)
+
+    def test_duplicate_key_diagnostic_is_fixed_and_secret_free(self):
+        marker = "AUTOTRADE_SYNTHETIC_SECRET_MARKER_f1137"
+        raw = ('{"' + marker + '":1,"' + marker + '":2}').encode("utf-8")
+        with self.assertRaisesRegex(
+            ValueError, "^provider response contains duplicate JSON keys$"
+        ) as caught:
+            ExactJsonTransportResponse(raw)
+        current = caught.exception
+        visited = set()
+        while current is not None and id(current) not in visited:
+            visited.add(id(current))
+            self.assertNotIn(marker, str(current))
+            self.assertNotIn(marker, repr(current))
+            current = current.__cause__ or current.__context__
+
+    def test_duplicate_key_after_send_is_unknown_and_never_retried(self):
+        marker = "AUTOTRADE_SYNTHETIC_SECRET_MARKER_send"
+        raw = ('{"' + marker + '":1,"' + marker + '":2}').encode("utf-8")
+        with TemporaryDirectory() as directory:
+            store = JournalStore(directory + "/journal.sqlite3")
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            sends = []
+
+            def send(_cid, _request, guard):
+                guard()
+                sends.append(raw)
+                return ExactJsonTransportResponse(raw)
+
+            args = {
+                "attempt_id": "duplicate-secret-post-send",
+                "intent_id": "duplicate-secret-intent",
+                "intent_hash": "duplicate-secret-intent-hash",
+                "provider": "BYBIT",
+                "request": {"symbol": "BTCUSD", "qty": "1"},
+                "now": "2026-09-24T18:00:00Z",
+                "authority_check": lambda _hash, _now: (True, "allowed"),
+            }
+            outcome = dispatcher.dispatch(**args, transport_send=send)
+            self.assertEqual(outcome.status, "UNKNOWN")
+            self.assertEqual(len(sends), 1)
+            aggregate_id = submission_attempt_aggregate_id(
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id=args["attempt_id"],
+            )
+            events = store.load_events("submission_attempt", aggregate_id)
+            self.assertEqual(
+                [event["event_type"] for event in events],
+                ["SubmissionPrepared", "SubmissionSending", "SubmissionUnknown"],
+            )
+            self.assertNotIn(marker, repr(events))
+            retry = dispatcher.dispatch(
+                **args,
+                transport_send=lambda *_: self.fail("blind provider retry"),
+            )
+            self.assertEqual(retry.status, "UNKNOWN")
+            self.assertEqual(len(sends), 1)
 
     def test_duplicate_and_nonfinite_json_fail_closed(self):
         for raw in (

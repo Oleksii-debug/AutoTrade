@@ -147,8 +147,16 @@ def _qualification(candidate, trust_root, *, artifacts=None, result="PASS"):
         EvidenceArtifactRef(
             artifact_id=item.artifact_id,
             sha256=item.artifact_sha256,
-            media_type=RELEASE_MEDIA_TYPE,
-            evidence_kind=RELEASE_EVIDENCE_KIND,
+            media_type=(
+                supply_chain_module.SUPPLY_CHAIN_PROOF_MEDIA_TYPE
+                if item.role == "DEPENDENCY_RIGHTS"
+                else RELEASE_MEDIA_TYPE
+            ),
+            evidence_kind=(
+                supply_chain_module.SUPPLY_CHAIN_PROOF_EVIDENCE_KIND
+                if item.role == "DEPENDENCY_RIGHTS"
+                else RELEASE_EVIDENCE_KIND
+            ),
             source_sha=item.source_sha,
         )
         for item in (candidate.artifacts if artifacts is None else artifacts)
@@ -382,6 +390,89 @@ def _supply_chain_receipt(evidence, trust_root):
     return SignedQualificationAttestation(value, _sign(value))
 
 
+def _bind_supply_chain_proof(
+    candidate,
+    store,
+    trust_root,
+    *,
+    supply_chain_evidence_override=None,
+    supply_chain_receipt_override=None,
+    supply_chain_release_artifact_override=None,
+):
+    supply_chain_evidence = (
+        supply_chain_evidence_override
+        if supply_chain_evidence_override is not None
+        else _supply_chain_fixture(
+            candidate,
+            store,
+            release_artifact=supply_chain_release_artifact_override,
+        )
+    )
+    supply_chain_receipt = (
+        supply_chain_receipt_override
+        if supply_chain_receipt_override is not None
+        else _supply_chain_receipt(supply_chain_evidence, trust_root)
+    )
+    proof_bytes = supply_chain_module.canonical_supply_chain_proof_bytes(
+        supply_chain_evidence,
+        supply_chain_receipt,
+    )
+    dependency_rights = next(
+        item for item in candidate.artifacts
+        if item.role == "DEPENDENCY_RIGHTS"
+    )
+    bound_dependency_rights = ReleaseArtifactEvidence.create(
+        role=dependency_rights.role,
+        artifact_id=dependency_rights.artifact_id,
+        artifact_sha256="sha256:" + sha256(proof_bytes).hexdigest(),
+        source_sha=dependency_rights.source_sha,
+        signature_status=dependency_rights.signature_status,
+        evidence_status=dependency_rights.evidence_status,
+    )
+    _ARTIFACT_BYTES[bound_dependency_rights.artifact_id] = proof_bytes
+    bound_candidate = ReleaseCandidateInput.create(
+        release_id=candidate.release_id,
+        source_sha=candidate.source_sha,
+        baseline_hash=candidate.baseline_hash,
+        schema_contract_hash=candidate.schema_contract_hash,
+        artifacts=tuple(
+            bound_dependency_rights if item.role == "DEPENDENCY_RIGHTS" else item
+            for item in candidate.artifacts
+        ),
+        unresolved_blockers=candidate.unresolved_blockers,
+    )
+    return bound_candidate, supply_chain_evidence, supply_chain_receipt
+
+
+def _publish_candidate_artifacts(store, candidate, *, omit_roles=()):
+    for item in candidate.artifacts:
+        if item.role in omit_roles:
+            continue
+        is_supply_chain_proof = item.role == "DEPENDENCY_RIGHTS"
+        store.publish_bytes(
+            artifact_id=item.artifact_id,
+            data=_ARTIFACT_BYTES[item.artifact_id],
+            media_type=(
+                supply_chain_module.SUPPLY_CHAIN_PROOF_MEDIA_TYPE
+                if is_supply_chain_proof
+                else RELEASE_MEDIA_TYPE
+            ),
+            rights={"storage": True, "export": False},
+            source_refs=[f"git:{item.source_sha}"],
+            metadata={
+                "evidence_kind": (
+                    supply_chain_module.SUPPLY_CHAIN_PROOF_EVIDENCE_KIND
+                    if is_supply_chain_proof
+                    else RELEASE_EVIDENCE_KIND
+                ),
+                "role": item.role,
+                "source_sha": item.source_sha,
+                "signature_status": item.signature_status,
+                "evidence_status": item.evidence_status,
+            },
+        )
+
+
 def freeze_with_integrity_store(
     candidate,
     *,
@@ -397,24 +488,23 @@ def freeze_with_integrity_store(
 ):
     with TemporaryDirectory() as directory:
         store = ArtifactStore(directory)
-        for item in candidate.artifacts:
-            if item.role in omit_roles:
-                continue
-            data = _ARTIFACT_BYTES[item.artifact_id]
-            store.publish_bytes(
-                artifact_id=item.artifact_id,
-                data=data,
-                media_type=RELEASE_MEDIA_TYPE,
-                rights={"storage": True, "export": False},
-                source_refs=[f"git:{item.source_sha}"],
-                metadata={
-                    "evidence_kind": RELEASE_EVIDENCE_KIND,
-                    "role": item.role,
-                    "source_sha": item.source_sha,
-                    "signature_status": item.signature_status,
-                    "evidence_status": item.evidence_status,
-                },
+        trust_root = _trust_root()
+        if with_attestation or receipt_override is not None:
+            candidate, _, _ = _bind_supply_chain_proof(
+                candidate,
+                store,
+                trust_root,
+                supply_chain_evidence_override=supply_chain_evidence_override,
+                supply_chain_receipt_override=supply_chain_receipt_override,
+                supply_chain_release_artifact_override=(
+                    supply_chain_release_artifact_override
+                ),
             )
+        _publish_candidate_artifacts(
+            store,
+            candidate,
+            omit_roles=omit_roles,
+        )
         if corrupt_role is not None:
             item = next(
                 artifact for artifact in candidate.artifacts
@@ -429,21 +519,6 @@ def freeze_with_integrity_store(
                 evidence_store=store,
                 evidence_root=directory,
             )
-        trust_root = _trust_root()
-        supply_chain_evidence = (
-            supply_chain_evidence_override
-            if supply_chain_evidence_override is not None
-            else _supply_chain_fixture(
-                candidate,
-                store,
-                release_artifact=supply_chain_release_artifact_override,
-            )
-        )
-        supply_chain_receipt = (
-            supply_chain_receipt_override
-            if supply_chain_receipt_override is not None
-            else _supply_chain_receipt(supply_chain_evidence, trust_root)
-        )
         canonical_policy = QualificationTrustPolicy(
             policy_version="2026.09",
             roots=(trust_root,),
@@ -484,12 +559,11 @@ def freeze_with_integrity_store(
                 evidence_store=store,
                 evidence_root=directory,
                 qualification_receipt=receipt,
-                supply_chain_evidence=supply_chain_evidence,
-                supply_chain_receipt=supply_chain_receipt,
                 qualification_policy=caller_policy,
                 expected_policy_id=caller_policy.policy_id,
                 expected_policy_version=caller_policy.policy_version,
             )
+
 
 class ReleaseCandidateFreezeTests(unittest.TestCase):
     def candidate(self, **overrides):
@@ -525,7 +599,6 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
             manifest["qualification"]["policy_id"],
             decision.qualification_policy_id,
         )
-
 
     def test_freeze_uses_one_exact_detached_candidate_graph_across_callbacks(self):
         phase = {"mutated": False}
@@ -694,9 +767,6 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
         candidate = self.candidate()
         trust_root = _trust_root()
         receipt = _qualification(candidate, trust_root)
-        wrong_windows = next(
-            item for item in candidate.artifacts if item.role == "WINDOWS_PACKAGE"
-        )
         wrong = QualificationAttestation(
             **{
                 **receipt.attestation.__dict__,
@@ -786,33 +856,18 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
         candidate = self.candidate()
         with TemporaryDirectory() as directory:
             store = ArtifactStore(directory)
-            for item in candidate.artifacts:
-                data = _ARTIFACT_BYTES[item.artifact_id]
-                store.publish_bytes(
-                    artifact_id=item.artifact_id,
-                    data=data,
-                    media_type=RELEASE_MEDIA_TYPE,
-                    rights={"storage": True, "export": False},
-                    source_refs=[f"git:{item.source_sha}"],
-                    metadata={
-                        "evidence_kind": RELEASE_EVIDENCE_KIND,
-                        "role": item.role,
-                        "source_sha": item.source_sha,
-                        "signature_status": item.signature_status,
-                        "evidence_status": item.evidence_status,
-                    },
-                )
             trust_root = _trust_root()
+            candidate, _, _ = _bind_supply_chain_proof(
+                candidate,
+                store,
+                trust_root,
+            )
+            _publish_candidate_artifacts(store, candidate)
             canonical_policy = QualificationTrustPolicy(
                 policy_version="2026.09",
                 roots=(trust_root,),
             )
             receipt = _qualification(candidate, trust_root)
-            supply_chain_evidence = _supply_chain_fixture(candidate, store)
-            supply_chain_receipt = _supply_chain_receipt(
-                supply_chain_evidence,
-                trust_root,
-            )
 
             def canonical_verify(receipt_arg, **kwargs):
                 return verify_qualification_attestation(
@@ -837,8 +892,6 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                     evidence_store=store,
                     evidence_root=directory,
                     qualification_receipt=receipt,
-                    supply_chain_evidence=supply_chain_evidence,
-                    supply_chain_receipt=supply_chain_receipt,
                 )
                 rehydrated = ReleaseCandidateDecision(
                     status="FROZEN",
@@ -851,8 +904,6 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                     qualification_trust_root_id=original.qualification_trust_root_id,
                     _verification_store=store,
                     _verification_root=directory,
-                    _supply_chain_evidence=supply_chain_evidence,
-                    _supply_chain_receipt=supply_chain_receipt,
                 )
                 self.assertEqual(rehydrated, original)
 
@@ -893,8 +944,6 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                         ),
                         _verification_store=store,
                         _verification_root=directory,
-                        _supply_chain_evidence=supply_chain_evidence,
-                        _supply_chain_receipt=supply_chain_receipt,
                     )
 
     def test_structural_rehydration_rejects_changed_signed_artifact_binding(self):
@@ -1274,7 +1323,6 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
         self.assertIsNone(original.manifest_sha256)
         self.assertIsNone(changed.manifest_sha256)
 
-
     def test_nonbinary_missing_or_invalid_signature_status_is_unresolved(self):
         for status in ("MISSING", "INVALID"):
             with self.subTest(status=status):
@@ -1294,8 +1342,6 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                     "signature_status_unresolved:SBOM",
                     decision.reasons,
                 )
-
-
 
     def test_freeze_without_store_reports_both_missing_integrity_and_trust(self):
         decision = freeze_release_candidate(self.candidate())
@@ -1335,6 +1381,7 @@ class ReleaseCandidateFreezeTests(unittest.TestCase):
                 self.candidate(),
                 evidence_store=lambda _artifact: True,
             )
+
 
 if __name__ == "__main__":
     unittest.main()

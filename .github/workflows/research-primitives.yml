@@ -5,12 +5,22 @@ on:
   push:
     branches: [main]
     paths:
+      - "autotrade_numeric/**"
+      - "pyproject.toml"
+      - "mvp/autotrade_mvp/exact_decimal.py"
+      - "tools/generate_common_scalar_bindings.py"
+      - "contracts/jsonschema/common.schema.json"
       - "research/**"
       - "requirements-dev.txt"
       - "provenance/reuse/autosport-neutral-primitives.json"
       - ".github/workflows/research-primitives.yml"
   pull_request:
     paths:
+      - "autotrade_numeric/**"
+      - "pyproject.toml"
+      - "mvp/autotrade_mvp/exact_decimal.py"
+      - "tools/generate_common_scalar_bindings.py"
+      - "contracts/jsonschema/common.schema.json"
       - "research/**"
       - "requirements-dev.txt"
       - "provenance/reuse/autosport-neutral-primitives.json"
@@ -44,9 +54,12 @@ jobs:
           cache: pip
           cache-dependency-path: |
             requirements-dev.txt
+            pyproject.toml
             research/pyproject.toml
       - name: Install exact research test dependencies
         run: "python -m pip install --disable-pip-version-check --force-reinstall --no-deps --only-binary=:all: --require-hashes -r requirements-dev.txt"
+      - name: Install locally shared exact numeric package
+        run: python -m pip install --no-deps --no-build-isolation -e .
       - name: Install research package
         run: python -m pip install --no-deps --no-build-isolation -e research
       - name: Run research and migrated primitive tests

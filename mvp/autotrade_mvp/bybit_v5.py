@@ -290,6 +290,10 @@ def _position_idx_from_capability(
         raise ProviderCoreError(
             "capability environment does not match target Bybit environment"
         )
+    if capability.provider_environment != provider_env:
+        raise ProviderCoreError(
+            "capability provider_environment does not match target Bybit environment"
+        )
 
     family = _text(product_family, name="product_family").upper()
     try:
@@ -575,8 +579,8 @@ def prepare_order_submission(
     position_side: str | None = None,
     position_idx: int | None = None,
 ) -> BybitPreparedSubmission:
-    if not isinstance(capability, CapabilitySnapshot):
-        raise TypeError("capability must be CapabilitySnapshot")
+    if type(capability) is not CapabilitySnapshot:
+        raise TypeError("capability must be exact CapabilitySnapshot")
     if capability.provider_id.upper() != "BYBIT":
         raise ProviderCoreError("capability belongs to another provider")
     provider_env = _text(
@@ -591,6 +595,10 @@ def prepare_order_submission(
     if capability.environment.upper() != runtime_env:
         raise ProviderCoreError(
             "capability environment does not match Bybit provider environment"
+        )
+    if capability.provider_environment != provider_env:
+        raise ProviderCoreError(
+            "capability provider_environment does not match Bybit provider environment"
         )
     point = (
         at.astimezone(timezone.utc)

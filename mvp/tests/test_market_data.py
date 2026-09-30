@@ -77,6 +77,7 @@ def raw(
     ingested=None,
     revision=0,
     stream=None,
+    evidence=None,
 ):
     available = available or (source + timedelta(milliseconds=100))
     ingested = ingested or (available + timedelta(milliseconds=100))
@@ -93,7 +94,7 @@ def raw(
         sequence_stream=stream,
         revision=revision,
         payload=payload,
-        raw_evidence_ref=EVIDENCE,
+        raw_evidence_ref=EVIDENCE if evidence is None else evidence,
     )
 
 
@@ -755,7 +756,7 @@ class MarketNormalizationTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(MarketDataError, "price_tick"):
             normalizer.normalize(raw("TRADE", {"price": "100.005", "quantity": "1"}))
-        with self.assertRaisesRegex(MarketDataError, "exact decimal"):
+        with self.assertRaisesRegex(MarketDataError, "unsupported value type float"):
             normalizer.normalize(raw("TRADE", {"price": 100.1, "quantity": "1"}))
 
     def test_stale_sequenced_snapshot_cannot_establish_executable_book(self):
@@ -833,6 +834,10 @@ class MarketNormalizationTests(unittest.TestCase):
                 source=at(7, 1, 12),
                 available=at(7, 1, 12, 0, 1),
                 ingested=at(7, 1, 12, 0, 2),
+                evidence={
+                    **EVIDENCE,
+                    "observed_at": "2026-07-01T12:00:01Z",
+                },
             )
         )
         self.assertIn("NOT_TRADABLE_AT_EVENT_TIME", event.quality_flags)
@@ -855,6 +860,10 @@ class MarketNormalizationTests(unittest.TestCase):
                 source=saturday,
                 available=saturday + timedelta(seconds=1),
                 ingested=saturday + timedelta(seconds=2),
+                evidence={
+                    **EVIDENCE,
+                    "observed_at": "2026-09-26T12:00:01Z",
+                },
             )
         )
         self.assertIn("NOT_TRADABLE_AT_EVENT_TIME", weekend.quality_flags)

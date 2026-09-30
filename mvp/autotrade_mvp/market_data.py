@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from .exact_decimal import ExactDecimalError, canonical_decimal_text
+from ._market_payload_snapshot import PayloadSnapshotError, snapshot_market_payload
 from .instruments import (
     InstrumentNotFound,
     InstrumentRegistry,
@@ -47,6 +48,43 @@ def _text(value: str, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise MarketDataError(f"{field} is required")
     return value.strip()
+
+
+def _admission_text(value: object, field: str) -> str:
+    """Detach RawMarketUpdate identity from caller-defined str subclasses."""
+
+    if type(value) is not str:
+        raise MarketDataError(f"{field} must be an exact string")
+    normalized = value.strip()
+    if not normalized:
+        raise MarketDataError(f"{field} is required")
+    return normalized
+
+
+def _admission_instant(value: object, field: str) -> datetime:
+    """Normalize one exact datetime without retaining caller timezone authority."""
+
+    if type(value) is not datetime or value.tzinfo is None:
+        raise MarketDataError(f"{field} must be an exact timezone-aware datetime")
+    try:
+        normalized = value.astimezone(timezone.utc)
+    except (OverflowError, ValueError, TypeError) as error:
+        raise MarketDataError(
+            f"{field} must have a deterministic timezone"
+        ) from error
+    if type(normalized) is not datetime:
+        raise MarketDataError(f"{field} must normalize to an exact datetime")
+    return normalized
+
+
+def _admission_sequence(value: object, field: str) -> int | None:
+    """Accept only exact built-in integer sequence identity at admission."""
+
+    if value is None:
+        return None
+    if type(value) is not int or value < 0:
+        raise MarketDataError(f"{field} must be an exact non-negative integer")
+    return value
 
 
 def _instant(value: datetime, field: str) -> datetime:
@@ -97,25 +135,31 @@ def _canonical(value: Any) -> str:
 def _evidence(value: Mapping[str, object]) -> Mapping[str, object]:
     if not isinstance(value, Mapping) or not value:
         raise MarketDataError("raw_evidence_ref is required")
+    detached: dict[str, object] = {}
+    for key, item in value.items():
+        if type(key) is not str:
+            raise MarketDataError("raw_evidence_ref keys must be exact strings")
+        detached[key] = item
     required = {"artifact_id", "sha256", "observed_at"}
     allowed = required | {"source_uri", "rights_id"}
-    keys = set(value)
+    keys = set(detached)
+    value = detached
     if required - keys:
         raise MarketDataError("raw_evidence_ref is missing required fields")
     if keys - allowed:
         raise MarketDataError("raw_evidence_ref contains unknown fields")
 
-    artifact_id = _text(value["artifact_id"], "artifact_id")
+    artifact_id = _admission_text(value["artifact_id"], "artifact_id")
     try:
         UUID(artifact_id)
     except (ValueError, TypeError, AttributeError) as error:
         raise MarketDataError("raw evidence artifact_id must be a UUID") from error
 
-    digest = _text(value["sha256"], "sha256")
+    digest = _admission_text(value["sha256"], "sha256")
     if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
         raise MarketDataError("raw evidence sha256 must be a canonical SHA-256 digest")
 
-    observed_at = _text(value["observed_at"], "observed_at")
+    observed_at = _admission_text(value["observed_at"], "observed_at")
     if not observed_at.endswith("Z"):
         raise MarketDataError("raw evidence observed_at must be UTC and end in Z")
     try:
@@ -131,12 +175,12 @@ def _evidence(value: Mapping[str, object]) -> Mapping[str, object]:
         "observed_at": observed_at,
     }
     if "source_uri" in value:
-        source_uri = _text(value["source_uri"], "source_uri")
+        source_uri = _admission_text(value["source_uri"], "source_uri")
         if not urlsplit(source_uri).scheme:
             raise MarketDataError("raw evidence source_uri must be an absolute URI")
         normalized["source_uri"] = source_uri
     if "rights_id" in value:
-        normalized["rights_id"] = _text(value["rights_id"], "rights_id")
+        normalized["rights_id"] = _admission_text(value["rights_id"], "rights_id")
     return MappingProxyType(normalized)
 
 
@@ -158,14 +202,18 @@ class RawMarketUpdate:
 
     def __post_init__(self) -> None:
         for field in ("provider_id", "venue_id", "provider_symbol", "availability_basis"):
-            object.__setattr__(self, field, _text(getattr(self, field), field))
-        kind = _text(self.kind, "kind").upper()
+            object.__setattr__(
+                self,
+                field,
+                _admission_text(getattr(self, field), field),
+            )
+        kind = _admission_text(self.kind, "kind").upper()
         if kind not in KINDS:
             raise MarketDataError("kind is unsupported")
         object.__setattr__(self, "kind", kind)
-        source = _instant(self.source_event_at, "source_event_at")
-        available = _instant(self.available_at, "available_at")
-        ingested = _instant(self.ingested_at, "ingested_at")
+        source = _admission_instant(self.source_event_at, "source_event_at")
+        available = _admission_instant(self.available_at, "available_at")
+        ingested = _admission_instant(self.ingested_at, "ingested_at")
         if source > available:
             raise MarketDataError("source_event_at must not be after available_at")
         if available > ingested:
@@ -173,22 +221,40 @@ class RawMarketUpdate:
         object.__setattr__(self, "source_event_at", source)
         object.__setattr__(self, "available_at", available)
         object.__setattr__(self, "ingested_at", ingested)
-        revision = _sequence(self.revision, "revision")
+        revision = _admission_sequence(self.revision, "revision")
         if revision is None:
             raise MarketDataError("revision is required")
         object.__setattr__(self, "revision", revision)
         object.__setattr__(
-            self, "source_sequence", _sequence(self.source_sequence, "source_sequence")
+            self,
+            "source_sequence",
+            _admission_sequence(self.source_sequence, "source_sequence"),
         )
-        if not isinstance(self.payload, Mapping):
-            raise MarketDataError("payload must be an object")
-        object.__setattr__(self, "payload", MappingProxyType(dict(self.payload)))
-        object.__setattr__(self, "raw_evidence_ref", _evidence(self.raw_evidence_ref))
+        try:
+            payload_snapshot = snapshot_market_payload(self.payload)
+        except PayloadSnapshotError as error:
+            raise MarketDataError(str(error)) from error
+        object.__setattr__(self, "payload", payload_snapshot)
+        normalized_evidence = _evidence(self.raw_evidence_ref)
+        evidence_observed_text = normalized_evidence["observed_at"]
+        assert isinstance(evidence_observed_text, str)
+        evidence_observed = datetime.fromisoformat(
+            evidence_observed_text[:-1] + "+00:00"
+        ).astimezone(timezone.utc)
+        if evidence_observed < source:
+            raise MarketDataError(
+                "raw evidence cannot be observed before source_event_at"
+            )
+        if evidence_observed > ingested:
+            raise MarketDataError(
+                "raw evidence cannot be observed after ingested_at"
+            )
+        object.__setattr__(self, "raw_evidence_ref", normalized_evidence)
         if self.sequence_stream is not None:
             object.__setattr__(
                 self,
                 "sequence_stream",
-                _text(self.sequence_stream, "sequence_stream"),
+                _admission_text(self.sequence_stream, "sequence_stream"),
             )
 
 

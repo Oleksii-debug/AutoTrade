@@ -33,6 +33,7 @@ from research.autotrade_research.artifacts import (
     ArtifactStore,
     trusted_authenticated_reader,
 )
+import tools.check_nvda_qualification as nvda_qualification
 from tools.check_nvda_qualification import (
     NvdaQualificationError,
     validate_release_artifact_binding,
@@ -90,6 +91,7 @@ _WHOLE_PRODUCT_GATE = "COMPLETION"
 _WHOLE_PRODUCT_PACKAGE = "WP-60"
 _WHOLE_PRODUCT_PROTOCOL = "whole-product-completion-v1"
 _WHOLE_PRODUCT_PROTOCOL_VERSION = "1.0.0"
+_NVDA_REQUIREMENTS_REQUIREMENT_PREFIX = "nvda-requirements/sha256:"
 
 
 @dataclass(frozen=True)
@@ -241,8 +243,29 @@ def _exact_source(value: object) -> str | None:
     return None
 
 
-def _nvda_requirement_ids(requirements: dict[str, Any]) -> tuple[str, ...]:
-    workflows = requirements.get("workflows")
+def _nvda_requirement_ids(
+    requirements: dict[str, Any],
+    *,
+    source_sha: str,
+) -> tuple[str, ...]:
+    """Resolve the complete signed NVDA subject from exact-source protocol bytes."""
+    raw_requirements = nvda_qualification.load_canonical_nvda_requirements_bytes(
+        expected_source_sha=source_sha,
+    )
+    try:
+        canonical_requirements = json.loads(raw_requirements.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise NvdaQualificationError(
+            "canonical NVDA requirements are invalid"
+        ) from error
+    if type(canonical_requirements) is not dict:
+        raise NvdaQualificationError("canonical NVDA requirements must be an object")
+    if canonical_requirements != requirements:
+        raise NvdaQualificationError(
+            "supplied NVDA requirements do not match exact-source canonical requirements"
+        )
+
+    workflows = canonical_requirements.get("workflows")
     if not isinstance(workflows, list) or not workflows:
         raise NvdaQualificationError("requirements contain no workflows")
     requirement_ids: list[str] = []
@@ -253,8 +276,11 @@ def _nvda_requirement_ids(requirements: dict[str, Any]) -> tuple[str, ...]:
         if not isinstance(requirement_id, str) or not requirement_id.strip():
             raise NvdaQualificationError("requirements.workflow.id is required")
         requirement_ids.append(requirement_id.strip())
+    requirement_ids.append(
+        _NVDA_REQUIREMENTS_REQUIREMENT_PREFIX + sha256(raw_requirements).hexdigest()
+    )
     if len(requirement_ids) != len(set(requirement_ids)):
-        raise NvdaQualificationError("requirements.workflow ids must be unique")
+        raise NvdaQualificationError("NVDA signed requirement ids must be unique")
     return tuple(sorted(requirement_ids))
 
 
@@ -300,7 +326,10 @@ def _terminal_nvda_status(
         requirements = json.loads(evidence_context.nvda_requirements_json)
         if type(requirements) is not dict:
             return False
-        requirement_ids = _nvda_requirement_ids(requirements)
+        requirement_ids = _nvda_requirement_ids(
+            requirements,
+            source_sha=exact_source_sha,
+        )
         accepted = verify_canonical_qualification_attestation(
             receipt,
             evidence_store=evidence_context.evidence_store,

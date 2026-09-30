@@ -114,6 +114,37 @@ class ProviderCoreTests(unittest.TestCase):
                 with self.assertRaises(ProviderCoreError):
                     provider_core_module._decimal(value, "price")
 
+    def test_submission_observation_reparses_sha_bound_exact_response_bytes(self):
+        # Dispatch's transport-only JSON preview may pass through default
+        # json.loads floats. The financial observation must use untouched raw
+        # journal bytes, keeping scale/trailing-zero identity from Decimal.
+        with TemporaryDirectory() as directory:
+            binding, request_sha = self._durable_submission_binding(
+                directory,
+                raw=(
+                    b'{"orderId":"provider-1","price":65000.10,'
+                    b'"fee":0.0100,"sequence":12345678901234567890}'
+                ),
+            )
+            observation = observe_submission_json_response(
+                response_binding=binding,
+                provider_id="BYBIT",
+                endpoint="/v5/order/create",
+                prepared_request_sha256=request_sha,
+                capability_snapshot_ids=("cap-1",),
+                instrument_versions=("BTCUSD:v1",),
+            )
+            self.assertEqual(
+                observation.payload["price"].as_tuple(),
+                Decimal("65000.10").as_tuple(),
+            )
+            self.assertEqual(
+                observation.payload["fee"].as_tuple(),
+                Decimal("0.0100").as_tuple(),
+            )
+            self.assertIs(type(observation.payload["sequence"]), int)
+            self.assertEqual(observation.response_sha256, binding.response_sha256)
+
     def test_invalid_response_cannot_become_authenticated_submission_observation(self):
         with TemporaryDirectory() as directory:
             binding, request_sha = self._durable_submission_binding(

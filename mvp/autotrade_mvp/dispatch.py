@@ -323,8 +323,12 @@ def load_submission_response_binding(
 ) -> SubmissionResponseBinding:
     """Load exact provider response provenance from the canonical submission journal."""
 
-    if not isinstance(store, JournalStore):
-        raise TypeError("store must be JournalStore")
+    # This factory mints the private durable-response binding token. Do not
+    # virtual-dispatch an authority-bearing journal read through a caller
+    # subclass: matching bytes/digests are not proof that the history exists
+    # in the canonical physical JournalStore.
+    if type(store) is not JournalStore:
+        raise TypeError("store must be the canonical JournalStore")
     aggregate_id = submission_attempt_aggregate_id(
         environment=environment,
         account_id=account_id,
@@ -530,6 +534,12 @@ class GuardedDispatcher:
         owner_epoch: int = 1,
         prepared_lease_seconds: int = 60,
     ):
+        # SubmissionPrepared/Sending/Sent/Unknown is financial send-state
+        # authority. Until persistence exposes a sealed store capability,
+        # reject caller-polymorphic journal implementations before any read or
+        # append method can run.
+        if type(store) is not JournalStore:
+            raise TypeError("store must be the canonical JournalStore")
         self.store = store
         normalized_environment = (
             environment.strip().upper() if isinstance(environment, str) else ""

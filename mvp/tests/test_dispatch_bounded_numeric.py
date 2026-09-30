@@ -17,6 +17,43 @@ from mvp.autotrade_mvp.persistence import JournalStore
 
 
 class DispatchBoundedNumericTransportTests(unittest.TestCase):
+    def test_authoritative_submission_journal_rejects_subclass_before_callbacks(self):
+        touched = []
+
+        class HostileJournalStore(JournalStore):
+            def load_events(self, *_args, **_kwargs):
+                touched.append("load_events")
+                raise AssertionError("caller journal override executed")
+
+            def append_event(self, *_args, **_kwargs):
+                touched.append("append_event")
+                raise AssertionError("caller journal override executed")
+
+        with TemporaryDirectory() as directory:
+            hostile = HostileJournalStore(directory + "/journal.sqlite3")
+
+            with self.assertRaisesRegex(
+                TypeError, "canonical JournalStore"
+            ):
+                load_submission_response_binding(
+                    hostile,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    attempt_id="forged-attempt",
+                )
+
+            with self.assertRaisesRegex(
+                TypeError, "canonical JournalStore"
+            ):
+                GuardedDispatcher(
+                    hostile,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    owner_token="owner",
+                )
+
+        self.assertEqual(touched, [])
+
     def test_shared_depth_boundary_and_parser_recursion_remain_redacted(self):
         at_limit = b"[" * 64 + b"0" + b"]" * 64
         too_deep = b"[" * 65 + b"0" + b"]" * 65

@@ -673,6 +673,9 @@ def derive_capability_snapshot(
     required_sources: frozenset[str] = SOURCES,
     evidence_verifier: Callable[[CapabilityClaim], EvidenceVerification] | None = None,
 ) -> CapabilitySnapshot:
+    # This is the deterministic intersection/diagnostic primitive. Caller-selected
+    # evidence verification can establish VERIFIED semantics, but never current
+    # financial admission authority. Production issuance is a separate trust root.
     point = _instant(observed_at, "observed_at")
     records = tuple(_snapshot_capability_claim(claim) for claim in claims)
     if not records:
@@ -797,9 +800,7 @@ def derive_capability_snapshot(
         status=status,
         sources=verified_sources,
         _verification_token=_DERIVED_SNAPSHOT_TOKEN,
-        _admission_token=(
-            _FRESH_ADMISSION_TOKEN if status == "VERIFIED" else None
-        ),
+        _admission_token=None,
     )
 
 

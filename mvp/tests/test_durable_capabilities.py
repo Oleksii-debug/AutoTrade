@@ -14,7 +14,10 @@ from mvp.autotrade_mvp.capabilities import (
 )
 from mvp.autotrade_mvp.durable_capabilities import DurableCapabilityRegistry
 from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_digest
-from mvp.tests.capability_test_support import fresh_test_admission
+from mvp.tests.capability_test_support import (
+    fresh_test_admission,
+    register_fresh_test_snapshot,
+)
 
 
 NOW = datetime(2026, 9, 25, 20, 0, tzinfo=timezone.utc)
@@ -96,7 +99,7 @@ class DurableCapabilityRegistryTests(unittest.TestCase):
                 "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
                 NOW,
             )
-            self.assertTrue(first.add(snapshot))
+            self.assertTrue(register_fresh_test_snapshot(first, snapshot))
             self.assertEqual(
                 first.require_verified(
                     provider_id="simulated",
@@ -145,7 +148,7 @@ class DurableCapabilityRegistryTests(unittest.TestCase):
                 "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
                 refreshed_at,
             )
-            self.assertTrue(restarted.add(refreshed))
+            self.assertTrue(register_fresh_test_snapshot(restarted, refreshed))
             admitted = restarted.require_verified(
                 provider_id="simulated",
                 account_id="paper-account",
@@ -172,7 +175,7 @@ class DurableCapabilityRegistryTests(unittest.TestCase):
                 "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
                 NOW,
             )
-            self.assertTrue(first.add(original))
+            self.assertTrue(register_fresh_test_snapshot(first, original))
             before = first.store.load_events_by_aggregate_type("capability_history")
             self.assertEqual(len(before), 1)
 
@@ -195,7 +198,7 @@ class DurableCapabilityRegistryTests(unittest.TestCase):
                 NOW,
             )
             self.assertEqual(freshly_reverified, original)
-            self.assertFalse(restarted.add(freshly_reverified))
+            self.assertFalse(register_fresh_test_snapshot(restarted, freshly_reverified))
             after = restarted.store.load_events_by_aggregate_type("capability_history")
             self.assertEqual(len(after), 1)
 
@@ -233,8 +236,8 @@ class DurableCapabilityRegistryTests(unittest.TestCase):
                 provider_id="BYBIT",
                 provider_environment="DEMO",
             )
-            self.assertTrue(registry.add(testnet))
-            self.assertTrue(registry.add(demo))
+            self.assertTrue(register_fresh_test_snapshot(registry, testnet))
+            self.assertTrue(register_fresh_test_snapshot(registry, demo))
             events = registry.store.load_events_by_aggregate_type("capability_history")
             self.assertEqual(len(events), 2)
             self.assertEqual(len({event["aggregate_id"] for event in events}), 2)
@@ -286,7 +289,7 @@ class DurableCapabilityRegistryTests(unittest.TestCase):
                     at=NOW + timedelta(seconds=1),
                 )
 
-            self.assertFalse(restarted.add(testnet))
+            self.assertFalse(register_fresh_test_snapshot(restarted, testnet))
             self.assertEqual(
                 restarted.require_verified(
                     provider_id="BYBIT",

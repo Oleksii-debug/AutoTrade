@@ -175,6 +175,20 @@ public sealed class LeanCallbackCharacterizer
             throw new InvalidDataException("LEAN callback restart state callbacks are required.");
         }
 
+        // Nullable-reference metadata is not sufficient as a persisted-state
+        // admission fence on every supported System.Text.Json path. Reject
+        // required identity strings before re-serializing the payload for its
+        // integrity hash so malformed state cannot escape as a JsonException
+        // or be canonicalized into a different callback identity.
+        if (state.Callbacks.Any(entry =>
+                entry.Symbol is null ||
+                entry.FillPriceCurrency is null ||
+                entry.FeeCurrency is null))
+        {
+            throw new InvalidDataException(
+                "LEAN callback restart identity strings must be present and non-null.");
+        }
+
         var payload = new LeanCallbackCharacterizerStatePayload(
             state.SchemaVersion,
             state.ArrivalHighWaterUtc,

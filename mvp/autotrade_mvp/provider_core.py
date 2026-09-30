@@ -20,11 +20,32 @@ import re
 
 from .capabilities import CapabilitySnapshot
 from .dispatch import SubmissionResponseBinding
-from .provider_domain import ProviderDomainError, normalize_provider_environment
+from .provider_domain import (
+    ProviderDomainError,
+    normalize_provider_environment as _normalize_provider_environment,
+)
 
 
 class ProviderCoreError(ValueError):
     pass
+
+
+def normalize_provider_environment(
+    *,
+    provider_id: str,
+    environment: str,
+    provider_environment: str | None,
+) -> str:
+    """Expose the shared provider-domain policy under provider-core errors."""
+
+    try:
+        return _normalize_provider_environment(
+            provider_id=provider_id,
+            environment=environment,
+            provider_environment=provider_environment,
+        )
+    except ProviderDomainError as error:
+        raise ProviderCoreError(str(error)) from error
 
 
 _GIT_OBJECT_ID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
@@ -204,7 +225,7 @@ class AuthenticatedReadQueryBinding:
             _text(self.environment, "environment").upper(),
         )
         try:
-            provider_environment = normalize_provider_environment(
+            provider_environment = _normalize_provider_environment(
                 provider_id=provider,
                 environment=self.environment,
                 provider_environment=self.provider_environment,

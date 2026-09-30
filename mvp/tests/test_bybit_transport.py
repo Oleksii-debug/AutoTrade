@@ -68,6 +68,7 @@ def prepared(client_order_id="bybit-order-1"):
         position_mode="HEDGE",
         account_id="bybit-account",
         environment="PAPER",
+        provider_environment="TESTNET",
         instrument_version="BTCUSDT@1",
         permission_scope="BYBIT.LINEAR.ORDER.WRITE",
         additional_permission_scopes=("ORDER_WRITE",),
@@ -238,7 +239,7 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
 
         self.assertEqual(
             events,
-            ["quota", "capability", "resolve", "capability", "wire"],
+            ["quota", "resolve", "wire"],
         )
         self.assertEqual(len(resolver.calls), 1)
         self.assertEqual(observation.provider_id, "BYBIT")
@@ -504,7 +505,7 @@ class BybitV5SharedTransportTests(unittest.TestCase):
         self.assertEqual(response.payload["retCode"], 0)
         self.assertEqual(
             events,
-            ["quota", "capability", "resolve", "capability", "guard", "wire"],
+            ["quota", "resolve", "guard", "wire"],
         )
         self.assertEqual(len(resolver.calls), 1)
         self.assertEqual(len(wire.requests), 1)
@@ -593,7 +594,7 @@ class BybitV5SharedTransportTests(unittest.TestCase):
                 lambda: events.append("guard"),
             )
 
-        self.assertEqual(events, ["capability"])
+        self.assertEqual(events, [])
         self.assertEqual(resolver.calls, [])
         self.assertEqual(wire.requests, [])
 
@@ -626,7 +627,7 @@ class BybitV5SharedTransportTests(unittest.TestCase):
 
         self.assertEqual(
             events,
-            ["capability", "resolve", "capability"],
+            ["resolve"],
         )
         self.assertEqual(len(resolver.calls), 1)
         self.assertEqual(wire.requests, [])
@@ -653,7 +654,7 @@ class BybitV5SharedTransportTests(unittest.TestCase):
             )
         self.assertEqual(
             events,
-            ["capability", "resolve", "capability", "guard"],
+            ["resolve", "guard"],
         )
         self.assertEqual(len(resolver.calls), 1)
         self.assertEqual(wire.requests, [])

@@ -108,6 +108,9 @@ def durable_submission(payload, *, intent_id):
             owner_token="contract-owner",
         )
         submission_scope = {
+            "provider": "BYBIT",
+            "account_id": "contract-account",
+            "environment": "LIVE",
             "endpoint": prepared.endpoint,
             "prepared_request_sha256": prepared.body_sha256,
             "capability_snapshot_ids": list(prepared.capability_snapshot_ids),
@@ -123,6 +126,12 @@ def durable_submission(payload, *, intent_id):
         ):
             if prepared_scope_hash != payload_digest(dict(prepared_scope)):
                 return False, "prepared_scope_hash_mismatch"
+            if prepared_scope.get("provider") != "BYBIT":
+                return False, "provider_mismatch"
+            if prepared_scope.get("account_id") != "contract-account":
+                return False, "account_mismatch"
+            if prepared_scope.get("environment") != "LIVE":
+                return False, "environment_mismatch"
             if prepared_scope.get("provider_environment") != "MAINNET":
                 return False, "provider_environment_mismatch"
             if prepared_scope.get("endpoint") != prepared.endpoint:

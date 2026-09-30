@@ -154,6 +154,7 @@ def qualify(
     trusted=False,
     omit_attestation_scenarios=(),
     attested_policy=None,
+    mutate_during_verify=None,
 ):
     with TemporaryDirectory() as directory:
         store = ArtifactStore(directory)
@@ -232,6 +233,8 @@ def qualify(
         def canonical_verify(receipt_arg, **kwargs):
             if canonical_policy is None:
                 raise AssertionError("canonical verifier used without trusted fixture")
+            if mutate_during_verify is not None:
+                mutate_during_verify()
             return verify_qualification_attestation(
                 receipt_arg,
                 policy=canonical_policy,
@@ -279,6 +282,65 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
                 evidence=complete_evidence(),
                 evidence_store=lambda _item: True,
             )
+
+    def test_recovery_terminal_rejects_subclass_and_hostile_scalar_graphs(self):
+        base = evidence(RecoveryScenario.NETWORK_LOSS)
+
+        class DerivedRecoveryScenarioEvidence(RecoveryScenarioEvidence):
+            pass
+
+        derived = DerivedRecoveryScenarioEvidence(
+            **{
+                name: getattr(base, name)
+                for name in base.__dataclass_fields__
+            }
+        )
+        with self.assertRaisesRegex(TypeError, "canonical RecoveryScenarioEvidence"):
+            qualify_recovery_release(
+                policy=policy(),
+                evidence=[derived],
+            )
+
+        class HostileText(str):
+            pass
+
+        poisoned = evidence(RecoveryScenario.NETWORK_LOSS)
+        object.__setattr__(poisoned, "source_sha", HostileText(poisoned.source_sha))
+        with self.assertRaisesRegex(TypeError, "source_sha must use exact str"):
+            qualify_recovery_release(
+                policy=policy(),
+                evidence=[poisoned],
+            )
+
+    def test_verifier_side_mutation_cannot_change_detached_recovery_decision(self):
+        items = complete_evidence()
+        target = items[0]
+        original_downtime = target.downtime_ms
+
+        def mutate_original():
+            object.__setattr__(
+                target,
+                "downtime_ms",
+                policy().max_downtime_ms[target.scenario] + 1,
+            )
+
+        decision = qualify(
+            policy=policy(),
+            evidence=items,
+            trusted=True,
+            mutate_during_verify=mutate_original,
+        )
+
+        self.assertEqual(decision.status, RecoveryEvidenceStatus.PASS)
+        self.assertEqual(decision.blockers, ())
+        self.assertEqual(
+            decision.measured_downtime_ms[target.scenario],
+            original_downtime,
+        )
+        self.assertGreater(
+            target.downtime_ms,
+            policy().max_downtime_ms[target.scenario],
+        )
 
     def test_missing_or_corrupt_recovery_receipt_fails_closed(self):
         items = complete_evidence()

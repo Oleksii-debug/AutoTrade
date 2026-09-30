@@ -1521,10 +1521,13 @@ class AblationTests(unittest.TestCase):
             def resolve(self, pairs, *, outcome_refs):
                 raise AssertionError("subclass resolve must never execute")
 
-        forged = object.__new__(ForgedAuthority)
+        forged = str.__new__(
+            ForgedAuthority,
+            "autotrade-forged-ablation-qualification-authority",
+        )
         with self.assertRaisesRegex(
             TypeError,
-            "canonical AblationQualificationAuthority",
+            "qualification authority type is invalid",
         ):
             evaluate_qualified_incremental_value(
                 "agent",

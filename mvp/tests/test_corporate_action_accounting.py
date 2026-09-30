@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 import json
 from pathlib import Path
@@ -1129,6 +1129,69 @@ class AtomicCorporateActionFinancialTests(unittest.TestCase):
                 1,
             )
             self.assertEqual(len(economics.transactions), 2)
+
+    def test_hostile_activation_timezone_is_rejected_before_durable_mutation(self):
+        touched = []
+
+        class HostileTz(tzinfo):
+            def utcoffset(self, dt):
+                touched.append("utcoffset")
+                raise AssertionError("hostile activation timezone callback")
+
+            def dst(self, dt):
+                touched.append("dst")
+                raise AssertionError("hostile activation timezone callback")
+
+            def fromutc(self, dt):
+                touched.append("fromutc")
+                raise AssertionError("hostile activation timezone callback")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            durable_evidence = evidence_store(store)
+            economics = economic_book(store)
+            accepted = resolve_action(sealed_action())
+            before_transactions = economics.transactions
+            before_evidence = store.load_events(
+                "corporate_action_evidence",
+                durable_evidence.aggregate_id,
+            )
+            hostile_cut = datetime(
+                2026,
+                1,
+                2,
+                12,
+                tzinfo=HostileTz(),
+            )
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "exact datetime with built-in timezone",
+            ):
+                commit_authoritative_corporate_action(
+                    store=store,
+                    evidence_store=durable_evidence,
+                    economic_book=economics,
+                    corporate_book=pure_book(),
+                    accepted=accepted,
+                    activation_at=hostile_cut,
+                )
+
+            self.assertEqual(touched, [])
+            self.assertEqual(economics.transactions, before_transactions)
+            self.assertEqual(
+                store.load_events(
+                    "corporate_action_evidence",
+                    durable_evidence.aggregate_id,
+                ),
+                before_evidence,
+            )
+            self.assertEqual(
+                store.load_events_by_aggregate_type(
+                    "corporate_action_activation"
+                ),
+                [],
+            )
 
     def test_durable_unsettled_cash_and_dividend_are_context_invariant(self):
         precisions = (6, 10, 28, 80)

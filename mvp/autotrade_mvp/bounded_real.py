@@ -555,6 +555,263 @@ class BoundedRealObservations:
         return cls(**values)
 
 
+
+def _exact_snapshot_text(value: object, *, name: str) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{name} must be an exact built-in string")
+    return value
+
+
+def _snapshot_immutable_evidence_ref(
+    ref: ImmutableEvidenceRef,
+) -> ImmutableEvidenceRef:
+    if not isinstance(ref, ImmutableEvidenceRef):
+        raise TypeError("evidence ref must be ImmutableEvidenceRef")
+    artifact_id = ref.artifact_id
+    digest = ref.sha256
+    evidence_kind = ref.evidence_kind
+    source_sha = ref.source_sha
+    envelope_id = ref.envelope_id
+    envelope_digest = ref.envelope_digest
+    provider_id = ref.provider_id
+    account_id = ref.account_id
+    return ImmutableEvidenceRef(
+        artifact_id=_exact_snapshot_text(
+            artifact_id,
+            name="evidence_ref.artifact_id",
+        ),
+        sha256=_exact_snapshot_text(
+            digest,
+            name="evidence_ref.sha256",
+        ),
+        evidence_kind=_exact_snapshot_text(
+            evidence_kind,
+            name="evidence_ref.evidence_kind",
+        ),
+        source_sha=_exact_snapshot_text(
+            source_sha,
+            name="evidence_ref.source_sha",
+        ),
+        envelope_id=_exact_snapshot_text(
+            envelope_id,
+            name="evidence_ref.envelope_id",
+        ),
+        envelope_digest=_exact_snapshot_text(
+            envelope_digest,
+            name="evidence_ref.envelope_digest",
+        ),
+        provider_id=_exact_snapshot_text(
+            provider_id,
+            name="evidence_ref.provider_id",
+        ),
+        account_id=_exact_snapshot_text(
+            account_id,
+            name="evidence_ref.account_id",
+        ),
+    )
+
+
+def _snapshot_bounded_real_envelope(
+    envelope: BoundedRealEnvelope,
+) -> BoundedRealEnvelope:
+    if not isinstance(envelope, BoundedRealEnvelope):
+        raise TypeError("envelope must be BoundedRealEnvelope")
+    envelope_id = envelope.envelope_id
+    source_sha = envelope.source_sha
+    account_id = envelope.account_id
+    provider_id = envelope.provider_id
+    policy_id = envelope.policy_id
+    allowed_actions = envelope.allowed_actions
+    max_capital = envelope.max_capital
+    max_single_notional = envelope.max_single_notional
+    max_gross_leverage = envelope.max_gross_leverage
+    if type(allowed_actions) is not frozenset or any(
+        type(value) is not str for value in allowed_actions
+    ):
+        raise TypeError(
+            "envelope.allowed_actions must be an exact frozenset of built-in strings"
+        )
+    for value, name in (
+        (max_capital, "envelope.max_capital"),
+        (max_single_notional, "envelope.max_single_notional"),
+        (max_gross_leverage, "envelope.max_gross_leverage"),
+    ):
+        if type(value) is not Decimal:
+            raise TypeError(f"{name} must be an exact Decimal")
+    return BoundedRealEnvelope.create(
+        envelope_id=_exact_snapshot_text(
+            envelope_id,
+            name="envelope.envelope_id",
+        ),
+        source_sha=_exact_snapshot_text(
+            source_sha,
+            name="envelope.source_sha",
+        ),
+        account_id=_exact_snapshot_text(
+            account_id,
+            name="envelope.account_id",
+        ),
+        provider_id=_exact_snapshot_text(
+            provider_id,
+            name="envelope.provider_id",
+        ),
+        policy_id=_exact_snapshot_text(
+            policy_id,
+            name="envelope.policy_id",
+        ),
+        allowed_actions=frozenset(allowed_actions),
+        max_capital=max_capital,
+        max_single_notional=max_single_notional,
+        max_gross_leverage=max_gross_leverage,
+    )
+
+
+def _snapshot_qualification_evidence(
+    evidence: QualificationEvidence,
+) -> QualificationEvidence:
+    if not isinstance(evidence, QualificationEvidence):
+        raise TypeError(
+            "prerequisite_evidence must contain QualificationEvidence"
+        )
+    evidence_id = evidence.evidence_id
+    evidence_kind = evidence.evidence_kind
+    source_sha = evidence.source_sha
+    envelope_id = evidence.envelope_id
+    envelope_digest = evidence.envelope_digest
+    passed = evidence.passed
+    evidence_ref = evidence.evidence_ref
+    unresolved_blockers = evidence.unresolved_blockers
+    if type(passed) is not bool:
+        raise TypeError("qualification_evidence.passed must be an exact boolean")
+    if type(unresolved_blockers) is not tuple or any(
+        type(value) is not str for value in unresolved_blockers
+    ):
+        raise TypeError(
+            "qualification_evidence.unresolved_blockers must be an exact tuple "
+            "of built-in strings"
+        )
+    return QualificationEvidence.create(
+        evidence_id=_exact_snapshot_text(
+            evidence_id,
+            name="qualification_evidence.evidence_id",
+        ),
+        evidence_kind=_exact_snapshot_text(
+            evidence_kind,
+            name="qualification_evidence.evidence_kind",
+        ),
+        source_sha=_exact_snapshot_text(
+            source_sha,
+            name="qualification_evidence.source_sha",
+        ),
+        envelope_id=_exact_snapshot_text(
+            envelope_id,
+            name="qualification_evidence.envelope_id",
+        ),
+        envelope_digest=_exact_snapshot_text(
+            envelope_digest,
+            name="qualification_evidence.envelope_digest",
+        ),
+        passed=passed,
+        evidence_ref=_snapshot_immutable_evidence_ref(evidence_ref),
+        unresolved_blockers=tuple(unresolved_blockers),
+    )
+
+
+def _snapshot_bounded_real_observations(
+    observations: BoundedRealObservations,
+) -> BoundedRealObservations:
+    if not isinstance(observations, BoundedRealObservations):
+        raise TypeError("observations must be BoundedRealObservations")
+    source_sha = observations.source_sha
+    envelope_id = observations.envelope_id
+    envelope_digest = observations.envelope_digest
+    provider_id = observations.provider_id
+    account_id = observations.account_id
+    observed_fill_count = observations.observed_fill_count
+    observed_partial_fill = observations.observed_partial_fill
+    all_fills_reconciled = observations.all_fills_reconciled
+    fees_reconciled = observations.fees_reconciled
+    revocation_verified = observations.revocation_verified
+    protection_verified = observations.protection_verified
+    unauthorized_action_count = observations.unauthorized_action_count
+    unresolved_unknown_count = observations.unresolved_unknown_count
+    evidence_refs = observations.evidence_refs
+    for value, name in (
+        (observed_fill_count, "observations.observed_fill_count"),
+        (unauthorized_action_count, "observations.unauthorized_action_count"),
+        (unresolved_unknown_count, "observations.unresolved_unknown_count"),
+    ):
+        if type(value) is not int:
+            raise TypeError(f"{name} must be an exact integer")
+    for value, name in (
+        (observed_partial_fill, "observations.observed_partial_fill"),
+        (all_fills_reconciled, "observations.all_fills_reconciled"),
+        (fees_reconciled, "observations.fees_reconciled"),
+        (revocation_verified, "observations.revocation_verified"),
+        (protection_verified, "observations.protection_verified"),
+    ):
+        if type(value) is not bool:
+            raise TypeError(f"{name} must be an exact boolean")
+    if type(evidence_refs) is not tuple:
+        raise TypeError(
+            "observations.evidence_refs must be an exact tuple at the terminal boundary"
+        )
+    exact_refs = tuple(
+        _snapshot_immutable_evidence_ref(ref)
+        for ref in evidence_refs
+    )
+    return BoundedRealObservations.create(
+        source_sha=_exact_snapshot_text(
+            source_sha,
+            name="observations.source_sha",
+        ),
+        envelope_id=_exact_snapshot_text(
+            envelope_id,
+            name="observations.envelope_id",
+        ),
+        envelope_digest=_exact_snapshot_text(
+            envelope_digest,
+            name="observations.envelope_digest",
+        ),
+        provider_id=_exact_snapshot_text(
+            provider_id,
+            name="observations.provider_id",
+        ),
+        account_id=_exact_snapshot_text(
+            account_id,
+            name="observations.account_id",
+        ),
+        observed_fill_count=observed_fill_count,
+        observed_partial_fill=observed_partial_fill,
+        all_fills_reconciled=all_fills_reconciled,
+        fees_reconciled=fees_reconciled,
+        revocation_verified=revocation_verified,
+        protection_verified=protection_verified,
+        unauthorized_action_count=unauthorized_action_count,
+        unresolved_unknown_count=unresolved_unknown_count,
+        evidence_refs=exact_refs,
+    )
+
+
+def _snapshot_prerequisite_evidence(
+    values: Iterable[QualificationEvidence],
+) -> tuple[QualificationEvidence, ...]:
+    if isinstance(values, (str, bytes)):
+        raise TypeError(
+            "prerequisite_evidence must be an iterable of QualificationEvidence"
+        )
+    try:
+        captured = tuple(values)
+    except TypeError as error:
+        raise TypeError(
+            "prerequisite_evidence must be an iterable of QualificationEvidence"
+        ) from error
+    return tuple(
+        _snapshot_qualification_evidence(value)
+        for value in captured
+    )
+
+
 @dataclass(frozen=True)
 class BoundedRealQualificationResult:
     complete: bool
@@ -613,10 +870,11 @@ def assess_bounded_real_qualification(
 ) -> BoundedRealQualificationResult:
     """Validate a bounded-real evidence bundle without granting authority."""
 
-    if not isinstance(envelope, BoundedRealEnvelope):
-        raise TypeError("envelope must be BoundedRealEnvelope")
-    if not isinstance(observations, BoundedRealObservations):
-        raise TypeError("observations must be BoundedRealObservations")
+    envelope = _snapshot_bounded_real_envelope(envelope)
+    observations = _snapshot_bounded_real_observations(observations)
+    prerequisite_evidence = _snapshot_prerequisite_evidence(
+        prerequisite_evidence
+    )
 
     reasons: list[str] = []
     scope_matches = (

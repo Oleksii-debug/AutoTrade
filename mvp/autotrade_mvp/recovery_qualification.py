@@ -381,6 +381,80 @@ class RecoveryQualificationPolicy:
         )
 
 
+def _snapshot_recovery_qualification_policy(
+    policy: RecoveryQualificationPolicy,
+) -> RecoveryQualificationPolicy:
+    """Detach one exact terminal recovery policy before trust callbacks."""
+
+    if type(policy) is not RecoveryQualificationPolicy:
+        raise TypeError("policy must be the canonical RecoveryQualificationPolicy")
+    values = {
+        "source_sha": policy.source_sha,
+        "release_artifact_id": policy.release_artifact_id,
+        "release_artifact_sha256": policy.release_artifact_sha256,
+        "evidence_schema_version": policy.evidence_schema_version,
+        "protocol_id": policy.protocol_id,
+        "max_downtime_ms": policy.max_downtime_ms,
+        "required_tests": policy.required_tests,
+    }
+    for field in (
+        "source_sha",
+        "release_artifact_id",
+        "release_artifact_sha256",
+        "evidence_schema_version",
+        "protocol_id",
+    ):
+        if type(values[field]) is not str:
+            raise TypeError(f"{field} must use exact str")
+
+    mapping_proxy_type = type(MappingProxyType({}))
+    limits_view = values["max_downtime_ms"]
+    tests_view = values["required_tests"]
+    if type(limits_view) is not mapping_proxy_type:
+        raise TypeError("max_downtime_ms must be the canonical mapping proxy")
+    if type(tests_view) is not mapping_proxy_type:
+        raise TypeError("required_tests must be the canonical mapping proxy")
+    if (
+        set(limits_view) != _REQUIRED_SCENARIOS
+        or any(type(scenario) is not RecoveryScenario for scenario in limits_view)
+    ):
+        raise ValueError("max_downtime_ms must contain exact required scenarios")
+    if (
+        set(tests_view) != _REQUIRED_SCENARIOS
+        or any(type(scenario) is not RecoveryScenario for scenario in tests_view)
+    ):
+        raise ValueError("required_tests must contain exact required scenarios")
+
+    limits: dict[RecoveryScenario, int] = {}
+    required_tests: dict[RecoveryScenario, tuple[str, ...]] = {}
+    for scenario in RecoveryScenario:
+        limit = limits_view[scenario]
+        if type(limit) is not int:
+            raise TypeError(
+                f"max_downtime_ms[{scenario.value}] must use exact int"
+            )
+        limits[scenario] = limit
+
+        required = tests_view[scenario]
+        if type(required) is not tuple or any(
+            type(test_id) is not str for test_id in required
+        ):
+            raise TypeError(
+                f"required_tests[{scenario.value}] must use an exact tuple of exact str values"
+            )
+        required_tests[scenario] = tuple(required)
+
+    return RecoveryQualificationPolicy(
+        source_sha=values["source_sha"],
+        release_artifact_id=values["release_artifact_id"],
+        release_artifact_sha256=values["release_artifact_sha256"],
+        evidence_schema_version=values["evidence_schema_version"],
+        protocol_id=values["protocol_id"],
+        max_downtime_ms=limits,
+        required_tests=required_tests,
+    )
+
+
 def recovery_policy_subject_requirement(
     policy: RecoveryQualificationPolicy,
 ) -> str:
@@ -685,6 +759,14 @@ class RecoveryQualificationDecision:
                 raise ValueError(
                     "PASS recovery decision requires independently verifiable qualification evidence"
                 )
+            try:
+                _verification_policy = _snapshot_recovery_qualification_policy(
+                    _verification_policy
+                )
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    "PASS recovery decision requires canonical recovery policy evidence"
+                ) from error
             if (
                 type(_verification_evidence) is not tuple
                 or any(
@@ -933,8 +1015,7 @@ def qualify_recovery_release(
 ) -> RecoveryQualificationDecision:
     """Evaluate recovery evidence without performing recovery itself."""
 
-    if type(policy) is not RecoveryQualificationPolicy:
-        raise TypeError("policy must be the canonical RecoveryQualificationPolicy")
+    policy = _snapshot_recovery_qualification_policy(policy)
     policy_requirement = recovery_policy_subject_requirement(policy)
     if type(evidence) not in (list, tuple):
         raise TypeError("evidence must be an exact list or tuple")

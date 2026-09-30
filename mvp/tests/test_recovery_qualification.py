@@ -342,6 +342,74 @@ class RecoveryReleaseQualificationTests(unittest.TestCase):
             policy().max_downtime_ms[target.scenario],
         )
 
+    def test_verifier_side_policy_mutation_cannot_loosen_detached_recovery_policy(self):
+        current_policy = policy()
+        items = complete_evidence()
+        target = items[0]
+        items[0] = evidence(target.scenario, downtime_ms=60_001)
+        original_requirement = recovery_policy_subject_requirement(current_policy)
+
+        def loosen_original_policy():
+            object.__setattr__(
+                current_policy,
+                "max_downtime_ms",
+                {scenario: 120_000 for scenario in RecoveryScenario},
+            )
+
+        decision = qualify(
+            policy=current_policy,
+            evidence=items,
+            trusted=True,
+            mutate_during_verify=loosen_original_policy,
+        )
+
+        self.assertEqual(decision.status, RecoveryEvidenceStatus.FAIL)
+        self.assertIn(
+            f"{target.scenario.value.lower()}:downtime_limit_exceeded",
+            decision.blockers,
+        )
+        self.assertEqual(
+            decision.recovery_policy_requirement,
+            original_requirement,
+        )
+        self.assertEqual(current_policy.max_downtime_ms[target.scenario], 120_000)
+        self.assertFalse(decision.matches_policy(current_policy))
+
+    def test_recovery_policy_snapshot_rejects_post_construction_container_rebinding(self):
+        current_policy = policy()
+        object.__setattr__(
+            current_policy,
+            "required_tests",
+            {
+                scenario: REQUIRED_TESTS[scenario]
+                for scenario in RecoveryScenario
+            },
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "required_tests must be the canonical mapping proxy",
+        ):
+            qualify_recovery_release(
+                policy=current_policy,
+                evidence=complete_evidence(),
+            )
+
+    def test_recovery_policy_snapshot_rejects_hostile_scalar_rebinding(self):
+        class HostileText(str):
+            pass
+
+        current_policy = policy()
+        object.__setattr__(
+            current_policy,
+            "source_sha",
+            HostileText(current_policy.source_sha),
+        )
+        with self.assertRaisesRegex(TypeError, "source_sha must use exact str"):
+            qualify_recovery_release(
+                policy=current_policy,
+                evidence=complete_evidence(),
+            )
+
     def test_missing_or_corrupt_recovery_receipt_fails_closed(self):
         items = complete_evidence()
         target = items[0]

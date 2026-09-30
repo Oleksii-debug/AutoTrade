@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, Inexact, Rounded, localcontext
 import json
 from tempfile import TemporaryDirectory
 import unittest
@@ -177,6 +177,45 @@ def futures_response_bytes(payload) -> bytes:
 
 
 class KrakenFuturesAdapterTests(unittest.TestCase):
+    def test_payload_numeric_admission_uses_shared_bounded_exact_authority(self):
+        arguments = dict(environment="LIVE", symbol="PI_XBTUSD", side="BUY",
+                         order_type="LIMIT", size="1.0001", price="70000.01",
+                         client_order_id="exact-1")
+        for precision in (1, 2, 28):
+            with self.subTest(precision=precision), localcontext() as context:
+                context.prec = precision
+                context.traps[Inexact] = True
+                context.traps[Rounded] = True
+                payload = build_order_payload(**arguments)
+                self.assertEqual(payload["size"], "1.0001")
+                self.assertEqual(payload["limitPrice"], "70000.01")
+        for value in ("1e999999999", "9" * 257, Decimal("1e-257")):
+            with self.subTest(value=repr(value)), self.assertRaises(ProviderCoreError):
+                build_order_payload(**{**arguments, "size": value})
+
+    def test_uncertain_or_contradictory_response_retains_unknown_exposure(self):
+        cases = (
+            {"result": "pending"},
+            {"result": "error", "error": "nonceDuplicate"},
+            {"result": "error", "error": "insufficientFunds",
+             "sendStatus": {"status": "placed", "order_id": "seen-order"}},
+            {"result": "success", "sendStatus": {"status": "placed",
+             "order_id": "first", "orderId": "second"}},
+            {"result": "success", "sendStatus": {"status": "placed", "order_id": " padded "}},
+            {"result": "success", "sendStatus":
+             '{"status":"insufficientAvailableFunds","status":"placed","order_id":"ambiguous"}'},
+        )
+        for index, payload in enumerate(cases):
+            with self.subTest(payload=payload):
+                attempt, prepared, observation = self._durable_submission_observation(
+                    payload, intent_id=f"uncertain-response-{index}")
+                result = parse_submission_response(attempt_id=attempt,
+                    prepared_request=prepared, observation=observation)
+                self.assertEqual(result["outcome"], "UNKNOWN")
+                self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
+                self.assertNotIn("provider_order_id", result)
+                self.assertEqual(len(result["evidence"]), 1)
+
     def test_live_and_demo_services_are_explicit(self):
         self.assertEqual(futures_base_url("LIVE"), "https://futures.kraken.com")
         self.assertEqual(futures_base_url("DEMO"), "https://demo-futures.kraken.com")
@@ -328,6 +367,71 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                 self.assertEqual(result["retry_disposition"], "NEVER")
                 self.assertNotIn("fill", repr(result).lower())
 
+    def test_success_with_insufficient_available_funds_is_rejected(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {
+                "result": "success",
+                "sendStatus": {"status": "insufficientAvailableFunds"},
+            },
+            intent_id="hedge-insufficient-available-funds",
+            provider_environment="LIVE",
+        )
+        result = parse_submission_response(
+            attempt_id=attempt,
+            prepared_request=prepared,
+            observation=observation,
+        )
+        self.assertEqual(result["outcome"], "REJECTED")
+        self.assertEqual(
+            result["reason_code"],
+            "KRAKEN_FUTURES_INSUFFICIENT_AVAILABLE_FUNDS",
+        )
+        self.assertEqual(result["retry_disposition"], "NEVER")
+        self.assertNotIn("provider_order_id", result)
+
+    def test_unclassified_success_status_never_becomes_acknowledged(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {
+                "result": "success",
+                "sendStatus": {
+                    "status": "futureProviderStatus",
+                    "order_id": "must-not-mint-ack",
+                },
+            },
+            intent_id="hedge-unclassified-status",
+            provider_environment="LIVE",
+        )
+        result = parse_submission_response(
+            attempt_id=attempt,
+            prepared_request=prepared,
+            observation=observation,
+        )
+        self.assertEqual(result["outcome"], "UNKNOWN")
+        self.assertEqual(
+            result["reason_code"],
+            "KRAKEN_FUTURES_UNCLASSIFIED_SEND_STATUS",
+        )
+        self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
+        self.assertNotIn("provider_order_id", result)
+
+    def test_placed_without_provider_order_id_is_unknown(self):
+        attempt, prepared, observation = self._durable_submission_observation(
+            {"result": "success", "sendStatus": {"status": "placed"}},
+            intent_id="hedge-placed-without-id",
+            provider_environment="LIVE",
+        )
+        result = parse_submission_response(
+            attempt_id=attempt,
+            prepared_request=prepared,
+            observation=observation,
+        )
+        self.assertEqual(result["outcome"], "UNKNOWN")
+        self.assertEqual(
+            result["reason_code"],
+            "KRAKEN_FUTURES_PLACED_WITHOUT_ORDER_ID",
+        )
+        self.assertEqual(result["retry_disposition"], "RECONCILE_FIRST")
+
     def test_transport_ambiguity_is_unknown_and_never_blind_retried(self):
         prepared = prepared_futures_request("hedge-unknown")
         result = parse_submission_response(
@@ -372,7 +476,7 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
     def test_submission_evidence_preserves_exact_response_bytes(self):
         payload = {
             "result": "success",
-            "sendStatus": {"order_id": "provider-bind"},
+            "sendStatus": {"order_id": "provider-bind", "status": "placed"},
         }
         raw_a = futures_response_bytes(payload)
         raw_b = json.dumps(payload, indent=1).encode("utf-8")
@@ -417,6 +521,7 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                 "result": "success",
                 "sendStatus": {
                     "order_id": "provider-mismatch",
+                    "status": "placed",
                     "cliOrdId": wrong_client,
                 },
             },

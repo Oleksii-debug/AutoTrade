@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from hashlib import sha256
 import json
 import re
@@ -19,11 +19,17 @@ from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from .capabilities import CapabilitySnapshot
+from .exact_decimal import (
+    ExactDecimalError,
+    canonical_decimal_text,
+    parse_bounded_exact_decimal,
+)
 from .provider_core import (
     ProviderCoreError,
     ProviderResponseObservation,
     ProviderSubmissionObservation,
     Surface,
+    _decode_exact_json,
 )
 from .reconciliation import CoverageSurfaceEvidence, ProviderFillEvidence
 
@@ -76,14 +82,10 @@ def _integer(value: object, *, name: str, minimum: int | None = None) -> int:
 
 
 def _decimal(value: object, *, name: str, positive: bool = False) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise ProviderCoreError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise ProviderCoreError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ProviderCoreError(f"{name} must be a finite decimal")
+        result = parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise ProviderCoreError(f"{name} must be a bounded exact decimal") from error
     if positive and result <= 0:
         raise ProviderCoreError(f"{name} must be positive")
     return result
@@ -91,10 +93,7 @@ def _decimal(value: object, *, name: str, positive: bool = False) -> Decimal:
 
 def _decimal_text(value: object, *, name: str, positive: bool = False) -> str:
     number = _decimal(value, name=name, positive=positive)
-    rendered = format(number, "f")
-    if "." in rendered:
-        rendered = rendered.rstrip("0").rstrip(".")
-    return rendered or "0"
+    return canonical_decimal_text(number)
 
 
 def _client_order_id(value: object) -> str:
@@ -111,6 +110,12 @@ def _client_order_id(value: object) -> str:
     raise ProviderCoreError(
         "client_order_id must be a UUID/short UUID or 1-18 printable ASCII characters"
     )
+
+
+def validate_futures_client_order_id(value: object) -> str:
+    """Expose the canonical Kraken Futures client-order identity validator."""
+
+    return _client_order_id(value)
 
 
 def _uuid_text(value: object, *, name: str) -> str:
@@ -435,30 +440,48 @@ def parse_submission_response(
             prepared_request=prepared_request,
         )
     ]
+    def unknown(reason: str) -> dict[str, Any]:
+        return {
+            "attempt_id": aid,
+            "outcome": "UNKNOWN",
+            "client_order_id": cid,
+            "reason_code": "KRAKEN_FUTURES_" + reason,
+            "evidence": evidence,
+            "retry_disposition": "RECONCILE_FIRST",
+        }
+
     envelope = _mapping(observation.payload, name="response")
-    result = _text(envelope.get("result"), name="result").lower()
+    result = envelope.get("result")
     if result != "success":
         error = envelope.get("error")
-        if error in (None, ""):
-            errors = envelope.get("errors")
-            error = errors if errors not in (None, (), []) else "UNKNOWN_ERROR"
+        # A nonce duplicate or unclassified response cannot prove this attempt
+        # never created an order. Only documented no-execution facts may release
+        # exposure; contradictory operation details retain UNKNOWN.
+        if (
+            result != "error"
+            or error not in ("insufficientFunds", "insufficientAvailableFunds")
+            or envelope.get("sendStatus") is not None
+        ):
+            return unknown("UNCLASSIFIED_OR_INCONSISTENT_RESULT")
         return {
             "attempt_id": aid,
             "outcome": "REJECTED",
             "client_order_id": cid,
-            "reason_code": "KRAKEN_FUTURES_" + str(error),
+            "reason_code": "KRAKEN_FUTURES_" + error,
             "evidence": evidence,
             "retry_disposition": "NEVER",
         }
 
     send_status = envelope.get("sendStatus")
-    if isinstance(send_status, str):
+    if type(send_status) is str:
         try:
-            send_status = json.loads(send_status)
-        except json.JSONDecodeError as error:
-            raise ProviderCoreError(
-                "Kraken Futures sendStatus string is invalid JSON"
-            ) from error
+            # Reuse the common bounded/duplicate-rejecting decoder for the
+            # legacy JSON-in-text response instead of a second permissive path.
+            send_status = _decode_exact_json(send_status.encode("utf-8"))
+        except (ProviderCoreError, UnicodeEncodeError):
+            return unknown("INVALID_SEND_STATUS_JSON")
+    if not isinstance(send_status, Mapping):
+        return unknown("MISSING_SEND_STATUS")
     status = _mapping(send_status, name="sendStatus")
     echoed = status.get("cliOrdId")
     if echoed is None:
@@ -467,17 +490,90 @@ def parse_submission_response(
         raise ProviderCoreError(
             "Kraken Futures client identity does not match guarded request"
         )
-    provider_order_id = status.get("order_id")
-    if provider_order_id in (None, ""):
-        provider_order_id = status.get("orderId")
-    provider_order_id = _text(provider_order_id, name="sendStatus.order_id")
+
+    raw_operation_status = status.get("status")
+    if not isinstance(raw_operation_status, str) or not raw_operation_status.strip():
+        return {
+            "attempt_id": aid,
+            "outcome": "UNKNOWN",
+            "client_order_id": cid,
+            "reason_code": "KRAKEN_FUTURES_MISSING_SEND_STATUS",
+            "evidence": evidence,
+            "retry_disposition": "RECONCILE_FIRST",
+        }
+    operation_status = raw_operation_status.strip()
+    if raw_operation_status != operation_status:
+        return {
+            "attempt_id": aid,
+            "outcome": "UNKNOWN",
+            "client_order_id": cid,
+            "reason_code": "KRAKEN_FUTURES_NONCANONICAL_SEND_STATUS",
+            "evidence": evidence,
+            "retry_disposition": "RECONCILE_FIRST",
+        }
+
+    provider_order_id_value = status.get("order_id")
+    alias_order_id = status.get("orderId")
+    if (
+        provider_order_id_value not in (None, "")
+        and alias_order_id not in (None, "")
+        and provider_order_id_value != alias_order_id
+    ):
+        return unknown("INCONSISTENT_ORDER_ID")
+    if provider_order_id_value in (None, ""):
+        provider_order_id_value = alias_order_id
+
+    if operation_status == "placed":
+        if provider_order_id_value in (None, ""):
+            return {
+                "attempt_id": aid,
+                "outcome": "UNKNOWN",
+                "client_order_id": cid,
+                "reason_code": "KRAKEN_FUTURES_PLACED_WITHOUT_ORDER_ID",
+                "evidence": evidence,
+                "retry_disposition": "RECONCILE_FIRST",
+            }
+        if (
+            type(provider_order_id_value) is not str
+            or provider_order_id_value != provider_order_id_value.strip()
+        ):
+            return unknown("NONCANONICAL_ORDER_ID")
+        provider_order_id = provider_order_id_value
+        return {
+            "attempt_id": aid,
+            "outcome": "ACKNOWLEDGED",
+            "provider_order_id": provider_order_id,
+            "client_order_id": cid,
+            "evidence": evidence,
+            "retry_disposition": "NEVER",
+        }
+
+    if operation_status == "insufficientAvailableFunds":
+        if provider_order_id_value not in (None, ""):
+            return {
+                "attempt_id": aid,
+                "outcome": "UNKNOWN",
+                "client_order_id": cid,
+                "reason_code": "KRAKEN_FUTURES_INCONSISTENT_SEND_STATUS",
+                "evidence": evidence,
+                "retry_disposition": "RECONCILE_FIRST",
+            }
+        return {
+            "attempt_id": aid,
+            "outcome": "REJECTED",
+            "client_order_id": cid,
+            "reason_code": "KRAKEN_FUTURES_INSUFFICIENT_AVAILABLE_FUNDS",
+            "evidence": evidence,
+            "retry_disposition": "NEVER",
+        }
+
     return {
         "attempt_id": aid,
-        "outcome": "ACKNOWLEDGED",
-        "provider_order_id": provider_order_id,
+        "outcome": "UNKNOWN",
         "client_order_id": cid,
+        "reason_code": "KRAKEN_FUTURES_UNCLASSIFIED_SEND_STATUS",
         "evidence": evidence,
-        "retry_disposition": "NEVER",
+        "retry_disposition": "RECONCILE_FIRST",
     }
 
 

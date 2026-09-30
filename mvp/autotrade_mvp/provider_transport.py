@@ -39,7 +39,9 @@ from urllib.request import (
 
 from .capabilities import CapabilityRegistry, CapabilitySnapshot
 from .dispatch import ExactJsonTransportResponse
+from .exact_decimal import ExactDecimalError, parse_canonical_decimal_text
 from .persistence import JournalStore, payload_digest
+from .kraken_futures import validate_futures_client_order_id
 from .kraken_spot import (
     spot_submission_requires_reconciliation,
     validate_spot_client_order_id,
@@ -300,6 +302,26 @@ WHITEBIT_ENDPOINT_POLICIES: Mapping[str, ProviderEndpointPolicy] = (
                 environment="LIVE",
                 base_url="https://whitebit.com",
                 allowed_hosts=frozenset({"whitebit.com"}),
+            ),
+        }
+    )
+)
+
+
+KRAKEN_FUTURES_ENDPOINT_POLICIES: Mapping[str, ProviderEndpointPolicy] = (
+    MappingProxyType(
+        {
+            "LIVE": ProviderEndpointPolicy(
+                provider_id="KRAKEN",
+                environment="LIVE",
+                base_url="https://futures.kraken.com",
+                allowed_hosts=frozenset({"futures.kraken.com"}),
+            ),
+            "DEMO": ProviderEndpointPolicy(
+                provider_id="KRAKEN",
+                environment="PAPER",
+                base_url="https://demo-futures.kraken.com",
+                allowed_hosts=frozenset({"demo-futures.kraken.com"}),
             ),
         }
     )
@@ -837,9 +859,15 @@ class SignedHttpRequest:
             or parsed.fragment
         ):
             raise ProviderTransportScopeError("signed request URL is invalid")
-        if type(self.body) is not bytes or not self.body:
+        if type(self.body) is not bytes:
             raise ProviderTransportScopeError(
-                "signed request body must be non-empty exact bytes"
+                "signed request body must be exact bytes"
+            )
+        has_query = bool(parsed.query)
+        has_body = bool(self.body)
+        if has_query == has_body:
+            raise ProviderTransportScopeError(
+                "signed POST requires exactly one payload channel: URL query or body"
             )
         if not isinstance(self.headers, Mapping):
             raise ProviderTransportScopeError("headers must be a mapping")
@@ -1021,7 +1049,7 @@ class UrllibJsonWireClient:
                 "request must be SignedHttpRequest or AuthenticatedReadHttpRequest"
             )
         if isinstance(request, SignedHttpRequest):
-            data = request.body
+            data = request.body or None
             method = request.method
         else:
             data = request.body or None
@@ -2089,6 +2117,203 @@ class WhiteBitHttpTransport:
             final_guard()
             wire_response = self.wire_client.send(signed)
             return _whitebit_exact_trading_response(wire_response)
+
+
+@dataclass(frozen=True)
+class KrakenFuturesCredential:
+    """Exact private credential shape used only at the signing boundary."""
+
+    api_key: str
+    api_secret: str
+
+    @classmethod
+    def parse(cls, plaintext: object) -> "KrakenFuturesCredential":
+        if type(plaintext) is not str or not plaintext:
+            raise ProviderTransportScopeError(
+                "Kraken Futures credential material is unavailable"
+            )
+        try:
+            value = json.loads(plaintext)
+        except json.JSONDecodeError as error:
+            raise ProviderTransportScopeError(
+                "Kraken Futures credential material has invalid format"
+            ) from error
+        if not isinstance(value, dict) or set(value) != {"api_key", "api_secret"}:
+            raise ProviderTransportScopeError(
+                "Kraken Futures credential material must contain exact api_key/api_secret fields"
+            )
+        api_key = _canonical_text(value["api_key"], name="api_key")
+        api_secret = _canonical_text(value["api_secret"], name="api_secret")
+        try:
+            decoded = base64.b64decode(api_secret, validate=True)
+        except (ValueError, binascii.Error, UnicodeEncodeError) as error:
+            raise ProviderTransportScopeError(
+                "Kraken Futures api_secret must be canonical base64"
+            ) from error
+        if not decoded or base64.b64encode(decoded).decode("ascii") != api_secret:
+            raise ProviderTransportScopeError(
+                "Kraken Futures api_secret must be canonical base64 of non-empty bytes"
+            )
+        return cls(api_key=api_key, api_secret=api_secret)
+
+
+def _kraken_futures_decimal_text(value: object, *, name: str) -> str:
+    try:
+        number = parse_canonical_decimal_text(value)
+    except ExactDecimalError as error:
+        raise ProviderTransportScopeError(
+            f"Kraken Futures {name} must be canonical bounded decimal text"
+        ) from error
+    if number <= 0:
+        raise ProviderTransportScopeError(
+            f"Kraken Futures {name} must be positive and finite"
+        )
+    return value
+
+
+def _kraken_futures_prepared_body(body: object) -> Mapping[str, str]:
+    if type(body) not in (dict, MappingProxyType):
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures request body must be a mapping"
+        )
+    normalized = dict(body)
+    if any(type(key) is not str for key in normalized):
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures order keys must be exact text"
+        )
+    required = {"orderType", "symbol", "side", "size", "cliOrdId"}
+    optional = {"limitPrice", "reduceOnly"}
+    if not required <= set(normalized) or set(normalized) - required - optional:
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures order body is not canonical"
+        )
+    if any(type(value) is not str for value in normalized.values()):
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures order values must be exact text"
+        )
+    order_type = _canonical_text(normalized["orderType"], name="orderType")
+    if order_type not in {"mkt", "lmt"}:
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures orderType must be mkt or lmt"
+        )
+    symbol = _canonical_text(normalized["symbol"], name="symbol")
+    side = _canonical_text(normalized["side"], name="side")
+    if side not in {"buy", "sell"}:
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures side must be buy or sell"
+        )
+    size = _kraken_futures_decimal_text(normalized["size"], name="size")
+    try:
+        client_id = validate_futures_client_order_id(normalized["cliOrdId"])
+    except Exception as error:
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures client order id is invalid"
+        ) from error
+    if client_id != normalized["cliOrdId"]:
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures client order id must be canonical text"
+        )
+
+    price = normalized.get("limitPrice")
+    if order_type == "mkt":
+        if price is not None:
+            raise ProviderTransportScopeError(
+                "prepared Kraken Futures market order must omit limitPrice"
+            )
+    elif price is None:
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures limit order requires limitPrice"
+        )
+    else:
+        normalized["limitPrice"] = _kraken_futures_decimal_text(
+            price,
+            name="limitPrice",
+        )
+    if "reduceOnly" in normalized and normalized["reduceOnly"] != "true":
+        raise ProviderTransportScopeError(
+            "prepared Kraken Futures reduceOnly must be literal true when present"
+        )
+    normalized["orderType"] = order_type
+    normalized["symbol"] = symbol
+    normalized["side"] = side
+    normalized["size"] = size
+    normalized["cliOrdId"] = client_id
+    return MappingProxyType(normalized)
+
+
+class KrakenFuturesSigner:
+    """Pure Derivatives v3 signer; this class owns no send authority."""
+
+    PLACE_ORDER_ENDPOINT = "/derivatives/api/v3/sendorder"
+    SIGNING_PATH = "/api/v3/sendorder"
+
+    @staticmethod
+    def sign(
+        *,
+        policy: ProviderEndpointPolicy,
+        provider_environment: object,
+        endpoint: object,
+        body: object,
+        credential_plaintext: object,
+        nonce: object,
+    ) -> SignedHttpRequest:
+        if type(provider_environment) is not str or type(policy) is not ProviderEndpointPolicy:
+            raise ProviderTransportScopeError(
+                "Kraken Futures policy does not match exact provider environment"
+            )
+        provider_env = provider_environment
+        canonical_policy = KRAKEN_FUTURES_ENDPOINT_POLICIES.get(provider_env)
+        exact_policy_values = (
+            type(policy.provider_id) is str
+            and type(policy.environment) is str
+            and type(policy.base_url) is str
+            and type(policy.allowed_hosts) is frozenset
+            and all(type(host) is str for host in policy.allowed_hosts)
+            and type(policy.timeout_seconds) is int
+        )
+        if canonical_policy is None or not exact_policy_values or policy != canonical_policy:
+            raise ProviderTransportScopeError(
+                "Kraken Futures policy does not match exact provider environment"
+            )
+        path = endpoint
+        if type(path) is not str or path != KrakenFuturesSigner.PLACE_ORDER_ENDPOINT:
+            raise ProviderTransportScopeError(
+                "Kraken Futures signer permits only the canonical sendorder path"
+            )
+        parameters = _kraken_futures_prepared_body(body)
+        if (
+            type(nonce) is not int
+            or nonce <= 0
+            or nonce > _UINT64_MAX
+        ):
+            raise ProviderTransportScopeError(
+                "Kraken Futures nonce must be an unsigned 64-bit positive integer"
+            )
+        credential = KrakenFuturesCredential.parse(credential_plaintext)
+        exact_query = urlencode(sorted(parameters.items()))
+        exact_query_bytes = exact_query.encode("ascii")
+        digest = sha256(
+            exact_query_bytes
+            + str(nonce).encode("ascii")
+            + KrakenFuturesSigner.SIGNING_PATH.encode("ascii")
+        ).digest()
+        secret = base64.b64decode(credential.api_secret, validate=True)
+        signature = base64.b64encode(
+            hmac.new(secret, digest, sha512).digest()
+        ).decode("ascii")
+        return SignedHttpRequest(
+            method="POST",
+            url=ProviderEndpointPolicy.absolute_url(canonical_policy, path) + "?" + exact_query,
+            headers=MappingProxyType(
+                {
+                    "APIKey": credential.api_key,
+                    "Nonce": str(nonce),
+                    "Authent": signature,
+                }
+            ),
+            body=b"",
+            timeout_seconds=canonical_policy.timeout_seconds,
+        )
 
 
 @dataclass(frozen=True)

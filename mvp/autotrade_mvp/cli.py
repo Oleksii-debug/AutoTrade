@@ -63,18 +63,24 @@ def main() -> int:
     parser.add_argument("--multi-episode", action="store_true", help="Run semicolon-separated episodes")
     parser.add_argument("--canonical-simulation", action="store_true", help="Run one journal-backed canonical simulated episode")
     parser.add_argument("--episode-id", default="episode-1", help="Stable canonical simulation episode identity")
+    parser.add_argument("--source-sha", help="Exact lowercase 40-character Git SHA for canonical simulation identity")
     parser.add_argument("--at", help="Optional ISO timestamp for deterministic simulation evidence")
     parser.add_argument("--fault-after-send", action="store_true", help="Inject an ambiguous simulated send, which will never be retried")
     args = parser.parse_args()
     if args.canonical_simulation:
         if args.status or args.accessible_status or args.economic_report or args.multi_episode:
             parser.error("--canonical-simulation cannot be combined with legacy modes")
+        if args.source_sha is None:
+            parser.error("--canonical-simulation requires --source-sha")
         result = run_canonical_simulation(
             args.prices.split(","), args.state_dir, episode_id=args.episode_id,
-            now=args.at, fault_after_send=args.fault_after_send,
+            source_sha=args.source_sha, now=args.at,
+            fault_after_send=args.fault_after_send,
         )
         print(json.dumps(result, indent=2))
         return 0
+    if args.source_sha is not None:
+        parser.error("--source-sha requires --canonical-simulation")
     if args.status:
         print(json.dumps(get_status(args.state_dir), indent=2))
         return 0

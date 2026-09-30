@@ -681,6 +681,28 @@ def _dispatch_provider_domain(
     return provider, provider_environment
 
 
+def _dispatch_prepared_request_sha256(
+    submission_scope: Mapping[str, Any] | None,
+) -> str:
+    """Return the exact provider-request digest bound into financial dispatch scope."""
+
+    if submission_scope is None or not isinstance(submission_scope, Mapping):
+        raise ValueError("submission_scope must be a mapping")
+    value = submission_scope.get("prepared_request_sha256")
+    if not isinstance(value, str) or not value.startswith("sha256:"):
+        raise ValueError(
+            "submission_scope prepared_request_sha256 must be a canonical SHA-256 digest"
+        )
+    digest = value.removeprefix("sha256:")
+    if len(digest) != 64 or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
+        raise ValueError(
+            "submission_scope prepared_request_sha256 must be a canonical SHA-256 digest"
+        )
+    return value
+
+
 @dataclass(frozen=True)
 class RiskAuthorityRequest:
     """Scope presented to the service-owned authoritative risk resolver.
@@ -4053,7 +4075,12 @@ class AuthorityService:
             else _text(capability_snapshot_id, name="capability_snapshot_id")
         )
         expected_submission_scope_hash: str | None = None
-        if submission_scope is not None:
+        if submission_scope is None:
+            if env in {"PAPER", "LIVE"}:
+                raise ValueError(
+                    "financial dispatch guard requires exact submission_scope"
+                )
+        else:
             if not isinstance(submission_scope, Mapping):
                 raise ValueError("submission_scope must be a mapping")
             try:
@@ -4064,11 +4091,24 @@ class AuthorityService:
                 raise ValueError(
                     "submission_scope must be canonical JSON"
                 ) from error
-            _dispatch_provider_domain(
-                canonical_submission_scope,
-                account_id=account,
-                environment=env,
+            dispatch_provider, dispatch_provider_environment = (
+                _dispatch_provider_domain(
+                    canonical_submission_scope,
+                    account_id=account,
+                    environment=env,
+                )
             )
+            if env in {"PAPER", "LIVE"}:
+                if (
+                    dispatch_provider is None
+                    or dispatch_provider_environment is None
+                ):
+                    raise ValueError(
+                        "financial dispatch submission_scope requires provider domain"
+                    )
+                _dispatch_prepared_request_sha256(
+                    canonical_submission_scope
+                )
             expected_submission_scope_hash = (
                 "sha256:"
                 + sha256(
@@ -4096,6 +4136,25 @@ class AuthorityService:
                     canonical_json(canonical_prepared_scope).encode("utf-8")
                 ).hexdigest()
             )
+            if env in {"PAPER", "LIVE"}:
+                try:
+                    prepared_provider, prepared_provider_environment = (
+                        _dispatch_provider_domain(
+                            canonical_prepared_scope,
+                            account_id=account,
+                            environment=env,
+                        )
+                    )
+                    if (
+                        prepared_provider is None
+                        or prepared_provider_environment is None
+                    ):
+                        return False, "provider_domain_required"
+                    _dispatch_prepared_request_sha256(
+                        canonical_prepared_scope
+                    )
+                except ValueError:
+                    return False, "submission_scope_invalid"
             if prepared_submission_scope_hash != calculated_hash:
                 return False, "submission_scope_hash_mismatch"
             if (

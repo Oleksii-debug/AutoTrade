@@ -15,27 +15,40 @@ import re
 from typing import Iterable
 from uuid import UUID
 
+from autotrade_numeric import (
+    MAX_INTEGER_DIGITS,
+    MAX_DECIMAL_TEXT_LENGTH,
+    MAX_SIGNIFICANT_DIGITS,
+    as_fraction,
+    bounded_fraction,
+)
+
 
 def _decimal(value, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise TypeError(f"{name} must use Decimal, string or integer input")
+    # Reject caller-polymorphic inputs before virtual methods or text rendering.
+    if type(value) not in (Decimal, str, int):
+        raise TypeError(f"{name} must use exact built-in Decimal, string or integer input")
+    if type(value) is str and len(value) > MAX_DECIMAL_TEXT_LENGTH:
+        raise ValueError(f"{name} exceeds decimal text admission envelope")
+    if type(value) is int and value.bit_length() > MAX_INTEGER_DIGITS * 4 + 1:
+        raise ValueError(f"{name} exceeds integer admission envelope")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
+        result = value if type(value) is Decimal else Decimal(value)
     except (InvalidOperation, ValueError, TypeError) as error:
         raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ValueError(f"{name} must be a finite decimal")
+    # The neutral v5 converter owns bounds, without consulting ambient Context.
+    as_fraction(result)
     return result
 
 
 def _time(value: datetime, *, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
+    if type(value) is not datetime or value.tzinfo is None:
         raise ValueError(f"{name} must be timezone-aware")
     return value.astimezone(timezone.utc)
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
 
@@ -324,6 +337,251 @@ class DeterministicProposal:
                 )
 
 
+def _parse_utc_text(value: str, *, name: str) -> datetime:
+    text = _text(value, name=name)
+    if not text.endswith("Z"):
+        raise ValueError(f"{name} must be canonical UTC text ending in Z")
+    try:
+        parsed = datetime.fromisoformat(text[:-1] + "+00:00")
+    except ValueError as error:
+        raise ValueError(f"{name} must be canonical UTC text") from error
+    return _time(parsed, name=name)
+
+
+def _proposal_document(proposal: DeterministicProposal) -> dict[str, object]:
+    if type(proposal) is not DeterministicProposal:
+        raise TypeError("proposal must be DeterministicProposal")
+    return {
+        "symbol": proposal.symbol,
+        "action": proposal.action,
+        "quantity": str(proposal.quantity),
+        "decision_time": _utc_text(proposal.decision_time),
+        "evidence_event_ids": list(proposal.evidence_event_ids),
+        "model_calls": proposal.model_calls,
+        "economic_edge_claim": proposal.economic_edge_claim,
+        "reason": proposal.reason,
+        "information_cutoff": (
+            None
+            if proposal.information_cutoff is None
+            else _utc_text(proposal.information_cutoff)
+        ),
+        "horizon_seconds": proposal.horizon_seconds,
+        "expiry": None if proposal.expiry is None else _utc_text(proposal.expiry),
+        "strategy_version": proposal.strategy_version,
+        "strategy_fingerprint": proposal.strategy_fingerprint,
+        "strategy_configuration_fingerprint": (
+            proposal.strategy_configuration_fingerprint
+        ),
+    }
+
+
+def _proposal_from_document(payload: object) -> DeterministicProposal:
+    expected = {
+        "symbol", "action", "quantity", "decision_time", "evidence_event_ids",
+        "model_calls", "economic_edge_claim", "reason", "information_cutoff",
+        "horizon_seconds", "expiry", "strategy_version", "strategy_fingerprint",
+        "strategy_configuration_fingerprint",
+    }
+    if not isinstance(payload, dict) or set(payload) != expected:
+        raise ValueError("registered run proposal document is invalid")
+    evidence = payload["evidence_event_ids"]
+    if not isinstance(evidence, list):
+        raise ValueError("registered run proposal evidence must be an array")
+    cutoff = payload["information_cutoff"]
+    expiry = payload["expiry"]
+    return DeterministicProposal(
+        symbol=payload["symbol"],
+        action=payload["action"],
+        quantity=payload["quantity"],
+        decision_time=_parse_utc_text(payload["decision_time"], name="decision_time"),
+        evidence_event_ids=tuple(evidence),
+        model_calls=payload["model_calls"],
+        economic_edge_claim=payload["economic_edge_claim"],
+        reason=payload["reason"],
+        information_cutoff=(
+            None if cutoff is None
+            else _parse_utc_text(cutoff, name="information_cutoff")
+        ),
+        horizon_seconds=payload["horizon_seconds"],
+        expiry=None if expiry is None else _parse_utc_text(expiry, name="expiry"),
+        strategy_version=payload["strategy_version"],
+        strategy_fingerprint=payload["strategy_fingerprint"],
+        strategy_configuration_fingerprint=payload[
+            "strategy_configuration_fingerprint"
+        ],
+    )
+
+
+@dataclass(frozen=True)
+class RegisteredStrategyRunReceipt:
+    """Replay-verifiable proof of one registered deterministic strategy run."""
+
+    strategy_snapshot: str
+    instrument_version: str
+    symbol: str
+    decision_time: datetime
+    observations: tuple[CausalObservation, ...]
+    proposal: DeterministicProposal
+
+    def __post_init__(self) -> None:
+        if type(self.strategy_snapshot) is not str or not self.strategy_snapshot:
+            raise ValueError("strategy_snapshot is required")
+        strategy = ReturnThresholdBaseline.restore(self.strategy_snapshot)
+        if strategy.snapshot() != self.strategy_snapshot:
+            raise ValueError("strategy_snapshot must use canonical snapshot bytes")
+        if strategy.descriptor is None:
+            raise ValueError("registered run requires a registered strategy descriptor")
+        if strategy._observations_by_id or any(strategy._history.values()):
+            raise ValueError("registered run strategy snapshot must be pristine")
+        instrument = _text(self.instrument_version, name="instrument_version")
+        symbol = _text(self.symbol, name="symbol")
+        decision = _time(self.decision_time, name="decision_time")
+        if type(self.observations) is not tuple:
+            raise ValueError("registered run observations must be a tuple")
+        observations = tuple(self.observations)
+        for observation in observations:
+            if type(observation) is not CausalObservation:
+                raise TypeError(
+                    "registered run observations must contain CausalObservation values"
+                )
+            if observation.available_at > decision:
+                raise ValueError(
+                    "registered run observation is not available at decision_time"
+                )
+        event_ids = tuple(item.event_id for item in observations)
+        if len(set(event_ids)) != len(event_ids):
+            raise ValueError("registered run observations contain duplicate event_id")
+        if type(self.proposal) is not DeterministicProposal:
+            raise TypeError("registered run proposal must be DeterministicProposal")
+        proposal = self.proposal
+        descriptor = strategy.descriptor
+        if proposal.symbol != symbol or proposal.decision_time != decision:
+            raise ValueError("registered run proposal identity does not match receipt")
+        if proposal.strategy_fingerprint != descriptor.fingerprint:
+            raise ValueError(
+                "registered run descriptor fingerprint does not match proposal"
+            )
+        if (
+            proposal.strategy_configuration_fingerprint
+            != strategy.configuration_fingerprint
+        ):
+            raise ValueError(
+                "registered run configuration fingerprint does not match proposal"
+            )
+        if proposal.strategy_version != f"{descriptor.strategy_id}@{descriptor.version}":
+            raise ValueError("registered run strategy version does not match proposal")
+        if proposal.information_cutoff != decision:
+            raise ValueError(
+                "registered run information_cutoff does not match decision_time"
+            )
+        if proposal.horizon_seconds != descriptor.horizon_seconds:
+            raise ValueError("registered run horizon does not match descriptor")
+        if proposal.expiry != decision + timedelta(seconds=descriptor.horizon_seconds):
+            raise ValueError("registered run expiry does not match descriptor horizon")
+        object.__setattr__(self, "instrument_version", instrument)
+        object.__setattr__(self, "symbol", symbol)
+        object.__setattr__(self, "decision_time", decision)
+        object.__setattr__(self, "observations", observations)
+
+    def canonical_document(self) -> dict[str, object]:
+        return {
+            "schema_version": "1.0.0",
+            "strategy_snapshot": self.strategy_snapshot,
+            "instrument_version": self.instrument_version,
+            "symbol": self.symbol,
+            "decision_time": _utc_text(self.decision_time),
+            "observations": [
+                {
+                    "event_id": item.event_id,
+                    "symbol": item.symbol,
+                    "available_at": _utc_text(item.available_at),
+                    "price": str(item.price),
+                }
+                for item in self.observations
+            ],
+            "proposal": _proposal_document(self.proposal),
+        }
+
+    @property
+    def fingerprint(self) -> str:
+        return "sha256:" + sha256(
+            _canonical_json(self.canonical_document()).encode("utf-8")
+        ).hexdigest()
+
+    def to_json(self) -> str:
+        return _canonical_json(self.canonical_document())
+
+    @classmethod
+    def from_json(cls, value: str) -> "RegisteredStrategyRunReceipt":
+        try:
+            payload = json.loads(value)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ValueError("registered run receipt is invalid JSON") from error
+        expected = {
+            "schema_version", "strategy_snapshot", "instrument_version", "symbol",
+            "decision_time", "observations", "proposal",
+        }
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != expected
+            or payload.get("schema_version") != "1.0.0"
+            or not isinstance(payload.get("observations"), list)
+        ):
+            raise ValueError("registered run receipt structure is invalid")
+        observations = []
+        for item in payload["observations"]:
+            if not isinstance(item, dict) or set(item) != {
+                "event_id", "symbol", "available_at", "price"
+            }:
+                raise ValueError("registered run observation document is invalid")
+            observations.append(
+                CausalObservation.create(
+                    event_id=item["event_id"],
+                    symbol=item["symbol"],
+                    available_at=_parse_utc_text(
+                        item["available_at"], name="observation available_at"
+                    ),
+                    price=item["price"],
+                )
+            )
+        return cls(
+            strategy_snapshot=payload["strategy_snapshot"],
+            instrument_version=payload["instrument_version"],
+            symbol=payload["symbol"],
+            decision_time=_parse_utc_text(
+                payload["decision_time"], name="decision_time"
+            ),
+            observations=tuple(observations),
+            proposal=_proposal_from_document(payload["proposal"]),
+        )
+
+
+def verify_registered_strategy_run(
+    proposal: DeterministicProposal,
+    receipt: RegisteredStrategyRunReceipt,
+) -> str:
+    """Replay one receipt from pristine state and return its verified digest."""
+
+    if type(proposal) is not DeterministicProposal:
+        raise TypeError("proposal must be DeterministicProposal")
+    if type(receipt) is not RegisteredStrategyRunReceipt:
+        raise TypeError("receipt must be RegisteredStrategyRunReceipt")
+    if receipt.proposal != proposal:
+        raise ValueError(
+            "registered run receipt proposal does not match supplied proposal"
+        )
+    strategy = ReturnThresholdBaseline.restore(receipt.strategy_snapshot)
+    replayed = run_baseline(
+        strategy,
+        receipt.observations,
+        decision_time=receipt.decision_time,
+        symbol=receipt.symbol,
+    )
+    if replayed != proposal:
+        raise ValueError("registered run receipt does not replay to supplied proposal")
+    return receipt.fingerprint
+
+
 @dataclass(frozen=True)
 class StrategyEconomicsBinding:
     """Frozen ex-ante economics/capacity evidence for one deterministic proposal cut.
@@ -351,6 +609,7 @@ class StrategyEconomicsBinding:
     capacity_assessment_sha256: str
     max_feasible_quantity: Decimal
     lot_size: Decimal
+    registered_run_receipt_sha256: str | None = None
     required_evidence_dimensions: tuple[str, ...] = ()
     dimension_evidence: tuple[tuple[str, str], ...] = ()
     status: str = "INCONCLUSIVE"
@@ -429,6 +688,15 @@ class StrategyEconomicsBinding:
             "execution_fidelity",
             _text(self.execution_fidelity, name="execution_fidelity").upper(),
         )
+        if self.registered_run_receipt_sha256 is not None:
+            object.__setattr__(
+                self,
+                "registered_run_receipt_sha256",
+                _digest(
+                    self.registered_run_receipt_sha256,
+                    name="registered_run_receipt_sha256",
+                ),
+            )
 
         lower_bound = _decimal(
             self.after_cost_lower_bound,
@@ -532,6 +800,7 @@ class StrategyEconomicsBinding:
             "capacity_assessment_sha256": self.capacity_assessment_sha256,
             "max_feasible_quantity": str(self.max_feasible_quantity),
             "lot_size": str(self.lot_size),
+            "registered_run_receipt_sha256": self.registered_run_receipt_sha256,
             "required_evidence_dimensions": list(
                 self.required_evidence_dimensions
             ),
@@ -550,6 +819,21 @@ class StrategyEconomicsBinding:
         ).hexdigest()
 
 
+def _require_registered_economics_join(
+    receipt: RegisteredStrategyRunReceipt,
+    economics: StrategyEconomicsBinding,
+) -> None:
+    """Require one economics evidence chain to name the exact registered run."""
+
+    if type(receipt) is not RegisteredStrategyRunReceipt:
+        raise TypeError("registered run receipt must be canonical RegisteredStrategyRunReceipt")
+    receipt_digest = verify_registered_strategy_run(receipt.proposal, receipt)
+    if economics.registered_run_receipt_sha256 != receipt_digest:
+        raise ValueError(
+            "economics evidence is not bound to the exact registered strategy run"
+        )
+
+
 @dataclass(frozen=True)
 class EconomicsBoundProposal:
     """Gross deterministic signal plus a non-expansive ex-ante economics gate."""
@@ -560,6 +844,79 @@ class EconomicsBoundProposal:
     action: str
     quantity: Decimal
     reason: str
+    registered_run_receipt: RegisteredStrategyRunReceipt | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.gross_proposal) is not DeterministicProposal:
+            raise TypeError("gross_proposal must be DeterministicProposal")
+        if type(self.economics) is not StrategyEconomicsBinding:
+            raise TypeError("economics must be StrategyEconomicsBinding")
+        instrument = _text(self.instrument_version, name="instrument_version")
+        receipt = self.registered_run_receipt
+        action = _text(self.action, name="action").upper()
+        if action not in {"BUY", "SELL", "HOLD"}:
+            raise ValueError("unsupported economics-bound proposal action")
+        quantity = _decimal(self.quantity, name="quantity")
+        if quantity < 0:
+            raise ValueError("economics-bound quantity must be non-negative")
+        if action == "HOLD" and quantity != 0:
+            raise ValueError("HOLD economics-bound proposal quantity must be zero")
+        if action in {"BUY", "SELL"} and quantity <= 0:
+            raise ValueError("BUY/SELL economics-bound proposal quantity must be positive")
+        gross = self.gross_proposal
+        economics = self.economics
+        if gross.action != "HOLD" and receipt is None:
+            raise ValueError(
+                "exposure-bearing registered proposal requires a verified run receipt"
+            )
+        if receipt is not None:
+            verify_registered_strategy_run(gross, receipt)
+            if receipt.instrument_version != instrument:
+                raise ValueError(
+                    "registered run instrument_version does not match economics binding"
+                )
+            if action != "HOLD":
+                _require_registered_economics_join(receipt, economics)
+        if gross.strategy_fingerprint != economics.strategy_fingerprint:
+            raise ValueError("economics strategy fingerprint does not match proposal")
+        if (
+            gross.strategy_configuration_fingerprint
+            != economics.strategy_configuration_fingerprint
+        ):
+            raise ValueError(
+                "economics strategy configuration fingerprint does not match proposal"
+            )
+        if economics.instrument_version != instrument:
+            raise ValueError("economics instrument_version does not match proposal")
+        if economics.information_cutoff != gross.information_cutoff:
+            raise ValueError("economics information_cutoff does not match proposal")
+        if economics.decision_time != gross.decision_time:
+            raise ValueError("economics decision_time does not match proposal")
+        if economics.horizon_seconds != gross.horizon_seconds:
+            raise ValueError("economics horizon does not match proposal")
+        if economics.expiry != gross.expiry:
+            raise ValueError("economics expiry does not match proposal")
+        if action != "HOLD":
+            if action != gross.action:
+                raise ValueError("economics-bound action cannot change gross direction")
+            if quantity > gross.quantity:
+                raise ValueError("economics binding cannot increase proposal exposure")
+            if quantity > economics.max_feasible_quantity:
+                raise ValueError(
+                    "economics-bound quantity exceeds frozen capacity"
+                )
+            if quantity % economics.lot_size != 0:
+                raise ValueError(
+                    "economics-bound quantity must be an executable lot multiple"
+                )
+            if economics.status != "QUALIFIED":
+                raise ValueError(
+                    "non-HOLD economics-bound proposal requires QUALIFIED economics"
+                )
+        object.__setattr__(self, "instrument_version", instrument)
+        object.__setattr__(self, "action", action)
+        object.__setattr__(self, "quantity", quantity)
+        object.__setattr__(self, "reason", _text(self.reason, name="reason"))
 
     @property
     def fingerprint(self) -> str:
@@ -581,6 +938,10 @@ class EconomicsBoundProposal:
             "evidence_event_ids": list(gross.evidence_event_ids),
             "economics_binding_sha256": self.economics.fingerprint,
             "instrument_version": self.instrument_version,
+            "registered_run_receipt_sha256": (
+                None if self.registered_run_receipt is None
+                else self.registered_run_receipt.fingerprint
+            ),
             "effective_action": self.action,
             "effective_quantity": str(self.quantity),
             "reason": self.reason,
@@ -595,12 +956,13 @@ def bind_strategy_economics(
     economics: StrategyEconomicsBinding,
     *,
     instrument_version: str,
+    registered_run_receipt: RegisteredStrategyRunReceipt | None = None,
 ) -> EconomicsBoundProposal:
     """Bind frozen decision-time economics without expanding the gross signal."""
 
-    if not isinstance(proposal, DeterministicProposal):
+    if type(proposal) is not DeterministicProposal:
         raise TypeError("proposal must be DeterministicProposal")
-    if not isinstance(economics, StrategyEconomicsBinding):
+    if type(economics) is not StrategyEconomicsBinding:
         raise TypeError("economics must be StrategyEconomicsBinding")
     instrument = _text(instrument_version, name="instrument_version")
     if (
@@ -611,6 +973,21 @@ def bind_strategy_economics(
         or proposal.strategy_configuration_fingerprint is None
     ):
         raise ValueError("proposal lacks registered strategy/horizon metadata")
+    if proposal.action != "HOLD" and registered_run_receipt is None:
+        raise ValueError(
+            "exposure-bearing registered proposal requires a verified run receipt"
+        )
+    if registered_run_receipt is not None:
+        verify_registered_strategy_run(proposal, registered_run_receipt)
+        if registered_run_receipt.instrument_version != instrument:
+            raise ValueError(
+                "registered run instrument_version does not match economics binding"
+            )
+        if proposal.action != "HOLD" and economics.status == "QUALIFIED":
+            _require_registered_economics_join(
+                registered_run_receipt,
+                economics,
+            )
     if economics.strategy_fingerprint != proposal.strategy_fingerprint:
         raise ValueError("economics strategy fingerprint does not match proposal")
     if (
@@ -639,6 +1016,7 @@ def bind_strategy_economics(
             action="HOLD",
             quantity=Decimal("0"),
             reason=proposal.reason,
+            registered_run_receipt=registered_run_receipt,
         )
 
     if economics.status != "QUALIFIED":
@@ -654,6 +1032,7 @@ def bind_strategy_economics(
             action="HOLD",
             quantity=Decimal("0"),
             reason=f"decision-time economics {economics.status}: {missing}",
+            registered_run_receipt=registered_run_receipt,
         )
 
     capped = min(proposal.quantity, economics.max_feasible_quantity)
@@ -667,6 +1046,7 @@ def bind_strategy_economics(
             action="HOLD",
             quantity=Decimal("0"),
             reason="decision-time capacity is below one executable lot",
+            registered_run_receipt=registered_run_receipt,
         )
     if quantity > proposal.quantity:
         raise ValueError("economics binding cannot increase proposal exposure")
@@ -681,6 +1061,7 @@ def bind_strategy_economics(
             if quantity == proposal.quantity
             else "gross signal retained with quantity reduced by frozen ex-ante capacity"
         ),
+        registered_run_receipt=registered_run_receipt,
     )
 
 
@@ -757,6 +1138,11 @@ class ReturnThresholdBaseline:
         if descriptor is not None:
             if not isinstance(descriptor, StrategyDescriptor):
                 raise TypeError("descriptor must be StrategyDescriptor or None")
+            if descriptor.family != "DETERMINISTIC_RETURN_THRESHOLD":
+                raise ValueError(
+                    "return-threshold descriptor family must be "
+                    "DETERMINISTIC_RETURN_THRESHOLD"
+                )
             if descriptor.minimum_history != lookback:
                 raise ValueError("descriptor minimum_history must equal lookback")
             bounds = {name: (Decimal(minimum), Decimal(maximum)) for name, minimum, maximum in descriptor.parameter_bounds}
@@ -790,6 +1176,8 @@ class ReturnThresholdBaseline:
         ).hexdigest()
 
     def ingest(self, observation: CausalObservation, *, simulation_time: datetime) -> bool:
+        if not isinstance(observation, CausalObservation):
+            raise TypeError("observation must be CausalObservation")
         cutoff = _time(simulation_time, name="simulation_time")
         if observation.available_at > cutoff:
             raise ValueError("observation is not causally available at simulation_time")
@@ -851,12 +1239,16 @@ class ReturnThresholdBaseline:
         window = eligible[-self.lookback:]
         first = window[0].price
         last = window[-1].price
-        change = (last / first) - Decimal("1")
-        if change > self.threshold:
+        # The registered decision is exact. Ambient Decimal precision and
+        # rounding are not part of strategy identity or receipt authority.
+        initial = as_fraction(first)
+        change = bounded_fraction((as_fraction(last) - initial) / initial)
+        threshold = as_fraction(self.threshold)
+        if change > threshold:
             action = "BUY"
             quantity = self.proposal_quantity
             reason = "registered deterministic return threshold exceeded"
-        elif change < -self.threshold:
+        elif change < -threshold:
             action = "SELL"
             quantity = self.proposal_quantity
             reason = "registered deterministic negative return threshold exceeded"
@@ -1090,6 +1482,53 @@ def run_baseline(
     return strategy.propose(symbol=symbol, decision_time=cutoff)
 
 
+def run_registered_baseline(
+    strategy: ReturnThresholdBaseline,
+    observations: Iterable[CausalObservation],
+    *,
+    decision_time: datetime,
+    symbol: str,
+    instrument_version: str,
+) -> tuple[DeterministicProposal, RegisteredStrategyRunReceipt]:
+    """Run a registered strategy from pristine state and mint replay evidence."""
+
+    if type(strategy) is not ReturnThresholdBaseline:
+        raise TypeError("strategy must be ReturnThresholdBaseline")
+    if strategy.descriptor is None:
+        raise ValueError("registered runner requires a registered strategy descriptor")
+    if strategy._observations_by_id or any(strategy._history.values()):
+        raise ValueError("registered runner requires pristine strategy state")
+    if type(strategy.descriptor) is not StrategyDescriptor:
+        raise TypeError("registered runner descriptor must be canonical StrategyDescriptor")
+    pristine_snapshot = strategy.snapshot()
+    materialized = tuple(observations)
+    for observation in materialized:
+        if type(observation) is not CausalObservation:
+            raise TypeError(
+                "registered runner observations must contain CausalObservation values"
+            )
+    event_ids = tuple(item.event_id for item in materialized)
+    if len(set(event_ids)) != len(event_ids):
+        raise ValueError("registered runner observations contain duplicate event_id")
+    runner = ReturnThresholdBaseline.restore(pristine_snapshot)
+    proposal = run_baseline(
+        runner,
+        materialized,
+        decision_time=decision_time,
+        symbol=symbol,
+    )
+    receipt = RegisteredStrategyRunReceipt(
+        strategy_snapshot=pristine_snapshot,
+        instrument_version=instrument_version,
+        symbol=symbol,
+        decision_time=decision_time,
+        observations=materialized,
+        proposal=proposal,
+    )
+    verify_registered_strategy_run(proposal, receipt)
+    return proposal, receipt
+
+
 
 def _utc_text(value: datetime) -> str:
     normalized = _time(value, name="timestamp")
@@ -1104,6 +1543,7 @@ def to_decision_proposal(
     economics_binding: StrategyEconomicsBinding,
     exit_policy_ref: str,
     compute_cost_currency: str,
+    registered_run_receipt: RegisteredStrategyRunReceipt | None = None,
     counterarguments: tuple[str, ...] = (),
 ) -> dict[str, object]:
     """Project a registered zero-model result through frozen ex-ante economics.
@@ -1113,8 +1553,10 @@ def to_decision_proposal(
     financial authority and never consumes realized post-arrival liquidity.
     """
 
-    if not isinstance(proposal, DeterministicProposal):
+    if type(proposal) is not DeterministicProposal:
         raise TypeError("proposal must be DeterministicProposal")
+    if type(economics_binding) is not StrategyEconomicsBinding:
+        raise TypeError("economics_binding must be canonical StrategyEconomicsBinding")
     if (
         proposal.information_cutoff is None
         or proposal.horizon_seconds is None
@@ -1149,6 +1591,7 @@ def to_decision_proposal(
         proposal,
         economics_binding,
         instrument_version=instrument,
+        registered_run_receipt=registered_run_receipt,
     )
     no_trade = bound.action == "HOLD"
     body: dict[str, object] = {
@@ -1176,6 +1619,10 @@ def to_decision_proposal(
             "effective_quantity": str(bound.quantity),
             "strategy_economics_binding_sha256": economics_binding.fingerprint,
             "economics_bound_proposal_sha256": bound.fingerprint,
+            "registered_run_receipt_sha256": (
+                None if registered_run_receipt is None
+                else registered_run_receipt.fingerprint
+            ),
             "gross_return_distribution_ref": (
                 economics_binding.gross_return_distribution_sha256
             ),

@@ -44,6 +44,7 @@ def read_capability(
     environment="PAPER",
     provider_environment="TESTNET",
     instrument_version="BTCUSDT@v1",
+    snapshot_id=None,
 ):
     observed_at = READ_AT - timedelta(hours=1)
     claims = tuple(
@@ -74,7 +75,7 @@ def read_capability(
         for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
     )
     return derive_capability_snapshot(
-        snapshot_id=str(uuid4()),
+        snapshot_id=snapshot_id or str(uuid4()),
         claims=claims,
         observed_at=READ_AT,
         evidence_verifier=lambda _claim: EvidenceVerification(valid=True),

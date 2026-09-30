@@ -487,6 +487,12 @@ class AuthorityAllocationBindingTests(unittest.TestCase):
 
             admitted = _admit(authority, reservations, checkpoint, result)
             self.assertEqual(admitted.outcome, "ADMITTED")
+            submission_scope = {
+                    "provider_id": admitted.provider_id,
+                    "provider_environment": admitted.provider_environment,
+                    "account_id": admitted.account_id,
+                    "environment": admitted.environment,
+                }
             binding = store.load_events(
                 "risk_decision",
                 admitted.risk_decision_id,
@@ -504,6 +510,7 @@ class AuthorityAllocationBindingTests(unittest.TestCase):
                     action="ORDER.SUBMIT",
                     now=VALID_UNTIL,
                     capability_snapshot_id=CAPABILITY_ID,
+                    submission_scope=submission_scope,
                 ),
                 (True, "allowed"),
             )
@@ -518,6 +525,7 @@ class AuthorityAllocationBindingTests(unittest.TestCase):
                     action="ORDER.SUBMIT",
                     now="2026-09-24T18:02:00.000001Z",
                     capability_snapshot_id=CAPABILITY_ID,
+                    submission_scope=submission_scope,
                 ),
                 (False, "allocation_evidence_expired"),
             )

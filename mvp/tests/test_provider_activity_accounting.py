@@ -3,9 +3,11 @@ from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_activity_accounting import (
+    AccountingConflict,
     _activity_identity,
     _book_id,
     book_external_provider_cash_activity,
@@ -19,6 +21,7 @@ def activity(
     provider_id="ALPACA",
     account_id="paper-1",
     environment="PAPER",
+    provider_environment=None,
     activity_id="cash-1",
     activity_type="DEPOSIT",
     origin="EXTERNAL",
@@ -34,6 +37,7 @@ def activity(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
         activity_id=activity_id,
         activity_type=activity_type,
         origin=origin,
@@ -101,6 +105,71 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                 environment="LIVE",
             ),
         )
+
+    def test_bybit_external_cash_replay_is_provider_environment_scoped(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            evidence = activity(
+                provider_id="BYBIT",
+                account_id="acct",
+                provider_environment="TESTNET",
+                activity_id="cash-testnet",
+                signed_amount="25",
+            )
+            transaction, inserted = book_paper_activity(
+                store,
+                provider_id="BYBIT",
+                account_id="acct",
+                activity=evidence,
+                observed_at="2026-09-24T18:01:00Z",
+            )
+            self.assertTrue(inserted)
+
+            testnet_book_id = paper_book_id(
+                provider_id="BYBIT",
+                account_id="acct",
+                provider_environment="TESTNET",
+            )
+            demo_book_id = paper_book_id(
+                provider_id="BYBIT",
+                account_id="acct",
+                provider_environment="DEMO",
+            )
+            self.assertNotEqual(testnet_book_id, demo_book_id)
+            events = store.load_events("economic_book", testnet_book_id)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(
+                events[0]["payload"]["provider_environment"],
+                "TESTNET",
+            )
+
+            reloaded = load_paper_book(
+                store,
+                provider_id="BYBIT",
+                account_id="acct",
+                provider_environment="TESTNET",
+            )
+            self.assertEqual(
+                [item.transaction_id for item in reloaded.transactions],
+                [transaction.transaction_id],
+            )
+            demo = load_paper_book(
+                store,
+                provider_id="BYBIT",
+                account_id="acct",
+                provider_environment="DEMO",
+            )
+            self.assertEqual(demo.transactions, ())
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "requires explicit provider_environment",
+            ):
+                activity(
+                    provider_id="BYBIT",
+                    account_id="acct",
+                    activity_id="missing-provider-environment",
+                )
 
     def test_bridge_requires_canonical_environment_scope(self):
         with TemporaryDirectory() as directory:
@@ -212,16 +281,33 @@ class ProviderActivityAccountingTests(unittest.TestCase):
             )
             self.assertTrue(inserted)
 
-            second, replay_inserted = book_paper_activity(
+            with patch.object(
                 store,
-                provider_id="IBKR",
-                account_id="acct-repoll",
-                activity=evidence,
-                amount="100.00",
-                observed_at="2026-09-24T18:12:00Z",
-            )
+                "commit_command",
+                wraps=store.commit_command,
+            ) as commit_command:
+                second, replay_inserted = book_paper_activity(
+                    store,
+                    provider_id="IBKR",
+                    account_id="acct-repoll",
+                    activity=evidence,
+                    amount="100.00",
+                    observed_at="2026-09-24T18:12:00Z",
+                )
             self.assertFalse(replay_inserted)
             self.assertEqual(first, second)
+            replay_events = commit_command.call_args.kwargs["events"]
+            self.assertEqual(len(replay_events), 2)
+            for replay_envelope, _topic in replay_events:
+                self.assertEqual(
+                    replay_envelope["committed_at"],
+                    "2026-09-24T18:02:00Z",
+                )
+                self.assertEqual(
+                    replay_envelope["payload"]["observed_at"],
+                    "2026-09-24T18:02:00Z",
+                )
+                self.assertEqual(replay_envelope["aggregate_version"], "1")
             self.assertEqual(
                 len(
                     store.load_events(
@@ -247,6 +333,142 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                 imported[0]["payload"]["observed_at"],
                 "2026-09-24T18:02:00Z",
             )
+
+    def test_command_without_provider_cash_effects_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            evidence = activity(
+                provider_id="IBKR",
+                account_id="acct-command-only",
+                activity_id="dep-command-only",
+            )
+
+            def command_without_effects(**kwargs):
+                return kwargs["result"], False, ()
+
+            with patch.object(
+                store,
+                "commit_command",
+                side_effect=command_without_effects,
+            ):
+                with self.assertRaisesRegex(
+                    AccountingConflict,
+                    "durable command exists without its financial effects",
+                ):
+                    book_paper_activity(
+                        store,
+                        provider_id="IBKR",
+                        account_id="acct-command-only",
+                        activity=evidence,
+                        amount="100",
+                        observed_at="2026-09-24T18:02:00Z",
+                    )
+
+    def test_concurrent_exact_provider_cash_commit_replays_idempotently(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            evidence = activity(
+                provider_id="IBKR",
+                account_id="acct-race",
+                activity_id="dep-race",
+            )
+            original_commit_command = store.commit_command
+            calls = 0
+
+            def competing_exact_commit(**kwargs):
+                nonlocal calls
+                calls += 1
+                saved_result, inserted, topics = original_commit_command(**kwargs)
+                if calls == 1:
+                    self.assertTrue(inserted)
+                    return saved_result, False, ()
+                return saved_result, inserted, topics
+
+            with patch.object(
+                store,
+                "commit_command",
+                side_effect=competing_exact_commit,
+            ):
+                transaction, inserted = book_paper_activity(
+                    store,
+                    provider_id="IBKR",
+                    account_id="acct-race",
+                    activity=evidence,
+                    amount="100",
+                    observed_at="2026-09-24T18:02:00Z",
+                )
+
+            self.assertFalse(inserted)
+            self.assertGreaterEqual(calls, 2)
+            self.assertEqual(
+                load_paper_book(
+                    store,
+                    provider_id="IBKR",
+                    account_id="acct-race",
+                ).transactions,
+                (transaction,),
+            )
+            self.assertEqual(
+                len(
+                    store.load_events(
+                        "provider_activity",
+                        paper_activity_identity(
+                            provider_id="IBKR",
+                            account_id="acct-race",
+                            activity_id="dep-race",
+                        ),
+                    )
+                ),
+                1,
+            )
+            self.assertEqual(
+                len(
+                    store.load_events(
+                        "economic_book",
+                        paper_book_id(
+                            provider_id="IBKR",
+                            account_id="acct-race",
+                        ),
+                    )
+                ),
+                1,
+            )
+
+    def test_repoll_rejects_durable_command_result_effect_mismatch(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            evidence = activity(
+                provider_id="IBKR",
+                account_id="acct-result-mismatch",
+                activity_id="dep-result-mismatch",
+            )
+            _, inserted = book_paper_activity(
+                store,
+                provider_id="IBKR",
+                account_id="acct-result-mismatch",
+                activity=evidence,
+                amount="100",
+                observed_at="2026-09-24T18:02:00Z",
+            )
+            self.assertTrue(inserted)
+
+            with patch.object(
+                store,
+                "commit_command",
+                return_value=({"tampered": True}, False, ()),
+            ):
+                with self.assertRaisesRegex(
+                    AccountingConflict,
+                    "durable command result conflicts with its financial effect",
+                ):
+                    book_paper_activity(
+                        store,
+                        provider_id="IBKR",
+                        account_id="acct-result-mismatch",
+                        activity=evidence,
+                        amount="100.00",
+                        observed_at="2026-09-24T18:12:00Z",
+                    )
 
     def test_same_activity_reobserved_later_is_idempotent(self):
         with TemporaryDirectory() as directory:
@@ -492,8 +714,8 @@ class ProviderActivityAccountingTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
             for candidate in (
-                activity(provider_id="BYBIT", account_id="acct", activity_id="unknown", origin="UNKNOWN"),
-                activity(provider_id="BYBIT", account_id="acct", activity_id="auto", origin="AUTOTRADE"),
+                activity(provider_id="BYBIT", account_id="acct", provider_environment="TESTNET", activity_id="unknown", origin="UNKNOWN"),
+                activity(provider_id="BYBIT", account_id="acct", provider_environment="TESTNET", activity_id="auto", origin="AUTOTRADE"),
             ):
                 with self.assertRaisesRegex(ValueError, "MANUAL or EXTERNAL"):
                     book_paper_activity(
@@ -513,6 +735,7 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                     activity=activity(
                         provider_id="BYBIT",
                         account_id="acct",
+                        provider_environment="TESTNET",
                         activity_id="adjustment",
                         activity_type="CASH_ADJUSTMENT",
                     ),

@@ -484,6 +484,12 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                 instrument_version=1,
                 action="ORDER.SUBMIT",
                 capability_snapshot_id="borrow-capability-1",
+                submission_scope={
+                    "provider_id": admitted.provider_id,
+                    "provider_environment": admitted.provider_environment,
+                    "account_id": admitted.account_id,
+                    "environment": admitted.environment,
+                },
             )
             self.assertEqual(
                 authority.dispatch_allowed(
@@ -817,6 +823,12 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                     action="ORDER.SUBMIT",
                     now="2026-09-25T05:01:30Z",
                     capability_snapshot_id="borrow-capability-1",
+                    submission_scope={
+                    "provider_id": admitted.provider_id,
+                    "provider_environment": admitted.provider_environment,
+                    "account_id": admitted.account_id,
+                    "environment": admitted.environment,
+                },
                 ),
                 (False, "financial_evidence_invalid"),
             )

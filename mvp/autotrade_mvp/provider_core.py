@@ -48,6 +48,65 @@ def _text(value: str, name: str) -> str:
     return value.strip()
 
 
+_RUNTIME_ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
+_BYBIT_PROVIDER_ENVIRONMENTS = frozenset({"MAINNET", "TESTNET", "DEMO"})
+
+
+def normalize_provider_environment(
+    *,
+    provider_id: str,
+    environment: str,
+    provider_environment: str | None,
+) -> str:
+    """Return one canonical provider-domain identity for authority consumers.
+
+    Runtime environment and provider environment stay separate. BYBIT retains
+    exact MAINNET/TESTNET/DEMO mapping semantics. Other providers retain any
+    canonical explicit provider-domain identity, but this function grants no
+    endpoint, credential, capability, or trading authority for that identity.
+    """
+
+    provider = _text(provider_id, "provider_id").upper()
+    runtime_environment = _text(environment, "environment").upper()
+    if runtime_environment not in _RUNTIME_ENVIRONMENTS:
+        raise ProviderCoreError(
+            "environment must be REPLAY, SIMULATION, PAPER, or LIVE"
+        )
+
+    if provider == "BYBIT":
+        if provider_environment is None:
+            raise ProviderCoreError(
+                "BYBIT requires explicit provider_environment"
+            )
+        normalized = _text(provider_environment, "provider_environment").upper()
+        if normalized not in _BYBIT_PROVIDER_ENVIRONMENTS:
+            raise ProviderCoreError(
+                "BYBIT provider_environment must be MAINNET, TESTNET or DEMO"
+            )
+        if (
+            runtime_environment == "LIVE" and normalized != "MAINNET"
+        ) or (
+            runtime_environment == "PAPER"
+            and normalized not in {"TESTNET", "DEMO"}
+        ):
+            raise ProviderCoreError(
+                "BYBIT provider_environment does not match runtime environment"
+            )
+        return normalized
+
+    normalized = (
+        runtime_environment
+        if provider_environment is None
+        else _text(provider_environment, "provider_environment").upper()
+    )
+    if len(normalized) > 64 or any(
+        character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+        for character in normalized
+    ):
+        raise ProviderCoreError("provider_environment is not canonical")
+    return normalized
+
+
 def _decimal(value, name: str, *, non_negative: bool = False) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise ProviderCoreError(f"{name} must use exact decimal input")
@@ -351,6 +410,7 @@ class ProviderResponseObservation:
     """Exact response bytes bound to one immutable authenticated query."""
 
     query_binding: AuthenticatedReadQueryBinding
+    provider_environment: str
     observed_at: str
     http_status: int
     response_sha256: str
@@ -367,6 +427,15 @@ class ProviderResponseObservation:
             raise TypeError(
                 "query_binding must be AuthenticatedReadQueryBinding"
             )
+        object.__setattr__(
+            self,
+            "provider_environment",
+            normalize_provider_environment(
+                provider_id=self.query_binding.provider_id,
+                environment=self.query_binding.environment,
+                provider_environment=self.provider_environment,
+            ),
+        )
         if (
             isinstance(self.http_status, bool)
             or not isinstance(self.http_status, int)
@@ -430,6 +499,7 @@ class ProviderResponseObservation:
         endpoint: str,
         account_id: str | None = None,
         environment: str | None = None,
+        provider_environment: str | None = None,
     ) -> None:
         self.query_binding.require_scope(
             provider_id=provider_id,
@@ -438,6 +508,20 @@ class ProviderResponseObservation:
             account_id=account_id,
             environment=environment,
         )
+        if provider_environment is not None:
+            expected_provider_environment = normalize_provider_environment(
+                provider_id=provider_id,
+                environment=(
+                    self.query_binding.environment
+                    if environment is None
+                    else environment
+                ),
+                provider_environment=provider_environment,
+            )
+            if expected_provider_environment != self.provider_environment:
+                raise ProviderCoreError(
+                    "provider-read provenance provider-environment mismatch"
+                )
 
 
 def observe_authenticated_json_response(
@@ -446,6 +530,7 @@ def observe_authenticated_json_response(
     http_status: int,
     response_bytes: bytes,
     observed_at: datetime,
+    provider_environment: str | None = None,
 ) -> ProviderResponseObservation:
     if not isinstance(query_binding, AuthenticatedReadQueryBinding):
         raise TypeError("query_binding must be AuthenticatedReadQueryBinding")
@@ -460,9 +545,16 @@ def observe_authenticated_json_response(
         )
     payload = _decode_exact_json(response_bytes)
     observed = _utc_text(observed_at, "observed_at")
+    provider_env = normalize_provider_environment(
+        provider_id=query_binding.provider_id,
+        environment=query_binding.environment,
+        provider_environment=provider_environment,
+    )
     response_digest = "sha256:" + sha256(response_bytes).hexdigest()
     identity_material = (
         query_binding.query_digest
+        + "\n"
+        + provider_env
         + "\n"
         + str(http_status)
         + "\n"
@@ -473,6 +565,7 @@ def observe_authenticated_json_response(
     evidence_ref = "provider-read:sha256:" + sha256(identity_material).hexdigest()
     return ProviderResponseObservation(
         query_binding=query_binding,
+        provider_environment=provider_env,
         observed_at=observed,
         http_status=http_status,
         response_sha256=response_digest,
@@ -579,6 +672,7 @@ class ProviderSubmissionObservation:
         instrument_versions: tuple[str, ...],
         account_id: str | None = None,
         environment: str | None = None,
+        provider_environment: str | None = None,
         client_order_id: str | None = None,
     ) -> None:
         if _text(provider_id, "provider_id").upper() != self.provider_id:
@@ -587,10 +681,6 @@ class ProviderSubmissionObservation:
             raise ProviderCoreError("provider-write provenance endpoint mismatch")
         if prepared_request_sha256 != self.request_sha256:
             raise ProviderCoreError("provider-write provenance request digest mismatch")
-        if tuple(capability_snapshot_ids) != self.capability_snapshot_ids:
-            raise ProviderCoreError("provider-write provenance capability mismatch")
-        if tuple(instrument_versions) != self.instrument_versions:
-            raise ProviderCoreError("provider-write provenance instrument mismatch")
         if account_id is not None and _text(account_id, "account_id") != self.account_id:
             raise ProviderCoreError("provider-write provenance account mismatch")
         if (
@@ -598,6 +688,27 @@ class ProviderSubmissionObservation:
             and _text(environment, "environment").upper() != self.environment
         ):
             raise ProviderCoreError("provider-write provenance environment mismatch")
+        if provider_environment is not None:
+            expected_provider_environment = normalize_provider_environment(
+                provider_id=provider_id,
+                environment=self.environment if environment is None else environment,
+                provider_environment=provider_environment,
+            )
+            actual_provider_environment = _thaw_json(
+                self.response_binding.submission_scope
+            ).get("provider_environment")
+            if (
+                not isinstance(actual_provider_environment, str)
+                or actual_provider_environment.upper()
+                != expected_provider_environment
+            ):
+                raise ProviderCoreError(
+                    "provider-write provenance provider-environment mismatch"
+                )
+        if tuple(capability_snapshot_ids) != self.capability_snapshot_ids:
+            raise ProviderCoreError("provider-write provenance capability mismatch")
+        if tuple(instrument_versions) != self.instrument_versions:
+            raise ProviderCoreError("provider-write provenance instrument mismatch")
         if (
             client_order_id is not None
             and _text(client_order_id, "client_order_id") != self.client_order_id
@@ -613,6 +724,7 @@ def observe_submission_json_response(
     prepared_request_sha256: str,
     capability_snapshot_ids: tuple[str, ...],
     instrument_versions: tuple[str, ...],
+    provider_environment: str | None = None,
 ) -> ProviderSubmissionObservation:
     """Project one exact durable write response into provider-neutral evidence."""
 
@@ -655,6 +767,13 @@ def observe_submission_json_response(
         "capability_snapshot_ids": list(capabilities),
         "instrument_versions": list(instruments),
     }
+    provider_env = normalize_provider_environment(
+        provider_id=provider,
+        environment=response_binding.environment,
+        provider_environment=provider_environment,
+    )
+    if provider == "BYBIT" or provider_environment is not None:
+        expected_scope["provider_environment"] = provider_env
     actual_scope = _thaw_json(response_binding.submission_scope)
     if actual_scope != expected_scope:
         raise ProviderCoreError(

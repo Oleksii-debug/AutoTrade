@@ -263,6 +263,7 @@ def public_authoritative_risk_snapshot(
         account_id=request.account_id,
         environment=request.environment,
         provider_id=request.provider_id,
+        provider_environment=request.provider_environment,
         instrument_version=request.instrument_version,
         capability_snapshot_id=request.capability_snapshot_id,
         reconciliation_checkpoint_event_id=(
@@ -2490,6 +2491,8 @@ class AuthorityTests(unittest.TestCase):
                     reservation_requirements={"CASH:USD": "100"},
                     reservation_available={"CASH:USD": "1000"},
                     journal_sequence_cut=store.current_journal_sequence(),
+                    provider_id="TEST_PROVIDER",
+                    provider_environment="PAPER",
                     now="2026-09-24T18:01:00Z",
                 )
 
@@ -2527,6 +2530,12 @@ class AuthorityTests(unittest.TestCase):
                 instrument_version=1,
                 action="ORDER.SUBMIT",
                 now="2026-09-24T18:01:15Z",
+                submission_scope={
+                    "provider_id": admitted.provider_id,
+                    "provider_environment": admitted.provider_environment,
+                    "account_id": admitted.account_id,
+                    "environment": admitted.environment,
+                },
             )
             self.assertEqual(
                 authority.dispatch_allowed(admitted.admission_id, **common),
@@ -2607,6 +2616,12 @@ class AuthorityTests(unittest.TestCase):
                     action="ORDER.SUBMIT",
                     now="2026-09-24T18:01:15Z",
                     capability_snapshot_id=PUBLIC_CAPABILITY_SNAPSHOT_ID,
+                    submission_scope={
+                    "provider_id": admitted.provider_id,
+                    "provider_environment": admitted.provider_environment,
+                    "account_id": admitted.account_id,
+                    "environment": admitted.environment,
+                },
                 ),
                 (False, "reservation_state_changed"),
             )

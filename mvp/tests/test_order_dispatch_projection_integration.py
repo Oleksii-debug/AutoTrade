@@ -2,6 +2,7 @@ from decimal import Decimal
 import json
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.dispatch import (
     ExactJsonTransportResponse,
@@ -12,6 +13,7 @@ from mvp.autotrade_mvp.dispatch import (
 from mvp.autotrade_mvp.durable_order_projection import (
     DurableOrderBookProjection,
 )
+from mvp.autotrade_mvp.order_projection import OrderProjectionConflict
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.reconciliation import (
     ProviderFillEvidence,
@@ -181,6 +183,49 @@ class DispatchOrderProjectionIntegrationTests(unittest.TestCase):
             self.assertEqual(
                 terminal["payload"]["response_encoding"], "utf-8-json"
             )
+            # Simulate a corrupt *read of the original journal evidence*,
+            # without mutating the real durable event. No forged ACK/fill
+            # may be projected from SHA-mismatched exact provider bytes.
+            aggregate_id = submission_attempt_aggregate_id(
+                environment="SIMULATION",
+                account_id=ACCOUNT,
+                attempt_id=attempt_id,
+            )
+            original_load_events = store.load_events
+
+            def corrupt_exact_source(aggregate_type, selected_id, *args, **kwargs):
+                events = original_load_events(
+                    aggregate_type, selected_id, *args, **kwargs
+                )
+                if aggregate_type != "submission_attempt" or selected_id != aggregate_id:
+                    return events
+                corrupted = list(events)
+                sent = dict(corrupted[-1])
+                sent_payload = dict(sent["payload"])
+                sent_payload["response_sha256"] = "sha256:" + "0" * 64
+                sent["payload"] = sent_payload
+                corrupted[-1] = sent
+                return corrupted
+
+            with patch.object(
+                store, "load_events", side_effect=corrupt_exact_source
+            ):
+                with self.assertRaisesRegex(
+                    OrderProjectionConflict,
+                    "exact submission response evidence is invalid",
+                ):
+                    orders.sync_submission_attempt(attempt_id=attempt_id)
+            self.assertEqual(
+                orders.order(client_order_id).snapshot().state,
+                "SEND_STARTED",
+            )
+            self.assertEqual(
+                orders.order(client_order_id).snapshot().filled_quantity,
+                Decimal("0"),
+            )
+            # The same original SHA-bound journal source is still valid.
+            # Replaying its already-projected send-start fact must be
+            # idempotent and yield exactly one WORKING ACK, never a fill.
             projected = orders.sync_submission_attempt(attempt_id=attempt_id)
             self.assertEqual(len(projected), 2)
             self.assertEqual(projected[0].snapshot.state, "SEND_STARTED")

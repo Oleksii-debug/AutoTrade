@@ -459,6 +459,13 @@ class SupplyChainQualification:
     checks: tuple[tuple[str, str], ...]
     reason_codes: tuple[str, ...]
     release_authority: bool = False
+    accepted_attestation_id: str | None = None
+    accepted_attestation_digest: str | None = None
+    accepted_policy_id: str | None = None
+    accepted_trust_root_id: str | None = None
+    subject_requirement: str | None = None
+    release_artifact_id: str | None = None
+    release_artifact_sha256: str | None = None
 
 
 def _store_artifact_matches(
@@ -958,9 +965,27 @@ def qualify_supply_chain(
         sort_keys=True,
         separators=(",", ":"),
     )
+    accepted_identity = (
+        None
+        if accepted_trust is None
+        else (
+            accepted_trust.attestation_id,
+            accepted_trust.attestation_digest,
+            accepted_trust.policy_id,
+            accepted_trust.trust_root_id,
+        )
+    )
     return SupplyChainQualification(
         "supply-" + sha256(canonical.encode("utf-8")).hexdigest()[:32],
         status,
         tuple(checks),
         tuple(dict.fromkeys(reasons)),
+        False,
+        None if accepted_identity is None else accepted_identity[0],
+        None if accepted_identity is None else accepted_identity[1],
+        None if accepted_identity is None else accepted_identity[2],
+        None if accepted_identity is None else accepted_identity[3],
+        subject_requirement if accepted_identity is not None else None,
+        evidence.release_artifact_id,
+        evidence.release_artifact_sha256,
     )

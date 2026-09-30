@@ -21,7 +21,8 @@ from .persistence import JournalStore, canonical_json, payload_digest
 
 
 _AGGREGATE_TYPE = "capability_history"
-_EVENT_TYPE = "CapabilitySnapshotObserved.v1"
+_EVENT_TYPE_V1 = "CapabilitySnapshotObserved.v1"
+_EVENT_TYPE = "CapabilitySnapshotObserved.v2"
 
 
 def _identity_id(snapshot: CapabilitySnapshot) -> str:
@@ -29,22 +30,38 @@ def _identity_id(snapshot: CapabilitySnapshot) -> str:
     return "capability:" + sha256(material).hexdigest()
 
 
+def _legacy_identity_id(snapshot: CapabilitySnapshot) -> str:
+    material = canonical_json(
+        [
+            snapshot.provider_id,
+            snapshot.account_id,
+            snapshot.entity_id,
+            snapshot.environment,
+            snapshot.instrument_version,
+        ]
+    ).encode("utf-8")
+    return "capability:" + sha256(material).hexdigest()
+
+
 def _payload(snapshot: CapabilitySnapshot) -> dict[str, Any]:
     return {
-        "schema_version": "1.0.0",
+        "schema_version": "2.0.0",
         "snapshot": snapshot.to_contract_dict(),
         "sources": sorted(snapshot.sources),
     }
 
 
 def _rehydrate(payload: dict[str, Any]) -> CapabilitySnapshot:
-    if not isinstance(payload, dict) or payload.get("schema_version") != "1.0.0":
+    if not isinstance(payload, dict):
+        raise CapabilityError("unsupported durable capability payload")
+    schema_version = payload.get("schema_version")
+    if schema_version not in {"1.0.0", "2.0.0"}:
         raise CapabilityError("unsupported durable capability payload")
     raw = payload.get("snapshot")
     sources = payload.get("sources")
     if not isinstance(raw, dict) or not isinstance(sources, list):
         raise CapabilityError("durable capability payload is malformed")
-    required = {
+    v1_required = {
         "snapshot_id",
         "provider_id",
         "account_id",
@@ -63,8 +80,20 @@ def _rehydrate(payload: dict[str, Any]) -> CapabilitySnapshot:
         "evidence",
         "status",
     }
+    required = (
+        v1_required
+        if schema_version == "1.0.0"
+        else v1_required | {"provider_environment"}
+    )
     if set(raw) != required:
         raise CapabilityError("durable capability snapshot fields are malformed")
+    if (
+        schema_version == "1.0.0"
+        and str(raw.get("provider_id", "")).strip().upper() == "BYBIT"
+    ):
+        raise CapabilityError(
+            "legacy BYBIT capability lacks exact provider_environment"
+        )
     try:
         observed_at = datetime.fromisoformat(
             str(raw["observed_at"]).replace("Z", "+00:00")
@@ -80,6 +109,7 @@ def _rehydrate(payload: dict[str, Any]) -> CapabilitySnapshot:
         account_id=raw["account_id"],
         entity_id=raw["entity_id"],
         environment=raw["environment"],
+        provider_environment=raw.get("provider_environment"),
         instrument_version=raw["instrument_version"],
         observed_at=observed_at,
         expires_at=expires_at,
@@ -95,7 +125,11 @@ def _rehydrate(payload: dict[str, Any]) -> CapabilitySnapshot:
         sources=frozenset(sources),
         _verification_token=_DERIVED_SNAPSHOT_TOKEN,
     )
-    if snapshot.to_contract_dict() != raw:
+    projected = snapshot.to_contract_dict()
+    if schema_version == "1.0.0":
+        projected = dict(projected)
+        projected.pop("provider_environment")
+    if projected != raw:
         raise CapabilityError("durable capability snapshot is not canonical")
     if sorted(snapshot.sources) != sources:
         raise CapabilityError("durable capability sources are not canonical")
@@ -118,7 +152,7 @@ class DurableCapabilityRegistry:
         for event in events:
             if event["aggregate_type"] != _AGGREGATE_TYPE:
                 raise CapabilityError("capability event uses wrong aggregate type")
-            if event["event_type"] != _EVENT_TYPE:
+            if event["event_type"] not in {_EVENT_TYPE_V1, _EVENT_TYPE}:
                 raise CapabilityError("unsupported durable capability event type")
             aggregate_id = event["aggregate_id"]
             expected = seen_versions.get(aggregate_id, 0) + 1
@@ -128,7 +162,12 @@ class DurableCapabilityRegistry:
             if payload_digest(event["payload"]) != event["payload_hash"]:
                 raise CapabilityError("durable capability payload integrity failure")
             snapshot = _rehydrate(event["payload"])
-            if _identity_id(snapshot) != aggregate_id:
+            expected_identity = (
+                _legacy_identity_id(snapshot)
+                if event["payload"].get("schema_version") == "1.0.0"
+                else _identity_id(snapshot)
+            )
+            if expected_identity != aggregate_id:
                 raise CapabilityError("durable capability aggregate identity mismatch")
             registry.add(snapshot)
         return registry

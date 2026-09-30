@@ -193,6 +193,61 @@ class CapabilityClaim:
         object.__setattr__(self, "evidence_ref", evidence)
 
 
+def _snapshot_capability_claim(claim: CapabilityClaim) -> CapabilityClaim:
+    """Detach one exact claim graph before crossing any verifier callback."""
+
+    if type(claim) is not CapabilityClaim:
+        raise TypeError("claims must contain exact CapabilityClaim values")
+
+    values: dict[str, object] = {}
+    for field in (
+        "source",
+        "provider_id",
+        "account_id",
+        "entity_id",
+        "environment",
+        "instrument_version",
+        "position_mode",
+        "rate_limit_policy_id",
+    ):
+        current = object.__getattribute__(claim, field)
+        if type(current) is not str:
+            raise TypeError(f"claim.{field} must use exact str")
+        values[field] = current
+
+    for field in ("observed_at", "expires_at"):
+        current = object.__getattribute__(claim, field)
+        if type(current) is not datetime:
+            raise TypeError(f"claim.{field} must use exact datetime")
+        values[field] = current
+
+    for field in (
+        "supported_order_types",
+        "time_in_force",
+        "permission_scopes",
+        "native_protection",
+        "data_entitlements",
+    ):
+        current = object.__getattribute__(claim, field)
+        if type(current) is not frozenset or any(
+            type(value) is not str for value in current
+        ):
+            raise TypeError(f"claim.{field} must use exact frozenset[str]")
+        values[field] = frozenset(current)
+
+    evidence = object.__getattribute__(claim, "evidence_ref")
+    if type(evidence) is not MappingProxyType:
+        raise TypeError("claim.evidence_ref must use the canonical immutable mapping")
+    evidence_copy: dict[str, object] = {}
+    for key, value in evidence.items():
+        if type(key) is not str or type(value) is not str:
+            raise TypeError("claim.evidence_ref must contain exact string values")
+        evidence_copy[key] = value
+    values["evidence_ref"] = evidence_copy
+
+    return CapabilityClaim(**values)
+
+
 @dataclass(frozen=True)
 class EvidenceVerification:
     """Result of resolving one capability claim to immutable evidence."""
@@ -576,15 +631,12 @@ def derive_capability_snapshot(
     evidence_verifier: Callable[[CapabilityClaim], EvidenceVerification] | None = None,
 ) -> CapabilitySnapshot:
     point = _instant(observed_at, "observed_at")
-    records = tuple(claims)
+    records = tuple(_snapshot_capability_claim(claim) for claim in claims)
     if not records:
         raise CapabilityError("at least one capability claim is required")
     required = frozenset(_text(source, "required_source").upper() for source in required_sources)
     if required != SOURCES:
         raise CapabilityError("all canonical capability sources are required for verification")
-
-    if any(not isinstance(claim, CapabilityClaim) for claim in records):
-        raise TypeError("claims must contain CapabilityClaim values")
 
     first = records[0]
     identity = (

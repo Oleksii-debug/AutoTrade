@@ -186,6 +186,7 @@ class DurableCapabilityRegistry:
                 environment=snapshot.environment,
                 instrument_version=snapshot.instrument_version,
                 at=snapshot.observed_at,
+                provider_environment=snapshot.provider_environment,
             )
         except CapabilityError:
             existing = None

@@ -994,9 +994,20 @@ class UrllibJsonWireClient:
         # explicit network-policy authority, not ambient environment variables.
         self._opener = build_opener(ProxyHandler({}), _NoRedirectHandler())
 
-    def _bounded_body(self, raw: bytes) -> bytes:
+    def _response_budget(self) -> int:
+        budget = self.max_response_bytes
+        if (
+            type(budget) is not int
+            or not 1 <= budget <= HARD_MAX_PROVIDER_RESPONSE_BYTES
+        ):
+            raise ProviderTransportScopeError(
+                "provider response byte budget is invalid"
+            )
+        return budget
+
+    def _bounded_body(self, raw: bytes, *, max_bytes: int) -> bytes:
         try:
-            return require_provider_response_bytes(raw, max_bytes=self.max_response_bytes)
+            return require_provider_response_bytes(raw, max_bytes=max_bytes)
         except (TypeError, ValueError) as error:
             raise ProviderTransportError("invalid or oversized provider HTTP response") from error
 
@@ -1027,6 +1038,9 @@ class UrllibJsonWireClient:
             request,
             AuthenticatedReadHttpRequest,
         )
+        # Capture one exact validated budget before any response-body read.
+        # Mutating the client during I/O cannot widen this send's read envelope.
+        response_budget = self._response_budget()
         http_status: int | None = None
         try:
             with self._opener.open(
@@ -1034,7 +1048,10 @@ class UrllibJsonWireClient:
                 timeout=request.timeout_seconds,
             ) as response:
                 http_status = int(response.status)
-                raw = self._bounded_body(response.read(self.max_response_bytes + 1))
+                raw = self._bounded_body(
+                    response.read(response_budget + 1),
+                    max_bytes=response_budget,
+                )
         except HTTPError as error:
             # Redirects are prohibited for both reads and writes. For reads,
             # preserve non-redirect HTTP status as a typed outcome so an error
@@ -1043,7 +1060,10 @@ class UrllibJsonWireClient:
                 raise ProviderTransportError(
                     "provider redirect is prohibited"
                 ) from error
-            raw = self._bounded_body(error.read(self.max_response_bytes + 1))
+            raw = self._bounded_body(
+                error.read(response_budget + 1),
+                max_bytes=response_budget,
+            )
             if type(raw) is not bytes or not raw:
                 raise ProviderTransportError(
                     "provider returned an empty HTTP error response"

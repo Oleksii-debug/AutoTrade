@@ -4007,6 +4007,95 @@ class SharedProviderWireResponseBudgetTests(unittest.TestCase):
         self.assertEqual(require_provider_response_bytes(b"x" * 8, max_bytes=8), b"x" * 8)
         self.assertEqual(UrllibJsonWireClient(max_response_bytes=8).max_response_bytes, 8)
 
+
+    def test_mutated_response_budget_is_revalidated_before_read_and_snapshotted(self):
+        class Stream:
+            status = 200
+
+            def __init__(self, client, body, mutate_to):
+                self.client = client
+                self.body = body
+                self.mutate_to = mutate_to
+                self.sizes = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self, size=-1):
+                self.sizes.append(size)
+                self.client.max_response_bytes = self.mutate_to
+                return self.body[:size]
+
+        class Opener:
+            def __init__(self, stream):
+                self.stream = stream
+                self.calls = 0
+
+            def open(self, *_args, **_kwargs):
+                self.calls += 1
+                return self.stream
+
+        client = UrllibJsonWireClient(max_response_bytes=8)
+        stream = Stream(client, b"x" * 8, 8)
+        opener = Opener(stream)
+        client._opener = opener
+        client.max_response_bytes = HARD_MAX_PROVIDER_RESPONSE_BYTES + 1
+        with self.assertRaisesRegex(ProviderTransportScopeError, "byte budget"):
+            client.send(self.request())
+        self.assertEqual(opener.calls, 0)
+        self.assertEqual(stream.sizes, [])
+
+        # A concurrent field mutation cannot widen the captured four-byte limit.
+        client = UrllibJsonWireClient(max_response_bytes=4)
+        stream = Stream(client, b"x" * 5, 8)
+        opener = Opener(stream)
+        client._opener = opener
+        with self.assertRaisesRegex(ProviderTransportError, "oversized"):
+            client.send(self.request())
+        self.assertEqual(opener.calls, 1)
+        self.assertEqual(stream.sizes, [5])
+
+    def test_http_error_uses_same_captured_budget_when_live_field_mutates_during_read(self):
+        class MutatingBytesIO(BytesIO):
+            def __init__(self, client, data, mutate_to):
+                super().__init__(data)
+                self.client = client
+                self.mutate_to = mutate_to
+                self.read_sizes = []
+
+            def read(self, size=-1):
+                self.read_sizes.append(size)
+                self.client.max_response_bytes = self.mutate_to
+                return super().read(size)
+
+        class FailingOpener:
+            def __init__(self, client):
+                self.stream = MutatingBytesIO(client, b"x" * 5, 8)
+                self.error = HTTPError(
+                    "https://api.example.test/v1/order",
+                    429,
+                    "error",
+                    {},
+                    self.stream,
+                )
+                self.calls = 0
+
+            def open(self, *_args, **_kwargs):
+                self.calls += 1
+                raise self.error
+
+        client = UrllibJsonWireClient(max_response_bytes=4)
+        opener = FailingOpener(client)
+        client._opener = opener
+        with self.assertRaisesRegex(ProviderTransportError, "oversized"):
+            client.send(self.request())
+        self.assertEqual(opener.calls, 1)
+        self.assertEqual(opener.stream.read_sizes, [5])
+        self.assertEqual(client.max_response_bytes, 8)
+
     def test_http_success_reads_at_most_limit_plus_one_and_rejects_overlimit(self):
         class Stream:
             def __init__(self, body):

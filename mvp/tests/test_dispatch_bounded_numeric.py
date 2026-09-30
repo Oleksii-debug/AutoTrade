@@ -54,6 +54,62 @@ class DispatchBoundedNumericTransportTests(unittest.TestCase):
 
         self.assertEqual(touched, [])
 
+    def test_exact_journal_instance_shadow_and_generation_replacement_fail_closed(self):
+        touched = []
+
+        def hostile_load(*_args, **_kwargs):
+            touched.append("load_events")
+            raise AssertionError("instance load override executed")
+
+        def hostile_append(*_args, **_kwargs):
+            touched.append("append_event")
+            raise AssertionError("instance append override executed")
+
+        def hostile_connect(*_args, **_kwargs):
+            touched.append("_connect")
+            raise AssertionError("instance connection override executed")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(directory + "/journal.sqlite3")
+            store.__dict__["load_events"] = hostile_load
+            with self.assertRaisesRegex(TypeError, "instance state is shadowed"):
+                load_submission_response_binding(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    attempt_id="shadowed-load",
+                )
+            del store.__dict__["load_events"]
+
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+
+            for name, callback in (
+                ("load_events", hostile_load),
+                ("append_event", hostile_append),
+                ("_connect", hostile_connect),
+            ):
+                with self.subTest(name=name):
+                    store.__dict__[name] = callback
+                    with self.assertRaisesRegex(
+                        TypeError, "instance state is shadowed"
+                    ):
+                        dispatcher._events("shadowed-attempt")
+                    del store.__dict__[name]
+
+            other = JournalStore(directory + "/other.sqlite3")
+            dispatcher.store = other
+            with self.assertRaisesRegex(
+                PermissionError, "submission journal authority changed"
+            ):
+                dispatcher._events("wrong-generation")
+
+        self.assertEqual(touched, [])
+
     def test_shared_depth_boundary_and_parser_recursion_remain_redacted(self):
         at_limit = b"[" * 64 + b"0" + b"]" * 64
         too_deep = b"[" * 65 + b"0" + b"]" * 65

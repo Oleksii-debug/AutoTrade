@@ -22,6 +22,7 @@ from mvp.autotrade_mvp.kraken_futures import (
 from mvp.autotrade_mvp.dispatch import (
     ExactJsonTransportResponse,
     GuardedDispatcher,
+    PreparedSubmissionAuthorityCheck,
     load_submission_response_binding,
     stable_client_order_id,
 )
@@ -254,7 +255,9 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                 provider="KRAKEN",
                 request=prepared.body,
                 now=NOW,
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=PreparedSubmissionAuthorityCheck(
+                    lambda _hash, _now, _scope, _scope_hash: (True, "allowed")
+                ),
                 transport_send=lambda _cid, _request, guard: (
                     guard(),
                     ExactJsonTransportResponse(raw),
@@ -263,6 +266,10 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                 client_id_format="UUID",
                 sender_check=lambda _owner, _epoch: None,
                 submission_scope={
+                    "provider": "KRAKEN",
+                    "account_id": prepared.account_id,
+                    "environment": prepared.environment,
+                    "provider_environment": provider_environment,
                     "endpoint": prepared.endpoint,
                     "prepared_request_sha256": prepared.body_sha256,
                     "capability_snapshot_ids": [
@@ -291,6 +298,7 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                 instrument_versions=(
                     prepared.instrument_version,
                 ),
+                provider_environment=provider_environment,
             )
         return attempt, prepared, observation
 

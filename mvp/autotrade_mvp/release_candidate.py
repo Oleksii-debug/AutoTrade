@@ -1079,7 +1079,7 @@ def _load_supply_chain_proof(
             "canonical WP-64 proof artifact integrity is not verified"
         )
     try:
-        return parse_supply_chain_proof_bytes(raw)
+        evidence, trust_receipt = parse_supply_chain_proof_bytes(raw)
     except (
         ArtifactIntegrityError,
         FileNotFoundError,
@@ -1091,6 +1091,11 @@ def _load_supply_chain_proof(
         raise ReleaseCandidateError(
             "canonical WP-64 proof artifact is malformed"
         ) from error
+    if evidence.release_commit_sha != artifact.source_sha:
+        raise ReleaseCandidateError(
+            "canonical WP-64 proof source SHA does not match dependency-rights artifact"
+        )
+    return evidence, trust_receipt
 
 
 def _qualification_claims_cover_exact_candidate(

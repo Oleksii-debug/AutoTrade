@@ -562,7 +562,10 @@ class ResearchJobStoreTests(unittest.TestCase):
 
     def test_valid_looking_self_asserted_resolution_ref_cannot_requeue(self):
         with TemporaryDirectory() as directory:
-            store = ResearchJobStore(\n                Path(directory) / "jobs.sqlite3",\n                authoritative_artifact_root=Path(directory) / "artifacts",\n            )
+            store = ResearchJobStore(
+                Path(directory) / "jobs.sqlite3",
+                authoritative_artifact_root=Path(directory) / "artifacts",
+            )
             job, _ = store.enqueue(
                 kind="research.external_annotation",
                 dedupe_key="self-asserted-proof",

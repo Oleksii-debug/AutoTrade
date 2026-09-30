@@ -8,7 +8,7 @@ import hashlib
 from pathlib import Path
 import re
 from types import MappingProxyType
-from typing import Callable, Iterable, Mapping, Protocol, runtime_checkable
+from typing import Callable, Iterable, Mapping
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -638,21 +638,50 @@ class CapabilitySnapshot:
         }
 
 
-@runtime_checkable
-class CapabilityLookup(Protocol):
-    """Structural current-admission authority consumed by provider transports."""
+def _capability_content_sha256(snapshot: CapabilitySnapshot) -> str:
+    """Hash immutable capability semantics independently of caller snapshot labels."""
 
-    def require_verified(
-        self,
-        *,
-        provider_id: str,
-        account_id: str,
-        entity_id: str,
-        environment: str,
-        instrument_version: str,
-        at: datetime,
-        provider_environment: str | None = None,
-    ) -> CapabilitySnapshot: ...
+    if type(snapshot) is not CapabilitySnapshot:
+        raise TypeError("snapshot must be exact CapabilitySnapshot")
+    material = snapshot.to_contract_dict()
+    material = dict(material)
+    material.pop("snapshot_id")
+    encoded = json.dumps(
+        material,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return "sha256:" + sha256(encoded).hexdigest()
+
+
+def _admitted_snapshot_copy(snapshot: CapabilitySnapshot) -> CapabilitySnapshot:
+    """Create an ephemeral admitted view only after registry-owned freshness passes."""
+
+    return CapabilitySnapshot(
+        snapshot_id=snapshot.snapshot_id,
+        provider_id=snapshot.provider_id,
+        account_id=snapshot.account_id,
+        entity_id=snapshot.entity_id,
+        environment=snapshot.environment,
+        provider_environment=snapshot.provider_environment,
+        instrument_version=snapshot.instrument_version,
+        observed_at=snapshot.observed_at,
+        expires_at=snapshot.expires_at,
+        supported_order_types=snapshot.supported_order_types,
+        time_in_force=snapshot.time_in_force,
+        permission_scopes=snapshot.permission_scopes,
+        position_mode=snapshot.position_mode,
+        native_protection=snapshot.native_protection,
+        rate_limit_policy_id=snapshot.rate_limit_policy_id,
+        data_entitlements=snapshot.data_entitlements,
+        evidence=snapshot.evidence,
+        status=snapshot.status,
+        sources=snapshot.sources,
+        _verification_token=_DERIVED_SNAPSHOT_TOKEN,
+        _admission_token=_FRESH_ADMISSION_TOKEN,
+    )
 
 
 def _intersection(claims: tuple[CapabilityClaim, ...], field: str) -> frozenset[str]:
@@ -810,6 +839,7 @@ class CapabilityRegistry:
     def __init__(self) -> None:
         self._by_id: dict[str, CapabilitySnapshot] = {}
         self._by_identity: dict[tuple[str, str, str, str, str, str], list[CapabilitySnapshot]] = {}
+        self._fresh_content_sha256: set[str] = set()
 
     def add(self, snapshot: CapabilitySnapshot) -> None:
         if type(snapshot) is not CapabilitySnapshot:
@@ -870,6 +900,7 @@ class CapabilityRegistry:
             raise CapabilityError(f"capability status is {snapshot.status}")
         if point >= snapshot.expires_at:
             raise CapabilityError("capability snapshot is expired")
-        if not getattr(snapshot, "_can_admit", False):
+        content_sha256 = _capability_content_sha256(snapshot)
+        if content_sha256 not in self._fresh_content_sha256:
             raise CapabilityError("capability snapshot lacks fresh admission authority")
-        return snapshot
+        return _admitted_snapshot_copy(snapshot)

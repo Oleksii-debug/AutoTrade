@@ -12,6 +12,12 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5, uuid4
 
+from autotrade_numeric.exact_decimal import (
+    ExactDecimalError,
+    parse_bounded_json_integer_token,
+    parse_bounded_json_number_token,
+)
+
 from .persistence import JournalStore, canonical_json, payload_digest
 
 
@@ -41,12 +47,21 @@ def _decode_exact_json_bytes(raw: bytes) -> Any:
         return json.loads(
             text,
             object_pairs_hook=no_duplicate_keys,
+            parse_float=parse_bounded_json_number_token,
+            parse_int=parse_bounded_json_integer_token,
             parse_constant=lambda value: (_ for _ in ()).throw(
                 ValueError(
                     f"provider response contains non-finite JSON constant: {value}"
                 )
             ),
         )
+    except ExactDecimalError as error:
+        # After a provider SEND, the dispatch layer must not turn a malformed
+        # numeric response into financial success. The guarded dispatcher
+        # retains UNKNOWN + reconciliation on an exception after its barrier.
+        raise ValueError(
+            "provider response contains invalid or oversized exact JSON number"
+        ) from error
     except ValueError:
         raise
     except (UnicodeDecodeError, json.JSONDecodeError) as error:

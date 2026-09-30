@@ -9,6 +9,11 @@ content-derived protocol/configuration digest. That makes replay incompatible
 across different builds or behavior-affecting canonical configuration. The
 source SHA is an identity claim, not installed-source authentication; release
 and qualification tooling own that independent trust boundary.
+
+A separate durable ``SimulationSessionOwned`` marker is atomically claimed as
+the first whole-store business event before bootstrap. It carries the exact
+protocol and creation identity so restart can reject adoption of foreign state
+without turning caller replay knobs into authority.
 """
 
 from __future__ import annotations
@@ -51,11 +56,13 @@ PROVIDER = "SIMULATED"
 INITIAL_CASH = Decimal("1000")
 FEE_RATE = Decimal("0.001")
 _AGGREGATE = "single-episode"
+_OWNER_AGGREGATE_TYPE = "canonical_simulation_store_owner"
+_OWNER_AGGREGATE_ID = "canonical"
 _SOURCE_SHA = re.compile(r"^[0-9a-f]{40}$")
 _FAULT_NONE = "NONE"
 _FAULT_AFTER_ACCEPT_RESPONSE_LOST = "AFTER_ACCEPT_RESPONSE_LOST"
 
-CANONICAL_SIMULATION_PROTOCOL_VERSION = "2.0.0"
+CANONICAL_SIMULATION_PROTOCOL_VERSION = "3.0.0"
 _STRATEGY_CONFIG = {
     "strategy_id": "moving-average",
     "strategy_version": "1.0.0",
@@ -105,6 +112,7 @@ _COMPONENT_CONFIG = {
     "reconciliation": "reconcile_account/v1",
     "reconciliation_checkpoint": "record_reconciliation_checkpoint/v1",
     "simulated_provider": "SimulatedProvider/v1",
+    "store_ownership": "JournalStore.claim_first_event/v1",
 }
 
 
@@ -222,6 +230,99 @@ def _event(store: JournalStore, kind: str, session_id: str, payload: dict, now: 
     }
     store.append_event(envelope)
     return envelope
+
+
+def _owner_payload(*, episode_id: str, input_hash: str, session_id: str,
+                   source_sha: str, protocol_id: str, protocol: dict[str, object],
+                   creation_id: str, creation_identity: dict[str, object],
+                   decision: str) -> dict[str, object]:
+    return {
+        "schema_version": "1.0.0",
+        "episode_id": episode_id,
+        "input_hash": input_hash,
+        "session_id": session_id,
+        "source_sha": source_sha,
+        "protocol_version": CANONICAL_SIMULATION_PROTOCOL_VERSION,
+        "protocol_id": protocol_id,
+        "protocol": protocol,
+        "creation_id": creation_id,
+        "creation_identity": creation_identity,
+        "decision": decision,
+        "environment": ENVIRONMENT,
+    }
+
+
+def _claim_owner(store: JournalStore, *, session_id: str, payload: dict[str, object],
+                 now: str) -> dict:
+    envelope = {
+        "event_id": _uuid("SimulationSessionOwned", session_id),
+        "event_type": "SimulationSessionOwned",
+        "schema_version": "1.0.0",
+        "aggregate_type": _OWNER_AGGREGATE_TYPE,
+        "aggregate_id": _OWNER_AGGREGATE_ID,
+        "aggregate_version": "1",
+        "host_id": "local-simulation",
+        "owner_epoch": "1",
+        "environment": ENVIRONMENT,
+        "occurred_at": now,
+        "observed_at": now,
+        "committed_at": now,
+        "correlation_id": _uuid("correlation", session_id),
+        "causation_id": None,
+        "payload": payload,
+        "payload_hash": payload_digest(payload),
+        "evidence_refs": [],
+    }
+    store.claim_first_event(envelope)
+    persisted = store.get_event(envelope["event_id"])
+    if persisted is None:
+        raise RuntimeError("canonical simulation ownership event was not persisted")
+    return persisted
+
+
+def _validated_persisted_identity(
+    payload: object, *, episode_id: str, input_hash: str, source_sha: str,
+    protocol_id: str, protocol: dict[str, object],
+) -> tuple[str, str, str, str]:
+    if type(payload) is not dict:
+        raise ValueError("durable simulation identity payload is invalid")
+    if (
+        payload.get("source_sha") != source_sha
+        or payload.get("protocol_version") != CANONICAL_SIMULATION_PROTOCOL_VERSION
+        or payload.get("protocol_id") != protocol_id
+        or payload.get("protocol") != protocol
+    ):
+        raise ValueError(
+            "durable simulation protocol/build identity is incompatible with this runtime"
+        )
+    creation_identity = payload.get("creation_identity")
+    if type(creation_identity) is not dict:
+        raise ValueError("durable simulation creation identity is missing")
+    evidence_time = creation_identity.get("evidence_time")
+    fault_profile = creation_identity.get("transport_fault_profile")
+    if (
+        type(evidence_time) is not str
+        or _now(evidence_time) != evidence_time
+        or fault_profile not in {_FAULT_NONE, _FAULT_AFTER_ACCEPT_RESPONSE_LOST}
+    ):
+        raise ValueError("durable simulation creation identity is invalid")
+    creation_id = payload_digest(creation_identity)
+    if payload.get("creation_id") != creation_id:
+        raise ValueError("durable simulation creation identity digest is invalid")
+    session_id = _session_identity(
+        episode_id=episode_id,
+        input_hash=input_hash,
+        protocol_id=protocol_id,
+        creation_id=creation_id,
+    )
+    if (
+        payload.get("episode_id") != episode_id
+        or payload.get("input_hash") != input_hash
+        or payload.get("session_id") != session_id
+        or payload.get("environment") != ENVIRONMENT
+    ):
+        raise ValueError("state directory belongs to another simulation input")
+    return session_id, creation_id, evidence_time, str(fault_profile)
 
 
 def _deliver_event(store: JournalStore, event_id: str) -> None:
@@ -345,81 +446,116 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
                 source_sha: str, protocol: dict[str, object], protocol_id: str,
                 decision, now: str | None, fault_after_send: bool) -> dict[str, object]:
     store = JournalStore(root / "journal.sqlite3")
+    owners = store.load_events(_OWNER_AGGREGATE_TYPE, _OWNER_AGGREGATE_ID)
     prior = store.load_events("canonical_simulation_session", _AGGREGATE)
-    if prior:
-        started = prior[0]
-        started_payload = started.get("payload", {})
-        if started["event_type"] != "SimulationSessionStarted":
-            raise ValueError("durable simulation session marker is invalid")
+    resumed_from_owner = False
+
+    if owners:
+        if len(owners) != 1:
+            raise ValueError("durable simulation ownership chronology is invalid")
+        owner = owners[0]
         if (
-            started_payload.get("source_sha") != source_sha
-            or started_payload.get("protocol_version") != CANONICAL_SIMULATION_PROTOCOL_VERSION
-            or started_payload.get("protocol_id") != protocol_id
-            or started_payload.get("protocol") != protocol
+            owner.get("event_type") != "SimulationSessionOwned"
+            or owner.get("aggregate_version") != 1
+            or owner.get("journal_sequence") != 1
         ):
-            raise ValueError(
-                "durable simulation protocol/build identity is incompatible with this runtime"
+            raise ValueError("durable simulation owner is not the first store authority")
+        session_id, creation_id, evidence_time, fault_profile = _validated_persisted_identity(
+            owner.get("payload"), episode_id=episode_id, input_hash=input_hash,
+            source_sha=source_sha, protocol_id=protocol_id, protocol=protocol,
+        )
+        timestamp = evidence_time
+        if prior:
+            started = prior[0]
+            started_payload = started.get("payload", {})
+            if started.get("event_type") != "SimulationSessionStarted":
+                raise ValueError("durable simulation session marker is invalid")
+            started_session, started_creation, started_time, started_fault = (
+                _validated_persisted_identity(
+                    started_payload, episode_id=episode_id, input_hash=input_hash,
+                    source_sha=source_sha, protocol_id=protocol_id, protocol=protocol,
+                )
             )
-        creation_identity = started_payload.get("creation_identity")
-        if type(creation_identity) is not dict:
-            raise ValueError("durable simulation creation identity is missing")
-        evidence_time = creation_identity.get("evidence_time")
-        fault_profile = creation_identity.get("transport_fault_profile")
-        if (
-            type(evidence_time) is not str
-            or _now(evidence_time) != evidence_time
-            or fault_profile not in {_FAULT_NONE, _FAULT_AFTER_ACCEPT_RESPONSE_LOST}
-        ):
-            raise ValueError("durable simulation creation identity is invalid")
-        creation_id = payload_digest(creation_identity)
-        if started_payload.get("creation_id") != creation_id:
-            raise ValueError("durable simulation creation identity digest is invalid")
+            if (
+                started_session != session_id
+                or started_creation != creation_id
+                or started_time != evidence_time
+                or started_fault != fault_profile
+            ):
+                raise ValueError("durable simulation owner/start identity is inconsistent")
+            if len(prior) == 2 and prior[1]["event_type"] == "SimulationSessionCompleted":
+                result = dict(prior[1]["payload"])
+                if (
+                    result.get("source_sha") != source_sha
+                    or result.get("protocol_id") != protocol_id
+                    or result.get("creation_id") != creation_id
+                    or result.get("session_id") != session_id
+                ):
+                    raise ValueError("completed simulation provenance is incompatible")
+                economic = DurableProviderEconomicBook(
+                    store, provider_id=PROVIDER, account_id=ACCOUNT,
+                    environment=ENVIRONMENT,
+                )
+                if (result["cash"] != str(economic.cash("USD"))
+                        or result["position"] != str(economic.position(INSTRUMENT))):
+                    raise ValueError("completed simulation does not match durable economics")
+                result["resumed"] = True
+                result["new_outbound_requests"] = 0
+                return result
+            if len(prior) != 1:
+                raise ValueError("canonical simulation session chronology is invalid")
+            return {
+                "status": "UNKNOWN", "environment": ENVIRONMENT,
+                "episode_id": episode_id, "session_id": session_id,
+                "source_sha": source_sha, "protocol_id": protocol_id,
+                "protocol_version": CANONICAL_SIMULATION_PROTOCOL_VERSION,
+                "creation_id": creation_id, "evidence_time": evidence_time,
+                "reason": "incomplete_send_requires_reconciliation",
+                "reconciled": False, "resumed": True, "new_outbound_requests": 0,
+            }
+        if store.current_journal_sequence() != 1:
+            return {
+                "status": "BLOCKED", "environment": ENVIRONMENT,
+                "episode_id": episode_id, "session_id": session_id,
+                "source_sha": source_sha, "protocol_id": protocol_id,
+                "protocol_version": CANONICAL_SIMULATION_PROTOCOL_VERSION,
+                "creation_id": creation_id, "evidence_time": evidence_time,
+                "reason": "owned_bootstrap_incomplete_pre_send",
+                "reconciled": False, "resumed": True, "new_outbound_requests": 0,
+            }
+        resumed_from_owner = True
+    else:
+        if prior:
+            raise ValueError(
+                "durable simulation session exists without first-store ownership"
+            )
+        timestamp = _now(now)
+        creation_identity, creation_id = _creation_identity(timestamp, fault_after_send)
         session_id = _session_identity(
             episode_id=episode_id, input_hash=input_hash, protocol_id=protocol_id,
             creation_id=creation_id,
         )
-        if (
-            started_payload.get("episode_id") != episode_id
-            or started_payload.get("input_hash") != input_hash
-            or started_payload.get("session_id") != session_id
-        ):
-            raise ValueError("state directory belongs to another simulation input")
-        if len(prior) == 2 and prior[1]["event_type"] == "SimulationSessionCompleted":
-            result = dict(prior[1]["payload"])
-            if (
-                result.get("source_sha") != source_sha
-                or result.get("protocol_id") != protocol_id
-                or result.get("creation_id") != creation_id
-                or result.get("session_id") != session_id
-            ):
-                raise ValueError("completed simulation provenance is incompatible")
-            economic = DurableProviderEconomicBook(
-                store, provider_id=PROVIDER, account_id=ACCOUNT,
-                environment=ENVIRONMENT,
-            )
-            if (result["cash"] != str(economic.cash("USD"))
-                    or result["position"] != str(economic.position(INSTRUMENT))):
-                raise ValueError("completed simulation does not match durable economics")
-            result["resumed"] = True
-            result["new_outbound_requests"] = 0
-            return result
-        return {
-            "status": "UNKNOWN", "environment": ENVIRONMENT,
-            "episode_id": episode_id, "session_id": session_id,
-            "source_sha": source_sha, "protocol_id": protocol_id,
-            "protocol_version": CANONICAL_SIMULATION_PROTOCOL_VERSION,
-            "creation_id": creation_id, "evidence_time": evidence_time,
-            "reason": "incomplete_send_requires_reconciliation",
-            "reconciled": False, "resumed": True, "new_outbound_requests": 0,
-        }
+        fault_profile = str(creation_identity["transport_fault_profile"])
+        owner_payload = _owner_payload(
+            episode_id=episode_id, input_hash=input_hash, session_id=session_id,
+            source_sha=source_sha, protocol_id=protocol_id, protocol=protocol,
+            creation_id=creation_id, creation_identity=creation_identity,
+            decision=decision.side,
+        )
+        try:
+            _claim_owner(store, session_id=session_id, payload=owner_payload, now=timestamp)
+        except ValueError as error:
+            if "durable business state" in str(error):
+                raise ValueError(
+                    "state directory contains foreign durable business authority"
+                ) from error
+            raise
 
-    timestamp = _now(now)
-    creation_identity, creation_id = _creation_identity(timestamp, fault_after_send)
-    session_id = _session_identity(
-        episode_id=episode_id, input_hash=input_hash, protocol_id=protocol_id,
-        creation_id=creation_id,
-    )
-    fault_profile = creation_identity["transport_fault_profile"]
+    creation_identity = {
+        "schema_version": "1.0.0",
+        "evidence_time": timestamp,
+        "transport_fault_profile": fault_profile,
+    }
     future = (datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
               + timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
     provider = SimulatedProvider(
@@ -435,16 +571,13 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT,
     )
     if store.load_events("economic_book", economic.book_id):
-        # A prior process may have died between bootstrap and the session marker.
-        # Its send state cannot be inferred from a fresh simulated provider. WP-03
-        # ownership hardening must move the protocol marker ahead of bootstrap;
-        # until then this state remains opaque and cannot be resumed or resent.
         return {
-            "status": "UNKNOWN", "environment": ENVIRONMENT,
+            "status": "BLOCKED", "environment": ENVIRONMENT,
             "episode_id": episode_id, "session_id": session_id,
             "source_sha": source_sha, "protocol_id": protocol_id,
             "protocol_version": CANONICAL_SIMULATION_PROTOCOL_VERSION,
-            "reason": "orphaned_durable_state_requires_reconciliation",
+            "creation_id": creation_id, "evidence_time": timestamp,
+            "reason": "owned_bootstrap_incomplete_pre_send",
             "reconciled": False, "resumed": True, "new_outbound_requests": 0,
         }
     economic.append(book_external_cash_flow(
@@ -464,7 +597,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
     )
     _deliver_event(store, availability["event_id"])
     _event(store, "SimulationSessionStarted", session_id, {
-        "schema_version": "2.0.0",
+        "schema_version": "3.0.0",
         "input_hash": input_hash,
         "session_id": session_id,
         "source_sha": source_sha,
@@ -498,7 +631,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
             "new_outbound_requests": 0,
         }
         _event(store, "SimulationSessionCompleted", session_id, result, timestamp)
-        return {**result, "resumed": False}
+        return {**result, "resumed": resumed_from_owner}
 
     policy = _risk_policy()
     context = _risk_context(decision.price)
@@ -585,7 +718,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
             "new_outbound_requests": 0,
         }
         _event(store, "SimulationSessionCompleted", session_id, result, timestamp)
-        return {**result, "resumed": False}
+        return {**result, "resumed": resumed_from_owner}
 
     submission_scope = {
         "provider_id": PROVIDER,
@@ -625,7 +758,7 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
             "status": "UNKNOWN" if dispatch.status == "UNKNOWN" else "BLOCKED",
             "decision": "BUY", "environment": ENVIRONMENT,
             "reason": dispatch.reason,
-            "reconciled": False, "resumed": False,
+            "reconciled": False, "resumed": resumed_from_owner,
             "new_outbound_requests": provider.outbound_request_count,
         }
     if dispatch.response.get("outcome") != "ACKNOWLEDGED":
@@ -672,4 +805,4 @@ def _run_locked(root: Path, *, episode_id: str, input_hash: str,
         "new_outbound_requests": provider.outbound_request_count,
     }
     _event(store, "SimulationSessionCompleted", session_id, result, timestamp)
-    return {**result, "resumed": False}
+    return {**result, "resumed": resumed_from_owner}

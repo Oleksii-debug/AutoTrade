@@ -16,6 +16,8 @@ from .capabilities import (
     CapabilityRegistry,
     CapabilitySnapshot,
     _DERIVED_SNAPSHOT_TOKEN,
+    _admitted_snapshot_copy,
+    _capability_content_sha256,
 )
 from .persistence import JournalStore, canonical_json, payload_digest
 
@@ -143,7 +145,7 @@ class DurableCapabilityRegistry:
         if not isinstance(store, JournalStore):
             raise TypeError("store must be JournalStore")
         self.store = store
-        self._session_verified: dict[str, CapabilitySnapshot] = {}
+        self._fresh_content_sha256: set[str] = set()
 
     def _history(self) -> CapabilityRegistry:
         registry = CapabilityRegistry()
@@ -195,10 +197,6 @@ class DurableCapabilityRegistry:
                 raise CapabilityError(
                     "snapshot observed_at conflicts with durable capability history"
                 )
-            if snapshot.status == "VERIFIED":
-                if getattr(snapshot, "_can_admit", False):
-                    self._session_verified[snapshot.snapshot_id] = snapshot
-                return False
             return False
 
         # Canonical in-memory registry owns ordering/content semantics.
@@ -239,17 +237,11 @@ class DurableCapabilityRegistry:
                     "capability history changed concurrently; refresh required"
                 ) from error
             if persisted == snapshot:
-                if snapshot.status == "VERIFIED" and getattr(
-                    snapshot, "_can_admit", False
-                ):
-                    self._session_verified[snapshot.snapshot_id] = snapshot
                 return False
             raise CapabilityError(
                 "capability history changed concurrently; refresh required"
             ) from error
 
-        if result.inserted and snapshot.status == "VERIFIED":
-            self._session_verified[snapshot.snapshot_id] = snapshot
         return result.inserted
 
     def latest(self, **kwargs) -> CapabilitySnapshot:
@@ -264,14 +256,9 @@ class DurableCapabilityRegistry:
             raise CapabilityError(f"capability status is {snapshot.status}")
         if point >= snapshot.expires_at:
             raise CapabilityError("capability snapshot is expired")
-        fresh = self._session_verified.get(snapshot.snapshot_id)
-        if (
-            fresh is None
-            or type(fresh) is not CapabilitySnapshot
-            or fresh != snapshot
-            or not getattr(fresh, "_can_admit", False)
-        ):
+        content_sha256 = _capability_content_sha256(snapshot)
+        if content_sha256 not in self._fresh_content_sha256:
             raise CapabilityError(
                 "capability requires fresh current-process verification after restart"
             )
-        return fresh
+        return _admitted_snapshot_copy(snapshot)

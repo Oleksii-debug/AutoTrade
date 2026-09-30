@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone, tzinfo
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 import unittest
 
@@ -1175,7 +1175,7 @@ class CorporateActionSemanticGraphAuthorityTests(unittest.TestCase):
         self.assertEqual(book.events, before_events)
 
     def test_builtin_fixed_offset_timezone_normalizes_deterministically(self):
-        fixed = timezone.utc
+        fixed = timezone(timedelta(hours=2))
         event = corporate_event(
             event_id="builtin-timezone",
             kind="CASH_DIVIDEND",
@@ -1185,7 +1185,7 @@ class CorporateActionSemanticGraphAuthorityTests(unittest.TestCase):
             payload={"per_share": "1", "currency": "USD"},
         )
         self.assertEqual(event.effective_at.tzinfo, timezone.utc)
-        self.assertEqual(event.effective_at.hour, 12)
+        self.assertEqual(event.effective_at.hour, 10)
 
 
 

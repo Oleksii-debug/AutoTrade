@@ -14,7 +14,6 @@ import re
 from types import MappingProxyType
 from typing import Callable, Mapping
 
-from .provider_qualification_authority import PrivateStreamSemantics
 from .provider_response_limits import require_provider_json_depth
 
 
@@ -30,12 +29,13 @@ class PrivateStreamParserError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class InstalledPrivateStreamParser:
-    topic_id: str
+    stream_id: str
+    topic: str
     parser_id: str
     parser_version: str
     sequence_policy: str
-    sequence_scope: str
-    recovery_method_id: str
+    sequence_scope: str | None
+    recovery_rule_id: str
 
     @property
     def key(self) -> tuple[str, str]:
@@ -123,12 +123,13 @@ class ParsedPrivateStreamFrame:
 
 
 _BYBIT_V5_PRIVATE_EXECUTION = InstalledPrivateStreamParser(
-    topic_id="execution",
+    stream_id="PRIVATE_EXECUTIONS",
+    topic="execution",
     parser_id="bybit-v5-private-execution",
     parser_version="1.0.0",
     sequence_policy="MONOTONIC_NONCONTIGUOUS",
     sequence_scope="symbol",
-    recovery_method_id="snapshot-readback-v1",
+    recovery_rule_id="snapshot-readback-v1",
 )
 
 
@@ -302,38 +303,49 @@ _PARSER_DESCRIPTORS: Mapping[
 
 
 def installed_private_stream_parser(
-    semantics: PrivateStreamSemantics,
+    *,
+    stream_id: object,
+    topic: object,
+    parser_id: object,
+    parser_version: object,
+    sequence_policy: object,
+    sequence_scope: object,
+    recovery_rule_id: object,
 ) -> InstalledPrivateStreamParser:
-    """Resolve one source-installed parser from one exact accepted-Q stream contract."""
+    """Resolve one exact source-installed parser selected by accepted Q."""
 
-    if type(semantics) is not PrivateStreamSemantics:
+    if type(parser_id) is not str or type(parser_version) is not str:
         raise PrivateStreamParserError(
-            "private-stream parser selection requires exact accepted-Q semantics"
+            "private-stream parser id/version must be exact text"
         )
-    descriptor = _PARSER_DESCRIPTORS.get(
-        (semantics.parser_id, semantics.parser_version)
-    )
+    descriptor = _PARSER_DESCRIPTORS.get((parser_id, parser_version))
     if descriptor is None:
         raise PrivateStreamParserError(
             "private-stream parser id/version is not source-installed"
         )
     supplied = (
-        semantics.topic_id,
-        semantics.parser_id,
-        semantics.parser_version,
-        semantics.sequence_policy,
-        semantics.sequence_scope,
-        semantics.recovery_method_id,
+        stream_id,
+        topic,
+        parser_id,
+        parser_version,
+        sequence_policy,
+        sequence_scope,
+        recovery_rule_id,
     )
     expected = (
-        descriptor.topic_id,
+        descriptor.stream_id,
+        descriptor.topic,
         descriptor.parser_id,
         descriptor.parser_version,
         descriptor.sequence_policy,
         descriptor.sequence_scope,
-        descriptor.recovery_method_id,
+        descriptor.recovery_rule_id,
     )
-    if supplied != expected:
+    if supplied != expected or any(
+        type(value) is not str
+        for value in supplied
+        if value is not None
+    ):
         raise PrivateStreamParserError(
             "private-stream parser selection does not match installed Q semantics"
         )
@@ -342,12 +354,26 @@ def installed_private_stream_parser(
 
 def parse_installed_private_stream_frame(
     *,
-    semantics: PrivateStreamSemantics,
+    stream_id: object,
+    topic: object,
+    parser_id: object,
+    parser_version: object,
+    sequence_policy: object,
+    sequence_scope: object,
+    recovery_rule_id: object,
     frame_bytes: object,
 ) -> ParsedPrivateStreamFrame:
-    """Parse held exact frame bytes under one exact accepted-Q parser contract."""
+    """Parse held exact frame bytes with one exact source-installed implementation."""
 
-    descriptor = installed_private_stream_parser(semantics)
+    descriptor = installed_private_stream_parser(
+        stream_id=stream_id,
+        topic=topic,
+        parser_id=parser_id,
+        parser_version=parser_version,
+        sequence_policy=sequence_policy,
+        sequence_scope=sequence_scope,
+        recovery_rule_id=recovery_rule_id,
+    )
     if type(frame_bytes) is not bytes:
         raise PrivateStreamParserError(
             "private-stream frame must be exact bytes"

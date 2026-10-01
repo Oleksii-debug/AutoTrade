@@ -1558,11 +1558,6 @@ class ProviderOriginJournal:
             "reconciliation_generation": generation_payload,
         }
         try:
-            # Call the exact installed ArtifactStore implementation rather than
-            # resolving an instance attribute after construction.  The store is
-            # exact-typed and root-authenticated separately; allowing its
-            # instance __dict__ to interpose publish_bytes would still execute
-            # caller code inside the financial retention boundary.
             manifest = ArtifactStore.publish_bytes(
                 self._response_store,
                 artifact_id=response_artifact_id,

@@ -65,6 +65,12 @@ from .provider_core import (
 )
 from .windows_secrets import PersistentCredentialHandle
 from .security import SecurityBoundary
+from .provider_qualification_authority import ProviderQualificationCurrentReader
+from .provider_selection import (
+    ProviderSelectionError,
+    SelectedProviderAuthority,
+    revalidate_selected_provider_authority,
+)
 from .provider_response_limits import (
     DEFAULT_MAX_PROVIDER_RESPONSE_BYTES,
     HARD_MAX_PROVIDER_RESPONSE_BYTES,
@@ -115,6 +121,8 @@ class _ProductCredentialWireComposition:
     identity_scope: tuple[tuple[str, object], ...]
     policy_state: tuple[str, str, str, frozenset[str], int]
     credential_handle_state: tuple[str, str, str, str, str, int, str]
+    selected_provider_authority: SelectedProviderAuthority | None
+    qualification_reader: ProviderQualificationCurrentReader | None
 
 
 _PRODUCT_CREDENTIAL_WIRE_GUARD = Lock()
@@ -225,6 +233,8 @@ def _register_product_credential_wire(
     *,
     security_boundary: SecurityBoundary,
     wire_client: ProviderWireClient,
+    selected_provider_authority: SelectedProviderAuthority | None,
+    qualification_reader: ProviderQualificationCurrentReader | None,
 ) -> None:
     if type(security_boundary) is not SecurityBoundary:
         raise ProviderTransportScopeError(
@@ -238,6 +248,21 @@ def _register_product_credential_wire(
         raise ProviderTransportScopeError(
             "product credential authority requires canonical urllib wire"
         )
+    product_read = type(transport) in _product_authenticated_read_transport_types()
+    if product_read:
+        if type(selected_provider_authority) is not SelectedProviderAuthority:
+            raise ProviderTransportScopeError(
+                "product authenticated read requires exact selected provider authority"
+            )
+        if type(qualification_reader) is not ProviderQualificationCurrentReader:
+            raise ProviderTransportScopeError(
+                "product authenticated read requires exact qualification current reader"
+            )
+    elif selected_provider_authority is not None or qualification_reader is not None:
+        raise ProviderTransportScopeError(
+            "provider read authority may only be attached to authenticated-read transports"
+        )
+
     value_scope, identity_scope = _capture_product_scope(transport)
     policy = object.__getattribute__(transport, "policy")
     credential_handle = object.__getattribute__(transport, "credential_handle")
@@ -286,6 +311,8 @@ def _register_product_credential_wire(
             identity_scope=identity_scope,
             policy_state=policy_state,
             credential_handle_state=credential_handle_state,
+            selected_provider_authority=selected_provider_authority,
+            qualification_reader=qualification_reader,
         )
 
 
@@ -293,6 +320,8 @@ def build_product_credential_transport(
     transport_type: type,
     *,
     security_boundary: SecurityBoundary,
+    selected_provider_authority: SelectedProviderAuthority | None = None,
+    qualification_reader: ProviderQualificationCurrentReader | None = None,
     **transport_kwargs: object,
 ):
     """Issue one production credential/wire composition through the module TCB.
@@ -315,17 +344,47 @@ def build_product_credential_transport(
             "product transport factory owns secret_resolver and wire_client"
         )
 
+    product_read = transport_type in _product_authenticated_read_transport_types()
+    if product_read:
+        if type(selected_provider_authority) is not SelectedProviderAuthority:
+            raise ProviderTransportScopeError(
+                "product authenticated read requires exact selected provider authority"
+            )
+        if type(qualification_reader) is not ProviderQualificationCurrentReader:
+            raise ProviderTransportScopeError(
+                "product authenticated read requires exact qualification current reader"
+            )
+    elif selected_provider_authority is not None or qualification_reader is not None:
+        raise ProviderTransportScopeError(
+            "provider read authority may only be attached to authenticated-read transports"
+        )
+
     kwargs = dict(transport_kwargs)
-    if transport_type in _product_authenticated_read_transport_types():
-        # Public constructors remain deterministic TEST/INJECTED seams, but the
-        # factory-issued product path must not let a caller backdate current
-        # capability admission or the definitive response observation instant.
+    if product_read:
+        # Direct constructors remain TEST/INJECTED seams. Product-issued reads
+        # consume process-owned authority time and cannot be backdated by callers.
         kwargs["clock_utc"] = _current_authority_utc
     if "policy" not in kwargs:
         raise ProviderTransportScopeError(
             "product transport factory requires canonical endpoint policy"
         )
-    _require_canonical_product_policy_state(kwargs["policy"])
+    policy_state = _require_canonical_product_policy_state(kwargs["policy"])
+    if product_read:
+        selected = selected_provider_authority
+        assert selected is not None
+        if (
+            selected.provider_id != policy_state[0]
+            or selected.environment != policy_state[1]
+            or kwargs.get("account_id") != selected.account_id
+            or kwargs.get("capability_snapshot_id") != selected.capability_snapshot_id
+            or (
+                "provider_environment" in kwargs
+                and kwargs.get("provider_environment") != selected.provider_environment
+            )
+        ):
+            raise ProviderTransportScopeError(
+                "selected provider authority does not match product transport scope"
+            )
     kwargs["secret_resolver"] = _ProductConstructionResolver()
     kwargs["wire_client"] = None
     with _product_factory_construction():
@@ -339,12 +398,85 @@ def build_product_credential_transport(
         transport,
         security_boundary=security_boundary,
         wire_client=selected_wire,
+        selected_provider_authority=selected_provider_authority,
+        qualification_reader=qualification_reader,
     )
     # Keep the authority-bearing wire reachable only from the module registry.
     # The product instance retains no reference that ordinary caller code can
     # use to mutate the canonical opener or response budget in place.
     object.__setattr__(transport, "_wire_client", None)
     return transport
+
+
+def _require_product_authenticated_read_authority(
+    transport: object,
+    query_binding: AuthenticatedReadQueryBinding,
+) -> None:
+    """Revalidate exact selected Q1+C1 and canonical route at the wire cut."""
+
+    composition = _product_credential_wire_composition(transport)
+    if composition is None:
+        return
+    if type(transport) not in _product_authenticated_read_transport_types():
+        return
+    selected = composition.selected_provider_authority
+    reader = composition.qualification_reader
+    if type(selected) is not SelectedProviderAuthority or type(
+        reader
+    ) is not ProviderQualificationCurrentReader:
+        raise ProviderTransportScopeError(
+            "product authenticated-read Q+C authority is unavailable"
+        )
+    if type(query_binding) is not AuthenticatedReadQueryBinding:
+        raise TypeError("query_binding must be exact AuthenticatedReadQueryBinding")
+    if (
+        query_binding.provider_id != selected.provider_id
+        or query_binding.account_id != selected.account_id
+        or query_binding.entity_id != selected.entity_id
+        or query_binding.environment != selected.environment
+        or query_binding.provider_environment != selected.provider_environment
+        or query_binding.instrument_version != selected.instrument_version
+        or query_binding.capability_snapshot_id != selected.capability_snapshot_id
+    ):
+        raise ProviderTransportScopeError(
+            "authenticated-read query is outside selected provider authority"
+        )
+
+    registry = object.__getattribute__(transport, "capability_registry")
+    if type(registry) is not CapabilityRegistry:
+        raise ProviderTransportScopeError(
+            "product authenticated-read capability registry changed"
+        )
+    try:
+        first_route = canonical_authenticated_read_route(query_binding)
+    except (ProviderTransportScopeError, TypeError, ValueError) as error:
+        raise ProviderTransportScopeError(
+            "authenticated-read route authority is unavailable before wire"
+        ) from error
+
+    point = _product_authority_utc()
+    try:
+        revalidate_selected_provider_authority(
+            selected,
+            qualification_reader=reader,
+            capability_registry=registry,
+            at=point,
+        )
+    except (ProviderSelectionError, TypeError, ValueError) as error:
+        raise ProviderTransportScopeError(
+            "selected provider Q+C authority changed before wire"
+        ) from error
+
+    try:
+        final_route = canonical_authenticated_read_route(query_binding)
+    except (ProviderTransportScopeError, TypeError, ValueError) as error:
+        raise ProviderTransportScopeError(
+            "authenticated-read route authority changed before wire"
+        ) from error
+    if final_route != first_route:
+        raise ProviderTransportScopeError(
+            "authenticated-read route authority changed during final Q+C cut"
+        )
 
 
 def _credential_wire_authority(
@@ -499,6 +631,21 @@ def _current_authority_utc() -> datetime:
     """Return product-owned UTC authority time for irreversible LIVE admission."""
 
     return datetime.now(timezone.utc)
+
+
+def _product_authority_utc() -> datetime:
+    """Validate the product-owned clock before financial/provider authority use."""
+
+    point = _current_authority_utc()
+    if (
+        type(point) is not datetime
+        or point.tzinfo is None
+        or point.utcoffset() is None
+    ):
+        raise ProviderTransportScopeError(
+            "product authority UTC clock must return exact aware datetime"
+        )
+    return point.astimezone(timezone.utc)
 
 
 _UINT64_MAX = (1 << 64) - 1
@@ -4032,6 +4179,7 @@ class KrakenSpotAuthenticatedReadTransport(_CredentialWireBoundTransport):
 
                 # Resolve authority again immediately before the irreversible read.
                 self._require_current_capability(query_binding, rule)
+                _require_product_authenticated_read_authority(self, query_binding)
                 wire_response = _credential_wire_authority(self)[1].send(signed)
         finally:
             provider_api_key = None
@@ -4326,6 +4474,7 @@ class AlpacaAuthenticatedReadTransport(_CredentialWireBoundTransport):
         # Re-resolve current C after credential access and immediately before
         # the only irreversible network read.
         self._require_current_capability(query_binding, rule)
+        _require_product_authenticated_read_authority(self, query_binding)
         wire_response = _credential_wire_authority(self)[1].send(request)
         if type(wire_response) is not AuthenticatedReadWireResponse:
             raise ProviderTransportError(
@@ -5346,6 +5495,7 @@ class BybitV5AuthenticatedReadTransport(_CredentialWireBoundTransport):
             credential_plaintext = None
 
         self._require_current_capability(query_binding, rule)
+        _require_product_authenticated_read_authority(self, query_binding)
         wire_response = _credential_wire_authority(self)[1].send(signed)
         if not isinstance(wire_response, AuthenticatedReadWireResponse):
             raise ProviderTransportError(
@@ -5955,6 +6105,7 @@ class BinanceSpotAuthenticatedReadTransport(_CredentialWireBoundTransport):
         # Secret access/signing may take time. Re-resolve authority at the
         # irreversible boundary so revocation/expiry cannot race the wire send.
         self._require_current_capability(query_binding, rule)
+        _require_product_authenticated_read_authority(self, query_binding)
         wire_response = _credential_wire_authority(self)[1].send(signed)
         if not isinstance(wire_response, AuthenticatedReadWireResponse):
             raise ProviderTransportError(

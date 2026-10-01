@@ -4,6 +4,10 @@ from unittest.mock import patch
 
 from mvp.autotrade_mvp import provider_transport as provider_transport_module
 from mvp.autotrade_mvp.capabilities import CapabilityRegistry
+from mvp.autotrade_mvp.provider_qualification_authority import (
+    ProviderQualificationCurrentReader,
+)
+from mvp.autotrade_mvp.provider_selection import SelectedProviderAuthority
 from mvp.autotrade_mvp.provider_transport import (
     BINANCE_SPOT_ENDPOINT_POLICIES,
     BinanceSpotAuthenticatedReadTransport,
@@ -20,14 +24,41 @@ from mvp.tests.test_provider_transport import (
 )
 
 
+def _selected_read_authority(capability) -> SelectedProviderAuthority:
+    return SelectedProviderAuthority(
+        provider_id="BINANCE",
+        product_family="CRYPTO_SPOT",
+        adapter_code_sha="1" * 40,
+        qualification_id="sha256:" + "2" * 64,
+        capability_snapshot_id=capability.snapshot_id,
+        account_id="acct-1",
+        entity_id="entity-1",
+        environment="PAPER",
+        provider_environment="PAPER",
+        instrument_version="BTCUSDT@1",
+        route_policy_id="binance-spot-account-read-v1",
+        entity_policy_id="binance-spot-account-v1",
+        network_policy_id="direct-tls-v1",
+        account_class="SPOT",
+        release_artifact_id=None,
+        release_artifact_sha256=None,
+        reconciliation_semantics_id=None,
+    )
+
+
 class ProductAuthenticatedReadTimeAuthorityTests(unittest.TestCase):
     def _product(self, *, registry, caller_clock):
+        capability = verified_read_capability()
         return build_product_credential_transport(
             BinanceSpotAuthenticatedReadTransport,
             security_boundary=object.__new__(SecurityBoundary),
+            selected_provider_authority=_selected_read_authority(capability),
+            qualification_reader=object.__new__(
+                ProviderQualificationCurrentReader
+            ),
             policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
             account_id="acct-1",
-            capability_snapshot_id=verified_read_capability().snapshot_id,
+            capability_snapshot_id=capability.snapshot_id,
             capability_registry=registry,
             credential_handle=read_handle(),
             session_token="product-time-authority-session",
@@ -83,6 +114,10 @@ class ProductAuthenticatedReadTimeAuthorityTests(unittest.TestCase):
             transport = build_product_credential_transport(
                 BinanceSpotAuthenticatedReadTransport,
                 security_boundary=object.__new__(SecurityBoundary),
+                selected_provider_authority=_selected_read_authority(capability),
+                qualification_reader=object.__new__(
+                    ProviderQualificationCurrentReader
+                ),
                 policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
                 account_id="acct-1",
                 capability_snapshot_id=capability.snapshot_id,

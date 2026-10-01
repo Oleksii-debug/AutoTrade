@@ -9,7 +9,6 @@ The composition manifest is published last.
 from __future__ import annotations
 
 import argparse
-import ctypes
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
@@ -37,22 +36,6 @@ from autotrade_foundation.windows_namespace import (
 ROOT = Path(__file__).resolve().parents[1]
 _GIT_OBJECT_ID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-_POSIX_OPENAT2_SYSCALL = 437
-_POSIX_RESOLVE_NO_XDEV = 0x01
-_POSIX_RESOLVE_NO_MAGICLINKS = 0x02
-_POSIX_RESOLVE_NO_SYMLINKS = 0x04
-_POSIX_RESOLVE_BENEATH = 0x08
-_POSIX_OPENAT2_MACHINES = frozenset(
-    {"x86_64", "amd64", "aarch64", "arm64", "riscv64"}
-)
-
-
-class _OpenHow(ctypes.Structure):
-    _fields_ = (
-        ("flags", ctypes.c_uint64),
-        ("mode", ctypes.c_uint64),
-        ("resolve", ctypes.c_uint64),
-    )
 
 
 @dataclass(frozen=True)
@@ -627,7 +610,7 @@ def _retained_posix_relative_directory(
         )
     current = os.dup(root_descriptor)
     try:
-        for depth, part in enumerate(parts):
+        for part in parts:
             if not part or part in {".", ".."} or "/" in part or "\\" in part:
                 raise FoundationStagingError(
                     "POSIX retained directory component is not canonical"
@@ -644,11 +627,6 @@ def _retained_posix_relative_directory(
                 if not create:
                     raise FoundationStagingError(
                         "POSIX retained directory component is missing"
-                    ) from None
-                if depth:
-                    raise FoundationStagingError(
-                        "POSIX retained nested directory creation is not authorized "
-                        "through a movable descendant"
                     ) from None
                 try:
                     os.mkdir(part, 0o700, dir_fd=current)
@@ -679,68 +657,6 @@ def _retained_posix_relative_directory(
         yield current
     finally:
         os.close(current)
-
-
-def _open_posix_beneath(
-    root_descriptor: int,
-    relative: str,
-    *,
-    flags: int,
-    mode: int,
-    subject: str,
-) -> int:
-    """Open one full root-relative path without permitting ancestor escape."""
-
-    if sys.platform != "linux":
-        raise FoundationStagingError(
-            f"{subject} requires Linux openat2 beneath/no-symlink authority"
-        )
-    if type(root_descriptor) is not int or root_descriptor < 0:
-        raise TypeError("root_descriptor must be an exact non-negative int")
-    if type(relative) is not str or not relative or "\x00" in relative:
-        raise FoundationStagingError(f"{subject} relative path is not canonical")
-    candidate = PurePosixPath(relative)
-    parts = candidate.parts
-    if (
-        candidate.is_absolute()
-        or candidate.as_posix() != relative
-        or not parts
-        or any(part in {"", ".", ".."} or "\\" in part for part in parts)
-    ):
-        raise FoundationStagingError(f"{subject} relative path is not canonical")
-    machine = os.uname().machine.lower()
-    if machine not in _POSIX_OPENAT2_MACHINES:
-        raise FoundationStagingError(
-            f"{subject} has no qualified openat2 syscall mapping for {machine}"
-        )
-    how = _OpenHow(
-        flags=flags,
-        mode=mode,
-        resolve=(
-            _POSIX_RESOLVE_BENEATH
-            | _POSIX_RESOLVE_NO_XDEV
-            | _POSIX_RESOLVE_NO_SYMLINKS
-            | _POSIX_RESOLVE_NO_MAGICLINKS
-        ),
-    )
-    libc = ctypes.CDLL(None, use_errno=True)
-    syscall = libc.syscall
-    syscall.restype = ctypes.c_long
-    ctypes.set_errno(0)
-    descriptor = syscall(
-        ctypes.c_long(_POSIX_OPENAT2_SYSCALL),
-        ctypes.c_int(root_descriptor),
-        ctypes.c_char_p(os.fsencode(relative)),
-        ctypes.byref(how),
-        ctypes.c_size_t(ctypes.sizeof(how)),
-    )
-    if descriptor < 0:
-        error_number = ctypes.get_errno()
-        error = OSError(error_number, os.strerror(error_number))
-        raise FoundationStagingError(
-            f"{subject} root-relative beneath/no-symlink open failed"
-        ) from error
-    return int(descriptor)
 
 
 def _read_posix_regular_file(
@@ -794,38 +710,40 @@ def _require_posix_relative_directory_matches(
 
 
 def _write_posix_new_regular(
-    root_descriptor: int,
     parent_descriptor: int,
     *,
     target_name: str,
     data: bytes,
     relative: str,
 ) -> None:
-    """Publish a new component through the retained staging-root authority."""
+    """Publish a non-authoritative component leaf relative to a retained parent."""
+
+    raise FoundationStagingError(
+        "authoritative source-controlled staging requires Windows retained "
+        "namespace authority; POSIX descendant rename-out cannot be "
+        "linearized without stronger filesystem/process isolation"
+    )
 
     no_follow = _required_posix_open_flag("O_NOFOLLOW")
     flags = (
-        os.O_RDWR
+        os.O_WRONLY
         | os.O_CREAT
         | os.O_EXCL
         | getattr(os, "O_CLOEXEC", 0)
         | no_follow
     )
     try:
-        descriptor = _open_posix_beneath(
-            root_descriptor,
-            relative,
-            flags=flags,
-            mode=0o600,
-            subject=f"POSIX retained component publication: {relative}",
+        descriptor = os.open(
+            target_name,
+            flags,
+            0o600,
+            dir_fd=parent_descriptor,
         )
-    except FoundationStagingError:
-        raise
     except OSError as error:
         raise FoundationStagingError(
             f"POSIX retained component publication failed: {relative}"
         ) from error
-
+    complete = False
     try:
         view = memoryview(data)
         while view:
@@ -834,29 +752,23 @@ def _write_posix_new_regular(
                 raise OSError("short POSIX retained component write")
             view = view[written:]
         os.fsync(descriptor)
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        observed = bytearray()
-        while True:
-            chunk = os.read(descriptor, 64 * 1024)
-            if not chunk:
-                break
-            observed.extend(chunk)
-        if bytes(observed) != data:
-            raise FoundationStagingError(
-                f"staged component verification failed: {relative}"
-            )
+        complete = True
     finally:
-        # Never unlink through a previously retained descendant after failure:
-        # that descendant may have moved. Without a composition update any
-        # residual leaf remains non-authoritative and is rejected on retry.
         os.close(descriptor)
-
-    relative_parent = tuple(PurePosixPath(relative).parent.parts)
-    _require_posix_relative_directory_matches(
-        root_descriptor,
-        relative_parent,
+        if not complete:
+            try:
+                os.unlink(target_name, dir_fd=parent_descriptor)
+            except OSError:
+                pass
+    observed, _opened = _read_posix_regular_file(
         parent_descriptor,
+        target_name,
+        subject="published component",
     )
+    if observed != data:
+        raise FoundationStagingError(
+            f"staged component verification failed: {relative}"
+        )
     os.fsync(parent_descriptor)
 
 
@@ -935,7 +847,6 @@ def _atomic_publish_regular(
     relative: str,
     windows_parent_authority=None,
     posix_parent_authority: int | None = None,
-    posix_root_authority: int | None = None,
     publication_authority: ExitStack | None = None,
 ) -> None:
     _preflight_existing_chain(
@@ -972,12 +883,11 @@ def _atomic_publish_regular(
             ) from error
         return
 
-    if posix_root_authority is None or posix_parent_authority is None:
+    if posix_parent_authority is None:
         raise FoundationStagingError(
-            "POSIX component publication requires retained root and parent authority"
+            "POSIX component publication requires retained parent authority"
         )
     _write_posix_new_regular(
-        posix_root_authority,
         posix_parent_authority,
         target_name=path.name,
         data=data,
@@ -1065,6 +975,13 @@ def _stage_source_controlled_components_unserialized(
     posix_composition_authority: int | None = None,
 ) -> tuple[dict[str, str], ...]:
     """Internal TCB used only with reviewed, module-owned descriptor sets."""
+
+    if os.name != "nt":
+        raise FoundationStagingError(
+            "authoritative source-controlled staging requires Windows retained "
+            "namespace authority; POSIX descendant rename-out cannot be "
+            "linearized without stronger filesystem/process isolation"
+        )
 
     descriptors = _validate_descriptors(descriptors)
     source_root_baseline = _require_git_root(source_root)
@@ -1285,7 +1202,6 @@ def _stage_source_controlled_components_unserialized(
                     root=staging,
                     relative=descriptor.path,
                     posix_parent_authority=parent_authority,
-                    posix_root_authority=posix_staging_authority,
                 )
 
         if os.name != "nt":
@@ -1328,6 +1244,13 @@ def _stage_source_controlled_components(
     descriptors: tuple[_SourceControlledComponent, ...],
 ) -> tuple[dict[str, str], ...]:
     """Run one serialized preflight -> component publish -> manifest commit."""
+
+    if os.name != "nt":
+        raise FoundationStagingError(
+            "authoritative source-controlled staging requires Windows retained "
+            "namespace authority; POSIX descendant rename-out cannot be "
+            "linearized without stronger filesystem/process isolation"
+        )
 
     with _composition_publish_transaction(
         composition_path.parent

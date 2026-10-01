@@ -17,6 +17,10 @@ import weakref
 import mvp.autotrade_mvp.provider_transport as provider_transport
 from mvp.autotrade_mvp.capabilities import CapabilityRegistry
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.provider_qualification_authority import (
+    ProviderQualificationCurrentReader,
+)
+from mvp.autotrade_mvp.provider_selection import SelectedProviderAuthority
 from mvp.autotrade_mvp.security import SecurityBoundary
 from mvp.autotrade_mvp.provider_transport import (
     ALPACA_ENDPOINT_POLICIES,
@@ -40,6 +44,47 @@ from mvp.autotrade_mvp.provider_transport import (
     WhiteBitHttpTransport,
 )
 from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
+
+
+_PRODUCT_READ_TRANSPORTS = (
+    KrakenSpotAuthenticatedReadTransport,
+    BybitV5AuthenticatedReadTransport,
+    BinanceSpotAuthenticatedReadTransport,
+)
+
+
+def _product_read_authority(constructor, args):
+    if constructor not in _PRODUCT_READ_TRANSPORTS:
+        return {}
+    handle = args["credential_handle"]
+    provider_environment = args.get(
+        "provider_environment",
+        handle.provider_environment,
+    )
+    return {
+        "selected_provider_authority": SelectedProviderAuthority(
+            provider_id=handle.provider,
+            product_family="TEST_PRODUCT",
+            adapter_code_sha="1" * 40,
+            qualification_id="sha256:" + "2" * 64,
+            capability_snapshot_id=args["capability_snapshot_id"],
+            account_id=args["account_id"],
+            entity_id="test-entity",
+            environment=handle.environment,
+            provider_environment=provider_environment,
+            instrument_version="TEST@1",
+            route_policy_id="test-route-v1",
+            entity_policy_id="test-entity-v1",
+            network_policy_id="direct-tls-v1",
+            account_class="TEST",
+            release_artifact_id=None,
+            release_artifact_sha256=None,
+            reconciliation_semantics_id=None,
+        ),
+        "qualification_reader": object.__new__(
+            ProviderQualificationCurrentReader
+        ),
+    }
 
 
 class _InjectedWire:
@@ -154,6 +199,7 @@ class ProductionCredentialWireSeparationTests(unittest.TestCase):
         return build_product_credential_transport(
             constructor,
             security_boundary=security,
+            **_product_read_authority(constructor, kwargs),
             **kwargs,
         )
 
@@ -396,6 +442,7 @@ class ProductionCredentialWireSeparationTests(unittest.TestCase):
                         build_product_credential_transport(
                             constructor,
                             security_boundary=security,
+                            **_product_read_authority(constructor, kwargs),
                             **kwargs,
                         )
 

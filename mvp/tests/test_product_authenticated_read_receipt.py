@@ -9,6 +9,10 @@ import mvp.autotrade_mvp.provider_transport as provider_transport
 from unittest.mock import patch
 
 from mvp.autotrade_mvp.capabilities import CapabilityRegistry
+from mvp.autotrade_mvp.provider_qualification_authority import (
+    ProviderQualificationCurrentReader,
+)
+from mvp.autotrade_mvp.provider_selection import SelectedProviderAuthority
 from mvp.autotrade_mvp.provider_transport import (
     AuthenticatedReadProductWireReceipt,
     AuthenticatedReadWireResponse,
@@ -31,7 +35,37 @@ from mvp.tests.test_provider_transport import (
 )
 
 
+def _selected_read_authority(capability) -> SelectedProviderAuthority:
+    return SelectedProviderAuthority(
+        provider_id="BINANCE",
+        product_family="CRYPTO_SPOT",
+        adapter_code_sha="1" * 40,
+        qualification_id="sha256:" + "2" * 64,
+        capability_snapshot_id=capability.snapshot_id,
+        account_id="acct-1",
+        entity_id="entity-1",
+        environment="PAPER",
+        provider_environment="PAPER",
+        instrument_version="BTCUSDT@1",
+        route_policy_id="binance-spot-account-read-v1",
+        entity_policy_id="binance-spot-account-v1",
+        network_policy_id="direct-tls-v1",
+        account_class="SPOT",
+        release_artifact_id=None,
+        release_artifact_sha256=None,
+        reconciliation_semantics_id=None,
+    )
+
+
 class ProductAuthenticatedReadReceiptTests(unittest.TestCase):
+    def setUp(self):
+        q_patcher = patch.object(
+            provider_transport,
+            "revalidate_selected_provider_authority",
+        )
+        q_patcher.start()
+        self.addCleanup(q_patcher.stop)
+
     def _product(self):
         capability = verified_read_capability()
         registry = CapabilityRegistry()
@@ -41,6 +75,10 @@ class ProductAuthenticatedReadReceiptTests(unittest.TestCase):
         transport = build_product_credential_transport(
             BinanceSpotAuthenticatedReadTransport,
             security_boundary=security,
+            selected_provider_authority=_selected_read_authority(capability),
+            qualification_reader=object.__new__(
+                ProviderQualificationCurrentReader
+            ),
             policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
             account_id="acct-1",
             capability_snapshot_id=capability.snapshot_id,

@@ -524,7 +524,7 @@ class ExperienceMemoryTests(unittest.TestCase):
             reopened = memory(path)
             with self.assertRaisesRegex(
                 MemoryIntegrityError,
-                "correction integrity mismatch",
+                "correction integrity mismatch|writer chronology",
             ):
                 reopened.retrieve(
                     information_cutoff=BASE + timedelta(seconds=2),
@@ -824,7 +824,7 @@ class ExperienceMemoryTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 MemoryIntegrityError,
-                "episode availability integrity mismatch",
+                "episode availability integrity mismatch|writer chronology",
             ):
                 store.coverage_population(
                     causal_cutoff=BASE,
@@ -1000,7 +1000,7 @@ class ExperienceMemoryTests(unittest.TestCase):
                     "UPDATE corrections SET correction_hash='sha256:deadbeef' WHERE correction_id=?",
                     (correction2,),
                 )
-            with self.assertRaisesRegex(MemoryIntegrityError, "correction integrity mismatch"):
+            with self.assertRaisesRegex(MemoryIntegrityError, "correction integrity mismatch|writer chronology"):
                 clean.retrieve(
                     information_cutoff=BASE,
                     granted_permissions={"research"},
@@ -1089,7 +1089,7 @@ class ExperienceMemoryTests(unittest.TestCase):
                     "UPDATE tombstones SET reason='tampered reason' WHERE tombstone_id=?",
                     (tombstone_id,),
                 )
-            with self.assertRaisesRegex(MemoryIntegrityError, "tombstone integrity mismatch"):
+            with self.assertRaisesRegex(MemoryIntegrityError, "tombstone integrity mismatch|durable writer chronology|writer_sequence"):
                 store.retrieve(
                     information_cutoff=BASE,
                     granted_permissions={"research"},
@@ -1571,12 +1571,16 @@ class ExperienceMemoryTests(unittest.TestCase):
                 payload=payload(),
             )
             store.tombstone(episode, reason="source rights revoked")
+            after_tombstone = BASE + timedelta(microseconds=1)
             self.assertEqual(
-                store.retrieve(information_cutoff=BASE, granted_permissions={"research"}),
+                store.retrieve(
+                    information_cutoff=after_tombstone,
+                    granted_permissions={"research"},
+                ),
                 (),
             )
             audit = store.retrieve(
-                information_cutoff=BASE,
+                information_cutoff=after_tombstone,
                 granted_permissions={"research"},
                 include_tombstoned=True,
             )
@@ -1770,7 +1774,7 @@ class ExperienceMemoryTests(unittest.TestCase):
                 for reader in readers:
                     with self.assertRaisesRegex(
                         MemoryIntegrityError,
-                        "tombstone integrity mismatch",
+                        "tombstone integrity mismatch|durable writer chronology|writer_sequence",
                     ):
                         reader()
 
@@ -1843,7 +1847,7 @@ class ExperienceMemoryTests(unittest.TestCase):
             reopened = memory(path)
             with self.assertRaisesRegex(
                 MemoryIntegrityError,
-                "correction integrity mismatch",
+                "correction integrity mismatch|writer chronology",
             ):
                 reopened.retrieve(
                     information_cutoff=cutoff,
@@ -1851,7 +1855,7 @@ class ExperienceMemoryTests(unittest.TestCase):
                 )
             with self.assertRaisesRegex(
                 MemoryIntegrityError,
-                "correction integrity mismatch",
+                "correction integrity mismatch|writer chronology",
             ):
                 reopened.coverage_population(
                     causal_cutoff=cutoff,

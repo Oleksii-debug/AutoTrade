@@ -73,8 +73,10 @@ def _canonical_decimal_text(value: Decimal, *, name: str) -> str:
 def _decimal(value, name: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise FxValuationError(f"{name} must use exact decimal input")
+    if isinstance(value, Decimal) and type(value) is not Decimal:
+        raise FxValuationError(f"{name} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
+        result = value if type(value) is Decimal else Decimal(value)
     except (InvalidOperation, TypeError, ValueError) as error:
         raise FxValuationError(f"{name} must be a finite decimal") from error
     if not result.is_finite():

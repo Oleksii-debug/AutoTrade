@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -400,11 +400,6 @@ class ExperienceMemory:
             raise MemoryIntegrityError(
                 "durable writer chronology is not gap-free and globally unique"
             )
-        for previous, current in zip(entries, entries[1:]):
-            if current[1] <= previous[1]:
-                raise MemoryIntegrityError(
-                    "durable writer chronology timestamps are not strictly monotonic"
-                )
 
         if state is None:
             raise MemoryIntegrityError(
@@ -414,7 +409,7 @@ class ExperienceMemory:
             state["last_sequence"],
             name="writer chronology last_sequence",
         )
-        last_created = _stored_time(
+        durable_time_floor = _stored_time(
             state["last_created_at"],
             name="writer chronology last_created_at",
         )
@@ -427,37 +422,52 @@ class ExperienceMemory:
         )
         if state["chronology_hash"] != expected_hash:
             raise MemoryIntegrityError("writer chronology state integrity mismatch")
-        if last_sequence != entries[-1][0] or last_created != entries[-1][1]:
+        if last_sequence != entries[-1][0]:
             raise MemoryIntegrityError(
                 "writer chronology state does not match immutable memory tail"
             )
-        return last_sequence, last_created
+        if durable_time_floor != max(created for _sequence, created in entries):
+            raise MemoryIntegrityError(
+                "writer chronology time floor does not match immutable memory"
+            )
+        return last_sequence, durable_time_floor
 
     @staticmethod
     def _next_writer_chronology(
         con: sqlite3.Connection,
         current: tuple[int, datetime] | None,
+        *,
+        require_advancing_wall_time: bool,
     ) -> tuple[int, datetime]:
-        """Advance local append time conservatively under the SQLite writer lock."""
+        """Bind append order without fabricating a UTC availability timestamp.
+
+        Evidence-backed corrections may retain an independently verified causal
+        availability while writer_sequence orders equal-availability rows. Local
+        availability has no such external authority: if the sampled wall clock
+        does not advance beyond the durable high-water mark, refuse the write
+        rather than backdating it or synthesizing a timestamp inside a historical
+        causal cut.
+        """
 
         sampled = _time(_utc_now(), name="writer clock")
         if current is None:
             sequence = 1
-            created = sampled
+            durable_time_floor = sampled
         else:
-            previous_sequence, previous_created = current
+            previous_sequence, previous_time_floor = current
+            if require_advancing_wall_time and sampled <= previous_time_floor:
+                raise MemoryConflict(
+                    "local writer clock did not advance beyond durable memory "
+                    "chronology; append refused"
+                )
             sequence = previous_sequence + 1
-            created = (
-                sampled
-                if sampled > previous_created
-                else previous_created + timedelta(microseconds=1)
-            )
-        created_text = created.isoformat()
+            durable_time_floor = max(previous_time_floor, sampled)
+        floor_text = durable_time_floor.isoformat()
         chronology_hash = _hash(
             {
                 "schema_version": 1,
                 "last_sequence": sequence,
-                "last_created_at": created_text,
+                "last_created_at": floor_text,
             }
         )
         con.execute(
@@ -470,9 +480,9 @@ class ExperienceMemory:
                 last_created_at=excluded.last_created_at,
                 chronology_hash=excluded.chronology_hash
             """,
-            (sequence, created_text, chronology_hash),
+            (sequence, floor_text, chronology_hash),
         )
-        return sequence, created
+        return sequence, sampled
 
     @staticmethod
     def _verified_episode(row: sqlite3.Row) -> dict[str, Any]:
@@ -718,6 +728,7 @@ class ExperienceMemory:
             writer_sequence, created = self._next_writer_chronology(
                 con,
                 writer_state,
+                require_advancing_wall_time=True,
             )
             created_at = created.isoformat()
             availability_digest = _hash(
@@ -859,21 +870,29 @@ class ExperienceMemory:
                     raise MemoryConflict("correction identity conflict")
                 return identifier, False
 
-            writer_sequence, created = self._next_writer_chronology(
-                con,
-                writer_state,
-            )
             if requested_availability is None:
-                availability = created
                 availability_authority = "LOCAL_APPEND"
             else:
-                availability = requested_availability
+                availability_authority = "EVIDENCE_REF"
                 evidenced_at = self._resolve_correction_evidence_time(evidence_ref)
-                if evidenced_at != availability:
+                if evidenced_at != requested_availability:
                     raise MemoryIntegrityError(
                         "correction available_at does not match independently verified evidence"
                     )
-                availability_authority = "EVIDENCE_REF"
+
+            writer_sequence, created = self._next_writer_chronology(
+                con,
+                writer_state,
+                require_advancing_wall_time=(
+                    availability_authority == "LOCAL_APPEND"
+                ),
+            )
+            availability = (
+                created
+                if availability_authority == "LOCAL_APPEND"
+                else requested_availability
+            )
+            assert availability is not None
             if availability < episode_decision:
                 raise MemoryConflict(
                     "correction availability cannot precede episode decision_time"
@@ -930,6 +949,7 @@ class ExperienceMemory:
             writer_sequence, created = self._next_writer_chronology(
                 con,
                 writer_state,
+                require_advancing_wall_time=True,
             )
             created_at = created.isoformat()
             digest = _hash(

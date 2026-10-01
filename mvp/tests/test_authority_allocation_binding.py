@@ -703,6 +703,8 @@ class AuthorityAllocationBindingTests(unittest.TestCase):
                     provider_id=PROVIDER_ID,
                     account_id=ACCOUNT_ID,
                     policy_version=result.policy_version,
+                    allocation_policy=_allocation_policy(),
+                    max_candidate_sets=64,
                     instrument_versions=dict(result.instrument_versions),
                     financial_instruments={"ABC": (INSTRUMENT_ID, 1)},
                     capability_snapshot_ids=dict(result.capability_snapshot_ids),

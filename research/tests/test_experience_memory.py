@@ -101,6 +101,15 @@ class ExperienceMemoryTests(unittest.TestCase):
                             permission_class="research",
                             payload=payload("blocked"),
                         )
+                    elif operation == "correction":
+                        store.append_correction(
+                            episode,
+                            payload={
+                                "supersedes_fields": ["outcome"],
+                                "outcome": {"label": "blocked correction"},
+                                "evidence_ref": "artifact:blocked-correction",
+                            },
+                        )
                     else:
                         store.tombstone(episode, reason="blocked writer tombstone")
                 except BaseException as error:
@@ -163,14 +172,22 @@ class ExperienceMemoryTests(unittest.TestCase):
                 after_source = next(
                     item for item in after if item["episode_id"] == episode
                 )
-                self.assertEqual(before_source["tombstone_lineage"], ())
-                self.assertEqual(len(after_source["tombstone_lineage"]), 1)
+                lineage_key = (
+                    "correction_lineage"
+                    if operation == "correction"
+                    else "tombstone_lineage"
+                )
+                self.assertEqual(before_source[lineage_key], ())
+                self.assertEqual(len(after_source[lineage_key]), 1)
 
     def test_episode_availability_clock_is_sampled_after_writer_lock(self):
         self._assert_availability_clock_waits_for_writer_lock("append")
 
     def test_tombstone_availability_clock_is_sampled_after_writer_lock(self):
         self._assert_availability_clock_waits_for_writer_lock("tombstone")
+
+    def test_correction_append_clock_is_sampled_after_writer_lock(self):
+        self._assert_availability_clock_waits_for_writer_lock("correction")
 
     def test_duplicate_episode_is_idempotent(self):
         with TemporaryDirectory() as directory:
@@ -1464,6 +1481,164 @@ class ExperienceMemoryTests(unittest.TestCase):
                         "costs": {"fees": 0.1},
                         "evidence_ref": "artifact:float-cost",
                     },
+                )
+
+
+    def test_tombstone_identity_is_bound_across_all_memory_reads(self):
+        for mutation in ("clone", "rewrite"):
+            with self.subTest(mutation=mutation), TemporaryDirectory() as directory:
+                path = Path(directory) / "memory.sqlite3"
+                store = memory(path)
+                episode, _ = store.append_episode(
+                    decision_time=BASE,
+                    information_cutoff=BASE,
+                    task="research",
+                    regime="calm",
+                    instrument_family="equity",
+                    permission_class="research",
+                    payload=payload(),
+                )
+                tombstone_id = store.tombstone(
+                    episode,
+                    reason="identity-bound tombstone",
+                )
+                replacement_id = (
+                    "00000000-0000-0000-0000-000000000901"
+                    if mutation == "clone"
+                    else "00000000-0000-0000-0000-000000000902"
+                )
+                with store._connect() as con:
+                    if mutation == "clone":
+                        row = con.execute(
+                            "SELECT episode_id,reason,created_at,tombstone_hash "
+                            "FROM tombstones WHERE tombstone_id=?",
+                            (tombstone_id,),
+                        ).fetchone()
+                        con.execute(
+                            "INSERT INTO tombstones("
+                            "tombstone_id,episode_id,reason,created_at,tombstone_hash"
+                            ") VALUES(?,?,?,?,?)",
+                            (
+                                replacement_id,
+                                row["episode_id"],
+                                row["reason"],
+                                row["created_at"],
+                                row["tombstone_hash"],
+                            ),
+                        )
+                    else:
+                        con.execute(
+                            "UPDATE tombstones SET tombstone_id=? WHERE tombstone_id=?",
+                            (replacement_id, tombstone_id),
+                        )
+
+                reopened = memory(path)
+                readers = (
+                    lambda: reopened.retrieve(
+                        information_cutoff=BASE,
+                        granted_permissions={"research"},
+                        include_tombstoned=True,
+                    ),
+                    lambda: reopened.source_episode(
+                        episode,
+                        information_cutoff=BASE,
+                        granted_permissions={"research"},
+                        include_tombstoned=True,
+                    ),
+                    lambda: reopened.coverage_population(
+                        causal_cutoff=BASE,
+                        granted_permissions={"research"},
+                    ),
+                )
+                for reader in readers:
+                    with self.assertRaisesRegex(
+                        MemoryIntegrityError,
+                        "tombstone integrity mismatch",
+                    ):
+                        reader()
+
+    def test_same_availability_correction_created_at_reorder_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "memory.sqlite3"
+            store = memory(path)
+            episode, _ = store.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload("pending"),
+            )
+            with patch(
+                "research.autotrade_research.memory.episodes._utc_now",
+                return_value=BASE + timedelta(seconds=1),
+            ):
+                first_id, _ = store.append_correction(
+                    episode,
+                    available_at=BASE,
+                    correction_id="00000000-0000-0000-0000-000000000911",
+                    payload={
+                        "supersedes_fields": ["outcome"],
+                        "outcome": {"label": "first"},
+                        "evidence_ref": "artifact:first-same-availability",
+                    },
+                )
+            with patch(
+                "research.autotrade_research.memory.episodes._utc_now",
+                return_value=BASE + timedelta(seconds=2),
+            ):
+                store.append_correction(
+                    episode,
+                    available_at=BASE,
+                    correction_id="00000000-0000-0000-0000-000000000912",
+                    payload={
+                        "supersedes_fields": ["outcome"],
+                        "outcome": {"label": "second"},
+                        "evidence_ref": "artifact:second-same-availability",
+                    },
+                )
+
+            cutoff = BASE + timedelta(minutes=1)
+            retrieved = store.retrieve(
+                information_cutoff=cutoff,
+                granted_permissions={"research"},
+            )
+            self.assertEqual(
+                [item["outcome"]["label"] for item in retrieved[0]["corrections"]],
+                ["first", "second"],
+            )
+            population = store.coverage_population(
+                causal_cutoff=cutoff,
+                granted_permissions={"research"},
+            )
+            self.assertEqual(
+                population[0]["effective_payload"]["outcome"]["label"],
+                "second",
+            )
+
+            with store._connect() as con:
+                con.execute(
+                    "UPDATE corrections SET created_at=? WHERE correction_id=?",
+                    ((BASE + timedelta(seconds=3)).isoformat(), first_id),
+                )
+
+            reopened = memory(path)
+            with self.assertRaisesRegex(
+                MemoryIntegrityError,
+                "correction integrity mismatch",
+            ):
+                reopened.retrieve(
+                    information_cutoff=cutoff,
+                    granted_permissions={"research"},
+                )
+            with self.assertRaisesRegex(
+                MemoryIntegrityError,
+                "correction integrity mismatch",
+            ):
+                reopened.coverage_population(
+                    causal_cutoff=cutoff,
+                    granted_permissions={"research"},
                 )
 
 

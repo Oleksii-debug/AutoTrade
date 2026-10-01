@@ -8,7 +8,9 @@ from pathlib import Path
 import re
 import sqlite3
 import sys
+from threading import RLock
 from typing import Any
+from weakref import WeakKeyDictionary
 
 from autotrade_foundation.local_filesystem import (
     LocalFilesystemQualificationError,
@@ -35,6 +37,46 @@ from .store_identity import (
 _JOURNAL_OPERATION_AUTHORITY: ContextVar[
     tuple[int, JournalStoreIdentity] | None
 ] = ContextVar("autotrade_journal_operation_authority", default=None)
+
+
+def _protected_writer_registry_factory():
+    """Keep selected writer capabilities outside caller-mutable store state."""
+
+    selections = WeakKeyDictionary()
+    lock = RLock()
+
+    def register(
+        store: object,
+        writer: object,
+        scope: tuple[object, ...],
+    ) -> None:
+        with lock:
+            registry = selections.get(store)
+            if registry is None:
+                registry = {}
+                selections[store] = registry
+            registry[id(writer)] = (writer, *scope)
+
+    def lookup(
+        store: object,
+        writer: object,
+    ) -> tuple[object, ...] | None:
+        with lock:
+            registry = selections.get(store)
+            if registry is None:
+                return None
+            selected = registry.get(id(writer))
+            if selected is None:
+                return None
+            return tuple(selected)
+
+    return register, lookup
+
+
+_register_protected_writer_selection, _lookup_protected_writer_selection = (
+    _protected_writer_registry_factory()
+)
+del _protected_writer_registry_factory
 
 
 
@@ -111,19 +153,6 @@ class JournalStore(_JournalStoreImpl):
         self._initialize()
         if self._store_identity is None:
             raise RuntimeError("journal store identity was not established")
-        # Process capability registry is separate from durable writer metadata.
-        # Holding the tuple rather than only the object makes post-issuance
-        # object.__setattr__ tampering fail closed at every use.
-        self._selected_protected_writers: dict[
-            int,
-            tuple[
-                ProtectedJournalWriter,
-                JournalStoreIdentity,
-                str,
-                str,
-                str,
-            ],
-        ] = {}
 
     @classmethod
     def _migration_statements(cls, version: int) -> tuple[str, ...]:
@@ -201,17 +230,16 @@ class JournalStore(_JournalStoreImpl):
         cannot be promoted.
         """
 
+        if type(self) is not JournalStore:
+            raise TypeError(
+                "protected writer selection requires exact canonical JournalStore"
+            )
         state = _require_exact_journal_store_state(
             self,
             subject="protected writer JournalStore",
         )
         _reject_journal_store_instance_shadows(state)
         identity = JournalStore.store_identity.__get__(self, JournalStore)
-        registry = state.get("_selected_protected_writers")
-        if type(registry) is not dict:
-            raise RuntimeError(
-                "protected writer process capability registry is unavailable"
-            )
         # Construct and fully validate the process capability before durable
         # namespace registration so invalid selection is always zero-mutation.
         writer = ProtectedJournalWriter(
@@ -226,12 +254,15 @@ class JournalStore(_JournalStoreImpl):
             namespace_version=writer.namespace_version,
             writer_authority_id=writer.writer_authority_id,
         )
-        registry[id(writer)] = (
+        _register_protected_writer_selection(
+            self,
             writer,
-            identity,
-            writer.aggregate_type,
-            writer.namespace_version,
-            writer.writer_authority_id,
+            (
+                identity,
+                writer.aggregate_type,
+                writer.namespace_version,
+                writer.writer_authority_id,
+            ),
         )
         return writer
 
@@ -239,6 +270,10 @@ class JournalStore(_JournalStoreImpl):
         self,
         writer: object,
     ) -> ProtectedJournalWriter:
+        if type(self) is not JournalStore:
+            raise TypeError(
+                "protected writer use requires exact canonical JournalStore"
+            )
         if type(writer) is not ProtectedJournalWriter:
             raise TypeError(
                 "writer must be exact selected ProtectedJournalWriter"
@@ -248,12 +283,7 @@ class JournalStore(_JournalStoreImpl):
             subject="protected writer JournalStore",
         )
         _reject_journal_store_instance_shadows(state)
-        registry = state.get("_selected_protected_writers")
-        if type(registry) is not dict:
-            raise RuntimeError(
-                "protected writer process capability registry is unavailable"
-            )
-        selected = registry.get(id(writer))
+        selected = _lookup_protected_writer_selection(self, writer)
         if (
             type(selected) is not tuple
             or len(selected) != 5

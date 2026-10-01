@@ -515,6 +515,12 @@ def _policy_from_payload(value: object) -> RiskPolicy:
     return policy
 
 
+def canonical_risk_policy(policy: RiskPolicy) -> RiskPolicy:
+    """Return one detached exact-base RiskPolicy after canonical content validation."""
+
+    return _policy_from_payload(risk_policy_payload(policy))
+
+
 def _scope_from_payload(value: object) -> RiskPolicyScope:
     payload = _strict_mapping(value, name="risk policy scope", keys=_SCOPE_KEYS)
     scope = RiskPolicyScope(**payload)

@@ -14,6 +14,7 @@ from mvp.autotrade_mvp.risk_policy_authority import (
     RiskPolicyAuthorityError,
     RiskPolicyIdentity,
     RiskPolicyScope,
+    canonical_risk_policy,
     risk_policy_digest,
     risk_policy_payload,
 )
@@ -57,6 +58,29 @@ def policy(*, max_gross_leverage="2", max_daily_loss="100"):
 
 
 class DurableRiskPolicyRegistryTests(unittest.TestCase):
+    def test_canonical_risk_policy_detaches_exact_caller_state(self):
+        caller = policy(max_gross_leverage="2")
+        canonical = canonical_risk_policy(caller)
+        object.__setattr__(caller, "max_gross_leverage", Decimal("9"))
+        self.assertEqual(caller.max_gross_leverage, Decimal("9"))
+        self.assertEqual(canonical.max_gross_leverage, Decimal("2"))
+
+    def test_canonical_risk_policy_rejects_subclass_before_field_callbacks(self):
+        class HostileRiskPolicy(RiskPolicy):
+            callbacks = 0
+
+            def __getattribute__(self, name):
+                if name in {"max_abs_position", "max_gross_leverage"}:
+                    type(self).callbacks += 1
+                    raise AssertionError("RiskPolicy subclass field callback executed")
+                return super().__getattribute__(name)
+
+        base = policy()
+        hostile = HostileRiskPolicy(**vars(base))
+        with self.assertRaisesRegex(TypeError, "exact RiskPolicy"):
+            canonical_risk_policy(hostile)
+        self.assertEqual(HostileRiskPolicy.callbacks, 0)
+
     def test_scope_use_time_seal_rejects_post_construction_mutation(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

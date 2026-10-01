@@ -171,23 +171,25 @@ class JournalStore(_JournalStoreImpl):
         )
         _reject_journal_store_instance_shadows(state)
         identity = JournalStore.store_identity.__get__(self, JournalStore)
-        _JournalStoreImpl._register_protected_event_namespace(
-            self,
-            aggregate_type=aggregate_type,
-            namespace_version=namespace_version,
-            writer_authority_id=writer_authority_id,
-        )
+        registry = state.get("_selected_protected_writers")
+        if type(registry) is not dict:
+            raise RuntimeError(
+                "protected writer process capability registry is unavailable"
+            )
+        # Construct and fully validate the process capability before durable
+        # namespace registration so invalid selection is always zero-mutation.
         writer = ProtectedJournalWriter(
             store_identity=identity,
             aggregate_type=aggregate_type,
             namespace_version=namespace_version,
             writer_authority_id=writer_authority_id,
         )
-        registry = state.get("_selected_protected_writers")
-        if type(registry) is not dict:
-            raise RuntimeError(
-                "protected writer process capability registry is unavailable"
-            )
+        _JournalStoreImpl._register_protected_event_namespace(
+            self,
+            aggregate_type=writer.aggregate_type,
+            namespace_version=writer.namespace_version,
+            writer_authority_id=writer.writer_authority_id,
+        )
         registry[id(writer)] = (
             writer,
             identity,

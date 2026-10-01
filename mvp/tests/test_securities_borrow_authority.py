@@ -40,7 +40,7 @@ from mvp.tests.securities_borrow_evidence_helpers import (
 INSTRUMENT_ID = "11111111-1111-4111-8111-111111111111"
 PROVIDER_ID = "TEST_PROVIDER"
 ACCOUNT_ID = "paper-borrow-authority"
-ENVIRONMENT = "PAPER"
+ENVIRONMENT = "SIMULATION"
 NOW = "2026-09-25T05:01:00Z"
 
 

@@ -420,7 +420,7 @@ class _IssuedFinancialAuthorityCheck:
         binding = _FINANCIAL_AUTHORITY_BINDINGS.get(self)
         if binding is None:
             raise PermissionError("financial dispatch authority is not issued")
-        callback, _store = binding
+        callback, _store, _environment, _account_id = binding
         return callback(intent_hash, now)
 
 
@@ -428,23 +428,40 @@ def _issue_financial_authority_check(
     callback: AuthorityCheck,
     *,
     store: JournalStore | None,
+    environment: str,
+    account_id: str,
 ) -> AuthorityCheck:
-    """Issue one opaque financial authority capability for an exact store."""
+    """Issue one opaque financial authority capability for one exact scope."""
 
     if not callable(callback):
         raise TypeError("financial authority callback must be callable")
+    normalized_environment = (
+        environment.strip().upper() if isinstance(environment, str) else ""
+    )
+    if normalized_environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+        raise ValueError(
+            "financial authority environment must be REPLAY, SIMULATION, PAPER, or LIVE"
+        )
+    if not isinstance(account_id, str) or not account_id.strip():
+        raise ValueError("financial authority account_id is required")
+    normalized_account_id = account_id.strip()
     if store is not None:
         require_exact_journal_store_authority(store)
     capability = _IssuedFinancialAuthorityCheck(
         _FINANCIAL_AUTHORITY_ISSUANCE_TOKEN
     )
-    _FINANCIAL_AUTHORITY_BINDINGS[capability] = (callback, store)
+    _FINANCIAL_AUTHORITY_BINDINGS[capability] = (
+        callback,
+        store,
+        normalized_environment,
+        normalized_account_id,
+    )
     return capability
 
 
 def _issued_financial_authority_binding(
     value: object,
-) -> tuple[AuthorityCheck, JournalStore | None]:
+) -> tuple[AuthorityCheck, JournalStore | None, str, str]:
     if type(value) is not _IssuedFinancialAuthorityCheck:
         raise PermissionError(
             "PAPER/LIVE financial authority must be issued by AuthorityService"
@@ -452,10 +469,14 @@ def _issued_financial_authority_binding(
     binding = _FINANCIAL_AUTHORITY_BINDINGS.get(value)
     if binding is None:
         raise PermissionError("financial dispatch authority is not issued")
-    callback, store = binding
+    callback, store, environment, account_id = binding
     if not callable(callback):
         raise PermissionError("financial dispatch authority binding is invalid")
-    return callback, store
+    if environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+        raise PermissionError("financial dispatch authority scope is invalid")
+    if not isinstance(account_id, str) or not account_id:
+        raise PermissionError("financial dispatch authority scope is invalid")
+    return callback, store, environment, account_id
 
 
 @dataclass(frozen=True)
@@ -1188,13 +1209,23 @@ class GuardedDispatcher:
         if not isinstance(request, Mapping):
             raise TypeError("request must be a mapping")
         if self.environment in {"PAPER", "LIVE"}:
-            _issued_callback, issued_store = _issued_financial_authority_binding(
-                authority_check
-            )
+            (
+                _issued_callback,
+                issued_store,
+                issued_environment,
+                issued_account_id,
+            ) = _issued_financial_authority_binding(authority_check)
             selected_store = self._journal_store_authority()
             if issued_store is None or issued_store is not selected_store:
                 raise PermissionError(
                     "PAPER/LIVE financial authority belongs to another journal authority"
+                )
+            if (
+                issued_environment != self.environment
+                or issued_account_id != self.account_id
+            ):
+                raise PermissionError(
+                    "PAPER/LIVE financial authority belongs to another dispatcher scope"
                 )
         _instant(now)
         request_canonical = canonical_json(dict(request))

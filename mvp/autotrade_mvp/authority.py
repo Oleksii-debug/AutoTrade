@@ -4589,7 +4589,12 @@ class AuthorityService:
                 capability_snapshot_id=capability,
             )
 
-        return _issue_financial_authority_check(check, store=self.store)
+        return _issue_financial_authority_check(
+            check,
+            store=self.store,
+            environment=env,
+            account_id=account,
+        )
 
 
     def export_state(self) -> dict:

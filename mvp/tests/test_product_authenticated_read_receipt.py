@@ -351,6 +351,45 @@ class ProductAuthenticatedReadReceiptTests(unittest.TestCase):
         ):
             execute_product_authenticated_read(transport, query)
 
+
+    def test_receipt_authority_does_not_depend_on_reusable_object_id_token(self):
+        transport, query, _point = self._product()
+        credential = '{"api_key":"test-key","api_secret":"test-secret"}'
+        response = AuthenticatedReadWireResponse(200, b'{"balances":[]}')
+        with patch.object(
+            SecurityBoundary,
+            "resolve_for_execution",
+            return_value=credential,
+        ), patch.object(
+            UrllibJsonWireClient,
+            "send",
+            return_value=response,
+        ):
+            issued = execute_product_authenticated_read(transport, query)
+
+        cloned = replace(issued)
+        self.assertEqual(cloned, issued)
+        self.assertIsNot(cloned, issued)
+        validate_product_authenticated_read_receipt(issued, query)
+
+        real_id = id
+
+        def colliding_id(value):
+            if value is cloned:
+                return real_id(issued)
+            return real_id(value)
+
+        # Simulate the only property the old registry relied on: a later object
+        # receiving the same process-local identity token as the issued receipt.
+        # All unrelated object identities remain real so endpoint/transport
+        # authority checks are not perturbed by this falsifier.
+        with patch("builtins.id", side_effect=colliding_id):
+            with self.assertRaisesRegex(
+                ProviderTransportScopeError,
+                "lacks canonical wire execution evidence",
+            ):
+                validate_product_authenticated_read_receipt(cloned, query)
+
     def test_retired_receipt_cannot_be_reused(self):
         transport, query, _point = self._product()
         credential = '{"api_key":"test-key","api_secret":"test-secret"}'

@@ -40,6 +40,7 @@ from mvp.autotrade_mvp.provider_transport import (
     ProviderEndpointPolicy,
     ProviderTransportScopeError,
     UrllibJsonWireClient,
+    WhiteBitAuthenticatedReadTransport,
     WhiteBitDurableNonceAllocator,
     WhiteBitHttpTransport,
 )
@@ -47,6 +48,7 @@ from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
 
 
 _PRODUCT_READ_TRANSPORTS = (
+    WhiteBitAuthenticatedReadTransport,
     KrakenSpotAuthenticatedReadTransport,
     BybitV5AuthenticatedReadTransport,
     BinanceSpotAuthenticatedReadTransport,
@@ -143,6 +145,19 @@ class ProductionCredentialWireSeparationTests(unittest.TestCase):
             journal=journal, account_id="acct-wb", environment="LIVE",
             clock_millis=millis, clock_utc=now,
         )
+        wb_read = scoped(
+            "WHITEBIT",
+            "LIVE",
+            "acct-wb",
+            "READ",
+            WHITEBIT_ENDPOINT_POLICIES["LIVE"],
+            provider_environment="LIVE",
+        )
+        wb_read["nonce_allocator"] = WhiteBitDurableNonceAllocator(
+            journal=journal, account_id="acct-wb", environment="LIVE",
+            clock_millis=millis, clock_utc=now,
+        )
+        wb_read.update(capability_registry=registry, clock_utc=now)
         kraken = []
         for purpose in ("TRADE", "READ"):
             k = scoped("KRAKEN", "LIVE", "acct-kraken", purpose, KRAKEN_SPOT_ENDPOINT_POLICIES["LIVE"])
@@ -183,6 +198,7 @@ class ProductionCredentialWireSeparationTests(unittest.TestCase):
 
         return (
             ("whitebit-write", WhiteBitHttpTransport, wb),
+            ("whitebit-read", WhiteBitAuthenticatedReadTransport, wb_read),
             ("kraken-write", KrakenSpotHttpTransport, kraken[0]),
             ("kraken-read", KrakenSpotAuthenticatedReadTransport, kraken[1]),
             ("alpaca-write", AlpacaTradingHttpTransport, alpaca),

@@ -21,6 +21,7 @@ from mvp.autotrade_mvp.provider_transport import (
     BinanceSpotAuthenticatedReadTransport,
     BybitV5AuthenticatedReadTransport,
     KrakenSpotAuthenticatedReadTransport,
+    WhiteBitAuthenticatedReadTransport,
     ProviderTransportScopeError,
     _require_product_authenticated_read_authority,
     build_product_credential_transport,
@@ -228,6 +229,7 @@ class ProductAuthenticatedReadDecisionCutTests(unittest.TestCase):
 
     def test_all_product_read_sends_are_guarded_immediately_before_wire(self):
         for transport_type in (
+            WhiteBitAuthenticatedReadTransport,
             KrakenSpotAuthenticatedReadTransport,
             AlpacaAuthenticatedReadTransport,
             BybitV5AuthenticatedReadTransport,

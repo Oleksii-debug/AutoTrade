@@ -124,9 +124,11 @@ class KrakenSpotContractTests(unittest.TestCase):
         ).encode("utf-8")
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
+            # Contract fixtures validate adapter/schema semantics, not production
+            # financial authority. Keep synthetic durable wire evidence in SIMULATION.
             dispatcher = GuardedDispatcher(
                 store,
-                environment=prepared_request.environment,
+                environment="SIMULATION",
                 account_id=prepared_request.account_id,
                 owner_token="contract-owner",
             )
@@ -159,7 +161,7 @@ class KrakenSpotContractTests(unittest.TestCase):
             self.assertEqual(outcome.status, "SENT")
             binding = load_submission_response_binding(
                 store,
-                environment=prepared_request.environment,
+                environment="SIMULATION",
                 account_id=prepared_request.account_id,
                 attempt_id=attempt_id,
             )

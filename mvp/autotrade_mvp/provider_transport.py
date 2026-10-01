@@ -185,6 +185,7 @@ def _product_transport_types() -> tuple[type, ...]:
     # Names resolve only when a caller invokes the factory after module import.
     return (
         WhiteBitHttpTransport,
+        WhiteBitAuthenticatedReadTransport,
         KrakenSpotHttpTransport,
         KrakenSpotAuthenticatedReadTransport,
         AlpacaTradingHttpTransport,
@@ -1182,6 +1183,20 @@ class AuthenticatedReadEndpointRule:
             )
 
 
+WHITEBIT_AUTHENTICATED_READ_ENDPOINTS: Mapping[
+    str, AuthenticatedReadEndpointRule
+] = MappingProxyType(
+    {
+        "/api/v4/trade-account/executed-history": AuthenticatedReadEndpointRule(
+            surface=Surface.ACTIVITIES,
+            permission_scope="TRADE.READ",
+            data_entitlement="TRADES",
+            success_statuses=frozenset({200}),
+        ),
+    }
+)
+
+
 BINANCE_SPOT_AUTHENTICATED_READ_ENDPOINTS: Mapping[
     str, AuthenticatedReadEndpointRule
 ] = MappingProxyType(
@@ -1444,6 +1459,148 @@ def _alpaca_authenticated_read_rule(
             "authenticated-read permission scope does not match Alpaca endpoint policy"
         )
     _validate_alpaca_authenticated_read_query(binding)
+    return rule
+
+
+_WHITEBIT_AUTHENTICATED_READ_QUERY_FIELDS = frozenset(
+    {
+        "market",
+        "clientOrderId",
+        "startDate",
+        "endDate",
+        "limit",
+        "offset",
+    }
+)
+
+
+def _whitebit_canonical_integer(
+    value: object,
+    *,
+    name: str,
+    minimum: int,
+    maximum: int,
+) -> int:
+    text = _canonical_text(value, name=name)
+    if (
+        not text.isascii()
+        or not text.isdigit()
+        or len(text) > len(str(maximum))
+    ):
+        raise ProviderTransportScopeError(
+            f"WhiteBIT {name} must be bounded canonical non-negative integer text"
+        )
+    parsed = int(text, 10)
+    if str(parsed) != text or not minimum <= parsed <= maximum:
+        raise ProviderTransportScopeError(
+            f"WhiteBIT {name} is outside the admitted integer range"
+        )
+    return parsed
+
+
+def _validate_whitebit_authenticated_read_query(
+    binding: AuthenticatedReadQueryBinding,
+) -> None:
+    unsupported = set(binding.query) - _WHITEBIT_AUTHENTICATED_READ_QUERY_FIELDS
+    if unsupported:
+        raise ProviderTransportScopeError(
+            "WhiteBIT authenticated-read query contains unsupported fields: "
+            + ",".join(sorted(unsupported))
+        )
+
+    # Project reconciliation deliberately requires an explicit finite window
+    # and page geometry even though the provider endpoint has defaults.
+    required = {"startDate", "endDate", "limit", "offset"}
+    missing = required - set(binding.query)
+    if missing:
+        raise ProviderTransportScopeError(
+            "WhiteBIT executed-history query is missing required bounded fields: "
+            + ",".join(sorted(missing))
+        )
+
+    start = _whitebit_canonical_integer(
+        binding.query["startDate"],
+        name="startDate",
+        minimum=0,
+        maximum=(1 << 63) - 1,
+    )
+    end = _whitebit_canonical_integer(
+        binding.query["endDate"],
+        name="endDate",
+        minimum=0,
+        maximum=(1 << 63) - 1,
+    )
+    if end < start:
+        raise ProviderTransportScopeError(
+            "WhiteBIT endDate must not precede startDate"
+        )
+    if end - start > 31 * 24 * 60 * 60:
+        raise ProviderTransportScopeError(
+            "WhiteBIT executed-history window cannot exceed 31 days"
+        )
+
+    _whitebit_canonical_integer(
+        binding.query["limit"],
+        name="limit",
+        minimum=1,
+        maximum=100,
+    )
+    _whitebit_canonical_integer(
+        binding.query["offset"],
+        name="offset",
+        minimum=0,
+        maximum=10_000,
+    )
+
+    market = binding.query.get("market")
+    if market is not None:
+        normalized = _canonical_text(market, name="market")
+        if (
+            normalized != normalized.upper()
+            or len(normalized) > 64
+            or any(
+                not (
+                    character.isascii()
+                    and (character.isalnum() or character == "_")
+                )
+                for character in normalized
+            )
+        ):
+            raise ProviderTransportScopeError(
+                "WhiteBIT market must be canonical uppercase market text"
+            )
+
+    client_order_id = binding.query.get("clientOrderId")
+    if client_order_id is not None:
+        try:
+            canonical_client_id = validate_client_order_id(client_order_id)
+        except ValueError as error:
+            raise ProviderTransportScopeError(
+                "WhiteBIT clientOrderId filter is invalid"
+            ) from error
+        if canonical_client_id != client_order_id:
+            raise ProviderTransportScopeError(
+                "WhiteBIT clientOrderId filter is not canonical"
+            )
+
+
+def _whitebit_authenticated_read_rule(
+    binding: AuthenticatedReadQueryBinding,
+) -> AuthenticatedReadEndpointRule:
+    rule = WHITEBIT_AUTHENTICATED_READ_ENDPOINTS.get(binding.endpoint)
+    if rule is None:
+        raise ProviderTransportScopeError(
+            "WhiteBIT authenticated-read endpoint is not explicitly allowed"
+        )
+    if binding.surface != rule.surface:
+        raise ProviderTransportScopeError(
+            "authenticated-read endpoint surface does not match WhiteBIT policy"
+        )
+    if binding.permission_scope != rule.permission_scope:
+        raise ProviderTransportScopeError(
+            "authenticated-read permission scope does not match WhiteBIT endpoint policy"
+        )
+    _validate_whitebit_authenticated_read_query(binding)
     return rule
 
 
@@ -1775,7 +1932,14 @@ def resolve_authenticated_read_route_authority(
     if type(binding) is not AuthenticatedReadQueryBinding:
         raise TypeError("binding must be exact AuthenticatedReadQueryBinding")
 
-    if binding.provider_id == "ALPACA":
+    if binding.provider_id == "WHITEBIT":
+        policy = WHITEBIT_ENDPOINT_POLICIES.get(binding.provider_environment)
+        if policy is None or policy.environment != binding.environment:
+            raise ProviderTransportScopeError(
+                "WhiteBIT authenticated-read provider environment is not canonical"
+            )
+        rule = _whitebit_authenticated_read_rule(binding)
+    elif binding.provider_id == "ALPACA":
         policy = ALPACA_ENDPOINT_POLICIES.get(binding.provider_environment)
         if policy is None or policy.environment != binding.environment:
             raise ProviderTransportScopeError(
@@ -3124,6 +3288,302 @@ class KrakenSpotDurableNonceAllocator:
 
     def send_lock_path_for_provider_api_key(self, provider_api_key: object):
         return self.for_provider_api_key(provider_api_key)._send_lock_path
+
+class WhiteBitAuthenticatedReadSigner:
+    """Pure signer for bounded WhiteBIT private executed-history reads."""
+
+    _INTEGER_FIELDS = frozenset({"startDate", "endDate", "limit", "offset"})
+
+    @staticmethod
+    def sign(
+        *,
+        policy: ProviderEndpointPolicy,
+        query_binding: AuthenticatedReadQueryBinding,
+        credential_plaintext: object,
+        nonce: object,
+    ) -> AuthenticatedReadHttpRequest:
+        if type(query_binding) is not AuthenticatedReadQueryBinding:
+            raise TypeError(
+                "query_binding must be exact AuthenticatedReadQueryBinding"
+            )
+        if policy is not WHITEBIT_ENDPOINT_POLICIES["LIVE"]:
+            raise ProviderTransportScopeError(
+                "WhiteBIT authenticated-read signer requires canonical LIVE policy"
+            )
+        if (
+            query_binding.provider_id != "WHITEBIT"
+            or query_binding.environment != "LIVE"
+            or query_binding.provider_environment != "LIVE"
+        ):
+            raise ProviderTransportScopeError(
+                "WhiteBIT authenticated-read binding provider/environment mismatch"
+            )
+        _whitebit_authenticated_read_rule(query_binding)
+
+        parameters: dict[str, object] = {}
+        for key, value in query_binding.query.items():
+            if key in WhiteBitAuthenticatedReadSigner._INTEGER_FIELDS:
+                parameters[key] = int(value, 10)
+            else:
+                parameters[key] = value
+
+        credential = WhiteBitCredential.parse(credential_plaintext)
+        provider_signed = sign_private_request(
+            endpoint=query_binding.endpoint,
+            parameters=parameters,
+            nonce=nonce,
+            api_key=credential.api_key,
+            api_secret=credential.api_secret,
+            nonce_window=False,
+        )
+        return AuthenticatedReadHttpRequest(
+            url=policy.absolute_url(provider_signed.endpoint),
+            headers=provider_signed.headers,
+            timeout_seconds=policy.timeout_seconds,
+            method="POST",
+            body=provider_signed.body,
+        )
+
+
+class WhiteBitAuthenticatedReadTransport(_CredentialWireBoundTransport):
+    """One-shot WhiteBIT LIVE executed-history read on the shared product TCB."""
+
+    def __init__(
+        self,
+        *,
+        policy: ProviderEndpointPolicy,
+        account_id: str,
+        capability_snapshot_id: str,
+        capability_registry: CapabilityRegistry,
+        secret_resolver: ProviderSecretResolver,
+        credential_handle: PersistentCredentialHandle,
+        session_token: str,
+        origin: str,
+        execution_identity: str,
+        nonce_allocator: WhiteBitDurableNonceAllocator,
+        clock_utc: ClockUtc,
+        quota_gate: QuotaGate,
+        wire_client: ProviderWireClient | None = None,
+    ) -> None:
+        if type(policy) is not ProviderEndpointPolicy:
+            raise TypeError("policy must be exact ProviderEndpointPolicy")
+        if policy is not WHITEBIT_ENDPOINT_POLICIES["LIVE"]:
+            raise ProviderTransportScopeError(
+                "WhiteBIT authenticated-read transport requires canonical LIVE policy"
+            )
+        if type(credential_handle) is not PersistentCredentialHandle:
+            raise TypeError(
+                "credential_handle must be exact PersistentCredentialHandle"
+            )
+        if (
+            credential_handle.provider != "WHITEBIT"
+            or credential_handle.environment != "LIVE"
+            or credential_handle.provider_environment != "LIVE"
+            or credential_handle.purpose != "READ"
+        ):
+            raise ProviderTransportScopeError(
+                "READ credential handle provider/environment/purpose mismatch"
+            )
+        account = _canonical_text(account_id, name="account_id")
+        if credential_handle.account_id != account:
+            raise ProviderTransportScopeError(
+                "credential handle account mismatch"
+            )
+        capability = _canonical_text(
+            capability_snapshot_id,
+            name="capability_snapshot_id",
+        )
+        if not isinstance(capability_registry, CapabilityRegistry):
+            raise TypeError("capability_registry must be CapabilityRegistry")
+        if not hasattr(secret_resolver, "resolve_for_execution"):
+            raise TypeError(
+                "secret_resolver must implement resolve_for_execution"
+            )
+        if type(nonce_allocator) is not WhiteBitDurableNonceAllocator:
+            raise TypeError(
+                "nonce_allocator must be exact WhiteBitDurableNonceAllocator"
+            )
+        if (
+            nonce_allocator.account_id != account
+            or nonce_allocator.environment != "LIVE"
+        ):
+            raise ProviderTransportScopeError(
+                "nonce allocator account/environment scope mismatch"
+            )
+        if not callable(clock_utc):
+            raise TypeError("clock_utc must be callable")
+        if not callable(quota_gate):
+            raise TypeError(
+                "quota_gate must be callable for WhiteBIT LIVE authenticated reads"
+            )
+        if wire_client is not None and not hasattr(wire_client, "send"):
+            raise TypeError("wire_client must implement send")
+
+        self.policy = policy
+        self.account_id = account
+        self.capability_snapshot_id = capability
+        self.capability_registry = capability_registry
+        self.secret_resolver = secret_resolver
+        self.credential_handle = credential_handle
+        self.session_token = _canonical_text(
+            session_token,
+            name="session_token",
+        )
+        self.origin = _canonical_text(origin, name="origin")
+        self.execution_identity = _canonical_text(
+            execution_identity,
+            name="execution_identity",
+        )
+        self.nonce_allocator = nonce_allocator
+        self.clock_utc = clock_utc
+        self.quota_gate = quota_gate
+        self._bind_wire_client(
+            secret_resolver=secret_resolver,
+            wire_client=wire_client,
+        )
+
+    def _require_current_capability(
+        self,
+        query_binding: AuthenticatedReadQueryBinding,
+        rule: AuthenticatedReadEndpointRule,
+    ) -> CapabilitySnapshot:
+        point = self.clock_utc()
+        if (
+            type(point) is not datetime
+            or point.tzinfo is None
+            or point.utcoffset() is None
+        ):
+            raise ProviderTransportScopeError(
+                "clock_utc must return an exact timezone-aware datetime"
+            )
+        point = point.astimezone(timezone.utc)
+        try:
+            current = self.capability_registry.require_verified(
+                provider_id="WHITEBIT",
+                account_id=self.account_id,
+                entity_id=query_binding.entity_id,
+                environment="LIVE",
+                provider_environment="LIVE",
+                instrument_version=query_binding.instrument_version,
+                at=point,
+            )
+        except Exception as error:
+            raise ProviderTransportScopeError(
+                "authenticated-read current capability cannot be verified"
+            ) from error
+        if not isinstance(current, CapabilitySnapshot):
+            raise ProviderTransportScopeError(
+                "capability registry must return CapabilitySnapshot"
+            )
+        if (
+            current.snapshot_id != self.capability_snapshot_id
+            or current.provider_id != "WHITEBIT"
+            or current.account_id != self.account_id
+            or current.entity_id != query_binding.entity_id
+            or current.environment != "LIVE"
+            or current.provider_environment != "LIVE"
+            or current.instrument_version != query_binding.instrument_version
+            or current.status != "VERIFIED"
+            or not (current.observed_at <= point < current.expires_at)
+            or query_binding.permission_scope not in current.permission_scopes
+            or rule.data_entitlement not in current.data_entitlements
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read capability is no longer valid for exact WhiteBIT query binding"
+            )
+        return current
+
+    def __call__(
+        self,
+        query_binding: AuthenticatedReadQueryBinding,
+    ) -> ProviderResponseObservation:
+        if type(query_binding) is not AuthenticatedReadQueryBinding:
+            raise TypeError(
+                "query_binding must be exact AuthenticatedReadQueryBinding"
+            )
+        if (
+            query_binding.provider_id != "WHITEBIT"
+            or query_binding.account_id != self.account_id
+            or query_binding.environment != "LIVE"
+            or query_binding.provider_environment != "LIVE"
+            or query_binding.capability_snapshot_id != self.capability_snapshot_id
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read query scope mismatch"
+            )
+        rule = _whitebit_authenticated_read_rule(query_binding)
+
+        self.quota_gate(
+            "WHITEBIT",
+            self.account_id,
+            "LIVE",
+            "AUTHENTICATED_READ",
+        )
+        self._require_current_capability(query_binding, rule)
+
+        credential_authority, _ = _credential_wire_authority(self)
+        credential_plaintext = credential_authority.resolve_for_execution(
+            self.session_token,
+            origin=self.origin,
+            handle=self.credential_handle,
+            execution_identity=self.execution_identity,
+            account_id=self.account_id,
+            provider="WHITEBIT",
+            environment="LIVE",
+            provider_environment="LIVE",
+            purpose="READ",
+        )
+        provider_api_key = None
+        try:
+            provider_api_key = WhiteBitCredential.parse(
+                credential_plaintext
+            ).api_key
+            nonce_domain = self.nonce_allocator.for_provider_api_key(
+                provider_api_key
+            )
+            provider_api_key = None
+            with nonce_domain.serialized_send():
+                nonce = nonce_domain.allocate()
+                signed = WhiteBitAuthenticatedReadSigner.sign(
+                    policy=self.policy,
+                    query_binding=query_binding,
+                    credential_plaintext=credential_plaintext,
+                    nonce=nonce,
+                )
+
+                self._require_current_capability(query_binding, rule)
+                _require_product_authenticated_read_authority(
+                    self,
+                    query_binding,
+                )
+                wire_response = _credential_wire_authority(self)[1].send(
+                    signed
+                )
+        finally:
+            provider_api_key = None
+            credential_plaintext = None
+
+        if type(wire_response) is not AuthenticatedReadWireResponse:
+            raise ProviderTransportError(
+                "authenticated-read wire client must preserve exact HTTP status"
+            )
+        if wire_response.http_status not in rule.success_statuses:
+            raise ProviderTransportError(
+                "authenticated provider read returned unexpected HTTP status "
+                + str(wire_response.http_status)
+                + "; allowed="
+                + ",".join(
+                    str(status) for status in sorted(rule.success_statuses)
+                )
+            )
+        observed_at = self.clock_utc()
+        return observe_authenticated_json_response(
+            query_binding=query_binding,
+            http_status=wire_response.http_status,
+            response_bytes=wire_response.body,
+            observed_at=observed_at,
+        )
+
 
 class WhiteBitHttpTransport(_CredentialWireBoundTransport):
     """GuardedDispatcher-compatible WhiteBIT LIVE order transport.
@@ -6163,6 +6623,7 @@ class BinanceSpotAuthenticatedReadTransport(_CredentialWireBoundTransport):
 
 def _product_authenticated_read_transport_types() -> tuple[type, ...]:
     return (
+        WhiteBitAuthenticatedReadTransport,
         KrakenSpotAuthenticatedReadTransport,
         AlpacaAuthenticatedReadTransport,
         BybitV5AuthenticatedReadTransport,
@@ -6406,7 +6867,10 @@ def _build_product_authenticated_read_receipt_api():
     """Create the product-wire receipt authority without module-exported mutable state."""
 
     guard = Lock()
-    records: dict[str, tuple[int, tuple[object, ...]]] = {}
+    records: dict[
+        str,
+        tuple[AuthenticatedReadProductWireReceipt, tuple[object, ...]],
+    ] = {}
 
     def execute_product_authenticated_read(
         transport: object,
@@ -6527,11 +6991,16 @@ def _build_product_authenticated_read_receipt_api():
         )
         with guard:
             existing = records.get(receipt_id)
-            if existing is not None and existing != (id(receipt), record):
+            if existing is not None and (
+                existing[0] is not receipt or existing[1] != record
+            ):
                 raise ProviderTransportError(
                     "product authenticated-read receipt identity conflict"
                 )
-            records[receipt_id] = (id(receipt), record)
+            # Retain the exact issued object itself until retirement. Python object
+            # IDs are reusable after collection and therefore are not an authority
+            # token for a financial/provider evidence capability.
+            records[receipt_id] = (receipt, record)
         # parse_error is intentionally not re-raised: the exact wire fact exists.
         # Financial promotion later re-applies current route/Q/status/parser rules.
         _ = parse_error
@@ -6595,7 +7064,11 @@ def _build_product_authenticated_read_receipt_api():
         )
         with guard:
             registered = records.get(receipt.receipt_id)
-        if registered != (id(receipt), record):
+        if (
+            registered is None
+            or registered[0] is not receipt
+            or registered[1] != record
+        ):
             raise ProviderTransportScopeError(
                 "product authenticated-read receipt lacks canonical wire execution evidence"
             )
@@ -6653,7 +7126,7 @@ def _build_product_authenticated_read_receipt_api():
             )
         with guard:
             existing = records.get(receipt.receipt_id)
-            if existing is None or existing[0] != id(receipt):
+            if existing is None or existing[0] is not receipt:
                 raise ProviderTransportScopeError(
                     "product authenticated-read receipt is not current"
                 )

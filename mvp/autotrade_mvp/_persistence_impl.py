@@ -92,7 +92,7 @@ class JournalStore:
     publication intent; a separate qualified dispatcher must perform delivery.
     """
 
-    SCHEMA_VERSION = 9
+    SCHEMA_VERSION = 10
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -254,6 +254,21 @@ class JournalStore:
                 "UPDATE command_dedupe SET effect_kind = 'LEGACY_UNKNOWN' "
                 "WHERE effect_kind IS NULL",
             )
+        if version == 10:
+            # Writer provenance is JournalStore-authored metadata, never an
+            # event-payload assertion. Existing rows stay NULL and cannot be
+            # retroactively promoted when a namespace is protected later.
+            return (
+                "ALTER TABLE events ADD COLUMN writer_authority_id TEXT",
+                """
+                CREATE TABLE protected_event_namespaces (
+                    aggregate_type TEXT PRIMARY KEY,
+                    namespace_version TEXT NOT NULL,
+                    writer_authority_id TEXT NOT NULL,
+                    registered_at TEXT NOT NULL
+                )
+                """,
+            )
         raise ValueError(f"Unsupported journal migration version: {version}")
 
     @classmethod
@@ -274,7 +289,8 @@ class JournalStore:
                 "event_id", "event_type", "aggregate_type", "aggregate_id",
                 "aggregate_version", "payload_json", "payload_hash", "committed_at",
             } | ({"envelope_json", "envelope_hash"} if cls.SCHEMA_VERSION >= 5 else set())
-              | ({"journal_sequence"} if cls.SCHEMA_VERSION >= 6 else set())),
+              | ({"journal_sequence"} if cls.SCHEMA_VERSION >= 6 else set())
+              | ({"writer_authority_id"} if cls.SCHEMA_VERSION >= 10 else set())),
             "outbox": frozenset({
                 "outbox_id", "event_id", "topic", "payload_json",
                 "created_at", "delivered_at"
@@ -290,6 +306,11 @@ class JournalStore:
             required["global_projection_checkpoints"] = frozenset({
                 "projection_name", "journal_sequence",
                 "state_json", "state_hash", "updated_at",
+            })
+        if cls.SCHEMA_VERSION >= 10:
+            required["protected_event_namespaces"] = frozenset({
+                "aggregate_type", "namespace_version",
+                "writer_authority_id", "registered_at",
             })
         return required
 
@@ -357,6 +378,8 @@ class JournalStore:
             )
         if cls.SCHEMA_VERSION >= 6:
             events["journal_sequence"] = ("INTEGER", False)
+        if cls.SCHEMA_VERSION >= 10:
+            events["writer_authority_id"] = ("TEXT", False)
 
         outbox = {
             "outbox_id": ("TEXT", False),
@@ -395,6 +418,13 @@ class JournalStore:
                 "state_json": ("TEXT", True),
                 "state_hash": ("TEXT", True),
                 "updated_at": ("TEXT", True),
+            }
+        if cls.SCHEMA_VERSION >= 10:
+            required["protected_event_namespaces"] = {
+                "aggregate_type": ("TEXT", False),
+                "namespace_version": ("TEXT", True),
+                "writer_authority_id": ("TEXT", True),
+                "registered_at": ("TEXT", True),
             }
         return required
 
@@ -474,6 +504,10 @@ class JournalStore:
         if cls.SCHEMA_VERSION >= 7:
             expected_primary_keys["global_projection_checkpoints"] = (
                 "projection_name",
+            )
+        if cls.SCHEMA_VERSION >= 10:
+            expected_primary_keys["protected_event_namespaces"] = (
+                "aggregate_type",
             )
         expected_unique = {
             "events": {
@@ -767,6 +801,8 @@ class JournalStore:
                     required_tables.add("projection_checkpoints")
                 if self.SCHEMA_VERSION >= 7:
                     required_tables.add("global_projection_checkpoints")
+                if self.SCHEMA_VERSION >= 10:
+                    required_tables.add("protected_event_namespaces")
                 present_tables = {
                     str(row[0])
                     for row in connection.execute(
@@ -896,6 +932,17 @@ class JournalStore:
             )
         if "journal_sequence" in row_keys:
             decoded["journal_sequence"] = journal_sequence
+        if "writer_authority_id" in row_keys:
+            writer_authority_id = row["writer_authority_id"]
+            if writer_authority_id is not None:
+                if (
+                    type(writer_authority_id) is not str
+                    or re.fullmatch(r"sha256:[0-9a-f]{64}", writer_authority_id) is None
+                ):
+                    raise ValueError(
+                        "journal event writer authority id is not canonical"
+                    )
+                decoded["writer_authority_id"] = writer_authority_id
         return decoded
 
     def get_event(self, event_id: str) -> dict[str, Any] | None:
@@ -1079,11 +1126,173 @@ class JournalStore:
             expected += 1
         return decoded
 
-    def append_event(self, envelope: dict[str, Any], *, outbox_topic: str | None = None) -> AppendResult:
+    @staticmethod
+    def _protected_namespace_row(
+        connection: sqlite3.Connection,
+        aggregate_type: str,
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            "SELECT aggregate_type, namespace_version, writer_authority_id "
+            "FROM protected_event_namespaces WHERE aggregate_type = ?",
+            (aggregate_type,),
+        ).fetchone()
+
+    @staticmethod
+    def _require_writer_authority_id(value: object) -> str:
+        if (
+            type(value) is not str
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None
+        ):
+            raise ValueError(
+                "writer_authority_id must be canonical lowercase SHA-256 identity"
+            )
+        return value
+
+    @classmethod
+    def _require_namespace_version(cls, value: object) -> str:
+        if type(value) is not str or not value or value != value.strip():
+            raise ValueError("namespace_version must be canonical non-empty text")
+        return value
+
+    def _register_protected_event_namespace(
+        self,
+        *,
+        aggregate_type: str,
+        namespace_version: str,
+        writer_authority_id: str,
+    ) -> bool:
+        if self.SCHEMA_VERSION < 10:
+            raise ValueError(
+                "protected event namespaces require journal schema version 10"
+            )
+        aggregate_type = self._require_text(aggregate_type, "aggregate_type")
+        if aggregate_type != aggregate_type.strip():
+            raise ValueError("aggregate_type must be canonical text")
+        namespace_version = self._require_namespace_version(namespace_version)
+        writer_authority_id = self._require_writer_authority_id(
+            writer_authority_id
+        )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = self._protected_namespace_row(
+                    connection, aggregate_type
+                )
+                if existing is not None:
+                    if (
+                        existing["namespace_version"] != namespace_version
+                        or existing["writer_authority_id"] != writer_authority_id
+                    ):
+                        raise ValueError(
+                            "protected event namespace is already bound to "
+                            "a different writer authority"
+                        )
+                    connection.commit()
+                    return False
+
+                # Never upgrade caller-authored historical rows into issuer
+                # evidence after the fact. A namespace may only become protected
+                # before its first event exists.
+                historical = connection.execute(
+                    "SELECT 1 FROM events WHERE aggregate_type = ? LIMIT 1",
+                    (aggregate_type,),
+                ).fetchone()
+                if historical is not None:
+                    raise ValueError(
+                        "cannot protect an event namespace with existing "
+                        "unqualified journal history"
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO protected_event_namespaces(
+                        aggregate_type, namespace_version,
+                        writer_authority_id, registered_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        aggregate_type,
+                        namespace_version,
+                        writer_authority_id,
+                        self._now(),
+                    ),
+                )
+                connection.commit()
+                return True
+            except Exception:
+                connection.rollback()
+                raise
+
+    def _require_protected_namespace(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        aggregate_type: str,
+        namespace_version: str,
+        writer_authority_id: str,
+    ) -> None:
+        if self.SCHEMA_VERSION < 10:
+            raise ValueError(
+                "protected event namespaces require journal schema version 10"
+            )
+        selected = self._protected_namespace_row(connection, aggregate_type)
+        if selected is None:
+            raise ValueError("event namespace is not protected")
+        if (
+            selected["namespace_version"] != namespace_version
+            or selected["writer_authority_id"] != writer_authority_id
+        ):
+            raise ValueError(
+                "protected event writer does not match durable namespace authority"
+            )
+
+    def append_event(
+        self,
+        envelope: dict[str, Any],
+        *,
+        outbox_topic: str | None = None,
+    ) -> AppendResult:
+        return self._append_event(
+            envelope,
+            outbox_topic=outbox_topic,
+            namespace_version=None,
+            writer_authority_id=None,
+        )
+
+    def _append_protected_event(
+        self,
+        envelope: dict[str, Any],
+        *,
+        namespace_version: str,
+        writer_authority_id: str,
+        outbox_topic: str | None = None,
+    ) -> AppendResult:
+        namespace_version = self._require_namespace_version(namespace_version)
+        writer_authority_id = self._require_writer_authority_id(
+            writer_authority_id
+        )
+        return self._append_event(
+            envelope,
+            outbox_topic=outbox_topic,
+            namespace_version=namespace_version,
+            writer_authority_id=writer_authority_id,
+        )
+
+    def _append_event(
+        self,
+        envelope: dict[str, Any],
+        *,
+        outbox_topic: str | None,
+        namespace_version: str | None,
+        writer_authority_id: str | None,
+    ) -> AppendResult:
         event_id = self._require_text(envelope.get("event_id"), "event_id")
         event_type = self._require_text(envelope.get("event_type"), "event_type")
-        aggregate_type = self._require_text(envelope.get("aggregate_type"), "aggregate_type")
-        aggregate_id = self._require_text(envelope.get("aggregate_id"), "aggregate_id")
+        aggregate_type = self._require_text(
+            envelope.get("aggregate_type"), "aggregate_type"
+        )
+        aggregate_id = self._require_text(
+            envelope.get("aggregate_id"), "aggregate_id"
+        )
         try:
             raw_aggregate_version = envelope["aggregate_version"]
         except KeyError as error:
@@ -1103,196 +1312,343 @@ class JournalStore:
         payload_json = canonical_json(payload)
         envelope_json = canonical_json(envelope)
         envelope_hash = _event_envelope_digest(envelope_json)
-        committed_at = self._require_text(envelope.get("committed_at"), "committed_at")
+        committed_at = self._require_text(
+            envelope.get("committed_at"), "committed_at"
+        )
         if outbox_topic is not None:
             outbox_topic = self._require_text(outbox_topic, "outbox_topic")
 
+        if writer_authority_id is None:
+            if namespace_version is not None:
+                raise ValueError(
+                    "generic journal append cannot carry namespace authority"
+                )
+        else:
+            if namespace_version is None:
+                raise ValueError(
+                    "protected journal append requires namespace version"
+                )
+            writer_authority_id = self._require_writer_authority_id(
+                writer_authority_id
+            )
+            namespace_version = self._require_namespace_version(
+                namespace_version
+            )
+
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            existing = connection.execute("SELECT * FROM events WHERE event_id = ?", (event_id,)).fetchone()
-            if existing is not None:
-                exact = (
-                    existing["event_type"] == event_type
-                    and existing["aggregate_type"] == aggregate_type
-                    and existing["aggregate_id"] == aggregate_id
-                    and existing["aggregate_version"] == aggregate_version
-                    and existing["payload_json"] == payload_json
-                    and existing["payload_hash"] == supplied_hash
-                    and existing["committed_at"] == committed_at
-                    and (
-                        self.SCHEMA_VERSION < 5
-                        or (
-                            existing["envelope_json"] == envelope_json
-                            and existing["envelope_hash"] == envelope_hash
-                        )
-                    )
-                )
-                existing_outbox = connection.execute(
-                    "SELECT topic, payload_json, envelope_hash "
-                    "FROM outbox WHERE event_id = ?",
-                    (event_id,),
-                ).fetchone()
-                expected_outbox_payload = (
-                    envelope_json if outbox_topic is not None else None
-                )
-                expected_outbox_hash = (
-                    _outbox_envelope_digest(
-                        outbox_topic,
-                        expected_outbox_payload,
-                    )
-                    if expected_outbox_payload is not None
+            try:
+                protected = (
+                    self._protected_namespace_row(connection, aggregate_type)
+                    if self.SCHEMA_VERSION >= 10
                     else None
                 )
-                outbox_exact = (
-                    (
-                        outbox_topic is None
-                        and existing_outbox is None
+                if writer_authority_id is None:
+                    if protected is not None:
+                        raise ValueError(
+                            "generic append_event cannot write a protected "
+                            "event namespace"
+                        )
+                else:
+                    self._require_protected_namespace(
+                        connection,
+                        aggregate_type=aggregate_type,
+                        namespace_version=namespace_version,
+                        writer_authority_id=writer_authority_id,
                     )
-                    or (
-                        outbox_topic is not None
-                        and existing_outbox is not None
-                        and existing_outbox["topic"] == outbox_topic
-                        and existing_outbox["payload_json"] == expected_outbox_payload
-                        and existing_outbox["envelope_hash"] == expected_outbox_hash
+
+                existing = connection.execute(
+                    "SELECT * FROM events WHERE event_id = ?",
+                    (event_id,),
+                ).fetchone()
+                if existing is not None:
+                    exact = (
+                        existing["event_type"] == event_type
+                        and existing["aggregate_type"] == aggregate_type
+                        and existing["aggregate_id"] == aggregate_id
+                        and existing["aggregate_version"] == aggregate_version
+                        and existing["payload_json"] == payload_json
+                        and existing["payload_hash"] == supplied_hash
+                        and existing["committed_at"] == committed_at
+                        and (
+                            self.SCHEMA_VERSION < 5
+                            or (
+                                existing["envelope_json"] == envelope_json
+                                and existing["envelope_hash"] == envelope_hash
+                            )
+                        )
+                        and (
+                            self.SCHEMA_VERSION < 10
+                            or existing["writer_authority_id"]
+                            == writer_authority_id
+                        )
                     )
-                )
-                if not exact or not outbox_exact:
-                    connection.rollback()
-                    raise ValueError(
-                        "event_id conflicts with an existing event or publication intent"
+                    existing_outbox = connection.execute(
+                        "SELECT topic, payload_json, envelope_hash "
+                        "FROM outbox WHERE event_id = ?",
+                        (event_id,),
+                    ).fetchone()
+                    expected_outbox_payload = (
+                        envelope_json if outbox_topic is not None else None
                     )
-                # Idempotent replay is still an authority read. Revalidate the
-                # durable aggregate/global cuts so corruption cannot be hidden
-                # merely because the event payload itself matches.
-                self._aggregate_version_value(
+                    expected_outbox_hash = (
+                        _outbox_envelope_digest(
+                            outbox_topic,
+                            expected_outbox_payload,
+                        )
+                        if expected_outbox_payload is not None
+                        else None
+                    )
+                    outbox_exact = (
+                        (
+                            outbox_topic is None
+                            and existing_outbox is None
+                        )
+                        or (
+                            outbox_topic is not None
+                            and existing_outbox is not None
+                            and existing_outbox["topic"] == outbox_topic
+                            and existing_outbox["payload_json"]
+                            == expected_outbox_payload
+                            and existing_outbox["envelope_hash"]
+                            == expected_outbox_hash
+                        )
+                    )
+                    if not exact or not outbox_exact:
+                        raise ValueError(
+                            "event_id conflicts with an existing event or "
+                            "publication intent"
+                        )
+                    self._aggregate_version_value(
+                        connection,
+                        aggregate_type,
+                        aggregate_id,
+                    )
+                    if self.SCHEMA_VERSION >= 6:
+                        self._journal_sequence_value(connection)
+                    connection.commit()
+                    return AppendResult(
+                        event_id, aggregate_version, False
+                    )
+
+                current = self._aggregate_version_value(
                     connection,
                     aggregate_type,
                     aggregate_id,
                 )
-                if self.SCHEMA_VERSION >= 6:
-                    self._journal_sequence_value(connection)
-                connection.commit()
-                return AppendResult(event_id, aggregate_version, False)
+                expected_version = current + 1
+                if aggregate_version != expected_version:
+                    raise ValueError(
+                        f"aggregate_version must be {expected_version} "
+                        f"for {aggregate_type}/{aggregate_id}"
+                    )
 
-            current = self._aggregate_version_value(
-                connection,
-                aggregate_type,
-                aggregate_id,
-            )
-            expected_version = current + 1
-            if aggregate_version != expected_version:
-                connection.rollback()
-                raise ValueError(
-                    f"aggregate_version must be {expected_version} for {aggregate_type}/{aggregate_id}"
-                )
-
-            if self.SCHEMA_VERSION >= 6:
-                journal_sequence = self._journal_sequence_value(connection) + 1
-                connection.execute(
-                    """
-                    INSERT INTO events(
-                        event_id, event_type, aggregate_type, aggregate_id,
-                        aggregate_version, payload_json, payload_hash, committed_at,
-                        envelope_json, envelope_hash, journal_sequence
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        event_id,
-                        event_type,
-                        aggregate_type,
-                        aggregate_id,
-                        aggregate_version,
-                        payload_json,
-                        supplied_hash,
-                        committed_at,
-                        envelope_json,
-                        envelope_hash,
-                        journal_sequence,
-                    ),
-                )
-            elif self.SCHEMA_VERSION >= 5:
-                connection.execute(
-                    """
-                    INSERT INTO events(
-                        event_id, event_type, aggregate_type, aggregate_id,
-                        aggregate_version, payload_json, payload_hash, committed_at,
-                        envelope_json, envelope_hash
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        event_id,
-                        event_type,
-                        aggregate_type,
-                        aggregate_id,
-                        aggregate_version,
-                        payload_json,
-                        supplied_hash,
-                        committed_at,
-                        envelope_json,
-                        envelope_hash,
-                    ),
-                )
-            else:
-                connection.execute(
-                    """
-                    INSERT INTO events(
-                        event_id, event_type, aggregate_type, aggregate_id,
-                        aggregate_version, payload_json, payload_hash, committed_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        event_id,
-                        event_type,
-                        aggregate_type,
-                        aggregate_id,
-                        aggregate_version,
-                        payload_json,
-                        supplied_hash,
-                        committed_at,
-                    ),
-                )
-            if outbox_topic is not None:
-                outbox_payload = envelope_json
-                outbox_id = "outbox-" + sha256(event_id.encode("utf-8")).hexdigest()[:32]
-                if self.SCHEMA_VERSION >= 4:
-                    outbox_hash = _outbox_envelope_digest(
-                        outbox_topic,
-                        outbox_payload,
+                if self.SCHEMA_VERSION >= 10:
+                    journal_sequence = (
+                        self._journal_sequence_value(connection) + 1
                     )
                     connection.execute(
                         """
-                        INSERT INTO outbox(
-                            outbox_id, event_id, topic, payload_json,
-                            created_at, envelope_hash
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?)
+                        INSERT INTO events(
+                            event_id, event_type, aggregate_type, aggregate_id,
+                            aggregate_version, payload_json, payload_hash,
+                            committed_at, envelope_json, envelope_hash,
+                            journal_sequence, writer_authority_id
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
-                            outbox_id,
                             event_id,
-                            outbox_topic,
-                            outbox_payload,
-                            self._now(),
-                            outbox_hash,
+                            event_type,
+                            aggregate_type,
+                            aggregate_id,
+                            aggregate_version,
+                            payload_json,
+                            supplied_hash,
+                            committed_at,
+                            envelope_json,
+                            envelope_hash,
+                            journal_sequence,
+                            writer_authority_id,
+                        ),
+                    )
+                elif self.SCHEMA_VERSION >= 6:
+                    journal_sequence = (
+                        self._journal_sequence_value(connection) + 1
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO events(
+                            event_id, event_type, aggregate_type, aggregate_id,
+                            aggregate_version, payload_json, payload_hash,
+                            committed_at, envelope_json, envelope_hash,
+                            journal_sequence
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            event_id,
+                            event_type,
+                            aggregate_type,
+                            aggregate_id,
+                            aggregate_version,
+                            payload_json,
+                            supplied_hash,
+                            committed_at,
+                            envelope_json,
+                            envelope_hash,
+                            journal_sequence,
+                        ),
+                    )
+                elif self.SCHEMA_VERSION >= 5:
+                    connection.execute(
+                        """
+                        INSERT INTO events(
+                            event_id, event_type, aggregate_type, aggregate_id,
+                            aggregate_version, payload_json, payload_hash,
+                            committed_at, envelope_json, envelope_hash
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            event_id,
+                            event_type,
+                            aggregate_type,
+                            aggregate_id,
+                            aggregate_version,
+                            payload_json,
+                            supplied_hash,
+                            committed_at,
+                            envelope_json,
+                            envelope_hash,
                         ),
                     )
                 else:
                     connection.execute(
                         """
-                        INSERT INTO outbox(
-                            outbox_id, event_id, topic, payload_json, created_at
-                        ) VALUES (?, ?, ?, ?, ?)
+                        INSERT INTO events(
+                            event_id, event_type, aggregate_type, aggregate_id,
+                            aggregate_version, payload_json, payload_hash,
+                            committed_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
-                            outbox_id,
                             event_id,
-                            outbox_topic,
-                            outbox_payload,
-                            self._now(),
+                            event_type,
+                            aggregate_type,
+                            aggregate_id,
+                            aggregate_version,
+                            payload_json,
+                            supplied_hash,
+                            committed_at,
                         ),
                     )
-            connection.commit()
-        return AppendResult(event_id, aggregate_version, True)
+                if outbox_topic is not None:
+                    outbox_payload = envelope_json
+                    outbox_id = (
+                        "outbox-"
+                        + sha256(event_id.encode("utf-8")).hexdigest()[:32]
+                    )
+                    if self.SCHEMA_VERSION >= 4:
+                        outbox_hash = _outbox_envelope_digest(
+                            outbox_topic,
+                            outbox_payload,
+                        )
+                        connection.execute(
+                            """
+                            INSERT INTO outbox(
+                                outbox_id, event_id, topic, payload_json,
+                                created_at, envelope_hash
+                            ) VALUES (?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                outbox_id,
+                                event_id,
+                                outbox_topic,
+                                outbox_payload,
+                                self._now(),
+                                outbox_hash,
+                            ),
+                        )
+                    else:
+                        connection.execute(
+                            """
+                            INSERT INTO outbox(
+                                outbox_id, event_id, topic, payload_json,
+                                created_at
+                            ) VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (
+                                outbox_id,
+                                event_id,
+                                outbox_topic,
+                                outbox_payload,
+                                self._now(),
+                            ),
+                        )
+                connection.commit()
+                return AppendResult(
+                    event_id, aggregate_version, True
+                )
+            except Exception:
+                connection.rollback()
+                raise
+
+    def _load_protected_events(
+        self,
+        *,
+        aggregate_type: str,
+        aggregate_id: str,
+        namespace_version: str,
+        writer_authority_id: str,
+    ) -> list[dict[str, Any]]:
+        if self.SCHEMA_VERSION < 10:
+            raise ValueError(
+                "protected event namespaces require journal schema version 10"
+            )
+        aggregate_type = self._require_text(
+            aggregate_type, "aggregate_type"
+        )
+        aggregate_id = self._require_text(
+            aggregate_id, "aggregate_id"
+        )
+        namespace_version = self._require_namespace_version(
+            namespace_version
+        )
+        writer_authority_id = self._require_writer_authority_id(
+            writer_authority_id
+        )
+        with self._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                self._require_protected_namespace(
+                    connection,
+                    aggregate_type=aggregate_type,
+                    namespace_version=namespace_version,
+                    writer_authority_id=writer_authority_id,
+                )
+                rows = connection.execute(
+                    """
+                    SELECT event_id, event_type, aggregate_type, aggregate_id,
+                           aggregate_version, payload_json, payload_hash,
+                           committed_at, envelope_json, envelope_hash,
+                           journal_sequence, writer_authority_id
+                    FROM events
+                    WHERE aggregate_type = ? AND aggregate_id = ?
+                    ORDER BY aggregate_version
+                    """,
+                    (aggregate_type, aggregate_id),
+                ).fetchall()
+                decoded: list[dict[str, Any]] = []
+                for row in rows:
+                    if row["writer_authority_id"] != writer_authority_id:
+                        raise ValueError(
+                            "protected event history contains unqualified "
+                            "writer provenance"
+                        )
+                    decoded.append(self._decode_event_row(row))
+                connection.commit()
+                return decoded
+            except Exception:
+                connection.rollback()
+                raise
 
     def load_events(self, aggregate_type: str, aggregate_id: str) -> list[dict[str, Any]]:
         aggregate_type = self._require_text(aggregate_type, "aggregate_type")
@@ -2360,6 +2716,17 @@ class JournalStore:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 self._reject_legacy_unscoped_key(connection, idempotency_key)
+                if self.SCHEMA_VERSION >= 10:
+                    for protected_aggregate_type in {
+                        item["aggregate_type"] for item in prepared
+                    }:
+                        if self._protected_namespace_row(
+                            connection, protected_aggregate_type
+                        ) is not None:
+                            raise ValueError(
+                                "generic commit_command cannot write a "
+                                "protected event namespace"
+                            )
                 existing = connection.execute(
                     "SELECT * FROM command_dedupe "
                     "WHERE actor = ? AND environment = ? AND idempotency_key = ?",

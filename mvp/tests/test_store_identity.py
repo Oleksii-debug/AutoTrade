@@ -530,7 +530,7 @@ class StoreIdentityTests(unittest.TestCase):
             root = Path(directory)
             ambiguous_parent = root / "state."
             candidate = ambiguous_parent / "journal.sqlite3"
-            with self.assertRaisesRegex(RuntimeError, "namespace component"):
+            with self.assertRaisesRegex(RuntimeError, "Win32 pathname component"):
                 establish_database_anchor(candidate)
             self.assertFalse(ambiguous_parent.exists())
 

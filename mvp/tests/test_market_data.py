@@ -1378,6 +1378,129 @@ class MarketNormalizationTests(unittest.TestCase):
             "BOOTSTRAPPING",
         )
 
+    def test_provider_book_event_identity_retention_is_bounded_and_eviction_fails_closed(self):
+        policy_id = "provider-a-depth-v1"
+        normalizer = MarketNormalizer(
+            registry(),
+            max_retained_book_events_per_stream=2,
+            book_stream_policies=(
+                BookStreamPolicyBinding(
+                    provider_id="provider-a",
+                    venue_id="venue-a",
+                    stream="book",
+                    policy_id=policy_id,
+                    range_evaluator=provider_range_evaluator,
+                ),
+            ),
+        )
+        begin_provider_policy(normalizer, policy_id=policy_id)
+        snapshot = normalizer.normalize(
+            provider_raw(
+                "BOOK_SNAPSHOT",
+                {"bids": [["99.99", "1"]], "asks": [["100.01", "1"]]},
+                sequence=100,
+                stream="book",
+            )
+        )
+        normalizer.register_provider_book_snapshot(
+            snapshot,
+            provider_id="provider-a",
+            venue_id="venue-a",
+            provider_symbol="ABC-USD",
+            policy_id=policy_id,
+            cursor_sequence=100,
+        )
+        first = normalizer.normalize(
+            provider_raw(
+                "BOOK_DELTA",
+                {
+                    "bids": [["99.98", "1"]],
+                    "asks": [],
+                    "first_sequence": 101,
+                    "last_sequence": 101,
+                },
+                sequence=101,
+                stream="book",
+            )
+        )
+        normalizer.normalize(
+            provider_raw(
+                "BOOK_DELTA",
+                {
+                    "bids": [["99.97", "1"]],
+                    "asks": [],
+                    "first_sequence": 102,
+                    "last_sequence": 102,
+                },
+                sequence=102,
+                stream="book",
+            )
+        )
+        normalizer.normalize(
+            provider_raw(
+                "BOOK_DELTA",
+                {
+                    "bids": [["99.96", "1"]],
+                    "asks": [],
+                    "first_sequence": 103,
+                    "last_sequence": 103,
+                },
+                sequence=103,
+                stream="book",
+            )
+        )
+
+        self.assertEqual(len(normalizer._book_event_keys), 2)
+        self.assertEqual(len(normalizer._book_event_contracts), 2)
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "book event does not belong to this stream",
+        ):
+            normalizer.apply_qualified_book_range(
+                first,
+                provider_id="provider-a",
+                venue_id="venue-a",
+                provider_symbol="ABC-USD",
+            )
+
+    def test_provider_generation_transition_releases_retained_event_identity(self):
+        policy_id = "provider-a-depth-v1"
+        normalizer = MarketNormalizer(
+            registry(),
+            book_stream_policies=(
+                BookStreamPolicyBinding(
+                    provider_id="provider-a",
+                    venue_id="venue-a",
+                    stream="book",
+                    policy_id=policy_id,
+                    range_evaluator=provider_range_evaluator,
+                ),
+            ),
+        )
+        begin_provider_policy(normalizer, policy_id=policy_id)
+        normalizer.normalize(
+            provider_raw(
+                "BOOK_DELTA",
+                {
+                    "bids": [["99.98", "1"]],
+                    "asks": [],
+                    "first_sequence": 101,
+                    "last_sequence": 101,
+                },
+                sequence=101,
+                stream="book",
+            )
+        )
+        self.assertEqual(len(normalizer._book_event_keys), 1)
+        normalizer.invalidate_provider_book_stream(
+            provider_id="provider-a",
+            venue_id="venue-a",
+            provider_symbol="ABC-USD",
+            policy_id=policy_id,
+        )
+        self.assertEqual(normalizer._book_event_keys, {})
+        self.assertEqual(normalizer._book_event_contracts, {})
+
     def test_qualified_range_admission_is_event_policy_and_cursor_bound(self):
         policy_id = "provider-a-depth-v1"
         normalizer = MarketNormalizer(

@@ -132,7 +132,13 @@
           <button id="refresh-state" type="button">Refresh host state</button>
         </fieldset>
       </form>
-      <p id="command-result" tabindex="-1">No host command has been submitted.</p>
+      <p id="command-result" tabindex="-1" aria-describedby="command-validation-details">No host command has been submitted.</p>
+      <div id="command-validation-details" role="region" aria-labelledby="command-validation-heading">
+        <h3 id="command-validation-heading">Command validation details</h3>
+        <ul id="command-validation-list">
+          <li>No confirmed host field-validation details are available yet.</li>
+        </ul>
+      </div>
     </section>
 
     <section id="research" aria-labelledby="research-heading">

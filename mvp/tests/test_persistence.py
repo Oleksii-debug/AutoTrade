@@ -1040,7 +1040,7 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(legacy.current_schema_version(), 1)
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 9)
+            self.assertEqual(upgraded.current_schema_version(), JournalStore.SCHEMA_VERSION)
             self.assertEqual(
                 upgraded.load_events("account", "paper-1")[0]["event_id"],
                 "evt-1",
@@ -1077,7 +1077,7 @@ class JournalStoreTests(unittest.TestCase):
                 connection.close()
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 9)
+            self.assertEqual(upgraded.current_schema_version(), JournalStore.SCHEMA_VERSION)
             with self.assertRaisesRegex(ValueError, "legacy unscoped"):
                 upgraded.record_command(
                     actor="alice",
@@ -1141,7 +1141,7 @@ class JournalStoreTests(unittest.TestCase):
                 connection.close()
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 9)
+            self.assertEqual(upgraded.current_schema_version(), JournalStore.SCHEMA_VERSION)
             connection = sqlite3.connect(path)
             try:
                 command_row = connection.execute(
@@ -1857,7 +1857,7 @@ class JournalStoreTests(unittest.TestCase):
             self.assertEqual(legacy.current_schema_version(), 6)
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 9)
+            self.assertEqual(upgraded.current_schema_version(), JournalStore.SCHEMA_VERSION)
             self.assertEqual(
                 [item["event_id"] for item in upgraded.load_events_after_journal_sequence(0)],
                 ["evt-1"],
@@ -2170,7 +2170,7 @@ class JournalStoreTests(unittest.TestCase):
             )
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 9)
+            self.assertEqual(upgraded.current_schema_version(), JournalStore.SCHEMA_VERSION)
             self.assertIsNone(
                 upgraded.load_projection_checkpoint(
                     projection_name="position",
@@ -2873,7 +2873,7 @@ class JournalStoreTests(unittest.TestCase):
                 connection.close()
 
             upgraded = JournalStore(path)
-            self.assertEqual(upgraded.current_schema_version(), 9)
+            self.assertEqual(upgraded.current_schema_version(), JournalStore.SCHEMA_VERSION)
             with self.assertRaisesRegex(
                 ValueError,
                 "ambiguous transactional effect",

@@ -1,1 +1,40 @@
-from datetime import timedelta\nimport unittest\n\nfrom mvp.autotrade_mvp.provider_core import ProviderCoreError, Surface, prepare_authenticated_read_query\nfrom mvp.tests.test_capability_provider_environment import NOW, snapshot\n\nclass AuthenticatedReadCapabilityDomainGuardTests(unittest.TestCase):\n    def test_read_binding_cannot_change_exact_capability_provider_environment(self):\n        capability = snapshot(provider_environment="TESTNET")\n        exact = prepare_authenticated_read_query(\n            capability=capability,\n            surface=Surface.AUTHENTICATED_READ,\n            endpoint="/account/read",\n            query={"kind": "balance"},\n            at=NOW + timedelta(seconds=1),\n            provider_environment="TESTNET",\n        )\n        self.assertEqual(exact.provider_environment, "TESTNET")\n        with self.assertRaisesRegex(ProviderCoreError, "provider environment mismatch"):\n            prepare_authenticated_read_query(\n                capability=capability,\n                surface=Surface.AUTHENTICATED_READ,\n                endpoint="/account/read",\n                query={"kind": "balance"},\n                at=NOW + timedelta(seconds=1),\n                provider_environment="DEMO",\n            )\n\nif __name__ == "__main__":\n    unittest.main()\n
+from datetime import timedelta
+import unittest
+
+from mvp.autotrade_mvp.provider_core import (
+    ProviderCoreError,
+    Surface,
+    prepare_authenticated_read_query,
+)
+from mvp.tests.test_capability_provider_environment import NOW, snapshot
+
+
+class AuthenticatedReadCapabilityDomainGuardTests(unittest.TestCase):
+    def test_read_binding_cannot_change_exact_capability_provider_environment(self):
+        capability = snapshot(provider_environment="TESTNET")
+        exact = prepare_authenticated_read_query(
+            capability=capability,
+            surface=Surface.AUTHENTICATED_READ,
+            endpoint="/account/read",
+            query={"kind": "balance"},
+            at=NOW + timedelta(seconds=1),
+            provider_environment="TESTNET",
+        )
+        self.assertEqual(exact.provider_environment, "TESTNET")
+
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "provider environment does not match capability",
+        ):
+            prepare_authenticated_read_query(
+                capability=capability,
+                surface=Surface.AUTHENTICATED_READ,
+                endpoint="/account/read",
+                query={"kind": "balance"},
+                at=NOW + timedelta(seconds=1),
+                provider_environment="DEMO",
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

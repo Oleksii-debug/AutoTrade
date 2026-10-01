@@ -254,6 +254,43 @@ def _require_snapshot(
     return expected
 
 
+def _provider_origin_ref(
+    *,
+    attempt_id: str,
+    prepared_event_id: str,
+    observed_event_id: str,
+    query_digest: str,
+    endpoint: str,
+    http_status: int,
+    response_sha256: str,
+    observed_at: str,
+    transport_identity: str,
+    network_policy_identity: str,
+    journal_sequence: int,
+) -> str:
+    material = {
+        "attempt_id": attempt_id,
+        "prepared_event_id": prepared_event_id,
+        "observed_event_id": observed_event_id,
+        "query_digest": query_digest,
+        "endpoint": endpoint,
+        "http_status": http_status,
+        "response_sha256": response_sha256,
+        "observed_at": observed_at,
+        "transport_identity": transport_identity,
+        "network_policy_identity": network_policy_identity,
+        "journal_sequence": journal_sequence,
+    }
+    encoded = json.dumps(
+        material,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return "provider-origin:sha256:" + sha256(encoded).hexdigest()
+
+
 @dataclass(frozen=True)
 class AuthenticatedReadResponseBinding:
     """Journal-derived exact provider response authority."""
@@ -271,6 +308,8 @@ class AuthenticatedReadResponseBinding:
     http_status: int
     response_sha256: str
     response_bytes: bytes
+    transport_identity: str
+    network_policy_identity: str
     origin_ref: str
     journal_sequence: int
     _binding_token: InitVar[object | None] = None
@@ -292,6 +331,8 @@ class AuthenticatedReadResponseBinding:
             "observed_event_id",
             "observed_at",
             "response_sha256",
+            "transport_identity",
+            "network_policy_identity",
             "origin_ref",
         ):
             _exact_text(getattr(self, name), name=name)
@@ -313,12 +354,31 @@ class AuthenticatedReadResponseBinding:
             raise ProviderOriginError("response_sha256 conflicts with exact response bytes")
         if _SHA256_RE.fullmatch(self.query_digest) is None:
             raise ProviderOriginError("query_digest must be canonical")
+        if _SHA256_RE.fullmatch(self.network_policy_identity) is None:
+            raise ProviderOriginError("network_policy_identity must be canonical SHA-256")
         if _ORIGIN_REF_RE.fullmatch(self.origin_ref) is None:
             raise ProviderOriginError("origin_ref must be canonical")
         _parse_utc_text(self.observed_at, name="observed_at")
         if type(self.journal_sequence) is not int or self.journal_sequence <= 0:
             raise ProviderOriginError(
                 "journal_sequence must be an exact positive integer"
+            )
+        expected_origin_ref = _provider_origin_ref(
+            attempt_id=self.attempt_id,
+            prepared_event_id=self.prepared_event_id,
+            observed_event_id=self.observed_event_id,
+            query_digest=self.query_digest,
+            endpoint=self.endpoint,
+            http_status=self.http_status,
+            response_sha256=self.response_sha256,
+            observed_at=self.observed_at,
+            transport_identity=self.transport_identity,
+            network_policy_identity=self.network_policy_identity,
+            journal_sequence=self.journal_sequence,
+        )
+        if self.origin_ref != expected_origin_ref:
+            raise ProviderOriginError(
+                "origin_ref conflicts with complete durable provider-origin subject"
             )
 
 
@@ -607,20 +667,31 @@ class ProviderOriginJournal:
             raise ProviderOriginError(
                 "provider-origin observed journal sequence is invalid"
             )
-        origin_material = (
-            attempt
-            + "\n"
-            + str(prepared.get("event_id"))
-            + "\n"
-            + str(observed.get("event_id"))
-            + "\n"
-            + expected["query_digest"]
-            + "\n"
-            + response_digest
-            + "\n"
-            + str(journal_sequence)
-        ).encode("utf-8")
-        origin_ref = "provider-origin:sha256:" + sha256(origin_material).hexdigest()
+        transport_identity = _exact_text(
+            observed_payload.get("transport_identity"),
+            name="transport_identity",
+        )
+        network_policy_identity = _exact_text(
+            observed_payload.get("network_policy_identity"),
+            name="network_policy_identity",
+        )
+        if _SHA256_RE.fullmatch(network_policy_identity) is None:
+            raise ProviderOriginError(
+                "durable network_policy_identity must be canonical SHA-256"
+            )
+        origin_ref = _provider_origin_ref(
+            attempt_id=attempt,
+            prepared_event_id=str(prepared.get("event_id")),
+            observed_event_id=str(observed.get("event_id")),
+            query_digest=expected["query_digest"],
+            endpoint=expected["endpoint"],
+            http_status=status,
+            response_sha256=response_digest,
+            observed_at=observed_text,
+            transport_identity=transport_identity,
+            network_policy_identity=network_policy_identity,
+            journal_sequence=journal_sequence,
+        )
         return AuthenticatedReadResponseBinding(
             attempt_id=attempt,
             provider_id=expected["provider_id"],
@@ -635,6 +706,8 @@ class ProviderOriginJournal:
             http_status=status,
             response_sha256=response_digest,
             response_bytes=raw,
+            transport_identity=transport_identity,
+            network_policy_identity=network_policy_identity,
             origin_ref=origin_ref,
             journal_sequence=journal_sequence,
             _binding_token=_BINDING_TOKEN,
@@ -645,6 +718,7 @@ def observe_provider_origin_json_response(
     *,
     response_binding: AuthenticatedReadResponseBinding,
     query_binding: AuthenticatedReadQueryBinding,
+    accepted_success_statuses: frozenset[int],
 ) -> ProviderOriginObservation:
     if type(response_binding) is not AuthenticatedReadResponseBinding:
         raise ProviderOriginError(
@@ -663,9 +737,20 @@ def observe_provider_origin_json_response(
         raise ProviderOriginError(
             "durable provider response binding does not match exact query"
         )
-    if not 200 <= response_binding.http_status <= 299:
+    if (
+        type(accepted_success_statuses) is not frozenset
+        or not accepted_success_statuses
+        or any(
+            type(status) is not int or not 200 <= status <= 299
+            for status in accepted_success_statuses
+        )
+    ):
         raise ProviderOriginError(
-            "successful provider-origin observation requires HTTP 2xx"
+            "accepted_success_statuses must be an exact non-empty frozenset of 2xx integers"
+        )
+    if response_binding.http_status not in accepted_success_statuses:
+        raise ProviderOriginError(
+            "provider-origin HTTP status is outside the accepted endpoint policy"
         )
     observed_at = _parse_utc_text(
         response_binding.observed_at, name="observed_at"

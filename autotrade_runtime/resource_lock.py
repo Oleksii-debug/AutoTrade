@@ -181,7 +181,12 @@ class ResourceLock:
                 self.path,
                 create=True,
             )
-            parent_guard.__enter__()
+            try:
+                parent_guard.__enter__()
+            except BaseException as admission_error:
+                raise ResourceLockError(
+                    "resource lock requires ordinary retained local Windows namespace"
+                ) from admission_error
             try:
                 self._acquire_after_parent_ready()
             except BaseException as acquire_error:

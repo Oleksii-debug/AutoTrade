@@ -39,6 +39,8 @@ class ProviderOriginJournalTests(unittest.TestCase):
             )
             self.assertEqual(binding.response_bytes, body)
             self.assertEqual(binding.http_status, 200)
+            self.assertEqual(binding.transport_identity, "UrllibJsonWireClient:v1")
+            self.assertEqual(binding.network_policy_identity, "sha256:" + "1" * 64)
             self.assertTrue(binding.origin_ref.startswith("provider-origin:sha256:"))
             self.assertGreater(binding.journal_sequence, 0)
 
@@ -49,6 +51,7 @@ class ProviderOriginJournalTests(unittest.TestCase):
             observation = observe_provider_origin_json_response(
                 response_binding=recovered,
                 query_binding=query,
+                accepted_success_statuses=frozenset({200}),
             )
             self.assertEqual(observation.origin_ref, binding.origin_ref)
             self.assertEqual(observation.provider_id, "BINANCE")
@@ -191,11 +194,45 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 _origin_token=_PROVIDER_ORIGIN_RECORD_TOKEN,
             )
             self.assertEqual(binding.http_status, 429)
-            with self.assertRaisesRegex(ProviderOriginError, "requires HTTP 2xx"):
+            with self.assertRaisesRegex(ProviderOriginError, "endpoint policy"):
                 observe_provider_origin_json_response(
                     response_binding=binding,
                     query_binding=query,
+                    accepted_success_statuses=frozenset({200}),
                 )
+
+    def test_endpoint_policy_status_contract_is_exact(self):
+        query = authenticated_read_binding()
+        with TemporaryDirectory() as directory:
+            journal = ProviderOriginJournal(
+                JournalStore(f"{directory}/journal.sqlite3")
+            )
+            attempt_id = journal.prepare(
+                query,
+                transport_identity="UrllibJsonWireClient:v1",
+                network_policy_identity="sha256:" + "7" * 64,
+                recorded_at=READ_NOW,
+            )
+            binding = journal._record_provider_origin(
+                attempt_id,
+                query,
+                http_status=201,
+                response_bytes=b'{"ok":true}',
+                observed_at=READ_NOW + timedelta(seconds=1),
+                _origin_token=_PROVIDER_ORIGIN_RECORD_TOKEN,
+            )
+            with self.assertRaisesRegex(ProviderOriginError, "endpoint policy"):
+                observe_provider_origin_json_response(
+                    response_binding=binding,
+                    query_binding=query,
+                    accepted_success_statuses=frozenset({200}),
+                )
+            observation = observe_provider_origin_json_response(
+                response_binding=binding,
+                query_binding=query,
+                accepted_success_statuses=frozenset({200, 201}),
+            )
+            self.assertEqual(observation.response_binding.http_status, 201)
 
     def test_response_binding_cannot_be_publicly_constructed(self):
         with self.assertRaisesRegex(
@@ -215,6 +252,8 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 http_status=200,
                 response_sha256="sha256:" + "b" * 64,
                 response_bytes=b"{}",
+                transport_identity="UrllibJsonWireClient:v1",
+                network_policy_identity="sha256:" + "d" * 64,
                 origin_ref="provider-origin:sha256:" + "c" * 64,
                 journal_sequence=2,
             )

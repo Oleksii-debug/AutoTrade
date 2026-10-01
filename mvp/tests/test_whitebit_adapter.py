@@ -1221,15 +1221,15 @@ class WhiteBitAdapterTests(unittest.TestCase):
             "feeAsset": "USDT",
         }
         cases = (
-            ("amount", DecimalSubclass("0.001")),
-            ("amount", "1e256"),
-            ("fee", 10**300),
+            ("amount", DecimalSubclass("0.001"), "exact JSON string"),
+            ("amount", "1e256", "bounded exact decimal"),
+            ("fee", 10**300, "exact JSON string"),
         )
-        for field, value in cases:
+        for field, value, expected_error in cases:
             with self.subTest(field=field, value=repr(value)):
                 with self.assertRaisesRegex(
                     WhiteBitAdapterError,
-                    "bounded exact decimal",
+                    expected_error,
                 ):
                     parse_execution_deal(
                         {**base, field: value},

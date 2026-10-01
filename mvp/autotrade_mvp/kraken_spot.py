@@ -32,8 +32,10 @@ KRAKEN_SPOT_DOCS = MappingProxyType(
     {
         "order_contract": "https://docs.kraken.com/api-reference/trading/add-order",
         "authentication": "https://docs.kraken.com/exchange/guides/rest/authentication",
-        "book_checksum_v2": "https://docs.kraken.com/exchange/guides/websockets/book-checksum-v2",
     }
+)
+KRAKEN_SPOT_BOOK_CHECKSUM_V2_DOC = (
+    "https://docs.kraken.com/exchange/guides/websockets/book-checksum-v2"
 )
 
 _KRAKEN_SPOT_BOOK_CHECKSUM_POLICY_ID = "KRAKEN_SPOT_WS_V2_BOOK_CRC32_TOP10_V1"

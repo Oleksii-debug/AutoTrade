@@ -1281,11 +1281,14 @@ def allocate_objective_targets(
     """Select the best deterministic feasible candidate subset by net utility.
 
     Candidates are ranked only to make enumeration and tie-breaking stable.
-    Every non-empty subset of positive objective-rate candidates is evaluated
-    through the same hard allocation constraints. Estimated execution cost is
-    subtracted exactly once from the objective, and an explicit portfolio-level
-    stress-loss penalty may rank feasible subsets without replacing the hard
-    risk gate. The search is exhaustive only
+    The exact no-trade/current-portfolio state and every non-empty subset of
+    positive objective-rate candidates are evaluated through the same hard
+    allocation constraints and complete-portfolio utility. Estimated execution
+    cost is subtracted exactly once from the objective, and an explicit
+    portfolio-level stress-loss penalty may rank feasible subsets without
+    replacing the hard risk gate. A hard-feasible, economically qualified
+    no-trade state is the strict utility floor: equal utility preserves the
+    current portfolio. The search is exhaustive only
     inside max_candidate_sets; if the complete subset space does not fit that
     budget, the allocator fails closed to a no-increase cash fallback rather
     than silently truncating instrument selection.
@@ -1308,7 +1311,7 @@ def allocate_objective_targets(
             allocation=fallback,
             selected_symbols=(),
             expected_net_utility=Decimal("0"),
-            objective_version="deterministic-net-utility-v4",
+            objective_version="deterministic-net-utility-v5",
             reason="no objective candidates",
         )
 
@@ -1335,10 +1338,46 @@ def allocate_objective_targets(
                 allocation=fallback,
                 selected_symbols=(),
                 expected_net_utility=Decimal("0"),
-                objective_version="deterministic-net-utility-v4",
+                objective_version="deterministic-net-utility-v5",
                 reason=evidence_problem,
             )
         normalized_evidence = tuple(stress_evidence)
+
+    complete_objective = {
+        item.candidate.symbol: item
+        for item in candidates
+    }
+    current_portfolio_candidates = [
+        replace(
+            item.candidate,
+            desired_notional=_exact_multiply(
+                item.candidate.current_quantity,
+                item.candidate.price,
+            ),
+        )
+        for item in candidates
+    ]
+    current_has_exposure = any(
+        item.candidate.current_quantity != 0
+        for item in candidates
+    )
+    no_trade_allocation = allocate_targets(
+        current_portfolio_candidates,
+        policy,
+        stress_scenarios=normalized_stress,
+        stress_evidence=normalized_evidence,
+        decision_time=decision_time,
+    )
+    no_trade_utility: Decimal | None = None
+    if (
+        not current_has_exposure
+        or no_trade_allocation.status == "ALLOCATED"
+    ):
+        no_trade_utility = _expected_net_utility(
+            no_trade_allocation,
+            complete_objective,
+            policy,
+        )
 
     ranked = sorted(
         (
@@ -1359,8 +1398,12 @@ def allocate_objective_targets(
         return ObjectiveAllocationResult(
             allocation=fallback,
             selected_symbols=(),
-            expected_net_utility=Decimal("0"),
-            objective_version="deterministic-net-utility-v4",
+            expected_net_utility=(
+                no_trade_utility
+                if no_trade_utility is not None
+                else Decimal("0")
+            ),
+            objective_version="deterministic-net-utility-v5",
             reason="no candidate has positive expected return after risk penalty",
         )
 
@@ -1378,18 +1421,18 @@ def allocate_objective_targets(
         return ObjectiveAllocationResult(
             allocation=fallback,
             selected_symbols=(),
-            expected_net_utility=Decimal("0"),
-            objective_version="deterministic-net-utility-v4",
+            expected_net_utility=(
+                no_trade_utility
+                if no_trade_utility is not None
+                else Decimal("0")
+            ),
+            objective_version="deterministic-net-utility-v5",
             reason=(
                 "objective search budget exceeded before complete subset "
                 "evaluation"
             ),
         )
 
-    objective_by_symbol = {
-        item.candidate.symbol: item
-        for item in ranked
-    }
     best_result: AllocationResult | None = None
     best_symbols: tuple[str, ...] = ()
     best_utility = Decimal("0")
@@ -1438,17 +1481,17 @@ def allocate_objective_targets(
                 allocation=fallback,
                 selected_symbols=(),
                 expected_net_utility=Decimal("0"),
-                objective_version="deterministic-net-utility-v4",
+                objective_version="deterministic-net-utility-v5",
                 reason=result.reason,
             )
         if result.status != "ALLOCATED":
             continue
-        complete_objective = {
-            item.candidate.symbol: item
-            for item in candidates
-        }
         utility = _expected_net_utility(result, complete_objective, policy)
         if utility <= 0:
+            continue
+        if no_trade_utility is not None and utility <= no_trade_utility:
+            # Equal utility is not an improvement. Preserving the current
+            # reconciled portfolio avoids needless turnover and fee/impact risk.
             continue
         target_by_symbol = {
             target.symbol: target
@@ -1481,11 +1524,13 @@ def allocate_objective_targets(
             and utility == best_utility
         ):
             candidate_key = (
+                result.turnover_notional,
                 result.estimated_cost,
                 result.gross_notional,
                 active_symbols,
             )
             current_key = (
+                best_result.turnover_notional,
                 best_result.estimated_cost,
                 best_result.gross_notional,
                 best_symbols,
@@ -1506,25 +1551,37 @@ def allocate_objective_targets(
                 "constraints and estimated costs"
             ),
         )
-        return ObjectiveAllocationResult(
-            allocation=fallback,
-            selected_symbols=(),
-            expected_net_utility=Decimal("0"),
-            objective_version="deterministic-net-utility-v4",
-            reason=(
+        qualified_baseline = no_trade_utility is not None
+        reason = (
+            "no positive-turnover feasible allocation strictly improved the "
+            "qualified no-trade portfolio baseline"
+            if qualified_baseline
+            else (
                 "no positive-utility feasible allocation survived hard "
                 "constraints and estimated costs"
+            )
+        )
+        return ObjectiveAllocationResult(
+            allocation=replace(fallback, reason=reason),
+            selected_symbols=(),
+            expected_net_utility=(
+                no_trade_utility
+                if no_trade_utility is not None
+                else Decimal("0")
             ),
+            objective_version="deterministic-net-utility-v5",
+            reason=reason,
         )
 
     return ObjectiveAllocationResult(
         allocation=best_result,
         selected_symbols=best_symbols,
         expected_net_utility=best_utility,
-        objective_version="deterministic-net-utility-v4",
+        objective_version="deterministic-net-utility-v5",
         reason=(
             "selected the highest positive expected-net-utility deterministic "
-            "candidate subset that passed all hard allocation constraints"
+            "candidate subset that strictly improved the qualified no-trade "
+            "baseline when that baseline was feasible"
         ),
     )
 
@@ -1903,7 +1960,7 @@ def _candidate_evidence_matches(
 
 
 _EXECUTION_SEARCH_ALGORITHM = "bounded-execution-state-enumeration-v1"
-_OBJECTIVE_SEARCH_ALGORITHM = "complete-subset-enumeration-v4"
+_OBJECTIVE_SEARCH_ALGORITHM = "complete-subset-with-qualified-no-trade-baseline-v5"
 _ALLOCATION_FX_PROJECTION_ALGORITHM = "purpose-bound-conservative-fx-projection-v1"
 
 

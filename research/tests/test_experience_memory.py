@@ -1212,6 +1212,223 @@ class ExperienceMemoryTests(unittest.TestCase):
             )
             self.assertEqual(audit["tombstones"][0]["reason"], "source rights revoked")
 
+    def test_writer_clock_rollback_cannot_backdate_local_causal_visibility(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "memory.sqlite3"
+            store = memory(path)
+            with patch(
+                "research.autotrade_research.memory.episodes._utc_now",
+                return_value=BASE,
+            ):
+                episode, _ = store.append_episode(
+                    decision_time=BASE,
+                    information_cutoff=BASE,
+                    task="research",
+                    regime="calm",
+                    instrument_family="equity",
+                    permission_class="research",
+                    payload=payload("pending"),
+                )
+
+            with patch(
+                "research.autotrade_research.memory.episodes._utc_now",
+                return_value=BASE - timedelta(days=1),
+            ):
+                store.append_correction(
+                    episode,
+                    payload={
+                        "supersedes_fields": ["outcome"],
+                        "outcome": {"label": "corrected"},
+                        "evidence_ref": "artifact:rollback-local",
+                    },
+                )
+
+            at_episode_time = store.retrieve(
+                information_cutoff=BASE,
+                granted_permissions={"research"},
+            )
+            self.assertEqual(len(at_episode_time), 1)
+            self.assertEqual(at_episode_time[0]["corrections"], [])
+
+            correction_cutoff = BASE + timedelta(microseconds=1)
+            after_correction = store.retrieve(
+                information_cutoff=correction_cutoff,
+                granted_permissions={"research"},
+            )
+            self.assertEqual(
+                [item["outcome"]["label"] for item in after_correction[0]["corrections"]],
+                ["corrected"],
+            )
+
+            with patch(
+                "research.autotrade_research.memory.episodes._utc_now",
+                return_value=BASE - timedelta(days=2),
+            ):
+                store.tombstone(episode, reason="rollback tombstone")
+
+            historical_source = store.source_episode(
+                episode,
+                information_cutoff=correction_cutoff,
+                granted_permissions={"research"},
+            )
+            self.assertEqual(historical_source["tombstones"], [])
+
+            tombstone_cutoff = BASE + timedelta(microseconds=2)
+            with self.assertRaisesRegex(PermissionError, "tombstoned"):
+                store.source_episode(
+                    episode,
+                    information_cutoff=tombstone_cutoff,
+                    granted_permissions={"research"},
+                )
+            population_before = store.coverage_population(
+                causal_cutoff=correction_cutoff,
+                granted_permissions={"research"},
+            )
+            population_after = store.coverage_population(
+                causal_cutoff=tombstone_cutoff,
+                granted_permissions={"research"},
+            )
+            self.assertEqual(population_before[0]["tombstone_lineage"], ())
+            self.assertEqual(len(population_after[0]["tombstone_lineage"]), 1)
+
+    def test_equal_wall_clock_evidence_corrections_replay_in_append_order(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "memory.sqlite3"
+            store = memory(path)
+            with patch(
+                "research.autotrade_research.memory.episodes._utc_now",
+                return_value=BASE,
+            ):
+                episode, _ = store.append_episode(
+                    decision_time=BASE,
+                    information_cutoff=BASE,
+                    task="research",
+                    regime="calm",
+                    instrument_family="equity",
+                    permission_class="research",
+                    payload=payload("pending"),
+                )
+                store.append_correction(
+                    episode,
+                    correction_id="00000000-0000-0000-0000-000000000999",
+                    available_at=BASE,
+                    payload={
+                        "supersedes_fields": ["outcome"],
+                        "outcome": {"label": "first"},
+                        "evidence_ref": "artifact:equal-clock",
+                    },
+                )
+                store.append_correction(
+                    episode,
+                    correction_id="00000000-0000-0000-0000-000000000001",
+                    available_at=BASE,
+                    payload={
+                        "supersedes_fields": ["outcome"],
+                        "outcome": {"label": "second"},
+                        "evidence_ref": "artifact:equal-clock",
+                    },
+                )
+
+            reopened = memory(path)
+            retrieved = reopened.retrieve(
+                information_cutoff=BASE,
+                granted_permissions={"research"},
+            )
+            self.assertEqual(
+                [item["outcome"]["label"] for item in retrieved[0]["corrections"]],
+                ["first", "second"],
+            )
+            population = reopened.coverage_population(
+                causal_cutoff=BASE,
+                granted_permissions={"research"},
+            )
+            self.assertEqual(
+                [
+                    item["correction_id"]
+                    for item in population[0]["correction_lineage"]
+                ],
+                [
+                    "00000000-0000-0000-0000-000000000999",
+                    "00000000-0000-0000-0000-000000000001",
+                ],
+            )
+            self.assertEqual(
+                population[0]["effective_payload"]["outcome"]["label"],
+                "second",
+            )
+
+    def test_writer_chronology_sequence_tamper_fails_closed(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "memory.sqlite3"
+            store = memory(path)
+            episode, _ = store.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload("pending"),
+            )
+            store.append_correction(
+                episode,
+                available_at=BASE,
+                payload={
+                    "supersedes_fields": ["outcome"],
+                    "outcome": {"label": "corrected"},
+                    "evidence_ref": "artifact:sequence-tamper",
+                },
+            )
+            with store._connect() as con:
+                con.execute(
+                    "UPDATE corrections SET writer_sequence=1 WHERE episode_id=?",
+                    (episode,),
+                )
+
+            reopened = memory(path)
+            for reader in (
+                lambda: reopened.retrieve(
+                    information_cutoff=BASE + timedelta(days=1),
+                    granted_permissions={"research"},
+                ),
+                lambda: reopened.coverage_population(
+                    causal_cutoff=BASE + timedelta(days=1),
+                    granted_permissions={"research"},
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    MemoryIntegrityError,
+                    "writer chronology|writer_sequence",
+                ):
+                    reader()
+
+    def test_legacy_rows_without_writer_chronology_require_explicit_recovery(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "memory.sqlite3"
+            store = memory(path)
+            store.append_episode(
+                decision_time=BASE,
+                information_cutoff=BASE,
+                task="research",
+                regime="calm",
+                instrument_family="equity",
+                permission_class="research",
+                payload=payload(),
+            )
+            with store._connect() as con:
+                con.execute("UPDATE episodes SET writer_sequence=NULL")
+                con.execute("DELETE FROM writer_chronology")
+
+            reopened = memory(path)
+            with self.assertRaisesRegex(
+                MemoryIntegrityError,
+                "durable writer chronology|writer_sequence",
+            ):
+                reopened.retrieve(
+                    information_cutoff=BASE + timedelta(days=1),
+                    granted_permissions={"research"},
+                )
+
     def test_historical_retrieval_excludes_episode_appended_after_cutoff(self):
         with TemporaryDirectory() as directory:
             store = memory(Path(directory) / "memory.sqlite3")

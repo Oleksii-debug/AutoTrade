@@ -1480,7 +1480,11 @@ def allocate_objective_targets(
             return ObjectiveAllocationResult(
                 allocation=fallback,
                 selected_symbols=(),
-                expected_net_utility=Decimal("0"),
+                expected_net_utility=(
+                    no_trade_utility
+                    if no_trade_utility is not None
+                    else Decimal("0")
+                ),
                 objective_version="deterministic-net-utility-v5",
                 reason=result.reason,
             )

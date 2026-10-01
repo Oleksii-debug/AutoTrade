@@ -138,6 +138,53 @@ class ProtectedJournalWriterTests(unittest.TestCase):
             finally:
                 connection.close()
 
+    def test_internal_core_entrypoints_are_not_instance_writer_authority(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            writer = self.select(store)
+
+            with self.assertRaisesRegex(
+                RuntimeError, "selected ProtectedJournalWriter"
+            ):
+                store._append_protected_event(
+                    event(),
+                    namespace_version=NAMESPACE_VERSION,
+                    writer_authority_id=WRITER_ID,
+                )
+            with self.assertRaisesRegex(
+                RuntimeError, "not a public writer authority"
+            ):
+                store._append_event(
+                    event(),
+                    outbox_topic=None,
+                    namespace_version=NAMESPACE_VERSION,
+                    writer_authority_id=WRITER_ID,
+                )
+            with self.assertRaisesRegex(
+                RuntimeError, "product selection"
+            ):
+                store._register_protected_event_namespace(
+                    aggregate_type=AGGREGATE_TYPE,
+                    namespace_version=NAMESPACE_VERSION,
+                    writer_authority_id=WRITER_ID,
+                )
+            with self.assertRaisesRegex(
+                RuntimeError, "recovery requires selected"
+            ):
+                store._load_protected_events(
+                    aggregate_type=AGGREGATE_TYPE,
+                    aggregate_id="provider-read:attempt-1",
+                    namespace_version=NAMESPACE_VERSION,
+                    writer_authority_id=WRITER_ID,
+                )
+
+            # The selected public capability path remains functional.
+            store.append_protected_event(writer, event())
+            loaded = store.load_protected_events(
+                writer, "provider-read:attempt-1"
+            )
+            self.assertEqual(len(loaded), 1)
+
     def test_directly_constructed_capability_is_not_selected_authority(self) -> None:
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

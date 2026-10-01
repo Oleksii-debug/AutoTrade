@@ -355,8 +355,68 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("function parseCommandResult(value, expectedCommandId)", js)
         self.assertIn('["ACCEPTED", "REJECTED", "CONFLICT"]', js)
         self.assertIn("CommandResult command_id does not match", js)
-        self.assertIn("field_errors must be an array", js)
+        self.assertIn("field_errors must be an array of objects", js)
+        self.assertIn('result.field_errors.some((item) =>', js)
+        self.assertIn(
+            '!item || typeof item !== "object" || Array.isArray(item)',
+            js,
+        )
         self.assertIn("response.status !== 200 && response.status !== 409", js)
+
+    def test_command_field_validation_details_are_semantic_and_never_silently_dropped(self):
+        html = INDEX.read_text(encoding="utf-8")
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn(
+            'id="command-result" tabindex="-1" aria-describedby="command-validation-details"',
+            html,
+        )
+        self.assertIn(
+            'id="command-validation-details" role="region" aria-labelledby="command-validation-heading"',
+            html,
+        )
+        self.assertIn(
+            '<h3 id="command-validation-heading">Command validation details</h3>',
+            html,
+        )
+        self.assertIn('id="command-validation-list"', html)
+        self.assertIn(
+            'function renderCommandValidationDetails(fieldErrors, stateName)',
+            js,
+        )
+        self.assertIn('appendMessage(projectionText(error))', js)
+        self.assertIn(
+            'renderCommandValidationDetails(result.fieldErrors, "confirmed")',
+            js,
+        )
+        self.assertIn(
+            'renderCommandValidationDetails([], "pending")',
+            js,
+        )
+        self.assertIn(
+            'renderCommandValidationDetails([], "unavailable")',
+            js,
+        )
+        self.assertIn(
+            "No field-specific validation errors reported by the host.",
+            js,
+        )
+        self.assertEqual(js.count("innerHTML"), 0)
+
+        submit = js.index("async function submitCommand(event)")
+        pending = js.index('renderCommandValidationDetails([], "pending")', submit)
+        network = js.index("await submitCanonicalCommand(payload)", submit)
+        confirmed = js.index(
+            'renderCommandValidationDetails(result.fieldErrors, "confirmed")',
+            network,
+        )
+        status_branch = js.index('if (result.status === "ACCEPTED")', confirmed)
+        unavailable = js.index(
+            'renderCommandValidationDetails([], "unavailable")',
+            status_branch,
+        )
+        self.assertLess(pending, network)
+        self.assertLess(confirmed, status_branch)
+        self.assertGreater(unavailable, status_branch)
 
     def test_operation_identity_is_canonical_uuid_before_route_use(self):
         js = APP.read_text(encoding="utf-8")

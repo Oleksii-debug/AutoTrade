@@ -1212,7 +1212,7 @@ class ExperienceMemoryTests(unittest.TestCase):
             )
             self.assertEqual(audit["tombstones"][0]["reason"], "source rights revoked")
 
-    def test_writer_clock_rollback_cannot_backdate_local_causal_visibility(self):
+    def test_writer_clock_rollback_refuses_local_writes_without_rewriting_cutoff(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "memory.sqlite3"
             store = memory(path)
@@ -1230,66 +1230,120 @@ class ExperienceMemoryTests(unittest.TestCase):
                     payload=payload("pending"),
                 )
 
-            with patch(
-                "research.autotrade_research.memory.episodes._utc_now",
-                return_value=BASE - timedelta(days=1),
-            ):
-                store.append_correction(
-                    episode,
-                    payload={
-                        "supersedes_fields": ["outcome"],
-                        "outcome": {"label": "corrected"},
-                        "evidence_ref": "artifact:rollback-local",
-                    },
-                )
-
-            at_episode_time = store.retrieve(
-                information_cutoff=BASE,
+            historical_cutoff = BASE + timedelta(seconds=10)
+            before_retrieve = store.retrieve(
+                information_cutoff=historical_cutoff,
+                granted_permissions={"research"},
+                include_tombstoned=True,
+            )
+            before_source = store.source_episode(
+                episode,
+                information_cutoff=historical_cutoff,
+                granted_permissions={"research"},
+                include_tombstoned=True,
+            )
+            before_population = store.coverage_population(
+                causal_cutoff=historical_cutoff,
                 granted_permissions={"research"},
             )
-            self.assertEqual(len(at_episode_time), 1)
-            self.assertEqual(at_episode_time[0]["corrections"], [])
 
-            correction_cutoff = BASE + timedelta(microseconds=1)
-            after_correction = store.retrieve(
-                information_cutoff=correction_cutoff,
-                granted_permissions={"research"},
+            rollback = BASE - timedelta(days=1)
+            with patch(
+                "research.autotrade_research.memory.episodes._utc_now",
+                return_value=rollback,
+            ):
+                with self.assertRaisesRegex(
+                    MemoryConflict,
+                    "local writer clock did not advance",
+                ):
+                    store.append_episode(
+                        episode_id="00000000-0000-0000-0000-000000000777",
+                        decision_time=BASE,
+                        information_cutoff=BASE,
+                        task="research",
+                        regime="rollback",
+                        instrument_family="equity",
+                        permission_class="research",
+                        payload=payload("late-episode"),
+                    )
+                with self.assertRaisesRegex(
+                    MemoryConflict,
+                    "local writer clock did not advance",
+                ):
+                    store.append_correction(
+                        episode,
+                        payload={
+                            "supersedes_fields": ["outcome"],
+                            "outcome": {"label": "late-correction"},
+                            "evidence_ref": "artifact:rollback-local",
+                        },
+                    )
+                with self.assertRaisesRegex(
+                    MemoryConflict,
+                    "local writer clock did not advance",
+                ):
+                    store.tombstone(episode, reason="late rollback tombstone")
+
+            reopened = memory(path)
+            self.assertEqual(
+                reopened.retrieve(
+                    information_cutoff=historical_cutoff,
+                    granted_permissions={"research"},
+                    include_tombstoned=True,
+                ),
+                before_retrieve,
             )
             self.assertEqual(
-                [item["outcome"]["label"] for item in after_correction[0]["corrections"]],
-                ["corrected"],
+                reopened.source_episode(
+                    episode,
+                    information_cutoff=historical_cutoff,
+                    granted_permissions={"research"},
+                    include_tombstoned=True,
+                ),
+                before_source,
+            )
+            self.assertEqual(
+                reopened.coverage_population(
+                    causal_cutoff=historical_cutoff,
+                    granted_permissions={"research"},
+                ),
+                before_population,
             )
 
+    def test_equal_wall_clock_refuses_local_append(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "memory.sqlite3"
+            store = memory(path)
             with patch(
                 "research.autotrade_research.memory.episodes._utc_now",
-                return_value=BASE - timedelta(days=2),
+                return_value=BASE,
             ):
-                store.tombstone(episode, reason="rollback tombstone")
-
-            historical_source = store.source_episode(
-                episode,
-                information_cutoff=correction_cutoff,
-                granted_permissions={"research"},
-            )
-            self.assertEqual(historical_source["tombstones"], [])
-
-            tombstone_cutoff = BASE + timedelta(microseconds=2)
-            with self.assertRaisesRegex(PermissionError, "tombstoned"):
-                store.source_episode(
-                    episode,
-                    information_cutoff=tombstone_cutoff,
-                    granted_permissions={"research"},
+                episode, _ = store.append_episode(
+                    decision_time=BASE,
+                    information_cutoff=BASE,
+                    task="research",
+                    regime="calm",
+                    instrument_family="equity",
+                    permission_class="research",
+                    payload=payload("pending"),
                 )
-            population_before = store.coverage_population(
-                causal_cutoff=correction_cutoff,
-                granted_permissions={"research"},
-            )
-            population_after = store.coverage_population(
-                causal_cutoff=tombstone_cutoff,
-                granted_permissions={"research"},
-            )
-            self.assertEqual(population_before[0]["tombstone_lineage"], ())
-            self.assertEqual(len(population_after[0]["tombstone_lineage"]), 1)
+                with self.assertRaisesRegex(
+                    MemoryConflict,
+                    "local writer clock did not advance",
+                ):
+                    store.append_correction(
+                        episode,
+                        payload={
+                            "supersedes_fields": ["outcome"],
+                            "outcome": {"label": "equal-clock-local"},
+                            "evidence_ref": "artifact:equal-local",
+                        },
+                    )
+                with self.assertRaisesRegex(
+                    MemoryConflict,
+                    "local writer clock did not advance",
+                ):
+                    store.tombstone(episode, reason="equal clock tombstone")
 
     def test_equal_wall_clock_evidence_corrections_replay_in_append_order(self):
         with TemporaryDirectory() as directory:

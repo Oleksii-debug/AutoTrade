@@ -1100,7 +1100,7 @@ class AllocationTests(unittest.TestCase):
             ),
             stress_scenarios={"down": {"RISKY": "-0.25"}},
         )
-        self.assertEqual(result.allocation.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(result.allocation.status, "ALLOCATED")
         self.assertEqual(result.allocation.targets[0].notional, Decimal("200"))
         self.assertEqual(result.allocation.targets[0].estimated_cost, Decimal("4.00"))
         self.assertEqual(result.allocation.cash_required, Decimal("104.00"))
@@ -2038,7 +2038,7 @@ class DiscreteAllocationSearchTests(unittest.TestCase):
                 max_total_cost="100",
             ),
         )
-        self.assertEqual(result.allocation.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(result.allocation.status, "ALLOCATED")
         self.assertEqual(result.allocation.turnover_notional, Decimal("0"))
         self.assertEqual(result.allocation.targets[0].notional, Decimal("100"))
         self.assertEqual(result.expected_net_utility, Decimal("10"))
@@ -2270,7 +2270,7 @@ class DiscreteAllocationSearchTests(unittest.TestCase):
             ],
             self.policy(max_total_cost="100"),
         )
-        self.assertEqual(result.allocation.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(result.allocation.status, "ALLOCATED")
         self.assertEqual(result.allocation.turnover_notional, Decimal("0"))
         self.assertEqual(result.expected_net_utility, Decimal("10"))
 
@@ -2320,7 +2320,7 @@ class DiscreteAllocationSearchTests(unittest.TestCase):
             stress_scenarios={"down": {"AAA": "-0.10"}},
         )
         # Current gross objective 10 - holding cost 1 - stress penalty 1 = 8.
-        self.assertEqual(result.allocation.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(result.allocation.status, "ALLOCATED")
         self.assertEqual(result.allocation.estimated_cost, Decimal("1"))
         self.assertEqual(result.allocation.worst_stress_loss, Decimal("10"))
         self.assertEqual(result.expected_net_utility, Decimal("8"))

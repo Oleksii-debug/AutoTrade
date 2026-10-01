@@ -45,6 +45,40 @@ _OBSERVED_EVENT = "AuthenticatedReadObserved"
 _ORIGIN_KIND = "PROVIDER_ORIGIN"
 _SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _ORIGIN_REF_RE = re.compile(r"provider-origin:sha256:[0-9a-f]{64}")
+_EVENT_KEYS = frozenset(
+    {
+        "event_id",
+        "event_type",
+        "aggregate_type",
+        "aggregate_id",
+        "aggregate_version",
+        "payload",
+        "payload_hash",
+        "committed_at",
+        "journal_sequence",
+    }
+)
+_PREPARED_PAYLOAD_KEYS = frozenset(
+    {
+        "origin_kind",
+        "query",
+        "transport_identity",
+        "network_policy_identity",
+    }
+)
+_OBSERVED_PAYLOAD_KEYS = frozenset(
+    {
+        "origin_kind",
+        "prepared_event_id",
+        "query_digest",
+        "transport_identity",
+        "network_policy_identity",
+        "http_status",
+        "response_sha256",
+        "response_base64",
+        "observed_at",
+    }
+)
 
 
 def _exact_text(value: object, *, name: str) -> str:
@@ -159,6 +193,50 @@ def _query_snapshot(
     if _SHA256_RE.fullmatch(state["query_digest"]) is None:
         raise ProviderOriginError("authenticated-read query digest is non-canonical")
     return {**material, "query_digest": state["query_digest"]}
+
+
+def _require_origin_event(
+    event: object,
+    *,
+    attempt_id: str,
+    event_type: str,
+    aggregate_version: int,
+    payload_keys: frozenset[str],
+) -> dict[str, object]:
+    if type(event) is not dict or set(event) != _EVENT_KEYS:
+        raise ProviderOriginError(
+            "provider-origin journal event schema is not exact"
+        )
+    expected_event_id = (
+        attempt_id
+        + (":prepared" if event_type == _PREPARED_EVENT else ":observed")
+    )
+    if (
+        event.get("event_id") != expected_event_id
+        or event.get("event_type") != event_type
+        or event.get("aggregate_type") != _AGGREGATE_TYPE
+        or event.get("aggregate_id") != attempt_id
+        or event.get("aggregate_version") != aggregate_version
+    ):
+        raise ProviderOriginError(
+            "provider-origin journal event identity or chronology is invalid"
+        )
+    payload = event.get("payload")
+    if type(payload) is not dict or set(payload) != payload_keys:
+        raise ProviderOriginError(
+            "provider-origin journal payload schema is not exact"
+        )
+    if event.get("payload_hash") != payload_digest(payload):
+        raise ProviderOriginError(
+            "provider-origin payload digest conflicts with durable payload"
+        )
+    _parse_utc_text(event.get("committed_at"), name="committed_at")
+    sequence = event.get("journal_sequence")
+    if type(sequence) is not int or sequence <= 0:
+        raise ProviderOriginError(
+            "provider-origin journal sequence must be an exact positive integer"
+        )
+    return payload
 
 
 def _require_snapshot(
@@ -403,14 +481,18 @@ class ProviderOriginJournal:
         observed_text = _utc_text(observed_at, name="observed_at")
         store = self._require_store()
         events = JournalStore.load_events(store, _AGGREGATE_TYPE, attempt)
-        if len(events) != 1 or events[0].get("event_type") != _PREPARED_EVENT:
+        if len(events) != 1:
             raise ProviderOriginError(
                 "provider-origin response requires one exact durable Prepared event"
             )
         prepared = events[0]
-        if prepared.get("aggregate_version") != 1:
-            raise ProviderOriginError("provider-origin Prepared version is invalid")
-        payload = prepared.get("payload")
+        payload = _require_origin_event(
+            prepared,
+            attempt_id=attempt,
+            event_type=_PREPARED_EVENT,
+            aggregate_version=1,
+            payload_keys=_PREPARED_PAYLOAD_KEYS,
+        )
         expected = _require_snapshot(payload, query_binding)
         prepared_at = _parse_utc_text(
             prepared.get("committed_at"), name="prepared committed_at"
@@ -460,18 +542,21 @@ class ProviderOriginJournal:
                 "provider-origin response is incomplete; Prepared and Observed are required"
             )
         prepared, observed = events
-        if (
-            prepared.get("event_type") != _PREPARED_EVENT
-            or prepared.get("aggregate_version") != 1
-            or observed.get("event_type") != _OBSERVED_EVENT
-            or observed.get("aggregate_version") != 2
-        ):
-            raise ProviderOriginError("provider-origin event chronology is invalid")
-        prepared_payload = prepared.get("payload")
+        prepared_payload = _require_origin_event(
+            prepared,
+            attempt_id=attempt,
+            event_type=_PREPARED_EVENT,
+            aggregate_version=1,
+            payload_keys=_PREPARED_PAYLOAD_KEYS,
+        )
         _require_snapshot(prepared_payload, query_binding)
-        observed_payload = observed.get("payload")
-        if type(observed_payload) is not dict:
-            raise ProviderOriginError("provider-origin Observed payload is invalid")
+        observed_payload = _require_origin_event(
+            observed,
+            attempt_id=attempt,
+            event_type=_OBSERVED_EVENT,
+            aggregate_version=2,
+            payload_keys=_OBSERVED_PAYLOAD_KEYS,
+        )
         if (
             observed_payload.get("origin_kind") != _ORIGIN_KIND
             or observed_payload.get("prepared_event_id") != prepared.get("event_id")

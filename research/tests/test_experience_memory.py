@@ -44,16 +44,9 @@ def payload(outcome="flat"):
 
 class ExperienceMemoryTests(unittest.TestCase):
     def setUp(self):
-        self._clock_tick = 0
-
-        def advancing_test_clock():
-            value = BASE + timedelta(microseconds=self._clock_tick)
-            self._clock_tick += 1
-            return value
-
         self._clock_patch = patch(
             "research.autotrade_research.memory.episodes._utc_now",
-            side_effect=advancing_test_clock,
+            return_value=BASE,
         )
         self._clock_patch.start()
         self.addCleanup(self._clock_patch.stop)
@@ -422,11 +415,15 @@ class ExperienceMemoryTests(unittest.TestCase):
                 "outcome": {"label": "late"},
                 "evidence_ref": "artifact:retry",
             }
-            first, inserted = store.append_correction(
-                episode,
-                correction_id=correction_id,
-                payload=correction,
-            )
+            with patch(
+                "research.autotrade_research.memory.episodes._utc_now",
+                return_value=BASE + timedelta(microseconds=1),
+            ):
+                first, inserted = store.append_correction(
+                    episode,
+                    correction_id=correction_id,
+                    payload=correction,
+                )
             second, inserted_again = store.append_correction(
                 episode,
                 correction_id=correction_id,
@@ -687,14 +684,18 @@ class ExperienceMemoryTests(unittest.TestCase):
                 permission_class="research",
                 payload=payload("pending"),
             )
-            correction_id, _ = store.append_correction(
-                episode,
-                payload={
-                    "supersedes_fields": ["outcome"],
-                    "outcome": {"label": "observed-now"},
-                    "evidence_ref": "artifact:local-observation",
-                },
-            )
+            with patch(
+                "research.autotrade_research.memory.episodes._utc_now",
+                return_value=BASE + timedelta(microseconds=1),
+            ):
+                correction_id, _ = store.append_correction(
+                    episode,
+                    payload={
+                        "supersedes_fields": ["outcome"],
+                        "outcome": {"label": "observed-now"},
+                        "evidence_ref": "artifact:local-observation",
+                    },
+                )
             with store._connect() as con:
                 row = con.execute(
                     "SELECT created_at,available_at,availability_authority "
@@ -1090,7 +1091,11 @@ class ExperienceMemoryTests(unittest.TestCase):
                 permission_class="research",
                 payload=payload(),
             )
-            tombstone_id = store.tombstone(episode, reason="source rights revoked")
+            with patch(
+                "research.autotrade_research.memory.episodes._utc_now",
+                return_value=BASE + timedelta(microseconds=1),
+            ):
+                tombstone_id = store.tombstone(episode, reason="source rights revoked")
             with store._connect() as con:
                 con.execute(
                     "UPDATE tombstones SET reason='tampered reason' WHERE tombstone_id=?",
@@ -1098,7 +1103,7 @@ class ExperienceMemoryTests(unittest.TestCase):
                 )
             with self.assertRaisesRegex(MemoryIntegrityError, "tombstone integrity mismatch|durable writer chronology|writer_sequence"):
                 store.retrieve(
-                    information_cutoff=BASE,
+                    information_cutoff=BASE + timedelta(microseconds=1),
                     granted_permissions={"research"},
                     include_tombstoned=True,
                 )
@@ -1113,7 +1118,11 @@ class ExperienceMemoryTests(unittest.TestCase):
                 permission_class="research",
                 payload=payload(),
             )
-            second.tombstone(episode2, reason="legacy row")
+            with patch(
+                "research.autotrade_research.memory.episodes._utc_now",
+                return_value=BASE + timedelta(microseconds=1),
+            ):
+                second.tombstone(episode2, reason="legacy row")
             with second._connect() as con:
                 con.execute(
                     "UPDATE tombstones SET tombstone_hash=NULL WHERE episode_id=?",
@@ -1131,7 +1140,7 @@ class ExperienceMemoryTests(unittest.TestCase):
                 "legacy tombstone lacks integrity identity",
             ):
                 reopened.retrieve(
-                    information_cutoff=BASE,
+                    information_cutoff=BASE + timedelta(microseconds=1),
                     granted_permissions={"research"},
                     include_tombstoned=True,
                 )
@@ -1204,7 +1213,11 @@ class ExperienceMemoryTests(unittest.TestCase):
             self.assertEqual(source["episode_id"], episode)
             self.assertEqual(source["permission_class"], "private-research")
 
-            store.tombstone(episode, reason="source rights revoked")
+            with patch(
+                "research.autotrade_research.memory.episodes._utc_now",
+                return_value=BASE + timedelta(microseconds=1),
+            ):
+                store.tombstone(episode, reason="source rights revoked")
             with self.assertRaisesRegex(PermissionError, "tombstoned"):
                 store.source_episode(
                     episode,
@@ -1587,7 +1600,11 @@ class ExperienceMemoryTests(unittest.TestCase):
                 permission_class="research",
                 payload=payload(),
             )
-            store.tombstone(episode, reason="source rights revoked")
+            with patch(
+                "research.autotrade_research.memory.episodes._utc_now",
+                return_value=BASE + timedelta(microseconds=1),
+            ):
+                store.tombstone(episode, reason="source rights revoked")
 
             with self.assertRaisesRegex(TypeError, "include_tombstoned"):
                 store.retrieve(
@@ -1631,7 +1648,11 @@ class ExperienceMemoryTests(unittest.TestCase):
                 permission_class="research",
                 payload=payload(),
             )
-            store.tombstone(episode, reason="source rights revoked")
+            with patch(
+                "research.autotrade_research.memory.episodes._utc_now",
+                return_value=BASE + timedelta(microseconds=1),
+            ):
+                store.tombstone(episode, reason="source rights revoked")
             after_tombstone = BASE + timedelta(microseconds=1)
             self.assertEqual(
                 store.retrieve(
@@ -1780,10 +1801,14 @@ class ExperienceMemoryTests(unittest.TestCase):
                     permission_class="research",
                     payload=payload(),
                 )
-                tombstone_id = store.tombstone(
-                    episode,
-                    reason="identity-bound tombstone",
-                )
+                with patch(
+                    "research.autotrade_research.memory.episodes._utc_now",
+                    return_value=BASE + timedelta(microseconds=1),
+                ):
+                    tombstone_id = store.tombstone(
+                        episode,
+                        reason="identity-bound tombstone",
+                    )
                 replacement_id = (
                     "00000000-0000-0000-0000-000000000901"
                     if mutation == "clone"
@@ -1817,18 +1842,18 @@ class ExperienceMemoryTests(unittest.TestCase):
                 reopened = memory(path)
                 readers = (
                     lambda: reopened.retrieve(
-                        information_cutoff=BASE,
+                        information_cutoff=BASE + timedelta(microseconds=1),
                         granted_permissions={"research"},
                         include_tombstoned=True,
                     ),
                     lambda: reopened.source_episode(
                         episode,
-                        information_cutoff=BASE,
+                        information_cutoff=BASE + timedelta(microseconds=1),
                         granted_permissions={"research"},
                         include_tombstoned=True,
                     ),
                     lambda: reopened.coverage_population(
-                        causal_cutoff=BASE,
+                        causal_cutoff=BASE + timedelta(microseconds=1),
                         granted_permissions={"research"},
                     ),
                 )

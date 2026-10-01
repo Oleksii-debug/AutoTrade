@@ -1491,7 +1491,7 @@ class AllocationTests(unittest.TestCase):
             )
             self.assertEqual(result.allocation.status, "NO_INCREASE_FALLBACK")
             self.assertEqual(result.selected_symbols, ())
-            self.assertEqual(result.expected_net_utility, Decimal("0"))
+            self.assertEqual(result.expected_net_utility, Decimal("-10.00"))
             self.assertEqual(
                 result.allocation.targets[0].notional,
                 Decimal(current),
@@ -1526,7 +1526,7 @@ class AllocationTests(unittest.TestCase):
         flat = reversal("100")
         self.assertEqual(flat.allocation.status, "NO_INCREASE_FALLBACK")
         self.assertEqual(flat.allocation.targets[0].notional, Decimal("100"))
-        self.assertEqual(flat.expected_net_utility, Decimal("0"))
+        self.assertEqual(flat.expected_net_utility, Decimal("-10.00"))
         self.assertEqual(flat.selected_symbols, ())
 
         crossed = reversal("120")

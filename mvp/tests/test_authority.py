@@ -2969,7 +2969,7 @@ class AuthorityTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 AuthorityConflict,
-                "another financial command",
+                "reservation requirements changed for an existing financial command",
             ):
                 restarted.admit(
                     reservation_book=restarted_book,

@@ -8,8 +8,9 @@ import sqlite3
 import sys
 from typing import Any
 
-from autotrade_local_filesystem import (
+from autotrade_foundation.local_filesystem import (
     LocalFilesystemQualificationError,
+    freeze_local_filesystem_path,
     require_qualified_local_filesystem_path,
 )
 
@@ -22,12 +23,12 @@ from ._persistence_impl import JournalStore as _JournalStoreImpl
 from .store_identity import (
     JournalStoreIdentity,
     connection_main_identity,
-    connection_main_path,
     establish_database_anchor,
     freeze_database_path,
     guard_windows_database_authority,
     require_database_identity,
     require_exact_journal_store_identity,
+    same_journal_backing_object,
 )
 
 _JOURNAL_OPERATION_AUTHORITY: ContextVar[
@@ -56,13 +57,17 @@ class JournalStore(_JournalStoreImpl):
     """
 
     def __init__(self, path: str | Path):
+        # Freeze caller-relative text before locality admission performs Win32
+        # I/O. A concurrent process-wide chdir after admission must not retarget
+        # durable financial state into an unclassified namespace.
+        frozen_path = freeze_local_filesystem_path(Path(path).expanduser())
         try:
-            require_qualified_local_filesystem_path(path)
+            require_qualified_local_filesystem_path(frozen_path)
         except LocalFilesystemQualificationError as error:
             raise RuntimeError(
                 "journal database path must be on a qualified local filesystem"
             ) from error
-        self.path = freeze_database_path(path)
+        self.path = freeze_database_path(frozen_path)
         self._store_identity: JournalStoreIdentity | None = None
         self._initialize()
         if self._store_identity is None:
@@ -244,10 +249,10 @@ class JournalStore(_JournalStoreImpl):
             connection = sqlite3.connect(path, timeout=30, isolation_level=None)
             try:
                 connection.row_factory = sqlite3.Row
-                opened_path = connection_main_path(connection)
-                if opened_path != path:
+                opened_identity = connection_main_identity(connection)
+                if not same_journal_backing_object(opened_identity, guarded):
                     raise RuntimeError(
-                        "SQLite main database path does not match canonical journal authority"
+                        "SQLite main database does not match canonical journal authority"
                     )
                 if expected is None:
                     self._store_identity = guarded
@@ -283,9 +288,13 @@ class JournalStore(_JournalStoreImpl):
                             raise RuntimeError(
                                 "journal authority changed while connection was active"
                             )
-                        if connection_main_path(connection) != path:
+                        opened_identity = connection_main_identity(connection)
+                        if not same_journal_backing_object(
+                            opened_identity,
+                            expected,
+                        ):
                             raise RuntimeError(
-                                "SQLite main database path changed while connection was active"
+                                "SQLite main database changed while connection was active"
                             )
                 finally:
                     connection.close()

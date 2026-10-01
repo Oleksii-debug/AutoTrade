@@ -185,6 +185,43 @@ class ProtectedJournalWriterTests(unittest.TestCase):
             )
             self.assertEqual(len(loaded), 1)
 
+    def test_instance_state_injection_cannot_register_forged_writer(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            self.select(store)
+            forged = ProtectedJournalWriter(
+                store_identity=store.store_identity,
+                aggregate_type=AGGREGATE_TYPE,
+                namespace_version=NAMESPACE_VERSION,
+                writer_authority_id=WRITER_ID,
+            )
+            # Instance state is caller-mutable and therefore is not the selected
+            # process authority. A lookalike registry must have no effect.
+            vars(store)["_selected_protected_writers"] = {
+                id(forged): (
+                    forged,
+                    store.store_identity,
+                    AGGREGATE_TYPE,
+                    NAMESPACE_VERSION,
+                    WRITER_ID,
+                )
+            }
+            with self.assertRaisesRegex(
+                RuntimeError, "was not selected by this JournalStore"
+            ):
+                store.append_protected_event(forged, event())
+
+    def test_subclass_cannot_select_protected_writer_authority(self) -> None:
+        class DerivedJournalStore(JournalStore):
+            pass
+
+        with TemporaryDirectory() as directory:
+            store = DerivedJournalStore(Path(directory) / "journal.sqlite3")
+            with self.assertRaisesRegex(
+                TypeError, "exact canonical JournalStore"
+            ):
+                self.select(store)
+
     def test_directly_constructed_capability_is_not_selected_authority(self) -> None:
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

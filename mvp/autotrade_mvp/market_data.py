@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -25,6 +26,9 @@ from .instruments import (
     InstrumentRegistryError,
     InstrumentVersion,
 )
+
+
+_MAX_RETAINED_BOOK_EVENTS_PER_STREAM = 8_192
 
 
 KINDS = {
@@ -464,6 +468,7 @@ class MarketNormalizer:
         max_available_age: timedelta = timedelta(seconds=5),
         max_book_age: timedelta = timedelta(seconds=5),
         max_book_levels_per_side: int = 10_000,
+        max_retained_book_events_per_stream: int = _MAX_RETAINED_BOOK_EVENTS_PER_STREAM,
         book_stream_policies: tuple[BookStreamPolicyBinding, ...] = (),
     ) -> None:
         if not isinstance(registry, InstrumentRegistry):
@@ -474,6 +479,14 @@ class MarketNormalizer:
             raise MarketDataError("max_book_age must be positive")
         if type(max_book_levels_per_side) is not int or max_book_levels_per_side <= 0:
             raise MarketDataError("max_book_levels_per_side must be an exact positive integer")
+        if (
+            type(max_retained_book_events_per_stream) is not int
+            or not 0 < max_retained_book_events_per_stream <= _MAX_RETAINED_BOOK_EVENTS_PER_STREAM
+        ):
+            raise MarketDataError(
+                "max_retained_book_events_per_stream must be an exact positive integer "
+                "within the supported retention envelope"
+            )
         self._registry = registry
         if type(book_stream_policies) is not tuple:
             raise MarketDataError("book_stream_policies must be an exact tuple")
@@ -494,6 +507,9 @@ class MarketNormalizer:
         self._max_available_age = max_available_age
         self._max_book_age = max_book_age
         self._max_book_levels_per_side = max_book_levels_per_side
+        self._max_retained_book_events_per_stream = (
+            max_retained_book_events_per_stream
+        )
         self._last_sequence: dict[tuple[str, str, str, str], int] = {}
         self._seen_sequence_ids: set[tuple[str, str, str, str, int]] = set()
         self._last_revision: dict[tuple[str, str, str, str, int], int] = {}
@@ -521,6 +537,9 @@ class MarketNormalizer:
             str, tuple[str, str, str, str]
         ] = {}
         self._book_event_contracts: dict[str, str] = {}
+        self._book_event_order: dict[
+            tuple[str, str, str, str], deque[str]
+        ] = {}
         self._active_book_generation: dict[
             tuple[str, str, str, str], int
         ] = {}
@@ -538,6 +557,43 @@ class MarketNormalizer:
             _text(provider_symbol, "provider_symbol"),
             _text(stream, "stream"),
         )
+
+    def _clear_retained_book_events(
+        self,
+        key: tuple[str, str, str, str],
+    ) -> None:
+        """Drop stale-generation event authority for one provider book stream."""
+
+        order = self._book_event_order.pop(key, ())
+        for event_id in order:
+            self._book_event_keys.pop(event_id, None)
+            self._book_event_contracts.pop(event_id, None)
+
+    def _retain_book_event_identity(
+        self,
+        event: NormalizedMarketEvent,
+        key: tuple[str, str, str, str],
+    ) -> None:
+        """Retain one canonical event identity inside a deterministic FIFO envelope."""
+
+        contract = _canonical(event.to_contract_dict())
+        existing_key = self._book_event_keys.get(event.event_id)
+        if existing_key is not None:
+            if (
+                existing_key != key
+                or self._book_event_contracts.get(event.event_id) != contract
+            ):
+                raise MarketDataError("normalized book event identity collision")
+            return
+
+        order = self._book_event_order.setdefault(key, deque())
+        order.append(event.event_id)
+        self._book_event_keys[event.event_id] = key
+        self._book_event_contracts[event.event_id] = contract
+        while len(order) > self._max_retained_book_events_per_stream:
+            evicted_event_id = order.popleft()
+            self._book_event_keys.pop(evicted_event_id, None)
+            self._book_event_contracts.pop(evicted_event_id, None)
 
     def book_state(
         self,
@@ -691,6 +747,7 @@ class MarketNormalizer:
             raise MarketDataError(
                 "provider book generation must strictly increase"
             )
+        self._clear_retained_book_events(key)
         self._active_book_generation[key] = admitted_generation
         self._book_state[key] = "UNINITIALIZED"
         self._book_last_available_at.pop(key, None)
@@ -730,6 +787,7 @@ class MarketNormalizer:
         self._book_last_available_at.pop(key, None)
         self._book_levels.pop(key, None)
         self._provider_book_cursor.pop(key, None)
+        self._clear_retained_book_events(key)
 
     def provider_book_cursor(
         self,
@@ -1723,8 +1781,5 @@ class MarketNormalizer:
             raw_evidence_ref=update.raw_evidence_ref,
         )
         if update.kind in {"BOOK_SNAPSHOT", "BOOK_DELTA"}:
-            self._book_event_keys[event_id] = stream_key
-            self._book_event_contracts[event_id] = _canonical(
-                event.to_contract_dict()
-            )
+            self._retain_book_event_identity(event, stream_key)
         return event

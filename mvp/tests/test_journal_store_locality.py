@@ -5,6 +5,10 @@ import unittest
 from unittest.mock import patch
 
 from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.store_identity import (
+    observe_database_identity,
+    same_journal_backing_object,
+)
 
 
 @unittest.skipUnless(sys.platform == "win32", "Windows filesystem qualification")
@@ -53,7 +57,13 @@ class WindowsJournalStoreLocalityTests(unittest.TestCase):
             path = Path(directory) / "journal.sqlite3"
             store = JournalStore(path)
             self.assertTrue(path.exists())
-            self.assertEqual(store.store_identity.canonical_path, str(path.resolve()))
+            self.assertTrue(Path(store.path).is_absolute())
+            self.assertTrue(
+                same_journal_backing_object(
+                    store.store_identity,
+                    observe_database_identity(path),
+                )
+            )
 
 
 if __name__ == "__main__":

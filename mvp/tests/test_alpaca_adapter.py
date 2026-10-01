@@ -485,6 +485,7 @@ class AlpacaAdapterTests(unittest.TestCase):
         payload,
         intent_id="alpaca-submission-intent",
         attempt_id=None,
+        http_status=200,
     ):
         attempt = attempt_id or str(uuid4())
         client_id = stable_client_order_id(
@@ -535,7 +536,7 @@ class AlpacaAdapterTests(unittest.TestCase):
                 authority_check=lambda _hash, _now: (True, "allowed"),
                 transport_send=lambda _cid, _request, guard: (
                     guard(),
-                    ExactJsonTransportResponse(raw),
+                    ExactJsonTransportResponse(raw, http_status=http_status),
                 )[1],
                 sender_check=lambda _owner, _epoch: None,
                 submission_scope={
@@ -591,6 +592,56 @@ class AlpacaAdapterTests(unittest.TestCase):
             result["evidence"][0]["sha256"],
             observation.response_sha256,
         )
+
+
+    def test_submission_response_requires_exact_documented_success_http_status(self):
+        order_id = str(uuid4())
+        payload = {
+            "id": order_id,
+            "client_order_id": stable_client_order_id(
+                "ALPACA",
+                "alpaca-submission-intent",
+                environment="PAPER",
+                account_id="paper-account",
+            ),
+        }
+        for http_status in (None, 403, 422, 500):
+            with self.subTest(http_status=http_status):
+                attempt, prepared, observation = self._durable_submission_observation(
+                    payload=payload,
+                    http_status=http_status,
+                )
+                self.assertEqual(observation.http_status, http_status)
+                with self.assertRaisesRegex(AlpacaAdapterError, "HTTP 200"):
+                    parse_submission_response(
+                        attempt_id=attempt,
+                        prepared_request=prepared,
+                        observation=observation,
+                    )
+
+    def test_submission_evidence_identity_binds_http_status(self):
+        attempt_id = str(uuid4())
+        payload = {
+            "id": str(uuid4()),
+            "client_order_id": stable_client_order_id(
+                "ALPACA",
+                "alpaca-submission-intent",
+                environment="PAPER",
+                account_id="paper-account",
+            ),
+        }
+        _attempt, _prepared, ok = self._durable_submission_observation(
+            payload=payload,
+            attempt_id=attempt_id,
+            http_status=200,
+        )
+        _attempt, _prepared, forbidden = self._durable_submission_observation(
+            payload=payload,
+            attempt_id=attempt_id,
+            http_status=403,
+        )
+        self.assertEqual(ok.response_sha256, forbidden.response_sha256)
+        self.assertNotEqual(ok.evidence_ref, forbidden.evidence_ref)
 
     def test_submission_response_rejects_attempt_and_scope_relabelling(self):
         order_id = str(uuid4())

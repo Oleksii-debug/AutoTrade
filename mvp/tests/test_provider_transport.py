@@ -4120,6 +4120,19 @@ class KrakenFuturesSigningPrimitiveTests(unittest.TestCase):
         request = self.sign(policy=policy)
         self.assertTrue(request.url.startswith("https://futures.kraken.com/derivatives/api/v3/sendorder?"))
 
+    def test_mutated_canonical_policy_cannot_retarget_signer(self):
+        policy = KRAKEN_FUTURES_ENDPOINT_POLICIES["LIVE"]
+        original_base_url = policy.base_url
+        object.__setattr__(policy, "base_url", "https://attacker.test")
+        try:
+            with self.assertRaisesRegex(
+                ProviderTransportScopeError,
+                "canonical endpoint policy changed",
+            ):
+                self.sign(policy=policy)
+        finally:
+            object.__setattr__(policy, "base_url", original_base_url)
+
     def test_unbounded_size_is_rejected_before_provider_decimal_construction(self):
         body = {"orderType": "mkt", "symbol": "PF_XBTUSD", "side": "buy",
                 "size": "1e999999999", "cliOrdId": "client-1"}

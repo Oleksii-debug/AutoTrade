@@ -99,6 +99,7 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
             query={"category": "spot", "limit": "100"},
             at=READ_AT,
             permission_scope="ORDER.READ",
+            provider_environment="TESTNET",
         )
 
     def make_transport(
@@ -191,6 +192,7 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
         self.assertEqual(observation.provider_id, "BYBIT")
         self.assertEqual(observation.account_id, "paper-1")
         self.assertEqual(observation.environment, "PAPER")
+        self.assertEqual(observation.provider_environment, "TESTNET")
         self.assertEqual(observation.query_binding.endpoint, "/v5/execution/list")
         self.assertEqual(observation.payload["retCode"], 0)
         self.assertEqual(len(wire.requests), 1)
@@ -229,6 +231,7 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
             query={"category": "spot"},
             at=READ_AT,
             permission_scope="ORDER.READ",
+            provider_environment="TESTNET",
         )
         with self.assertRaisesRegex(
             ProviderTransportScopeError,
@@ -236,6 +239,36 @@ class BybitV5AuthenticatedReadTransportTests(unittest.TestCase):
         ):
             transport(wrong)
         self.assertEqual(resolver.calls, [])
+
+    def test_provider_environment_mismatch_fails_before_secret_or_wire(self):
+        capability, testnet_binding = self.binding()
+        events = []
+        wire = RecordingWire(events)
+        transport, resolver, _registry = self.make_transport(
+            capability=capability,
+            events=events,
+            wire=wire,
+        )
+        demo_binding = prepare_authenticated_read_query(
+            capability=capability,
+            surface=Surface.AUTHENTICATED_READ,
+            endpoint="/v5/execution/list",
+            query={"category": "spot", "limit": "100"},
+            at=READ_AT,
+            permission_scope="ORDER.READ",
+            provider_environment="DEMO",
+        )
+        self.assertNotEqual(
+            demo_binding.query_digest,
+            testnet_binding.query_digest,
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "query scope mismatch",
+        ):
+            transport(demo_binding)
+        self.assertEqual(resolver.calls, [])
+        self.assertEqual(wire.requests, [])
 
     def test_non_success_http_status_never_becomes_provider_state(self):
         capability, binding = self.binding()

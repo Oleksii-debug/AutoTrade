@@ -59,6 +59,14 @@ def verification_commands(*, platform: str | None = None) -> tuple[tuple[str, ..
             "--",
             "contracts/fixtures/common-scalars.corpus.json",
         ),
+        (
+            "dotnet",
+            "run",
+            "--project",
+            "tests/Host.Process/Host.Process.csproj",
+            "--configuration",
+            "Release",
+        ),
     )
     if platform == "win32":
         commands += (

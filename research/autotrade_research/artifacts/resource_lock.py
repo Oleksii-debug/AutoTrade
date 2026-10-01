@@ -6,6 +6,12 @@ import stat
 from pathlib import Path
 from typing import BinaryIO
 
+from autotrade_foundation.local_filesystem import (
+    LocalFilesystemQualificationError,
+    require_qualified_local_filesystem_path,
+)
+from autotrade_foundation.windows_namespace import retain_windows_parent_namespace
+
 
 class ResourceLockError(RuntimeError):
     """Resource lock acquisition, integrity, or teardown failure."""
@@ -146,12 +152,72 @@ class ResourceLock:
         self.path = Path(lock_path)
         self.blocking = blocking
         self._handle: BinaryIO | None = None
+        # On Windows this owns the exact retained parent namespace generation
+        # for the complete held-lock lifetime.  Releasing it immediately after
+        # acquire would permit a renamed/recreated pathname generation to host
+        # a second logical lock while the first handle is still locked.
+        self._windows_parent_guard = None
 
     def acquire(self) -> None:
-        if self._handle is not None:
-            raise ResourceLockError("resource lock is already held by this lock object")
-        _reject_known_remote_lock_path(self.path)
+        if self._handle is not None or self._windows_parent_guard is not None:
+            raise ResourceLockError(
+                "resource lock is already held or has unreleased Windows namespace authority"
+            )
+        try:
+            require_qualified_local_filesystem_path(self.path)
+        except LocalFilesystemQualificationError as error:
+            raise ResourceLockError(
+                "resource lock path must be on a qualified local filesystem"
+            ) from error
+
+        if os.name == "nt":
+            # Do not create parents through a pathname after locality admission.
+            # Normalize lexically, then create/retain each missing ancestor
+            # relative to the already-retained no-reparse parent handle.  The
+            # guard deliberately survives successful acquire and is released
+            # only after the lock handle is definitively closed.
+            self.path = Path(os.path.abspath(os.fspath(self.path)))
+            parent_guard = retain_windows_parent_namespace(
+                self.path,
+                create=True,
+            )
+            try:
+                parent_guard.__enter__()
+            except (OSError, RuntimeError, ValueError) as error:
+                raise ResourceLockError(
+                    "resource lock parent must be an ordinary retained local Windows namespace"
+                ) from error
+            try:
+                self._acquire_after_parent_ready()
+            except BaseException as acquire_error:
+                if self._handle is not None:
+                    # _acquire_after_parent_ready() retains a poisoned handle
+                    # when cleanup close itself fails.  Keep the parent
+                    # generation retained as well; releasing it here would turn
+                    # an uncertain open handle into a pathname split-brain.
+                    self._windows_parent_guard = parent_guard
+                else:
+                    try:
+                        parent_guard.__exit__(
+                            type(acquire_error),
+                            acquire_error,
+                            acquire_error.__traceback__,
+                        )
+                    except BaseException as guard_error:
+                        self._windows_parent_guard = parent_guard
+                        _add_secondary_failure_note(
+                            acquire_error,
+                            "Windows parent namespace release also failed during acquisition cleanup",
+                            guard_error,
+                        )
+                raise
+            self._windows_parent_guard = parent_guard
+            return
+
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._acquire_after_parent_ready()
+
+    def _acquire_after_parent_ready(self) -> None:
         handle = self._open_lock_handle()
         try:
             self._validate_handle_identity(handle)
@@ -176,9 +242,36 @@ class ResourceLock:
             raise
         self._handle = handle
 
+    def _release_windows_parent_guard(
+        self,
+        *,
+        primary_error: BaseException | None = None,
+    ) -> None:
+        guard = self._windows_parent_guard
+        if guard is None:
+            return
+        try:
+            guard.__exit__(
+                None if primary_error is None else type(primary_error),
+                primary_error,
+                None if primary_error is None else primary_error.__traceback__,
+            )
+        except BaseException as guard_error:
+            if primary_error is not None:
+                _add_secondary_failure_note(
+                    primary_error,
+                    "Windows parent namespace release also failed",
+                    guard_error,
+                )
+                return
+            raise
+        else:
+            self._windows_parent_guard = None
+
     def release(self) -> None:
         handle = self._handle
         if handle is None:
+            self._release_windows_parent_guard()
             return
         try:
             self._unlock_handle(handle)
@@ -191,14 +284,26 @@ class ResourceLock:
                     "resource lock handle close also failed after unlock failure",
                     close_error,
                 )
+                # Keep both authorities retained.  The OS handle lifetime is
+                # uncertain, so releasing the parent would permit a second
+                # pathname generation while the first may still own the lock.
                 self._handle = handle
             else:
                 self._handle = None
+                self._release_windows_parent_guard(
+                    primary_error=unlock_error,
+                )
             raise
+
         try:
             handle.close()
-        finally:
-            self._handle = None
+        except BaseException:
+            # A failed close leaves handle lifetime uncertain.  Do not release
+            # the Windows parent namespace guard in that state.
+            self._handle = handle
+            raise
+        self._handle = None
+        self._release_windows_parent_guard()
 
     def __enter__(self) -> "ResourceLock":
         self.acquire()
@@ -228,6 +333,15 @@ class ResourceLock:
             raise ResourceLockError("cannot create resource lock path") from exc
 
         self._validate_existing_lock_path()
+        if os.name == "nt":
+            try:
+                return self._open_existing_windows_lock_handle()
+            except FileNotFoundError as exc:
+                raise ResourceLockError(
+                    "resource lock path changed during acquisition"
+                ) from exc
+            except OSError as exc:
+                raise ResourceLockError("cannot open resource lock path") from exc
         try:
             return self.path.open("r+b")
         except FileNotFoundError as exc:
@@ -263,7 +377,6 @@ class ResourceLock:
         generic_write = 0x40000000
         file_share_read = 0x00000001
         file_share_write = 0x00000002
-        file_share_delete = 0x00000004
         create_new = 1
         file_attribute_normal = 0x00000080
         file_flag_open_reparse_point = 0x00200000
@@ -272,7 +385,7 @@ class ResourceLock:
         kernel_handle = create_file(
             str(self.path),
             generic_read | generic_write,
-            file_share_read | file_share_write | file_share_delete,
+            file_share_read | file_share_write,
             None,
             create_new,
             file_attribute_normal | file_flag_open_reparse_point,
@@ -284,6 +397,73 @@ class ResourceLock:
                 raise FileExistsError(
                     error_code,
                     "resource lock path already exists",
+                    str(self.path),
+                )
+            raise ctypes.WinError(error_code)
+
+        close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+        try:
+            descriptor = msvcrt.open_osfhandle(
+                kernel_handle,
+                os.O_RDWR | os.O_BINARY,
+            )
+        except BaseException:
+            close_handle(kernel_handle)
+            raise
+        try:
+            return os.fdopen(descriptor, "r+b", closefd=True)
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    def _open_existing_windows_lock_handle(self) -> BinaryIO:
+        """Open an existing Windows lock while denying pathname deletion."""
+
+        if os.name != "nt":
+            raise RuntimeError("Windows lock handle requested on non-Windows platform")
+
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        create_file = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
+        create_file.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        )
+        create_file.restype = wintypes.HANDLE
+
+        generic_read = 0x80000000
+        generic_write = 0x40000000
+        file_share_read = 0x00000001
+        file_share_write = 0x00000002
+        open_existing = 3
+        file_attribute_normal = 0x00000080
+        file_flag_open_reparse_point = 0x00200000
+        invalid_handle_value = ctypes.c_void_p(-1).value
+
+        kernel_handle = create_file(
+            str(self.path),
+            generic_read | generic_write,
+            file_share_read | file_share_write,
+            None,
+            open_existing,
+            file_attribute_normal | file_flag_open_reparse_point,
+            None,
+        )
+        if kernel_handle == invalid_handle_value:
+            error_code = ctypes.get_last_error()
+            if error_code in (2, 3):
+                raise FileNotFoundError(
+                    error_code,
+                    "resource lock path changed during acquisition",
                     str(self.path),
                 )
             raise ctypes.WinError(error_code)

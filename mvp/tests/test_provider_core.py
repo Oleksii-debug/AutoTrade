@@ -312,6 +312,7 @@ class ProviderCoreTests(unittest.TestCase):
         capability_snapshot_ids=("cap-1",),
         instrument_versions=("BTCUSD:v1",),
         raw=b'{ "orderId" : "provider-1" }',
+        requires_reconciliation=False,
     ):
         store = JournalStore(f"{directory}/journal.sqlite3")
         dispatcher = GuardedDispatcher(
@@ -338,7 +339,15 @@ class ProviderCoreTests(unittest.TestCase):
 
         def transport(_client_id, _request, guard):
             guard()
-            return ExactJsonTransportResponse(raw)
+            return ExactJsonTransportResponse(
+                raw,
+                requires_reconciliation=requires_reconciliation,
+                ambiguity_reason=(
+                    "provider_response_ambiguous"
+                    if requires_reconciliation
+                    else None
+                ),
+            )
 
         outcome = dispatcher.dispatch(
             attempt_id="provider-evidence-a1",
@@ -351,7 +360,10 @@ class ProviderCoreTests(unittest.TestCase):
             transport_send=transport,
             submission_scope=scope,
         )
-        self.assertEqual(outcome.status, "SENT")
+        self.assertEqual(
+            outcome.status,
+            "UNKNOWN" if requires_reconciliation else "SENT",
+        )
         return (
             load_submission_response_binding(
                 store,
@@ -361,6 +373,18 @@ class ProviderCoreTests(unittest.TestCase):
             ),
             request_sha,
         )
+
+    def test_submission_observation_is_sealed_against_subclass_scope_bypass(self):
+        with self.assertRaisesRegex(
+            TypeError,
+            "ProviderSubmissionObservation is sealed",
+        ):
+            class ForgedProviderSubmissionObservation(ProviderSubmissionObservation):
+                def __post_init__(self, _observation_token=None):
+                    pass
+
+                def require_scope(self, **_kwargs):
+                    return None
 
     def test_submission_observation_requires_durable_exact_send_scope(self):
         with TemporaryDirectory() as directory:
@@ -377,6 +401,7 @@ class ProviderCoreTests(unittest.TestCase):
             self.assertEqual(observation.payload["orderId"], "provider-1")
             self.assertEqual(observation.response_sha256, binding.response_sha256)
             self.assertEqual(observation.request_sha256, request_sha)
+            self.assertEqual(binding.terminal_state, "SENT")
             observation.require_scope(
                 provider_id="BYBIT",
                 endpoint="/v5/order/create",
@@ -387,6 +412,31 @@ class ProviderCoreTests(unittest.TestCase):
                 environment="SIMULATION",
                 client_order_id=binding.client_order_id,
             )
+
+    def test_submission_observation_rejects_response_bearing_unknown(self):
+        with TemporaryDirectory() as directory:
+            binding, request_sha = self._durable_submission_binding(
+                directory,
+                requires_reconciliation=True,
+            )
+            self.assertEqual(binding.terminal_state, "UNKNOWN")
+            self.assertEqual(
+                binding.ambiguity_reason,
+                "provider_response_ambiguous",
+            )
+            self.assertEqual(binding.retry_disposition, "RECONCILE_FIRST")
+            with self.assertRaisesRegex(
+                ProviderCoreError,
+                "requires definitive SENT response",
+            ):
+                observe_submission_json_response(
+                    response_binding=binding,
+                    provider_id="BYBIT",
+                    endpoint="/v5/order/create",
+                    prepared_request_sha256=request_sha,
+                    capability_snapshot_ids=("cap-1",),
+                    instrument_versions=("BTCUSD:v1",),
+                )
 
     def test_submission_observation_rejects_scope_relabelling(self):
         with TemporaryDirectory() as directory:

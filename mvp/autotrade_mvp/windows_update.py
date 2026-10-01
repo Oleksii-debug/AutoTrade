@@ -16,8 +16,8 @@ from pathlib import Path
 import re
 from typing import Any
 
-from research.autotrade_research.artifacts import trusted_authenticated_reader
-from research.autotrade_research.artifacts.store import ArtifactStore
+from autotrade_runtime.artifacts import trusted_authenticated_reader
+from autotrade_runtime.artifacts.store import ArtifactStore
 
 from .qualification_attestation import (
     QualificationTrustError,

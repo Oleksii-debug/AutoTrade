@@ -22,6 +22,8 @@ from mvp.autotrade_mvp.qualification_attestation import (
     QualificationTrustError,
     canonical_packaged_qualification_trust_policy_digest,
 )
+from tools.stage_windows_foundation import FoundationStagingError
+from tools.stage_windows_release_runtime import stage_windows_release_runtime
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -281,6 +283,71 @@ def _entry_metadata(relative: str, data: bytes) -> dict[str, object]:
         "sha256": "sha256:" + sha256(data).hexdigest(),
         "size": len(data),
     }
+
+
+def _require_release_runtime_snapshot_binding(
+    *,
+    files: list[tuple[str, Path, bytes]],
+    composition: dict[str, object],
+    staged_expected: tuple[dict[str, str], ...],
+) -> None:
+    """Bind collection to the canonical exact-source snapshot returned by staging."""
+
+    if len(staged_expected) != 37:
+        raise BundleError(
+            "release runtime stager did not return the canonical 37-leaf snapshot"
+        )
+    required = {"component_id", "kind", "path", "version", "sha256"}
+    validated_expected: list[dict[str, str]] = []
+    expected_paths: set[str] = set()
+    for index, expected in enumerate(staged_expected):
+        if not isinstance(expected, dict) or set(expected) != required:
+            raise BundleError(
+                f"release runtime snapshot record {index} is not canonical"
+            )
+        if any(
+            not isinstance(expected[field], str) or not expected[field]
+            for field in ("component_id", "kind", "path")
+        ):
+            raise BundleError(
+                f"release runtime snapshot record {index} has invalid identity"
+            )
+        if expected["version"] != "source-controlled":
+            raise BundleError(
+                f"release runtime snapshot record {index} has invalid version"
+            )
+        _windows_path_key(expected["path"])
+        if expected["path"] in expected_paths:
+            raise BundleError("release runtime snapshot contains duplicate paths")
+        expected_paths.add(expected["path"])
+        if CANONICAL_SHA256.fullmatch(expected["sha256"]) is None:
+            raise BundleError(
+                f"release runtime snapshot record {index} has invalid digest"
+            )
+        validated_expected.append(expected)
+
+    collected = {
+        relative: "sha256:" + sha256(data).hexdigest()
+        for relative, _, data in files
+    }
+    raw_components = composition.get("components")
+    if not isinstance(raw_components, list):
+        raise BundleError("release composition components are unavailable")
+    by_path = {
+        item["path"]: item
+        for item in raw_components
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    }
+    for expected in validated_expected:
+        path = expected["path"]
+        if collected.get(path) != expected["sha256"]:
+            raise BundleError(
+                f"release runtime changed after exact-source staging: {path}"
+            )
+        if by_path.get(path) != expected:
+            raise BundleError(
+                f"release composition changed after exact-source staging: {path}"
+            )
 
 
 def _canonical_digest(value: object, *, name: str) -> str:
@@ -616,6 +683,7 @@ def build_bundle(
             + ", ".join(sorted(codes))
         )
 
+    release_runtime_expected: tuple[dict[str, str], ...] = ()
     if mode == "release":
         provenance_source_sha = provenance.get("source_sha")
         if (
@@ -630,6 +698,22 @@ def build_bundle(
                 "release provenance source_sha does not match bundle source_sha"
             )
 
+        if composition_path is None:
+            raise BundleError(
+                "release bundle requires an exact Windows composition manifest"
+            )
+        try:
+            release_runtime_expected = stage_windows_release_runtime(
+                staging=staging,
+                composition_path=composition_path,
+                expected_source_sha=normalized_sha,
+                source_root=ROOT,
+            )
+        except FoundationStagingError as error:
+            raise BundleError(
+                f"release source-controlled runtime staging failed closed: {error}"
+            ) from error
+
     files = _collect(staging)
     composition = None
     composition_sha256 = None
@@ -639,7 +723,15 @@ def build_bundle(
             source_sha=normalized_sha,
             files=files,
         )
+        if mode == "release":
+            _require_release_runtime_snapshot_binding(
+                files=files,
+                composition=composition,
+                staged_expected=release_runtime_expected,
+            )
     elif mode == "release":
+        # Defensive unreachable guard: release mode is required to stage the
+        # exact source-controlled runtime above before any bundle collection.
         raise BundleError(
             "release bundle requires an exact Windows composition manifest"
         )

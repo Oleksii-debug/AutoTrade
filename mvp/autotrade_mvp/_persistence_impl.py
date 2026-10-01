@@ -61,6 +61,101 @@ def _projection_checkpoint_digest(
 
 _SEQUENCE_RE = re.compile(r"^(0|[1-9][0-9]*)$")
 
+_EVENT_TYPE_RETIREMENT_REJECT_TRIGGER = "autotrade_reject_retired_event_type"
+_EVENT_TYPE_RETIREMENT_UPDATE_TRIGGER = "autotrade_reject_retirement_update"
+_EVENT_TYPE_RETIREMENT_DELETE_TRIGGER = "autotrade_reject_retirement_delete"
+_EVENT_TYPE_RETIREMENT_REJECT_SQL = """
+CREATE TRIGGER IF NOT EXISTS autotrade_reject_retired_event_type
+BEFORE INSERT ON events
+WHEN EXISTS (
+    SELECT 1 FROM retired_event_types
+    WHERE event_type = NEW.event_type
+)
+BEGIN
+    SELECT RAISE(ABORT, 'event type is retired');
+END
+"""
+_EVENT_TYPE_RETIREMENT_UPDATE_SQL = """
+CREATE TRIGGER IF NOT EXISTS autotrade_reject_retirement_update
+BEFORE UPDATE ON retired_event_types
+BEGIN
+    SELECT RAISE(ABORT, 'event type retirement is immutable');
+END
+"""
+_EVENT_TYPE_RETIREMENT_DELETE_SQL = """
+CREATE TRIGGER IF NOT EXISTS autotrade_reject_retirement_delete
+BEFORE DELETE ON retired_event_types
+BEGIN
+    SELECT RAISE(ABORT, 'event type retirement is immutable');
+END
+"""
+
+
+_PROTECTED_WRITER_GUARD_TRIGGER = "autotrade_protected_event_writer_guard"
+_PROTECTED_WRITER_NAMESPACE_UPDATE_TRIGGER = (
+    "autotrade_protected_writer_namespace_no_update"
+)
+_PROTECTED_WRITER_NAMESPACE_DELETE_TRIGGER = (
+    "autotrade_protected_writer_namespace_no_delete"
+)
+_PROTECTED_WRITER_GUARD_SQL = """
+CREATE TRIGGER IF NOT EXISTS autotrade_protected_event_writer_guard
+BEFORE INSERT ON events
+WHEN EXISTS (
+    SELECT 1 FROM protected_writer_namespaces
+    WHERE aggregate_type = NEW.aggregate_type
+)
+BEGIN
+    SELECT CASE
+        WHEN COALESCE(
+            autotrade_protected_writer_authority(NEW.aggregate_type),
+            ''
+        ) != (
+            SELECT writer_authority_hash
+            FROM protected_writer_namespaces
+            WHERE aggregate_type = NEW.aggregate_type
+        )
+        THEN RAISE(
+            ABORT,
+            'protected journal aggregate requires exact writer authority'
+        )
+    END;
+    SELECT CASE
+        WHEN NEW.writer_namespace != (
+            SELECT namespace FROM protected_writer_namespaces
+            WHERE aggregate_type = NEW.aggregate_type
+        )
+        OR NEW.writer_authority_id != (
+            SELECT writer_authority_id FROM protected_writer_namespaces
+            WHERE aggregate_type = NEW.aggregate_type
+        )
+        OR NEW.writer_authority_hash != (
+            SELECT writer_authority_hash FROM protected_writer_namespaces
+            WHERE aggregate_type = NEW.aggregate_type
+        )
+        OR NEW.writer_provenance_hash IS NULL
+        THEN RAISE(
+            ABORT,
+            'protected journal event lacks exact writer provenance'
+        )
+    END;
+END
+"""
+_PROTECTED_WRITER_NAMESPACE_UPDATE_SQL = """
+CREATE TRIGGER IF NOT EXISTS autotrade_protected_writer_namespace_no_update
+BEFORE UPDATE ON protected_writer_namespaces
+BEGIN
+    SELECT RAISE(ABORT, 'protected writer namespace is immutable');
+END
+"""
+_PROTECTED_WRITER_NAMESPACE_DELETE_SQL = """
+CREATE TRIGGER IF NOT EXISTS autotrade_protected_writer_namespace_no_delete
+BEFORE DELETE ON protected_writer_namespaces
+BEGIN
+    SELECT RAISE(ABORT, 'protected writer namespace is immutable');
+END
+"""
+
 
 def _sequence(value: object, *, name: str, positive: bool = False) -> int:
     """Validate canonical Sequence text before integer persistence/arithmetic."""
@@ -78,6 +173,121 @@ def _sequence(value: object, *, name: str, positive: bool = False) -> int:
     return number
 
 
+def _protected_writer_authority_digest(
+    *,
+    aggregate_type: str,
+    namespace: str,
+    writer_authority_id: str,
+) -> str:
+    return payload_digest(
+        {
+            "schema_version": "1.0.0",
+            "aggregate_type": aggregate_type,
+            "namespace": namespace,
+            "writer_authority_id": writer_authority_id,
+        }
+    )
+
+
+def _event_writer_provenance_digest(
+    *,
+    event_id: str,
+    aggregate_type: str,
+    aggregate_id: str,
+    aggregate_version: int,
+    envelope_hash: str,
+    journal_sequence: int,
+    namespace: str,
+    writer_authority_id: str,
+    writer_authority_hash: str,
+) -> str:
+    return payload_digest(
+        {
+            "schema_version": "1.0.0",
+            "event_id": event_id,
+            "aggregate_type": aggregate_type,
+            "aggregate_id": aggregate_id,
+            "aggregate_version": aggregate_version,
+            "envelope_hash": envelope_hash,
+            "journal_sequence": journal_sequence,
+            "namespace": namespace,
+            "writer_authority_id": writer_authority_id,
+            "writer_authority_hash": writer_authority_hash,
+        }
+    )
+
+
+class ProtectedWriterCapability:
+    """Opaque process-lifetime handle for one durably registered writer."""
+
+    __slots__ = (
+        "aggregate_type",
+        "namespace",
+        "writer_authority_id",
+        "writer_authority_hash",
+        "_store_instance_id",
+    )
+
+    def __init__(self, *args, **kwargs):
+        raise TypeError(
+            "ProtectedWriterCapability is issued only by JournalStore authority"
+        )
+
+    def __init_subclass__(cls, **kwargs):
+        raise TypeError("ProtectedWriterCapability cannot be subclassed")
+
+
+class AggregatePreconditionFailed(ValueError):
+    """A read-only aggregate head changed before any requested mutation."""
+
+
+class JournalSequencePreconditionFailed(ValueError):
+    """The global durable journal cut changed before a requested mutation."""
+
+
+@dataclass(frozen=True)
+class ExpectedAggregateHead:
+    """Immutable read-only aggregate precondition for one journal transaction."""
+
+    aggregate_type: str
+    aggregate_id: str
+    aggregate_version: int
+    latest_event_id: str | None = None
+    latest_payload_hash: str | None = None
+
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.aggregate_type, "aggregate_type"),
+            (self.aggregate_id, "aggregate_id"),
+        ):
+            if type(value) is not str or not value or value != value.strip():
+                raise ValueError(f"{name} must be canonical non-empty text")
+        if type(self.aggregate_version) is not int or self.aggregate_version < 0:
+            raise ValueError("aggregate_version must be a non-negative integer")
+        for value, name in (
+            (self.latest_event_id, "latest_event_id"),
+            (self.latest_payload_hash, "latest_payload_hash"),
+        ):
+            if (
+                value is not None
+                and (
+                    type(value) is not str
+                    or not value
+                    or value != value.strip()
+                )
+            ):
+                raise ValueError(
+                    f"{name} must be canonical non-empty text when provided"
+                )
+        if self.aggregate_version == 0 and (
+            self.latest_event_id is not None
+            or self.latest_payload_hash is not None
+        ):
+            raise ValueError(
+                "empty aggregate precondition cannot name a latest event"
+            )
+
+
 @dataclass(frozen=True)
 class AppendResult:
     event_id: str
@@ -92,11 +302,12 @@ class JournalStore:
     publication intent; a separate qualified dispatcher must perform delivery.
     """
 
-    SCHEMA_VERSION = 9
+    SCHEMA_VERSION = 11
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._protected_writer_capabilities: dict[int, ProtectedWriterCapability] = {}
         self._initialize()
 
     @contextmanager
@@ -104,6 +315,11 @@ class JournalStore:
         connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)
         try:
             connection.row_factory = sqlite3.Row
+            connection.create_function(
+                "autotrade_protected_writer_authority",
+                1,
+                lambda _aggregate_type: None,
+            )
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA synchronous=FULL")
@@ -254,6 +470,43 @@ class JournalStore:
                 "UPDATE command_dedupe SET effect_kind = 'LEGACY_UNKNOWN' "
                 "WHERE effect_kind IS NULL",
             )
+        if version == 10:
+            # Event-type retirement is a durable cross-runtime writer fence.
+            # A process that initialized under an older schema still executes
+            # INSERT against this same events table; the database trigger, not
+            # process-local code, therefore blocks a retired writer after cutover.
+            return (
+                """
+                CREATE TABLE IF NOT EXISTS retired_event_types (
+                    event_type TEXT PRIMARY KEY,
+                    retirement_id TEXT NOT NULL,
+                    retirement_hash TEXT NOT NULL
+                )
+                """,
+                _EVENT_TYPE_RETIREMENT_REJECT_SQL,
+                _EVENT_TYPE_RETIREMENT_UPDATE_SQL,
+                _EVENT_TYPE_RETIREMENT_DELETE_SQL,
+            )
+        if version == 11:
+            # Protected writer provenance is separate from event payload/envelope
+            # authority. Historical rows remain explicitly unqualified.
+            return (
+                """
+                CREATE TABLE IF NOT EXISTS protected_writer_namespaces (
+                    aggregate_type TEXT PRIMARY KEY,
+                    namespace TEXT NOT NULL UNIQUE,
+                    writer_authority_id TEXT NOT NULL,
+                    writer_authority_hash TEXT NOT NULL
+                )
+                """,
+                "ALTER TABLE events ADD COLUMN writer_namespace TEXT",
+                "ALTER TABLE events ADD COLUMN writer_authority_id TEXT",
+                "ALTER TABLE events ADD COLUMN writer_authority_hash TEXT",
+                "ALTER TABLE events ADD COLUMN writer_provenance_hash TEXT",
+                _PROTECTED_WRITER_GUARD_SQL,
+                _PROTECTED_WRITER_NAMESPACE_UPDATE_SQL,
+                _PROTECTED_WRITER_NAMESPACE_DELETE_SQL,
+            )
         raise ValueError(f"Unsupported journal migration version: {version}")
 
     @classmethod
@@ -274,7 +527,13 @@ class JournalStore:
                 "event_id", "event_type", "aggregate_type", "aggregate_id",
                 "aggregate_version", "payload_json", "payload_hash", "committed_at",
             } | ({"envelope_json", "envelope_hash"} if cls.SCHEMA_VERSION >= 5 else set())
-              | ({"journal_sequence"} if cls.SCHEMA_VERSION >= 6 else set())),
+              | ({"journal_sequence"} if cls.SCHEMA_VERSION >= 6 else set())
+              | ({
+                    "writer_namespace",
+                    "writer_authority_id",
+                    "writer_authority_hash",
+                    "writer_provenance_hash",
+                } if cls.SCHEMA_VERSION >= 11 else set())),
             "outbox": frozenset({
                 "outbox_id", "event_id", "topic", "payload_json",
                 "created_at", "delivered_at"
@@ -290,6 +549,17 @@ class JournalStore:
             required["global_projection_checkpoints"] = frozenset({
                 "projection_name", "journal_sequence",
                 "state_json", "state_hash", "updated_at",
+            })
+        if cls.SCHEMA_VERSION >= 10:
+            required["retired_event_types"] = frozenset({
+                "event_type", "retirement_id", "retirement_hash",
+            })
+        if cls.SCHEMA_VERSION >= 11:
+            required["protected_writer_namespaces"] = frozenset({
+                "aggregate_type",
+                "namespace",
+                "writer_authority_id",
+                "writer_authority_hash",
             })
         return required
 
@@ -357,6 +627,15 @@ class JournalStore:
             )
         if cls.SCHEMA_VERSION >= 6:
             events["journal_sequence"] = ("INTEGER", False)
+        if cls.SCHEMA_VERSION >= 11:
+            events.update(
+                {
+                    "writer_namespace": ("TEXT", False),
+                    "writer_authority_id": ("TEXT", False),
+                    "writer_authority_hash": ("TEXT", False),
+                    "writer_provenance_hash": ("TEXT", False),
+                }
+            )
 
         outbox = {
             "outbox_id": ("TEXT", False),
@@ -395,6 +674,19 @@ class JournalStore:
                 "state_json": ("TEXT", True),
                 "state_hash": ("TEXT", True),
                 "updated_at": ("TEXT", True),
+            }
+        if cls.SCHEMA_VERSION >= 10:
+            required["retired_event_types"] = {
+                "event_type": ("TEXT", False),
+                "retirement_id": ("TEXT", True),
+                "retirement_hash": ("TEXT", True),
+            }
+        if cls.SCHEMA_VERSION >= 11:
+            required["protected_writer_namespaces"] = {
+                "aggregate_type": ("TEXT", False),
+                "namespace": ("TEXT", True),
+                "writer_authority_id": ("TEXT", True),
+                "writer_authority_hash": ("TEXT", True),
             }
         return required
 
@@ -475,6 +767,12 @@ class JournalStore:
             expected_primary_keys["global_projection_checkpoints"] = (
                 "projection_name",
             )
+        if cls.SCHEMA_VERSION >= 10:
+            expected_primary_keys["retired_event_types"] = ("event_type",)
+        if cls.SCHEMA_VERSION >= 11:
+            expected_primary_keys["protected_writer_namespaces"] = (
+                "aggregate_type",
+            )
         expected_unique = {
             "events": {
                 ("aggregate_type", "aggregate_id", "aggregate_version"),
@@ -490,6 +788,8 @@ class JournalStore:
                 else {("idempotency_key",)}
             ),
         }
+        if cls.SCHEMA_VERSION >= 11:
+            expected_unique["protected_writer_namespaces"] = {("namespace",)}
         for table_name, expected_pk in expected_primary_keys.items():
             pk_columns = tuple(
                 str(row["name"])
@@ -548,6 +848,55 @@ class JournalStore:
             raise ValueError(
                 "Journal schema table outbox is missing event ownership foreign key"
             )
+
+    @classmethod
+    def _validate_event_type_retirement_contract(cls, connection) -> None:
+        if cls.SCHEMA_VERSION < 10:
+            return
+        expected_triggers = {
+            _EVENT_TYPE_RETIREMENT_REJECT_TRIGGER: _EVENT_TYPE_RETIREMENT_REJECT_SQL,
+            _EVENT_TYPE_RETIREMENT_UPDATE_TRIGGER: _EVENT_TYPE_RETIREMENT_UPDATE_SQL,
+            _EVENT_TYPE_RETIREMENT_DELETE_TRIGGER: _EVENT_TYPE_RETIREMENT_DELETE_SQL,
+        }
+        for trigger_name, expected_sql in expected_triggers.items():
+            row = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+                (trigger_name,),
+            ).fetchone()
+            if row is None or not isinstance(row["sql"], str):
+                raise ValueError(
+                    "Journal schema is missing event-type retirement trigger: "
+                    + trigger_name
+                )
+            actual = " ".join(str(row["sql"]).split())
+            expected = " ".join(expected_sql.replace("IF NOT EXISTS ", "").split())
+            if actual != expected:
+                raise ValueError(
+                    "Journal event-type retirement trigger contract mismatch: "
+                    + trigger_name
+                )
+
+        for row in connection.execute(
+            "SELECT event_type, retirement_id, retirement_hash "
+            "FROM retired_event_types ORDER BY event_type"
+        ):
+            event_type = row["event_type"]
+            retirement_id = row["retirement_id"]
+            retirement_hash = row["retirement_hash"]
+            if (
+                not isinstance(event_type, str)
+                or not event_type.strip()
+                or event_type != event_type.strip()
+                or not isinstance(retirement_id, str)
+                or not retirement_id.strip()
+                or retirement_id != retirement_id.strip()
+            ):
+                raise ValueError("event type retirement record is not canonical")
+            expected_hash = payload_digest(
+                {"event_type": event_type, "retirement_id": retirement_id}
+            )
+            if retirement_hash != expected_hash:
+                raise ValueError("event type retirement hash mismatch")
 
     def _initialize(self) -> None:
         with self._connect() as connection:
@@ -767,6 +1116,8 @@ class JournalStore:
                     required_tables.add("projection_checkpoints")
                 if self.SCHEMA_VERSION >= 7:
                     required_tables.add("global_projection_checkpoints")
+                if self.SCHEMA_VERSION >= 10:
+                    required_tables.add("retired_event_types")
                 present_tables = {
                     str(row[0])
                     for row in connection.execute(
@@ -801,10 +1152,43 @@ class JournalStore:
                         )
                 self._validate_column_contracts(connection)
                 self._validate_key_contracts(connection)
+                self._validate_event_type_retirement_contract(connection)
+                self._validate_protected_writer_trigger_contract(connection)
                 connection.commit()
             except Exception:
                 connection.rollback()
                 raise
+
+    @classmethod
+    def _validate_protected_writer_trigger_contract(cls, connection) -> None:
+        if cls.SCHEMA_VERSION < 11:
+            return
+        expected_triggers = {
+            _PROTECTED_WRITER_GUARD_TRIGGER: _PROTECTED_WRITER_GUARD_SQL,
+            _PROTECTED_WRITER_NAMESPACE_UPDATE_TRIGGER:
+                _PROTECTED_WRITER_NAMESPACE_UPDATE_SQL,
+            _PROTECTED_WRITER_NAMESPACE_DELETE_TRIGGER:
+                _PROTECTED_WRITER_NAMESPACE_DELETE_SQL,
+        }
+        for trigger_name, expected_sql in expected_triggers.items():
+            row = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+                (trigger_name,),
+            ).fetchone()
+            if row is None or not isinstance(row["sql"], str):
+                raise ValueError(
+                    "Journal schema is missing protected-writer trigger: "
+                    + trigger_name
+                )
+            actual = " ".join(str(row["sql"]).split())
+            expected = " ".join(
+                expected_sql.replace("IF NOT EXISTS ", "").split()
+            )
+            if actual != expected:
+                raise ValueError(
+                    "Journal protected-writer trigger contract mismatch: "
+                    + trigger_name
+                )
 
     def current_schema_version(self) -> int:
         with self._connect() as connection:
@@ -812,6 +1196,55 @@ class JournalStore:
                 "SELECT MAX(version) FROM schema_migrations"
             ).fetchone()
         return 0 if row is None or row[0] is None else int(row[0])
+
+    def retire_event_type(self, event_type: str, *, retirement_id: str) -> bool:
+        """Durably fence all future inserts of one legacy event type.
+
+        The fence lives in SQLite rather than process memory so an already-running
+        older runtime using the same events table is blocked after the retirement
+        transaction commits. Existing historical events remain readable. retirement_id is a deterministic
+        migration/generation identity, never a wall-clock attestation.
+        """
+
+        if self.SCHEMA_VERSION < 10:
+            raise RuntimeError("event type retirement requires journal schema v10")
+        event_type = self._require_text(event_type, "event_type")
+        retirement_id = self._require_text(retirement_id, "retirement_id")
+        retirement_hash = payload_digest(
+            {"event_type": event_type, "retirement_id": retirement_id}
+        )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = connection.execute(
+                    "SELECT retirement_id, retirement_hash "
+                    "FROM retired_event_types WHERE event_type = ?",
+                    (event_type,),
+                ).fetchone()
+                if existing is not None:
+                    exact = (
+                        existing["retirement_id"] == retirement_id
+                        and existing["retirement_hash"] == retirement_hash
+                    )
+                    if not exact:
+                        raise ValueError(
+                            "event type retirement conflicts with existing fence"
+                        )
+                    self._validate_event_type_retirement_contract(connection)
+                    connection.commit()
+                    return False
+                connection.execute(
+                    "INSERT INTO retired_event_types("
+                    "event_type, retirement_id, retirement_hash"
+                    ") VALUES (?, ?, ?)",
+                    (event_type, retirement_id, retirement_hash),
+                )
+                self._validate_event_type_retirement_contract(connection)
+                connection.commit()
+                return True
+            except Exception:
+                connection.rollback()
+                raise
 
     @staticmethod
     def _now() -> str:
@@ -896,6 +1329,71 @@ class JournalStore:
             )
         if "journal_sequence" in row_keys:
             decoded["journal_sequence"] = journal_sequence
+
+        writer_columns = {
+            "writer_namespace",
+            "writer_authority_id",
+            "writer_authority_hash",
+            "writer_provenance_hash",
+        }
+        if writer_columns.issubset(row_keys):
+            raw_writer = {name: row[name] for name in writer_columns}
+            present = {
+                name: value
+                for name, value in raw_writer.items()
+                if value is not None
+            }
+            if present and len(present) != len(writer_columns):
+                raise ValueError(
+                    "journal event writer provenance is only partially populated"
+                )
+            if present:
+                namespace = raw_writer["writer_namespace"]
+                writer_authority_id = raw_writer["writer_authority_id"]
+                writer_authority_hash = raw_writer["writer_authority_hash"]
+                writer_provenance_hash = raw_writer["writer_provenance_hash"]
+                if (
+                    type(namespace) is not str
+                    or not namespace
+                    or namespace != namespace.strip()
+                    or type(writer_authority_id) is not str
+                    or not writer_authority_id
+                    or writer_authority_id != writer_authority_id.strip()
+                    or type(writer_authority_hash) is not str
+                    or type(writer_provenance_hash) is not str
+                ):
+                    raise ValueError(
+                        "journal event writer provenance is non-canonical"
+                    )
+                expected_authority_hash = _protected_writer_authority_digest(
+                    aggregate_type=str(row["aggregate_type"]),
+                    namespace=namespace,
+                    writer_authority_id=writer_authority_id,
+                )
+                if writer_authority_hash != expected_authority_hash:
+                    raise ValueError(
+                        "journal event writer authority hash does not match identity"
+                    )
+                if "journal_sequence" not in row_keys or "envelope_hash" not in row_keys:
+                    raise ValueError(
+                        "journal event writer provenance lacks immutable event cut"
+                    )
+                expected_provenance_hash = _event_writer_provenance_digest(
+                    event_id=str(row["event_id"]),
+                    aggregate_type=str(row["aggregate_type"]),
+                    aggregate_id=str(row["aggregate_id"]),
+                    aggregate_version=int(row["aggregate_version"]),
+                    envelope_hash=str(row["envelope_hash"]),
+                    journal_sequence=journal_sequence,
+                    namespace=namespace,
+                    writer_authority_id=writer_authority_id,
+                    writer_authority_hash=writer_authority_hash,
+                )
+                if writer_provenance_hash != expected_provenance_hash:
+                    raise ValueError(
+                        "journal event writer provenance hash does not match event"
+                    )
+                decoded.update(raw_writer)
         return decoded
 
     def get_event(self, event_id: str) -> dict[str, Any] | None:
@@ -974,6 +1472,98 @@ class JournalStore:
                 "aggregate version authority is not a contiguous positive integer sequence"
             )
         return last_version
+
+    @staticmethod
+    def _validated_aggregate_preconditions(
+        value: tuple[ExpectedAggregateHead, ...],
+    ) -> tuple[ExpectedAggregateHead, ...]:
+        if type(value) is not tuple:
+            raise TypeError("aggregate_preconditions must be an exact tuple")
+        if len(value) > 16:
+            raise ValueError("aggregate_preconditions cannot contain more than 16 heads")
+        seen: set[tuple[str, str]] = set()
+        canonical: list[ExpectedAggregateHead] = []
+        for item in value:
+            if type(item) is not ExpectedAggregateHead:
+                raise TypeError(
+                    "aggregate_preconditions must contain exact ExpectedAggregateHead values"
+                )
+            # Reconstruct instead of trusting a previously-created frozen
+            # instance: object.__setattr__ can otherwise corrupt dataclass
+            # fields inside the same process after __post_init__ ran.
+            normalized = ExpectedAggregateHead(
+                item.aggregate_type,
+                item.aggregate_id,
+                item.aggregate_version,
+                latest_event_id=item.latest_event_id,
+                latest_payload_hash=item.latest_payload_hash,
+            )
+            key = (normalized.aggregate_type, normalized.aggregate_id)
+            if key in seen:
+                raise ValueError(
+                    "aggregate_preconditions cannot repeat an aggregate identity"
+                )
+            seen.add(key)
+            canonical.append(normalized)
+        return tuple(canonical)
+
+    @classmethod
+    def _require_aggregate_preconditions(
+        cls,
+        connection: sqlite3.Connection,
+        aggregate_preconditions: tuple[ExpectedAggregateHead, ...],
+    ) -> None:
+        for expected in aggregate_preconditions:
+            current = cls._aggregate_version_value(
+                connection,
+                expected.aggregate_type,
+                expected.aggregate_id,
+            )
+            if current != expected.aggregate_version:
+                raise AggregatePreconditionFailed(
+                    "aggregate head precondition failed for "
+                    f"{expected.aggregate_type}/{expected.aggregate_id}: "
+                    f"expected version {expected.aggregate_version}, found {current}"
+                )
+            if current == 0:
+                continue
+            row = connection.execute(
+                """
+                SELECT event_id, event_type, aggregate_type, aggregate_id,
+                       aggregate_version, payload_json, payload_hash, committed_at,
+                       envelope_json, envelope_hash, journal_sequence
+                FROM events
+                WHERE aggregate_type = ? AND aggregate_id = ?
+                  AND aggregate_version = ?
+                """,
+                (
+                    expected.aggregate_type,
+                    expected.aggregate_id,
+                    expected.aggregate_version,
+                ),
+            ).fetchone()
+            if row is None:
+                raise AggregatePreconditionFailed(
+                    "aggregate head precondition row is missing for "
+                    f"{expected.aggregate_type}/{expected.aggregate_id}"
+                )
+            event = cls._decode_event_row(row)
+            if (
+                expected.latest_event_id is not None
+                and event["event_id"] != expected.latest_event_id
+            ):
+                raise AggregatePreconditionFailed(
+                    "aggregate head event identity precondition failed for "
+                    f"{expected.aggregate_type}/{expected.aggregate_id}"
+                )
+            if (
+                expected.latest_payload_hash is not None
+                and event["payload_hash"] != expected.latest_payload_hash
+            ):
+                raise AggregatePreconditionFailed(
+                    "aggregate head payload precondition failed for "
+                    f"{expected.aggregate_type}/{expected.aggregate_id}"
+                )
 
     def next_aggregate_version(self, aggregate_type: str, aggregate_id: str) -> int:
         aggregate_type = self._require_text(aggregate_type, "aggregate_type")
@@ -1079,7 +1669,302 @@ class JournalStore:
             expected += 1
         return decoded
 
-    def append_event(self, envelope: dict[str, Any], *, outbox_topic: str | None = None) -> AppendResult:
+    @staticmethod
+    def _require_exact_authority_text(value: object, name: str) -> str:
+        if type(value) is not str or not value or value != value.strip():
+            raise ValueError(f"{name} must be exact canonical non-empty text")
+        return value
+
+    def _protected_writer_registry(self) -> dict[int, tuple[object, str, str, str, str, int]]:
+        registry = getattr(self, "_protected_writer_capabilities", None)
+        if type(registry) is not dict:
+            raise RuntimeError("protected writer capability registry is unavailable")
+        return registry
+
+    def bind_protected_writer(
+        self,
+        *,
+        aggregate_type: str,
+        namespace: str,
+        writer_authority_id: str,
+    ) -> ProtectedWriterCapability:
+        """Bind a protected aggregate writer without upgrading legacy history."""
+
+        aggregate_type = self._require_exact_authority_text(
+            aggregate_type, "aggregate_type"
+        )
+        namespace = self._require_exact_authority_text(namespace, "namespace")
+        writer_authority_id = self._require_exact_authority_text(
+            writer_authority_id, "writer_authority_id"
+        )
+        authority_hash = _protected_writer_authority_digest(
+            aggregate_type=aggregate_type,
+            namespace=namespace,
+            writer_authority_id=writer_authority_id,
+        )
+        if self.SCHEMA_VERSION < 11:
+            raise RuntimeError(
+                "protected writer provenance requires journal schema v11"
+            )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = connection.execute(
+                    """
+                    SELECT aggregate_type, namespace, writer_authority_id,
+                           writer_authority_hash
+                    FROM protected_writer_namespaces
+                    WHERE aggregate_type = ?
+                    """,
+                    (aggregate_type,),
+                ).fetchone()
+                if existing is None:
+                    legacy = connection.execute(
+                        "SELECT 1 FROM events WHERE aggregate_type = ? LIMIT 1",
+                        (aggregate_type,),
+                    ).fetchone()
+                    if legacy is not None:
+                        raise ValueError(
+                            "protected writer registration cannot bless "
+                            "pre-existing aggregate history"
+                        )
+                    namespace_owner = connection.execute(
+                        """
+                        SELECT aggregate_type
+                        FROM protected_writer_namespaces
+                        WHERE namespace = ?
+                        """,
+                        (namespace,),
+                    ).fetchone()
+                    if namespace_owner is not None:
+                        raise ValueError(
+                            "protected writer namespace is already bound"
+                        )
+                    connection.execute(
+                        """
+                        INSERT INTO protected_writer_namespaces(
+                            aggregate_type, namespace, writer_authority_id,
+                            writer_authority_hash
+                        ) VALUES (?, ?, ?, ?)
+                        """,
+                        (
+                            aggregate_type,
+                            namespace,
+                            writer_authority_id,
+                            authority_hash,
+                        ),
+                    )
+                elif (
+                    existing["namespace"] != namespace
+                    or existing["writer_authority_id"] != writer_authority_id
+                    or existing["writer_authority_hash"] != authority_hash
+                ):
+                    raise ValueError(
+                        "protected writer registration conflicts with durable authority"
+                    )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+        capability = object.__new__(ProtectedWriterCapability)
+        object.__setattr__(capability, "aggregate_type", aggregate_type)
+        object.__setattr__(capability, "namespace", namespace)
+        object.__setattr__(
+            capability, "writer_authority_id", writer_authority_id
+        )
+        object.__setattr__(
+            capability, "writer_authority_hash", authority_hash
+        )
+        object.__setattr__(capability, "_store_instance_id", id(self))
+        self._protected_writer_registry()[id(capability)] = (
+            capability,
+            aggregate_type,
+            namespace,
+            writer_authority_id,
+            authority_hash,
+            id(self),
+        )
+        return capability
+
+    def _protected_capability_metadata(
+        self, capability: object
+    ) -> dict[str, str]:
+        if type(capability) is not ProtectedWriterCapability:
+            raise TypeError(
+                "protected writer capability must be exact "
+                "ProtectedWriterCapability"
+            )
+        registry = self._protected_writer_registry()
+        selected = registry.get(id(capability))
+        if selected is None or selected[0] is not capability:
+            raise ValueError(
+                "protected writer capability was not issued by this JournalStore"
+            )
+        (
+            _selected_capability,
+            aggregate_type,
+            namespace,
+            writer_authority_id,
+            writer_authority_hash,
+            store_instance_id,
+        ) = selected
+        if store_instance_id != id(self) or capability._store_instance_id != id(self):
+            raise ValueError(
+                "protected writer capability belongs to a different JournalStore"
+            )
+        if (
+            capability.aggregate_type != aggregate_type
+            or capability.namespace != namespace
+            or capability.writer_authority_id != writer_authority_id
+            or capability.writer_authority_hash != writer_authority_hash
+        ):
+            raise ValueError(
+                "protected writer capability scope changed after issuance"
+            )
+        return {
+            "aggregate_type": aggregate_type,
+            "namespace": namespace,
+            "writer_authority_id": writer_authority_id,
+            "writer_authority_hash": writer_authority_hash,
+        }
+
+    def _resolve_event_writer(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        aggregate_type: str,
+        capability: object | None,
+    ) -> dict[str, str] | None:
+        if self.SCHEMA_VERSION < 11:
+            if capability is not None:
+                raise RuntimeError(
+                    "protected writer capability cannot be used before schema v11"
+                )
+            return None
+        registered = connection.execute(
+            """
+            SELECT aggregate_type, namespace, writer_authority_id,
+                   writer_authority_hash
+            FROM protected_writer_namespaces
+            WHERE aggregate_type = ?
+            """,
+            (aggregate_type,),
+        ).fetchone()
+        if registered is None:
+            if capability is not None:
+                raise ValueError(
+                    "protected writer capability aggregate is not registered"
+                )
+            return None
+        if capability is None:
+            raise ValueError(
+                "aggregate type requires protected writer capability"
+            )
+        metadata = self._protected_capability_metadata(capability)
+        if (
+            metadata["aggregate_type"] != aggregate_type
+            or metadata["namespace"] != registered["namespace"]
+            or metadata["writer_authority_id"]
+            != registered["writer_authority_id"]
+            or metadata["writer_authority_hash"]
+            != registered["writer_authority_hash"]
+        ):
+            raise ValueError(
+                "protected writer capability does not match durable authority"
+            )
+        expected_hash = _protected_writer_authority_digest(
+            aggregate_type=aggregate_type,
+            namespace=metadata["namespace"],
+            writer_authority_id=metadata["writer_authority_id"],
+        )
+        if expected_hash != metadata["writer_authority_hash"]:
+            raise ValueError("protected writer authority hash is invalid")
+        return metadata
+
+    @staticmethod
+    def _writer_row_matches(
+        row: sqlite3.Row,
+        *,
+        metadata: dict[str, str] | None,
+    ) -> bool:
+        if metadata is None:
+            return all(
+                row[name] is None
+                for name in (
+                    "writer_namespace",
+                    "writer_authority_id",
+                    "writer_authority_hash",
+                    "writer_provenance_hash",
+                )
+            )
+        journal_sequence = row["journal_sequence"]
+        if type(journal_sequence) is not int or journal_sequence <= 0:
+            return False
+        expected_provenance = _event_writer_provenance_digest(
+            event_id=str(row["event_id"]),
+            aggregate_type=str(row["aggregate_type"]),
+            aggregate_id=str(row["aggregate_id"]),
+            aggregate_version=int(row["aggregate_version"]),
+            envelope_hash=str(row["envelope_hash"]),
+            journal_sequence=journal_sequence,
+            namespace=metadata["namespace"],
+            writer_authority_id=metadata["writer_authority_id"],
+            writer_authority_hash=metadata["writer_authority_hash"],
+        )
+        return (
+            row["writer_namespace"] == metadata["namespace"]
+            and row["writer_authority_id"] == metadata["writer_authority_id"]
+            and row["writer_authority_hash"] == metadata["writer_authority_hash"]
+            and row["writer_provenance_hash"] == expected_provenance
+        )
+
+    def append_event(
+        self,
+        envelope: dict[str, Any],
+        *,
+        outbox_topic: str | None = None,
+        aggregate_preconditions: tuple[ExpectedAggregateHead, ...] = (),
+        expected_journal_sequence: int | None = None,
+    ) -> AppendResult:
+        return self._append_event(
+            envelope,
+            outbox_topic=outbox_topic,
+            protected_writer=None,
+            aggregate_preconditions=aggregate_preconditions,
+            expected_journal_sequence=expected_journal_sequence,
+        )
+
+    def append_protected_event(
+        self,
+        capability: ProtectedWriterCapability,
+        envelope: dict[str, Any],
+        *,
+        outbox_topic: str | None = None,
+        aggregate_preconditions: tuple[ExpectedAggregateHead, ...] = (),
+        expected_journal_sequence: int | None = None,
+    ) -> AppendResult:
+        if outbox_topic is not None:
+            raise RuntimeError(
+                "protected event publication requires writer-aware outbox authority"
+            )
+        return self._append_event(
+            envelope,
+            outbox_topic=None,
+            protected_writer=capability,
+            aggregate_preconditions=aggregate_preconditions,
+            expected_journal_sequence=expected_journal_sequence,
+        )
+
+    def _append_event(
+        self,
+        envelope: dict[str, Any],
+        *,
+        outbox_topic: str | None,
+        protected_writer: object | None,
+        aggregate_preconditions: tuple[ExpectedAggregateHead, ...],
+        expected_journal_sequence: int | None,
+    ) -> AppendResult:
         event_id = self._require_text(envelope.get("event_id"), "event_id")
         event_type = self._require_text(envelope.get("event_type"), "event_type")
         aggregate_type = self._require_text(envelope.get("aggregate_type"), "aggregate_type")
@@ -1106,9 +1991,37 @@ class JournalStore:
         committed_at = self._require_text(envelope.get("committed_at"), "committed_at")
         if outbox_topic is not None:
             outbox_topic = self._require_text(outbox_topic, "outbox_topic")
+        aggregate_preconditions = self._validated_aggregate_preconditions(
+            aggregate_preconditions
+        )
+        if expected_journal_sequence is not None and (
+            type(expected_journal_sequence) is not int
+            or expected_journal_sequence < 0
+        ):
+            raise ValueError(
+                "expected_journal_sequence must be a non-negative integer"
+            )
 
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            writer_metadata = self._resolve_event_writer(
+                connection,
+                aggregate_type=aggregate_type,
+                capability=protected_writer,
+            )
+            selected_writer_authority = (
+                None
+                if writer_metadata is None
+                else writer_metadata["writer_authority_hash"]
+            )
+            connection.create_function(
+                "autotrade_protected_writer_authority",
+                1,
+                lambda candidate, expected=aggregate_type,
+                       authority=selected_writer_authority: (
+                    authority if candidate == expected else None
+                ),
+            )
             existing = connection.execute("SELECT * FROM events WHERE event_id = ?", (event_id,)).fetchone()
             if existing is not None:
                 exact = (
@@ -1124,6 +2037,13 @@ class JournalStore:
                         or (
                             existing["envelope_json"] == envelope_json
                             and existing["envelope_hash"] == envelope_hash
+                        )
+                    )
+                    and (
+                        self.SCHEMA_VERSION < 11
+                        or self._writer_row_matches(
+                            existing,
+                            metadata=writer_metadata,
                         )
                     )
                 )
@@ -1174,6 +2094,19 @@ class JournalStore:
                 connection.commit()
                 return AppendResult(event_id, aggregate_version, False)
 
+            if expected_journal_sequence is not None:
+                current_journal_sequence = self._journal_sequence_value(connection)
+                if current_journal_sequence != expected_journal_sequence:
+                    connection.rollback()
+                    raise JournalSequencePreconditionFailed(
+                        "journal sequence changed before append: "
+                        f"expected {expected_journal_sequence}, "
+                        f"found {current_journal_sequence}"
+                    )
+            self._require_aggregate_preconditions(
+                connection,
+                aggregate_preconditions,
+            )
             current = self._aggregate_version_value(
                 connection,
                 aggregate_type,
@@ -1186,7 +2119,57 @@ class JournalStore:
                     f"aggregate_version must be {expected_version} for {aggregate_type}/{aggregate_id}"
                 )
 
-            if self.SCHEMA_VERSION >= 6:
+            if self.SCHEMA_VERSION >= 11:
+                journal_sequence = self._journal_sequence_value(connection) + 1
+                if writer_metadata is None:
+                    writer_namespace = None
+                    writer_authority_id = None
+                    writer_authority_hash = None
+                    writer_provenance_hash = None
+                else:
+                    writer_namespace = writer_metadata["namespace"]
+                    writer_authority_id = writer_metadata["writer_authority_id"]
+                    writer_authority_hash = writer_metadata["writer_authority_hash"]
+                    writer_provenance_hash = _event_writer_provenance_digest(
+                        event_id=event_id,
+                        aggregate_type=aggregate_type,
+                        aggregate_id=aggregate_id,
+                        aggregate_version=aggregate_version,
+                        envelope_hash=envelope_hash,
+                        journal_sequence=journal_sequence,
+                        namespace=writer_namespace,
+                        writer_authority_id=writer_authority_id,
+                        writer_authority_hash=writer_authority_hash,
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO events(
+                        event_id, event_type, aggregate_type, aggregate_id,
+                        aggregate_version, payload_json, payload_hash, committed_at,
+                        envelope_json, envelope_hash, journal_sequence,
+                        writer_namespace, writer_authority_id,
+                        writer_authority_hash, writer_provenance_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event_id,
+                        event_type,
+                        aggregate_type,
+                        aggregate_id,
+                        aggregate_version,
+                        payload_json,
+                        supplied_hash,
+                        committed_at,
+                        envelope_json,
+                        envelope_hash,
+                        journal_sequence,
+                        writer_namespace,
+                        writer_authority_id,
+                        writer_authority_hash,
+                        writer_provenance_hash,
+                    ),
+                )
+            elif self.SCHEMA_VERSION >= 6:
                 journal_sequence = self._journal_sequence_value(connection) + 1
                 connection.execute(
                     """
@@ -1293,6 +2276,61 @@ class JournalStore:
                     )
             connection.commit()
         return AppendResult(event_id, aggregate_version, True)
+
+    def load_protected_events(
+        self,
+        capability: ProtectedWriterCapability,
+        aggregate_id: str,
+    ) -> list[dict[str, Any]]:
+        """Load issuer-qualified rows only through the selected writer."""
+
+        metadata = self._protected_capability_metadata(capability)
+        aggregate_id = self._require_text(aggregate_id, "aggregate_id")
+        with self._connect() as connection:
+            connection.execute("BEGIN")
+            registered = self._resolve_event_writer(
+                connection,
+                aggregate_type=metadata["aggregate_type"],
+                capability=capability,
+            )
+            assert registered is not None
+            rows = connection.execute(
+                """
+                SELECT event_id, event_type, aggregate_type, aggregate_id,
+                       aggregate_version, payload_json, payload_hash, committed_at,
+                       envelope_json, envelope_hash, journal_sequence,
+                       writer_namespace, writer_authority_id,
+                       writer_authority_hash, writer_provenance_hash
+                FROM events
+                WHERE aggregate_type = ? AND aggregate_id = ?
+                ORDER BY aggregate_version
+                """,
+                (metadata["aggregate_type"], aggregate_id),
+            ).fetchall()
+            decoded: list[dict[str, Any]] = []
+            for row in rows:
+                if not self._writer_row_matches(row, metadata=registered):
+                    raise ValueError(
+                        "protected journal event lacks selected writer provenance"
+                    )
+                decoded.append(self._decode_event_row(row))
+            expected_version = 0
+            last_sequence = 0
+            for event in decoded:
+                expected_version += 1
+                if event["aggregate_version"] != expected_version:
+                    connection.rollback()
+                    raise ValueError("protected journal aggregate version gap")
+                sequence = event.get("journal_sequence")
+                if type(sequence) is not int or sequence <= last_sequence:
+                    connection.rollback()
+                    raise ValueError(
+                        "protected journal sequence authority is invalid"
+                    )
+                last_sequence = sequence
+            self._journal_sequence_value(connection)
+            connection.commit()
+            return decoded
 
     def load_events(self, aggregate_type: str, aggregate_id: str) -> list[dict[str, Any]]:
         aggregate_type = self._require_text(aggregate_type, "aggregate_type")

@@ -367,6 +367,10 @@ def prepare_order_request(
         raise ProviderCoreError(
             "capability environment does not match target runtime environment"
         )
+    if capability.provider_environment != provider_env:
+        raise ProviderCoreError(
+            "capability provider environment does not match target provider environment"
+        )
     if capability.instrument_version != instrument:
         raise ProviderCoreError(
             "capability instrument version does not match target instrument"

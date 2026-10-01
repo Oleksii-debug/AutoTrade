@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 from typing import Callable
 
-from research.autotrade_research.artifacts.store import ArtifactStore
+from autotrade_runtime.artifacts.store import ArtifactStore
 
 from .qualification_attestation import (
     AcceptedQualificationAttestation,

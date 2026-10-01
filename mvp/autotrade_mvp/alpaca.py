@@ -602,6 +602,10 @@ def parse_submission_response(
         observation,
         prepared_request=prepared_request,
     )
+    if observation.http_status != 200:
+        raise AlpacaAdapterError(
+            "Alpaca create-order acknowledgement requires durable HTTP 200 status"
+        )
     response = observation.payload
     if not isinstance(response, Mapping):
         raise AlpacaAdapterError("provider response payload must be an object")

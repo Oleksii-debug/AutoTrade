@@ -6,15 +6,19 @@ It never sends network requests and never converts ambiguity into retry authorit
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Iterable, Mapping
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
-from research.autotrade_research.artifacts.store import ArtifactStore
+from autotrade_runtime.artifacts.store import ArtifactStore
 
 from .dispatch import submission_attempt_aggregate_id
+from .exact_decimal import ExactDecimalError, parse_bounded_exact_decimal
 from .persistence import JournalStore, canonical_json, payload_digest
+from .provider_domain import provider_financial_scope
+from .provider_selection import SelectedProviderAuthority
 from .reconciliation import (
     ReconciliationResult,
     UnknownSubmission,
@@ -27,7 +31,7 @@ from .securities_borrow import (
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
 
@@ -124,8 +128,8 @@ def reconciliation_payload(
     *,
     observed_at: str,
 ) -> dict[str, Any]:
-    if not isinstance(result, ReconciliationResult):
-        raise TypeError("result must be ReconciliationResult")
+    if type(result) is not ReconciliationResult:
+        raise TypeError("result must be exact ReconciliationResult")
     timestamp = _instant(observed_at, name="observed_at")
 
     unexpected_fill_bindings: list[dict[str, Any]] = []
@@ -293,8 +297,8 @@ def record_reconciliation_checkpoint(
 ) -> dict[str, Any]:
     """Persist one exact reconciliation outcome, idempotently for retries."""
 
-    if not isinstance(store, JournalStore):
-        raise TypeError("store must be JournalStore")
+    if type(store) is not JournalStore:
+        raise TypeError("store must be exact JournalStore")
     _verify_borrow_checkpoint_evidence(result, evidence_artifact_store)
     rid = _text(reconciliation_id, name="reconciliation_id")
     host = _text(host_id, name="host_id")
@@ -311,12 +315,22 @@ def record_reconciliation_checkpoint(
         environment=result.environment,
     )
     existing = store.load_events("account_reconciliation", aggregate_id)
+    version_at_cut = 0
+    for expected_version, event in enumerate(existing, start=1):
+        event_version = event.get("aggregate_version")
+        if type(event_version) is not int or event_version != expected_version:
+            raise ValueError(
+                "reconciliation aggregate version is not a contiguous positive sequence"
+            )
+        version_at_cut = event_version
     if existing and existing[-1]["payload"] == payload:
         return existing[-1]
 
-    version = store.next_aggregate_version(
-        "account_reconciliation", aggregate_id
-    )
+    # The semantic/idempotence decision above and the append must share the
+    # same aggregate-version cut.  Do not refresh via next_aggregate_version()
+    # after validation: a concurrent writer that occupies version_at_cut + 1
+    # must make this stale decision fail instead of silently publishing at N+2.
+    version = version_at_cut + 1
     event_id = str(
         uuid5(
             NAMESPACE_URL,
@@ -361,8 +375,8 @@ def load_latest_reconciliation_checkpoint(
     account_id: str,
     environment: str,
 ) -> dict[str, Any] | None:
-    if not isinstance(store, JournalStore):
-        raise TypeError("store must be JournalStore")
+    if type(store) is not JournalStore:
+        raise TypeError("store must be exact JournalStore")
     rid = _text(reconciliation_id, name="reconciliation_id")
     aggregate_id = _reconciliation_aggregate_id(
         reconciliation_id=rid,
@@ -401,8 +415,8 @@ def load_latest_reconciliation_checkpoint_for_scope(
     greatest matching sequence is the canonical scope head.
     """
 
-    if not isinstance(store, JournalStore):
-        raise TypeError("store must be JournalStore")
+    if type(store) is not JournalStore:
+        raise TypeError("store must be exact JournalStore")
     provider, account, scope = _scope(
         provider_id=provider_id,
         account_id=account_id,
@@ -545,8 +559,8 @@ def load_submission_resolution_evidence(
     reconciliation-complete booleans are intentionally not accepted as inputs.
     """
 
-    if not isinstance(store, JournalStore):
-        raise TypeError("store must be JournalStore")
+    if type(store) is not JournalStore:
+        raise TypeError("store must be exact JournalStore")
     event_id = _text(checkpoint_event_id, name="checkpoint_event_id")
     expected_attempt = _text(attempt_id, name="attempt_id")
     expected_intent = _text(intent_id, name="intent_id")
@@ -672,8 +686,8 @@ def load_account_resource_availability_evidence(
     Caller-supplied numeric availability is never authority.
     """
 
-    if not isinstance(store, JournalStore):
-        raise TypeError("store must be JournalStore")
+    if type(store) is not JournalStore:
+        raise TypeError("store must be exact JournalStore")
     if not isinstance(require_latest_scope, bool):
         raise TypeError("require_latest_scope must be boolean")
     event_id = _text(checkpoint_event_id, name="checkpoint_event_id")
@@ -731,24 +745,29 @@ def load_account_resource_availability_evidence(
     if current < completed:
         raise ValueError("availability checkpoint cannot be from the future")
 
-    if isinstance(max_age_seconds, bool) or isinstance(max_age_seconds, float):
+    if type(max_age_seconds) not in {Decimal, str, int}:
         raise TypeError("max_age_seconds must use Decimal, string or integer input")
     try:
-        max_age = (
-            max_age_seconds
-            if isinstance(max_age_seconds, Decimal)
-            else Decimal(max_age_seconds)
-        )
-    except Exception as error:
-        raise ValueError("max_age_seconds must be a finite decimal") from error
-    if not max_age.is_finite() or max_age < 0:
+        max_age = parse_bounded_exact_decimal(max_age_seconds)
+    except ExactDecimalError as error:
+        raise ValueError("max_age_seconds must be a finite bounded decimal") from error
+    if max_age < 0:
         raise ValueError("max_age_seconds must be a non-negative finite decimal")
     delta = current - completed
     age_microseconds = (
         (delta.days * 86400 + delta.seconds) * 1_000_000
         + delta.microseconds
     )
-    age_seconds = Decimal(age_microseconds) / Decimal(1_000_000)
+    whole_seconds, remaining_microseconds = divmod(age_microseconds, 1_000_000)
+    age_text = (
+        str(whole_seconds)
+        if remaining_microseconds == 0
+        else f"{whole_seconds}.{remaining_microseconds:06d}"
+    )
+    try:
+        age_seconds = parse_bounded_exact_decimal(age_text)
+    except ExactDecimalError as error:
+        raise ValueError("availability checkpoint age exceeds numeric bounds") from error
     if age_seconds > max_age:
         raise ValueError("availability checkpoint is stale")
 
@@ -814,17 +833,17 @@ def load_account_resource_availability_evidence(
             raise ValueError(
                 "resource availability keys must be unique after normalization"
             )
-        if isinstance(raw_amount, bool) or isinstance(raw_amount, float):
+        if type(raw_amount) not in {Decimal, str, int}:
             raise TypeError(
                 "resource availability must use exact decimal encoding"
             )
         try:
-            amount = Decimal(raw_amount)
-        except Exception as error:
+            amount = parse_bounded_exact_decimal(raw_amount)
+        except ExactDecimalError as error:
             raise ValueError(
-                "resource availability must be a finite decimal"
+                "resource availability must be a finite bounded decimal"
             ) from error
-        if not amount.is_finite() or amount < 0:
+        if amount < 0:
             raise ValueError(
                 "resource availability must be a non-negative finite decimal"
             )
@@ -1151,8 +1170,8 @@ def unknown_submissions_from_dispatch(
     used by a scoped dispatcher, without duplicating dispatch identity logic.
     """
 
-    if not isinstance(store, JournalStore):
-        raise TypeError("store must be JournalStore")
+    if type(store) is not JournalStore:
+        raise TypeError("store must be exact JournalStore")
     normalized = tuple(_text(value, name="attempt_id") for value in attempt_ids)
     if len(normalized) != len(set(normalized)):
         raise ValueError("attempt_ids must be unique")
@@ -1249,3 +1268,517 @@ def unknown_submissions_from_dispatch(
                 )
             )
     return tuple(recovered)
+
+
+_RECONCILIATION_SCOPE_AGGREGATE = "reconciliation_scope"
+_RECONCILIATION_SCOPE_PREPARED = "ReconciliationScopePrepared.v1"
+
+
+@dataclass(frozen=True, slots=True)
+class ReconciliationScopeGeneration:
+    """Durable local acquisition generation; not provider-truth authority."""
+
+    aggregate_id: str
+    prepare_event_id: str
+    acquisition_request_id: str
+    generation: int
+    aggregate_version: int
+    journal_sequence: int
+    provider_id: str
+    product_family: str
+    account_id: str
+    entity_id: str
+    environment: str
+    provider_environment: str
+    route_policy_id: str
+    entity_policy_id: str
+    network_policy_id: str
+    account_class: str
+    adapter_code_sha: str
+    qualification_id: str
+    capability_snapshot_id: str
+    reconciliation_semantics_id: str
+    prepared_at: str
+
+
+def _canonical_uuid(value: object, *, name: str) -> str:
+    text = _text(value, name=name)
+    try:
+        parsed = UUID(text)
+    except (TypeError, ValueError, AttributeError) as error:
+        raise ValueError(f"{name} must be a canonical UUID") from error
+    canonical = str(parsed)
+    if text != canonical:
+        raise ValueError(f"{name} must be a canonical UUID")
+    return canonical
+
+
+def _canonical_sha256(value: object, *, name: str) -> str:
+    text = _text(value, name=name)
+    if len(text) != 71 or not text.startswith("sha256:"):
+        raise ValueError(f"{name} must be a canonical sha256 identity")
+    try:
+        int(text[7:], 16)
+    except ValueError as error:
+        raise ValueError(f"{name} must be a canonical sha256 identity") from error
+    if text != text.lower():
+        raise ValueError(f"{name} must use canonical lowercase hex")
+    return text
+
+
+def _selected_provider_authority_payload(
+    selected: SelectedProviderAuthority,
+) -> dict[str, object]:
+    if type(selected) is not SelectedProviderAuthority:
+        raise TypeError("selected_authority must be exact SelectedProviderAuthority")
+    scope = provider_financial_scope(
+        provider_id=selected.provider_id,
+        environment=selected.environment,
+        provider_environment=selected.provider_environment,
+        route_policy_id=selected.route_policy_id,
+    )
+    if selected.reconciliation_semantics_id is None:
+        raise ValueError(
+            "selected provider authority lacks reconciliation semantics"
+        )
+    adapter_code_sha = _text(
+        selected.adapter_code_sha,
+        name="selected_authority.adapter_code_sha",
+    )
+    if len(adapter_code_sha) != 40:
+        raise ValueError("selected authority adapter_code_sha must be canonical Git SHA")
+    try:
+        int(adapter_code_sha, 16)
+    except ValueError as error:
+        raise ValueError(
+            "selected authority adapter_code_sha must be canonical Git SHA"
+        ) from error
+    if adapter_code_sha != adapter_code_sha.lower():
+        raise ValueError(
+            "selected authority adapter_code_sha must use lowercase hex"
+        )
+    return {
+        "account_class": _text(
+            selected.account_class,
+            name="selected_authority.account_class",
+        ).upper(),
+        "account_id": _text(
+            selected.account_id,
+            name="selected_authority.account_id",
+        ),
+        "adapter_code_sha": adapter_code_sha,
+        "capability_snapshot_id": _canonical_uuid(
+            selected.capability_snapshot_id,
+            name="selected_authority.capability_snapshot_id",
+        ),
+        "entity_id": _text(
+            selected.entity_id,
+            name="selected_authority.entity_id",
+        ),
+        "entity_policy_id": _text(
+            selected.entity_policy_id,
+            name="selected_authority.entity_policy_id",
+        ),
+        "environment": scope.environment,
+        "instrument_version": _text(
+            selected.instrument_version,
+            name="selected_authority.instrument_version",
+        ),
+        "network_policy_id": _text(
+            selected.network_policy_id,
+            name="selected_authority.network_policy_id",
+        ),
+        "product_family": _text(
+            selected.product_family,
+            name="selected_authority.product_family",
+        ).upper(),
+        "provider_environment": scope.provider_environment,
+        "provider_id": scope.provider_id,
+        "qualification_id": _canonical_sha256(
+            selected.qualification_id,
+            name="selected_authority.qualification_id",
+        ),
+        "reconciliation_semantics_id": _canonical_sha256(
+            selected.reconciliation_semantics_id,
+            name="selected_authority.reconciliation_semantics_id",
+        ),
+        "route_policy_id": scope.route_policy_id,
+    }
+
+
+def _reconciliation_scope_identity_payload(
+    selected_payload: Mapping[str, object],
+) -> dict[str, object]:
+    return {
+        "account_class": selected_payload["account_class"],
+        "account_id": selected_payload["account_id"],
+        "entity_id": selected_payload["entity_id"],
+        "entity_policy_id": selected_payload["entity_policy_id"],
+        "environment": selected_payload["environment"],
+        "network_policy_id": selected_payload["network_policy_id"],
+        "product_family": selected_payload["product_family"],
+        "provider_environment": selected_payload["provider_environment"],
+        "provider_id": selected_payload["provider_id"],
+        "route_policy_id": selected_payload["route_policy_id"],
+        "schema_version": "1.0.0",
+    }
+
+
+def _reconciliation_scope_aggregate_id(
+    selected_payload: Mapping[str, object],
+) -> str:
+    material = canonical_json(
+        _reconciliation_scope_identity_payload(selected_payload)
+    )
+    return "reconciliation-scope:" + str(
+        uuid5(
+            NAMESPACE_URL,
+            "https://events.autotrade.local/reconciliation-acquisition/" + material,
+        )
+    )
+
+
+def _scope_generation_from_event(event: Mapping[str, object]) -> ReconciliationScopeGeneration:
+    if event.get("event_type") != _RECONCILIATION_SCOPE_PREPARED:
+        raise ValueError("reconciliation scope event is not a PREPARE event")
+    if event.get("aggregate_type") != _RECONCILIATION_SCOPE_AGGREGATE:
+        raise ValueError("reconciliation scope event has invalid aggregate type")
+    payload = event.get("payload")
+    if type(payload) is not dict:
+        raise ValueError("reconciliation scope PREPARE payload is required")
+    selected = payload.get("selected_provider_authority")
+    if type(selected) is not dict:
+        raise ValueError("reconciliation scope PREPARE lacks selected provider authority")
+    scope = payload.get("scope")
+    if type(scope) is not dict:
+        raise ValueError("reconciliation scope PREPARE lacks scope identity")
+    if scope != _reconciliation_scope_identity_payload(selected):
+        raise ValueError("reconciliation scope PREPARE scope identity mismatch")
+    aggregate_id = _text(event.get("aggregate_id"), name="aggregate_id")
+    if aggregate_id != _reconciliation_scope_aggregate_id(selected):
+        raise ValueError("reconciliation scope aggregate identity mismatch")
+    aggregate_version = event.get("aggregate_version")
+    journal_sequence = event.get("journal_sequence")
+    generation = payload.get("generation")
+    if (
+        type(aggregate_version) is not int
+        or aggregate_version <= 0
+        or type(journal_sequence) is not int
+        or journal_sequence <= 0
+        or type(generation) is not int
+        or generation <= 0
+    ):
+        raise ValueError("reconciliation scope sequence identity is invalid")
+    return ReconciliationScopeGeneration(
+        aggregate_id=aggregate_id,
+        prepare_event_id=_text(event.get("event_id"), name="prepare_event_id"),
+        acquisition_request_id=_canonical_uuid(
+            payload.get("acquisition_request_id"),
+            name="acquisition_request_id",
+        ),
+        generation=generation,
+        aggregate_version=aggregate_version,
+        journal_sequence=journal_sequence,
+        provider_id=_text(selected["provider_id"], name="provider_id"),
+        product_family=_text(selected["product_family"], name="product_family"),
+        account_id=_text(selected["account_id"], name="account_id"),
+        entity_id=_text(selected["entity_id"], name="entity_id"),
+        environment=_text(selected["environment"], name="environment"),
+        provider_environment=_text(
+            selected["provider_environment"],
+            name="provider_environment",
+        ),
+        route_policy_id=_text(
+            selected["route_policy_id"],
+            name="route_policy_id",
+        ),
+        entity_policy_id=_text(
+            selected["entity_policy_id"],
+            name="entity_policy_id",
+        ),
+        network_policy_id=_text(
+            selected["network_policy_id"],
+            name="network_policy_id",
+        ),
+        account_class=_text(selected["account_class"], name="account_class"),
+        adapter_code_sha=_text(
+            selected["adapter_code_sha"],
+            name="adapter_code_sha",
+        ),
+        qualification_id=_canonical_sha256(
+            selected["qualification_id"],
+            name="qualification_id",
+        ),
+        capability_snapshot_id=_canonical_uuid(
+            selected["capability_snapshot_id"],
+            name="capability_snapshot_id",
+        ),
+        reconciliation_semantics_id=_canonical_sha256(
+            selected["reconciliation_semantics_id"],
+            name="reconciliation_semantics_id",
+        ),
+        prepared_at=_instant(payload.get("prepared_at"), name="prepared_at"),
+    )
+
+
+def prepare_reconciliation_scope_generation(
+    store: JournalStore,
+    *,
+    selected_authority: SelectedProviderAuthority,
+    acquisition_request_id: str,
+    host_id: str,
+    owner_epoch: str,
+) -> ReconciliationScopeGeneration:
+    """Serialize one account-read generation before any external read begins.
+
+    The returned value is local currentness/serialization authority only.  It
+    does not assert that provider bytes were observed, that an account cut is
+    coherent, or that any resource amount is financially accepted.
+    """
+
+    if type(store) is not JournalStore:
+        raise TypeError("store must be exact JournalStore")
+    selected = _selected_provider_authority_payload(selected_authority)
+    request_id = _canonical_uuid(
+        acquisition_request_id,
+        name="acquisition_request_id",
+    )
+    host = _text(host_id, name="host_id")
+    epoch = _text(owner_epoch, name="owner_epoch")
+    aggregate_id = _reconciliation_scope_aggregate_id(selected)
+
+    journal_cut = JournalStore.current_journal_sequence(store)
+    events = JournalStore.load_events(
+        store,
+        _RECONCILIATION_SCOPE_AGGREGATE,
+        aggregate_id,
+    )
+    previous_generation = 0
+    for expected_version, event in enumerate(events, start=1):
+        if event.get("aggregate_version") != expected_version:
+            raise ValueError(
+                "reconciliation scope aggregate version is not contiguous"
+            )
+        current = _scope_generation_from_event(event)
+        if current.generation != previous_generation + 1:
+            raise ValueError(
+                "reconciliation scope generation is not contiguous"
+            )
+        previous_generation = current.generation
+        payload = event.get("payload")
+        if payload.get("acquisition_request_id") == request_id:
+            if payload.get("selected_provider_authority") != selected:
+                raise ValueError(
+                    "acquisition request id was already used with different authority"
+                )
+            if expected_version != len(events):
+                raise ValueError(
+                    "acquisition request id belongs to a superseded generation"
+                )
+            return current
+
+    generation = previous_generation + 1
+    aggregate_version = len(events) + 1
+    prepared_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    payload = {
+        "acquisition_request_id": request_id,
+        "generation": generation,
+        "prepared_at": prepared_at,
+        "prepared_from_journal_sequence": journal_cut,
+        "schema_version": "1.0.0",
+        "scope": _reconciliation_scope_identity_payload(selected),
+        "selected_provider_authority": selected,
+    }
+    event_id = str(
+        uuid5(
+            NAMESPACE_URL,
+            "https://events.autotrade.local/reconciliation-scope-prepare/"
+            + aggregate_id
+            + "/"
+            + request_id
+            + "/"
+            + payload_digest(payload),
+        )
+    )
+    envelope = {
+        "event_id": event_id,
+        "event_type": _RECONCILIATION_SCOPE_PREPARED,
+        "schema_version": "1.0.0",
+        "aggregate_type": _RECONCILIATION_SCOPE_AGGREGATE,
+        "aggregate_id": aggregate_id,
+        "aggregate_version": str(aggregate_version),
+        "host_id": host,
+        "owner_epoch": epoch,
+        "environment": selected["environment"],
+        "occurred_at": prepared_at,
+        "observed_at": prepared_at,
+        "committed_at": prepared_at,
+        "correlation_id": event_id,
+        "causation_id": events[-1]["event_id"] if events else None,
+        "payload": payload,
+        "payload_hash": payload_digest(payload),
+        "evidence_refs": [],
+    }
+    JournalStore.append_event(
+        store,
+        envelope,
+        expected_journal_sequence=journal_cut,
+    )
+    event = JournalStore.get_event(store, event_id)
+    if event is None:
+        raise RuntimeError("reconciliation scope PREPARE was not persisted")
+    return _scope_generation_from_event(event)
+
+
+def require_current_reconciliation_scope_generation(
+    store: JournalStore,
+    generation: ReconciliationScopeGeneration,
+) -> ReconciliationScopeGeneration:
+    """Require that no newer same-scope acquisition has been prepared."""
+
+    if type(store) is not JournalStore:
+        raise TypeError("store must be exact JournalStore")
+    if type(generation) is not ReconciliationScopeGeneration:
+        raise TypeError(
+            "generation must be exact ReconciliationScopeGeneration"
+        )
+    events = JournalStore.load_events(
+        store,
+        _RECONCILIATION_SCOPE_AGGREGATE,
+        generation.aggregate_id,
+    )
+    if not events:
+        raise ValueError("reconciliation scope generation is not durable")
+    current = _scope_generation_from_event(events[-1])
+    if (
+        current.prepare_event_id != generation.prepare_event_id
+        or current.generation != generation.generation
+        or current.aggregate_version != generation.aggregate_version
+    ):
+        raise ValueError(
+            "reconciliation scope generation is superseded by a newer acquisition"
+        )
+    return current
+
+_RECONCILIATION_SCOPE_GENERATION_KEYS = frozenset(
+    {
+        "aggregate_id",
+        "prepare_event_id",
+        "acquisition_request_id",
+        "generation",
+        "aggregate_version",
+        "journal_sequence",
+        "provider_id",
+        "product_family",
+        "account_id",
+        "entity_id",
+        "environment",
+        "provider_environment",
+        "route_policy_id",
+        "entity_policy_id",
+        "network_policy_id",
+        "account_class",
+        "adapter_code_sha",
+        "qualification_id",
+        "capability_snapshot_id",
+        "reconciliation_semantics_id",
+        "prepared_at",
+    }
+)
+
+
+def reconciliation_scope_generation_payload(
+    generation: ReconciliationScopeGeneration,
+) -> dict[str, object]:
+    """Return the closed durable identity of one acquisition generation."""
+
+    if type(generation) is not ReconciliationScopeGeneration:
+        raise TypeError(
+            "generation must be exact ReconciliationScopeGeneration"
+        )
+    return {
+        "aggregate_id": generation.aggregate_id,
+        "prepare_event_id": generation.prepare_event_id,
+        "acquisition_request_id": generation.acquisition_request_id,
+        "generation": generation.generation,
+        "aggregate_version": generation.aggregate_version,
+        "journal_sequence": generation.journal_sequence,
+        "provider_id": generation.provider_id,
+        "product_family": generation.product_family,
+        "account_id": generation.account_id,
+        "entity_id": generation.entity_id,
+        "environment": generation.environment,
+        "provider_environment": generation.provider_environment,
+        "route_policy_id": generation.route_policy_id,
+        "entity_policy_id": generation.entity_policy_id,
+        "network_policy_id": generation.network_policy_id,
+        "account_class": generation.account_class,
+        "adapter_code_sha": generation.adapter_code_sha,
+        "qualification_id": generation.qualification_id,
+        "capability_snapshot_id": generation.capability_snapshot_id,
+        "reconciliation_semantics_id": generation.reconciliation_semantics_id,
+        "prepared_at": generation.prepared_at,
+    }
+
+
+def load_reconciliation_scope_generation_payload(
+    store: JournalStore,
+    payload: Mapping[str, object],
+) -> ReconciliationScopeGeneration:
+    """Rehydrate one exact historical acquisition generation from JournalStore."""
+
+    if type(store) is not JournalStore:
+        raise TypeError("store must be exact JournalStore")
+    if type(payload) is not dict:
+        raise TypeError("generation payload must be exact dict")
+    if frozenset(payload) != _RECONCILIATION_SCOPE_GENERATION_KEYS:
+        raise ValueError("reconciliation generation payload shape is non-canonical")
+    aggregate_id = _text(payload["aggregate_id"], name="aggregate_id")
+    prepare_event_id = _text(
+        payload["prepare_event_id"],
+        name="prepare_event_id",
+    )
+    events = JournalStore.load_events(
+        store,
+        _RECONCILIATION_SCOPE_AGGREGATE,
+        aggregate_id,
+    )
+    matching = [
+        event
+        for event in events
+        if event.get("event_id") == prepare_event_id
+    ]
+    if len(matching) != 1:
+        raise ValueError(
+            "reconciliation scope generation event is missing or ambiguous"
+        )
+    historical = _scope_generation_from_event(matching[0])
+    canonical = reconciliation_scope_generation_payload(historical)
+    if dict(payload) != canonical:
+        raise ValueError(
+            "reconciliation scope generation payload differs from durable authority"
+        )
+    return historical
+
+
+def require_current_reconciliation_scope_generation_payload(
+    store: JournalStore,
+    payload: Mapping[str, object],
+) -> ReconciliationScopeGeneration:
+    """Re-resolve one serialized generation and require it is still scope head."""
+
+    historical = load_reconciliation_scope_generation_payload(store, payload)
+    events = JournalStore.load_events(
+        store,
+        _RECONCILIATION_SCOPE_AGGREGATE,
+        historical.aggregate_id,
+    )
+    if not events:
+        raise ValueError("reconciliation scope generation is not durable")
+    latest = _scope_generation_from_event(events[-1])
+    if latest.prepare_event_id != historical.prepare_event_id:
+        raise ValueError(
+            "reconciliation scope generation is superseded by a newer acquisition"
+        )
+    return historical
+

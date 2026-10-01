@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
 import re
+import weakref
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
@@ -18,8 +21,20 @@ from autotrade_numeric.exact_decimal import (
     parse_bounded_json_number_token,
 )
 
-from .persistence import JournalStore, canonical_json, payload_digest
-from .provider_response_limits import require_provider_json_depth
+from .persistence import (
+    AggregatePreconditionFailed,
+    JournalSequencePreconditionFailed,
+    ExpectedAggregateHead,
+    JournalStore,
+    canonical_json,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
+from .provider_response_limits import (
+    HARD_MAX_PROVIDER_RESPONSE_BYTES,
+    require_provider_json_depth,
+    require_provider_response_bytes,
+)
 
 
 AuthorityCheck = Callable[[str, str], tuple[bool, str]]
@@ -27,8 +42,12 @@ SenderCheck = Callable[[str, int], None]
 TransportSend = Callable[[str, Mapping[str, Any], Callable[[], None]], Any]
 
 _SUBMISSION_RESPONSE_BINDING_TOKEN = object()
+_DISPATCHER_SENDER_BINDINGS = weakref.WeakKeyDictionary()
+_DISPATCHER_JOURNAL_BINDINGS = weakref.WeakKeyDictionary()
+_DISPATCHER_SCOPE_BINDINGS = weakref.WeakKeyDictionary()
+_BOUND_SENDER_ISSUANCE_TOKEN = object()
 _EXACT_RESPONSE_MARKERS = frozenset(
-    {"response_encoding", "response_text", "response_sha256"}
+    {"response_encoding", "response_text", "response_base64", "response_sha256"}
 )
 
 
@@ -163,6 +182,51 @@ class ExactJsonTransportResponse:
 
 
 @dataclass(frozen=True)
+class ExactOpaqueTransportResponse:
+    """Exact bounded non-JSON provider bytes after an irreversible send.
+
+    Opaque responses are reconciliation evidence only. They never promote to a
+    successful JSON provider observation, SENT authority, acknowledgement, or fill.
+    """
+
+    response_bytes: bytes
+    http_status: int
+    ambiguity_reason: str
+
+    def __post_init__(self) -> None:
+        try:
+            require_provider_response_bytes(
+                self.response_bytes,
+                max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                allow_empty=True,
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError("opaque provider response bytes are invalid") from error
+        if (
+            type(self.http_status) is not int
+            or self.http_status < 100
+            or self.http_status > 599
+        ):
+            raise ValueError("opaque http_status must be an integer 100..599")
+        if (
+            type(self.ambiguity_reason) is not str
+            or not self.ambiguity_reason.strip()
+        ):
+            raise ValueError(
+                "opaque provider response requires a non-empty ambiguity_reason"
+            )
+        object.__setattr__(
+            self,
+            "ambiguity_reason",
+            self.ambiguity_reason.strip(),
+        )
+
+    @property
+    def response_sha256(self) -> str:
+        return "sha256:" + sha256(self.response_bytes).hexdigest()
+
+
+@dataclass(frozen=True)
 class SubmissionResponseBinding:
     """Journal-derived immutable binding between one send and exact response bytes."""
 
@@ -179,8 +243,15 @@ class SubmissionResponseBinding:
     submission_scope_hash: str
     response_bytes: bytes
     response_sha256: str
+    response_encoding: str = "utf-8-json"
+    terminal_state: str = "SENT"
+    ambiguity_reason: str | None = None
+    retry_disposition: str | None = None
     http_status: int | None = None
     _factory_token: object = field(default=None, repr=False, compare=False)
+
+    def __init_subclass__(cls, **_kwargs) -> None:
+        raise TypeError("SubmissionResponseBinding is sealed")
 
     def __post_init__(self) -> None:
         if self._factory_token is not _SUBMISSION_RESPONSE_BINDING_TOKEN:
@@ -204,14 +275,58 @@ class SubmissionResponseBinding:
             )
         if re.fullmatch(r"sha256:[0-9a-f]{64}", self.response_sha256) is None:
             raise ValueError("response_sha256 must be a canonical SHA-256 digest")
-        if type(self.response_bytes) is not bytes or not self.response_bytes:
-            raise ValueError("response_bytes must be non-empty bytes")
+        if self.response_encoding == "utf-8-json":
+            try:
+                require_provider_response_bytes(
+                    self.response_bytes,
+                    max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                )
+            except (TypeError, ValueError) as error:
+                raise ValueError("durable JSON provider response bytes are invalid") from error
+            _decode_exact_json_bytes(self.response_bytes)
+        elif self.response_encoding == "base64":
+            try:
+                require_provider_response_bytes(
+                    self.response_bytes,
+                    max_bytes=HARD_MAX_PROVIDER_RESPONSE_BYTES,
+                    allow_empty=True,
+                )
+            except (TypeError, ValueError) as error:
+                raise ValueError("durable opaque provider response bytes are invalid") from error
+        else:
+            raise ValueError("unsupported durable provider response encoding")
         if (
             "sha256:" + sha256(self.response_bytes).hexdigest()
             != self.response_sha256
         ):
             raise ValueError("durable provider response digest mismatch")
-        _decode_exact_json_bytes(self.response_bytes)
+        if not isinstance(self.terminal_state, str):
+            raise TypeError("terminal_state must be a string")
+        terminal_state = self.terminal_state.strip().upper()
+        if terminal_state not in {"SENT", "UNKNOWN"}:
+            raise ValueError("terminal_state must be SENT or UNKNOWN")
+        object.__setattr__(self, "terminal_state", terminal_state)
+        if terminal_state == "UNKNOWN":
+            if (
+                not isinstance(self.ambiguity_reason, str)
+                or not self.ambiguity_reason.strip()
+            ):
+                raise ValueError(
+                    "UNKNOWN durable response requires an ambiguity_reason"
+                )
+            if self.retry_disposition != "RECONCILE_FIRST":
+                raise ValueError(
+                    "UNKNOWN durable response must remain RECONCILE_FIRST"
+                )
+            object.__setattr__(
+                self,
+                "ambiguity_reason",
+                self.ambiguity_reason.strip(),
+            )
+        elif self.ambiguity_reason is not None or self.retry_disposition is not None:
+            raise ValueError(
+                "SENT durable response cannot carry UNKNOWN retry semantics"
+            )
         if self.http_status is not None and (
             type(self.http_status) is not int
             or self.http_status < 100
@@ -316,35 +431,14 @@ def submission_attempt_aggregate_id(
 
 def _canonical_journal_authority_snapshot(
     store: JournalStore,
-) -> tuple[object, object]:
-    """Validate the narrow canonical JournalStore instance/generation seam.
+) -> tuple[Path, object]:
+    """Compatibility adapter over the persistence-owned JournalStore authority."""
 
-    JournalStore currently has exactly two initialized instance fields. Any
-    additional per-instance attribute can shadow an authority-bearing class
-    method (load_events/append_event/_connect/etc.). Reject that entire class
-    of caller mutation instead of maintaining an open-ended method blacklist.
-    The returned path + physical store identity let long-lived dispatchers
-    detect replacement of the selected backing generation.
-    """
-
-    if type(store) is not JournalStore:
-        raise TypeError("store must be the canonical JournalStore")
-    state = vars(store)
-    class_owned_names = {
-        name
-        for base in JournalStore.__mro__
-        for name in base.__dict__
-    }
-    if class_owned_names.intersection(state):
-        raise TypeError("canonical JournalStore instance state is shadowed")
-    if "path" not in state or "_store_identity" not in state:
-        raise TypeError("canonical JournalStore backing state is unavailable")
-    path = state["path"]
-    identity = JournalStore.store_identity.__get__(store, JournalStore)
-    if getattr(identity, "canonical_path", None) != str(path):
-        raise PermissionError("canonical JournalStore backing identity changed")
-    return path, identity
-
+    identity = require_exact_journal_store_authority(
+        store,
+        subject="canonical JournalStore",
+    )
+    return Path(identity.canonical_path), identity
 
 def load_submission_response_binding(
     store: JournalStore,
@@ -379,28 +473,126 @@ def load_submission_response_binding(
         raise ValueError(
             "durable exact response requires Prepared -> Sending -> Sent/Unknown"
         )
+    versions = [event.get("aggregate_version") for event in events]
+    if (
+        any(type(version) is not int for version in versions)
+        or versions != [1, 2, 3]
+    ):
+        raise ValueError(
+            "durable exact response requires aggregate versions 1 -> 2 -> 3"
+        )
+    if any(
+        event.get("aggregate_type") != "submission_attempt"
+        or event.get("aggregate_id") != aggregate_id
+        for event in events
+    ):
+        raise ValueError("durable submission aggregate identity mismatch")
     prepared, sending, sent = events
     payload = prepared.get("payload")
     if not isinstance(payload, dict):
         raise ValueError("durable SubmissionPrepared payload is invalid")
+    sending_payload = sending.get("payload")
+    if not isinstance(sending_payload, dict):
+        raise ValueError("durable SubmissionSending payload is invalid")
     sent_payload = sent.get("payload")
     if not isinstance(sent_payload, dict):
         raise ValueError("durable terminal submission payload is invalid")
-    response_text = sent_payload.get("response_text")
-    response_sha256 = sent_payload.get("response_sha256")
-    if (
-        sent_payload.get("response_encoding") != "utf-8-json"
-        or not isinstance(response_text, str)
-        or not response_text
-        or not isinstance(response_sha256, str)
-    ):
-        raise ValueError(
-            "durable exact provider response bytes are unavailable"
+
+    durable_attempt_id = payload.get("attempt_id")
+    durable_environment = payload.get("environment")
+    durable_account_id = payload.get("account_id")
+    if durable_attempt_id != attempt_id:
+        raise ValueError("durable submission attempt identity mismatch")
+    try:
+        prepared_aggregate_id = submission_attempt_aggregate_id(
+            environment=durable_environment,
+            account_id=durable_account_id,
+            attempt_id=attempt_id,
         )
-    response_bytes = response_text.encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise ValueError("durable prepared submission identity is invalid") from error
+    if prepared_aggregate_id != aggregate_id:
+        raise ValueError("durable prepared submission aggregate mismatch")
+
+    client_order_id = payload.get("client_order_id")
+    if not isinstance(client_order_id, str) or not client_order_id:
+        raise ValueError("durable prepared client_order_id is invalid")
+    if (
+        sending_payload.get("client_order_id") != client_order_id
+        or sent_payload.get("client_order_id") != client_order_id
+    ):
+        raise ValueError("durable submission client_order_id continuity mismatch")
+    owner_token = payload.get("owner_token")
+    owner_epoch = payload.get("owner_epoch")
+    if (
+        not isinstance(owner_token, str)
+        or not owner_token
+        or type(owner_epoch) is not int
+        or owner_epoch < 1
+        or sending_payload.get("owner_token") != owner_token
+        or sending_payload.get("owner_epoch") != owner_epoch
+    ):
+        raise ValueError("durable SubmissionSending owner continuity mismatch")
+    response_encoding = sent_payload.get("response_encoding")
+    response_sha256 = sent_payload.get("response_sha256")
+    if not isinstance(response_sha256, str):
+        raise ValueError("durable exact provider response digest is unavailable")
+    terminal_state = (
+        "UNKNOWN" if sent.get("event_type") == "SubmissionUnknown" else "SENT"
+    )
+    ambiguity_reason = None
+    retry_disposition = None
+    if terminal_state == "UNKNOWN":
+        ambiguity_reason = sent_payload.get("reason")
+        retry_disposition = sent_payload.get("retry_disposition")
+        if (
+            not isinstance(ambiguity_reason, str)
+            or not ambiguity_reason.strip()
+            or retry_disposition != "RECONCILE_FIRST"
+        ):
+            raise ValueError(
+                "response-bearing SubmissionUnknown must remain RECONCILE_FIRST"
+            )
+        ambiguity_reason = ambiguity_reason.strip()
+    elif (
+        sent_payload.get("retry_disposition") is not None
+        or sent_payload.get("reason") is not None
+    ):
+        raise ValueError("SubmissionSent cannot carry UNKNOWN retry semantics")
+    if response_encoding == "utf-8-json":
+        response_text = sent_payload.get("response_text")
+        if not isinstance(response_text, str) or not response_text:
+            raise ValueError(
+                "durable exact provider JSON response bytes are unavailable"
+            )
+        response_bytes = response_text.encode("utf-8")
+    elif response_encoding == "base64":
+        if sent.get("event_type") != "SubmissionUnknown":
+            raise ValueError("opaque provider response must remain SubmissionUnknown")
+        if sent_payload.get("retry_disposition") != "RECONCILE_FIRST":
+            raise ValueError("opaque provider response must require reconciliation")
+        opaque_reason = sent_payload.get("reason")
+        if type(opaque_reason) is not str or not opaque_reason.strip():
+            raise ValueError("opaque provider response ambiguity reason is unavailable")
+        response_base64 = sent_payload.get("response_base64")
+        if type(response_base64) is not str:
+            raise ValueError(
+                "durable exact opaque provider response bytes are unavailable"
+            )
+        try:
+            ascii_bytes = response_base64.encode("ascii", errors="strict")
+            response_bytes = base64.b64decode(ascii_bytes, validate=True)
+        except (UnicodeError, ValueError, binascii.Error):
+            raise ValueError("durable opaque provider response base64 is invalid")
+        if base64.b64encode(response_bytes).decode("ascii") != response_base64:
+            raise ValueError("durable opaque provider response base64 is non-canonical")
+    else:
+        raise ValueError("durable exact provider response encoding is unavailable")
     if "sha256:" + sha256(response_bytes).hexdigest() != response_sha256:
         raise ValueError("durable provider response digest mismatch")
     http_status = sent_payload.get("http_status")
+    if response_encoding == "base64" and http_status is None:
+        raise ValueError("opaque provider response HTTP status is unavailable")
     if http_status is not None and (
         isinstance(http_status, bool)
         or not isinstance(http_status, int)
@@ -423,15 +615,19 @@ def load_submission_response_binding(
         aggregate_id=aggregate_id,
         provider=str(payload.get("provider", "")),
         request_hash=str(payload.get("request_hash", "")),
-        client_order_id=str(payload.get("client_order_id", "")),
-        environment=str(payload.get("environment", "")),
-        account_id=str(payload.get("account_id", "")),
+        client_order_id=client_order_id,
+        environment=str(durable_environment or ""),
+        account_id=str(durable_account_id or ""),
         prepared_at=prepared_at,
         sent_at=sent_at,
         submission_scope=scope,
         submission_scope_hash=scope_hash,
         response_bytes=response_bytes,
         response_sha256=response_sha256,
+        response_encoding=response_encoding,
+        terminal_state=terminal_state,
+        ambiguity_reason=ambiguity_reason,
+        retry_disposition=retry_disposition,
         http_status=http_status,
         _factory_token=_SUBMISSION_RESPONSE_BINDING_TOKEN,
     )
@@ -549,6 +745,67 @@ def _envelope(
     }
 
 
+def _canonical_sender_preconditions(
+    value: object,
+) -> tuple[ExpectedAggregateHead, ...]:
+    if type(value) is not tuple:
+        raise TypeError(
+            "bound_sender_preconditions must be an exact tuple of "
+            "ExpectedAggregateHead values"
+        )
+    canonical: list[ExpectedAggregateHead] = []
+    expected_keys = frozenset(
+        {
+            "aggregate_type",
+            "aggregate_id",
+            "aggregate_version",
+            "latest_event_id",
+            "latest_payload_hash",
+        }
+    )
+    for item in value:
+        if type(item) is not ExpectedAggregateHead:
+            raise TypeError(
+                "bound_sender_preconditions must be an exact tuple of "
+                "ExpectedAggregateHead values"
+            )
+        state = vars(item)
+        if (
+            any(type(name) is not str for name in state)
+            or frozenset(state) != expected_keys
+        ):
+            raise TypeError("sender aggregate precondition state is non-canonical")
+        canonical.append(
+            ExpectedAggregateHead(
+                aggregate_type=state["aggregate_type"],
+                aggregate_id=state["aggregate_id"],
+                aggregate_version=state["aggregate_version"],
+                latest_event_id=state["latest_event_id"],
+                latest_payload_hash=state["latest_payload_hash"],
+            )
+        )
+    return tuple(canonical)
+
+
+def _issued_sender_binding(
+    dispatcher: object,
+) -> tuple[SenderCheck | None, tuple[ExpectedAggregateHead, ...]]:
+    if type(dispatcher) is not GuardedDispatcher:
+        raise TypeError("dispatcher must be exact GuardedDispatcher")
+    binding = _DISPATCHER_SENDER_BINDINGS.get(dispatcher)
+    if binding is None:
+        raise PermissionError("dispatcher lacks issued sender authority")
+    issued_check, issued_preconditions = binding
+    if dispatcher._bound_sender_check is not issued_check:
+        raise PermissionError("dispatcher sender authority changed")
+    visible_preconditions = _canonical_sender_preconditions(
+        dispatcher._bound_sender_preconditions
+    )
+    if visible_preconditions != issued_preconditions:
+        raise PermissionError("dispatcher sender authority changed")
+    return issued_check, issued_preconditions
+
+
 class GuardedDispatcher:
     """Persist-before-send dispatcher that never blindly retries ambiguity.
 
@@ -566,6 +823,9 @@ class GuardedDispatcher:
         owner_token: str | None = None,
         owner_epoch: int = 1,
         prepared_lease_seconds: int = 60,
+        bound_sender_check: SenderCheck | None = None,
+        bound_sender_preconditions: tuple[ExpectedAggregateHead, ...] = (),
+        _bound_sender_issuance_token: object | None = None,
     ):
         # SubmissionPrepared/Sending/Sent/Unknown is financial send-state
         # authority. Capture the exact selected physical generation and reject
@@ -577,6 +837,11 @@ class GuardedDispatcher:
             self._journal_store_identity,
         ) = _canonical_journal_authority_snapshot(store)
         self.store = store
+        _DISPATCHER_JOURNAL_BINDINGS[self] = (
+            store,
+            self._journal_store_path,
+            self._journal_store_identity,
+        )
         normalized_environment = (
             environment.strip().upper() if isinstance(environment, str) else ""
         )
@@ -594,16 +859,103 @@ class GuardedDispatcher:
         if not isinstance(prepared_lease_seconds, int) or isinstance(prepared_lease_seconds, bool) or prepared_lease_seconds < 1:
             raise ValueError("prepared_lease_seconds must be a positive integer")
         self.prepared_lease_seconds = prepared_lease_seconds
+        _DISPATCHER_SCOPE_BINDINGS[self] = (
+            self.environment,
+            self.account_id,
+            self.scope_key,
+            self.owner_token,
+            self.owner_epoch,
+            self.prepared_lease_seconds,
+        )
+        # bound_sender_check/preconditions are financial sender authority.  The
+        # public constructor may preserve low-level compatibility, but it must
+        # not be an authority minting API.  Only the module-owned recovery
+        # issuance path may populate these fields.  This is a trusted-process
+        # provenance boundary, not a sandbox against arbitrary in-process code.
+        if type(bound_sender_preconditions) is not tuple:
+            raise TypeError(
+                "bound_sender_preconditions must be an exact tuple of "
+                "ExpectedAggregateHead values"
+            )
+        has_requested_bound_sender = (
+            bound_sender_check is not None or len(bound_sender_preconditions) != 0
+        )
+        if (
+            has_requested_bound_sender
+            and _bound_sender_issuance_token is not _BOUND_SENDER_ISSUANCE_TOKEN
+        ):
+            raise PermissionError(
+                "bound sender authority must be issued by recovery composition"
+            )
+        if (
+            _bound_sender_issuance_token is not None
+            and _bound_sender_issuance_token is not _BOUND_SENDER_ISSUANCE_TOKEN
+        ):
+            raise PermissionError("invalid bound sender issuance token")
+        if (
+            _bound_sender_issuance_token is _BOUND_SENDER_ISSUANCE_TOKEN
+            and bound_sender_check is None
+        ):
+            raise ValueError("issued bound sender authority requires a sender check")
+        if bound_sender_check is not None and not callable(bound_sender_check):
+            raise TypeError("bound_sender_check must be callable when provided")
+        bound_sender_preconditions = _canonical_sender_preconditions(
+            bound_sender_preconditions
+        )
+        if bound_sender_check is None and bound_sender_preconditions:
+            raise ValueError(
+                "sender aggregate preconditions require a bound sender authority"
+            )
+        if (
+            self.environment in {"PAPER", "LIVE"}
+            and bound_sender_check is not None
+            and not bound_sender_preconditions
+        ):
+            raise ValueError(
+                "bound PAPER/LIVE sender authority requires aggregate preconditions"
+            )
+        # A RecoveryController-minted dispatcher carries the selected sender
+        # authority with the dispatcher. Once present, that authority is the
+        # exclusive sender check: legacy per-call sender_check is not invoked,
+        # so caller code cannot mutate sender state between the bound check and
+        # the durable send barrier.
+        self._bound_sender_check = bound_sender_check
+        self._bound_sender_preconditions = bound_sender_preconditions
+        _DISPATCHER_SENDER_BINDINGS[self] = (
+            bound_sender_check,
+            _canonical_sender_preconditions(bound_sender_preconditions),
+        )
 
     def _journal_store_authority(self) -> JournalStore:
-        store = self.store
-        path, identity = _canonical_journal_authority_snapshot(store)
+        if type(self) is not GuardedDispatcher:
+            raise TypeError("dispatcher must be exact GuardedDispatcher")
+        issued_scope = _DISPATCHER_SCOPE_BINDINGS.get(self)
+        if issued_scope is None:
+            raise PermissionError("dispatcher lacks issued scope authority")
+        visible_scope = (
+            self.environment,
+            self.account_id,
+            self.scope_key,
+            self.owner_token,
+            self.owner_epoch,
+            self.prepared_lease_seconds,
+        )
+        if visible_scope != issued_scope:
+            raise PermissionError("submission dispatcher scope changed")
+        binding = _DISPATCHER_JOURNAL_BINDINGS.get(self)
+        if binding is None:
+            raise PermissionError("dispatcher lacks issued journal authority")
+        issued_store, issued_path, issued_identity = binding
         if (
-            path != self._journal_store_path
-            or identity != self._journal_store_identity
+            self.store is not issued_store
+            or self._journal_store_path != issued_path
+            or self._journal_store_identity != issued_identity
         ):
             raise PermissionError("submission journal authority changed")
-        return store
+        path, identity = _canonical_journal_authority_snapshot(issued_store)
+        if path != issued_path or identity != issued_identity:
+            raise PermissionError("submission journal authority changed")
+        return issued_store
 
     def _aggregate_id(self, attempt_id: str) -> str:
         return submission_attempt_aggregate_id(
@@ -628,6 +980,8 @@ class GuardedDispatcher:
         version: int,
         payload: dict[str, Any],
         now: str,
+        aggregate_preconditions: tuple[ExpectedAggregateHead, ...] = (),
+        expected_journal_sequence: int | None = None,
     ):
         store = self._journal_store_authority()
         return JournalStore.append_event(
@@ -644,6 +998,8 @@ class GuardedDispatcher:
                 owner_epoch=self.owner_epoch,
             ),
             outbox_topic="autotrade.submission.events",
+            aggregate_preconditions=aggregate_preconditions,
+            expected_journal_sequence=expected_journal_sequence,
         )
 
     @staticmethod
@@ -913,7 +1269,33 @@ class GuardedDispatcher:
                         now=barrier_now,
                     )
                     raise DispatchBlocked("final_barrier_clock_moved_backwards")
-            if self.environment in {"PAPER", "LIVE"} and sender_check is None:
+            try:
+                (
+                    bound_sender_check,
+                    issued_sender_preconditions,
+                ) = _issued_sender_binding(self)
+            except Exception as error:
+                barrier_reason = (
+                    "bound_sender_authority_changed:" + type(error).__name__
+                )
+                self._append(
+                    attempt_id=attempt_id,
+                    event_type="SubmissionBlocked",
+                    version=2,
+                    payload={
+                        "client_order_id": client_order_id,
+                        "reason": barrier_reason,
+                        "owner_token": self.owner_token,
+                        "owner_epoch": self.owner_epoch,
+                    },
+                    now=barrier_now,
+                )
+                raise DispatchBlocked(barrier_reason) from error
+            if (
+                self.environment in {"PAPER", "LIVE"}
+                and bound_sender_check is None
+                and sender_check is None
+            ):
                 barrier_reason = "sender_fence_required"
                 self._append(
                     attempt_id=attempt_id,
@@ -928,9 +1310,23 @@ class GuardedDispatcher:
                     now=barrier_now,
                 )
                 raise DispatchBlocked(barrier_reason)
-            if sender_check is not None:
+            # A product/recovery-bound authority is exclusive.  The per-call
+            # hook exists only for legacy low-level dispatchers that were not
+            # minted with a bound sender authority. Capture the canonical
+            # global journal cut before validating sender readiness so any
+            # durable mutation racing that readiness check is fenced by the
+            # same transaction that acquires SubmissionSending.
+            sender_journal_cut = JournalStore.current_journal_sequence(
+                self._journal_store_authority()
+            )
+            effective_sender_check = (
+                bound_sender_check
+                if bound_sender_check is not None
+                else sender_check
+            )
+            if effective_sender_check is not None:
                 try:
-                    sender_check(self.owner_token, self.owner_epoch)
+                    effective_sender_check(self.owner_token, self.owner_epoch)
                 except Exception as error:
                     barrier_reason = f"sender_fence_rejected:{type(error).__name__}"
                     self._append(
@@ -971,18 +1367,44 @@ class GuardedDispatcher:
                     now=barrier_now,
                 )
                 raise DispatchBlocked(barrier_reason)
-            self._append(
-                attempt_id=attempt_id,
-                event_type="SubmissionSending",
-                version=2,
-                payload={
-                    "client_order_id": client_order_id,
-                    "owner_token": self.owner_token,
-                    "owner_epoch": self.owner_epoch,
-                    "reason": "final_send_barrier_passed",
-                },
-                now=barrier_now,
-            )
+            try:
+                sending = self._append(
+                    attempt_id=attempt_id,
+                    event_type="SubmissionSending",
+                    version=2,
+                    payload={
+                        "client_order_id": client_order_id,
+                        "owner_token": self.owner_token,
+                        "owner_epoch": self.owner_epoch,
+                        "reason": "final_send_barrier_passed",
+                    },
+                    now=barrier_now,
+                    aggregate_preconditions=issued_sender_preconditions,
+                    expected_journal_sequence=sender_journal_cut,
+                )
+            except (AggregatePreconditionFailed, JournalSequencePreconditionFailed) as error:
+                barrier_reason = (
+                    "sender_head_changed_before_sending"
+                    if isinstance(error, AggregatePreconditionFailed)
+                    else "journal_cut_changed_before_sending"
+                )
+                self._append(
+                    attempt_id=attempt_id,
+                    event_type="SubmissionBlocked",
+                    version=2,
+                    payload={
+                        "client_order_id": client_order_id,
+                        "reason": barrier_reason,
+                        "owner_token": self.owner_token,
+                        "owner_epoch": self.owner_epoch,
+                    },
+                    now=barrier_now,
+                )
+                raise DispatchBlocked(barrier_reason) from error
+            if not sending.inserted:
+                raise RuntimeError(
+                    "fresh SubmissionSending acquisition returned historical replay"
+                )
             barrier_passed = True
 
         try:
@@ -1109,16 +1531,52 @@ class GuardedDispatcher:
                     )
                     sent_payload["reason"] = terminal_reason
                     sent_payload["retry_disposition"] = "RECONCILE_FIRST"
-            elif isinstance(response, ExactJsonTransportResponse):
+            elif type(response) is ExactOpaqueTransportResponse:
+                sent_payload = {
+                    "client_order_id": client_order_id,
+                    "response_base64": base64.b64encode(
+                        response.response_bytes
+                    ).decode("ascii"),
+                    "response_sha256": response.response_sha256,
+                    "response_encoding": "base64",
+                    "http_status": response.http_status,
+                    "reason": response.ambiguity_reason,
+                    "retry_disposition": "RECONCILE_FIRST",
+                }
+                outcome_response = None
+                terminal_requires_reconciliation = True
+                terminal_reason = response.ambiguity_reason
+            elif isinstance(
+                response,
+                (ExactJsonTransportResponse, ExactOpaqueTransportResponse),
+            ):
                 # Caller-polymorphic post-SEND response getters are not evidence.
                 # A durable UNKNOWN retains the no-blind-retry property.
                 raise TypeError("exact provider response subtype is forbidden")
             else:
-                sent_payload = {
-                    "client_order_id": client_order_id,
-                    "response": response,
-                }
-                outcome_response = response
+                if self.environment in {"PAPER", "LIVE"}:
+                    # A real financial send may be terminally classified only
+                    # from exact bounded provider wire evidence.  A generic
+                    # Python object can be a parser/test convenience, but it
+                    # cannot prove what bytes/status actually crossed the
+                    # provider boundary and must never create a fresh legacy-
+                    # shaped SubmissionSent row.
+                    sent_payload = {
+                        "client_order_id": client_order_id,
+                        "reason": "provider_response_missing_exact_wire_evidence",
+                        "retry_disposition": "RECONCILE_FIRST",
+                    }
+                    outcome_response = None
+                    terminal_requires_reconciliation = True
+                    terminal_reason = (
+                        "provider_response_missing_exact_wire_evidence"
+                    )
+                else:
+                    sent_payload = {
+                        "client_order_id": client_order_id,
+                        "response": response,
+                    }
+                    outcome_response = response
             self._append(
                 attempt_id=attempt_id,
                 event_type=(
@@ -1171,3 +1629,36 @@ class GuardedDispatcher:
             outcome_response,
             "sent_confirmed",
         )
+
+
+
+def _issue_recovery_guarded_dispatcher(
+    store: JournalStore,
+    *,
+    environment: str,
+    account_id: str,
+    owner_token: str,
+    owner_epoch: int,
+    prepared_lease_seconds: int,
+    bound_sender_check: SenderCheck,
+    bound_sender_preconditions: tuple[ExpectedAggregateHead, ...],
+) -> GuardedDispatcher:
+    """Issue one recovery-bound dispatcher inside the trusted product TCB.
+
+    Ordinary callers must not be able to turn the public GuardedDispatcher
+    constructor into a PAPER/LIVE sender-authority mint.  Recovery owns the
+    canonical owner/currentness checks; dispatch owns the sealed lifetime
+    binding consumed at the irreversible send barrier.
+    """
+
+    return GuardedDispatcher(
+        store,
+        environment=environment,
+        account_id=account_id,
+        owner_token=owner_token,
+        owner_epoch=owner_epoch,
+        prepared_lease_seconds=prepared_lease_seconds,
+        bound_sender_check=bound_sender_check,
+        bound_sender_preconditions=bound_sender_preconditions,
+        _bound_sender_issuance_token=_BOUND_SENDER_ISSUANCE_TOKEN,
+    )

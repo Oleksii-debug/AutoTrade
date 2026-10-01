@@ -17,6 +17,7 @@ from mvp.autotrade_mvp.store_identity import (
     observe_database_identity,
     require_database_identity,
     require_exact_journal_store_identity,
+    same_journal_backing_object,
 )
 
 
@@ -119,10 +120,12 @@ class StoreIdentityTests(unittest.TestCase):
                 os.chdir(first)
                 frozen = freeze_database_path("state/journal.sqlite")
                 os.chdir(second)
-                self.assertEqual(
-                    frozen,
-                    (first / "state" / "journal.sqlite").resolve(strict=False),
-                )
+                expected = first / "state" / "journal.sqlite"
+                if sys.platform == "win32":
+                    expected = Path(os.path.abspath(os.fspath(expected)))
+                else:
+                    expected = expected.resolve(strict=False)
+                self.assertEqual(frozen, expected)
                 self.assertTrue(frozen.is_absolute())
                 os.chdir(original_cwd)
         finally:
@@ -139,11 +142,25 @@ class StoreIdentityTests(unittest.TestCase):
             except (OSError, NotImplementedError):
                 self.skipTest("filesystem does not permit symlink creation")
 
-            self.assertEqual(freeze_database_path(alias), target.resolve())
-            self.assertEqual(
-                observe_database_identity(alias),
-                observe_database_identity(target),
-            )
+            if sys.platform == "win32":
+                # Windows authority rejects the alias itself rather than
+                # traversing it during pre-authority canonicalization.
+                self.assertEqual(
+                    freeze_database_path(alias),
+                    Path(os.path.abspath(os.fspath(alias))),
+                )
+                with self.assertRaises(RuntimeError):
+                    observe_database_identity(alias)
+                self.assertIs(
+                    type(observe_database_identity(target)),
+                    JournalStoreIdentity,
+                )
+            else:
+                self.assertEqual(freeze_database_path(alias), target.resolve())
+                self.assertEqual(
+                    observe_database_identity(alias),
+                    observe_database_identity(target),
+                )
 
     def test_initial_anchor_atomically_creates_and_binds_new_store_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -154,7 +171,7 @@ class StoreIdentityTests(unittest.TestCase):
 
             self.assertTrue(path.exists())
             self.assertEqual(anchor, observe_database_identity(path))
-            self.assertEqual(anchor.canonical_path, str(path.resolve()))
+            self.assertEqual(anchor.canonical_path, str(freeze_database_path(path)))
             self.assertEqual(path.stat().st_nlink, 1)
 
             # Re-observing an already established path must return the same authority.
@@ -180,7 +197,10 @@ class StoreIdentityTests(unittest.TestCase):
 
             alias.unlink()
             identity = observe_database_identity(original)
-            self.assertEqual(identity.canonical_path, str(original.resolve()))
+            self.assertEqual(
+                identity.canonical_path,
+                str(freeze_database_path(original)),
+            )
 
     def test_replacement_at_same_path_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -262,24 +282,59 @@ class StoreIdentityTests(unittest.TestCase):
             path = Path(directory) / "journal.sqlite"
             connection = sqlite3.connect(path)
             try:
-                self.assertEqual(
-                    connection_main_identity(connection),
-                    observe_database_identity(path),
+                self.assertTrue(
+                    same_journal_backing_object(
+                        connection_main_identity(connection),
+                        observe_database_identity(path),
+                    )
                 )
             finally:
                 connection.close()
 
+
+    def test_same_backing_object_uses_native_windows_identity_not_path_spelling(self) -> None:
+        left = JournalStoreIdentity(
+            canonical_path=r"C:\\TEMP\\SHORT~1\\journal.sqlite3",
+            filesystem_device=None,
+            filesystem_inode=None,
+            identity_source="windows_by_handle",
+            windows_volume_serial=7,
+            windows_file_index_high=11,
+            windows_file_index_low=13,
+        )
+        right = JournalStoreIdentity(
+            canonical_path=r"C:\\Temp\\Long Directory\\journal.sqlite3",
+            filesystem_device=None,
+            filesystem_inode=None,
+            identity_source="windows_by_handle",
+            windows_volume_serial=7,
+            windows_file_index_high=11,
+            windows_file_index_low=13,
+        )
+        other = JournalStoreIdentity(
+            canonical_path=right.canonical_path,
+            filesystem_device=None,
+            filesystem_inode=None,
+            identity_source="windows_by_handle",
+            windows_volume_serial=7,
+            windows_file_index_high=11,
+            windows_file_index_low=17,
+        )
+
+        self.assertTrue(same_journal_backing_object(left, right))
+        self.assertFalse(same_journal_backing_object(left, other))
 
     def test_validated_identity_is_detached_from_mutable_dataclass_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite"
             sqlite3.connect(path).close()
             original = observe_database_identity(path)
+            expected_canonical_path = original.canonical_path
             validated = require_exact_journal_store_identity(original)
             self.assertIsNot(validated, original)
             self.assertEqual(validated, original)
             vars(original)["canonical_path"] = str(path.with_name("other.sqlite"))
-            self.assertEqual(validated.canonical_path, str(path.resolve()))
+            self.assertEqual(validated.canonical_path, expected_canonical_path)
 
 
 if __name__ == "__main__":

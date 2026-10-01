@@ -501,15 +501,19 @@ class ExperienceMemoryTests(unittest.TestCase):
                 permission_class="research",
                 payload=payload("pending-a"),
             )
-            episode_b, _ = store.append_episode(
-                decision_time=BASE + timedelta(seconds=1),
-                information_cutoff=BASE,
-                task="research",
-                regime="calm",
-                instrument_family="equity",
-                permission_class="research",
-                payload=payload("pending-b"),
-            )
+            with patch(
+                "research.autotrade_research.memory.episodes._utc_now",
+                return_value=BASE + timedelta(seconds=1),
+            ):
+                episode_b, _ = store.append_episode(
+                    decision_time=BASE + timedelta(seconds=1),
+                    information_cutoff=BASE,
+                    task="research",
+                    regime="calm",
+                    instrument_family="equity",
+                    permission_class="research",
+                    payload=payload("pending-b"),
+                )
             correction_id, _ = store.append_correction(
                 episode_a,
                 available_at=BASE + timedelta(seconds=1),
@@ -1161,15 +1165,19 @@ class ExperienceMemoryTests(unittest.TestCase):
                 permission_class="research",
                 payload=negative,
             )
-            store.append_episode(
-                decision_time=BASE + timedelta(seconds=1),
-                information_cutoff=BASE,
-                task="research",
-                regime="calm",
-                instrument_family="equity",
-                permission_class="research",
-                payload=no_trade,
-            )
+            with patch(
+                "research.autotrade_research.memory.episodes._utc_now",
+                return_value=BASE + timedelta(seconds=1),
+            ):
+                store.append_episode(
+                    decision_time=BASE + timedelta(seconds=1),
+                    information_cutoff=BASE,
+                    task="research",
+                    regime="calm",
+                    instrument_family="equity",
+                    permission_class="research",
+                    payload=no_trade,
+                )
             retrieved = store.retrieve(
                 information_cutoff=BASE + timedelta(seconds=1),
                 granted_permissions={"research"},

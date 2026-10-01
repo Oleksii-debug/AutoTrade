@@ -45,6 +45,36 @@ class ProtectedJournalWriterTests(unittest.TestCase):
             writer_authority_id=WRITER_ID,
         )
 
+    def test_invalid_selection_is_zero_mutation(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            with self.assertRaisesRegex(
+                TypeError, "canonical non-empty text"
+            ):
+                store.select_protected_writer(
+                    aggregate_type=" " + AGGREGATE_TYPE,
+                    namespace_version=NAMESPACE_VERSION,
+                    writer_authority_id=WRITER_ID,
+                )
+
+            connection = sqlite3.connect(path)
+            try:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM protected_event_namespaces"
+                    ).fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM events"
+                    ).fetchone()[0],
+                    0,
+                )
+            finally:
+                connection.close()
+
     def test_generic_append_cannot_write_protected_namespace(self) -> None:
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")

@@ -10,6 +10,7 @@ from typing import Any
 
 from autotrade_foundation.local_filesystem import (
     LocalFilesystemQualificationError,
+    freeze_local_filesystem_path,
     require_qualified_local_filesystem_path,
 )
 
@@ -56,13 +57,17 @@ class JournalStore(_JournalStoreImpl):
     """
 
     def __init__(self, path: str | Path):
+        # Freeze caller-relative text before locality admission performs Win32
+        # I/O. A concurrent process-wide chdir after admission must not retarget
+        # durable financial state into an unclassified namespace.
+        frozen_path = freeze_local_filesystem_path(Path(path).expanduser())
         try:
-            require_qualified_local_filesystem_path(path)
+            require_qualified_local_filesystem_path(frozen_path)
         except LocalFilesystemQualificationError as error:
             raise RuntimeError(
                 "journal database path must be on a qualified local filesystem"
             ) from error
-        self.path = freeze_database_path(path)
+        self.path = freeze_database_path(frozen_path)
         self._store_identity: JournalStoreIdentity | None = None
         self._protected_writer_capabilities: dict[int, tuple[object, str, str, str, str, int]] = {}
         self._initialize()

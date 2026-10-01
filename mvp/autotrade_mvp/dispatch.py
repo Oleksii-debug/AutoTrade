@@ -35,6 +35,7 @@ from .provider_response_limits import (
     require_provider_json_depth,
     require_provider_response_bytes,
 )
+from .sender_gate import journal_sender_gate
 
 
 AuthorityCheck = Callable[[str, str], tuple[bool, str]]
@@ -46,6 +47,8 @@ _DISPATCHER_SENDER_BINDINGS = weakref.WeakKeyDictionary()
 _DISPATCHER_JOURNAL_BINDINGS = weakref.WeakKeyDictionary()
 _DISPATCHER_SCOPE_BINDINGS = weakref.WeakKeyDictionary()
 _BOUND_SENDER_ISSUANCE_TOKEN = object()
+_FINANCIAL_AUTHORITY_ISSUANCE_TOKEN = object()
+_FINANCIAL_AUTHORITY_BINDINGS = weakref.WeakKeyDictionary()
 _EXACT_RESPONSE_MARKERS = frozenset(
     {"response_encoding", "response_text", "response_base64", "response_sha256"}
 )
@@ -388,6 +391,71 @@ def _validated_authority_result(result: Any) -> tuple[bool, str]:
     if not isinstance(reason, str) or not reason.strip():
         return False, "authority_check_invalid_reason"
     return allowed, reason.strip()
+
+
+class _IssuedFinancialAuthorityCheck:
+    """Opaque trusted-process capability issued by AuthorityService only.
+
+    The object intentionally carries no callback or mutable authority state.
+    Its executable binding lives only in module-owned weak state. This is a
+    trusted-process provenance fence, not a sandbox against arbitrary code
+    executing inside this module's trust boundary.
+    """
+
+    __slots__ = ("__weakref__",)
+
+    def __new__(cls, issuance_token: object):
+        if (
+            cls is not _IssuedFinancialAuthorityCheck
+            or issuance_token is not _FINANCIAL_AUTHORITY_ISSUANCE_TOKEN
+        ):
+            raise PermissionError(
+                "financial dispatch authority must be issued by AuthorityService"
+            )
+        return super().__new__(cls)
+
+    def __call__(self, intent_hash: str, now: str) -> tuple[bool, str]:
+        if type(self) is not _IssuedFinancialAuthorityCheck:
+            raise PermissionError("financial dispatch authority type changed")
+        binding = _FINANCIAL_AUTHORITY_BINDINGS.get(self)
+        if binding is None:
+            raise PermissionError("financial dispatch authority is not issued")
+        callback, _store = binding
+        return callback(intent_hash, now)
+
+
+def _issue_financial_authority_check(
+    callback: AuthorityCheck,
+    *,
+    store: JournalStore | None,
+) -> AuthorityCheck:
+    """Issue one opaque financial authority capability for an exact store."""
+
+    if not callable(callback):
+        raise TypeError("financial authority callback must be callable")
+    if store is not None:
+        require_exact_journal_store_authority(store)
+    capability = _IssuedFinancialAuthorityCheck(
+        _FINANCIAL_AUTHORITY_ISSUANCE_TOKEN
+    )
+    _FINANCIAL_AUTHORITY_BINDINGS[capability] = (callback, store)
+    return capability
+
+
+def _issued_financial_authority_binding(
+    value: object,
+) -> tuple[AuthorityCheck, JournalStore | None]:
+    if type(value) is not _IssuedFinancialAuthorityCheck:
+        raise PermissionError(
+            "PAPER/LIVE financial authority must be issued by AuthorityService"
+        )
+    binding = _FINANCIAL_AUTHORITY_BINDINGS.get(value)
+    if binding is None:
+        raise PermissionError("financial dispatch authority is not issued")
+    callback, store = binding
+    if not callable(callback):
+        raise PermissionError("financial dispatch authority binding is invalid")
+    return callback, store
 
 
 @dataclass(frozen=True)
@@ -1119,6 +1187,15 @@ class GuardedDispatcher:
                 raise ValueError(f"{name} is required")
         if not isinstance(request, Mapping):
             raise TypeError("request must be a mapping")
+        if self.environment in {"PAPER", "LIVE"}:
+            _issued_callback, issued_store = _issued_financial_authority_binding(
+                authority_check
+            )
+            selected_store = self._journal_store_authority()
+            if issued_store is None or issued_store is not selected_store:
+                raise PermissionError(
+                    "PAPER/LIVE financial authority belongs to another journal authority"
+                )
         _instant(now)
         request_canonical = canonical_json(dict(request))
         request_dict = json.loads(request_canonical)
@@ -1407,43 +1484,87 @@ class GuardedDispatcher:
                 )
             barrier_passed = True
 
-        try:
-            response = transport_send(client_order_id, request_frozen, final_guard)
-        except DispatchBlocked as error:
-            return DispatchOutcome("BLOCKED", client_order_id, None, str(error))
-        except Exception as error:
-            events = self._events(attempt_id)
-            last = events[-1]
-            if last["event_type"] == "SubmissionSending":
-                self._append(
-                    attempt_id=attempt_id,
-                    event_type="SubmissionUnknown",
-                    version=3,
-                    payload={
-                        "client_order_id": client_order_id,
-                        "reason": f"transport_exception_after_send_barrier:{type(error).__name__}",
-                    },
-                    now=barrier_now,
-                )
-                return DispatchOutcome("UNKNOWN", client_order_id, None, "transport_result_ambiguous")
+        with journal_sender_gate(self._journal_store_authority()):
+            try:
+                response = transport_send(client_order_id, request_frozen, final_guard)
+            except DispatchBlocked as error:
+                return DispatchOutcome("BLOCKED", client_order_id, None, str(error))
+            except Exception as error:
+                events = self._events(attempt_id)
+                last = events[-1]
+                if last["event_type"] == "SubmissionSending":
+                    self._append(
+                        attempt_id=attempt_id,
+                        event_type="SubmissionUnknown",
+                        version=3,
+                        payload={
+                            "client_order_id": client_order_id,
+                            "reason": f"transport_exception_after_send_barrier:{type(error).__name__}",
+                        },
+                        now=barrier_now,
+                    )
+                    return DispatchOutcome("UNKNOWN", client_order_id, None, "transport_result_ambiguous")
+                if not guard_called:
+                    self._append(
+                        attempt_id=attempt_id,
+                        event_type="SubmissionBlocked",
+                        version=2,
+                        payload={
+                            "client_order_id": client_order_id,
+                            "reason": f"transport_failed_before_final_guard:{type(error).__name__}",
+                        },
+                        now=now,
+                    )
+                    return DispatchOutcome("BLOCKED", client_order_id, None, "transport_failed_before_send")
+                if not barrier_passed:
+                    # The provider wrapper invoked a guard that rejected, but did
+                    # not propagate DispatchBlocked. Once it masks that rejection
+                    # and raises something else, we can no longer prove that it
+                    # refrained from an outbound side effect after the guard.
+                    # Preserve worst-case exposure and force reconciliation.
+                    next_version = int(last["aggregate_version"]) + 1
+                    self._append(
+                        attempt_id=attempt_id,
+                        event_type="SubmissionUnknown",
+                        version=next_version,
+                        payload={
+                            "client_order_id": client_order_id,
+                            "reason": (
+                                "provider_wrapper_masked_final_guard_failure:"
+                                + type(error).__name__
+                            ),
+                        },
+                        now=barrier_now,
+                    )
+                    return DispatchOutcome(
+                        "UNKNOWN",
+                        client_order_id,
+                        None,
+                        "provider_guard_contract_violation",
+                    )
+                raise
+
             if not guard_called:
                 self._append(
                     attempt_id=attempt_id,
-                    event_type="SubmissionBlocked",
+                    event_type="SubmissionUnknown",
                     version=2,
                     payload={
                         "client_order_id": client_order_id,
-                        "reason": f"transport_failed_before_final_guard:{type(error).__name__}",
+                        "reason": "provider_wrapper_returned_without_final_guard",
                     },
                     now=now,
                 )
-                return DispatchOutcome("BLOCKED", client_order_id, None, "transport_failed_before_send")
+                return DispatchOutcome("UNKNOWN", client_order_id, None, "provider_guard_contract_violation")
+
             if not barrier_passed:
-                # The provider wrapper invoked a guard that rejected, but did
-                # not propagate DispatchBlocked. Once it masks that rejection
-                # and raises something else, we can no longer prove that it
-                # refrained from an outbound side effect after the guard.
-                # Preserve worst-case exposure and force reconciliation.
+                # A wrapper that catches DispatchBlocked (or any final-guard
+                # failure) and then returns has violated the only safe outbound
+                # contract. We cannot prove that it refrained from sending after
+                # swallowing the barrier, so preserve worst-case exposure and force
+                # reconciliation instead of fabricating SENT or safe-to-retry.
+                events = self._events(attempt_id)
+                last = events[-1]
                 next_version = int(last["aggregate_version"]) + 1
                 self._append(
                     attempt_id=attempt_id,
@@ -1451,10 +1572,7 @@ class GuardedDispatcher:
                     version=next_version,
                     payload={
                         "client_order_id": client_order_id,
-                        "reason": (
-                            "provider_wrapper_masked_final_guard_failure:"
-                            + type(error).__name__
-                        ),
+                        "reason": "provider_wrapper_swallowed_final_guard_failure",
                     },
                     now=barrier_now,
                 )
@@ -1464,171 +1582,131 @@ class GuardedDispatcher:
                     None,
                     "provider_guard_contract_violation",
                 )
-            raise
 
-        if not guard_called:
-            self._append(
-                attempt_id=attempt_id,
-                event_type="SubmissionUnknown",
-                version=2,
-                payload={
-                    "client_order_id": client_order_id,
-                    "reason": "provider_wrapper_returned_without_final_guard",
-                },
-                now=now,
-            )
-            return DispatchOutcome("UNKNOWN", client_order_id, None, "provider_guard_contract_violation")
-
-        if not barrier_passed:
-            # A wrapper that catches DispatchBlocked (or any final-guard
-            # failure) and then returns has violated the only safe outbound
-            # contract. We cannot prove that it refrained from sending after
-            # swallowing the barrier, so preserve worst-case exposure and force
-            # reconciliation instead of fabricating SENT or safe-to-retry.
-            events = self._events(attempt_id)
-            last = events[-1]
-            next_version = int(last["aggregate_version"]) + 1
-            self._append(
-                attempt_id=attempt_id,
-                event_type="SubmissionUnknown",
-                version=next_version,
-                payload={
-                    "client_order_id": client_order_id,
-                    "reason": "provider_wrapper_swallowed_final_guard_failure",
-                },
-                now=barrier_now,
-            )
-            return DispatchOutcome(
-                "UNKNOWN",
-                client_order_id,
-                None,
-                "provider_guard_contract_violation",
-            )
-
-        terminal_requires_reconciliation = False
-        terminal_reason = "sent_confirmed"
-        try:
-            if type(response) is ExactJsonTransportResponse:
-                # The exact raw bytes + digest are the durable source.
-                # The prior "response" JSON mirror could silently round
-                # decimals to float; persisting Decimal objects directly is
-                # not JSON-serializable and misclassified valid sends UNKNOWN.
-                # Keep the mirror out of exact response events altogether.
-                sent_payload = {
-                    "client_order_id": client_order_id,
-                    "response_text": response.response_text,
-                    "response_sha256": response.response_sha256,
-                    "response_encoding": "utf-8-json",
-                }
-                if response.http_status is not None:
-                    sent_payload["http_status"] = response.http_status
-                outcome_response = response.payload
-                terminal_requires_reconciliation = response.requires_reconciliation
-                if terminal_requires_reconciliation:
-                    terminal_reason = (
-                        response.ambiguity_reason
-                        or "provider_response_ambiguous"
-                    )
-                    sent_payload["reason"] = terminal_reason
-                    sent_payload["retry_disposition"] = "RECONCILE_FIRST"
-            elif type(response) is ExactOpaqueTransportResponse:
-                sent_payload = {
-                    "client_order_id": client_order_id,
-                    "response_base64": base64.b64encode(
-                        response.response_bytes
-                    ).decode("ascii"),
-                    "response_sha256": response.response_sha256,
-                    "response_encoding": "base64",
-                    "http_status": response.http_status,
-                    "reason": response.ambiguity_reason,
-                    "retry_disposition": "RECONCILE_FIRST",
-                }
-                outcome_response = None
-                terminal_requires_reconciliation = True
-                terminal_reason = response.ambiguity_reason
-            elif isinstance(
-                response,
-                (ExactJsonTransportResponse, ExactOpaqueTransportResponse),
-            ):
-                # Caller-polymorphic post-SEND response getters are not evidence.
-                # A durable UNKNOWN retains the no-blind-retry property.
-                raise TypeError("exact provider response subtype is forbidden")
-            else:
-                if self.environment in {"PAPER", "LIVE"}:
-                    # A real financial send may be terminally classified only
-                    # from exact bounded provider wire evidence.  A generic
-                    # Python object can be a parser/test convenience, but it
-                    # cannot prove what bytes/status actually crossed the
-                    # provider boundary and must never create a fresh legacy-
-                    # shaped SubmissionSent row.
+            terminal_requires_reconciliation = False
+            terminal_reason = "sent_confirmed"
+            try:
+                if type(response) is ExactJsonTransportResponse:
+                    # The exact raw bytes + digest are the durable source.
+                    # The prior "response" JSON mirror could silently round
+                    # decimals to float; persisting Decimal objects directly is
+                    # not JSON-serializable and misclassified valid sends UNKNOWN.
+                    # Keep the mirror out of exact response events altogether.
                     sent_payload = {
                         "client_order_id": client_order_id,
-                        "reason": "provider_response_missing_exact_wire_evidence",
+                        "response_text": response.response_text,
+                        "response_sha256": response.response_sha256,
+                        "response_encoding": "utf-8-json",
+                    }
+                    if response.http_status is not None:
+                        sent_payload["http_status"] = response.http_status
+                    outcome_response = response.payload
+                    terminal_requires_reconciliation = response.requires_reconciliation
+                    if terminal_requires_reconciliation:
+                        terminal_reason = (
+                            response.ambiguity_reason
+                            or "provider_response_ambiguous"
+                        )
+                        sent_payload["reason"] = terminal_reason
+                        sent_payload["retry_disposition"] = "RECONCILE_FIRST"
+                elif type(response) is ExactOpaqueTransportResponse:
+                    sent_payload = {
+                        "client_order_id": client_order_id,
+                        "response_base64": base64.b64encode(
+                            response.response_bytes
+                        ).decode("ascii"),
+                        "response_sha256": response.response_sha256,
+                        "response_encoding": "base64",
+                        "http_status": response.http_status,
+                        "reason": response.ambiguity_reason,
                         "retry_disposition": "RECONCILE_FIRST",
                     }
                     outcome_response = None
                     terminal_requires_reconciliation = True
-                    terminal_reason = (
-                        "provider_response_missing_exact_wire_evidence"
-                    )
+                    terminal_reason = response.ambiguity_reason
+                elif isinstance(
+                    response,
+                    (ExactJsonTransportResponse, ExactOpaqueTransportResponse),
+                ):
+                    # Caller-polymorphic post-SEND response getters are not evidence.
+                    # A durable UNKNOWN retains the no-blind-retry property.
+                    raise TypeError("exact provider response subtype is forbidden")
                 else:
-                    sent_payload = {
-                        "client_order_id": client_order_id,
-                        "response": response,
-                    }
-                    outcome_response = response
-            self._append(
-                attempt_id=attempt_id,
-                event_type=(
-                    "SubmissionUnknown"
-                    if terminal_requires_reconciliation
-                    else "SubmissionSent"
-                ),
-                version=3,
-                payload=sent_payload,
-                now=barrier_now,
-            )
-        except Exception as persistence_error:
-            # The outbound request has already crossed the final barrier.
-            # Never make this state safe to retry merely because the provider
-            # response could not be journaled.
-            try:
+                    if self.environment in {"PAPER", "LIVE"}:
+                        # A real financial send may be terminally classified only
+                        # from exact bounded provider wire evidence.  A generic
+                        # Python object can be a parser/test convenience, but it
+                        # cannot prove what bytes/status actually crossed the
+                        # provider boundary and must never create a fresh legacy-
+                        # shaped SubmissionSent row.
+                        sent_payload = {
+                            "client_order_id": client_order_id,
+                            "reason": "provider_response_missing_exact_wire_evidence",
+                            "retry_disposition": "RECONCILE_FIRST",
+                        }
+                        outcome_response = None
+                        terminal_requires_reconciliation = True
+                        terminal_reason = (
+                            "provider_response_missing_exact_wire_evidence"
+                        )
+                    else:
+                        sent_payload = {
+                            "client_order_id": client_order_id,
+                            "response": response,
+                        }
+                        outcome_response = response
                 self._append(
                     attempt_id=attempt_id,
-                    event_type="SubmissionUnknown",
+                    event_type=(
+                        "SubmissionUnknown"
+                        if terminal_requires_reconciliation
+                        else "SubmissionSent"
+                    ),
                     version=3,
-                    payload={
-                        "client_order_id": client_order_id,
-                        "reason": (
-                            "sent_response_persistence_failed:"
-                            + type(persistence_error).__name__
-                        ),
-                    },
+                    payload=sent_payload,
                     now=barrier_now,
                 )
-            except Exception:
-                # A durable SubmissionSending row already exists. Recovery will
-                # convert that state to UNKNOWN without another outbound send.
-                raise persistence_error
+            except Exception as persistence_error:
+                # The outbound request has already crossed the final barrier.
+                # Never make this state safe to retry merely because the provider
+                # response could not be journaled.
+                try:
+                    self._append(
+                        attempt_id=attempt_id,
+                        event_type="SubmissionUnknown",
+                        version=3,
+                        payload={
+                            "client_order_id": client_order_id,
+                            "reason": (
+                                "sent_response_persistence_failed:"
+                                + type(persistence_error).__name__
+                            ),
+                        },
+                        now=barrier_now,
+                    )
+                except Exception:
+                    # A durable SubmissionSending row already exists. Recovery will
+                    # convert that state to UNKNOWN without another outbound send.
+                    raise persistence_error
+                return DispatchOutcome(
+                    "UNKNOWN",
+                    client_order_id,
+                    None,
+                    "sent_response_persistence_failed",
+                )
+            if terminal_requires_reconciliation:
+                return DispatchOutcome(
+                    "UNKNOWN",
+                    client_order_id,
+                    None,
+                    terminal_reason,
+                )
             return DispatchOutcome(
-                "UNKNOWN",
+                "SENT",
                 client_order_id,
-                None,
-                "sent_response_persistence_failed",
+                outcome_response,
+                "sent_confirmed",
             )
-        if terminal_requires_reconciliation:
-            return DispatchOutcome(
-                "UNKNOWN",
-                client_order_id,
-                None,
-                terminal_reason,
-            )
-        return DispatchOutcome(
-            "SENT",
-            client_order_id,
-            outcome_response,
-            "sent_confirmed",
-        )
 
 
 

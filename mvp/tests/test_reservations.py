@@ -170,6 +170,27 @@ class ReservationFoundationTests(unittest.TestCase):
             snapshot.remaining["CASH:USD"] = Decimal("0")
         self.assertEqual(book.total_reserved("CASH:USD"), Decimal("10"))
 
+    def test_reservation_numeric_ingress_uses_shared_bounded_authority(self):
+        hostile_values = ("9" * 10000, 10**10000, "1e-9999999999999999999999999")
+        for value in hostile_values:
+            with self.subTest(kind=type(value).__name__):
+                book = ReservationBook()
+                with self.assertRaisesRegex(ValueError, "bounded decimal"):
+                    book.reserve(
+                        reservation_id="bounded-requirement",
+                        intent_id="bounded-intent",
+                        requirements={"CASH:USD": value},
+                        available={"CASH:USD": "100"},
+                    )
+                with self.assertRaisesRegex(ValueError, "bounded decimal"):
+                    book.reserve(
+                        reservation_id="bounded-availability",
+                        intent_id="bounded-intent-availability",
+                        requirements={"CASH:USD": "1"},
+                        available={"CASH:USD": value},
+                    )
+                self.assertEqual(book.active(), ())
+
     def test_resource_alias_collision_fails_closed_before_reservation(self):
         book = ReservationBook()
         with self.assertRaisesRegex(ValueError, "unique after normalization"):

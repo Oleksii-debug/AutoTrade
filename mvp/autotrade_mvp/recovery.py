@@ -29,6 +29,7 @@ from .store_identity import (
     JournalStoreIdentity,
     require_exact_journal_store_identity,
 )
+from .sender_gate import journal_sender_gate
 from .reconciliation_journal import (
     load_reconciliation_checkpoint_for_readiness,
     load_submission_resolution_evidence,
@@ -347,19 +348,20 @@ class RecoveryController:
         if self.owner is not None:
             raise RuntimeError("Host already has an owner")
         normalized_owner = owner_id.strip()
-        durable = self._latest_durable_owner()
-        if durable is not None:
-            raise PermissionError(
-                "Existing durable owner requires explicit takeover evidence"
-            )
-        candidate = OwnerFence(owner_id=normalized_owner, epoch=1)
-        self._append_durable_owner(candidate)
-        self.owner = candidate
-        self.state = HostState.RECOVERING
-        self.provider_reconciled = False
-        self.reason_codes = {"startup_reconciliation_required"}
-        self._recover_scoped_submission_uncertainty_from_owner_scope()
-        return self.owner
+        with journal_sender_gate(self._owner_store):
+            durable = self._latest_durable_owner()
+            if durable is not None:
+                raise PermissionError(
+                    "Existing durable owner requires explicit takeover evidence"
+                )
+            candidate = OwnerFence(owner_id=normalized_owner, epoch=1)
+            self._append_durable_owner(candidate)
+            self.owner = candidate
+            self.state = HostState.RECOVERING
+            self.provider_reconciled = False
+            self.reason_codes = {"startup_reconciliation_required"}
+            self._recover_scoped_submission_uncertainty_from_owner_scope()
+            return self.owner
 
     @staticmethod
     def _normalized_submission_scope(

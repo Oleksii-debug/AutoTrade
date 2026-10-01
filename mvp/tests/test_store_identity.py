@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 import os
 import sqlite3
 import sys
@@ -255,6 +256,152 @@ class StoreIdentityTests(unittest.TestCase):
             path.replace(moved)
             moved.replace(path)
             self.assertTrue(path.exists())
+
+    def test_windows_guard_preserves_primary_when_handle_close_also_fails(self) -> None:
+        identity = JournalStoreIdentity(
+            canonical_path=str(Path.cwd() / "journal.sqlite"),
+            filesystem_device=None,
+            filesystem_inode=None,
+            identity_source="windows_by_handle",
+            windows_volume_serial=7,
+            windows_file_index_high=11,
+            windows_file_index_low=13,
+        )
+        primary = RuntimeError("primary SQLite failure")
+        with (
+            patch(
+                "mvp.autotrade_mvp.store_identity.sys.platform",
+                "win32",
+            ),
+            patch(
+                "mvp.autotrade_mvp.store_identity.retain_windows_parent_namespace",
+                return_value=nullcontext(),
+            ),
+            patch(
+                "mvp.autotrade_mvp.store_identity.open_windows_regular_file",
+                return_value=123,
+            ),
+            patch(
+                "mvp.autotrade_mvp.store_identity._windows_identity_from_handle",
+                return_value=identity,
+            ),
+            patch(
+                "mvp.autotrade_mvp.store_identity.close_windows_handle",
+                side_effect=OSError("secondary CloseHandle failure"),
+            ),
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                with guard_windows_database_authority(
+                    "journal.sqlite",
+                    create=False,
+                ):
+                    raise primary
+
+        self.assertIs(caught.exception, primary)
+        notes = getattr(caught.exception, "__notes__", ())
+        self.assertTrue(
+            any(
+                "journal backing HANDLE cleanup also failed" in note
+                and "secondary CloseHandle failure" in note
+                for note in notes
+            ),
+            f"cleanup evidence missing from primary error notes: {notes!r}",
+        )
+
+    def test_windows_guard_surfaces_handle_close_failure_after_successful_body(self) -> None:
+        identity = JournalStoreIdentity(
+            canonical_path=str(Path.cwd() / "journal.sqlite"),
+            filesystem_device=None,
+            filesystem_inode=None,
+            identity_source="windows_by_handle",
+            windows_volume_serial=7,
+            windows_file_index_high=11,
+            windows_file_index_low=13,
+        )
+        with (
+            patch(
+                "mvp.autotrade_mvp.store_identity.sys.platform",
+                "win32",
+            ),
+            patch(
+                "mvp.autotrade_mvp.store_identity.retain_windows_parent_namespace",
+                return_value=nullcontext(),
+            ),
+            patch(
+                "mvp.autotrade_mvp.store_identity.open_windows_regular_file",
+                return_value=123,
+            ),
+            patch(
+                "mvp.autotrade_mvp.store_identity._windows_identity_from_handle",
+                return_value=identity,
+            ),
+            patch(
+                "mvp.autotrade_mvp.store_identity.close_windows_handle",
+                side_effect=OSError("CloseHandle failed after success"),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                OSError,
+                "CloseHandle failed after success",
+            ):
+                with guard_windows_database_authority(
+                    "journal.sqlite",
+                    create=False,
+                ) as guarded:
+                    self.assertEqual(guarded, identity)
+
+    def test_windows_guard_keeps_authority_verdict_over_close_failure(self) -> None:
+        identity = JournalStoreIdentity(
+            canonical_path=str(Path.cwd() / "journal.sqlite"),
+            filesystem_device=None,
+            filesystem_inode=None,
+            identity_source="windows_by_handle",
+            windows_volume_serial=7,
+            windows_file_index_high=11,
+            windows_file_index_low=13,
+        )
+        primary = RuntimeError("primary SQLite failure")
+        authority_error = RuntimeError("authority changed during failure")
+        with (
+            patch(
+                "mvp.autotrade_mvp.store_identity.sys.platform",
+                "win32",
+            ),
+            patch(
+                "mvp.autotrade_mvp.store_identity.retain_windows_parent_namespace",
+                return_value=nullcontext(),
+            ),
+            patch(
+                "mvp.autotrade_mvp.store_identity.open_windows_regular_file",
+                return_value=123,
+            ),
+            patch(
+                "mvp.autotrade_mvp.store_identity._windows_identity_from_handle",
+                side_effect=(identity, authority_error),
+            ),
+            patch(
+                "mvp.autotrade_mvp.store_identity.close_windows_handle",
+                side_effect=OSError("secondary CloseHandle failure"),
+            ),
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                with guard_windows_database_authority(
+                    "journal.sqlite",
+                    create=False,
+                ):
+                    raise primary
+
+        self.assertIs(caught.exception, authority_error)
+        self.assertIs(caught.exception.__cause__, primary)
+        notes = getattr(caught.exception, "__notes__", ())
+        self.assertTrue(
+            any(
+                "journal backing HANDLE cleanup also failed" in note
+                and "secondary CloseHandle failure" in note
+                for note in notes
+            ),
+            f"cleanup evidence missing from authority error notes: {notes!r}",
+        )
 
     @unittest.skipUnless(sys.platform == "win32", "Windows-only native identity")
     def test_windows_identity_is_native_by_handle_and_nonzero(self) -> None:

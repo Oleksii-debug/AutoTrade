@@ -117,6 +117,12 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                     observed_at="2026-09-24T18:01:00Z",
                 )
 
+    def test_provider_activity_amount_ingress_is_bounded(self):
+        for value in ("9" * 10000, 10**10000, "1e-9999999999999999999999999"):
+            with self.subTest(kind=type(value).__name__):
+                with self.assertRaisesRegex(ValueError, "bounded decimal"):
+                    activity(signed_amount=value)
+
     def test_external_deposit_is_atomically_booked_once(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
@@ -214,11 +220,18 @@ class ProviderActivityAccountingTests(unittest.TestCase):
             )
             self.assertTrue(inserted)
 
+            original_commit = JournalStore.commit_command
+            commit_calls = []
+
+            def recording_commit(selected_store, **kwargs):
+                commit_calls.append(kwargs)
+                return original_commit(selected_store, **kwargs)
+
             with patch.object(
-                store,
+                JournalStore,
                 "commit_command",
-                wraps=store.commit_command,
-            ) as commit_command:
+                new=recording_commit,
+            ):
                 second, replay_inserted = book_paper_activity(
                     store,
                     provider_id="IBKR",
@@ -229,7 +242,7 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                 )
             self.assertFalse(replay_inserted)
             self.assertEqual(first, second)
-            replay_events = commit_command.call_args.kwargs["events"]
+            replay_events = commit_calls[-1]["events"]
             self.assertEqual(len(replay_events), 2)
             for replay_envelope, _topic in replay_events:
                 self.assertEqual(
@@ -276,13 +289,13 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                 activity_id="dep-command-only",
             )
 
-            def command_without_effects(**kwargs):
+            def command_without_effects(_selected_store, **kwargs):
                 return kwargs["result"], False, ()
 
             with patch.object(
-                store,
+                JournalStore,
                 "commit_command",
-                side_effect=command_without_effects,
+                new=command_without_effects,
             ):
                 with self.assertRaisesRegex(
                     AccountingConflict,
@@ -305,22 +318,25 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                 account_id="acct-race",
                 activity_id="dep-race",
             )
-            original_commit_command = store.commit_command
+            original_commit_command = JournalStore.commit_command
             calls = 0
 
-            def competing_exact_commit(**kwargs):
+            def competing_exact_commit(selected_store, **kwargs):
                 nonlocal calls
                 calls += 1
-                saved_result, inserted, topics = original_commit_command(**kwargs)
+                saved_result, inserted, topics = original_commit_command(
+                    selected_store,
+                    **kwargs,
+                )
                 if calls == 1:
                     self.assertTrue(inserted)
                     return saved_result, False, ()
                 return saved_result, inserted, topics
 
             with patch.object(
-                store,
+                JournalStore,
                 "commit_command",
-                side_effect=competing_exact_commit,
+                new=competing_exact_commit,
             ):
                 transaction, inserted = book_paper_activity(
                     store,
@@ -385,10 +401,13 @@ class ProviderActivityAccountingTests(unittest.TestCase):
             )
             self.assertTrue(inserted)
 
+            def tampered_result(_selected_store, **_kwargs):
+                return {"tampered": True}, False, ()
+
             with patch.object(
-                store,
+                JournalStore,
                 "commit_command",
-                return_value=({"tampered": True}, False, ()),
+                new=tampered_result,
             ):
                 with self.assertRaisesRegex(
                     AccountingConflict,

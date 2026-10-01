@@ -1,7 +1,8 @@
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from hashlib import sha256
 import json
 from pathlib import Path
+from threading import Event
 import sys
 from tempfile import TemporaryDirectory
 import unittest
@@ -33,6 +34,23 @@ class CannotDecryptProtector(DeterministicProtector):
 
     def unprotect(self, ciphertext: bytes, *, entropy: bytes) -> bytes:
         raise OSError("different OS identity")
+
+
+class BlockingFirstUnprotectProtector(DeterministicProtector):
+    """Pause one resolution so vault mutation ordering is deterministic."""
+
+    def __init__(self):
+        self.first_unprotect_started = Event()
+        self.release_first_unprotect = Event()
+        self._blocked_once = False
+
+    def unprotect(self, ciphertext: bytes, *, entropy: bytes) -> bytes:
+        if not self._blocked_once:
+            self._blocked_once = True
+            self.first_unprotect_started.set()
+            if not self.release_first_unprotect.wait(timeout=5):
+                raise OSError("timed out waiting to release test unprotect")
+        return super().unprotect(ciphertext, entropy=entropy)
 
 
 class ProtectedCredentialVaultTests(unittest.TestCase):
@@ -123,6 +141,103 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
         for values in cases:
             with self.subTest(values=values), self.assertRaises(PermissionError):
                 self.vault.resolve(handle, **values)
+
+    def _assert_inflight_resolve_serializes_vault_mutation(self, mutation):
+        protector = BlockingFirstUnprotectProtector()
+        vault = ProtectedCredentialVault(self.path, protector=protector)
+        handle = vault.register(
+            handle_id="cred-linearized",
+            owner_identity="windows-user-1",
+            account_id="paper-1",
+            provider="SIMULATED",
+            environment="PAPER",
+            purpose="TRADE",
+            secret_value="linearized-secret",
+        )
+
+        def resolve_old_generation():
+            return vault.resolve(
+                handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            )
+
+        mutation_started = Event()
+
+        def mutate():
+            mutation_started.set()
+            return mutation(vault, handle)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            resolving = executor.submit(resolve_old_generation)
+            self.assertTrue(
+                protector.first_unprotect_started.wait(timeout=2),
+                "resolve did not reach the deterministic unprotect barrier",
+            )
+            mutating = executor.submit(mutate)
+            self.assertTrue(
+                mutation_started.wait(timeout=2),
+                "vault mutation worker did not start",
+            )
+            with self.assertRaises(FutureTimeoutError):
+                mutating.result(timeout=0.2)
+
+            protector.release_first_unprotect.set()
+            self.assertEqual(resolving.result(timeout=2), "linearized-secret")
+            result = mutating.result(timeout=2)
+
+        return vault, handle, result
+
+    def test_revocation_completion_waits_for_inflight_resolution(self):
+        vault, old, result = self._assert_inflight_resolve_serializes_vault_mutation(
+            lambda target, handle: target.revoke(
+                handle,
+                execution_identity="windows-user-1",
+            )
+        )
+        self.assertIsNone(result)
+        with self.assertRaises(PermissionError):
+            vault.resolve(
+                old,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            )
+
+    def test_rotation_completion_waits_for_inflight_old_generation_resolution(self):
+        vault, old, current = self._assert_inflight_resolve_serializes_vault_mutation(
+            lambda target, handle: target.rotate(
+                handle,
+                execution_identity="windows-user-1",
+                new_secret_value="rotated-linearized-secret",
+            )
+        )
+        self.assertEqual(current.generation, old.generation + 1)
+        with self.assertRaisesRegex(PermissionError, "stale"):
+            vault.resolve(
+                old,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            )
+        self.assertEqual(
+            vault.resolve(
+                current,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            ),
+            "rotated-linearized-secret",
+        )
 
     def test_rotation_invalidates_old_generation_across_restart(self):
         old = self.register()
@@ -315,6 +430,76 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
                 protector=DeterministicProtector(),
             )
 
+    def test_legacy_v2_vault_requires_explicit_provider_domain_reattachment(self):
+        legacy = {"version": 2, "records": {}}
+        self.path.write_text(json.dumps(legacy), encoding="utf-8")
+        with self.assertRaisesRegex(SecretVaultError, "provider_environment.*reattachment"):
+            ProtectedCredentialVault(
+                self.path,
+                protector=DeterministicProtector(),
+            )
+
+    def test_bybit_provider_environment_is_cryptographically_bound(self):
+        testnet_path = Path(self.directory.name) / "bybit-testnet.json"
+        demo_path = Path(self.directory.name) / "bybit-demo.json"
+        testnet = ProtectedCredentialVault(
+            testnet_path,
+            protector=DeterministicProtector(),
+        )
+        demo = ProtectedCredentialVault(
+            demo_path,
+            protector=DeterministicProtector(),
+        )
+        common = {
+            "handle_id": "cred-bybit-paper",
+            "owner_identity": "windows-user-1",
+            "account_id": "paper-1",
+            "provider": "BYBIT",
+            "environment": "PAPER",
+            "purpose": "TRADE",
+            "secret_value": "same-secret",
+        }
+        testnet_handle = testnet.register(
+            **common,
+            provider_environment="TESTNET",
+        )
+        demo_handle = demo.register(
+            **common,
+            provider_environment="DEMO",
+        )
+        self.assertEqual(testnet_handle.provider_environment, "TESTNET")
+        self.assertEqual(demo_handle.provider_environment, "DEMO")
+        self.assertNotEqual(
+            json.loads(testnet_path.read_text(encoding="utf-8"))["records"][
+                "cred-bybit-paper"
+            ]["ciphertext"],
+            json.loads(demo_path.read_text(encoding="utf-8"))["records"][
+                "cred-bybit-paper"
+            ]["ciphertext"],
+        )
+        with self.assertRaisesRegex(PermissionError, "scope mismatch"):
+            testnet.resolve(
+                testnet_handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="BYBIT",
+                environment="PAPER",
+                provider_environment="DEMO",
+                purpose="TRADE",
+            )
+        self.assertEqual(
+            testnet.resolve(
+                testnet_handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="BYBIT",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                purpose="TRADE",
+            ),
+            "same-secret",
+        )
+
     def test_duplicate_handle_and_corrupt_vault_fail_closed(self):
         self.register()
         with self.assertRaisesRegex(SecretVaultError, "already exists"):
@@ -433,6 +618,9 @@ class CredentialReattachmentManifestTests(unittest.TestCase):
         encoded = json.dumps(manifest, sort_keys=True)
 
         self.assertFalse(manifest["contains_secrets"])
+        self.assertEqual(manifest["schema_version"], "2.0.0")
+        for record in manifest["records"]:
+            self.assertIn("provider_environment", record["handle"])
         self.assertEqual(
             manifest["restore_mode"],
             "EXPLICIT_REATTACHMENT_REQUIRED",

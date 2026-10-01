@@ -8,6 +8,25 @@ class LocalFilesystemQualificationError(RuntimeError):
     """Raised when a durable path is not on a qualified local filesystem."""
 
 
+def freeze_local_filesystem_path(
+    path: str | os.PathLike[str],
+) -> str:
+    """Freeze path text before locality admission can race a process CWD change.
+
+    Windows path qualification and later retained-namespace mutation must refer
+    to one caller-path interpretation. Returning the lexical absolute spelling
+    before the drive-type check lets consumers qualify and then use that exact
+    path without a second current-directory lookup. POSIX preserves the existing
+    pathname semantics because this foundation does not claim local storage
+    authority there.
+    """
+
+    raw_path = os.fspath(path)
+    if sys.platform == "win32":
+        return os.path.abspath(raw_path)
+    return raw_path
+
+
 def require_qualified_local_filesystem_path(
     path: str | os.PathLike[str],
 ) -> None:

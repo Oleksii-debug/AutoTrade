@@ -313,6 +313,159 @@ class ProviderOriginReconciliationGenerationTests(unittest.TestCase):
                 [],
             )
 
+    def test_supersession_after_wire_retires_receipt_before_retention(self):
+        query = authenticated_read_binding()
+        selected = _reconciliation_selected(query)
+        route = resolve_authenticated_read_route_authority(query)
+        receipt = object()
+        with TemporaryDirectory() as directory:
+            journal = _provider_journal(
+                JournalStore(f"{directory}/journal.sqlite3")
+            )
+            generation = _prepare_generation(journal._store, selected, 107)
+
+            def validate(exact_receipt, exact_query):
+                self.assertIs(exact_receipt, receipt)
+                self.assertIs(exact_query, query)
+                _prepare_generation(journal._store, selected, 108)
+                return (
+                    "UrllibJsonWireClient:v1",
+                    route.network_policy_identity,
+                    200,
+                    b'{"balances":[]}',
+                    datetime.now(timezone.utc) + timedelta(seconds=3),
+                )
+
+            with patch(
+                "mvp.autotrade_mvp.provider_transport.product_authenticated_read_prepared_authority",
+                side_effect=lambda _transport, exact_query: self._prepared_authority(
+                    exact_query
+                ),
+            ), patch(
+                "mvp.autotrade_mvp.provider_transport.execute_product_authenticated_read",
+                return_value=receipt,
+            ) as execute, patch(
+                "mvp.autotrade_mvp.provider_transport.validate_product_authenticated_read_receipt",
+                side_effect=validate,
+            ), patch(
+                "mvp.autotrade_mvp.provider_transport.retire_product_authenticated_read_receipt",
+            ) as retire:
+                with self.assertRaisesRegex(
+                    ProviderOriginError,
+                    "no longer authoritative",
+                ):
+                    record_product_authenticated_read_origin(
+                        origin_journal=journal,
+                        product_transport=object(),
+                        query_binding=query,
+                        selected_authority=selected,
+                        qualification_reader=self.qualification_reader,
+                        capability_registry=self.capability_registry,
+                        reconciliation_generation=generation,
+                    )
+
+            execute.assert_called_once()
+            retire.assert_called_once_with(receipt)
+            provider_events = journal._store.load_events_by_aggregate_type(
+                "authenticated_provider_read"
+            )
+            self.assertEqual(
+                [event["event_type"] for event in provider_events],
+                ["AuthenticatedReadPrepared"],
+            )
+            self.assertEqual(journal._response_store.audit().manifests, 0)
+
+    def test_generation_move_at_retained_cut_retires_receipt_and_blocks_binding(self):
+        query = authenticated_read_binding()
+        selected = _reconciliation_selected(query)
+        route = resolve_authenticated_read_route_authority(query)
+        receipt = object()
+        with TemporaryDirectory() as directory:
+            journal = _provider_journal(
+                JournalStore(f"{directory}/journal.sqlite3")
+            )
+            generation = _prepare_generation(journal._store, selected, 109)
+            original_append = JournalStore.append_protected_event
+            moved = False
+
+            def move_generation_before_retained(
+                store,
+                capability,
+                envelope,
+                *,
+                outbox_topic=None,
+                aggregate_preconditions=(),
+                expected_journal_sequence=None,
+            ):
+                nonlocal moved
+                if (
+                    not moved
+                    and envelope.get("event_type")
+                    == "AuthenticatedReadResponseRetained"
+                ):
+                    moved = True
+                    _prepare_generation(journal._store, selected, 110)
+                return original_append(
+                    store,
+                    capability,
+                    envelope,
+                    outbox_topic=outbox_topic,
+                    aggregate_preconditions=aggregate_preconditions,
+                    expected_journal_sequence=expected_journal_sequence,
+                )
+
+            with patch(
+                "mvp.autotrade_mvp.provider_transport.product_authenticated_read_prepared_authority",
+                side_effect=lambda _transport, exact_query: self._prepared_authority(
+                    exact_query
+                ),
+            ), patch(
+                "mvp.autotrade_mvp.provider_transport.execute_product_authenticated_read",
+                return_value=receipt,
+            ) as execute, patch(
+                "mvp.autotrade_mvp.provider_transport.validate_product_authenticated_read_receipt",
+                return_value=(
+                    "UrllibJsonWireClient:v1",
+                    route.network_policy_identity,
+                    200,
+                    b'{"balances":[]}',
+                    datetime.now(timezone.utc) + timedelta(seconds=3),
+                ),
+            ), patch(
+                "mvp.autotrade_mvp.provider_transport.retire_product_authenticated_read_receipt",
+            ) as retire, patch.object(
+                JournalStore,
+                "append_protected_event",
+                new=move_generation_before_retained,
+            ):
+                with self.assertRaisesRegex(
+                    ProviderOriginError,
+                    "lost reconciliation-generation serialization",
+                ):
+                    record_product_authenticated_read_origin(
+                        origin_journal=journal,
+                        product_transport=object(),
+                        query_binding=query,
+                        selected_authority=selected,
+                        qualification_reader=self.qualification_reader,
+                        capability_registry=self.capability_registry,
+                        reconciliation_generation=generation,
+                    )
+
+            self.assertTrue(moved)
+            execute.assert_called_once()
+            retire.assert_called_once_with(receipt)
+            provider_events = journal._store.load_events_by_aggregate_type(
+                "authenticated_provider_read"
+            )
+            self.assertEqual(
+                [event["event_type"] for event in provider_events],
+                ["AuthenticatedReadPrepared"],
+            )
+            # Bytes can exist as immutable historical evidence after the cross-store
+            # race, but without Retained there is no provider-origin binding.
+            self.assertEqual(journal._response_store.audit().manifests, 1)
+
     def test_superseded_generation_reloads_historical_bytes_but_blocks_promotion(self):
         query = authenticated_read_binding()
         selected = _reconciliation_selected(query)

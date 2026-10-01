@@ -17,10 +17,6 @@ import weakref
 import mvp.autotrade_mvp.provider_transport as provider_transport
 from mvp.autotrade_mvp.capabilities import CapabilityRegistry
 from mvp.autotrade_mvp.persistence import JournalStore
-from mvp.autotrade_mvp.provider_qualification_authority import (
-    ProviderQualificationCurrentReader,
-)
-from mvp.autotrade_mvp.provider_selection import SelectedProviderAuthority
 from mvp.autotrade_mvp.security import SecurityBoundary
 from mvp.autotrade_mvp.provider_transport import (
     ALPACA_ENDPOINT_POLICIES,
@@ -44,47 +40,6 @@ from mvp.autotrade_mvp.provider_transport import (
     WhiteBitHttpTransport,
 )
 from mvp.autotrade_mvp.windows_secrets import PersistentCredentialHandle
-
-
-_PRODUCT_READ_TRANSPORTS = (
-    KrakenSpotAuthenticatedReadTransport,
-    BybitV5AuthenticatedReadTransport,
-    BinanceSpotAuthenticatedReadTransport,
-)
-
-
-def _product_read_authority(constructor, args):
-    if constructor not in _PRODUCT_READ_TRANSPORTS:
-        return {}
-    handle = args["credential_handle"]
-    provider_environment = args.get(
-        "provider_environment",
-        handle.environment,
-    )
-    return {
-        "selected_provider_authority": SelectedProviderAuthority(
-            provider_id=handle.provider,
-            product_family="TEST_PRODUCT",
-            adapter_code_sha="1" * 40,
-            qualification_id="sha256:" + "2" * 64,
-            capability_snapshot_id=args["capability_snapshot_id"],
-            account_id=args["account_id"],
-            entity_id="test-entity",
-            environment=handle.environment,
-            provider_environment=provider_environment,
-            instrument_version="TEST@1",
-            route_policy_id="test-route-v1",
-            entity_policy_id="test-entity-v1",
-            network_policy_id="direct-tls-v1",
-            account_class="TEST",
-            release_artifact_id=None,
-            release_artifact_sha256=None,
-            reconciliation_semantics_id=None,
-        ),
-        "qualification_reader": object.__new__(
-            ProviderQualificationCurrentReader
-        ),
-    }
 
 
 class _InjectedWire:
@@ -111,7 +66,15 @@ class ProductionCredentialWireSeparationTests(unittest.TestCase):
         # credential-resolution call fails. The boundary must decide *before* I/O.
         security = object.__new__(SecurityBoundary)
 
-        def scoped(provider, environment, account, purpose, policy):
+        def scoped(
+            provider,
+            environment,
+            account,
+            purpose,
+            policy,
+            *,
+            provider_environment=None,
+        ):
             return {
                 "policy": policy,
                 "account_id": account,
@@ -120,7 +83,9 @@ class ProductionCredentialWireSeparationTests(unittest.TestCase):
                 "credential_handle": PersistentCredentialHandle(
                     handle_id=f"cred-{provider.lower()}-{purpose.lower()}",
                     account_id=account, provider=provider,
-                    environment=environment, purpose=purpose, generation=1,
+                    environment=environment,
+                    provider_environment=provider_environment,
+                    purpose=purpose, generation=1,
                 ),
                 "session_token": "test-not-a-real-session",
                 "origin": "https://localhost",
@@ -149,7 +114,14 @@ class ProductionCredentialWireSeparationTests(unittest.TestCase):
 
         bybit = []
         for purpose in ("TRADE", "READ"):
-            b = scoped("BYBIT", "PAPER", "acct-bybit", purpose, BYBIT_V5_ENDPOINT_POLICIES["TESTNET"])
+            b = scoped(
+                "BYBIT",
+                "PAPER",
+                "acct-bybit",
+                purpose,
+                BYBIT_V5_ENDPOINT_POLICIES["TESTNET"],
+                provider_environment="TESTNET",
+            )
             b.update(
                 provider_environment="TESTNET", capability_registry=registry,
                 clock_millis=millis, clock_utc=now,
@@ -182,7 +154,6 @@ class ProductionCredentialWireSeparationTests(unittest.TestCase):
         return build_product_credential_transport(
             constructor,
             security_boundary=security,
-            **_product_read_authority(constructor, kwargs),
             **kwargs,
         )
 
@@ -425,7 +396,6 @@ class ProductionCredentialWireSeparationTests(unittest.TestCase):
                         build_product_credential_transport(
                             constructor,
                             security_boundary=security,
-                            **_product_read_authority(constructor, kwargs),
                             **kwargs,
                         )
 

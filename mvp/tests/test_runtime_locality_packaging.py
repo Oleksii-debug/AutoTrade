@@ -24,10 +24,6 @@ from research.autotrade_research.artifacts import resource_lock
 from tools.build_windows_bundle import build_bundle
 from tools.build_windows_install_manifest import build_installer_input_manifest
 from mvp.autotrade_mvp.persistence import JournalStore
-from mvp.autotrade_mvp.store_identity import (
-    observe_database_identity,
-    same_journal_backing_object,
-)
 import tools.stage_windows_foundation as staging_module
 from tools.stage_windows_foundation import FoundationStagingError, stage_windows_foundation
 
@@ -99,7 +95,6 @@ sys.path.insert(0, str(staging))
 from autotrade_foundation.local_filesystem import require_qualified_local_filesystem_path
 from autotrade_numeric.exact_decimal import parse_bounded_exact_decimal
 from mvp.autotrade_mvp.persistence import JournalStore
-from mvp.autotrade_mvp.store_identity import observe_database_identity, same_journal_backing_object
 assert str(parse_bounded_exact_decimal('1.25')) == '1.25'
 path = Path(os.environ['AUTOTRADE_TEST_DB'])
 require_qualified_local_filesystem_path(path)
@@ -116,11 +111,8 @@ for name, module in tuple(sys.modules.items()):
     assert name != 'autotrade_research' and not name.startswith('autotrade_research.')
 store = JournalStore(path)
 assert path.is_file()
-assert Path(store.path).is_absolute()
-assert same_journal_backing_object(
-    store.store_identity,
-    observe_database_identity(path),
-)
+assert Path(store.store_identity.canonical_path).is_absolute()
+assert store.store_identity.canonical_path == str(store.path)
 print('STAGED_JOURNAL_OK')
 """
             completed = _isolated_python(
@@ -274,6 +266,30 @@ else:
                 ),
                 encoding="utf-8",
             )
+
+            if os.name != "nt":
+                before_manifest = composition.read_bytes()
+                before_files = {
+                    path.relative_to(staging).as_posix(): path.read_bytes()
+                    for path in staging.rglob("*")
+                    if path.is_file()
+                }
+                with self.assertRaisesRegex(
+                    FoundationStagingError,
+                    "requires Windows retained namespace authority",
+                ):
+                    stage_windows_foundation(
+                        staging=staging,
+                        composition_path=composition,
+                    )
+                self.assertEqual(composition.read_bytes(), before_manifest)
+                after_files = {
+                    path.relative_to(staging).as_posix(): path.read_bytes()
+                    for path in staging.rglob("*")
+                    if path.is_file()
+                }
+                self.assertEqual(after_files, before_files)
+                return
 
             staged = stage_windows_foundation(
                 staging=staging,
@@ -487,10 +503,18 @@ class WindowsFoundationRetainedPublicationTests(unittest.TestCase):
                     "_unlock_windows_publication_lock",
                     side_effect=OSError("secondary unlock failure"),
                 ):
-                    with self.assertRaisesRegex(RuntimeError, "primary body failure"):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "primary body failure",
+                    ) as caught:
                         with serialize_windows_directory_publication(authority):
                             raise RuntimeError("primary body failure")
 
+                notes = getattr(caught.exception, "__notes__", ())
+                self.assertTrue(
+                    any("secondary unlock failure" in note for note in notes),
+                    notes,
+                )
                 # The primary exception did not prevent deterministic HANDLE
                 # close, so the same retained authority can reacquire the lock.
                 with serialize_windows_directory_publication(authority):
@@ -612,7 +636,7 @@ class FoundationExactGitProcessAuthorityTests(unittest.TestCase):
                     staging_module._trusted_git_executable(source_root=source)
 
 
-@unittest.skipIf(os.name == "nt", "POSIX retained publication only")
+@unittest.skipIf(os.name == "nt", "POSIX fail-closed acceptance only")
 class PosixFoundationRetainedPublicationTests(unittest.TestCase):
     def _composition(self, root: Path) -> tuple[Path, Path]:
         staging = root / "staging"
@@ -631,135 +655,61 @@ class PosixFoundationRetainedPublicationTests(unittest.TestCase):
         )
         return staging, composition
 
-    def test_posix_publication_uses_only_retained_dirfd_mutation(self):
+    def test_authoritative_staging_fails_before_publication_transaction(self):
         with TemporaryDirectory() as directory:
             staging, composition = self._composition(Path(directory))
-            original_replace = os.replace
-            relative_replacements = []
-
-            def guarded_replace(src, dst, *args, **kwargs):
-                self.assertIsNotNone(kwargs.get("src_dir_fd"))
-                self.assertIsNotNone(kwargs.get("dst_dir_fd"))
-                relative_replacements.append((src, dst))
-                return original_replace(src, dst, *args, **kwargs)
-
-            with patch.object(
-                staging_module.tempfile,
-                "mkstemp",
-                side_effect=AssertionError(
-                    "visible-path tempfile publication is forbidden on POSIX"
-                ),
-            ), patch.object(
-                staging_module.os,
-                "replace",
-                side_effect=guarded_replace,
-            ):
-                staged = stage_windows_foundation(
-                    staging=staging,
-                    composition_path=composition,
-                )
-
-            self.assertEqual(len(staged), 7)
-            self.assertEqual(len(relative_replacements), 1)
-            self.assertTrue(
-                (staging / "autotrade_foundation" / "local_filesystem.py").is_file()
-            )
-
-    def test_same_inode_manifest_tamper_is_not_silently_overwritten(self):
-        with TemporaryDirectory() as directory:
-            staging, composition = self._composition(Path(directory))
-            original_manifest = composition.read_bytes()
-            tampered_manifest = original_manifest.replace(b"AutoTrade", b"BadTrade!")
-            self.assertEqual(len(tampered_manifest), len(original_manifest))
-            self.assertNotEqual(tampered_manifest, original_manifest)
-            original_publish = staging_module._atomic_publish_manifest
-            tampered = False
-
-            def tampering_publish(path, data, *, baseline, expected_original, posix_parent_authority=None):
-                nonlocal tampered
-                path.write_bytes(tampered_manifest)
-                os.utime(
-                    path,
-                    ns=(baseline.st_atime_ns, baseline.st_mtime_ns),
-                    follow_symlinks=False,
-                )
-                observed = path.stat(follow_symlinks=False)
-                self.assertEqual(observed.st_dev, baseline.st_dev)
-                self.assertEqual(observed.st_ino, baseline.st_ino)
-                self.assertEqual(observed.st_size, baseline.st_size)
-                self.assertEqual(observed.st_mtime_ns, baseline.st_mtime_ns)
-                tampered = True
-                return original_publish(
-                    path,
-                    data,
-                    baseline=baseline,
-                    expected_original=expected_original,
-                    posix_parent_authority=posix_parent_authority,
-                )
+            before_manifest = composition.read_bytes()
 
             with patch.object(
                 staging_module,
-                "_atomic_publish_manifest",
-                side_effect=tampering_publish,
+                "_composition_publish_transaction",
+                side_effect=AssertionError("POSIX publication transaction must not start"),
             ):
                 with self.assertRaisesRegex(
                     FoundationStagingError,
-                    "composition manifest changed during staging",
+                    "requires Windows retained namespace authority",
                 ):
                     stage_windows_foundation(
                         staging=staging,
                         composition_path=composition,
                     )
 
-            self.assertTrue(tampered)
-            self.assertEqual(composition.read_bytes(), tampered_manifest)
+            self.assertEqual(composition.read_bytes(), before_manifest)
+            self.assertEqual(list(staging.iterdir()), [])
 
-    def test_parent_swap_after_retention_cannot_redirect_external_publication(self):
+    def test_posix_rejection_preserves_existing_staging_and_external_bytes(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             staging, composition = self._composition(root)
+            existing = staging / "existing.bin"
+            existing.write_bytes(b"existing-before")
             outside = root / "outside"
             outside.mkdir()
-            (outside / "sentinel").write_bytes(b"stable")
+            external = outside / "sentinel.bin"
+            external.write_bytes(b"external-before")
             before_manifest = composition.read_bytes()
-            original_retain = staging_module._retained_posix_relative_directory
-            raced = False
-
-            @contextmanager
-            def swapping_retain(root_descriptor, parts, *, create):
-                nonlocal raced
-                with original_retain(
-                    root_descriptor,
-                    parts,
-                    create=create,
-                ) as descriptor:
-                    if not raced and tuple(parts) == ("autotrade_numeric",):
-                        parent = staging / "autotrade_numeric"
-                        retained_generation = staging / "retained-numeric-generation"
-                        parent.rename(retained_generation)
-                        parent.symlink_to(outside, target_is_directory=True)
-                        raced = True
-                    yield descriptor
 
             with patch.object(
                 staging_module,
-                "_retained_posix_relative_directory",
-                side_effect=swapping_retain,
+                "_write_posix_new_regular",
+                side_effect=AssertionError("POSIX component writer must be unreachable"),
             ):
                 with self.assertRaisesRegex(
                     FoundationStagingError,
-                    "path component must not be a symlink/reparse point|retained directory component cannot be opened|changed during retained publication",
+                    "requires Windows retained namespace authority",
                 ):
                     stage_windows_foundation(
                         staging=staging,
                         composition_path=composition,
                     )
 
-            self.assertTrue(raced)
             self.assertEqual(composition.read_bytes(), before_manifest)
-            self.assertEqual(sorted(item.name for item in outside.iterdir()), ["sentinel"])
-            self.assertEqual((outside / "sentinel").read_bytes(), b"stable")
-            self.assertFalse((outside / "exact_decimal.py").exists())
+            self.assertEqual(existing.read_bytes(), b"existing-before")
+            self.assertEqual(external.read_bytes(), b"external-before")
+            self.assertEqual(
+                [path.name for path in staging.iterdir()],
+                ["existing.bin"],
+            )
 
 
 @unittest.skipUnless(sys.platform == "win32", "native Windows junction and hardlink acceptance")

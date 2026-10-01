@@ -13,6 +13,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
 
+from .dispatch import _issue_financial_authority_check
 from .allocation import (
     AllocationPolicy,
     EvidenceBoundObjectiveAllocationResult,
@@ -4588,7 +4589,7 @@ class AuthorityService:
                 capability_snapshot_id=capability,
             )
 
-        return check
+        return _issue_financial_authority_check(check, store=self.store)
 
 
     def export_state(self) -> dict:

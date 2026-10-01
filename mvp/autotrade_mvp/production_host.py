@@ -28,7 +28,9 @@ from .host_network import (
     SnapshotProvider,
     TransportResponse,
 )
-from .persistence import JournalStore
+from .dispatch import GuardedDispatcher
+from .persistence import JournalStore, require_exact_journal_store_authority
+from .recovery import RecoveryController
 from .store_identity import JournalStoreIdentity, require_database_identity
 from .security import SecurityBoundary, _authenticated_origin
 
@@ -244,8 +246,12 @@ class _StoreIdentityGate:
         journal: JournalStore,
     ) -> None:
         self._dispatch = application.dispatch
+        self._journal = journal
         self._journal_path = journal.path
-        self.store_identity: JournalStoreIdentity = journal.store_identity
+        self.store_identity: JournalStoreIdentity = require_exact_journal_store_authority(
+            journal,
+            subject="production host JournalStore",
+        )
 
     def dispatch(
         self,
@@ -255,6 +261,12 @@ class _StoreIdentityGate:
         headers,
         body: bytes = b"",
     ) -> TransportResponse:
+        current = require_exact_journal_store_authority(
+            self._journal,
+            subject="production host JournalStore",
+        )
+        if current != self.store_identity:
+            raise PermissionError("production host JournalStore authority changed")
         require_database_identity(self._journal_path, self.store_identity)
         response = self._dispatch(
             method=method,
@@ -262,6 +274,12 @@ class _StoreIdentityGate:
             headers=headers,
             body=body,
         )
+        current = require_exact_journal_store_authority(
+            self._journal,
+            subject="production host JournalStore",
+        )
+        if current != self.store_identity:
+            raise PermissionError("production host JournalStore authority changed")
         require_database_identity(self._journal_path, self.store_identity)
         return response
 
@@ -350,6 +368,8 @@ class ProductionHostRuntime:
         server: AuthenticatedHostServer,
         instance_fence: _InstanceFence,
         admission_gate: _CommandAdmissionGate,
+        recovery_controller: RecoveryController,
+        financial_dispatcher: GuardedDispatcher,
     ) -> None:
         self.config = config
         self.journal = journal
@@ -358,6 +378,8 @@ class ProductionHostRuntime:
         self.server = server
         self._instance_fence = instance_fence
         self._admission_gate = admission_gate
+        self.recovery_controller = recovery_controller
+        self.financial_dispatcher = financial_dispatcher
         self._lifecycle_condition = Condition()
         self._serve_state = "IDLE"
         self._serve_thread: Thread | None = None
@@ -575,6 +597,28 @@ def build_production_host(
     instance_fence = _InstanceFence.acquire(config.journal_path)
     try:
         journal = JournalStore(config.journal_path)
+        selected_store_identity = require_exact_journal_store_authority(
+            journal,
+            subject="production host JournalStore",
+        )
+        recovery_controller = RecoveryController(
+            owner_store=journal,
+            owner_scope=f"{config.environment}:{config.account_id}",
+        )
+        recovery_controller.start(config.host_id)
+        financial_dispatcher = recovery_controller.build_guarded_dispatcher(
+            journal,
+            environment=config.environment,
+            account_id=config.account_id,
+        )
+        if (
+            require_exact_journal_store_authority(
+                financial_dispatcher.store,
+                subject="production financial JournalStore",
+            )
+            != selected_store_identity
+        ):
+            raise RuntimeError("production financial authority store identity mismatch")
         application = AuthenticatedHostApplication(
             journal,
             security_boundary=security_boundary,
@@ -606,4 +650,6 @@ def build_production_host(
         server=server,
         instance_fence=instance_fence,
         admission_gate=admission_gate,
+        recovery_controller=recovery_controller,
+        financial_dispatcher=financial_dispatcher,
     )

@@ -111,6 +111,37 @@ def require_exact_journal_store_identity(
     )
 
 
+def same_journal_backing_object(
+    left: JournalStoreIdentity,
+    right: JournalStoreIdentity,
+) -> bool:
+    """Compare the authoritative backing object without trusting path spelling.
+
+    Windows path text is not a stable file identity: SQLite/Win32 may report a
+    long-name/case-normalized spelling for the same file that was opened through
+    a lexical absolute path. The retained HANDLE identity is authoritative.
+    POSIX deliberately preserves the stricter canonical-path + dev/inode cut.
+    """
+
+    left = require_exact_journal_store_identity(
+        left,
+        subject="left journal store identity",
+    )
+    right = require_exact_journal_store_identity(
+        right,
+        subject="right journal store identity",
+    )
+    if left.identity_source != right.identity_source:
+        return False
+    if left.identity_source == "windows_by_handle":
+        return (
+            left.windows_volume_serial == right.windows_volume_serial
+            and left.windows_file_index_high == right.windows_file_index_high
+            and left.windows_file_index_low == right.windows_file_index_low
+        )
+    return left == right
+
+
 def freeze_database_path(path: str | Path) -> Path:
     """Freeze caller path text without pre-authority Windows mutation.
 
@@ -194,17 +225,31 @@ def guard_windows_database_authority(
             create=create,
             subject="journal backing file",
         )
+        active_error: BaseException | None = None
         try:
-            # Parent generations and the final file are now retained with no
-            # reparse traversal and no FILE_SHARE_DELETE. Canonicalize only at
-            # this authority point: doing so earlier would follow caller path
-            # aliases before the namespace had been proven safe.
-            canonical = canonical.resolve(strict=True)
-            identity = _windows_identity_from_handle(canonical, database_handle)
             try:
-                yield identity
-            except BaseException as primary:
+                # Parent generations and the final file are now retained with no
+                # reparse traversal and no FILE_SHARE_DELETE. Canonicalize only at
+                # this authority point: doing so earlier would follow caller path
+                # aliases before the namespace had been proven safe.
+                canonical = canonical.resolve(strict=True)
+                identity = _windows_identity_from_handle(canonical, database_handle)
                 try:
+                    yield identity
+                except BaseException as primary:
+                    try:
+                        current = _windows_identity_from_handle(
+                            canonical,
+                            database_handle,
+                        )
+                        if current != identity:
+                            raise RuntimeError(
+                                "Windows journal backing file identity changed while guarded"
+                            )
+                    except BaseException as authority_error:
+                        raise authority_error from primary
+                    raise
+                else:
                     current = _windows_identity_from_handle(
                         canonical,
                         database_handle,
@@ -213,20 +258,22 @@ def guard_windows_database_authority(
                         raise RuntimeError(
                             "Windows journal backing file identity changed while guarded"
                         )
-                except BaseException as authority_error:
-                    raise authority_error from primary
+            except BaseException as error:
+                active_error = error
                 raise
-            else:
-                current = _windows_identity_from_handle(
-                    canonical,
-                    database_handle,
-                )
-                if current != identity:
-                    raise RuntimeError(
-                        "Windows journal backing file identity changed while guarded"
-                    )
         finally:
-            close_windows_handle(database_handle)
+            try:
+                close_windows_handle(database_handle)
+            except BaseException as close_error:
+                if active_error is None:
+                    raise
+                try:
+                    active_error.add_note(
+                        "Windows journal backing HANDLE cleanup also failed: "
+                        f"{type(close_error).__name__}: {close_error}"
+                    )
+                except BaseException:
+                    pass
 
 
 def observe_database_identity(path: str | Path) -> JournalStoreIdentity:

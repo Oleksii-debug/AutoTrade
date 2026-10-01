@@ -1428,6 +1428,27 @@ class ProviderOriginJournal:
             raise ProviderOriginError(
                 "provider-origin response lacks factory-issued wire execution evidence"
             ) from error
+
+        def retire_rejected_receipt(primary: BaseException) -> None:
+            """Destroy a validated receipt after permanent authority invalidation.
+
+            ArtifactStore I/O failures deliberately keep the receipt retryable for
+            this exact attempt.  A lost reconciliation/current-route cut is
+            different: the captured bytes must never be relabeled under a newer
+            acquisition generation.
+            """
+
+            try:
+                retire_product_authenticated_read_receipt(wire_receipt)
+            except ProviderTransportScopeError as cleanup_error:
+                try:
+                    primary.add_note(
+                        "wire receipt retirement also failed after authority rejection: "
+                        + f"{type(cleanup_error).__name__}: {cleanup_error}"
+                    )
+                except BaseException:
+                    pass
+
         if type(http_status) is not int or not 100 <= http_status <= 599:
             raise ProviderOriginError("http_status must be exact integer 100..599")
         if type(raw) is not bytes or not raw:
@@ -1459,19 +1480,28 @@ class ProviderOriginJournal:
         expected = _require_snapshot(payload, query_binding)
         durable_route = _validate_route_snapshot(payload.get("route"), query_binding)
         selection = _require_stored_selection(payload.get("selection"), query_binding)
-        generation_payload = _require_reconciliation_generation_scope(
-            store,
-            payload.get("reconciliation_generation"),
-            query_binding,
-            selection,
-            require_current=False,
-        )
+        response_journal_cut = None
+        if payload.get("reconciliation_generation") is not None:
+            response_journal_cut = JournalStore.current_journal_sequence(store)
+        try:
+            generation_payload = _require_reconciliation_generation_scope(
+                store,
+                payload.get("reconciliation_generation"),
+                query_binding,
+                selection,
+                require_current=True,
+            )
+        except ProviderOriginError as error:
+            retire_rejected_receipt(error)
+            raise
         _require_generation_precedes_provider_prepare(generation_payload, prepared)
         current_route = _current_route_snapshot(query_binding)
         if current_route != durable_route:
-            raise ProviderOriginError(
+            error = ProviderOriginError(
                 "authenticated-read route changed after durable prepare"
             )
+            retire_rejected_receipt(error)
+            raise error
         transport, network_policy = _require_prepared_authority(
             payload, durable_route
         )
@@ -1479,9 +1509,11 @@ class ProviderOriginJournal:
             receipt_transport_identity != transport
             or receipt_network_policy_identity != network_policy
         ):
-            raise ProviderOriginError(
+            error = ProviderOriginError(
                 "factory-issued wire receipt conflicts with durable Prepared authority"
             )
+            retire_rejected_receipt(error)
+            raise error
         prepared_at = _parse_utc_text(
             prepared.get("committed_at"), name="prepared committed_at"
         )
@@ -1567,18 +1599,29 @@ class ProviderOriginJournal:
             "response_artifact_id": response_artifact_id,
             "observed_at": observed_text,
         }
-        JournalStore.append_protected_event(
-            store,
-            self._writer_capability,
-            self._event(
-                event_id=retained_event_id,
-                event_type=_RETAINED_EVENT,
-                attempt_id=attempt,
-                aggregate_version=2,
-                payload=retained_payload,
-                committed_at=observed_text,
-            ),
-        )
+        retained_append_kwargs = {}
+        if response_journal_cut is not None:
+            retained_append_kwargs["expected_journal_sequence"] = response_journal_cut
+        try:
+            JournalStore.append_protected_event(
+                store,
+                self._writer_capability,
+                self._event(
+                    event_id=retained_event_id,
+                    event_type=_RETAINED_EVENT,
+                    attempt_id=attempt,
+                    aggregate_version=2,
+                    payload=retained_payload,
+                    committed_at=observed_text,
+                ),
+                **retained_append_kwargs,
+            )
+        except JournalSequencePreconditionFailed as error:
+            failure = ProviderOriginError(
+                "provider response retention lost reconciliation-generation serialization"
+            )
+            retire_rejected_receipt(failure)
+            raise failure from error
         # Retained is now the durable crash-recovery authority for this exact
         # wire fact.  The in-process receipt must become one-shot at this cut:
         # terminal Observed publication no longer needs it, and keeping it live

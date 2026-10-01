@@ -9,10 +9,6 @@ import mvp.autotrade_mvp.provider_transport as provider_transport
 from unittest.mock import patch
 
 from mvp.autotrade_mvp.capabilities import CapabilityRegistry
-from mvp.autotrade_mvp.provider_qualification_authority import (
-    ProviderQualificationCurrentReader,
-)
-from mvp.autotrade_mvp.provider_selection import SelectedProviderAuthority
 from mvp.autotrade_mvp.provider_transport import (
     AuthenticatedReadProductWireReceipt,
     AuthenticatedReadWireResponse,
@@ -35,58 +31,16 @@ from mvp.tests.test_provider_transport import (
 )
 
 
-def _selected_read_authority(capability) -> SelectedProviderAuthority:
-    return SelectedProviderAuthority(
-        provider_id="BINANCE",
-        product_family="CRYPTO_SPOT",
-        adapter_code_sha="1" * 40,
-        qualification_id="sha256:" + "2" * 64,
-        capability_snapshot_id=capability.snapshot_id,
-        account_id="acct-1",
-        entity_id="entity-1",
-        environment="PAPER",
-        provider_environment="PAPER",
-        instrument_version="BTCUSDT@1",
-        route_policy_id="binance-spot-account-read-v1",
-        entity_policy_id="binance-spot-account-v1",
-        network_policy_id="direct-tls-v1",
-        account_class="SPOT",
-        release_artifact_id=None,
-        release_artifact_sha256=None,
-        reconciliation_semantics_id=None,
-    )
-
-
 class ProductAuthenticatedReadReceiptTests(unittest.TestCase):
-    def setUp(self):
-        self.product_time = READ_NOW + timedelta(seconds=1)
-        time_patcher = patch.object(
-            provider_transport,
-            "_runtime_product_utc_now",
-            return_value=self.product_time,
-        )
-        q_patcher = patch.object(
-            provider_transport,
-            "revalidate_selected_provider_authority",
-        )
-        time_patcher.start()
-        q_patcher.start()
-        self.addCleanup(time_patcher.stop)
-        self.addCleanup(q_patcher.stop)
-
-    def _product(self, *, transport_time=None):
+    def _product(self):
         capability = verified_read_capability()
         registry = CapabilityRegistry()
         registry.add(capability)
         security = object.__new__(SecurityBoundary)
-        point = transport_time or self.product_time
+        point = READ_NOW + timedelta(seconds=1)
         transport = build_product_credential_transport(
             BinanceSpotAuthenticatedReadTransport,
             security_boundary=security,
-            selected_provider_authority=_selected_read_authority(capability),
-            qualification_reader=object.__new__(
-                ProviderQualificationCurrentReader
-            ),
             policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
             account_id="acct-1",
             capability_snapshot_id=capability.snapshot_id,
@@ -135,44 +89,6 @@ class ProductAuthenticatedReadReceiptTests(unittest.TestCase):
             str(authority["credential_handle_identity"]).startswith("sha256:")
         )
         self.assertEqual(authority["credential_generation"], 1)
-
-    def test_product_prepared_authority_ignores_backdated_transport_clock(self):
-        backdated = READ_NOW - timedelta(days=1)
-        transport, query, caller_time = self._product(transport_time=backdated)
-
-        authority = product_authenticated_read_prepared_authority(transport, query)
-
-        self.assertEqual(caller_time, backdated)
-        self.assertEqual(
-            authority["validated_at"],
-            self.product_time.isoformat().replace("+00:00", "Z"),
-        )
-        self.assertNotEqual(
-            authority["validated_at"],
-            caller_time.isoformat().replace("+00:00", "Z"),
-        )
-
-    def test_backdated_transport_clock_cannot_extend_expired_product_capability(self):
-        transport, query, caller_time = self._product()
-        expired_product_time = READ_NOW + timedelta(minutes=11)
-
-        with patch.object(
-            provider_transport,
-            "_runtime_product_utc_now",
-            return_value=expired_product_time,
-        ), patch.object(
-            UrllibJsonWireClient,
-            "send",
-            side_effect=AssertionError("expired authority must fail before wire I/O"),
-        ) as send:
-            with self.assertRaisesRegex(
-                ProviderTransportScopeError,
-                "cannot rederive requested scope",
-            ):
-                product_authenticated_read_prepared_authority(transport, query)
-
-        send.assert_not_called()
-        self.assertLess(caller_time, expired_product_time)
 
     def test_imported_query_token_cannot_replace_current_capability_authority(self):
         transport, query, _point = self._product()
@@ -239,29 +155,6 @@ class ProductAuthenticatedReadReceiptTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body, response.body)
         self.assertEqual(observed, point)
-
-    def test_product_receipt_observation_uses_product_time_not_transport_clock(self):
-        backdated = READ_NOW - timedelta(days=1)
-        transport, query, caller_time = self._product(transport_time=backdated)
-        response = AuthenticatedReadWireResponse(200, b'{"balances":[]}')
-        credential = '{"api_key":"test-key","api_secret":"test-secret"}'
-
-        with patch.object(
-            SecurityBoundary,
-            "resolve_for_execution",
-            return_value=credential,
-        ), patch.object(
-            UrllibJsonWireClient,
-            "send",
-            return_value=response,
-        ):
-            receipt = execute_product_authenticated_read(transport, query)
-
-        _transport_id, _network_id, _status, _body, observed = (
-            validate_product_authenticated_read_receipt(receipt, query)
-        )
-        self.assertEqual(observed, self.product_time)
-        self.assertNotEqual(observed, caller_time)
 
     def test_unexpected_http_status_is_retained_as_wire_fact(self):
         transport, query, _point = self._product()

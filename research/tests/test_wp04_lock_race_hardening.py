@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import sys
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
@@ -210,6 +211,176 @@ class ResourceLockRaceHardeningTests(unittest.TestCase):
             ):
                 lock.acquire()
         mkdir.assert_not_called()
+
+    def test_windows_kernel_handle_transfer_close_failure_poisoning_is_recorded(self):
+        lock = ResourceLock("resource.lock")
+        primary = RuntimeError("simulated CRT transfer failure")
+        fake_msvcrt = SimpleNamespace(
+            open_osfhandle=mock.Mock(side_effect=primary),
+        )
+
+        with (
+            patch.dict(sys.modules, {"msvcrt": fake_msvcrt}),
+            patch.object(
+                resource_lock_module,
+                "close_windows_handle",
+                side_effect=OSError("simulated native close failure"),
+            ),
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                lock._adopt_windows_kernel_handle(123, flags=0)
+
+        self.assertIs(caught.exception, primary)
+        self.assertTrue(lock._windows_handle_cleanup_uncertain)
+        notes = getattr(caught.exception, "__notes__", ())
+        self.assertTrue(
+            any(
+                "native Windows HANDLE close also failed" in note
+                and "simulated native close failure" in note
+                for note in notes
+            ),
+            f"native HANDLE cleanup evidence missing from notes: {notes!r}",
+        )
+
+    def test_windows_file_wrapper_close_failure_poisoning_is_recorded(self):
+        lock = ResourceLock("resource.lock")
+        primary = RuntimeError("simulated file-object wrapper failure")
+        fake_msvcrt = SimpleNamespace(
+            open_osfhandle=mock.Mock(return_value=456),
+        )
+
+        with (
+            patch.dict(sys.modules, {"msvcrt": fake_msvcrt}),
+            patch.object(
+                resource_lock_module.os,
+                "fdopen",
+                side_effect=primary,
+            ),
+            patch.object(
+                resource_lock_module.os,
+                "close",
+                side_effect=OSError("simulated descriptor close failure"),
+            ),
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                lock._adopt_windows_kernel_handle(123, flags=0)
+
+        self.assertIs(caught.exception, primary)
+        self.assertTrue(lock._windows_handle_cleanup_uncertain)
+        notes = getattr(caught.exception, "__notes__", ())
+        self.assertTrue(
+            any(
+                "CRT descriptor close also failed" in note
+                and "simulated descriptor close failure" in note
+                for note in notes
+            ),
+            f"CRT descriptor cleanup evidence missing from notes: {notes!r}",
+        )
+
+    def test_windows_uncertain_native_transfer_retains_parent_namespace(self):
+        events = []
+
+        class ParentGuard:
+            def __enter__(self):
+                events.append("parent-enter")
+                return object()
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                events.append("parent-exit")
+                return False
+
+        lock = ResourceLock("resource.lock")
+        guard = ParentGuard()
+        windows_os = SimpleNamespace(
+            name="nt",
+            path=os.path,
+            fspath=os.fspath,
+        )
+        primary = ResourceLockError("simulated transfer failure")
+
+        def fail_with_uncertain_native_handle():
+            lock._windows_handle_cleanup_uncertain = True
+            raise primary
+
+        with (
+            patch.object(resource_lock_module, "os", windows_os),
+            patch.object(
+                resource_lock_module,
+                "require_qualified_local_filesystem_path",
+            ),
+            patch.object(
+                resource_lock_module,
+                "retain_windows_parent_namespace",
+                return_value=guard,
+            ),
+            patch.object(
+                lock,
+                "_acquire_after_parent_ready",
+                side_effect=fail_with_uncertain_native_handle,
+            ),
+        ):
+            with self.assertRaises(ResourceLockError) as caught:
+                lock.acquire()
+            self.assertIs(caught.exception, primary)
+            self.assertIs(lock._windows_parent_guard, guard)
+            self.assertEqual(events, ["parent-enter"])
+
+            with self.assertRaisesRegex(
+                ResourceLockError,
+                "uncertain native handle cleanup",
+            ):
+                lock.release()
+            self.assertIs(lock._windows_parent_guard, guard)
+            self.assertEqual(events, ["parent-enter"])
+
+            with self.assertRaisesRegex(
+                ResourceLockError,
+                "uncertain native handle cleanup",
+            ):
+                lock.acquire()
+            self.assertEqual(events, ["parent-enter"])
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows filesystem qualification")
+    def test_relative_path_is_frozen_before_locality_admission_can_change_cwd(self):
+        original_cwd = Path.cwd()
+        with TemporaryDirectory() as first_dir, TemporaryDirectory() as second_dir:
+            first = Path(first_dir)
+            second = Path(second_dir)
+            observed = []
+            lock = ResourceLock("state/resource.lock")
+            acquired = False
+            try:
+                os.chdir(first)
+                original_require = (
+                    resource_lock_module.require_qualified_local_filesystem_path
+                )
+
+                def qualify_then_change_cwd(path):
+                    observed.append(Path(path))
+                    original_require(path)
+                    os.chdir(second)
+
+                with patch.object(
+                    resource_lock_module,
+                    "require_qualified_local_filesystem_path",
+                    new=qualify_then_change_cwd,
+                ):
+                    lock.acquire()
+                    acquired = True
+            finally:
+                # The selected lock path is absolute after admission, so release
+                # is deliberately independent of the process CWD.
+                os.chdir(original_cwd)
+                if acquired:
+                    lock.release()
+
+            expected = first / "state" / "resource.lock"
+            unexpected = second / "state" / "resource.lock"
+            self.assertEqual(len(observed), 1)
+            self.assertTrue(observed[0].is_absolute())
+            self.assertEqual(lock.path, expected)
+            self.assertTrue(expected.is_file())
+            self.assertFalse(unexpected.exists())
 
     def test_windows_parent_guard_admission_failure_uses_resource_lock_error(self):
         class FailingParentGuard:

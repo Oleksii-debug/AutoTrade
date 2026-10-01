@@ -2,13 +2,20 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import subprocess
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 import zipfile
 
 import research.autotrade_research.artifacts.durable_publish as durable_publish_module
-from tools.build_windows_bundle import BundleError, _windows_path_key, build_bundle
+from tools.build_windows_bundle import (
+    BundleError,
+    WINDOWS_REPARSE_POINT,
+    _has_windows_reparse_point,
+    _windows_path_key,
+    build_bundle,
+)
 
 
 SOURCE_SHA = "a" * 40
@@ -53,6 +60,104 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
             os.link(target, link)
         except (OSError, NotImplementedError) as error:
             self.skipTest(f"hardlink creation unavailable: {error}")
+
+    def test_windows_reparse_attribute_predicate_is_fail_closed(self):
+        regular = type("RegularStat", (), {"st_file_attributes": 0})()
+        reparse = type(
+            "ReparseStat",
+            (),
+            {"st_file_attributes": WINDOWS_REPARSE_POINT},
+        )()
+        invalid = type(
+            "InvalidStat",
+            (),
+            {"st_file_attributes": "reparse"},
+        )()
+        self.assertFalse(_has_windows_reparse_point(regular))
+        self.assertTrue(_has_windows_reparse_point(reparse))
+        with self.assertRaisesRegex(BundleError, "file attributes are invalid"):
+            _has_windows_reparse_point(invalid)
+
+    def _junction_or_skip(self, junction: Path, target: Path):
+        result = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(target)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            self.skipTest(
+                "directory junction creation unavailable: "
+                + (result.stderr or result.stdout).strip()
+            )
+        self.addCleanup(
+            lambda: subprocess.run(
+                ["cmd.exe", "/d", "/c", "rmdir", str(junction)],
+                capture_output=True,
+                check=False,
+            )
+            if junction.exists()
+            else None
+        )
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction regression")
+    def test_windows_directory_junction_in_staging_is_rejected_before_descent(self):
+        external = self.root / "external-junction-target"
+        external.mkdir()
+        (external / "outside.bin").write_bytes(b"must-not-enter-bundle")
+        junction = self.staging / "junction"
+        self._junction_or_skip(junction, external)
+
+        with self.assertRaisesRegex(BundleError, "reparse points are forbidden"):
+            build_bundle(
+                staging=self.staging,
+                output=self.root / "junction.zip",
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+        self.assertFalse((self.root / "junction.zip").exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction regression")
+    def test_windows_staging_ancestor_junction_is_rejected(self):
+        external_parent = self.root / "external-parent"
+        external_parent.mkdir()
+        nested = external_parent / "payload"
+        nested.mkdir()
+        (nested / "AutoTrade.exe").write_bytes(b"binary-placeholder")
+        junction_parent = self.root / "junction-parent"
+        self._junction_or_skip(junction_parent, external_parent)
+
+        with self.assertRaisesRegex(BundleError, "reparse points are forbidden"):
+            build_bundle(
+                staging=junction_parent / "payload",
+                output=self.root / "ancestor-junction.zip",
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+        self.assertFalse((self.root / "ancestor-junction.zip").exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction regression")
+    def test_windows_staging_root_junction_is_rejected(self):
+        real_staging = self.root / "real-staging"
+        real_staging.mkdir()
+        (real_staging / "AutoTrade.exe").write_bytes(b"binary-placeholder")
+        junction = self.root / "junction-staging"
+        self._junction_or_skip(junction, real_staging)
+
+        with self.assertRaisesRegex(BundleError, "reparse points are forbidden"):
+            build_bundle(
+                staging=junction,
+                output=self.root / "root-junction.zip",
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+        self.assertFalse((self.root / "root-junction.zip").exists())
 
     def test_hardlinked_staged_file_is_rejected_without_reading_alias(self):
         staged = self.staging / "AutoTrade.exe"

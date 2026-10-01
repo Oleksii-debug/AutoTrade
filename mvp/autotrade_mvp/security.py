@@ -363,6 +363,7 @@ class SecurityBoundary:
         account_id: str,
         provider: str,
         environment: str,
+        provider_environment: str | None = None,
         purpose: str,
         secret_value: str,
     ) -> CredentialHandle:
@@ -375,6 +376,14 @@ class SecurityBoundary:
             account_id=_required_text(account_id, name="account_id"),
             provider=_required_text(provider, name="provider"),
             environment=_required_text(environment, name="environment").upper(),
+            provider_environment=(
+                None
+                if provider_environment is None
+                else _required_text(
+                    provider_environment,
+                    name="provider_environment",
+                ).upper()
+            ),
             purpose=normalized_purpose,
             secret_value=secret_value,
         )
@@ -388,6 +397,7 @@ class SecurityBoundary:
             account_id=str(metadata["account_id"]),
             provider=str(metadata["provider"]),
             environment=str(metadata["environment"]),
+            provider_environment=str(metadata["provider_environment"]),
             purpose=str(metadata["purpose"]),
             generation=int(metadata["generation"]),
         )
@@ -434,6 +444,7 @@ class SecurityBoundary:
         account_id: str,
         provider: str,
         environment: str,
+        provider_environment: str | None = None,
         purpose: str,
     ) -> str:
         self.validate_session(token, required_roles=self._EXECUTION_ROLES, origin=origin)
@@ -447,6 +458,14 @@ class SecurityBoundary:
             account_id=_required_text(account_id, name="account_id"),
             provider=_required_text(provider, name="provider"),
             environment=_required_text(environment, name="environment").upper(),
+            provider_environment=(
+                None
+                if provider_environment is None
+                else _required_text(
+                    provider_environment,
+                    name="provider_environment",
+                ).upper()
+            ),
             purpose=_required_text(purpose, name="purpose").upper(),
         )
 

@@ -101,6 +101,7 @@ class FakeSecretResolver:
         account_id,
         provider,
         environment,
+        provider_environment=None,
         purpose,
     ):
         self.events.append("resolve")

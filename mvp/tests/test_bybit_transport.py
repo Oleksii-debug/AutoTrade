@@ -27,23 +27,35 @@ from mvp.tests.test_provider_transport import (
 )
 
 
-def read_handle(*, environment="PAPER", account_id="paper-1"):
+def read_handle(
+    *,
+    environment="PAPER",
+    account_id="paper-1",
+    provider_environment="TESTNET",
+):
     return PersistentCredentialHandle(
         handle_id="cred-bybit-read",
         account_id=account_id,
         provider="BYBIT",
         environment=environment,
+        provider_environment=provider_environment,
         purpose="READ",
         generation=1,
     )
 
 
-def trade_handle(*, environment="PAPER", account_id="bybit-account"):
+def trade_handle(
+    *,
+    environment="PAPER",
+    account_id="bybit-account",
+    provider_environment="TESTNET",
+):
     return PersistentCredentialHandle(
         handle_id="cred-bybit-trade",
         account_id=account_id,
         provider="BYBIT",
         environment=environment,
+        provider_environment=provider_environment,
         purpose="TRADE",
         generation=1,
     )
@@ -298,6 +310,7 @@ class BybitV5SharedTransportTests(unittest.TestCase):
         wire=None,
         quota_gate=None,
         provider_environment="TESTNET",
+        credential_provider_environment=None,
         policy=None,
         clock_utc=None,
         on_resolve=None,
@@ -316,7 +329,13 @@ class BybitV5SharedTransportTests(unittest.TestCase):
             capability_snapshot_id=capability.snapshot_id,
             capability_registry=registry,
             secret_resolver=resolver,
-            credential_handle=trade_handle(),
+            credential_handle=trade_handle(
+                provider_environment=(
+                    provider_environment
+                    if credential_provider_environment is None
+                    else credential_provider_environment
+                ),
+            ),
             session_token="session-token",
             origin="https://localhost",
             execution_identity="host-owner",
@@ -428,6 +447,22 @@ class BybitV5SharedTransportTests(unittest.TestCase):
                 provider_environment="TESTNET",
                 policy=BYBIT_V5_ENDPOINT_POLICIES["DEMO"],
             )
+
+    def test_credential_domain_cannot_cross_testnet_and_demo_before_secret_or_wire(self):
+        capability, _request = prepared()
+        events = []
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "credential handle provider/environment/purpose mismatch",
+        ):
+            self.make_transport(
+                capability=capability,
+                events=events,
+                provider_environment="DEMO",
+                credential_provider_environment="TESTNET",
+                policy=BYBIT_V5_ENDPOINT_POLICIES["DEMO"],
+            )
+        self.assertEqual(events, [])
 
     def test_scope_digest_and_provider_environment_fail_before_secret_or_wire(self):
         capability, request = prepared()

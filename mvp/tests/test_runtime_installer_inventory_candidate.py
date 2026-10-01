@@ -198,7 +198,7 @@ class NeutralRuntimeInstallerInventoryCandidateTests(unittest.TestCase):
         for field, replacement in cases:
             with self.subTest(field=field):
                 files, components = _base_entries()
-        _append_product_entrypoints(files, components)
+                _append_product_entrypoints(files, components)
                 _append_release_runtime_inventory(files, components)
                 target = _RUNTIME_REQUIRED[-1].path
                 component = next(item for item in components if item["path"] == target)

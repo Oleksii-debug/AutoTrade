@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from types import MappingProxyType
 from typing import Mapping
 
@@ -25,7 +25,15 @@ from .accounting import (
     canonical_transaction,
     reverse_transaction,
 )
+from .exact_decimal import (
+    ExactDecimalError,
+    canonical_decimal_text,
+    exact_add,
+    exact_multiply,
+    parse_bounded_exact_decimal,
+)
 from .durable_reservations import reservation_snapshot_digest
+from .instruments import InstrumentVersion
 from .persistence import JournalStore, payload_digest
 from .reconciliation import ProviderFillEvidence, provider_fill_identity_payload
 from .reconciliation_journal import require_current_reconciliation_checkpoint
@@ -42,12 +50,20 @@ def _decimal(value, *, name: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise TypeError(f"{name} must use Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, ValueError, TypeError) as error:
-        raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ValueError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise ValueError(f"{name} must be a finite bounded decimal") from error
+
+
+def _exact_financial_arithmetic(operation, *values: Decimal, name: str) -> Decimal:
+    """Evaluate authority-bearing finite arithmetic without ambient Decimal context."""
+
+    try:
+        return operation(*values)
+    except ExactDecimalError as error:
+        raise AccountingConflict(
+            f"{name} exceeds the exact-decimal resource envelope"
+        ) from error
 
 
 def _utc_text(value: str, *, name: str) -> str:
@@ -245,13 +261,19 @@ def _validated_fill_evidence(
         raise AccountingConflict(
             "provider fill position effect does not match projection"
         )
-    if provider_fill.position_side in {"LONG", "SHORT"}:
-        if provider_fill.position_effect is None:
-            raise AccountingConflict(
-                "hedge-mode provider fill position effect is not independently evidenced"
-            )
+    if (
+        provider_fill.position_side in {"LONG", "SHORT"}
+        and provider_fill.position_effect is None
+    ):
         raise AccountingConflict(
-            "hedge-mode provider fill requires leg-aware economic accounting"
+            "hedge-mode provider fill position effect is not independently evidenced"
+        )
+    if (
+        provider_fill.position_side is not None
+        or provider_fill.position_effect is not None
+    ):
+        raise AccountingConflict(
+            "provider fill position identity requires instrument-bound leg-aware economic accounting"
         )
 
     if projected_fill.correction_of is not None and not allow_correction:
@@ -420,8 +442,7 @@ def build_unexpected_provider_fill_transaction(
     checkpoint_event_id: str,
     book: ScopedEconomicBook,
     provider_fill: ProviderFillEvidence,
-    expected_instrument: str,
-    settlement_currency: str,
+    instrument_version: InstrumentVersion,
     observed_at: str | None = None,
 ) -> JournalTransaction:
     """Build economics only from current durable reconciliation evidence.
@@ -465,19 +486,30 @@ def build_unexpected_provider_fill_transaction(
         raise AccountingConflict(
             "unexpected provider fill direction is not independently evidenced"
         )
-    if provider_fill.position_side in {"LONG", "SHORT"}:
+    if (
+        provider_fill.position_side is not None
+        or provider_fill.position_effect is not None
+    ):
         raise AccountingConflict(
-            "unexpected hedge-mode fill requires leg-aware economic accounting"
+            "unexpected provider fill position identity requires instrument-bound leg-aware economic accounting"
         )
 
-    instrument = _text(expected_instrument, name="expected_instrument")
+    (
+        instrument,
+        settlement,
+        instrument_version_ref,
+        instrument_contract_digest,
+    ) = provider_fill_instrument_authority(
+        instrument_version=instrument_version,
+        provider_id=provider,
+        trade_time=provider_fill.trade_time,
+    )
     if provider_fill.instrument != instrument:
         raise AccountingConflict(
-            "unexpected provider fill instrument does not match expected instrument"
+            "unexpected provider fill instrument does not match exact instrument version"
         )
-    settlement = _text(settlement_currency, name="settlement_currency").upper()
     evidence = {
-        "schema_version": "1.1.0",
+        "schema_version": "1.2.0",
         "origin": "EXTERNAL_RECONCILED",
         "reconciliation_checkpoint_event_id": checkpoint["event_id"],
         "reconciliation_checkpoint_payload_hash": checkpoint["payload_hash"],
@@ -489,6 +521,8 @@ def build_unexpected_provider_fill_transaction(
         "environment": provider_fill.environment,
         "account_id": provider_fill.account_id,
         "provider_execution_id": provider_fill.provider_execution_id,
+        "instrument_version_ref": instrument_version_ref,
+        "instrument_contract_digest": instrument_contract_digest,
         "client_order_id": provider_fill.client_order_id,
         "side": provider_fill.side,
         "position_side": provider_fill.position_side,
@@ -537,20 +571,26 @@ def book_unexpected_provider_fill(
     checkpoint_event_id: str,
     book: ScopedEconomicBook,
     provider_fill: ProviderFillEvidence,
-    expected_instrument: str,
-    settlement_currency: str,
+    instrument_version: InstrumentVersion,
     observed_at: str | None = None,
 ) -> bool:
+    # Bind the current-checkpoint validation and first economic mutation to one
+    # durable journal cut. Any intervening financial/provider fact invalidates
+    # first admission; exact already-committed replay remains idempotent inside
+    # DurableProviderEconomicBook before the sequence fence is applied.
+    evidence_cut = store.current_journal_sequence()
     transaction = build_unexpected_provider_fill_transaction(
         store=store,
         checkpoint_event_id=checkpoint_event_id,
         book=book,
         provider_fill=provider_fill,
-        expected_instrument=expected_instrument,
-        settlement_currency=settlement_currency,
+        instrument_version=instrument_version,
         observed_at=observed_at,
     )
-    return book.append(transaction)
+    return book.append(
+        transaction,
+        expected_journal_sequence=evidence_cut,
+    )
 
 
 def build_provider_fill_transaction(
@@ -613,6 +653,8 @@ class ProviderFillFinancialPlan:
     reservation_id: str
     intent_id: str
     provider_execution_id: str
+    instrument_version_ref: str
+    instrument_contract_digest: str
     reservation_cut_digest: str
     transaction: JournalTransaction
     usage_items: tuple[tuple[str, Decimal], ...]
@@ -623,47 +665,87 @@ class ProviderFillFinancialPlan:
         return MappingProxyType(dict(self.usage_items))
 
 
+def provider_fill_instrument_authority(
+    *,
+    instrument_version: InstrumentVersion,
+    provider_id: str,
+    trade_time: str,
+) -> tuple[str, str, str, str]:
+    """Derive the exact cash-equity contract authority for provider-fill economics."""
+
+    if not isinstance(instrument_version, InstrumentVersion):
+        raise TypeError("instrument_version must be InstrumentVersion")
+    provider = _text(provider_id, name="provider_id").upper()
+    if instrument_version.provider_id.upper() != provider:
+        raise AccountingConflict(
+            "instrument version provider scope does not match provider fill"
+        )
+    canonical_trade_time = _utc_text(trade_time, name="trade_time")
+    trade_instant = datetime.fromisoformat(
+        canonical_trade_time.replace("Z", "+00:00")
+    )
+    if not instrument_version.contains(trade_instant):
+        raise AccountingConflict(
+            "provider fill trade time is outside instrument version effective interval"
+        )
+    instrument_version_ref = (
+        f"{instrument_version.instrument_id}@{instrument_version.version}"
+    )
+    instrument_contract_digest = payload_digest(
+        instrument_version.to_contract_dict()
+    )
+    if instrument_version.asset_class != "CASH_EQUITY":
+        raise AccountingConflict(
+            "provider fill reservation mapping is not qualified for instrument asset class"
+        )
+    if instrument_version.contract_multiplier != Decimal("1"):
+        raise AccountingConflict(
+            "cash-equity fill accounting requires unit contract multiplier"
+        )
+    return (
+        instrument_version.provider_symbol,
+        instrument_version.settlement_currency.upper(),
+        instrument_version_ref,
+        instrument_contract_digest,
+    )
+
+
 def build_provider_fill_financial_plan(
     *,
     book: ScopedEconomicBook,
     provider_id: str,
     projected_fill: ProjectedFillEvidence,
     provider_fill: ProviderFillEvidence,
-    expected_instrument: str,
-    settlement_currency: str,
+    instrument_version: InstrumentVersion,
     reservation_snapshot: ReservationSnapshot,
-    asset_family: str = "CASH_EQUITY",
     observed_at: str | None = None,
 ) -> ProviderFillFinancialPlan:
-    """Derive one fail-closed fill economics/reservation plan from shared evidence.
-
-    No caller-authored usage map is accepted. The same independently
-    provider-evidenced fill that determines canonical accounting determines the
-    reservation consumption. Positive fees consume reserved cash in their
-    exact currency; zero/negative fees never release or create authority.
-    """
+    """Derive fill economics and reservation use from one exact InstrumentVersion."""
 
     if not isinstance(reservation_snapshot, ReservationSnapshot):
         raise TypeError("reservation_snapshot must be ReservationSnapshot")
-    family = _text(asset_family, name="asset_family").upper()
-    if family != "CASH_EQUITY":
-        raise AccountingConflict(
-            "provider fill reservation mapping is not qualified for this asset family"
-        )
+    (
+        expected_instrument,
+        settlement,
+        instrument_version_ref,
+        instrument_contract_digest,
+    ) = provider_fill_instrument_authority(
+        instrument_version=instrument_version,
+        provider_id=provider_id,
+        trade_time=provider_fill.trade_time,
+    )
     if reservation_snapshot.intent_id != projected_fill.intent_id:
         raise AccountingConflict(
             "provider fill intent does not match admitted reservation"
         )
 
-    # Validate the complete independent provider/projection identity first.
-    # Asset-family admission must never mask contradictory provider truth.
     transaction = build_provider_fill_transaction(
         book=book,
         provider_id=provider_id,
         projected_fill=projected_fill,
         provider_fill=provider_fill,
         expected_instrument=expected_instrument,
-        settlement_currency=settlement_currency,
+        settlement_currency=settlement,
         observed_at=observed_at,
     )
 
@@ -671,18 +753,28 @@ def build_provider_fill_financial_plan(
         raise AccountingConflict(
             "cash-equity reservation consumption is qualified only for BUY fills"
         )
-    if provider_fill.position_side is not None:
+    if provider_fill.position_side is not None or provider_fill.position_effect is not None:
         raise AccountingConflict(
-            "cash-equity reservation consumption rejects derivative position_side"
+            "cash-equity reservation consumption rejects derivative position identity"
         )
 
-    settlement = _text(settlement_currency, name="settlement_currency").upper()
+    principal_usage = _exact_financial_arithmetic(
+        exact_multiply,
+        provider_fill.quantity,
+        provider_fill.price,
+        name="provider fill principal usage",
+    )
     usage: dict[str, Decimal] = {
-        f"CASH:{settlement}": provider_fill.quantity * provider_fill.price,
+        f"CASH:{settlement}": principal_usage,
     }
     if provider_fill.fee_amount > 0:
         fee_key = f"CASH:{provider_fill.fee_currency}"
-        usage[fee_key] = usage.get(fee_key, Decimal("0")) + provider_fill.fee_amount
+        usage[fee_key] = _exact_financial_arithmetic(
+            exact_add,
+            usage.get(fee_key, Decimal("0")),
+            provider_fill.fee_amount,
+            name="provider fill fee-inclusive usage",
+        )
 
     original = dict(reservation_snapshot.original)
     for resource, amount in usage.items():
@@ -702,17 +794,19 @@ def build_provider_fill_financial_plan(
     usage_items = tuple(sorted(usage.items()))
     reservation_cut_digest = reservation_snapshot_digest(reservation_snapshot)
     material = {
-        "schema_version": "1.1.0",
+        "schema_version": "1.2.0",
         "provider_id": provider_fill.provider_id,
         "account_id": provider_fill.account_id,
         "environment": provider_fill.environment,
         "reservation_id": reservation_snapshot.reservation_id,
         "intent_id": reservation_snapshot.intent_id,
         "provider_execution_id": provider_fill.provider_execution_id,
+        "instrument_version_ref": instrument_version_ref,
+        "instrument_contract_digest": instrument_contract_digest,
         "reservation_cut_digest": reservation_cut_digest,
         "transaction": canonical_transaction(transaction),
         "derived_usage": {
-            key: format(value, "f")
+            key: canonical_decimal_text(value)
             for key, value in usage_items
         },
     }
@@ -720,6 +814,8 @@ def build_provider_fill_financial_plan(
         reservation_id=reservation_snapshot.reservation_id,
         intent_id=reservation_snapshot.intent_id,
         provider_execution_id=provider_fill.provider_execution_id,
+        instrument_version_ref=instrument_version_ref,
+        instrument_contract_digest=instrument_contract_digest,
         reservation_cut_digest=reservation_cut_digest,
         transaction=transaction,
         usage_items=usage_items,
@@ -964,6 +1060,11 @@ def book_provider_fill(
     settlement_currency: str,
     observed_at: str | None = None,
 ) -> bool:
+    if type(book) is not ScopedEconomicBook:
+        raise AccountingConflict(
+            "direct provider fill booking is non-durable only; "
+            "durable fills require the atomic financial-authority path"
+        )
     transaction = build_provider_fill_transaction(
         book=book,
         provider_id=provider_id,
@@ -987,6 +1088,11 @@ def book_provider_fill_correction(
     settlement_currency: str,
     correction_observed_at: str,
 ) -> bool:
+    if type(book) is not ScopedEconomicBook:
+        raise AccountingConflict(
+            "direct provider fill correction is non-durable only; "
+            "durable corrections require the atomic financial-authority path"
+        )
     reversal, replacement = build_provider_fill_correction_transactions(
         book=book,
         provider_id=provider_id,

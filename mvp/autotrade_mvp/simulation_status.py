@@ -136,15 +136,23 @@ def _require_completed_send(events: list[dict], *, episode_id: str, order_id: st
             or any(event["aggregate_id"] != aggregate_id
                    or event["aggregate_version"] != index
                    or event.get("environment") != ENVIRONMENT
+                   or event.get("host_id") != "local-mvp"
+                   or event.get("owner_epoch") != "1"
                    or type(event["payload"]) is not dict
                    or event["payload"].get("client_order_id") != client_id
                    for index, event in enumerate(submissions, 1))):
         raise ValueError("simulation fill submission chronology differs")
     prepared = submissions[0]["payload"]
+    sending = submissions[1]["payload"]
     response = submissions[-1]["payload"].get("response")
     if (prepared.get("intent_id") != intent_id or prepared.get("attempt_id") != attempt_id
             or prepared.get("provider") != "simulated"
             or prepared.get("environment") != ENVIRONMENT or prepared.get("account_id") != ACCOUNT
+            or prepared.get("owner_token") != "canonical-simulation-owner"
+            or prepared.get("owner_epoch") != 1
+            or sending.get("owner_token") != "canonical-simulation-owner"
+            or sending.get("owner_epoch") != 1
+            or sending.get("reason") != "final_send_barrier_passed"
             or type(response) is not dict or response.get("outcome") != "ACKNOWLEDGED"
             or response.get("attempt_id") != attempt_id or response.get("client_order_id") != client_id):
         raise ValueError("simulation fill submission identity differs")

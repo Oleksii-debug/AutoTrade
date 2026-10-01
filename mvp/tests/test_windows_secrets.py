@@ -1,8 +1,9 @@
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from hashlib import sha256
 import json
 from pathlib import Path
 import sys
+from threading import Event
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -33,6 +34,20 @@ class CannotDecryptProtector(DeterministicProtector):
 
     def unprotect(self, ciphertext: bytes, *, entropy: bytes) -> bytes:
         raise OSError("different OS identity")
+
+
+class BlockingResolveProtector(DeterministicProtector):
+    """Pauses one resolve after vault state has been read but before plaintext returns."""
+
+    def __init__(self) -> None:
+        self.entered = Event()
+        self.release = Event()
+
+    def unprotect(self, ciphertext: bytes, *, entropy: bytes) -> bytes:
+        self.entered.set()
+        if not self.release.wait(timeout=5):
+            raise OSError("test resolve release timed out")
+        return super().unprotect(ciphertext, entropy=entropy)
 
 
 class ProtectedCredentialVaultTests(unittest.TestCase):
@@ -123,6 +138,104 @@ class ProtectedCredentialVaultTests(unittest.TestCase):
         for values in cases:
             with self.subTest(values=values), self.assertRaises(PermissionError):
                 self.vault.resolve(handle, **values)
+
+    def test_revoke_cannot_commit_between_resolve_snapshot_and_plaintext_return(self):
+        handle = self.register(secret="original-secret")
+        blocking = BlockingResolveProtector()
+        resolver = ProtectedCredentialVault(self.path, protector=blocking)
+        revoker = ProtectedCredentialVault(
+            self.path,
+            protector=DeterministicProtector(),
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            resolve_future = executor.submit(
+                resolver.resolve,
+                handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            )
+            self.assertTrue(blocking.entered.wait(timeout=2))
+            revoke_future = executor.submit(
+                revoker.revoke,
+                handle,
+                execution_identity="windows-user-1",
+            )
+
+            with self.assertRaises(FuturesTimeoutError):
+                revoke_future.result(timeout=0.2)
+
+            blocking.release.set()
+            self.assertEqual(resolve_future.result(timeout=2), "original-secret")
+            self.assertIsNone(revoke_future.result(timeout=2))
+
+        with self.assertRaises(PermissionError):
+            resolver.resolve(
+                handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            )
+
+    def test_rotate_cannot_commit_between_resolve_snapshot_and_plaintext_return(self):
+        handle = self.register(secret="original-secret")
+        blocking = BlockingResolveProtector()
+        resolver = ProtectedCredentialVault(self.path, protector=blocking)
+        rotator = ProtectedCredentialVault(
+            self.path,
+            protector=DeterministicProtector(),
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            resolve_future = executor.submit(
+                resolver.resolve,
+                handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            )
+            self.assertTrue(blocking.entered.wait(timeout=2))
+            rotate_future = executor.submit(
+                rotator.rotate,
+                handle,
+                execution_identity="windows-user-1",
+                new_secret_value="rotated-secret",
+            )
+
+            with self.assertRaises(FuturesTimeoutError):
+                rotate_future.result(timeout=0.2)
+
+            blocking.release.set()
+            self.assertEqual(resolve_future.result(timeout=2), "original-secret")
+            new_handle = rotate_future.result(timeout=2)
+
+        with self.assertRaisesRegex(PermissionError, "stale"):
+            resolver.resolve(
+                handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            )
+        self.assertEqual(
+            rotator.resolve(
+                new_handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            ),
+            "rotated-secret",
+        )
 
     def test_rotation_invalidates_old_generation_across_restart(self):
         old = self.register()

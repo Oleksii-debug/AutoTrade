@@ -1165,9 +1165,12 @@ class JournalStore:
             raise ValueError(
                 "protected event namespaces require journal schema version 10"
             )
-        aggregate_type = self._require_text(aggregate_type, "aggregate_type")
-        if aggregate_type != aggregate_type.strip():
-            raise ValueError("aggregate_type must be canonical text")
+        if (
+            type(aggregate_type) is not str
+            or not aggregate_type
+            or aggregate_type != aggregate_type.strip()
+        ):
+            raise ValueError("aggregate_type must be canonical non-empty text")
         namespace_version = self._require_namespace_version(namespace_version)
         writer_authority_id = self._require_writer_authority_id(
             writer_authority_id

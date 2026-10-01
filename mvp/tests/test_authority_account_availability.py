@@ -27,7 +27,7 @@ from mvp.autotrade_mvp.risk import RiskContext, RiskIntent, RiskPolicy
 INSTRUMENT_ID = "11111111-1111-4111-8111-111111111111"
 PROVIDER_ID = "TEST_PROVIDER"
 ACCOUNT_ID = "paper-availability"
-ENVIRONMENT = "PAPER"
+ENVIRONMENT = "SIMULATION"
 NOW = "2026-09-24T18:01:00Z"
 
 

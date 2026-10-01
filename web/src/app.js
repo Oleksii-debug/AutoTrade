@@ -291,8 +291,10 @@
     if (!["ACCEPTED", "REJECTED", "CONFLICT"].includes(result.status)) {
       throw new Error("CommandResult status is not canonical");
     }
-    if (!Array.isArray(result.field_errors)) {
-      throw new Error("field_errors must be an array");
+    if (!Array.isArray(result.field_errors) ||
+        result.field_errors.some((item) =>
+          !item || typeof item !== "object" || Array.isArray(item))) {
+      throw new Error("field_errors must be an array of objects");
     }
     const operationId = result.operation_id === undefined
       ? null
@@ -439,6 +441,39 @@
       return JSON.stringify(stableProjectionValue(value));
     }
     return String(value);
+  }
+
+  function renderCommandValidationDetails(fieldErrors, stateName) {
+    const list = byId("command-validation-list");
+    if (!list) return;
+    list.replaceChildren();
+
+    const appendMessage = (message) => {
+      const item = document.createElement("li");
+      item.textContent = message;
+      list.appendChild(item);
+    };
+
+    if (stateName === "pending") {
+      appendMessage(
+        "No confirmed host field-validation details are available for this command attempt yet.");
+      return;
+    }
+    if (stateName === "unavailable") {
+      appendMessage(
+        "Field-specific validation details are unavailable because the command response could not be confirmed.");
+      return;
+    }
+    if (stateName !== "confirmed" || !Array.isArray(fieldErrors)) {
+      throw new Error("command validation detail state is invalid");
+    }
+    if (fieldErrors.length === 0) {
+      appendMessage("No field-specific validation errors reported by the host.");
+      return;
+    }
+    for (const error of fieldErrors) {
+      appendMessage(projectionText(error));
+    }
   }
 
   function flattenProjectionRows(record) {
@@ -1036,6 +1071,7 @@
     event.preventDefault();
     const form = event.currentTarget;
     const button = form.querySelector('button[type="submit"]');
+    renderCommandValidationDetails([], "pending");
 
     if (!state.snapshotReady || state.sessionIdentity === null) {
       setCommandAvailability(false);
@@ -1088,6 +1124,7 @@
     try {
       const result = await submitCanonicalCommand(payload);
       clearConfirmedCommand(payload);
+      renderCommandValidationDetails(result.fieldErrors, "confirmed");
       if (result.status === "ACCEPTED") {
         let acceptedMessage =
           "Command " + commandId +
@@ -1143,6 +1180,7 @@
         "command-result",
         "Command " + commandId +
           " could not be confirmed. Its original command_id and idempotency_key are retained for exact retry after host state recovers. No durable financial or safety outcome is being claimed.");
+      renderCommandValidationDetails([], "unavailable");
       byId("command-result").focus();
     } finally {
       setCommandAvailability(state.snapshotReady && state.sessionIdentity !== null);

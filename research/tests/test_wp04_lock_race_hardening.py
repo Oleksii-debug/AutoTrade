@@ -649,5 +649,32 @@ class ResourceLockRaceHardeningTests(unittest.TestCase):
             ResourceLock("resource.lock", blocking=1)
 
 
+
+    @unittest.skipUnless(os.name == "nt", "native Windows pathname semantics")
+    def test_windows_lock_rejects_alternate_stream_before_mutation(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            ordinary = root / "resource.lock"
+            candidate = Path(str(ordinary) + ":shadow")
+            with self.assertRaisesRegex(
+                ResourceLockError,
+                "canonical Windows pathname",
+            ):
+                ResourceLock(candidate).acquire()
+            self.assertFalse(ordinary.exists())
+
+    @unittest.skipUnless(os.name == "nt", "native Windows pathname semantics")
+    def test_windows_lock_rejects_normalized_parent_before_creation(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            ambiguous_parent = root / "locks."
+            candidate = ambiguous_parent / "resource.lock"
+            with self.assertRaisesRegex(
+                ResourceLockError,
+                "ordinary retained local Windows namespace",
+            ):
+                ResourceLock(candidate).acquire()
+            self.assertFalse(ambiguous_parent.exists())
+
 if __name__ == "__main__":
     unittest.main()

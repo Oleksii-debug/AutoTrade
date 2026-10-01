@@ -11,6 +11,7 @@ from typing import Iterator
 from autotrade_foundation.windows_namespace import (
     close_windows_handle,
     open_windows_regular_file,
+    require_windows_namespace_component,
     retain_windows_parent_namespace,
     windows_handle_information,
 )
@@ -219,6 +220,10 @@ def guard_windows_database_authority(
     if sys.platform != "win32":
         raise RuntimeError("Windows journal authority guard is Windows-only")
     canonical = freeze_database_path(path)
+    require_windows_namespace_component(
+        canonical.name,
+        subject="journal backing file",
+    )
     with retain_windows_parent_namespace(canonical, create=create):
         database_handle = open_windows_regular_file(
             canonical,

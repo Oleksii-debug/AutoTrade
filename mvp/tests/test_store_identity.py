@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from autotrade_foundation.windows_namespace import require_windows_namespace_component
 from mvp.autotrade_mvp.store_identity import (
     JournalStoreIdentity,
     connection_main_identity,
@@ -483,6 +484,55 @@ class StoreIdentityTests(unittest.TestCase):
             vars(original)["canonical_path"] = str(path.with_name("other.sqlite"))
             self.assertEqual(validated.canonical_path, expected_canonical_path)
 
+
+
+    def test_windows_namespace_component_rejects_win32_alias_forms(self) -> None:
+        invalid = (
+            "journal.sqlite3:shadow",
+            "journal.sqlite3.",
+            "journal.sqlite3 ",
+            "CON.sqlite3",
+            "nul",
+            "COM1.log",
+            "LPT9.data",
+            "bad?.sqlite3",
+            "bad|name.sqlite3",
+            "bad" + chr(1) + "name.sqlite3",
+        )
+        for name in invalid:
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(RuntimeError, "canonical Win32"):
+                    require_windows_namespace_component(
+                        name,
+                        subject="journal backing file",
+                    )
+        self.assertEqual(
+            require_windows_namespace_component(
+                "journal.sqlite3",
+                subject="journal backing file",
+            ),
+            "journal.sqlite3",
+        )
+
+    @unittest.skipUnless(sys.platform == "win32", "native Windows pathname semantics")
+    def test_windows_journal_rejects_alternate_stream_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ordinary = root / "journal.sqlite3"
+            candidate = Path(str(ordinary) + ":shadow")
+            with self.assertRaisesRegex(RuntimeError, "canonical Win32"):
+                establish_database_anchor(candidate)
+            self.assertFalse(ordinary.exists())
+
+    @unittest.skipUnless(sys.platform == "win32", "native Windows pathname semantics")
+    def test_windows_journal_rejects_normalized_parent_before_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ambiguous_parent = root / "state."
+            candidate = ambiguous_parent / "journal.sqlite3"
+            with self.assertRaisesRegex(RuntimeError, "namespace component"):
+                establish_database_anchor(candidate)
+            self.assertFalse(ambiguous_parent.exists())
 
 if __name__ == "__main__":
     unittest.main()

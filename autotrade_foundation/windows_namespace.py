@@ -49,6 +49,13 @@ _NT_OBJ_CASE_INSENSITIVE = 0x00000040
 _FILE_RENAME_INFORMATION_CLASS = 10
 _FILE_DISPOSITION_INFO_CLASS = 4
 _LOCKFILE_EXCLUSIVE_LOCK = 0x00000002
+_WINDOWS_FORBIDDEN_WIN32_COMPONENT_CHARS = frozenset('<>:"/\\\\|?*')
+_WINDOWS_RESERVED_DOS_BASENAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL", "CLOCK$", "CONIN$", "CONOUT$"}
+    | {f"COM{number}" for number in range(1, 10)}
+    | {f"LPT{number}" for number in range(1, 10)}
+    | {"COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³"}
+)
 
 
 class _Overlapped(ctypes.Structure):
@@ -226,16 +233,43 @@ def windows_handle_information(
 
 
 def _validate_component(name: str) -> str:
-    if (
-        type(name) is not str
-        or not name
-        or name in {".", ".."}
-        or "/" in name
-        or "\\" in name
-        or ":" in name
+    if type(name) is not str or not name or name in {".", ".."}:
+        raise RuntimeError("path contains an unsafe Windows namespace component")
+    if name.endswith((" ", ".")):
+        raise RuntimeError("path contains a Win32-normalized namespace component")
+    if any(
+        ord(character) < 32
+        or character in _WINDOWS_FORBIDDEN_WIN32_COMPONENT_CHARS
+        for character in name
     ):
         raise RuntimeError("path contains an unsafe Windows namespace component")
+    basename = name.split(".", 1)[0].upper()
+    if basename in _WINDOWS_RESERVED_DOS_BASENAMES:
+        raise RuntimeError("path contains a reserved Windows DOS device component")
     return name
+
+
+def require_windows_namespace_component(
+    name: str,
+    *,
+    subject: str = "Windows pathname component",
+) -> str:
+    """Require one Win32/NT-stable ordinary pathname component.
+
+    Retained NT traversal and later Win32 pathname opens must name the same
+    namespace object. Alternate data streams, DOS devices, wildcard/control
+    characters and Win32 trailing-dot/space normalization are therefore
+    rejected before any durable filesystem mutation.
+    """
+
+    if type(subject) is not str or not subject:
+        raise TypeError("subject must be a non-empty exact str")
+    try:
+        return _validate_component(name)
+    except RuntimeError as error:
+        raise RuntimeError(
+            f"{subject} is not a canonical Win32 pathname component"
+        ) from error
 
 
 def _open_root_directory(path: Path) -> int:
@@ -535,6 +569,7 @@ def open_windows_regular_file(
     candidate = Path(path)
     if not candidate.is_absolute():
         raise RuntimeError(f"{subject} path must be absolute")
+    require_windows_namespace_component(candidate.name, subject=subject)
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     create_file = kernel32.CreateFileW

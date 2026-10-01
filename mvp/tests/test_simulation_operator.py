@@ -370,6 +370,45 @@ class SimulationOperatorTests(unittest.TestCase):
                 (Path(directory) / "checkpoint.json").write_text(text, encoding="utf-8")
                 self.assertEqual(get_status(directory)["status"], "corrupt")
 
+    def test_legacy_orphan_evidence_and_journal_are_recovery_state(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 103], directory)
+            (Path(directory) / "checkpoint.json").unlink()
+            before = dump(directory)
+            status = get_status(directory)
+            self.assertEqual(status["status"], "needs_recovery")
+            self.assertFalse(status["replay_verified"])
+            self.assertEqual(dump(directory), before)
+
+    def test_legacy_economic_report_rejects_mismatched_evidence(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 103], directory)
+            path = Path(directory) / "learning-evidence.jsonl"
+            row = json.loads(path.read_text())
+            row["equity"] = "999999"
+            path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+            self.assertEqual(command(directory, "--economic-report")[0], 2)
+            code, output, _ = command(directory, "--accessible-status")
+            self.assertEqual(code, 0)
+            self.assertIn("Replay verification: failed", output)
+            self.assertNotIn("Net profit or loss", output)
+            self.assertNotIn("Economic reconciliation: passed", output)
+
+    def test_legacy_economic_report_discarded_when_files_change_during_read(self):
+        with TemporaryDirectory() as directory:
+            run_vertical_slice([100, 101, 103], directory)
+            from mvp.autotrade_mvp import cli
+            original = cli.build_economic_report
+            def changed(root):
+                report = original(root)
+                with (Path(root) / "learning-evidence.jsonl").open("a") as stream:
+                    stream.write("\n")
+                return report
+            with patch.object(cli, "build_economic_report", changed):
+                code, output, error = command(directory, "--economic-report")
+            self.assertEqual((code, output), (2, ""))
+            self.assertIn("state changed during reading", error)
+
     def test_invalid_prices_return_an_operator_error_without_starting_state(self):
         with TemporaryDirectory() as directory:
             root = Path(directory) / "not-started"

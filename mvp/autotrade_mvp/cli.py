@@ -47,6 +47,8 @@ def _legacy_status(state_dir: str) -> dict:
     checkpoint_path = root / "checkpoint.json"
     evidence_path = root / "learning-evidence.jsonl"
     if not checkpoint_path.exists():
+        if evidence_path.exists() or (root / "journal.sqlite3").exists():
+            return {"status": "needs_recovery", "replay_verified": False}
         return {"status": "not_started"}
     try:
         checkpoint = strict_json_loads(checkpoint_path.read_text(encoding="utf-8"))
@@ -84,7 +86,18 @@ def get_economic_report(state_dir: str) -> dict:
         if canonical["economic_report"] is None:
             raise ValueError("simulation requires reconciliation before an economic report")
         return canonical["economic_report"]
-    return build_economic_report(state_dir).as_jsonable()
+    root = Path(state_dir)
+    paths = (root / "checkpoint.json", root / "learning-evidence.jsonl")
+    before = tuple(path.read_bytes() for path in paths)
+    strict_json_loads(before[0].decode("utf-8"))
+    for line in before[1].decode("utf-8").splitlines():
+        strict_json_loads(line)
+    if not verify_replay(root):
+        raise ValueError("legacy economic evidence does not match its checkpoint")
+    report = build_economic_report(root).as_jsonable()
+    if tuple(path.read_bytes() for path in paths) != before:
+        raise SimulationStateChanging("legacy state changed during economic read")
+    return report
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -138,10 +151,10 @@ def _execute(args) -> int:
         canonical = _read_canonical_state(args.state_dir)
         status = canonical["status"] if canonical else _legacy_status(args.state_dir)
         economic_report = canonical["economic_report"] if canonical else None
-        if canonical is None and status.get("status") in {"running", "needs_recovery"}:
+        if canonical is None and status.get("status") == "running":
             try:
-                economic_report = build_economic_report(args.state_dir).as_jsonable()
-            except ValueError:
+                economic_report = get_economic_report(args.state_dir)
+            except (OSError, ValueError):
                 economic_report = None
         print(format_accessible_status(status, economic_report))
         return 2 if status["status"] in {"corrupt", "busy"} else 0

@@ -329,11 +329,12 @@ class StoreIdentityTests(unittest.TestCase):
             path = Path(directory) / "journal.sqlite"
             sqlite3.connect(path).close()
             original = observe_database_identity(path)
+            expected_canonical_path = original.canonical_path
             validated = require_exact_journal_store_identity(original)
             self.assertIsNot(validated, original)
             self.assertEqual(validated, original)
             vars(original)["canonical_path"] = str(path.with_name("other.sqlite"))
-            self.assertEqual(validated.canonical_path, original.canonical_path)
+            self.assertEqual(validated.canonical_path, expected_canonical_path)
 
 
 if __name__ == "__main__":

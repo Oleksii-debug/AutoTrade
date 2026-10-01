@@ -151,6 +151,42 @@ class JournalStore(_JournalStoreImpl):
         )
         return identity
 
+    def append_event(
+        self,
+        envelope: dict[str, Any],
+        *,
+        outbox_topic: str | None = None,
+    ):
+        """Append only to an ordinary, non-protected event namespace."""
+
+        return _JournalStoreImpl._append_event(
+            self,
+            envelope,
+            outbox_topic=outbox_topic,
+            namespace_version=None,
+            writer_authority_id=None,
+        )
+
+    def _append_event(self, *args, **kwargs):
+        raise RuntimeError(
+            "internal journal append path is not a public writer authority"
+        )
+
+    def _append_protected_event(self, *args, **kwargs):
+        raise RuntimeError(
+            "protected event writes require selected ProtectedJournalWriter"
+        )
+
+    def _register_protected_event_namespace(self, *args, **kwargs):
+        raise RuntimeError(
+            "protected namespace registration requires product selection"
+        )
+
+    def _load_protected_events(self, *args, **kwargs):
+        raise RuntimeError(
+            "protected event recovery requires selected ProtectedJournalWriter"
+        )
+
     def select_protected_writer(
         self,
         *,

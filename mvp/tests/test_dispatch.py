@@ -1,3 +1,4 @@
+from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -22,6 +23,86 @@ class SimulatedProcessDeath(BaseException):
 
 
 class DispatchTests(unittest.TestCase):
+    def test_submission_response_binding_is_sealed_against_subclass_bypass(self):
+        with self.assertRaisesRegex(TypeError, "SubmissionResponseBinding is sealed"):
+            class ForgedSubmissionResponseBinding(SubmissionResponseBinding):
+                def __post_init__(self):
+                    pass
+
+    def test_dispatcher_scope_fields_are_lifetime_bound(self):
+        mutations = (
+            ("environment", "LIVE"),
+            ("account_id", "other-account"),
+            ("scope_key", "forged-scope"),
+            ("owner_token", "forged-owner"),
+            ("owner_epoch", 2),
+            ("prepared_lease_seconds", 61),
+        )
+        for field, replacement in mutations:
+            with self.subTest(field=field), TemporaryDirectory() as directory:
+                store = self.store(directory)
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment="SIMULATION",
+                    account_id="acct",
+                    owner_token="owner",
+                    owner_epoch=1,
+                    prepared_lease_seconds=60,
+                )
+                setattr(dispatcher, field, replacement)
+                with self.assertRaisesRegex(
+                    PermissionError, "submission dispatcher scope changed"
+                ):
+                    dispatcher._events("never-written")
+
+    def test_dispatcher_cannot_rebind_issued_journal_authority(self):
+        with TemporaryDirectory() as directory:
+            selected = JournalStore(f"{directory}/selected.sqlite3")
+            replacement = JournalStore(f"{directory}/replacement.sqlite3")
+            dispatcher = GuardedDispatcher(
+                selected,
+                environment="SIMULATION",
+                account_id="acct",
+            )
+
+            # Restamp every caller-visible journal selector consistently. The
+            # dispatcher must still remain bound to its originally issued
+            # physical JournalStore generation.
+            dispatcher.store = replacement
+            dispatcher._journal_store_path = Path(
+                replacement.store_identity.canonical_path
+            )
+            dispatcher._journal_store_identity = replacement.store_identity
+
+            with self.assertRaisesRegex(
+                PermissionError, "submission journal authority changed"
+            ):
+                dispatcher._events("never-written")
+
+    def test_dispatcher_rejects_polymorphic_journal_path_before_callback(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+            )
+            touched = []
+
+            class HostilePath:
+                def __fspath__(self):
+                    touched.append("fspath")
+                    return str(Path(directory) / "journal.sqlite3")
+
+                def __str__(self):
+                    touched.append("str")
+                    return str(Path(directory) / "journal.sqlite3")
+
+            store.path = HostilePath()
+            with self.assertRaisesRegex(TypeError, "path must be exact platform Path"):
+                dispatcher._events("never-written")
+            self.assertEqual(touched, [])
+
     def durable_ready(self, recovery, store, *, reconciliation_id):
         owner = recovery.owner
         self.assertIsNotNone(owner)
@@ -161,7 +242,7 @@ class DispatchTests(unittest.TestCase):
             def transport(client_id, request, final_guard):
                 final_guard()
                 sends.append(client_id)
-                return {"ok": True}
+                return ExactJsonTransportResponse(b'{"ok":true}')
 
             paper = GuardedDispatcher(
                 store, environment="PAPER", account_id="acct", owner_token="paper-owner"
@@ -743,6 +824,9 @@ class DispatchTests(unittest.TestCase):
                 "sha256:" + __import__("hashlib").sha256(raw).hexdigest(),
             )
             self.assertEqual(binding.payload["provider_order_id"], "p-1")
+            self.assertEqual(binding.terminal_state, "SENT")
+            self.assertIsNone(binding.ambiguity_reason)
+            self.assertIsNone(binding.retry_disposition)
             self.assertEqual(binding.submission_scope["endpoint"], "/orders")
 
             reopened = JournalStore(f"{directory}/journal.sqlite3")
@@ -757,6 +841,72 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(
                 after_restart.submission_scope_hash,
                 binding.submission_scope_hash,
+            )
+            self.assertEqual(after_restart.terminal_state, "SENT")
+
+    def test_response_bearing_unknown_preserves_reconcile_first_after_restart(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            dispatcher = GuardedDispatcher(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                owner_token="owner",
+            )
+            raw = b'{"status":"accepted-but-ambiguous"}'
+
+            outcome = dispatcher.dispatch(
+                attempt_id="ambiguous-response-a1",
+                intent_id="ambiguous-i1",
+                intent_hash="ambiguous-h1",
+                provider="provider",
+                request={"side": "BUY"},
+                now="2026-09-24T18:00:00Z",
+                authority_check=lambda _hash, _now: (True, "allowed"),
+                transport_send=lambda _cid, _request, guard: (
+                    guard(),
+                    ExactJsonTransportResponse(
+                        raw,
+                        http_status=202,
+                        requires_reconciliation=True,
+                        ambiguity_reason="provider_acceptance_ambiguous",
+                    ),
+                )[1],
+                submission_scope={"endpoint": "/orders"},
+            )
+            self.assertEqual(outcome.status, "UNKNOWN")
+            self.assertEqual(outcome.reason, "provider_acceptance_ambiguous")
+
+            binding = load_submission_response_binding(
+                store,
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="ambiguous-response-a1",
+            )
+            self.assertEqual(binding.response_bytes, raw)
+            self.assertEqual(binding.http_status, 202)
+            self.assertEqual(binding.terminal_state, "UNKNOWN")
+            self.assertEqual(
+                binding.ambiguity_reason,
+                "provider_acceptance_ambiguous",
+            )
+            self.assertEqual(binding.retry_disposition, "RECONCILE_FIRST")
+
+            reopened = JournalStore(f"{directory}/journal.sqlite3")
+            after_restart = load_submission_response_binding(
+                reopened,
+                environment="SIMULATION",
+                account_id="acct",
+                attempt_id="ambiguous-response-a1",
+            )
+            self.assertEqual(after_restart.terminal_state, "UNKNOWN")
+            self.assertEqual(
+                after_restart.ambiguity_reason,
+                "provider_acceptance_ambiguous",
+            )
+            self.assertEqual(
+                after_restart.retry_disposition,
+                "RECONCILE_FIRST",
             )
 
     def test_mapping_response_cannot_mint_exact_durable_response_provenance(self):
@@ -1119,7 +1269,7 @@ class DispatchTests(unittest.TestCase):
                     ["SubmissionPrepared", "SubmissionBlocked"],
                 )
 
-    def test_owner_transfer_during_provider_wait_blocks_stale_sender(self):
+    def test_legacy_takeover_booleans_during_provider_wait_fail_before_wire(self):
         with TemporaryDirectory() as directory:
             store = self.store(directory)
             recovery = RecoveryController(
@@ -1136,14 +1286,16 @@ class DispatchTests(unittest.TestCase):
                 owner_epoch=owner.epoch,
             )
             outbound = 0
+            guard_reached = False
 
             def transport(_client_id, _request, final_guard):
-                nonlocal outbound
+                nonlocal outbound, guard_reached
                 recovery.transfer_owner(
                     new_owner_id="host-b",
                     old_sender_fenced=True,
                     reconciled=True,
                 )
+                guard_reached = True
                 final_guard()
                 outbound += 1
                 return {"provider_order_id": "must-not-happen"}
@@ -1160,8 +1312,11 @@ class DispatchTests(unittest.TestCase):
                 sender_check=recovery.validate_sender,
             )
             self.assertEqual(result.status, "BLOCKED")
-            self.assertEqual(result.reason, "sender_fence_rejected:PermissionError")
+            self.assertEqual(result.reason, "transport_failed_before_send")
+            self.assertFalse(guard_reached)
             self.assertEqual(outbound, 0)
+            self.assertEqual(recovery.owner, owner)
+            self.assertEqual(recovery.durable_owner_chain(), (owner,))
 
     def test_paper_send_succeeds_only_with_current_durable_sender(self):
         with TemporaryDirectory() as directory:
@@ -1185,7 +1340,7 @@ class DispatchTests(unittest.TestCase):
                 nonlocal outbound
                 final_guard()
                 outbound += 1
-                return {"provider_order_id": "p-1"}
+                return ExactJsonTransportResponse(b'{"provider_order_id":"p-1"}')
 
             result = dispatcher.dispatch(
                 attempt_id="paper-current-owner",
@@ -1347,6 +1502,89 @@ class DispatchTests(unittest.TestCase):
                 events[-1]["payload"]["reason"],
                 "provider_wrapper_swallowed_final_guard_failure",
             )
+
+
+    def test_paper_and_live_generic_post_barrier_response_is_unknown(self):
+        with TemporaryDirectory() as directory:
+            store = self.store(directory)
+            outbound = 0
+
+            def authority(_intent_hash, _now):
+                return True, "allowed"
+
+            def generic_transport(_client_id, _request, final_guard):
+                nonlocal outbound
+                final_guard()
+                outbound += 1
+                return {"provider_order_id": "unbound-python-object"}
+
+            for index, environment in enumerate(("PAPER", "LIVE"), start=1):
+                dispatcher = GuardedDispatcher(
+                    store,
+                    environment=environment,
+                    account_id="acct",
+                    owner_token=f"owner-{index}",
+                )
+                attempt_id = f"missing-exact-wire-{environment.lower()}"
+                result = dispatcher.dispatch(
+                    attempt_id=attempt_id,
+                    intent_id=f"intent-{index}",
+                    intent_hash=f"hash-{index}",
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now="2026-10-01T00:00:00Z",
+                    authority_check=authority,
+                    transport_send=generic_transport,
+                    sender_check=lambda _owner, _epoch: None,
+                )
+
+                self.assertEqual(result.status, "UNKNOWN")
+                self.assertEqual(
+                    result.reason,
+                    "provider_response_missing_exact_wire_evidence",
+                )
+                events = store.load_events(
+                    "submission_attempt",
+                    dispatcher._aggregate_id(attempt_id),
+                )
+                self.assertEqual(
+                    [event["event_type"] for event in events],
+                    [
+                        "SubmissionPrepared",
+                        "SubmissionSending",
+                        "SubmissionUnknown",
+                    ],
+                )
+                self.assertEqual(
+                    events[-1]["payload"]["reason"],
+                    "provider_response_missing_exact_wire_evidence",
+                )
+                self.assertEqual(
+                    events[-1]["payload"]["retry_disposition"],
+                    "RECONCILE_FIRST",
+                )
+
+                retry = dispatcher.dispatch(
+                    attempt_id=attempt_id,
+                    intent_id=f"intent-{index}",
+                    intent_hash=f"hash-{index}",
+                    provider="provider",
+                    request={"side": "BUY"},
+                    now="2026-10-01T00:00:01Z",
+                    authority_check=authority,
+                    transport_send=lambda *_args: (_ for _ in ()).throw(
+                        AssertionError("UNKNOWN submission must not resend")
+                    ),
+                    sender_check=lambda _owner, _epoch: None,
+                )
+                self.assertEqual(retry.status, "UNKNOWN")
+                self.assertEqual(
+                    retry.reason,
+                    "provider_response_missing_exact_wire_evidence",
+                )
+
+            self.assertEqual(outbound, 2)
+
 
 
 if __name__ == "__main__":

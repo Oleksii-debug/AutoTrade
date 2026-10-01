@@ -1,5 +1,5 @@
-from datetime import date, datetime, timezone
-from decimal import Decimal
+from datetime import date, datetime, timedelta, timezone, tzinfo
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, localcontext
 import unittest
 
 from mvp.autotrade_mvp.corporate_actions import (
@@ -14,6 +14,7 @@ from mvp.autotrade_mvp.corporate_actions import (
     record_unsettled_purchase,
     settle_cash,
 )
+from mvp.autotrade_mvp.exact_decimal import MAX_INTEGER_DIGITS
 from mvp.autotrade_mvp.instruments import InstrumentRegistry, InstrumentVersion
 
 
@@ -996,6 +997,254 @@ class CorporateSettlementTests(unittest.TestCase):
             ("split-before-rename", "symbol-change-after-split"),
         )
 
+
+
+
+class CorporateActionExactArithmeticTests(unittest.TestCase):
+    _PRECISIONS = (6, 10, 28, 80)
+    _ROUNDINGS = (ROUND_FLOOR, ROUND_CEILING, ROUND_HALF_EVEN)
+
+    def test_dividend_economics_are_context_invariant(self):
+        expected_entitlement = Decimal("12345678902469135780.2469135780123456789")
+        expected_unsettled = Decimal("12345678902469135780.24691357801234567891")
+        event = corporate_event(
+            event_id="exact-dividend",
+            kind="CASH_DIVIDEND",
+            effective_date=date(2026, 1, 2),
+            source_revision="r1",
+            payload={"per_share": "1.0000000001", "currency": "USD"},
+        )
+
+        for precision in self._PRECISIONS:
+            for rounding in self._ROUNDINGS:
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        book = bound_book(
+                            state(
+                                quantity="12345678901234567890.123456789",
+                                unsettled_cash="0.00000000000000000001",
+                            )
+                        )
+                        result = book.apply(event)
+                        self.assertEqual(result.economic_pnl, expected_entitlement)
+                        self.assertEqual(result.after.unsettled_cash, expected_unsettled)
+
+    def test_split_quantity_is_context_invariant(self):
+        expected = Decimal("18518518351851851835.1851851835")
+        event = corporate_event(
+            event_id="exact-split",
+            kind="SPLIT",
+            effective_date=date(2026, 1, 2),
+            source_revision="r1",
+            payload={"numerator": "3", "denominator": "2"},
+        )
+
+        for precision in self._PRECISIONS:
+            for rounding in self._ROUNDINGS:
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        book = bound_book(
+                            state(quantity="12345678901234567890.123456789")
+                        )
+                        result = book.apply(event)
+                        self.assertEqual(result.after.quantity, expected)
+                        self.assertEqual(result.after.total_basis, Decimal("1000"))
+
+    def test_nonterminating_split_fails_before_book_mutation(self):
+        book = bound_book(state(quantity="1"))
+        before = book.state
+        event = corporate_event(
+            event_id="nonterminating-split",
+            kind="SPLIT",
+            effective_date=date(2026, 1, 2),
+            source_revision="r1",
+            payload={"numerator": "1", "denominator": "3"},
+        )
+
+        with self.assertRaisesRegex(ValueError, "not an exact terminating decimal"):
+            book.apply(event)
+
+        self.assertEqual(book.state, before)
+        self.assertEqual(book.applied_event_ids, ())
+
+    def test_settlement_helpers_preserve_high_significance_economics(self):
+        initial = state(
+            quantity="0",
+            total_basis="0",
+            settled_cash="12345678901234567890.123456789",
+            unsettled_cash="0.00000000000000000009",
+        )
+        expected_settled = Decimal("12345678901234567890.12345678900000000001")
+        expected_unsettled = Decimal("0.00000000000000000008")
+
+        for precision in self._PRECISIONS:
+            for rounding in self._ROUNDINGS:
+                with self.subTest(precision=precision, rounding=rounding):
+                    with localcontext() as context:
+                        context.prec = precision
+                        context.rounding = rounding
+                        result = settle_cash(
+                            initial,
+                            Decimal("0.00000000000000000001"),
+                        )
+                        self.assertEqual(result.settled_cash, expected_settled)
+                        self.assertEqual(result.unsettled_cash, expected_unsettled)
+
+    def test_decimal_subclasses_are_rejected_at_state_boundary(self):
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                raise AssertionError("virtual Decimal method must not run")
+
+            def as_tuple(self):
+                raise AssertionError("virtual Decimal method must not run")
+
+        with self.assertRaisesRegex(TypeError, "exact built-in Decimal"):
+            EquityState.create(
+                symbol="AAA",
+                quantity=HostileDecimal("1"),
+                total_basis="1",
+                settled_cash="1",
+                currency="USD",
+            )
+
+
+
+
+class CorporateActionSemanticGraphAuthorityTests(unittest.TestCase):
+    def test_event_subclass_is_rejected_before_semantic_attribute_dispatch(self):
+        touched = []
+
+        class HostileEvent(CorporateEvent):
+            def __getattribute__(self, name):
+                if name not in {"__class__"}:
+                    touched.append(name)
+                    raise AssertionError("hostile event attribute dispatch")
+                return super().__getattribute__(name)
+
+        hostile = object.__new__(HostileEvent)
+        book = bound_book(state())
+        before_state = book.state
+        before_events = book.events
+
+        with self.assertRaisesRegex(TypeError, "exact CorporateEvent"):
+            book.apply(hostile)
+
+        self.assertEqual(touched, [])
+        self.assertEqual(book.state, before_state)
+        self.assertEqual(book.events, before_events)
+
+    def test_hostile_nested_timezone_is_rejected_without_callback(self):
+        touched = []
+
+        class HostileTz(tzinfo):
+            def utcoffset(self, dt):
+                touched.append("utcoffset")
+                raise AssertionError("hostile timezone callback")
+
+            def dst(self, dt):
+                touched.append("dst")
+                raise AssertionError("hostile timezone callback")
+
+            def fromutc(self, dt):
+                touched.append("fromutc")
+                raise AssertionError("hostile timezone callback")
+
+        hostile_time = datetime(2026, 1, 2, 12, tzinfo=HostileTz())
+        book = bound_book(state())
+        before_state = book.state
+        before_events = book.events
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "exact datetime with built-in timezone",
+        ):
+            corporate_event(
+                event_id="hostile-timezone",
+                kind="CASH_DIVIDEND",
+                effective_date=date(2026, 1, 2),
+                effective_at=hostile_time,
+                source_revision="r1",
+                payload={"per_share": "1", "currency": "USD"},
+            )
+
+        self.assertEqual(touched, [])
+        self.assertEqual(book.state, before_state)
+        self.assertEqual(book.events, before_events)
+
+    def test_builtin_fixed_offset_timezone_normalizes_deterministically(self):
+        fixed = timezone(timedelta(hours=2))
+        event = corporate_event(
+            event_id="builtin-timezone",
+            kind="CASH_DIVIDEND",
+            effective_date=date(2026, 1, 2),
+            effective_at=datetime(2026, 1, 2, 12, tzinfo=fixed),
+            source_revision="r1",
+            payload={"per_share": "1", "currency": "USD"},
+        )
+        self.assertEqual(event.effective_at.tzinfo, timezone.utc)
+        self.assertEqual(event.effective_at.hour, 10)
+
+
+
+class CorporateActionBoundedIngressTests(unittest.TestCase):
+    def test_at_limit_domain_decimal_is_admitted_exactly(self):
+        text = "9" * MAX_INTEGER_DIGITS
+        accepted = EquityState.create(
+            symbol="AAA",
+            quantity=text,
+            total_basis="0",
+            settled_cash="0",
+            currency="USD",
+        )
+        self.assertEqual(accepted.quantity, Decimal(text))
+
+    def test_one_over_domain_decimal_fails_without_state_change(self):
+        initial = state(quantity="0", unsettled_cash="1")
+        oversized = "9" * (MAX_INTEGER_DIGITS + 1)
+
+        with self.assertRaisesRegex(ValueError, "resource envelope"):
+            settle_cash(initial, oversized)
+
+        self.assertEqual(initial, state(quantity="0", unsettled_cash="1"))
+
+    def test_one_over_domain_integer_fails_without_state_change(self):
+        initial = state(quantity="0", unsettled_cash="1")
+        oversized = 10 ** MAX_INTEGER_DIGITS
+
+        with self.assertRaisesRegex(ValueError, "resource envelope"):
+            settle_cash(initial, oversized)
+
+        self.assertEqual(initial, state(quantity="0", unsettled_cash="1"))
+
+    def test_numeric_subclasses_fail_before_virtual_dispatch(self):
+        touched = []
+
+        class HostileNumericText(str):
+            def __len__(self):
+                touched.append("len")
+                raise AssertionError("numeric string subclass dispatched")
+
+        class HostileInt(int):
+            def bit_length(self):
+                touched.append("bit_length")
+                raise AssertionError("integer subclass dispatched")
+
+        for value in (HostileNumericText("1"), HostileInt(1)):
+            with self.subTest(kind=type(value).__name__):
+                with self.assertRaisesRegex(TypeError, "exact built-in Decimal"):
+                    EquityState.create(
+                        symbol="AAA",
+                        quantity=value,
+                        total_basis="0",
+                        settled_cash="0",
+                        currency="USD",
+                    )
+
+        self.assertEqual(touched, [])
 
 
 if __name__ == "__main__":

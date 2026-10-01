@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Callable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
-from contracts.bindings.python.common_scalars import is_valid_common_scalar
+from ._generated_common_scalars import is_valid_common_scalar
 
 from .host_actions import canonical_host_action
 from .host_api import (

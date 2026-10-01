@@ -63,8 +63,13 @@ from mvp.autotrade_mvp.provider_transport import (
     KrakenSpotHttpTransport,
     KrakenSpotSigner,
     WHITEBIT_ENDPOINT_POLICIES,
+    WhiteBitAuthenticatedReadSigner,
+    WhiteBitAuthenticatedReadTransport,
     WhiteBitDurableNonceAllocator,
     WhiteBitHttpTransport,
+    resolve_authenticated_read_route_authority,
+    _product_authenticated_read_transport_types,
+    _product_transport_types,
     _DurableProviderNonceAllocator,
 )
 from mvp.autotrade_mvp.whitebit import WhiteBitPreparedRequest
@@ -101,6 +106,7 @@ class FakeSecretResolver:
         account_id,
         provider,
         environment,
+        provider_environment=None,
         purpose,
     ):
         self.events.append("resolve")
@@ -280,6 +286,99 @@ def whitebit_prepared_request(
         },
         "capability_snapshot_id": capability_snapshot_id,
     }
+
+
+WHITEBIT_READ_NOW = datetime(2026, 9, 25, 12, 30, tzinfo=timezone.utc)
+WHITEBIT_READ_SNAPSHOT_ID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+_WHITEBIT_READ_ARTIFACT_IDS = {
+    "DOCUMENTED": "71111111-1111-4111-8111-111111111111",
+    "API": "72222222-2222-4222-8222-222222222222",
+    "ACCOUNT": "73333333-3333-4333-8333-333333333333",
+    "INSTRUMENT": "74444444-4444-4444-8444-444444444444",
+}
+
+
+def whitebit_read_handle(
+    *,
+    account_id="acct-wb",
+    handle_id="cred-whitebit-read",
+    generation=1,
+):
+    return PersistentCredentialHandle(
+        handle_id=handle_id,
+        account_id=account_id,
+        provider="WHITEBIT",
+        environment="LIVE",
+        provider_environment="LIVE",
+        purpose="READ",
+        generation=generation,
+    )
+
+
+def verified_whitebit_read_capability(
+    *,
+    snapshot_id=WHITEBIT_READ_SNAPSHOT_ID,
+    snapshot_observed_at=WHITEBIT_READ_NOW,
+):
+    observed = snapshot_observed_at - timedelta(minutes=1)
+    expires = snapshot_observed_at + timedelta(minutes=10)
+    claims = tuple(
+        CapabilityClaim(
+            source=source,
+            provider_id="WHITEBIT",
+            account_id="acct-wb",
+            entity_id="entity-whitebit-spot",
+            environment="LIVE",
+            provider_environment="LIVE",
+            instrument_version="BTC_USDT@1",
+            observed_at=observed,
+            expires_at=expires,
+            supported_order_types=frozenset({"LIMIT"}),
+            time_in_force=frozenset({"GTC"}),
+            permission_scopes=frozenset({"TRADE.READ"}),
+            position_mode="NET",
+            native_protection=frozenset(),
+            rate_limit_policy_id="whitebit-live-v1",
+            data_entitlements=frozenset({"TRADES"}),
+            evidence_ref={
+                "artifact_id": _WHITEBIT_READ_ARTIFACT_IDS[source],
+                "sha256": "sha256:" + "e" * 64,
+                "observed_at": observed.isoformat().replace("+00:00", "Z"),
+            },
+        )
+        for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
+    )
+    return derive_capability_snapshot(
+        snapshot_id=snapshot_id,
+        claims=claims,
+        observed_at=snapshot_observed_at,
+        evidence_verifier=lambda _claim: EvidenceVerification(valid=True),
+    )
+
+
+def whitebit_authenticated_read_binding(
+    *,
+    capability=None,
+    query=None,
+):
+    selected = capability or verified_whitebit_read_capability()
+    return prepare_authenticated_read_query(
+        capability=selected,
+        surface=Surface.ACTIVITIES,
+        endpoint="/api/v4/trade-account/executed-history",
+        query={
+            "market": "BTC_USDT",
+            "startDate": "1700000000",
+            "endDate": "1700000100",
+            "offset": "0",
+            "limit": "100",
+        }
+        if query is None
+        else query,
+        at=WHITEBIT_READ_NOW,
+        permission_scope="TRADE.READ",
+        provider_environment="LIVE",
+    )
 
 
 def kraken_trade_handle(
@@ -1488,6 +1587,340 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
             self.assertEqual(response.http_status, 400)
             self.assertFalse(response.requires_reconciliation)
             self.assertIsNone(response.ambiguity_reason)
+
+
+class WhiteBitAuthenticatedReadTransportTests(unittest.TestCase):
+    def make_transport(
+        self,
+        *,
+        events=None,
+        wire=None,
+        capability=None,
+        on_resolve=None,
+        clock_utc=None,
+    ):
+        event_log = [] if events is None else events
+        current = capability or verified_whitebit_read_capability()
+        registry = RecordingCapabilityRegistry(event_log)
+        registry.add(current)
+        journal_directory = TemporaryDirectory()
+        self.addCleanup(journal_directory.cleanup)
+        allocator = WhiteBitDurableNonceAllocator(
+            journal=JournalStore(
+                f"{journal_directory.name}/whitebit-read-journal.sqlite3"
+            ),
+            account_id="acct-wb",
+            environment="LIVE",
+            clock_millis=lambda: (
+                event_log.append("nonce") or 1_800_000_000_000
+            ),
+            clock_utc=clock_utc
+            or (lambda: WHITEBIT_READ_NOW + timedelta(seconds=1)),
+        )
+        resolver = FakeSecretResolver(
+            event_log,
+            on_resolve=on_resolve,
+        )
+        selected_wire = wire or RecordingWire(
+            event_log,
+            response=b'{"BTC_USDT":[]}',
+            http_status=200,
+        )
+        transport = WhiteBitAuthenticatedReadTransport(
+            policy=WHITEBIT_ENDPOINT_POLICIES["LIVE"],
+            account_id="acct-wb",
+            capability_snapshot_id=current.snapshot_id,
+            capability_registry=registry,
+            secret_resolver=resolver,
+            credential_handle=whitebit_read_handle(),
+            session_token="session-whitebit-read",
+            origin="autotrade://reconciliation",
+            execution_identity="reconciler-whitebit",
+            nonce_allocator=allocator,
+            clock_utc=clock_utc
+            or (lambda: WHITEBIT_READ_NOW + timedelta(seconds=1)),
+            quota_gate=lambda *_args: event_log.append("quota"),
+            wire_client=selected_wire,
+        )
+        return transport, registry, resolver, selected_wire, allocator
+
+    def test_signer_uses_exact_post_body_and_shared_whitebit_auth_contract(self):
+        binding = whitebit_authenticated_read_binding()
+        request = WhiteBitAuthenticatedReadSigner.sign(
+            policy=WHITEBIT_ENDPOINT_POLICIES["LIVE"],
+            query_binding=binding,
+            credential_plaintext=json.dumps(
+                {
+                    "api_key": "api-key-SECRET",
+                    "api_secret": "signing-SECRET",
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            nonce=1_800_000_000_123,
+        )
+        body = json.loads(request.body.decode("utf-8"))
+        self.assertEqual(request.method, "POST")
+        self.assertEqual(
+            request.url,
+            "https://whitebit.com/api/v4/trade-account/executed-history",
+        )
+        self.assertEqual(
+            set(body),
+            {
+                "market",
+                "startDate",
+                "endDate",
+                "offset",
+                "limit",
+                "request",
+                "nonce",
+            },
+        )
+        self.assertEqual(
+            body["request"],
+            "/api/v4/trade-account/executed-history",
+        )
+        self.assertEqual(body["nonce"], 1_800_000_000_123)
+        self.assertIs(type(body["limit"]), int)
+        self.assertEqual(body["limit"], 100)
+        self.assertIs(type(body["offset"]), int)
+        self.assertEqual(body["offset"], 0)
+        self.assertNotIn("nonceWindow", body)
+        self.assertEqual(
+            request.headers["X-TXC-PAYLOAD"],
+            __import__("base64").b64encode(request.body).decode("ascii"),
+        )
+        self.assertIn("X-TXC-SIGNATURE", request.headers)
+
+    def test_route_authority_binds_exact_entitlement_status_and_network_policy(self):
+        route = resolve_authenticated_read_route_authority(
+            whitebit_authenticated_read_binding()
+        )
+        self.assertEqual(route.provider_id, "WHITEBIT")
+        self.assertEqual(route.environment, "LIVE")
+        self.assertEqual(route.provider_environment, "LIVE")
+        self.assertEqual(route.surface, Surface.ACTIVITIES)
+        self.assertEqual(route.permission_scope, "TRADE.READ")
+        self.assertEqual(route.data_entitlement, "TRADES")
+        self.assertEqual(route.success_statuses, (200,))
+        self.assertTrue(route.network_policy_identity.startswith("sha256:"))
+        self.assertTrue(route.route_identity.startswith("sha256:"))
+
+    def test_read_transport_uses_current_capability_shared_nonce_and_one_post(self):
+        events = []
+        transport, _registry, resolver, wire, allocator = self.make_transport(
+            events=events
+        )
+        observation = transport(whitebit_authenticated_read_binding())
+        self.assertEqual(
+            events,
+            [
+                "quota",
+                "capability",
+                "resolve",
+                "nonce",
+                "capability",
+                "wire",
+            ],
+        )
+        self.assertEqual(len(resolver.calls), 1)
+        self.assertEqual(resolver.calls[0]["purpose"], "READ")
+        self.assertEqual(len(wire.requests), 1)
+        request = wire.requests[0]
+        self.assertEqual(request.method, "POST")
+        body = json.loads(request.body.decode("utf-8"))
+        self.assertEqual(body["nonce"], 1_800_000_000_000)
+        self.assertEqual(body["limit"], 100)
+        self.assertEqual(observation.http_status, 200)
+        self.assertEqual(observation.payload, {"BTC_USDT": ()})
+        self.assertEqual(
+            allocator.aggregate_id_for_provider_api_key("api-key-SECRET"),
+            allocator.for_provider_api_key("api-key-SECRET").aggregate_id,
+        )
+
+    def test_query_limit_101_fails_before_quota_secret_nonce_or_wire(self):
+        events = []
+        transport, _registry, resolver, wire, _allocator = self.make_transport(
+            events=events
+        )
+        binding = whitebit_authenticated_read_binding(
+            query={
+                "market": "BTC_USDT",
+                "startDate": "1700000000",
+                "endDate": "1700000100",
+                "offset": "0",
+                "limit": "101",
+            }
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "limit.*admitted integer range",
+        ):
+            transport(binding)
+        self.assertEqual(events, [])
+        self.assertEqual(resolver.calls, [])
+        self.assertEqual(wire.requests, [])
+
+    def test_unbounded_or_unsupported_query_shape_fails_closed(self):
+        transport, _registry, _resolver, _wire, _allocator = self.make_transport()
+        cases = (
+            {
+                "market": "BTC_USDT",
+                "startDate": "1700000000",
+                "endDate": "1700000100",
+                "offset": "0",
+            },
+            {
+                "market": "BTC_USDT",
+                "startDate": "1700000000",
+                "endDate": str(1700000000 + 31 * 24 * 60 * 60 + 1),
+                "offset": "0",
+                "limit": "100",
+            },
+            {
+                "market": "BTC_USDT",
+                "startDate": "1700000000",
+                "endDate": "1700000100",
+                "offset": "0",
+                "limit": "100",
+                "nonce": "123",
+            },
+        )
+        for query in cases:
+            with self.subTest(query=query), self.assertRaises(
+                ProviderTransportScopeError
+            ):
+                transport(whitebit_authenticated_read_binding(query=query))
+
+    def test_non_200_definitive_response_is_not_retried_or_observed_as_success(self):
+        events = []
+        wire = RecordingWire(
+            events,
+            response=b'{"message":"temporary unavailable"}',
+            http_status=503,
+        )
+        transport, _registry, _resolver, selected_wire, _allocator = (
+            self.make_transport(events=events, wire=wire)
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportError,
+            "unexpected HTTP status 503",
+        ):
+            transport(whitebit_authenticated_read_binding())
+        self.assertEqual(len(selected_wire.requests), 1)
+        self.assertEqual(events.count("wire"), 1)
+        self.assertEqual(events.count("nonce"), 1)
+
+    def test_capability_supersession_after_secret_resolution_blocks_wire(self):
+        events = []
+        original = verified_whitebit_read_capability()
+        registry_holder = {}
+
+        def supersede():
+            registry_holder["registry"].add(
+                verified_whitebit_read_capability(
+                    snapshot_id="ffffffff-ffff-4fff-8fff-ffffffffffff",
+                    snapshot_observed_at=WHITEBIT_READ_NOW
+                    + timedelta(milliseconds=500),
+                )
+            )
+
+        current_clock = lambda: WHITEBIT_READ_NOW + timedelta(seconds=1)
+        registry = RecordingCapabilityRegistry(events)
+        registry.add(original)
+        registry_holder["registry"] = registry
+        journal_directory = TemporaryDirectory()
+        self.addCleanup(journal_directory.cleanup)
+        allocator = WhiteBitDurableNonceAllocator(
+            journal=JournalStore(
+                f"{journal_directory.name}/whitebit-supersede.sqlite3"
+            ),
+            account_id="acct-wb",
+            environment="LIVE",
+            clock_millis=lambda: events.append("nonce") or 1_800_000_000_000,
+            clock_utc=current_clock,
+        )
+        resolver = FakeSecretResolver(events, on_resolve=supersede)
+        wire = RecordingWire(events, response=b'{"BTC_USDT":[]}')
+        transport = WhiteBitAuthenticatedReadTransport(
+            policy=WHITEBIT_ENDPOINT_POLICIES["LIVE"],
+            account_id="acct-wb",
+            capability_snapshot_id=original.snapshot_id,
+            capability_registry=registry,
+            secret_resolver=resolver,
+            credential_handle=whitebit_read_handle(),
+            session_token="session-whitebit-read",
+            origin="autotrade://reconciliation",
+            execution_identity="reconciler-whitebit",
+            nonce_allocator=allocator,
+            clock_utc=current_clock,
+            quota_gate=lambda *_args: events.append("quota"),
+            wire_client=wire,
+        )
+        with self.assertRaisesRegex(
+            ProviderTransportScopeError,
+            "no longer valid",
+        ):
+            transport(
+                whitebit_authenticated_read_binding(capability=original)
+            )
+        self.assertEqual(wire.requests, [])
+        self.assertEqual(
+            events,
+            ["quota", "capability", "resolve", "nonce", "capability"],
+        )
+
+    def test_constructor_requires_read_handle_and_live_quota_gate(self):
+        events = []
+        with TemporaryDirectory() as directory:
+            allocator = WhiteBitDurableNonceAllocator(
+                journal=JournalStore(f"{directory}/journal.sqlite3"),
+                account_id="acct-wb",
+                environment="LIVE",
+                clock_millis=lambda: 1_800_000_000_000,
+                clock_utc=lambda: WHITEBIT_READ_NOW,
+            )
+            registry = CapabilityRegistry()
+            registry.add(verified_whitebit_read_capability())
+            common = {
+                "policy": WHITEBIT_ENDPOINT_POLICIES["LIVE"],
+                "account_id": "acct-wb",
+                "capability_snapshot_id": WHITEBIT_READ_SNAPSHOT_ID,
+                "capability_registry": registry,
+                "secret_resolver": FakeSecretResolver(events),
+                "session_token": "session-whitebit-read",
+                "origin": "autotrade://reconciliation",
+                "execution_identity": "reconciler-whitebit",
+                "nonce_allocator": allocator,
+                "clock_utc": lambda: WHITEBIT_READ_NOW,
+                "wire_client": RecordingWire(events),
+            }
+            with self.assertRaisesRegex(
+                ProviderTransportScopeError,
+                "READ credential",
+            ):
+                WhiteBitAuthenticatedReadTransport(
+                    credential_handle=whitebit_trade_handle(),
+                    quota_gate=lambda *_args: None,
+                    **common,
+                )
+            with self.assertRaisesRegex(TypeError, "quota_gate must be callable"):
+                WhiteBitAuthenticatedReadTransport(
+                    credential_handle=whitebit_read_handle(),
+                    quota_gate=None,
+                    **common,
+                )
+
+    def test_product_registries_include_whitebit_authenticated_read_transport(self):
+        self.assertIn(
+            WhiteBitAuthenticatedReadTransport,
+            _product_transport_types(),
+        )
+        self.assertIn(
+            WhiteBitAuthenticatedReadTransport,
+            _product_authenticated_read_transport_types(),
+        )
 
 
 class KrakenSpotProviderTransportTests(unittest.TestCase):
@@ -4119,6 +4552,19 @@ class KrakenFuturesSigningPrimitiveTests(unittest.TestCase):
         object.__setattr__(policy, "absolute_url", lambda endpoint: "https://attacker.test/order")
         request = self.sign(policy=policy)
         self.assertTrue(request.url.startswith("https://futures.kraken.com/derivatives/api/v3/sendorder?"))
+
+    def test_mutated_canonical_policy_cannot_retarget_signer(self):
+        policy = KRAKEN_FUTURES_ENDPOINT_POLICIES["LIVE"]
+        original_base_url = policy.base_url
+        object.__setattr__(policy, "base_url", "https://attacker.test")
+        try:
+            with self.assertRaisesRegex(
+                ProviderTransportScopeError,
+                "canonical endpoint policy changed",
+            ):
+                self.sign(policy=policy)
+        finally:
+            object.__setattr__(policy, "base_url", original_base_url)
 
     def test_unbounded_size_is_rejected_before_provider_decimal_construction(self):
         body = {"orderType": "mkt", "symbol": "PF_XBTUSD", "side": "buy",

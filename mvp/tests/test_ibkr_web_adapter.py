@@ -1,9 +1,10 @@
-from functools import partial
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
 import unittest
 from uuid import uuid4
+
+import mvp.autotrade_mvp.ibkr_web as ibkr_web
 
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
@@ -19,11 +20,9 @@ from mvp.autotrade_mvp.ibkr_web import (
     IbkrAbsenceEvidence,
     IbkrBrokerageSessionStatus,
     IbkrContractIdentity,
-    IbkrExecutionEvidence,
     IbkrReplyRequest,
     IbkrWebAdapterError,
     IbkrWebOrderIntent,
-    execution_to_reconciliation_fill,
     parse_cancel_response,
     parse_order_submission_response,
     parse_web_api_trades,
@@ -105,14 +104,11 @@ def ibkr_trade_observation(payload, *, account_id="U1234567"):
     )
 
 
-# Bind only the non-provider-read fixture helper.
-execution_to_reconciliation_fill = partial(
-    execution_to_reconciliation_fill,
-    environment="PAPER",
-)
-
-
 class IbkrWebAdapterTests(unittest.TestCase):
+    def test_legacy_side_less_execution_fill_seam_is_not_exposed(self):
+        self.assertFalse(hasattr(ibkr_web, "IbkrExecutionEvidence"))
+        self.assertFalse(hasattr(ibkr_web, "execution_to_reconciliation_fill"))
+
     def test_trade_session_requires_all_ready_flags_and_no_competitor(self):
         self.assertTrue(ready_session().trade_ready)
         for override in (
@@ -315,30 +311,6 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 at=NOW,
                 maximum_session_age_seconds=30,
             )
-
-    def test_execution_identity_uses_exec_id_and_perm_id(self):
-        execution = IbkrExecutionEvidence.create(
-            execution_id="0001.123.01",
-            permanent_order_id=778899,
-            account_id="U1234567",
-            quantity="0.5",
-            price="220.10",
-        )
-        self.assertEqual(execution.execution_id, "0001.123.01")
-        self.assertEqual(execution.permanent_order_id, "778899")
-        self.assertEqual(execution.quantity, Decimal("0.5"))
-
-    def test_execution_permanent_order_id_must_be_positive_integer(self):
-        for invalid in (None, True, 0, -1, "778899"):
-            with self.subTest(invalid=invalid):
-                with self.assertRaises(IbkrWebAdapterError):
-                    IbkrExecutionEvidence.create(
-                        execution_id="0001.123.01",
-                        permanent_order_id=invalid,
-                        account_id="U1234567",
-                        quantity="0.5",
-                        price="220.10",
-                    )
 
     def test_incomplete_execution_surfaces_do_not_prove_absence(self):
         evidence = IbkrAbsenceEvidence(
@@ -711,35 +683,6 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 ),
             )
 
-    def test_unique_execution_maps_to_canonical_reconciliation_fill(self):
-        execution = IbkrExecutionEvidence.create(
-            execution_id="0001.123.01",
-            permanent_order_id=778899,
-            account_id="U1234567",
-            quantity="0.5",
-            price="220.10",
-        )
-        fill = execution_to_reconciliation_fill(
-            execution,
-            client_order_id="at-ibkr-1",
-            expected_account_id="U1234567",
-            instrument="AAPL-CONID-265598:v1",
-            fee_amount="-0.35",
-            fee_currency="USD",
-            trade_time="2026-09-24T20:00:01Z",
-        )
-        self.assertEqual(fill.provider_id, "IBKR")
-        self.assertEqual(fill.account_id, "U1234567")
-        self.assertEqual(fill.environment, "PAPER")
-        self.assertEqual(fill.provider_execution_id, "0001.123.01")
-        self.assertEqual(fill.client_order_id, "at-ibkr-1")
-        self.assertEqual(fill.quantity, Decimal("0.5"))
-        self.assertEqual(fill.price, Decimal("220.10"))
-        self.assertEqual(fill.fee_amount, Decimal("-0.35"))
-        self.assertEqual(fill.fee_currency, "USD")
-
-
-
     def test_web_api_trades_use_execution_identity_coid_and_explicit_fee_currency(self):
         rows = [
             {
@@ -754,8 +697,9 @@ class IbkrWebAdapterTests(unittest.TestCase):
                 "trade_time": "2026-09-24T20:00:01Z",
             }
         ]
+        observation = ibkr_trade_observation([rows[0], dict(rows[0])])
         fills = parse_web_api_trades(
-            ibkr_trade_observation([rows[0], dict(rows[0])]),
+            observation,
             instrument_versions_by_conid={265598: "AAPL-CONID-265598:v1"},
             fee_currency_by_execution_id={"0001.123.01": "USD"},
         )
@@ -768,6 +712,7 @@ class IbkrWebAdapterTests(unittest.TestCase):
         self.assertEqual(fills[0].side, "BUY")
         self.assertEqual(fills[0].quantity, Decimal("0.5"))
         self.assertEqual(fills[0].fee_amount, Decimal("-0.35"))
+        self.assertEqual(fills[0].evidence_refs, (observation.evidence_ref,))
 
     def test_web_api_trade_rejects_cross_account_unknown_conid_and_missing_fee_currency(self):
         row = {
@@ -873,45 +818,6 @@ class IbkrWebAdapterTests(unittest.TestCase):
             fee_currency_by_execution_id={"exec-side-1": "USD"},
         )
         self.assertEqual(fills[0].side, "BUY")
-
-    def test_reconciliation_fill_rejects_noncanonical_environment(self):
-        execution = IbkrExecutionEvidence.create(
-            execution_id="0001.998.01",
-            permanent_order_id=778898,
-            account_id="U1234567",
-            quantity="1",
-            price="100",
-        )
-        with self.assertRaisesRegex(ValueError, "environment"):
-            execution_to_reconciliation_fill(
-                execution,
-                environment="UNKNOWN_ENV",
-                client_order_id="at-ibkr-env",
-                expected_account_id="U1234567",
-                instrument="AAPL-CONID-265598:v1",
-                fee_amount="0",
-                fee_currency="USD",
-                trade_time="2026-09-24T20:00:01Z",
-            )
-
-    def test_execution_cannot_cross_account_boundary_during_reconciliation(self):
-        execution = IbkrExecutionEvidence.create(
-            execution_id="0001.999.01",
-            permanent_order_id=778899,
-            account_id="U1234567",
-            quantity="1",
-            price="100",
-        )
-        with self.assertRaisesRegex(IbkrWebAdapterError, "account"):
-            execution_to_reconciliation_fill(
-                execution,
-                client_order_id="at-ibkr-account",
-                expected_account_id="OTHER",
-                instrument="AAPL-CONID-265598:v1",
-                fee_amount="0",
-                fee_currency="USD",
-                trade_time="2026-09-24T20:00:01Z",
-            )
 
     def test_regulated_instrument_requires_manual_indicator_evidence(self):
         with self.assertRaisesRegex(IbkrWebAdapterError, "manual_indicator is required"):

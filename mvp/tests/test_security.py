@@ -379,6 +379,58 @@ class SecurityBoundaryTests(unittest.TestCase):
         )
         self.assertEqual(resolved, "rotated-secret")
 
+    def test_bybit_provider_environment_is_required_and_cross_domain_denied(self):
+        with self.assertRaisesRegex(PermissionError, "explicit provider_environment"):
+            self.boundary.register_secret(
+                self.owner.token,
+                origin=self.owner.origin,
+                owner_identity="windows-user-1",
+                account_id="paper-bybit",
+                provider="BYBIT",
+                environment="PAPER",
+                purpose="TRADE",
+                secret_value="bybit-secret",
+            )
+
+        handle = self.boundary.register_secret(
+            self.owner.token,
+            origin=self.owner.origin,
+            owner_identity="windows-user-1",
+            account_id="paper-bybit",
+            provider="BYBIT",
+            environment="PAPER",
+            provider_environment="TESTNET",
+            purpose="TRADE",
+            secret_value="bybit-secret",
+        )
+        self.assertEqual(handle.provider_environment, "TESTNET")
+        with self.assertRaisesRegex(PermissionError, "scope mismatch"):
+            self.boundary.resolve_for_execution(
+                self.owner.token,
+                origin=self.owner.origin,
+                handle=handle,
+                execution_identity="windows-user-1",
+                account_id="paper-bybit",
+                provider="BYBIT",
+                environment="PAPER",
+                provider_environment="DEMO",
+                purpose="TRADE",
+            )
+        self.assertEqual(
+            self.boundary.resolve_for_execution(
+                self.owner.token,
+                origin=self.owner.origin,
+                handle=handle,
+                execution_identity="windows-user-1",
+                account_id="paper-bybit",
+                provider="BYBIT",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                purpose="TRADE",
+            ),
+            "bybit-secret",
+        )
+
     def test_withdrawal_credentials_are_not_supported(self):
         with self.assertRaises(PermissionError):
             self.boundary.register_secret(

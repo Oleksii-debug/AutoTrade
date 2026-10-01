@@ -19,6 +19,8 @@ import tempfile
 from typing import Protocol
 from uuid import uuid4
 
+from .provider_domain import ProviderDomainError, normalize_provider_environment
+
 
 class SecretVaultError(ValueError):
     pass
@@ -46,6 +48,7 @@ def _scope_entropy(
     account_id: str,
     provider: str,
     environment: str,
+    provider_environment: str,
     purpose: str,
     generation: int,
 ) -> bytes:
@@ -55,6 +58,7 @@ def _scope_entropy(
         "account_id": account_id,
         "provider": provider,
         "environment": environment,
+        "provider_environment": provider_environment,
         "purpose": purpose,
         "generation": generation,
     }
@@ -203,6 +207,7 @@ class PersistentCredentialHandle:
     environment: str
     purpose: str
     generation: int
+    provider_environment: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "handle_id", _text(self.handle_id, name="handle_id"))
@@ -212,6 +217,19 @@ class PersistentCredentialHandle:
         if environment not in _ALLOWED_ENVIRONMENTS:
             raise SecretVaultError("credential environment is not canonical")
         object.__setattr__(self, "environment", environment)
+        try:
+            provider_environment = normalize_provider_environment(
+                provider_id=self.provider,
+                environment=environment,
+                provider_environment=self.provider_environment,
+            )
+        except ProviderDomainError as error:
+            raise SecretVaultError(str(error)) from error
+        object.__setattr__(
+            self,
+            "provider_environment",
+            provider_environment,
+        )
         purpose = _text(self.purpose, name="purpose").upper()
         if purpose not in _ALLOWED_PURPOSES:
             raise SecretVaultError("credential purpose is not allowed")
@@ -241,7 +259,7 @@ class CredentialReattachmentRequirement:
 class ProtectedCredentialVault:
     """Atomic metadata+ciphertext vault using an injected OS protector."""
 
-    FORMAT_VERSION = 2
+    FORMAT_VERSION = 3
     ALLOWED_PURPOSES = _ALLOWED_PURPOSES
     ALLOWED_ENVIRONMENTS = _ALLOWED_ENVIRONMENTS
 
@@ -271,6 +289,11 @@ class ProtectedCredentialVault:
                 "legacy credential vault v1 has no environment binding; "
                 "explicit credential reattachment is required"
             )
+        if version == 2:
+            raise SecretVaultError(
+                "legacy credential vault v2 has no provider_environment binding; "
+                "explicit credential reattachment is required"
+            )
         if version != self.FORMAT_VERSION:
             raise SecretVaultError("credential vault version is unsupported")
         records = raw.get("records")
@@ -288,6 +311,7 @@ class ProtectedCredentialVault:
                 "account_id",
                 "provider",
                 "environment",
+                "provider_environment",
                 "purpose",
                 "generation",
             }:
@@ -300,6 +324,7 @@ class ProtectedCredentialVault:
                     account_id=handle.get("account_id"),
                     provider=handle.get("provider"),
                     environment=handle.get("environment"),
+                    provider_environment=handle.get("provider_environment"),
                     purpose=handle.get("purpose"),
                     generation=handle.get("generation"),
                 )
@@ -349,20 +374,36 @@ class ProtectedCredentialVault:
         account_id: object,
         provider: object,
         environment: object,
+        provider_environment: object | None,
         purpose: object,
-    ) -> tuple[str, str, str, str, str]:
+    ) -> tuple[str, str, str, str, str, str]:
         owner = _text(owner_identity, name="owner_identity")
         account = _text(account_id, name="account_id")
         normalized_provider = _text(provider, name="provider").upper()
         normalized_environment = _text(environment, name="environment").upper()
         if normalized_environment not in ProtectedCredentialVault.ALLOWED_ENVIRONMENTS:
             raise PermissionError("Credential environment is not canonical")
+        try:
+            normalized_provider_environment = normalize_provider_environment(
+                provider_id=normalized_provider,
+                environment=normalized_environment,
+                provider_environment=provider_environment,
+            )
+        except ProviderDomainError as error:
+            raise PermissionError(str(error)) from error
         normalized_purpose = _text(purpose, name="purpose").upper()
         if normalized_purpose not in ProtectedCredentialVault.ALLOWED_PURPOSES:
             raise PermissionError(
                 "Credential purpose is not an allowed read/trade scope"
             )
-        return owner, account, normalized_provider, normalized_environment, normalized_purpose
+        return (
+            owner,
+            account,
+            normalized_provider,
+            normalized_environment,
+            normalized_provider_environment,
+            normalized_purpose,
+        )
 
     @staticmethod
     def _handle(record: dict[str, object]) -> PersistentCredentialHandle:
@@ -372,6 +413,7 @@ class ProtectedCredentialVault:
             account_id=str(metadata["account_id"]),
             provider=str(metadata["provider"]),
             environment=str(metadata["environment"]),
+            provider_environment=str(metadata["provider_environment"]),
             purpose=str(metadata["purpose"]),
             generation=int(metadata["generation"]),
         )
@@ -383,15 +425,24 @@ class ProtectedCredentialVault:
         account_id: str,
         provider: str,
         environment: str,
+        provider_environment: str | None = None,
         purpose: str,
         secret_value: str,
         handle_id: str | None = None,
     ) -> PersistentCredentialHandle:
-        owner, account, normalized_provider, normalized_environment, normalized_purpose = self._normalize_scope(
+        (
+            owner,
+            account,
+            normalized_provider,
+            normalized_environment,
+            normalized_provider_environment,
+            normalized_purpose,
+        ) = self._normalize_scope(
             owner_identity=owner_identity,
             account_id=account_id,
             provider=provider,
             environment=environment,
+            provider_environment=provider_environment,
             purpose=purpose,
         )
         if not isinstance(secret_value, str) or not secret_value:
@@ -413,6 +464,7 @@ class ProtectedCredentialVault:
                 account_id=account,
                 provider=normalized_provider,
                 environment=normalized_environment,
+                provider_environment=normalized_provider_environment,
                 purpose=normalized_purpose,
                 generation=generation,
             )
@@ -425,6 +477,7 @@ class ProtectedCredentialVault:
                 account_id=account,
                 provider=normalized_provider,
                 environment=normalized_environment,
+                provider_environment=normalized_provider_environment,
                 purpose=normalized_purpose,
                 generation=generation,
             )
@@ -449,6 +502,7 @@ class ProtectedCredentialVault:
             "account_id": handle.account_id,
             "provider": handle.provider,
             "environment": handle.environment,
+            "provider_environment": handle.provider_environment,
             "purpose": handle.purpose,
             "generation": handle.generation,
         }
@@ -475,7 +529,7 @@ class ProtectedCredentialVault:
                     }
                 )
             return {
-                "schema_version": "1.0.0",
+                "schema_version": "2.0.0",
                 "source_vault_format_version": self.FORMAT_VERSION,
                 "contains_secrets": False,
                 "restore_mode": "EXPLICIT_REATTACHMENT_REQUIRED",
@@ -503,7 +557,7 @@ class ProtectedCredentialVault:
             raise SecretVaultError(
                 "credential reattachment manifest shape is invalid"
             )
-        if manifest["schema_version"] != "1.0.0":
+        if manifest["schema_version"] != "2.0.0":
             raise SecretVaultError(
                 "credential reattachment manifest schema is unsupported"
             )
@@ -532,6 +586,7 @@ class ProtectedCredentialVault:
             "account_id",
             "provider",
             "environment",
+            "provider_environment",
             "purpose",
             "generation",
         }
@@ -551,6 +606,7 @@ class ProtectedCredentialVault:
                     account_id=metadata["account_id"],
                     provider=metadata["provider"],
                     environment=metadata["environment"],
+                    provider_environment=metadata["provider_environment"],
                     purpose=metadata["purpose"],
                     generation=metadata["generation"],
                 )
@@ -589,6 +645,7 @@ class ProtectedCredentialVault:
             account_id=handle.account_id,
             provider=handle.provider,
             environment=handle.environment,
+            provider_environment=handle.provider_environment,
             purpose=handle.purpose,
             generation=handle.generation,
         )
@@ -613,55 +670,67 @@ class ProtectedCredentialVault:
         account_id: str,
         provider: str,
         environment: str,
+        provider_environment: str | None = None,
         purpose: str,
     ) -> str:
         if not isinstance(handle, PersistentCredentialHandle):
             raise TypeError("handle must be a PersistentCredentialHandle")
-        owner, account, normalized_provider, normalized_environment, normalized_purpose = self._normalize_scope(
+        (
+            owner,
+            account,
+            normalized_provider,
+            normalized_environment,
+            normalized_provider_environment,
+            normalized_purpose,
+        ) = self._normalize_scope(
             owner_identity=execution_identity,
             account_id=account_id,
             provider=provider,
             environment=environment,
+            provider_environment=provider_environment,
             purpose=purpose,
         )
-        state = self._load()
-        record = state["records"].get(handle.handle_id)
-        if record is None or record["active"] is not True:
-            raise PermissionError("Credential is unavailable")
-        current = self._handle(record)
-        if current != handle:
-            raise PermissionError("Credential handle generation is stale")
-        if record["owner_identity"] != owner:
-            raise PermissionError("Execution identity cannot decrypt this credential")
-        if (
-            current.account_id != account
-            or current.provider != normalized_provider
-            or current.environment != normalized_environment
-        ):
-            raise PermissionError("Credential scope mismatch")
-        if current.purpose != normalized_purpose:
-            raise PermissionError("Credential purpose mismatch")
-        entropy = _scope_entropy(
-            handle_id=current.handle_id,
-            owner_identity=owner,
-            account_id=current.account_id,
-            provider=current.provider,
-            environment=current.environment,
-            purpose=current.purpose,
-            generation=current.generation,
-        )
-        try:
-            plaintext = self._protector.unprotect(
-                b64decode(record["ciphertext"], validate=True),
-                entropy=entropy,
+        with _exclusive_file_lock(self.lock_path):
+            state = self._load()
+            record = state["records"].get(handle.handle_id)
+            if record is None or record["active"] is not True:
+                raise PermissionError("Credential is unavailable")
+            current = self._handle(record)
+            if current != handle:
+                raise PermissionError("Credential handle generation is stale")
+            if record["owner_identity"] != owner:
+                raise PermissionError("Execution identity cannot decrypt this credential")
+            if (
+                current.account_id != account
+                or current.provider != normalized_provider
+                or current.environment != normalized_environment
+                or current.provider_environment != normalized_provider_environment
+            ):
+                raise PermissionError("Credential scope mismatch")
+            if current.purpose != normalized_purpose:
+                raise PermissionError("Credential purpose mismatch")
+            entropy = _scope_entropy(
+                handle_id=current.handle_id,
+                owner_identity=owner,
+                account_id=current.account_id,
+                provider=current.provider,
+                environment=current.environment,
+                provider_environment=current.provider_environment,
+                purpose=current.purpose,
+                generation=current.generation,
             )
-            if not isinstance(plaintext, bytes) or not plaintext:
-                raise OSError("protector returned invalid plaintext")
-            return plaintext.decode("utf-8")
-        except (UnicodeDecodeError, OSError, ValueError, TypeError) as error:
-            raise PermissionError(
-                "Credential cannot be decrypted in this identity"
-            ) from error
+            try:
+                plaintext = self._protector.unprotect(
+                    b64decode(record["ciphertext"], validate=True),
+                    entropy=entropy,
+                )
+                if not isinstance(plaintext, bytes) or not plaintext:
+                    raise OSError("protector returned invalid plaintext")
+                return plaintext.decode("utf-8")
+            except (UnicodeDecodeError, OSError, ValueError, TypeError) as error:
+                raise PermissionError(
+                    "Credential cannot be decrypted in this identity"
+                ) from error
 
     def rotate(
         self,
@@ -699,6 +768,7 @@ class ProtectedCredentialVault:
                 account_id=current.account_id,
                 provider=current.provider,
                 environment=current.environment,
+                provider_environment=current.provider_environment,
                 purpose=current.purpose,
                 generation=current.generation + 1,
             )
@@ -708,6 +778,7 @@ class ProtectedCredentialVault:
                 account_id=next_handle.account_id,
                 provider=next_handle.provider,
                 environment=next_handle.environment,
+                provider_environment=next_handle.provider_environment,
                 purpose=next_handle.purpose,
                 generation=next_handle.generation,
             )

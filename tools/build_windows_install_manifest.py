@@ -22,6 +22,7 @@ from research.autotrade_research.artifacts.durable_publish import (
     atomic_write_bytes_with_sha256_sidecar,
     validate_publication_destination,
 )
+from tools.stage_windows_release_runtime import _RELEASE_RUNTIME_REQUIRED
 
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -35,6 +36,20 @@ _WINDOWS_RESERVED_BASENAMES = {
 
 class InstallerManifestError(ValueError):
     pass
+
+
+_REQUIRED_WINDOWS_PRODUCT_ENTRYPOINTS = (
+    {
+        "component_id": "autotrade-desktop-entrypoint",
+        "kind": "desktop-entrypoint",
+        "basename": "AutoTrade.Desktop.exe",
+    },
+    {
+        "component_id": "autotrade-host-entrypoint",
+        "kind": "host-entrypoint",
+        "basename": "AutoTrade.Host.exe",
+    },
+)
 
 
 def _text(value: object, *, name: str) -> str:
@@ -100,6 +115,62 @@ def _canonical_bytes(value: object) -> bytes:
         )
         + "\n"
     ).encode("utf-8")
+
+
+def _require_release_runtime_inventory(components: list[dict[str, str]]) -> None:
+    """Independently require the complete 37-leaf release runtime."""
+
+    by_path = {item["path"]: item for item in components}
+    missing: list[str] = []
+    noncanonical: list[str] = []
+    for descriptor in _RELEASE_RUNTIME_REQUIRED:
+        item = by_path.get(descriptor.path)
+        if item is None:
+            missing.append(descriptor.path)
+            continue
+        if (
+            item["component_id"] != descriptor.component_id
+            or item["kind"] != descriptor.kind
+            or item["version"] != "source-controlled"
+        ):
+            noncanonical.append(descriptor.path)
+    if missing or noncanonical:
+        details: list[str] = []
+        if missing:
+            details.append("missing=" + ",".join(missing))
+        if noncanonical:
+            details.append("noncanonical=" + ",".join(noncanonical))
+        raise InstallerManifestError(
+            "composition release runtime inventory is incomplete or noncanonical: "
+            + "; ".join(details)
+        )
+
+
+def _require_windows_product_entrypoints(
+    components: list[dict[str, str]],
+) -> None:
+    """Require the accessible desktop and active financial host roles."""
+
+    for required in _REQUIRED_WINDOWS_PRODUCT_ENTRYPOINTS:
+        matches = [
+            item
+            for item in components
+            if item["kind"] == required["kind"]
+        ]
+        if len(matches) != 1:
+            raise InstallerManifestError(
+                "composition requires exactly one Windows product entrypoint: "
+                + required["kind"]
+            )
+        item = matches[0]
+        if (
+            item["component_id"] != required["component_id"]
+            or PurePosixPath(item["path"]).name != required["basename"]
+        ):
+            raise InstallerManifestError(
+                "Windows product entrypoint identity is noncanonical: "
+                + required["kind"]
+            )
 
 
 def _verify_composition(
@@ -237,6 +308,9 @@ def _verify_composition(
         raise InstallerManifestError(
             "composition component inventory does not match verified bundle payload"
         )
+
+    _require_release_runtime_inventory(components)
+    _require_windows_product_entrypoints(components)
 
     by_kind: dict[str, list[dict[str, str]]] = {}
     for item in components:
@@ -554,7 +628,6 @@ def _verify_release_bundle_stream(
         "composition": verified_composition,
         "files": verified_files,
     }
-
 
 
 def _validate_output_destination(path: Path, *, name: str) -> None:

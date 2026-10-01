@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 import os
 import sqlite3
 import sys
@@ -8,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from autotrade_foundation.windows_namespace import require_windows_namespace_component
 from mvp.autotrade_mvp.store_identity import (
     JournalStoreIdentity,
     connection_main_identity,
@@ -17,6 +19,7 @@ from mvp.autotrade_mvp.store_identity import (
     observe_database_identity,
     require_database_identity,
     require_exact_journal_store_identity,
+    same_journal_backing_object,
 )
 
 
@@ -119,10 +122,12 @@ class StoreIdentityTests(unittest.TestCase):
                 os.chdir(first)
                 frozen = freeze_database_path("state/journal.sqlite")
                 os.chdir(second)
-                self.assertEqual(
-                    frozen,
-                    (first / "state" / "journal.sqlite").resolve(strict=False),
-                )
+                expected = first / "state" / "journal.sqlite"
+                if sys.platform == "win32":
+                    expected = Path(os.path.abspath(os.fspath(expected)))
+                else:
+                    expected = expected.resolve(strict=False)
+                self.assertEqual(frozen, expected)
                 self.assertTrue(frozen.is_absolute())
                 os.chdir(original_cwd)
         finally:
@@ -139,11 +144,25 @@ class StoreIdentityTests(unittest.TestCase):
             except (OSError, NotImplementedError):
                 self.skipTest("filesystem does not permit symlink creation")
 
-            self.assertEqual(freeze_database_path(alias), target.resolve())
-            self.assertEqual(
-                observe_database_identity(alias),
-                observe_database_identity(target),
-            )
+            if sys.platform == "win32":
+                # Windows authority rejects the alias itself rather than
+                # traversing it during pre-authority canonicalization.
+                self.assertEqual(
+                    freeze_database_path(alias),
+                    Path(os.path.abspath(os.fspath(alias))),
+                )
+                with self.assertRaises(RuntimeError):
+                    observe_database_identity(alias)
+                self.assertIs(
+                    type(observe_database_identity(target)),
+                    JournalStoreIdentity,
+                )
+            else:
+                self.assertEqual(freeze_database_path(alias), target.resolve())
+                self.assertEqual(
+                    observe_database_identity(alias),
+                    observe_database_identity(target),
+                )
 
     def test_initial_anchor_atomically_creates_and_binds_new_store_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -154,7 +173,7 @@ class StoreIdentityTests(unittest.TestCase):
 
             self.assertTrue(path.exists())
             self.assertEqual(anchor, observe_database_identity(path))
-            self.assertEqual(anchor.canonical_path, str(path.resolve()))
+            self.assertEqual(anchor.canonical_path, str(freeze_database_path(path)))
             self.assertEqual(path.stat().st_nlink, 1)
 
             # Re-observing an already established path must return the same authority.
@@ -180,7 +199,10 @@ class StoreIdentityTests(unittest.TestCase):
 
             alias.unlink()
             identity = observe_database_identity(original)
-            self.assertEqual(identity.canonical_path, str(original.resolve()))
+            self.assertEqual(
+                identity.canonical_path,
+                str(freeze_database_path(original)),
+            )
 
     def test_replacement_at_same_path_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -236,6 +258,152 @@ class StoreIdentityTests(unittest.TestCase):
             moved.replace(path)
             self.assertTrue(path.exists())
 
+    def test_windows_guard_preserves_primary_when_handle_close_also_fails(self) -> None:
+        identity = JournalStoreIdentity(
+            canonical_path=str(Path.cwd() / "journal.sqlite"),
+            filesystem_device=None,
+            filesystem_inode=None,
+            identity_source="windows_by_handle",
+            windows_volume_serial=7,
+            windows_file_index_high=11,
+            windows_file_index_low=13,
+        )
+        primary = RuntimeError("primary SQLite failure")
+        with (
+            patch(
+                "mvp.autotrade_mvp.store_identity.sys.platform",
+                "win32",
+            ),
+            patch(
+                "mvp.autotrade_mvp.store_identity.retain_windows_parent_namespace",
+                return_value=nullcontext(),
+            ),
+            patch(
+                "mvp.autotrade_mvp.store_identity.open_windows_regular_file",
+                return_value=123,
+            ),
+            patch(
+                "mvp.autotrade_mvp.store_identity._windows_identity_from_handle",
+                return_value=identity,
+            ),
+            patch(
+                "mvp.autotrade_mvp.store_identity.close_windows_handle",
+                side_effect=OSError("secondary CloseHandle failure"),
+            ),
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                with guard_windows_database_authority(
+                    "journal.sqlite",
+                    create=False,
+                ):
+                    raise primary
+
+        self.assertIs(caught.exception, primary)
+        notes = getattr(caught.exception, "__notes__", ())
+        self.assertTrue(
+            any(
+                "journal backing HANDLE cleanup also failed" in note
+                and "secondary CloseHandle failure" in note
+                for note in notes
+            ),
+            f"cleanup evidence missing from primary error notes: {notes!r}",
+        )
+
+    def test_windows_guard_surfaces_handle_close_failure_after_successful_body(self) -> None:
+        identity = JournalStoreIdentity(
+            canonical_path=str(Path.cwd() / "journal.sqlite"),
+            filesystem_device=None,
+            filesystem_inode=None,
+            identity_source="windows_by_handle",
+            windows_volume_serial=7,
+            windows_file_index_high=11,
+            windows_file_index_low=13,
+        )
+        with (
+            patch(
+                "mvp.autotrade_mvp.store_identity.sys.platform",
+                "win32",
+            ),
+            patch(
+                "mvp.autotrade_mvp.store_identity.retain_windows_parent_namespace",
+                return_value=nullcontext(),
+            ),
+            patch(
+                "mvp.autotrade_mvp.store_identity.open_windows_regular_file",
+                return_value=123,
+            ),
+            patch(
+                "mvp.autotrade_mvp.store_identity._windows_identity_from_handle",
+                return_value=identity,
+            ),
+            patch(
+                "mvp.autotrade_mvp.store_identity.close_windows_handle",
+                side_effect=OSError("CloseHandle failed after success"),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                OSError,
+                "CloseHandle failed after success",
+            ):
+                with guard_windows_database_authority(
+                    "journal.sqlite",
+                    create=False,
+                ) as guarded:
+                    self.assertEqual(guarded, identity)
+
+    def test_windows_guard_keeps_authority_verdict_over_close_failure(self) -> None:
+        identity = JournalStoreIdentity(
+            canonical_path=str(Path.cwd() / "journal.sqlite"),
+            filesystem_device=None,
+            filesystem_inode=None,
+            identity_source="windows_by_handle",
+            windows_volume_serial=7,
+            windows_file_index_high=11,
+            windows_file_index_low=13,
+        )
+        primary = RuntimeError("primary SQLite failure")
+        authority_error = RuntimeError("authority changed during failure")
+        with (
+            patch(
+                "mvp.autotrade_mvp.store_identity.sys.platform",
+                "win32",
+            ),
+            patch(
+                "mvp.autotrade_mvp.store_identity.retain_windows_parent_namespace",
+                return_value=nullcontext(),
+            ),
+            patch(
+                "mvp.autotrade_mvp.store_identity.open_windows_regular_file",
+                return_value=123,
+            ),
+            patch(
+                "mvp.autotrade_mvp.store_identity._windows_identity_from_handle",
+                side_effect=(identity, authority_error),
+            ),
+            patch(
+                "mvp.autotrade_mvp.store_identity.close_windows_handle",
+                side_effect=OSError("secondary CloseHandle failure"),
+            ),
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                with guard_windows_database_authority(
+                    "journal.sqlite",
+                    create=False,
+                ):
+                    raise primary
+
+        self.assertIs(caught.exception, authority_error)
+        self.assertIs(caught.exception.__cause__, primary)
+        notes = getattr(caught.exception, "__notes__", ())
+        self.assertTrue(
+            any(
+                "journal backing HANDLE cleanup also failed" in note
+                and "secondary CloseHandle failure" in note
+                for note in notes
+            ),
+            f"cleanup evidence missing from authority error notes: {notes!r}",
+        )
+
     @unittest.skipUnless(sys.platform == "win32", "Windows-only native identity")
     def test_windows_identity_is_native_by_handle_and_nonzero(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -262,25 +430,109 @@ class StoreIdentityTests(unittest.TestCase):
             path = Path(directory) / "journal.sqlite"
             connection = sqlite3.connect(path)
             try:
-                self.assertEqual(
-                    connection_main_identity(connection),
-                    observe_database_identity(path),
+                self.assertTrue(
+                    same_journal_backing_object(
+                        connection_main_identity(connection),
+                        observe_database_identity(path),
+                    )
                 )
             finally:
                 connection.close()
 
+
+    def test_same_backing_object_uses_native_windows_identity_not_path_spelling(self) -> None:
+        left = JournalStoreIdentity(
+            canonical_path=r"C:\\TEMP\\SHORT~1\\journal.sqlite3",
+            filesystem_device=None,
+            filesystem_inode=None,
+            identity_source="windows_by_handle",
+            windows_volume_serial=7,
+            windows_file_index_high=11,
+            windows_file_index_low=13,
+        )
+        right = JournalStoreIdentity(
+            canonical_path=r"C:\\Temp\\Long Directory\\journal.sqlite3",
+            filesystem_device=None,
+            filesystem_inode=None,
+            identity_source="windows_by_handle",
+            windows_volume_serial=7,
+            windows_file_index_high=11,
+            windows_file_index_low=13,
+        )
+        other = JournalStoreIdentity(
+            canonical_path=right.canonical_path,
+            filesystem_device=None,
+            filesystem_inode=None,
+            identity_source="windows_by_handle",
+            windows_volume_serial=7,
+            windows_file_index_high=11,
+            windows_file_index_low=17,
+        )
+
+        self.assertTrue(same_journal_backing_object(left, right))
+        self.assertFalse(same_journal_backing_object(left, other))
 
     def test_validated_identity_is_detached_from_mutable_dataclass_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite"
             sqlite3.connect(path).close()
             original = observe_database_identity(path)
+            expected_canonical_path = original.canonical_path
             validated = require_exact_journal_store_identity(original)
             self.assertIsNot(validated, original)
             self.assertEqual(validated, original)
             vars(original)["canonical_path"] = str(path.with_name("other.sqlite"))
-            self.assertEqual(validated.canonical_path, str(path.resolve()))
+            self.assertEqual(validated.canonical_path, expected_canonical_path)
 
+
+
+    def test_windows_namespace_component_rejects_win32_alias_forms(self) -> None:
+        invalid = (
+            "journal.sqlite3:shadow",
+            "journal.sqlite3.",
+            "journal.sqlite3 ",
+            "CON.sqlite3",
+            "nul",
+            "COM1.log",
+            "LPT9.data",
+            "bad?.sqlite3",
+            "bad|name.sqlite3",
+            "bad" + chr(1) + "name.sqlite3",
+        )
+        for name in invalid:
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(RuntimeError, "canonical Win32"):
+                    require_windows_namespace_component(
+                        name,
+                        subject="journal backing file",
+                    )
+        self.assertEqual(
+            require_windows_namespace_component(
+                "journal.sqlite3",
+                subject="journal backing file",
+            ),
+            "journal.sqlite3",
+        )
+
+    @unittest.skipUnless(sys.platform == "win32", "native Windows pathname semantics")
+    def test_windows_journal_rejects_alternate_stream_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ordinary = root / "journal.sqlite3"
+            candidate = Path(str(ordinary) + ":shadow")
+            with self.assertRaisesRegex(RuntimeError, "canonical Win32"):
+                establish_database_anchor(candidate)
+            self.assertFalse(ordinary.exists())
+
+    @unittest.skipUnless(sys.platform == "win32", "native Windows pathname semantics")
+    def test_windows_journal_rejects_normalized_parent_before_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ambiguous_parent = root / "state."
+            candidate = ambiguous_parent / "journal.sqlite3"
+            with self.assertRaisesRegex(RuntimeError, "namespace component"):
+                establish_database_anchor(candidate)
+            self.assertFalse(ambiguous_parent.exists())
 
 if __name__ == "__main__":
     unittest.main()

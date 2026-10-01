@@ -158,6 +158,48 @@ class ReconciliationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "valid_until must be after"):
             resource_availability(valid_until="2026-09-24T19:00:00Z")
 
+    def test_provider_account_truth_numeric_ingress_is_bounded_before_decimal_construction(self):
+        hostile_text = "9" * 10000
+        hostile_int = 10**10000
+
+        for value in (hostile_text, hostile_int):
+            with self.subTest(kind=type(value).__name__):
+                with self.assertRaisesRegex(ValueError, "bounded decimal"):
+                    ProviderFillEvidence.create(
+                        provider_id="TEST_PROVIDER",
+                        account_id="test-account",
+                        environment="PAPER",
+                        provider_execution_id="bounded-exec",
+                        client_order_id="bounded-client",
+                        instrument="ABC",
+                        quantity=value,
+                        price="100",
+                        fee_amount="0",
+                        fee_currency="USD",
+                        trade_time="2026-09-24T18:00:00Z",
+                        side="BUY",
+                    )
+                with self.assertRaisesRegex(ValueError, "bounded decimal"):
+                    resource_availability(
+                        available_resources={"CASH:USD": value}
+                    )
+
+        with self.assertRaisesRegex(ValueError, "bounded decimal"):
+            ProviderFillEvidence.create(
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+                provider_execution_id="bounded-scale",
+                client_order_id="bounded-client",
+                instrument="ABC",
+                quantity="1e-9999999999999999999999999",
+                price="100",
+                fee_amount="0",
+                fee_currency="USD",
+                trade_time="2026-09-24T18:00:00Z",
+                side="BUY",
+            )
+
     def test_complete_matching_window_reconciles(self):
         result = self.base()
         self.assertTrue(result.complete)

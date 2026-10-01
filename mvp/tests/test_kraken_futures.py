@@ -98,6 +98,7 @@ def futures_write_capability(
     *,
     account_id="futures-account",
     environment="PAPER",
+    provider_environment="DEMO",
     instrument_version="PI_XBTUSD@v1",
 ):
     observed_at = NOW_DT - timedelta(hours=1)
@@ -108,6 +109,7 @@ def futures_write_capability(
             account_id=account_id,
             entity_id="futures-trading",
             environment=environment,
+            provider_environment=provider_environment,
             instrument_version=instrument_version,
             observed_at=observed_at,
             expires_at=NOW_DT + timedelta(hours=1),
@@ -153,6 +155,7 @@ def prepared_futures_request(
         capability=futures_write_capability(
             account_id=account_id,
             environment=runtime_environment,
+            provider_environment=provider_environment,
         ),
         account_id=account_id,
         provider_environment=provider_environment,
@@ -343,6 +346,36 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
         self.assertEqual(demo.environment, "PAPER")
         self.assertEqual(live.provider_environment, "LIVE")
         self.assertEqual(live.environment, "LIVE")
+
+    def test_preparation_rejects_cross_provider_environment_capability(self):
+        capability = futures_write_capability(
+            environment="PAPER",
+            provider_environment="TESTNET",
+        )
+        client_order_id = stable_client_order_id(
+            "KRAKEN",
+            "kraken-cross-domain",
+            environment="PAPER",
+            account_id="futures-account",
+            max_length=36,
+            client_id_format="UUID",
+        )
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "capability provider environment",
+        ):
+            prepare_order_request(
+                capability=capability,
+                account_id="futures-account",
+                provider_environment="DEMO",
+                instrument_version="PI_XBTUSD@v1",
+                at=NOW_DT,
+                symbol="PI_XBTUSD",
+                side="BUY",
+                order_type="MARKET",
+                size="1",
+                client_order_id=client_order_id,
+            )
 
     def test_success_is_acknowledgement_not_fill(self):
         for index, send_status in enumerate(

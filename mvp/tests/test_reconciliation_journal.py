@@ -1,6 +1,8 @@
+from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.dispatch import GuardedDispatcher
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
@@ -111,6 +113,69 @@ def reconciliation(**overrides):
 
 
 class ReconciliationJournalTests(unittest.TestCase):
+    def test_financial_reconciliation_rejects_journalstore_subclass_before_dispatch(self):
+        class HostileJournalStore(JournalStore):
+            def load_events(self, *args, **kwargs):
+                raise AssertionError("subclass load_events authority must not be consulted")
+
+            def append_event(self, *args, **kwargs):
+                raise AssertionError("subclass append_event authority must not be consulted")
+
+            def get_event(self, *args, **kwargs):
+                raise AssertionError("subclass get_event authority must not be consulted")
+
+        with TemporaryDirectory() as directory:
+            hostile = HostileJournalStore(Path(directory) / "journal.sqlite3")
+            with self.assertRaisesRegex(TypeError, "store must be exact JournalStore"):
+                record_reconciliation_checkpoint(
+                    hostile,
+                    reconciliation_id="hostile-store",
+                    result=reconciliation(),
+                    observed_at="2026-09-24T19:00:00Z",
+                    host_id="test-host",
+                    owner_epoch="epoch-1",
+                )
+
+    def test_checkpoint_rejects_reconciliation_subclass_before_field_dispatch(self):
+        class HostileReconciliationResult(type(reconciliation())):
+            def __getattribute__(self, name):
+                if name in {"provider_id", "account_id", "environment"}:
+                    raise AssertionError("subclass reconciliation fields must not be consulted")
+                return super().__getattribute__(name)
+
+        base = reconciliation()
+        hostile = HostileReconciliationResult(**vars(base))
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            with self.assertRaisesRegex(
+                TypeError, "result must be exact ReconciliationResult"
+            ):
+                record_reconciliation_checkpoint(
+                    store,
+                    reconciliation_id="hostile-result",
+                    result=hostile,
+                    observed_at="2026-09-24T19:00:00Z",
+                    host_id="test-host",
+                    owner_epoch="epoch-1",
+                )
+
+    def test_checkpoint_identity_rejects_string_subclass_before_normalization(self):
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError("string subclass normalization must not run")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            with self.assertRaisesRegex(ValueError, "reconciliation_id is required"):
+                record_reconciliation_checkpoint(
+                    store,
+                    reconciliation_id=HostileText("hostile-id"),
+                    result=reconciliation(),
+                    observed_at="2026-09-24T19:00:00Z",
+                    host_id="test-host",
+                    owner_epoch="epoch-1",
+                )
+
     def test_scoped_checkpoint_identity_cannot_collide_on_separator_characters(self):
         left = _reconciliation_aggregate_id(
             reconciliation_id="rid",
@@ -233,6 +298,81 @@ class ReconciliationJournalTests(unittest.TestCase):
                 [],
             )
 
+    def test_same_id_stale_semantic_cut_cannot_refresh_to_newer_version(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            aggregate_id = _reconciliation_aggregate_id(
+                reconciliation_id="same-id-cas",
+                provider_id="TEST_PROVIDER",
+                account_id="test-account",
+                environment="PAPER",
+            )
+            stale_result = reconciliation(provider_cash={"USD": "900"})
+            competing_result = reconciliation(provider_cash={"USD": "899.50"})
+            original_load_events = JournalStore.load_events
+            injected = False
+
+            def load_events_with_competing_commit(
+                selected_store,
+                aggregate_type,
+                selected_aggregate_id,
+            ):
+                nonlocal injected
+                events = original_load_events(
+                    selected_store,
+                    aggregate_type,
+                    selected_aggregate_id,
+                )
+                if (
+                    selected_store is store
+                    and aggregate_type == "account_reconciliation"
+                    and selected_aggregate_id == aggregate_id
+                    and not injected
+                ):
+                    injected = True
+                    competitor = JournalStore(path)
+                    record_reconciliation_checkpoint(
+                        competitor,
+                        reconciliation_id="same-id-cas",
+                        result=competing_result,
+                        observed_at="2026-09-24T19:00:01Z",
+                        host_id="test-host",
+                        owner_epoch="epoch-1",
+                    )
+                return events
+
+            with patch.object(
+                JournalStore,
+                "load_events",
+                new=load_events_with_competing_commit,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "aggregate_version must be 2",
+                ):
+                    record_reconciliation_checkpoint(
+                        store,
+                        reconciliation_id="same-id-cas",
+                        result=stale_result,
+                        observed_at="2026-09-24T19:00:00Z",
+                        host_id="test-host",
+                        owner_epoch="epoch-1",
+                    )
+
+            self.assertTrue(injected)
+            events = store.load_events(
+                "account_reconciliation",
+                aggregate_id,
+            )
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["aggregate_version"], 1)
+            self.assertEqual(
+                events[0]["payload"]["cash_differences"]["USD"],
+                "-0.50",
+            )
+            self.assertEqual(len(store.pending_outbox()), 1)
+
     def test_checkpoint_round_trip_is_exact_and_idempotent(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"
@@ -314,6 +454,87 @@ class ReconciliationJournalTests(unittest.TestCase):
                 latest["payload"]["resource_availability"]["available_resources"]["CASH:USD"],
                 "850",
             )
+
+    def test_availability_numeric_boundary_rejects_decimal_subclasses(self):
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                raise AssertionError("Decimal subclass method must not run")
+
+            def __lt__(self, other):
+                raise AssertionError("Decimal subclass comparison must not run")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="availability-exact-decimal",
+                result=reconciliation(resource_availability=availability()),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "max_age_seconds must use Decimal, string or integer input",
+            ):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds=HostileDecimal("60"),
+                )
+
+            forged = store.get_event(checkpoint["event_id"])
+            self.assertIsNotNone(forged)
+            forged["payload"]["resource_availability"]["available_resources"][
+                "CASH:USD"
+            ] = HostileDecimal("850")
+            with patch.object(JournalStore, "get_event", return_value=forged):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "resource availability must use exact decimal encoding",
+                ):
+                    load_account_resource_availability_evidence(
+                        store,
+                        checkpoint_event_id=checkpoint["event_id"],
+                        provider_id="TEST_PROVIDER",
+                        account_id="test-account",
+                        environment="PAPER",
+                        resources=("CASH:USD",),
+                        now="2026-09-24T19:00:30Z",
+                        max_age_seconds="60",
+                    )
+
+    def test_availability_numeric_boundary_rejects_oversized_decimal_text(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="availability-bounded-decimal",
+                result=reconciliation(resource_availability=availability()),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "finite bounded decimal",
+            ):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds="1e1000000",
+                )
 
     def test_cash_availability_checkpoint_is_invalidated_by_newer_settlement_truth(self):
         with TemporaryDirectory() as directory:

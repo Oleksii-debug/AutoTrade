@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 import re
 from types import MappingProxyType
 from typing import Iterable, Mapping
@@ -15,6 +15,7 @@ from .exact_decimal import (
     ExactDecimalError,
     canonical_decimal_text,
     is_exact_decimal_multiple,
+    parse_bounded_exact_decimal,
 )
 
 
@@ -40,11 +41,11 @@ def _decimal(value: Decimal | str | int, field: str, *, positive: bool = False) 
     if isinstance(value, bool) or isinstance(value, float):
         raise InstrumentRegistryError(f"{field} must use exact decimal input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, ValueError, TypeError) as error:
-        raise InstrumentRegistryError(f"{field} must be a finite decimal") from error
-    if not result.is_finite():
-        raise InstrumentRegistryError(f"{field} must be a finite decimal")
+        result = parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise InstrumentRegistryError(
+            f"{field} must be a finite bounded decimal"
+        ) from error
     if positive and result <= 0:
         raise InstrumentRegistryError(f"{field} must be positive")
     return result

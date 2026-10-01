@@ -4,6 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import sqlite3
 import unittest
+from unittest.mock import patch
 
 from mvp.autotrade_mvp.capabilities import (
     CapabilityClaim,
@@ -18,12 +19,17 @@ from mvp.autotrade_mvp.persistence import JournalStore
 NOW = datetime(2026, 9, 25, 20, 0, tzinfo=timezone.utc)
 
 
-def claim(source: str, *, observed_at: datetime) -> CapabilityClaim:
+def claim(
+    source: str,
+    *,
+    observed_at: datetime,
+    entity_id: str = "entity-1",
+) -> CapabilityClaim:
     return CapabilityClaim(
         source=source,
         provider_id="simulated",
         account_id="paper-account",
-        entity_id="entity-1",
+        entity_id=entity_id,
         environment="PAPER",
         instrument_version="instrument-v1",
         observed_at=observed_at,
@@ -53,11 +59,16 @@ def claim(source: str, *, observed_at: datetime) -> CapabilityClaim:
     )
 
 
-def verified(snapshot_id: str, observed_at: datetime):
+def verified(
+    snapshot_id: str,
+    observed_at: datetime,
+    *,
+    entity_id: str = "entity-1",
+):
     return derive_capability_snapshot(
         snapshot_id=snapshot_id,
         claims=tuple(
-            claim(source, observed_at=observed_at)
+            claim(source, observed_at=observed_at, entity_id=entity_id)
             for source in ("DOCUMENTED", "API", "ACCOUNT", "INSTRUMENT")
         ),
         observed_at=observed_at,
@@ -267,6 +278,141 @@ class DurableCapabilityRegistryTests(unittest.TestCase):
                         NOW,
                     )
                 )
+
+
+    def test_exact_journal_store_type_is_required(self):
+        class DerivedJournalStore(JournalStore):
+            pass
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            with self.assertRaisesRegex(TypeError, "exact JournalStore"):
+                DurableCapabilityRegistry(DerivedJournalStore(path))
+
+    def test_same_identity_concurrent_refresh_invalidates_stale_semantic_cut(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            current = DurableCapabilityRegistry(JournalStore(path))
+            stale = DurableCapabilityRegistry(JournalStore(path))
+
+            initial = verified(
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                NOW,
+            )
+            candidate = verified(
+                "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                NOW + timedelta(minutes=1),
+            )
+            winner = verified(
+                "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                NOW + timedelta(minutes=2),
+            )
+            self.assertTrue(current.add(initial))
+
+            original_cut = stale._validated_history_cut
+            injected = False
+
+            def cut_then_concurrent_refresh():
+                nonlocal injected
+                cut = original_cut()
+                if not injected:
+                    injected = True
+                    self.assertTrue(current.add(winner))
+                return cut
+
+            with patch.object(
+                stale,
+                "_validated_history_cut",
+                side_effect=cut_then_concurrent_refresh,
+            ):
+                with self.assertRaisesRegex(
+                    CapabilityError,
+                    "history changed concurrently",
+                ):
+                    stale.add(candidate)
+
+            events = current.store.load_events_by_aggregate_type(
+                "capability_history"
+            )
+            self.assertEqual(len(events), 2)
+            self.assertEqual(
+                [event["aggregate_version"] for event in events],
+                [1, 2],
+            )
+            restarted = DurableCapabilityRegistry(JournalStore(path))
+            latest = restarted.latest(
+                provider_id="simulated",
+                account_id="paper-account",
+                entity_id="entity-1",
+                environment="PAPER",
+                instrument_version="instrument-v1",
+                at=NOW + timedelta(minutes=3),
+            )
+            self.assertEqual(latest.snapshot_id, winner.snapshot_id)
+
+
+    def test_unrelated_capability_identity_does_not_conflict_with_cut_local_version(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            current = DurableCapabilityRegistry(JournalStore(path))
+            writer = DurableCapabilityRegistry(JournalStore(path))
+
+            initial = verified(
+                "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                NOW,
+            )
+            candidate = verified(
+                "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+                NOW + timedelta(minutes=1),
+            )
+            unrelated = verified(
+                "ffffffff-ffff-4fff-8fff-ffffffffffff",
+                NOW + timedelta(minutes=2),
+                entity_id="entity-2",
+            )
+            self.assertTrue(current.add(initial))
+
+            original_cut = writer._validated_history_cut
+            injected = False
+
+            def cut_then_unrelated_refresh():
+                nonlocal injected
+                cut = original_cut()
+                if not injected:
+                    injected = True
+                    self.assertTrue(current.add(unrelated))
+                return cut
+
+            with patch.object(
+                writer,
+                "_validated_history_cut",
+                side_effect=cut_then_unrelated_refresh,
+            ):
+                self.assertTrue(writer.add(candidate))
+
+            restarted = DurableCapabilityRegistry(JournalStore(path))
+            self.assertEqual(
+                restarted.latest(
+                    provider_id="simulated",
+                    account_id="paper-account",
+                    entity_id="entity-1",
+                    environment="PAPER",
+                    instrument_version="instrument-v1",
+                    at=NOW + timedelta(minutes=3),
+                ).snapshot_id,
+                candidate.snapshot_id,
+            )
+            self.assertEqual(
+                restarted.latest(
+                    provider_id="simulated",
+                    account_id="paper-account",
+                    entity_id="entity-2",
+                    environment="PAPER",
+                    instrument_version="instrument-v1",
+                    at=NOW + timedelta(minutes=3),
+                ).snapshot_id,
+                unrelated.snapshot_id,
+            )
 
 
 if __name__ == "__main__":

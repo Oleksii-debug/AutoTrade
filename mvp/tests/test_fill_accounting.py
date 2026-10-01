@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from decimal import Decimal
 from tempfile import TemporaryDirectory
 import unittest
@@ -7,6 +8,7 @@ from mvp.autotrade_mvp.accounting import (
     ScopedEconomicBook,
     book_equity_fill,
 )
+from mvp.autotrade_mvp.instruments import InstrumentVersion
 from mvp.autotrade_mvp.fill_accounting import (
     ProjectedFillEvidence,
     book_provider_fill,
@@ -18,7 +20,7 @@ from mvp.autotrade_mvp.fill_accounting import (
 )
 from mvp.autotrade_mvp.reconciliation import ProviderFillEvidence, ReconciliationResult
 from mvp.autotrade_mvp.reconciliation_journal import record_reconciliation_checkpoint
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.provider_activity_accounting import DurableProviderEconomicBook
 
 
@@ -67,6 +69,40 @@ def matched_fill(
     return projected, provider
 
 
+UNEXPECTED_INSTRUMENT_ID = "33333333-3333-4333-8333-333333333333"
+
+
+def unexpected_financial_instrument(
+    *,
+    provider_id="PROVIDER-A",
+    provider_symbol="ABC",
+    settlement_currency="USD",
+    venue_id="TEST-VENUE",
+    asset_class="CASH_EQUITY",
+    contract_multiplier="1",
+    effective_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+):
+    return InstrumentVersion(
+        instrument_id=UNEXPECTED_INSTRUMENT_ID,
+        version=1,
+        provider_id=provider_id,
+        venue_id=venue_id,
+        provider_symbol=provider_symbol,
+        asset_class=asset_class,
+        base_currency="ABC",
+        quote_currency=settlement_currency,
+        settlement_currency=settlement_currency,
+        quantity_unit="SHARE",
+        contract_multiplier=Decimal(contract_multiplier),
+        price_tick=Decimal("0.01"),
+        quantity_step=Decimal("1"),
+        minimum_quantity=Decimal("1"),
+        calendar_id="CONTINUOUS_24_7",
+        timezone_id="UTC",
+        effective_from=effective_from,
+    )
+
+
 class FillAccountingTests(unittest.TestCase):
     def test_only_matched_fill_evidence_books_economics(self):
         observed, provider = matched_fill()
@@ -82,6 +118,51 @@ class FillAccountingTests(unittest.TestCase):
         self.assertEqual(book.position("ABC"), Decimal("2"))
         self.assertEqual(book.cash("USD"), Decimal("-201"))
         self.assertEqual(book.fee_expense("USD"), Decimal("1"))
+
+    def test_direct_low_level_fill_mutators_cannot_bypass_durable_financial_authority(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(directory + "/journal.sqlite3")
+            book = DurableProviderEconomicBook(
+                store,
+                provider_id="PROVIDER-A",
+                account_id="acct-1",
+                environment="PAPER",
+            )
+            projected, provider = matched_fill()
+            before = book.audit_digest()
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "durable fills require the atomic financial-authority path",
+            ):
+                book_provider_fill(
+                    book=book,
+                    provider_id="PROVIDER-A",
+                    projected_fill=projected,
+                    provider_fill=provider,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                )
+            self.assertEqual(book.transactions, ())
+            self.assertEqual(book.audit_digest(), before)
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "durable corrections require the atomic financial-authority path",
+            ):
+                book_provider_fill_correction(
+                    book=book,
+                    provider_id="PROVIDER-A",
+                    original_projected_fill=projected,
+                    original_provider_fill=provider,
+                    corrected_projected_fill=projected,
+                    corrected_provider_fill=provider,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                    correction_observed_at="2026-01-01T00:00:01Z",
+                )
+            self.assertEqual(book.transactions, ())
+            self.assertEqual(book.audit_digest(), before)
 
     def test_provider_direction_must_be_evidenced_and_match_projection(self):
         observed, wrong_side = matched_fill(provider_side="SELL")
@@ -166,7 +247,11 @@ class FillAccountingTests(unittest.TestCase):
             provider_position_side="BOTH",
         )
         book = ScopedEconomicBook(environment="PAPER", account_id="acct-1")
-        self.assertTrue(
+        before_digest = book.audit_digest()
+        with self.assertRaisesRegex(
+            AccountingConflict,
+            "instrument-bound leg-aware economic accounting",
+        ):
             book_provider_fill(
                 book=book,
                 provider_id="provider-a",
@@ -175,8 +260,8 @@ class FillAccountingTests(unittest.TestCase):
                 expected_instrument="ABC",
                 settlement_currency="USD",
             )
-        )
-        self.assertEqual(book.position("ABC"), Decimal("2"))
+        self.assertEqual(book.transactions, ())
+        self.assertEqual(book.audit_digest(), before_digest)
 
     def test_provider_position_identity_must_match_projection_before_booking(self):
         cases = (
@@ -534,6 +619,20 @@ class FillAccountingTests(unittest.TestCase):
                 price="100",
             )
 
+
+    def test_projected_fill_numeric_ingress_uses_shared_bounded_authority(self):
+        for value in ("9" * 10000, 10**10000, "1e-9999999999999999999999999"):
+            with self.subTest(kind=type(value).__name__):
+                with self.assertRaisesRegex(ValueError, "bounded decimal"):
+                    ProjectedFillEvidence.create(
+                        fill_id="bounded-fill",
+                        provider_execution_id="bounded-execution",
+                        intent_id="bounded-intent",
+                        client_order_id="bounded-client",
+                        side="BUY",
+                        quantity=value,
+                        price="100",
+                    )
 
     def test_provider_identity_case_cannot_double_book_same_execution(self):
         observed, provider = matched_fill()
@@ -1217,8 +1316,7 @@ class FillAccountingTests(unittest.TestCase):
                         checkpoint_event_id=checkpoint_event_id,
                         book=book,
                         provider_fill=fill,
-                        expected_instrument="ABC",
-                        settlement_currency="USD",
+                        instrument_version=unexpected_financial_instrument(),
                     )
                 )
                 self.assertFalse(
@@ -1227,13 +1325,186 @@ class FillAccountingTests(unittest.TestCase):
                         checkpoint_event_id=checkpoint_event_id,
                         book=book,
                         provider_fill=fill,
-                        expected_instrument="ABC",
-                        settlement_currency="USD",
+                        instrument_version=unexpected_financial_instrument(),
                     )
                 )
                 self.assertEqual(book.position("ABC"), expected_position)
                 self.assertEqual(book.cash("USD"), expected_cash)
                 self.assertEqual(book.fee_expense("USD"), Decimal("1"))
+
+    def test_unexpected_provider_fill_uses_exact_temporal_instrument_authority(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(directory + "/journal.sqlite3")
+            fill = self._unexpected_fill(side="BUY")
+            checkpoint_event_id = self._record_unexpected_checkpoint(
+                store,
+                fill=fill,
+            )
+            book = DurableProviderEconomicBook(
+                store,
+                provider_id="PROVIDER-A",
+                account_id="acct-1",
+                environment="PAPER",
+            )
+            before = book.audit_digest()
+
+            invalid_versions = (
+                unexpected_financial_instrument(provider_id="OTHER-PROVIDER"),
+                unexpected_financial_instrument(provider_symbol="OTHER"),
+                unexpected_financial_instrument(asset_class="CRYPTO_SPOT"),
+                unexpected_financial_instrument(contract_multiplier="2"),
+                unexpected_financial_instrument(
+                    effective_from=datetime(2027, 1, 1, tzinfo=timezone.utc),
+                ),
+            )
+            for instrument_version in invalid_versions:
+                with self.subTest(instrument_version=instrument_version):
+                    with self.assertRaises(AccountingConflict):
+                        book_unexpected_provider_fill(
+                            store=store,
+                            checkpoint_event_id=checkpoint_event_id,
+                            book=book,
+                            provider_fill=fill,
+                            instrument_version=instrument_version,
+                        )
+                    self.assertEqual(book.transactions, ())
+                    self.assertEqual(book.audit_digest(), before)
+
+            canonical = unexpected_financial_instrument()
+            self.assertTrue(
+                book_unexpected_provider_fill(
+                    store=store,
+                    checkpoint_event_id=checkpoint_event_id,
+                    book=book,
+                    provider_fill=fill,
+                    instrument_version=canonical,
+                )
+            )
+            committed = book.audit_digest()
+            self.assertEqual(book.cash("USD"), Decimal("-201"))
+
+            with self.assertRaises(AccountingConflict):
+                book_unexpected_provider_fill(
+                    store=store,
+                    checkpoint_event_id=checkpoint_event_id,
+                    book=book,
+                    provider_fill=fill,
+                    instrument_version=unexpected_financial_instrument(
+                        venue_id="OTHER-VENUE",
+                    ),
+                )
+            self.assertEqual(book.audit_digest(), committed)
+            self.assertEqual(len(book.transactions), 1)
+
+    def test_unexpected_provider_fill_rejects_journal_advance_between_validation_and_commit(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(directory + "/journal.sqlite3")
+            fill = self._unexpected_fill(side="BUY")
+            checkpoint_event_id = self._record_unexpected_checkpoint(
+                store,
+                fill=fill,
+            )
+
+            class RacingEconomicBook(DurableProviderEconomicBook):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    self._race_injected = False
+
+                def append(
+                    self,
+                    transaction,
+                    *,
+                    expected_journal_sequence=None,
+                ):
+                    if not self._race_injected:
+                        self._race_injected = True
+                        race_payload = {"marker": "after-checkpoint-validation"}
+                        store.append_event(
+                            {
+                                "event_id": "unexpected-fill-race-advance",
+                                "event_type": "UnexpectedFillRaceAdvance",
+                                "aggregate_type": "test_race_advance",
+                                "aggregate_id": "unexpected-fill-race",
+                                "aggregate_version": "1",
+                                "committed_at": "2026-01-01T00:00:03Z",
+                                "payload": race_payload,
+                                "payload_hash": payload_digest(race_payload),
+                            }
+                        )
+                    return super().append(
+                        transaction,
+                        expected_journal_sequence=expected_journal_sequence,
+                    )
+
+            book = RacingEconomicBook(
+                store,
+                provider_id="PROVIDER-A",
+                account_id="acct-1",
+                environment="PAPER",
+            )
+            before = book.audit_digest()
+            with self.assertRaisesRegex(
+                ValueError,
+                "journal sequence changed after financial evidence validation",
+            ):
+                book_unexpected_provider_fill(
+                    store=store,
+                    checkpoint_event_id=checkpoint_event_id,
+                    book=book,
+                    provider_fill=fill,
+                    instrument_version=unexpected_financial_instrument(),
+                )
+            self.assertEqual(book.transactions, ())
+            self.assertEqual(book.audit_digest(), before)
+
+    def test_unexpected_provider_fill_exact_retry_survives_later_journal_advance(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(directory + "/journal.sqlite3")
+            fill = self._unexpected_fill(side="BUY")
+            checkpoint_event_id = self._record_unexpected_checkpoint(
+                store,
+                fill=fill,
+            )
+            book = DurableProviderEconomicBook(
+                store,
+                provider_id="PROVIDER-A",
+                account_id="acct-1",
+                environment="PAPER",
+            )
+            self.assertTrue(
+                book_unexpected_provider_fill(
+                    store=store,
+                    checkpoint_event_id=checkpoint_event_id,
+                    book=book,
+                    provider_fill=fill,
+                    instrument_version=unexpected_financial_instrument(),
+                )
+            )
+            committed_digest = book.audit_digest()
+            marker = {"marker": "post-booking-journal-advance"}
+            store.append_event(
+                {
+                    "event_id": "unexpected-fill-post-booking-advance",
+                    "event_type": "UnexpectedFillPostBookingAdvance",
+                    "aggregate_type": "test_post_booking_advance",
+                    "aggregate_id": "unexpected-fill-post-booking",
+                    "aggregate_version": "1",
+                    "committed_at": "2026-01-01T00:00:04Z",
+                    "payload": marker,
+                    "payload_hash": payload_digest(marker),
+                }
+            )
+            self.assertFalse(
+                book_unexpected_provider_fill(
+                    store=store,
+                    checkpoint_event_id=checkpoint_event_id,
+                    book=book,
+                    provider_fill=fill,
+                    instrument_version=unexpected_financial_instrument(),
+                )
+            )
+            self.assertEqual(book.audit_digest(), committed_digest)
+            self.assertEqual(len(book.transactions), 1)
 
     def test_unexpected_provider_fill_is_durable_across_restart(self):
         with TemporaryDirectory() as directory:
@@ -1255,8 +1526,7 @@ class FillAccountingTests(unittest.TestCase):
                     checkpoint_event_id=checkpoint_event_id,
                     book=book,
                     provider_fill=fill,
-                    expected_instrument="ABC",
-                    settlement_currency="USD",
+                    instrument_version=unexpected_financial_instrument(),
                 )
             )
             before = book.audit_digest()
@@ -1277,8 +1547,7 @@ class FillAccountingTests(unittest.TestCase):
                     checkpoint_event_id=checkpoint_event_id,
                     book=restarted,
                     provider_fill=fill,
-                    expected_instrument="ABC",
-                    settlement_currency="USD",
+                    instrument_version=unexpected_financial_instrument(),
                 )
             )
             self.assertEqual(restarted.audit_digest(), before)
@@ -1299,8 +1568,7 @@ class FillAccountingTests(unittest.TestCase):
                     checkpoint_event_id="caller-authored-not-authority",
                     book=book,
                     provider_fill=fill,
-                    expected_instrument="ABC",
-                    settlement_currency="USD",
+                    instrument_version=unexpected_financial_instrument(),
                 )
             self.assertEqual(book.transactions, ())
 
@@ -1314,8 +1582,7 @@ class FillAccountingTests(unittest.TestCase):
                     checkpoint_event_id=not_unexpected,
                     book=book,
                     provider_fill=fill,
-                    expected_instrument="ABC",
-                    settlement_currency="USD",
+                    instrument_version=unexpected_financial_instrument(),
                 )
 
             current = self._record_unexpected_checkpoint(
@@ -1328,8 +1595,7 @@ class FillAccountingTests(unittest.TestCase):
                     checkpoint_event_id=not_unexpected,
                     book=book,
                     provider_fill=fill,
-                    expected_instrument="ABC",
-                    settlement_currency="USD",
+                    instrument_version=unexpected_financial_instrument(),
                 )
 
             missing_side = ProviderFillEvidence.create(
@@ -1351,8 +1617,7 @@ class FillAccountingTests(unittest.TestCase):
                     checkpoint_event_id=current,
                     book=book,
                     provider_fill=missing_side,
-                    expected_instrument="ABC",
-                    settlement_currency="USD",
+                    instrument_version=unexpected_financial_instrument(),
                 )
             self.assertEqual(book.transactions, ())
 
@@ -1381,8 +1646,39 @@ class FillAccountingTests(unittest.TestCase):
                     checkpoint_event_id=checkpoint_event_id,
                     book=book,
                     provider_fill=hedge,
-                    expected_instrument="ABC",
-                    settlement_currency="USD",
+                    instrument_version=unexpected_financial_instrument(),
+                )
+            self.assertEqual(book.transactions, ())
+            self.assertEqual(book.audit_digest(), before)
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(directory + "/journal.sqlite3")
+            net_mode = self._unexpected_fill(
+                side="BUY",
+                position_side="BOTH",
+                position_effect="OPEN",
+            )
+            checkpoint_event_id = self._record_unexpected_checkpoint(
+                store,
+                fill=net_mode,
+            )
+            book = DurableProviderEconomicBook(
+                store,
+                provider_id="PROVIDER-A",
+                account_id="acct-1",
+                environment="PAPER",
+            )
+            before = book.audit_digest()
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "instrument-bound leg-aware economic accounting",
+            ):
+                book_unexpected_provider_fill(
+                    store=store,
+                    checkpoint_event_id=checkpoint_event_id,
+                    book=book,
+                    provider_fill=net_mode,
+                    instrument_version=unexpected_financial_instrument(),
                 )
             self.assertEqual(book.transactions, ())
             self.assertEqual(book.audit_digest(), before)
@@ -1406,8 +1702,7 @@ class FillAccountingTests(unittest.TestCase):
                     checkpoint_event_id=checkpoint_event_id,
                     book=book,
                     provider_fill=buy,
-                    expected_instrument="ABC",
-                    settlement_currency="USD",
+                    instrument_version=unexpected_financial_instrument(),
                 )
             )
             before = book.audit_digest()
@@ -1417,8 +1712,7 @@ class FillAccountingTests(unittest.TestCase):
                     checkpoint_event_id=checkpoint_event_id,
                     book=book,
                     provider_fill=self._unexpected_fill(side="SELL"),
-                    expected_instrument="ABC",
-                    settlement_currency="USD",
+                    instrument_version=unexpected_financial_instrument(),
                 )
             self.assertEqual(book.audit_digest(), before)
             self.assertEqual(len(book.transactions), 1)
@@ -1463,8 +1757,7 @@ class FillAccountingTests(unittest.TestCase):
                             checkpoint_event_id=checkpoint_event_id,
                             book=book,
                             provider_fill=conflicting,
-                            expected_instrument="ABC",
-                            settlement_currency="USD",
+                            instrument_version=unexpected_financial_instrument(),
                         )
                     self.assertEqual(book.transactions, ())
                     self.assertEqual(book.audit_digest(), before_digest)
@@ -1520,8 +1813,7 @@ class FillAccountingTests(unittest.TestCase):
                     checkpoint_event_id=event["event_id"],
                     book=book,
                     provider_fill=fill,
-                    expected_instrument="ABC",
-                    settlement_currency="USD",
+                    instrument_version=unexpected_financial_instrument(),
                 )
             self.assertEqual(book.transactions, ())
             self.assertEqual(book.audit_digest(), before)

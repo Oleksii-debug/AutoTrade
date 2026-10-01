@@ -371,39 +371,6 @@ def prepare_normalized_order(
 
 
 @dataclass(frozen=True)
-class IbkrExecutionEvidence:
-    execution_id: str
-    permanent_order_id: str
-    account_id: str
-    quantity: Decimal
-    price: Decimal
-
-    @classmethod
-    def create(
-        cls,
-        *,
-        execution_id: str,
-        permanent_order_id,
-        account_id: str,
-        quantity,
-        price,
-    ) -> "IbkrExecutionEvidence":
-        if (
-            not isinstance(permanent_order_id, int)
-            or isinstance(permanent_order_id, bool)
-            or permanent_order_id <= 0
-        ):
-            raise IbkrWebAdapterError("permanent_order_id must be a positive integer")
-        return cls(
-            execution_id=_text(execution_id, name="execution_id"),
-            permanent_order_id=str(permanent_order_id),
-            account_id=_text(account_id, name="account_id"),
-            quantity=_decimal(quantity, name="quantity", positive=True),
-            price=_decimal(price, name="price", positive=True),
-        )
-
-
-@dataclass(frozen=True)
 class IbkrAbsenceEvidence:
     exact_client_order_lookup_complete: bool
     exact_client_order_absent: bool
@@ -968,6 +935,7 @@ def parse_web_api_trades(
             fee_amount=_decimal(raw.get("commission"), name="trade.commission"),
             fee_currency=fee_currency,
             trade_time=trade_time,
+            evidence_refs=(observation.evidence_ref,),
         )
         prior = by_execution.get(execution_id)
         if prior is not None and prior != fill:
@@ -977,41 +945,3 @@ def parse_web_api_trades(
         by_execution[execution_id] = fill
 
     return tuple(by_execution.values())
-
-
-def execution_to_reconciliation_fill(
-    execution: IbkrExecutionEvidence,
-    *,
-    environment: str,
-    client_order_id: str | None,
-    expected_account_id: str,
-    instrument: str,
-    fee_amount,
-    fee_currency: str,
-    trade_time: str,
-) -> ProviderFillEvidence:
-    """Bind unique IBKR execution identity into canonical account truth.
-
-    Fee and trade-time evidence are explicit inputs because an execution row
-    must not invent commission or timestamp evidence that was not observed.
-    """
-
-    if not isinstance(execution, IbkrExecutionEvidence):
-        raise TypeError("execution must be IbkrExecutionEvidence")
-    account = _text(expected_account_id, name="expected_account_id")
-    if execution.account_id != account:
-        raise IbkrWebAdapterError("execution account does not match reconciliation account")
-    client_id = None if client_order_id is None else validate_coid(client_order_id)
-    return ProviderFillEvidence.create(
-        provider_id="IBKR",
-        account_id=account,
-        environment=environment,
-        provider_execution_id=execution.execution_id,
-        client_order_id=client_id,
-        instrument=_text(instrument, name="instrument"),
-        quantity=execution.quantity,
-        price=execution.price,
-        fee_amount=_decimal(fee_amount, name="fee_amount"),
-        fee_currency=_text(fee_currency, name="fee_currency"),
-        trade_time=_text(trade_time, name="trade_time"),
-    )

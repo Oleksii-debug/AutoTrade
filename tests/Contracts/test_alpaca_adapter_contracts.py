@@ -105,9 +105,11 @@ def durable_observation(*, payload, intent_id: str):
     ).encode("utf-8")
     with TemporaryDirectory() as directory:
         store = JournalStore(f"{directory}/journal.sqlite3")
+        # Contract fixtures validate adapter/schema semantics, not production
+        # financial authority. Keep synthetic durable wire evidence in SIMULATION.
         dispatcher = GuardedDispatcher(
             store,
-            environment="PAPER",
+            environment="SIMULATION",
             account_id="contract-account",
             owner_token="contract-owner",
         )
@@ -121,7 +123,7 @@ def durable_observation(*, payload, intent_id: str):
             authority_check=lambda _hash, _now: (True, "allowed"),
             transport_send=lambda _cid, _request, guard: (
                 guard(),
-                ExactJsonTransportResponse(raw),
+                ExactJsonTransportResponse(raw, http_status=200),
             )[1],
             sender_check=lambda _owner, _epoch: None,
             submission_scope={
@@ -135,7 +137,7 @@ def durable_observation(*, payload, intent_id: str):
             raise AssertionError(f"guarded dispatch did not persist SENT: {outcome}")
         binding = load_submission_response_binding(
             store,
-            environment="PAPER",
+            environment="SIMULATION",
             account_id="contract-account",
             attempt_id=attempt_id,
         )

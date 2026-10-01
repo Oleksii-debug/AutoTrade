@@ -24,6 +24,32 @@ class WindowsInstallerInputManifestTests(unittest.TestCase):
     def setUp(self):
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
+        # Historical four-file synthetic bundle: dedicated suites own the new
+        # exact-source, release-runtime and product-entrypoint gates.
+        release_stage_patcher = patch(
+            "tools.build_windows_bundle.stage_windows_release_runtime",
+            return_value=(),
+        )
+        release_stage_patcher.start()
+        self.addCleanup(release_stage_patcher.stop)
+        release_snapshot_patcher = patch(
+            "tools.build_windows_bundle._require_release_runtime_snapshot_binding",
+            return_value=None,
+        )
+        release_snapshot_patcher.start()
+        self.addCleanup(release_snapshot_patcher.stop)
+        release_inventory_patcher = patch(
+            "tools.build_windows_install_manifest._require_release_runtime_inventory",
+            return_value=None,
+        )
+        release_inventory_patcher.start()
+        self.addCleanup(release_inventory_patcher.stop)
+        product_entrypoint_patcher = patch(
+            "tools.build_windows_install_manifest._require_windows_product_entrypoints",
+            return_value=None,
+        )
+        product_entrypoint_patcher.start()
+        self.addCleanup(product_entrypoint_patcher.stop)
         self.root = Path(self.directory.name)
         self.staging = self.root / "staging"
         self.staging.mkdir()

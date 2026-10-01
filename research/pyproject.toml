@@ -20,5 +20,5 @@ test = [
 ]
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["autotrade_research*"]
+where = [".", ".."]
+include = ["autotrade_research*", "autotrade_foundation*", "autotrade_runtime*"]

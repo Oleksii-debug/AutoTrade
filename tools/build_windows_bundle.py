@@ -22,6 +22,8 @@ from mvp.autotrade_mvp.qualification_attestation import (
     QualificationTrustError,
     canonical_packaged_qualification_trust_policy_digest,
 )
+from tools.stage_windows_foundation import FoundationStagingError
+from tools.stage_windows_release_runtime import stage_windows_release_runtime
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,6 +63,8 @@ WINDOWS_RESERVED_STEMS = frozenset(
     | {f"lpt{index}" for index in range(1, 10)}
 )
 
+WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
 
 class BundleError(ValueError):
     pass
@@ -98,6 +102,96 @@ def _windows_path_key(relative: str) -> str:
             )
         normalized.append(part.casefold())
     return "/".join(normalized)
+
+
+def _has_windows_reparse_point(observed: os.stat_result) -> bool:
+    """Return whether a no-follow Windows stat identifies a reparse point."""
+
+    attributes = getattr(observed, "st_file_attributes", 0)
+    if isinstance(attributes, bool) or not isinstance(attributes, int):
+        raise BundleError("Windows file attributes are invalid")
+    return bool(attributes & WINDOWS_REPARSE_POINT)
+
+
+def _reject_windows_reparse(path: Path, observed: os.stat_result) -> None:
+    if _has_windows_reparse_point(observed):
+        raise BundleError(f"Windows reparse points are forbidden in bundles: {path}")
+
+
+def _assert_windows_path_chain_is_not_reparse(path: Path) -> None:
+    """Reject every existing component in one absolute staging path chain."""
+
+    absolute = path.absolute()
+    anchor = Path(absolute.anchor)
+    current = anchor
+    parts = absolute.parts[1:] if absolute.anchor else absolute.parts
+    for part in parts:
+        current = current / part
+        try:
+            observed = os.stat(current, follow_symlinks=False)
+        except OSError as error:
+            raise BundleError(
+                f"staging path identity cannot be verified: {current}"
+            ) from error
+        _reject_windows_reparse(current, observed)
+
+
+def _assert_staging_components_are_not_reparse(
+    path: Path,
+    *,
+    staging: Path,
+) -> None:
+    """Reject root/ancestor/final reparse aliases for one staged path."""
+
+    _assert_windows_path_chain_is_not_reparse(staging)
+    try:
+        relative = path.relative_to(staging)
+    except ValueError as error:
+        raise BundleError(f"staged path escaped staging directory: {path}") from error
+    current = staging
+    for part in relative.parts:
+        current = current / part
+        try:
+            observed = os.stat(current, follow_symlinks=False)
+        except OSError as error:
+            raise BundleError(
+                f"staging path identity cannot be verified: {current}"
+            ) from error
+        _reject_windows_reparse(current, observed)
+
+
+def _walk_staging(staging: Path) -> list[Path]:
+    """Enumerate staging without descending through symlink/reparse directories."""
+
+    files: list[Path] = []
+    pending = [staging]
+    while pending:
+        directory = pending.pop()
+        _assert_windows_path_chain_is_not_reparse(directory)
+        try:
+            entries = list(os.scandir(directory))
+        except OSError as error:
+            raise BundleError(
+                f"staging directory cannot be enumerated: {directory}"
+            ) from error
+        for entry in entries:
+            path = Path(entry.path)
+            try:
+                observed = entry.stat(follow_symlinks=False)
+            except OSError as error:
+                raise BundleError(
+                    f"staged entry identity cannot be verified: {path}"
+                ) from error
+            _reject_windows_reparse(path, observed)
+            if entry.is_symlink():
+                raise BundleError(f"symlinks are forbidden in bundles: {path}")
+            if stat.S_ISDIR(observed.st_mode):
+                pending.append(path)
+                continue
+            if not stat.S_ISREG(observed.st_mode):
+                raise BundleError(f"unsupported filesystem entry: {path}")
+            files.append(path)
+    return sorted(files, key=lambda item: item.as_posix())
 
 
 def _is_sensitive(path: Path) -> bool:
@@ -164,6 +258,7 @@ def _assert_staged_file_identity(
         raise BundleError(f"staged file identity cannot be verified: {path}") from error
 
     for observed in (opened, current, resolved_current):
+        _reject_windows_reparse(path, observed)
         if not stat.S_ISREG(observed.st_mode):
             raise BundleError(f"staged entry must remain a regular file: {path}")
 
@@ -222,18 +317,23 @@ def _read_staged_regular_file(path: Path, *, staging_resolved: Path) -> bytes:
 
 
 def _collect(staging: Path) -> list[tuple[str, Path, bytes]]:
-    if not staging.is_dir():
+    staging = staging.absolute()
+    _assert_windows_path_chain_is_not_reparse(staging)
+    try:
+        staging_stat = os.stat(staging, follow_symlinks=False)
+    except OSError as error:
+        raise BundleError("staging must be an existing directory") from error
+    _reject_windows_reparse(staging, staging_stat)
+    if not stat.S_ISDIR(staging_stat.st_mode):
         raise BundleError("staging must be an existing directory")
     staging_resolved = staging.resolve(strict=True)
     collected: list[tuple[str, Path, bytes]] = []
     windows_names: dict[str, str] = {}
-    for path in sorted(staging.rglob("*"), key=lambda item: item.as_posix()):
-        if path.is_symlink():
-            raise BundleError(f"symlinks are forbidden in bundles: {path}")
-        if path.is_dir():
-            continue
-        if not path.is_file():
-            raise BundleError(f"unsupported filesystem entry: {path}")
+    for path in _walk_staging(staging):
+        _assert_staging_components_are_not_reparse(
+            path,
+            staging=staging,
+        )
         relative = _safe_relative(path, staging)
         windows_key = _windows_path_key(relative)
         previous = windows_names.get(windows_key)
@@ -281,6 +381,71 @@ def _entry_metadata(relative: str, data: bytes) -> dict[str, object]:
         "sha256": "sha256:" + sha256(data).hexdigest(),
         "size": len(data),
     }
+
+
+def _require_release_runtime_snapshot_binding(
+    *,
+    files: list[tuple[str, Path, bytes]],
+    composition: dict[str, object],
+    staged_expected: tuple[dict[str, str], ...],
+) -> None:
+    """Bind collection to the canonical exact-source snapshot returned by staging."""
+
+    if len(staged_expected) != 37:
+        raise BundleError(
+            "release runtime stager did not return the canonical 37-leaf snapshot"
+        )
+    required = {"component_id", "kind", "path", "version", "sha256"}
+    validated_expected: list[dict[str, str]] = []
+    expected_paths: set[str] = set()
+    for index, expected in enumerate(staged_expected):
+        if not isinstance(expected, dict) or set(expected) != required:
+            raise BundleError(
+                f"release runtime snapshot record {index} is not canonical"
+            )
+        if any(
+            not isinstance(expected[field], str) or not expected[field]
+            for field in ("component_id", "kind", "path")
+        ):
+            raise BundleError(
+                f"release runtime snapshot record {index} has invalid identity"
+            )
+        if expected["version"] != "source-controlled":
+            raise BundleError(
+                f"release runtime snapshot record {index} has invalid version"
+            )
+        _windows_path_key(expected["path"])
+        if expected["path"] in expected_paths:
+            raise BundleError("release runtime snapshot contains duplicate paths")
+        expected_paths.add(expected["path"])
+        if CANONICAL_SHA256.fullmatch(expected["sha256"]) is None:
+            raise BundleError(
+                f"release runtime snapshot record {index} has invalid digest"
+            )
+        validated_expected.append(expected)
+
+    collected = {
+        relative: "sha256:" + sha256(data).hexdigest()
+        for relative, _, data in files
+    }
+    raw_components = composition.get("components")
+    if not isinstance(raw_components, list):
+        raise BundleError("release composition components are unavailable")
+    by_path = {
+        item["path"]: item
+        for item in raw_components
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    }
+    for expected in validated_expected:
+        path = expected["path"]
+        if collected.get(path) != expected["sha256"]:
+            raise BundleError(
+                f"release runtime changed after exact-source staging: {path}"
+            )
+        if by_path.get(path) != expected:
+            raise BundleError(
+                f"release composition changed after exact-source staging: {path}"
+            )
 
 
 def _canonical_digest(value: object, *, name: str) -> str:
@@ -616,6 +781,7 @@ def build_bundle(
             + ", ".join(sorted(codes))
         )
 
+    release_runtime_expected: tuple[dict[str, str], ...] = ()
     if mode == "release":
         provenance_source_sha = provenance.get("source_sha")
         if (
@@ -630,6 +796,22 @@ def build_bundle(
                 "release provenance source_sha does not match bundle source_sha"
             )
 
+        if composition_path is None:
+            raise BundleError(
+                "release bundle requires an exact Windows composition manifest"
+            )
+        try:
+            release_runtime_expected = stage_windows_release_runtime(
+                staging=staging,
+                composition_path=composition_path,
+                expected_source_sha=normalized_sha,
+                source_root=ROOT,
+            )
+        except FoundationStagingError as error:
+            raise BundleError(
+                f"release source-controlled runtime staging failed closed: {error}"
+            ) from error
+
     files = _collect(staging)
     composition = None
     composition_sha256 = None
@@ -639,7 +821,15 @@ def build_bundle(
             source_sha=normalized_sha,
             files=files,
         )
+        if mode == "release":
+            _require_release_runtime_snapshot_binding(
+                files=files,
+                composition=composition,
+                staged_expected=release_runtime_expected,
+            )
     elif mode == "release":
+        # Defensive unreachable guard: release mode is required to stage the
+        # exact source-controlled runtime above before any bundle collection.
         raise BundleError(
             "release bundle requires an exact Windows composition manifest"
         )

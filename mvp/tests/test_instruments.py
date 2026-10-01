@@ -40,6 +40,11 @@ def spot(
     timezone_id: str = "UTC",
     metadata_evidence=(),
     venue_id: str = "simulated-venue",
+    contract_multiplier=Decimal("1"),
+    price_tick=Decimal("0.01"),
+    quantity_step=Decimal("0.001"),
+    minimum_quantity=Decimal("0.001"),
+    maximum_quantity=Decimal("10"),
 ) -> InstrumentVersion:
     return InstrumentVersion(
         instrument_id=instrument_id,
@@ -52,11 +57,11 @@ def spot(
         quote_currency="USD",
         settlement_currency="USD",
         quantity_unit="ABC",
-        contract_multiplier=Decimal("1"),
-        price_tick=Decimal("0.01"),
-        quantity_step=Decimal("0.001"),
-        minimum_quantity=Decimal("0.001"),
-        maximum_quantity=Decimal("10"),
+        contract_multiplier=contract_multiplier,
+        price_tick=price_tick,
+        quantity_step=quantity_step,
+        minimum_quantity=minimum_quantity,
+        maximum_quantity=maximum_quantity,
         calendar_id=calendar_id,
         timezone_id=timezone_id,
         effective_from=effective_from,
@@ -188,6 +193,48 @@ class InstrumentRegistryTests(unittest.TestCase):
             instrument.validate_quantity("10.001")
         with self.assertRaisesRegex(InstrumentRegistryError, "exact decimal"):
             instrument.validate_price(100.1)
+
+    def test_instrument_numeric_ingress_uses_shared_bounded_resource_envelope(self):
+        hostile_values = (
+            "9" * 10000,
+            10**10000,
+            "1e-9999999999999999999999999",
+        )
+        for field in (
+            "contract_multiplier",
+            "price_tick",
+            "quantity_step",
+            "minimum_quantity",
+            "maximum_quantity",
+        ):
+            for value in hostile_values:
+                with self.subTest(field=field, kind=type(value).__name__):
+                    with self.assertRaisesRegex(
+                        InstrumentRegistryError,
+                        "finite bounded decimal",
+                    ):
+                        spot(**{field: value})
+
+        instrument = spot()
+        for value in hostile_values:
+            with self.subTest(validation="price", kind=type(value).__name__):
+                with self.assertRaisesRegex(
+                    InstrumentRegistryError,
+                    "finite bounded decimal",
+                ):
+                    instrument.validate_price(value)
+            with self.subTest(validation="quantity", kind=type(value).__name__):
+                with self.assertRaisesRegex(
+                    InstrumentRegistryError,
+                    "finite bounded decimal",
+                ):
+                    instrument.validate_quantity(value)
+            with self.subTest(validation="deliverable", kind=type(value).__name__):
+                with self.assertRaisesRegex(
+                    InstrumentRegistryError,
+                    "finite bounded decimal",
+                ):
+                    DeliverableLeg("ABC", value)
 
     def test_high_significance_contract_and_grid_are_context_independent(self):
         observed_contracts = []

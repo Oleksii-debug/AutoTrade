@@ -42,6 +42,7 @@ def capability():
             account_id="contract-account",
             entity_id="contract-entity",
             environment="PAPER",
+            provider_environment="DEMO",
             instrument_version="PI_XBTUSD@v1",
             observed_at=observed,
             expires_at=NOW_DT + timedelta(hours=1),
@@ -97,9 +98,11 @@ def durable_observation(payload, *, intent_id: str):
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     with TemporaryDirectory() as directory:
         store = JournalStore(f"{directory}/journal.sqlite3")
+        # Contract fixtures validate adapter/schema semantics, not production
+        # financial authority. Keep synthetic durable wire evidence in SIMULATION.
         dispatcher = GuardedDispatcher(
             store,
-            environment="PAPER",
+            environment="SIMULATION",
             account_id="contract-account",
             owner_token="owner",
         )
@@ -129,7 +132,7 @@ def durable_observation(payload, *, intent_id: str):
             raise AssertionError("contract fixture submission was not SENT")
         binding = load_submission_response_binding(
             store,
-            environment="PAPER",
+            environment="SIMULATION",
             account_id="contract-account",
             attempt_id=attempt,
         )

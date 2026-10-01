@@ -8,8 +8,9 @@ import sqlite3
 import sys
 from typing import Any
 
-from autotrade_local_filesystem import (
+from autotrade_foundation.local_filesystem import (
     LocalFilesystemQualificationError,
+    freeze_local_filesystem_path,
     require_qualified_local_filesystem_path,
 )
 
@@ -56,14 +57,19 @@ class JournalStore(_JournalStoreImpl):
     """
 
     def __init__(self, path: str | Path):
+        # Freeze caller-relative text before locality admission performs Win32
+        # I/O. A concurrent process-wide chdir after admission must not retarget
+        # durable financial state into an unclassified namespace.
+        frozen_path = freeze_local_filesystem_path(Path(path).expanduser())
         try:
-            require_qualified_local_filesystem_path(path)
+            require_qualified_local_filesystem_path(frozen_path)
         except LocalFilesystemQualificationError as error:
             raise RuntimeError(
                 "journal database path must be on a qualified local filesystem"
             ) from error
-        self.path = freeze_database_path(path)
+        self.path = freeze_database_path(frozen_path)
         self._store_identity: JournalStoreIdentity | None = None
+        self._protected_writer_capabilities: dict[int, tuple[object, str, str, str, str, int]] = {}
         self._initialize()
         if self._store_identity is None:
             raise RuntimeError("journal store identity was not established")
@@ -239,11 +245,24 @@ class JournalStore(_JournalStoreImpl):
                 raise RuntimeError(
                     "journal backing file is missing or inaccessible"
                 ) from error
-            if expected is not None and guarded != expected:
+            if expected is None:
+                # The first retained Windows authority may canonicalize an
+                # alias spelling (for example an 8.3 temp path) only after the
+                # no-reparse parent chain and exact final file are pinned.
+                # Persist that trusted spelling before SQLite/path identity
+                # comparisons so later operations use one canonical path.
+                path = Path(guarded.canonical_path)
+                self.path = path
+            elif guarded != expected:
                 raise RuntimeError("journal backing file identity changed")
             connection = sqlite3.connect(path, timeout=30, isolation_level=None)
             try:
                 connection.row_factory = sqlite3.Row
+                connection.create_function(
+                    "autotrade_protected_writer_authority",
+                    1,
+                    lambda _aggregate_type: None,
+                )
                 opened_path = connection_main_path(connection)
                 if opened_path != path:
                     raise RuntimeError(
@@ -320,6 +339,11 @@ class JournalStore(_JournalStoreImpl):
         connection = sqlite3.connect(path, timeout=30, isolation_level=None)
         try:
             connection.row_factory = sqlite3.Row
+            connection.create_function(
+                "autotrade_protected_writer_authority",
+                1,
+                lambda _aggregate_type: None,
+            )
             opened = connection_main_identity(connection)
             if opened.canonical_path != str(path):
                 raise RuntimeError(

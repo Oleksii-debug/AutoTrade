@@ -42,6 +42,7 @@ def capability():
             account_id="contract-account",
             entity_id="contract-entity",
             environment="PAPER",
+            provider_environment="DEMO",
             instrument_version="PI_XBTUSD@v1",
             observed_at=observed,
             expires_at=NOW_DT + timedelta(hours=1),

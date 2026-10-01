@@ -1,10 +1,13 @@
 import os
 from pathlib import Path
+import sys
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 from unittest.mock import patch
 
+import autotrade_research.artifacts.resource_lock as resource_lock_module
 from autotrade_research.artifacts.resource_lock import (
     ResourceLock,
     ResourceLockBusyError,
@@ -109,27 +112,38 @@ class ResourceLockRaceHardeningTests(unittest.TestCase):
             handle.close.side_effect = OSError("simulated close failure")
             primary = ResourceLockBusyError("another process owns the resource lock")
 
-            with (
-                patch.object(lock, "_open_lock_handle", return_value=handle),
-                patch.object(lock, "_validate_handle_identity"),
-                patch.object(ResourceLock, "_lock_handle", side_effect=primary),
-            ):
-                with self.assertRaises(ResourceLockBusyError) as caught:
-                    lock.acquire()
+            try:
+                with (
+                    patch.object(lock, "_open_lock_handle", return_value=handle),
+                    patch.object(lock, "_validate_handle_identity"),
+                    patch.object(ResourceLock, "_lock_handle", side_effect=primary),
+                ):
+                    with self.assertRaises(ResourceLockBusyError) as caught:
+                        lock.acquire()
 
-            self.assertIs(caught.exception, primary)
-            notes = getattr(caught.exception, "__notes__", ())
-            self.assertTrue(
-                any(
-                    "acquisition cleanup" in note
-                    and "simulated close failure" in note
-                    for note in notes
-                ),
-                f"cleanup evidence missing from primary exception notes: {notes!r}",
-            )
-            self.assertIs(lock._handle, handle)
-            with self.assertRaisesRegex(ResourceLockError, "already held"):
-                lock.acquire()
+                self.assertIs(caught.exception, primary)
+                notes = getattr(caught.exception, "__notes__", ())
+                self.assertTrue(
+                    any(
+                        "acquisition cleanup" in note
+                        and "simulated close failure" in note
+                        for note in notes
+                    ),
+                    f"cleanup evidence missing from primary exception notes: {notes!r}",
+                )
+                self.assertIs(lock._handle, handle)
+                with self.assertRaisesRegex(ResourceLockError, "already held"):
+                    lock.acquire()
+            finally:
+                # The production contract deliberately keeps the real Windows
+                # parent namespace retained while handle lifetime is uncertain.
+                # Once the poison assertions above are complete, remove only
+                # the synthetic close failure and bypass the synthetic OS-lock
+                # operation so the fixture can release that real guard.
+                handle.close.side_effect = None
+                if lock._handle is not None or lock._windows_parent_guard is not None:
+                    with patch.object(lock, "_unlock_handle"):
+                        lock.release()
 
     def test_dual_unlock_and_close_failure_keeps_lock_fail_closed(self):
         with TemporaryDirectory() as directory:
@@ -198,10 +212,496 @@ class ResourceLockRaceHardeningTests(unittest.TestCase):
                 lock.acquire()
         mkdir.assert_not_called()
 
+    def test_windows_kernel_handle_transfer_close_failure_poisoning_is_recorded(self):
+        lock = ResourceLock("resource.lock")
+        primary = RuntimeError("simulated CRT transfer failure")
+        fake_msvcrt = SimpleNamespace(
+            open_osfhandle=mock.Mock(side_effect=primary),
+        )
+
+        with (
+            patch.dict(sys.modules, {"msvcrt": fake_msvcrt}),
+            patch.object(
+                resource_lock_module,
+                "close_windows_handle",
+                side_effect=OSError("simulated native close failure"),
+            ),
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                lock._adopt_windows_kernel_handle(123, flags=0)
+
+        self.assertIs(caught.exception, primary)
+        self.assertTrue(lock._windows_handle_cleanup_uncertain)
+        notes = getattr(caught.exception, "__notes__", ())
+        self.assertTrue(
+            any(
+                "native Windows HANDLE close also failed" in note
+                and "simulated native close failure" in note
+                for note in notes
+            ),
+            f"native HANDLE cleanup evidence missing from notes: {notes!r}",
+        )
+
+    def test_windows_file_wrapper_close_failure_poisoning_is_recorded(self):
+        lock = ResourceLock("resource.lock")
+        primary = RuntimeError("simulated file-object wrapper failure")
+        fake_msvcrt = SimpleNamespace(
+            open_osfhandle=mock.Mock(return_value=456),
+        )
+
+        with (
+            patch.dict(sys.modules, {"msvcrt": fake_msvcrt}),
+            patch.object(
+                resource_lock_module.os,
+                "fdopen",
+                side_effect=primary,
+            ),
+            patch.object(
+                resource_lock_module.os,
+                "close",
+                side_effect=OSError("simulated descriptor close failure"),
+            ),
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                lock._adopt_windows_kernel_handle(123, flags=0)
+
+        self.assertIs(caught.exception, primary)
+        self.assertTrue(lock._windows_handle_cleanup_uncertain)
+        notes = getattr(caught.exception, "__notes__", ())
+        self.assertTrue(
+            any(
+                "CRT descriptor close also failed" in note
+                and "simulated descriptor close failure" in note
+                for note in notes
+            ),
+            f"CRT descriptor cleanup evidence missing from notes: {notes!r}",
+        )
+
+    def test_windows_uncertain_native_transfer_retains_parent_namespace(self):
+        events = []
+
+        class ParentGuard:
+            def __enter__(self):
+                events.append("parent-enter")
+                return object()
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                events.append("parent-exit")
+                return False
+
+        lock = ResourceLock("resource.lock")
+        guard = ParentGuard()
+        windows_os = SimpleNamespace(
+            name="nt",
+            path=os.path,
+            fspath=os.fspath,
+        )
+        primary = ResourceLockError("simulated transfer failure")
+
+        def fail_with_uncertain_native_handle():
+            lock._windows_handle_cleanup_uncertain = True
+            raise primary
+
+        with (
+            patch.object(resource_lock_module, "os", windows_os),
+            patch.object(
+                resource_lock_module,
+                "require_qualified_local_filesystem_path",
+            ),
+            patch.object(
+                resource_lock_module,
+                "retain_windows_parent_namespace",
+                return_value=guard,
+            ),
+            patch.object(
+                lock,
+                "_acquire_after_parent_ready",
+                side_effect=fail_with_uncertain_native_handle,
+            ),
+        ):
+            with self.assertRaises(ResourceLockError) as caught:
+                lock.acquire()
+            self.assertIs(caught.exception, primary)
+            self.assertIs(lock._windows_parent_guard, guard)
+            self.assertEqual(events, ["parent-enter"])
+
+            with self.assertRaisesRegex(
+                ResourceLockError,
+                "native Windows handle cleanup remains uncertain",
+            ):
+                lock.release()
+            self.assertIs(lock._windows_parent_guard, guard)
+            self.assertEqual(events, ["parent-enter"])
+
+            with self.assertRaisesRegex(
+                ResourceLockError,
+                "uncertain native handle cleanup",
+            ):
+                lock.acquire()
+            self.assertEqual(events, ["parent-enter"])
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows filesystem qualification")
+    def test_relative_path_is_frozen_before_locality_admission_can_change_cwd(self):
+        original_cwd = Path.cwd()
+        with TemporaryDirectory() as first_dir, TemporaryDirectory() as second_dir:
+            first = Path(first_dir)
+            second = Path(second_dir)
+            observed = []
+            lock = ResourceLock("state/resource.lock")
+            acquired = False
+            try:
+                os.chdir(first)
+                original_require = (
+                    resource_lock_module.require_qualified_local_filesystem_path
+                )
+
+                def qualify_then_change_cwd(path):
+                    observed.append(Path(path))
+                    original_require(path)
+                    os.chdir(second)
+
+                with patch.object(
+                    resource_lock_module,
+                    "require_qualified_local_filesystem_path",
+                    new=qualify_then_change_cwd,
+                ):
+                    lock.acquire()
+                    acquired = True
+            finally:
+                # The selected lock path is absolute after admission, so release
+                # is deliberately independent of the process CWD.
+                os.chdir(original_cwd)
+                if acquired:
+                    lock.release()
+
+            expected = first / "state" / "resource.lock"
+            unexpected = second / "state" / "resource.lock"
+            self.assertEqual(len(observed), 1)
+            self.assertTrue(observed[0].is_absolute())
+            self.assertEqual(lock.path, expected)
+            self.assertTrue(expected.is_file())
+            self.assertFalse(unexpected.exists())
+
+    def test_windows_parent_guard_admission_failure_uses_resource_lock_error(self):
+        class FailingParentGuard:
+            def __enter__(self):
+                raise RuntimeError("simulated retained-parent admission failure")
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                raise AssertionError("failed parent admission must not call __exit__")
+
+        with TemporaryDirectory() as directory:
+            lock = ResourceLock(Path(directory) / "resource.lock")
+            windows_os = SimpleNamespace(
+                name="nt",
+                path=os.path,
+                fspath=os.fspath,
+            )
+            with (
+                patch.object(resource_lock_module, "os", windows_os),
+                patch.object(
+                    resource_lock_module,
+                    "require_qualified_local_filesystem_path",
+                ),
+                patch.object(
+                    resource_lock_module,
+                    "retain_windows_parent_namespace",
+                    return_value=FailingParentGuard(),
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    ResourceLockError,
+                    "ordinary retained local Windows namespace",
+                ) as caught:
+                    lock.acquire()
+
+            self.assertIsInstance(caught.exception.__cause__, RuntimeError)
+            self.assertIsNone(lock._handle)
+            self.assertIsNone(lock._windows_parent_guard)
+
+    def test_windows_parent_guard_spans_complete_held_lock_lifetime(self):
+        events = []
+
+        class ParentGuard:
+            def __enter__(self):
+                events.append("parent-enter")
+                return object()
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                events.append("parent-exit")
+                return False
+
+        with TemporaryDirectory() as directory:
+            lock = ResourceLock(Path(directory) / "resource.lock")
+            handle = mock.MagicMock()
+            handle.close.side_effect = lambda: events.append("handle-close")
+            guard = ParentGuard()
+            windows_os = SimpleNamespace(
+                name="nt",
+                path=os.path,
+                fspath=os.fspath,
+            )
+
+            def acquired():
+                events.append("lock-acquired")
+                lock._handle = handle
+
+            def unlocked(_handle):
+                events.append("lock-unlocked")
+
+            with (
+                patch.object(resource_lock_module, "os", windows_os),
+                patch.object(
+                    resource_lock_module,
+                    "require_qualified_local_filesystem_path",
+                ),
+                patch.object(
+                    resource_lock_module,
+                    "retain_windows_parent_namespace",
+                    return_value=guard,
+                ),
+                patch.object(
+                    lock,
+                    "_acquire_after_parent_ready",
+                    side_effect=acquired,
+                ),
+                patch.object(lock, "_unlock_handle", side_effect=unlocked),
+            ):
+                lock.acquire()
+                self.assertEqual(events, ["parent-enter", "lock-acquired"])
+                self.assertIs(lock._windows_parent_guard, guard)
+                lock.release()
+
+            self.assertEqual(
+                events,
+                [
+                    "parent-enter",
+                    "lock-acquired",
+                    "lock-unlocked",
+                    "handle-close",
+                    "parent-exit",
+                ],
+            )
+            self.assertIsNone(lock._handle)
+            self.assertIsNone(lock._windows_parent_guard)
+
+    def test_windows_parent_guard_is_not_released_when_handle_close_is_uncertain(self):
+        events = []
+
+        class ParentGuard:
+            def __enter__(self):
+                events.append("parent-enter")
+                return object()
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                events.append("parent-exit")
+                return False
+
+        with TemporaryDirectory() as directory:
+            lock = ResourceLock(Path(directory) / "resource.lock")
+            handle = mock.MagicMock()
+            handle.close.side_effect = OSError("simulated close failure")
+            guard = ParentGuard()
+            windows_os = SimpleNamespace(
+                name="nt",
+                path=os.path,
+                fspath=os.fspath,
+            )
+
+            def acquired():
+                lock._handle = handle
+
+            with (
+                patch.object(resource_lock_module, "os", windows_os),
+                patch.object(
+                    resource_lock_module,
+                    "require_qualified_local_filesystem_path",
+                ),
+                patch.object(
+                    resource_lock_module,
+                    "retain_windows_parent_namespace",
+                    return_value=guard,
+                ),
+                patch.object(
+                    lock,
+                    "_acquire_after_parent_ready",
+                    side_effect=acquired,
+                ),
+                patch.object(lock, "_unlock_handle"),
+            ):
+                lock.acquire()
+                with self.assertRaisesRegex(OSError, "simulated close failure"):
+                    lock.release()
+
+            self.assertEqual(events, ["parent-enter"])
+            self.assertIs(lock._handle, handle)
+            self.assertIs(lock._windows_parent_guard, guard)
+
+    def test_windows_parent_cleanup_failure_poisons_reacquire(self):
+        events = []
+
+        class FailingParentGuard:
+            def __enter__(self):
+                events.append("parent-enter")
+                return object()
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                events.append("parent-exit")
+                raise OSError("simulated parent release failure")
+
+        with TemporaryDirectory() as directory:
+            lock = ResourceLock(Path(directory) / "resource.lock")
+            guard = FailingParentGuard()
+            windows_os = SimpleNamespace(
+                name="nt",
+                path=os.path,
+                fspath=os.fspath,
+            )
+            primary = ResourceLockBusyError("simulated acquire failure")
+
+            with (
+                patch.object(resource_lock_module, "os", windows_os),
+                patch.object(
+                    resource_lock_module,
+                    "require_qualified_local_filesystem_path",
+                ),
+                patch.object(
+                    resource_lock_module,
+                    "retain_windows_parent_namespace",
+                    return_value=guard,
+                ),
+                patch.object(
+                    lock,
+                    "_acquire_after_parent_ready",
+                    side_effect=primary,
+                ),
+            ):
+                with self.assertRaises(ResourceLockBusyError) as caught:
+                    lock.acquire()
+                self.assertIs(caught.exception, primary)
+                notes = getattr(caught.exception, "__notes__", ())
+                self.assertTrue(
+                    any(
+                        "parent namespace release also failed" in note
+                        and "simulated parent release failure" in note
+                        for note in notes
+                    ),
+                    f"parent cleanup evidence missing from notes: {notes!r}",
+                )
+                self.assertIs(lock._windows_parent_guard, guard)
+                with self.assertRaisesRegex(
+                    ResourceLockError,
+                    "unreleased Windows namespace authority",
+                ):
+                    lock.acquire()
+
+        self.assertEqual(events, ["parent-enter", "parent-exit"])
+
+    @unittest.skipUnless(
+        os.name == "nt",
+        "native Windows retained-parent lifetime regression",
+    )
+    def test_windows_held_lock_prevents_parent_generation_rename(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent = root / "held-parent"
+            moved = root / "moved-parent"
+            parent.mkdir()
+            lock = ResourceLock(parent / "resource.lock")
+            lock.acquire()
+            try:
+                with self.assertRaises(OSError):
+                    parent.rename(moved)
+                self.assertTrue(parent.exists())
+                self.assertFalse(moved.exists())
+            finally:
+                lock.release()
+
+            parent.rename(moved)
+            self.assertFalse(parent.exists())
+            self.assertTrue(moved.exists())
+
+    @unittest.skipUnless(
+        os.name == "nt",
+        "native Windows lock-file generation regression",
+    )
+    def test_windows_held_lock_prevents_lock_file_generation_rename(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            lock_path = root / "resource.lock"
+            moved_path = root / "moved-resource.lock"
+            lock = ResourceLock(lock_path)
+            lock.acquire()
+            try:
+                with self.assertRaises(OSError):
+                    lock_path.rename(moved_path)
+                self.assertTrue(lock_path.exists())
+                self.assertFalse(moved_path.exists())
+            finally:
+                lock.release()
+
+            lock_path.rename(moved_path)
+            self.assertFalse(lock_path.exists())
+            self.assertTrue(moved_path.exists())
+
     def test_blocking_mode_requires_exact_bool(self):
         with self.assertRaisesRegex(TypeError, "blocking must be bool"):
             ResourceLock("resource.lock", blocking=1)
 
+
+
+    @unittest.skipUnless(os.name == "nt", "native Windows pathname semantics")
+    def test_windows_lock_rejects_alternate_stream_before_mutation(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            ordinary = root / "resource.lock"
+            candidate = Path(str(ordinary) + ":shadow")
+            with self.assertRaisesRegex(
+                ResourceLockError,
+                "canonical Windows pathname",
+            ):
+                ResourceLock(candidate).acquire()
+            self.assertFalse(ordinary.exists())
+
+    @unittest.skipUnless(os.name == "nt", "native Windows pathname semantics")
+    def test_windows_lock_rejects_trailing_dot_leaf_before_creation(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            normalized = root / "resource.lock"
+            candidate = root / "resource.lock."
+            with self.assertRaisesRegex(
+                ResourceLockError,
+                "canonical Windows pathname",
+            ):
+                ResourceLock(candidate).acquire()
+            self.assertFalse(normalized.exists())
+
+    @unittest.skipUnless(os.name == "nt", "native Windows pathname semantics")
+    def test_windows_lock_rejects_trailing_space_leaf_before_creation(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            normalized = root / "resource.lock"
+            candidate = root / "resource.lock "
+            with self.assertRaisesRegex(
+                ResourceLockError,
+                "canonical Windows pathname",
+            ):
+                ResourceLock(candidate).acquire()
+            self.assertFalse(normalized.exists())
+
+    @unittest.skipUnless(os.name == "nt", "native Windows pathname semantics")
+    def test_windows_lock_rejects_normalized_parent_before_creation(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            ambiguous_parent = root / "locks."
+            candidate = ambiguous_parent / "resource.lock"
+            with self.assertRaisesRegex(
+                ResourceLockError,
+                "canonical Windows pathname",
+            ):
+                ResourceLock(candidate).acquire()
+            self.assertFalse(ambiguous_parent.exists())
+            self.assertFalse(candidate.exists())
 
 if __name__ == "__main__":
     unittest.main()

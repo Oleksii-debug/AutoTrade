@@ -9,8 +9,8 @@ guarded dispatcher and exact capability evidence.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Mapping
 from uuid import UUID
@@ -20,17 +20,7 @@ import hmac
 import json
 import re
 
-from autotrade_numeric import (
-    ExactDecimalError,
-    as_fraction,
-    exact_multiply,
-    parse_bounded_exact_decimal,
-    parse_bounded_json_integer_token,
-    parse_bounded_json_number_token,
-)
-
 from .capabilities import CapabilitySnapshot
-from .provider_response_limits import require_provider_json_depth
 from .reconciliation import ProviderFillEvidence
 
 
@@ -56,72 +46,30 @@ _SIDES = frozenset({"BUY", "SELL"})
 
 
 def decode_whitebit_json(raw: str | bytes):
-    """Decode bounded provider JSON while preserving every exact numeric token."""
-    if type(raw) is bytes:
-        raw_bytes = raw
+    """Decode provider JSON while preserving every decimal token exactly."""
+    if isinstance(raw, bytes):
         try:
-            raw_text = bytes.decode(raw, "utf-8", errors="strict")
+            raw = raw.decode("utf-8")
         except UnicodeDecodeError as error:
-            raise WhiteBitAdapterError(
-                "provider JSON must be exact UTF-8 text"
-            ) from error
-    elif type(raw) is str:
-        raw_text = raw
-        try:
-            raw_bytes = str.encode(raw, "utf-8", errors="strict")
-        except UnicodeEncodeError as error:
-            raise WhiteBitAdapterError(
-                "provider JSON must be exact UTF-8 text"
-            ) from error
-    else:
-        raise WhiteBitAdapterError(
-            "provider JSON must use exact str or bytes"
-        )
-
-    if not str.strip(raw_text):
+            raise WhiteBitAdapterError("provider JSON must be UTF-8") from error
+    if not isinstance(raw, str) or not raw.strip():
         raise WhiteBitAdapterError("provider JSON is required")
-
-    resource_failure = False
-    try:
-        require_provider_json_depth(raw_bytes)
-    except ValueError:
-        resource_failure = True
-    if resource_failure:
-        raise WhiteBitAdapterError(
-            "provider JSON exceeds maximum depth or resource budget"
-        )
 
     def reject_constant(value: str):
         raise WhiteBitAdapterError(
             f"provider JSON contains non-finite numeric token: {value}"
         )
 
-    def reject_duplicate_object_pairs(
-        pairs: list[tuple[str, object]],
-    ) -> dict[str, object]:
-        result: dict[str, object] = {}
-        for key, value in pairs:
-            if key in result:
-                raise WhiteBitAdapterError(
-                    f"provider JSON contains duplicate object key: {key}"
-                )
-            result[key] = value
-        return result
-
     try:
         return json.loads(
-            raw_text,
-            parse_float=parse_bounded_json_number_token,
-            parse_int=parse_bounded_json_integer_token,
+            raw,
+            parse_float=Decimal,
+            parse_int=int,
             parse_constant=reject_constant,
-            object_pairs_hook=reject_duplicate_object_pairs,
         )
-    except ExactDecimalError as error:
-        raise WhiteBitAdapterError(
-            "provider JSON numeric token exceeds the shared exact resource envelope"
-        ) from error
     except json.JSONDecodeError as error:
         raise WhiteBitAdapterError("provider JSON is invalid") from error
+
 
 def _text(value: str, *, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
@@ -130,12 +78,14 @@ def _text(value: str, *, name: str) -> str:
 
 
 def _decimal(value, *, name: str, positive: bool = False) -> Decimal:
+    if isinstance(value, bool) or isinstance(value, float):
+        raise WhiteBitAdapterError(f"{name} must use exact decimal input")
     try:
-        result = parse_bounded_exact_decimal(value)
-    except ExactDecimalError as error:
-        raise WhiteBitAdapterError(
-            f"{name} must use bounded exact decimal input"
-        ) from error
+        result = value if isinstance(value, Decimal) else Decimal(value)
+    except (InvalidOperation, TypeError, ValueError) as error:
+        raise WhiteBitAdapterError(f"{name} must be a finite decimal") from error
+    if not result.is_finite():
+        raise WhiteBitAdapterError(f"{name} must be a finite decimal")
     if positive and result <= 0:
         raise WhiteBitAdapterError(f"{name} must be positive")
     return result
@@ -1123,25 +1073,18 @@ class WhiteBitAbsenceEvidence:
 
 
 def _unix_instant(value, *, name: str) -> str:
-    """Convert bounded exact Unix time without ambient Decimal/platform timestamp math."""
+    """Convert an exact Unix timestamp to UTC without binary-float rounding."""
     instant = _decimal(value, name=name)
-    rational = as_fraction(instant)
-    if rational < 0:
+    if instant < 0:
         raise WhiteBitAdapterError(f"{name} cannot be negative")
-    whole_seconds, remainder = divmod(rational.numerator, rational.denominator)
-    microsecond_numerator = remainder * 1_000_000
-    if microsecond_numerator % rational.denominator:
+    whole = int(instant)
+    fractional = instant - Decimal(whole)
+    microseconds = fractional * Decimal("1000000")
+    if microseconds != microseconds.to_integral_value():
         raise WhiteBitAdapterError(f"{name} exceeds microsecond precision")
-    microseconds = microsecond_numerator // rational.denominator
-    try:
-        parsed = datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(
-            seconds=whole_seconds,
-            microseconds=microseconds,
-        )
-    except (OverflowError, ValueError) as error:
-        raise WhiteBitAdapterError(
-            f"{name} is outside the supported UTC range"
-        ) from error
+    parsed = datetime.fromtimestamp(whole, tz=timezone.utc).replace(
+        microsecond=int(microseconds)
+    )
     return parsed.isoformat().replace("+00:00", "Z")
 
 
@@ -1193,7 +1136,6 @@ def parse_execution_deal(
     required = (
         "id",
         "orderId",
-        "clientOrderId",
         "time",
         "side",
         "role",
@@ -1209,60 +1151,22 @@ def parse_execution_deal(
             "execution deal missing required fields: " + ", ".join(missing)
         )
 
-    for name in ("id", "orderId", "role"):
-        if type(payload[name]) is not int:
-            raise WhiteBitAdapterError(
-                f"execution {name} must be an exact JSON integer"
-            )
-        if payload[name] < 0:
-            raise WhiteBitAdapterError(f"execution {name} cannot be negative")
-
-    for name in (
-        "clientOrderId",
-        "side",
-        "amount",
-        "price",
-        "deal",
-        "fee",
-        "feeAsset",
-    ):
-        if type(payload[name]) is not str:
-            raise WhiteBitAdapterError(
-                f"execution {name} must be an exact JSON string"
-            )
-
-    if type(payload["time"]) not in {int, Decimal}:
-        raise WhiteBitAdapterError(
-            "execution time must be an exact JSON number"
-        )
-
-    raw_side = payload["side"]
-    if raw_side not in {"buy", "sell"}:
-        raise WhiteBitAdapterError(
-            "execution side must be exactly buy or sell"
-        )
-    side = raw_side.upper()
+    side = _text(str(payload["side"]), name="side").upper()
+    if side not in _SIDES:
+        raise WhiteBitAdapterError("execution side must be BUY or SELL")
 
     raw_role = payload["role"]
-    if raw_role == 1:
+    if raw_role == 1 or raw_role == "1":
         role = "MAKER"
-    elif raw_role == 2:
+    elif raw_role == 2 or raw_role == "2":
         role = "TAKER"
     else:
-        raise WhiteBitAdapterError(
-            "execution role must be 1 (maker) or 2 (taker)"
-        )
+        raise WhiteBitAdapterError("execution role must be 1 (maker) or 2 (taker)")
 
     quantity = _decimal(payload["amount"], name="amount", positive=True)
     price = _decimal(payload["price"], name="price", positive=True)
     deal_value = _decimal(payload["deal"], name="deal", positive=True)
-    try:
-        expected_deal_value = exact_multiply(quantity, price)
-    except ExactDecimalError as error:
-        raise WhiteBitAdapterError(
-            "execution amount multiplied by price exceeds the shared exact resource envelope"
-        ) from error
-    if deal_value != expected_deal_value:
+    if deal_value != quantity * price:
         raise WhiteBitAdapterError(
             "execution deal value must equal exact amount multiplied by price"
         )
@@ -1270,16 +1174,22 @@ def parse_execution_deal(
     if fee < 0:
         raise WhiteBitAdapterError("execution fee cannot be negative")
 
-    raw_client_id = payload["clientOrderId"]
+    raw_client_id = payload.get("clientOrderId")
     client_order_id = (
         None
-        if raw_client_id == ""
-        else validate_client_order_id(raw_client_id)
+        if raw_client_id in {None, ""}
+        else validate_client_order_id(str(raw_client_id))
     )
 
     return WhiteBitExecutionDeal(
-        provider_execution_id=str(payload["id"]),
-        provider_order_id=str(payload["orderId"]),
+        provider_execution_id=_text(
+            str(payload["id"]),
+            name="execution id",
+        ),
+        provider_order_id=_text(
+            str(payload["orderId"]),
+            name="order id",
+        ),
         client_order_id=client_order_id,
         market=_text(market, name="market").upper(),
         side=side,
@@ -1288,9 +1198,10 @@ def parse_execution_deal(
         price=price,
         deal_value=deal_value,
         fee_amount=fee,
-        fee_currency=_text(payload["feeAsset"], name="feeAsset").upper(),
+        fee_currency=_text(str(payload["feeAsset"]), name="feeAsset").upper(),
         trade_time=_unix_instant(payload["time"], name="time"),
     )
+
 
 def parse_execution_history(
     records: list[Mapping[str, object]] | tuple[Mapping[str, object], ...],

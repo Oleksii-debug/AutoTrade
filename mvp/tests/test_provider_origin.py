@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from copy import copy
 from datetime import timedelta
 from hashlib import sha256
@@ -264,6 +266,52 @@ def _record_test_provider_origin(
 
 
 class ProviderOriginJournalTests(unittest.TestCase):
+    def test_response_store_instance_publish_shadow_cannot_interpose_financial_retention(self):
+        query = authenticated_read_binding()
+        body = b'{"balances":[{"asset":"USDT","free":"100.00"}]}'
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            response_store = ArtifactStore(
+                Path(path).parent / "provider-origin-artifacts"
+            )
+            journal = ProviderOriginJournal(
+                store,
+                writer_capability=_provider_writer(store),
+                response_store=response_store,
+            )
+            attempt_id = journal.prepare(
+                query,
+                selected_authority=selected_authority(query),
+                transport_identity="UrllibJsonWireClient:v1",
+                network_policy_identity="sha256:" + "1" * 64,
+                recorded_at=READ_NOW,
+            )
+            hostile_calls = []
+
+            def hostile_publish(**_kwargs):
+                hostile_calls.append(True)
+                raise AssertionError(
+                    "caller-owned ArtifactStore instance method executed"
+                )
+
+            response_store.__dict__["publish_bytes"] = hostile_publish
+            binding = _record_test_provider_origin(
+                journal,
+                attempt_id,
+                query,
+                http_status=200,
+                response_bytes=body,
+                observed_at=READ_NOW + timedelta(seconds=1),
+            )
+
+            self.assertEqual(hostile_calls, [])
+            self.assertEqual(binding.response_bytes, body)
+            self.assertEqual(
+                journal._response_reader(binding.response_artifact_id)[1],
+                body,
+            )
+
     def test_pre_q_network_schema_is_historical_only_after_upgrade(self):
         query = authenticated_read_binding()
         body = b'{"balances":[{"asset":"USDT","free":"42.00"}]}'

@@ -5,7 +5,7 @@ from pathlib import Path
 import socket
 import time
 from tempfile import TemporaryDirectory
-from threading import Thread
+from threading import Event, Thread
 import unittest
 from urllib.request import urlopen
 
@@ -863,6 +863,24 @@ class HostNetworkTests(unittest.TestCase):
             expected_state_version=current_state_version,
             idempotency_key="host-network-wire-key-2",
         )
+        # Signal when the exact post-ACCEPTED authority handler has *returned*,
+        # not when a concurrent read merely observes the journal's SUCCEEDED
+        # phase while the handler may still hold SQLite resources. This is a
+        # test-local instrument, not a production completion/authority channel.
+        resume_finished = Event()
+        resumed_ids: list[str] = []
+        original_resume = app.resume_authority_operations
+
+        def observed_resume():
+            try:
+                completed = original_resume()
+                resumed_ids.extend(completed)
+                return completed
+            finally:
+                resume_finished.set()
+
+        app.resume_authority_operations = observed_resume
+
         native_body = json.dumps(native).encode("utf-8")
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
         conn.request(
@@ -880,6 +898,32 @@ class HostNetworkTests(unittest.TestCase):
             int(current_state_version) + 1,
         )
         conn.close()
+
+        # The exact handler completion signal is raised after
+        # resume_authority_operations() returns, with all its SQLite contexts
+        # closed. No wall-clock polling/sleeps or cleanup suppression. An
+        # externally imposed timeout only prevents a hung test from hanging CI.
+        native_operation_id = native_payload["operation_id"]
+        self.assertTrue(
+            resume_finished.wait(timeout=10.0),
+            "native post-ACCEPTED handler failed to drain",
+        )
+        self.assertIn(native_operation_id, resumed_ids)
+
+        # Still prove durable financial authority via the public endpoint;
+        # the private completion signal alone is not permission/evidence.
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        conn.request(
+            "GET",
+            "/api/v1/operations/" + native_operation_id,
+            headers=self._wire_headers(session, origin=origin),
+        )
+        operation_response = conn.getresponse()
+        native_operation = json.loads(operation_response.read().decode("utf-8"))
+        conn.close()
+        self.assertEqual(operation_response.status, 200)
+        self.assertEqual(native_operation["operation_id"], native_operation_id)
+        self.assertEqual(native_operation["phase"], "SUCCEEDED")
 
     def test_concrete_server_rejects_duplicate_sensitive_headers_before_dispatch(self):
         origin, session, app, port = self._network_fixture()

@@ -11,6 +11,7 @@ from pathlib import Path
 from decimal import Context, Decimal, localcontext, InvalidOperation, DivisionByZero, Overflow, Inexact, Rounded
 from contextlib import closing
 import sqlite3
+import re
 
 from autotrade_numeric import (
     canonical_decimal_text, exact_subtract, exact_sum, parse_bounded_exact_decimal,
@@ -18,10 +19,21 @@ from autotrade_numeric import (
 )
 
 from .durable_reservations import DurableReservationBook
+from .accounting import book_external_cash_flow, canonical_transaction
+from .dispatch import stable_client_order_id, submission_attempt_aggregate_id
 from .persistence import JournalStore
 from .provider_activity_accounting import DurableProviderEconomicBook
-from .simulation_session import ACCOUNT, ENVIRONMENT, INITIAL_CASH, INSTRUMENT, PROVIDER
+from .reconciliation_journal import load_latest_reconciliation_checkpoint
+from .simulation_session import ACCOUNT, ENVIRONMENT, INITIAL_CASH, INSTRUMENT, INSTRUMENT_ID, PROVIDER, _uuid
 from research.autotrade_research.artifacts.resource_lock import ResourceLock, ResourceLockBusyError
+
+
+_ECONOMIC_UNITS = frozenset({
+    ("CASH:USD", "USD"), ("EXTERNAL_EQUITY:USD", "USD"),
+    ("CLEARING:USD", "USD"), ("FEE_EXPENSE:USD", "USD"),
+    (f"POSITION:{INSTRUMENT}", INSTRUMENT),
+    (f"CLEARING:{INSTRUMENT}", INSTRUMENT),
+})
 
 
 class SimulationStateChanging(ValueError):
@@ -59,6 +71,115 @@ def _balance(book: DurableProviderEconomicBook, account: str, unit: str):
     return exact_sum(posting.signed_amount for transaction in book.transactions
                      for posting in transaction.postings
                      if posting.ledger_account == account and posting.asset_or_currency == unit)
+
+
+def _require_complete_reconciliation(event: dict, *, cash, position, fill_id) -> None:
+    """Check the whole bounded fixture, rather than a self-asserted complete flag."""
+    evidence = event["payload"]
+    if (event["aggregate_type"] != "account_reconciliation"
+            or event.get("environment") != ENVIRONMENT
+            or type(evidence) is not dict):
+        raise ValueError("simulation reconciliation owner differs")
+    _scope(evidence)
+    if (evidence.get("complete") is not True
+            or evidence.get("snapshot_consistent") is not True
+            or evidence.get("activity_coverage_complete") is not True
+            or evidence.get("checkpoint_owner") != {"host_id": "local-simulation", "owner_epoch": "1"}):
+        raise ValueError("simulation reconciliation is incomplete")
+    observed_at = evidence.get("observed_at")
+    if (type(observed_at) is not str or not observed_at
+            or event.get("observed_at") != observed_at
+            or event.get("committed_at") != observed_at
+            or event.get("host_id") != "local-simulation"
+            or event.get("owner_epoch") != "1"
+            or evidence.get("snapshot") != {
+                "mode": "ATOMIC", "query_started_at": observed_at, "query_completed_at": observed_at,
+            }):
+        raise ValueError("simulation reconciliation snapshot identity differs")
+    empty_lists = (
+        "reasons", "blocking_resources", "unexpected_execution_ids",
+        "missing_local_execution_ids", "unexpected_provider_fill_bindings",
+        "unexpected_working_provider_order_ids", "missing_local_working_client_order_ids",
+        "unexpected_provider_activity_ids", "missing_local_provider_activity_ids",
+        "manual_or_external_activity_ids", "submission_resolutions",
+        "matched_working_client_order_ids", "matched_provider_activity_ids",
+    )
+    if any(evidence.get(name) != [] for name in empty_lists):
+        raise ValueError("simulation reconciliation has unexpected or unresolved activity")
+    for name in ("cash_differences", "position_differences", "borrow_differences"):
+        amounts = evidence.get(name)
+        permitted = {"USD"} if name == "cash_differences" else {INSTRUMENT} if name == "position_differences" else set()
+        if (type(amounts) is not dict or set(amounts) - permitted
+                or any(_decimal(value) != 0 for value in amounts.values())):
+            raise ValueError("simulation reconciliation differences remain")
+    if evidence.get("matched_execution_ids") != ([] if fill_id is None else [fill_id]):
+        raise ValueError("simulation reconciled executions differ")
+    provider_cash = evidence.get("provider_cash")
+    provider_positions = evidence.get("provider_positions")
+    if (type(provider_cash) is not dict or set(provider_cash) != {"USD"}
+            or _decimal(provider_cash["USD"]) != cash
+            or type(provider_positions) is not dict
+            or set(provider_positions) - {INSTRUMENT}
+            or _decimal(provider_positions.get(INSTRUMENT, "0")) != position):
+        raise ValueError("simulation reconciliation units or amounts differ")
+
+
+def _require_completed_send(events: list[dict], *, episode_id: str, order_id: str) -> None:
+    """An economic fill must belong to this episode's durable submission."""
+    intent_id = _uuid("intent", episode_id)
+    attempt_id = _uuid("attempt", episode_id)
+    client_id = stable_client_order_id("simulated", intent_id, environment=ENVIRONMENT, account_id=ACCOUNT)
+    aggregate_id = submission_attempt_aggregate_id(environment=ENVIRONMENT, account_id=ACCOUNT, attempt_id=attempt_id)
+    submissions = [event for event in events if event["aggregate_type"] == "submission_attempt"]
+    if (order_id != client_id or len(submissions) != 3
+            or [event["event_type"] for event in submissions] != ["SubmissionPrepared", "SubmissionSending", "SubmissionSent"]
+            or any(event["aggregate_id"] != aggregate_id
+                   or event["aggregate_version"] != index
+                   or event.get("environment") != ENVIRONMENT
+                   or type(event["payload"]) is not dict
+                   or event["payload"].get("client_order_id") != client_id
+                   for index, event in enumerate(submissions, 1))):
+        raise ValueError("simulation fill submission chronology differs")
+    prepared = submissions[0]["payload"]
+    response = submissions[-1]["payload"].get("response")
+    if (prepared.get("intent_id") != intent_id or prepared.get("attempt_id") != attempt_id
+            or prepared.get("provider") != "simulated"
+            or prepared.get("environment") != ENVIRONMENT or prepared.get("account_id") != ACCOUNT
+            or type(response) is not dict or response.get("outcome") != "ACKNOWLEDGED"
+            or response.get("attempt_id") != attempt_id or response.get("client_order_id") != client_id):
+        raise ValueError("simulation fill submission identity differs")
+
+
+def _require_recorded_admission(events: list[dict], *, episode_id: str, outcome: str) -> dict:
+    """Display a recorded outcome only for the same intent and risk reference.
+
+    This is historical SIMULATION attribution. It never evaluates risk or
+    grants current admission, dispatch or retry authority.
+    """
+    admissions = [event for event in events if event["event_type"] == "AuthorityAdmissionRecorded"]
+    if len(admissions) != 1:
+        raise ValueError("simulation admission evidence differs")
+    admission = admissions[0]
+    payload = admission["payload"]
+    if (admission["aggregate_type"] != "authority_state" or admission["aggregate_id"] != "canonical"
+            or type(payload) is not dict or payload.get("outcome") != outcome
+            or payload.get("environment") != ENVIRONMENT or payload.get("account_id") != ACCOUNT
+            or payload.get("action") != "ORDER.SUBMIT"
+            or payload.get("instrument") != {"instrument_id": INSTRUMENT_ID, "version": 1}
+            or payload.get("admission_id") != _uuid("admission", episode_id)
+            or payload.get("intent_id") != _uuid("intent", episode_id)
+            or payload.get("financial_command_id") != _uuid("financial-command", episode_id)):
+        raise ValueError("simulation admission identity differs")
+    risks = [event for event in events if event["event_type"] == "RiskDecisionRecorded"]
+    if (len(risks) != 1 or risks[0]["aggregate_type"] != "risk_decision"
+            or risks[0]["aggregate_id"] != payload.get("risk_decision_id")
+            or type(risks[0]["payload"]) is not dict
+            or risks[0]["payload"].get("decision_id") != payload.get("risk_decision_id")
+            or risks[0]["payload"].get("intent_hash") != payload.get("intent_hash")
+            or risks[0]["payload"].get("verdict") != ("ALLOW" if outcome == "ADMITTED" else "REJECT")
+            or not risks[0]["journal_sequence"] < admission["journal_sequence"]):
+        raise ValueError("simulation recorded risk attribution differs")
+    return admission
 
 
 def inspect_canonical_simulation(state_dir: str | Path, *, history_limit: int = 0) -> dict | None:
@@ -113,6 +234,7 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
         if event["aggregate_type"] == "reservation_book":
             payload = event["payload"]
             if (type(payload) is not dict or payload.get("account_id") != ACCOUNT
+                    or event.get("environment") not in {None, ENVIRONMENT}
                     or payload.get("environment") != ENVIRONMENT):
                 raise ValueError("simulation reservation scope differs")
             snapshot = payload.get("snapshot")
@@ -122,6 +244,8 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
                 amounts = snapshot.get(name)
                 if type(amounts) is not dict or len(amounts) > 10:
                     raise ValueError("simulation reservation amount map is malformed")
+                if set(amounts) != {"CASH:USD"}:
+                    raise ValueError("single-episode simulation reservation resources differ")
                 for amount in amounts.values():
                     _decimal(amount)
         if event["aggregate_type"] != "economic_book":
@@ -129,6 +253,8 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
         payload = event["payload"]
         if type(payload) is not dict:
             raise ValueError("simulation economic payload is malformed")
+        if event.get("environment") not in {None, ENVIRONMENT}:
+            raise ValueError("simulation economic envelope scope differs")
         _scope(payload)
         transactions = payload.get("transactions")
         if type(transactions) is not list or not 1 <= len(transactions) <= 10:
@@ -143,6 +269,8 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
                 if type(posting) is not dict:
                     raise ValueError("simulation posting is malformed")
                 _decimal(posting.get("signed_amount"))
+                if (posting.get("ledger_account"), posting.get("asset_or_currency")) not in _ECONOMIC_UNITS:
+                    raise ValueError("single-episode simulation economic units differ")
     sessions = [event for event in events
                 if event["aggregate_type"] == "canonical_simulation_session"]
     if sessions:
@@ -160,7 +288,9 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
         if (type(episode_id) is not str or not episode_id.strip()
                 or started.get("environment") != ENVIRONMENT
                 or started.get("decision") not in {"BUY", "HOLD"}
-                or type(started.get("input_hash")) is not str):
+                or type(started.get("input_hash")) is not str
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", started["input_hash"]) is None
+                or sessions[0]["event_id"] != _uuid("SimulationSessionStarted", episode_id)):
             raise ValueError("simulation session identity is invalid")
     else:
         episode_id = None
@@ -171,12 +301,18 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
     )
     if not book.transactions:
         raise ValueError("journal has no canonical simulation economic state")
+    if any(event["aggregate_id"] != book.book_id for event in events
+           if event["aggregate_type"] == "economic_book"):
+        raise ValueError("simulation journal contains another economic book")
     cash = _balance(book, "CASH:USD", "USD")
     position = _balance(book, f"POSITION:{INSTRUMENT}", INSTRUMENT)
     initial_cash = exact_subtract(Decimal("0"), _balance(book, "EXTERNAL_EQUITY:USD", "USD"))
     if initial_cash != INITIAL_CASH:
         raise ValueError("simulation starting capital differs from the canonical fixture")
     reservations = DurableReservationBook(store, environment=ENVIRONMENT, account_id=ACCOUNT)
+    if any(event["aggregate_id"] != reservations.scope_id for event in events
+           if event["aggregate_type"] == "reservation_book"):
+        raise ValueError("simulation journal contains another reservation book")
     active = reservations.active()
     status = {
         "status": "needs_recovery", "state_format": "canonical_journal",
@@ -207,6 +343,7 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
         if type(result) is not dict:
             raise ValueError("completed simulation payload must be an object")
         if (completed["event_type"] != "SimulationSessionCompleted"
+                or completed["event_id"] != _uuid("SimulationSessionCompleted", episode_id)
                 or result.get("episode_id") != episode_id
                 or result.get("environment") != ENVIRONMENT
                 or result.get("decision") != started["decision"]
@@ -217,38 +354,64 @@ def _inspect(state_dir: str | Path, *, history_limit: int) -> dict | None:
         session_status = result.get("status")
         if session_status not in {"HOLD", "RISK_REJECTED", "FILL_RECONCILED_ORDER_UNCONFIRMED"}:
             raise ValueError("unsupported completed simulation outcome")
+        fill_id = result.get("fill_id")
+        is_fill = session_status == "FILL_RECONCILED_ORDER_UNCONFIRMED"
+        seed = book_external_cash_flow(
+            transaction_id=_uuid("seed-transaction", episode_id),
+            cause_event_id=_uuid("seed-cause", episode_id), currency="USD", amount=INITIAL_CASH,
+        )
+        if (len(book.transactions) != (2 if is_fill else 1)
+                or canonical_transaction(book.transactions[0]) != canonical_transaction(seed)):
+            raise ValueError("completed simulation economic history differs")
         reconciliation = next((event for event in events
                                if event["event_id"] == result.get("reconciliation_event_id")), None)
         if (reconciliation is None or reconciliation["event_type"] != "AccountReconciled"
                 or reconciliation["journal_sequence"] >= completed["journal_sequence"]):
             raise ValueError("simulation reconciliation evidence is missing")
+        selected = load_latest_reconciliation_checkpoint(
+            store, reconciliation_id="canonical-simulation-fill" if is_fill else "canonical-simulation-admission",
+            provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT,
+        )
+        if selected != reconciliation:
+            raise ValueError("simulation reconciliation is not the canonical checkpoint")
         evidence = reconciliation["payload"]
         if (type(evidence) is not dict or type(evidence.get("provider_cash")) is not dict
                 or type(evidence.get("provider_positions")) is not dict):
             raise ValueError("simulation reconciliation payload is malformed")
-        _scope(evidence)
-        if (evidence.get("complete") is not True
-                or evidence.get("snapshot_consistent") is not True
-                or evidence.get("reasons") != []
-                or evidence.get("blocking_resources") != []
-                or _decimal(evidence.get("provider_cash", {}).get("USD")) != cash
-                or _decimal(evidence.get("provider_positions", {}).get(INSTRUMENT, "0")) != position):
-            raise ValueError("simulation reconciliation is incomplete or differs")
-        fill_id = result.get("fill_id")
-        is_fill = session_status == "FILL_RECONCILED_ORDER_UNCONFIRMED"
+        _require_complete_reconciliation(reconciliation, cash=cash, position=position, fill_id=fill_id)
         if is_fill:
             if (result["decision"] != "BUY" or position <= 0
                     or type(fill_id) is not str or not fill_id
                     or type(result.get("order_id")) is not str or not result["order_id"]
-                    or fill_id not in evidence.get("matched_execution_ids", [])
-                    or not any(tx.cause_event_id == fill_id for tx in book.transactions)):
+                    or book.transactions[1].cause_event_id != fill_id
+                    or book.transactions[1].transaction_id != _uuid("fill-transaction", episode_id)
+                    or book.transactions[1].reverses_transaction_id is not None
+                    or book.transactions[1].corrects_transaction_id is not None
+                    or reconciliation["journal_sequence"] <= max(event["journal_sequence"] for event in events
+                        if event["aggregate_type"] == "economic_book")):
                 raise ValueError("completed simulation fill is not durably evidenced")
+            _require_completed_send(events, episode_id=episode_id, order_id=result["order_id"])
+            admission = _require_recorded_admission(events, episode_id=episode_id, outcome="ADMITTED")
+            prepared = next(event for event in events if event["event_type"] == "SubmissionPrepared")
+            if (prepared["payload"].get("intent_hash") != admission["payload"].get("intent_hash")
+                    or prepared["journal_sequence"] <= admission["journal_sequence"]):
+                raise ValueError("simulation send does not belong to the admitted intent")
+            if (len(active) != 1 or active[0].reservation_id != _uuid("reservation", episode_id)
+                    or active[0].intent_id != _uuid("intent", episode_id)
+                    or active[0].state != "WORKING" or active[0].remaining != {"CASH:USD": Decimal("0")}):
+                raise ValueError("completed simulation reservation differs")
             status["fills"] = {fill_id: {"instrument": INSTRUMENT,
                                         "quantity": canonical_decimal_text(position)}}
-        elif (fill_id is not None or result.get("order_id") is not None or position != 0
+        elif (fill_id is not None or result.get("order_id") is not None or position != 0 or active
+              or any(event["aggregate_type"] == "submission_attempt" for event in events)
               or (session_status == "HOLD" and result["decision"] != "HOLD")
               or (session_status == "RISK_REJECTED" and result["decision"] != "BUY")):
             raise ValueError("non-fill simulation contains unexpected exposure")
+        elif session_status == "RISK_REJECTED":
+            _require_recorded_admission(events, episode_id=episode_id, outcome="REJECTED")
+        elif any(event["event_type"] in {"AuthorityAdmissionRecorded", "RiskDecisionRecorded"}
+                 for event in events):
+            raise ValueError("completed HOLD contains an unexpected financial admission")
         status.update(
             status="awaiting_order_reconciliation" if is_fill or active else "completed",
             session_status=session_status, reconciled=True,

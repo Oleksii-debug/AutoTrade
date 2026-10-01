@@ -1,6 +1,7 @@
 """End-to-end operator reads of durable simulation, including crash boundaries."""
 
 from contextlib import closing
+from copy import deepcopy
 from decimal import localcontext, ROUND_UP, ROUND_DOWN
 import io
 import json
@@ -11,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 from mvp.autotrade_mvp import simulation_session
-from mvp.autotrade_mvp.accounting import book_external_cash_flow
+from mvp.autotrade_mvp.accounting import book_external_cash_flow, book_equity_fill
 from mvp.autotrade_mvp.cli import get_status, main
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.pipeline import run_vertical_slice
@@ -42,6 +43,222 @@ def command(directory, *args):
 
 
 class SimulationOperatorTests(unittest.TestCase):
+    def _invalid_journal(self, transform, prices=BUY):
+        """Produce integrity-valid malformed fixtures at the canonical write seam."""
+        append = JournalStore.append_event
+        commit = JournalStore.commit_command
+        def changed(envelope):
+            envelope = deepcopy(envelope)
+            transform(envelope)
+            envelope["payload_hash"] = payload_digest(envelope["payload"])
+            return envelope
+        def altered(store, envelope, **kwargs):
+            return append(store, changed(envelope), **kwargs)
+        def altered_command(store, **kwargs):
+            kwargs["events"] = [(changed(envelope), topic) for envelope, topic in kwargs["events"]]
+            return commit(store, **kwargs)
+        with TemporaryDirectory() as directory:
+            with patch.object(JournalStore, "append_event", altered), patch.object(JournalStore, "commit_command", altered_command):
+                run(directory, prices)
+            self._assert_untrusted_read(directory)
+
+    def _assert_untrusted_read(self, directory):
+        before = dump(directory)
+        for mode in ("--status", "--accessible-status", "--economic-report", "--history"):
+            with self.subTest(mode=mode):
+                code, output, error = command(directory, mode)
+                self.assertEqual(code, 2)
+                self.assertNotIn("Traceback", output + error)
+                self.assertNotIn("Economic reconciliation: passed", output)
+                self.assertNotIn('"reconciled": true', output)
+                self.assertEqual(dump(directory), before)
+
+    def test_completed_order_identity_must_match_durable_send(self):
+        self._invalid_completion({"order_id": "another-client-order"})
+
+    def test_reconciliation_owner_cannot_be_an_unrelated_aggregate(self):
+        def alter(event):
+            if event["event_type"] == "AccountReconciled":
+                event["aggregate_type"] = "unrelated_checkpoint"
+        self._invalid_journal(alter, ["100", "101"])
+
+    def test_reconciliation_envelope_environment_must_match_payload(self):
+        def alter(event):
+            if event["event_type"] == "AccountReconciled":
+                event["environment"] = "LIVE"
+        self._invalid_journal(alter, ["100", "101"])
+
+    def test_reconciliation_cannot_hide_another_currency(self):
+        def alter(event):
+            if event["event_type"] == "AccountReconciled":
+                event["payload"]["provider_cash"]["EUR"] = "10"
+        self._invalid_journal(alter)
+
+    def test_reconciliation_cannot_hide_another_position(self):
+        def alter(event):
+            if event["event_type"] == "AccountReconciled":
+                event["payload"]["provider_positions"]["OTHER@1"] = "1"
+        self._invalid_journal(alter)
+
+    def test_reconciliation_difference_maps_cannot_override_complete_flag(self):
+        for key in ("cash_differences", "position_differences", "borrow_differences"):
+            with self.subTest(key=key):
+                def alter(event):
+                    if event["event_type"] == "AccountReconciled":
+                        event["payload"][key] = {"unexpected": "1"}
+                self._invalid_journal(alter)
+
+    def test_reconciliation_unresolved_lists_cannot_override_complete_flag(self):
+        keys = ("unexpected_execution_ids", "missing_local_execution_ids",
+                "unexpected_provider_activity_ids", "missing_local_provider_activity_ids",
+                "unexpected_working_provider_order_ids", "missing_local_working_client_order_ids",
+                "manual_or_external_activity_ids", "submission_resolutions",
+                "unexpected_provider_fill_bindings")
+        for key in keys:
+            with self.subTest(key=key):
+                def alter(event):
+                    if event["event_type"] == "AccountReconciled":
+                        event["payload"][key] = ["unresolved"]
+                self._invalid_journal(alter)
+
+    def test_matched_execution_ids_must_be_an_exact_list(self):
+        for variant in ("string", "duplicate", "additional"):
+            with self.subTest(variant=variant):
+                def alter(event):
+                    ids = event["payload"].get("matched_execution_ids")
+                    if event["event_type"] == "AccountReconciled" and ids:
+                        event["payload"]["matched_execution_ids"] = (
+                            ids[0] if variant == "string" else
+                            ids + [ids[0] if variant == "duplicate" else "other-fill"])
+                self._invalid_journal(alter)
+
+    def test_fill_completion_requires_canonical_submission_owner(self):
+        def alter(event):
+            if event["aggregate_type"] == "submission_attempt":
+                event["aggregate_type"] = "unrelated_submission"
+        self._invalid_journal(alter)
+
+    def test_submission_client_order_is_consistent_through_the_send(self):
+        def alter(event):
+            if event["event_type"] == "SubmissionSent":
+                event["payload"]["client_order_id"] = "another-order"
+        self._invalid_journal(alter)
+
+    def test_complete_flag_cannot_replace_activity_coverage(self):
+        def alter(event):
+            if event["event_type"] == "AccountReconciled":
+                event["payload"]["activity_coverage_complete"] = False
+        self._invalid_journal(alter)
+
+    def test_complete_flag_cannot_replace_atomic_snapshot_identity(self):
+        for snapshot in (None, {"mode": "ATOMIC"},
+                         {"mode": "BRACKETED", "query_started_at": NOW, "query_completed_at": NOW},
+                         {"mode": "ATOMIC", "query_started_at": "2026-10-02T18:30:00Z", "query_completed_at": NOW}):
+            with self.subTest(snapshot=snapshot):
+                def alter(event):
+                    if event["event_type"] == "AccountReconciled":
+                        event["payload"]["snapshot"] = snapshot
+                self._invalid_journal(alter, ["100", "101"])
+
+    def test_reconciliation_envelope_owner_must_match_checkpoint_owner(self):
+        for key, value in (("host_id", "another-host"), ("owner_epoch", "2"),
+                           ("observed_at", "2026-10-02T18:30:00Z")):
+            with self.subTest(key=key):
+                def alter(event):
+                    if event["event_type"] == "AccountReconciled":
+                        event[key] = value
+                self._invalid_journal(alter)
+
+    def test_completed_session_cannot_use_another_started_event_identity(self):
+        def alter(event):
+            if event["event_type"] == "SimulationSessionStarted":
+                event["event_id"] = "other-started-event"
+        self._invalid_journal(alter, ["100", "101"])
+
+    def test_completed_session_input_digest_must_be_canonical(self):
+        for value in ("", "sha256:abc", "sha256:" + "A" * 64):
+            with self.subTest(value=value):
+                def alter(event):
+                    if event["event_type"] == "SimulationSessionStarted":
+                        event["payload"]["input_hash"] = value
+                self._invalid_journal(alter, ["100", "101"])
+
+    def test_zero_reconciliation_difference_cannot_hide_another_unit(self):
+        for key in ("cash_differences", "position_differences", "borrow_differences"):
+            with self.subTest(key=key):
+                def alter(event):
+                    if event["event_type"] == "AccountReconciled":
+                        event["payload"][key] = {"another-unit": "0"}
+                self._invalid_journal(alter)
+
+    def test_economic_envelope_cannot_cross_runtime_environment(self):
+        def alter(event):
+            if event["aggregate_type"] == "economic_book":
+                event["environment"] = "LIVE"
+        self._invalid_journal(alter, ["100", "101"])
+
+    def test_risk_rejected_summary_requires_recorded_rejection(self):
+        def alter(event):
+            if event["event_type"] == "AuthorityAdmissionRecorded":
+                event["payload"]["outcome"] = "ADMITTED"
+        self._invalid_journal(alter, ["1000", "1001", "1003"])
+
+    def test_risk_rejected_summary_requires_the_same_intent(self):
+        for key in ("intent_id", "admission_id", "financial_command_id", "account_id"):
+            with self.subTest(key=key):
+                def alter(event):
+                    if event["event_type"] == "AuthorityAdmissionRecorded":
+                        event["payload"][key] = "another-identity"
+                self._invalid_journal(alter, ["1000", "1001", "1003"])
+
+    def test_risk_rejected_summary_requires_the_canonical_risk_owner(self):
+        def alter(event):
+            if event["event_type"] == "RiskDecisionRecorded":
+                event["aggregate_type"] = "another-risk-owner"
+        self._invalid_journal(alter, ["1000", "1001", "1003"])
+
+    def test_risk_rejected_summary_requires_the_bound_risk_verdict(self):
+        def alter(event):
+            if event["event_type"] == "RiskDecisionRecorded":
+                event["payload"]["verdict"] = "ALLOW"
+        self._invalid_journal(alter, ["1000", "1001", "1003"])
+
+    def test_risk_rejected_summary_cannot_replace_risk_intent_hash(self):
+        def alter(event):
+            if event["event_type"] == "RiskDecisionRecorded":
+                event["payload"]["intent_hash"] = "sha256:" + "0" * 64
+        self._invalid_journal(alter, ["1000", "1001", "1003"])
+
+    def test_completed_hold_cannot_hide_extra_economic_units(self):
+        for transaction in (
+            book_external_cash_flow(transaction_id="extra-eur", cause_event_id="extra-eur", currency="EUR", amount="10"),
+            book_equity_fill(transaction_id="extra-position", cause_event_id="extra-position", instrument="OTHER@1",
+                             settlement_currency="EUR", side="BUY", quantity="1", price="1", fee="0", fee_currency="EUR"),
+        ):
+            with self.subTest(transaction=transaction.transaction_id), TemporaryDirectory() as directory:
+                event = simulation_session._event
+                def extra(store, kind, episode_id, payload, now):
+                    if kind == "SimulationSessionCompleted":
+                        book = DurableProviderEconomicBook(store, provider_id=PROVIDER, account_id=ACCOUNT, environment=ENVIRONMENT)
+                        book.append(transaction)
+                    return event(store, kind, episode_id, payload, now)
+                with patch.object(simulation_session, "_event", extra):
+                    run(directory, ["100", "101"])
+                self._assert_untrusted_read(directory)
+
+    def test_completed_hold_cannot_ignore_another_economic_book(self):
+        with TemporaryDirectory() as directory:
+            event = simulation_session._event
+            def extra(store, kind, episode_id, payload, now):
+                if kind == "SimulationSessionCompleted":
+                    seed = store.load_events_by_aggregate_type("economic_book")[0]
+                    seed = {**seed, "event_id": "other-book-event", "aggregate_id": "another-book", "aggregate_version": "1"}
+                    store.append_event(seed)
+                return event(store, kind, episode_id, payload, now)
+            with patch.object(simulation_session, "_event", extra):
+                run(directory, ["100", "101"])
+            self._assert_untrusted_read(directory)
+
     def test_missing_directory_is_not_created_by_status(self):
         with TemporaryDirectory() as directory:
             root = Path(directory) / "never-started"

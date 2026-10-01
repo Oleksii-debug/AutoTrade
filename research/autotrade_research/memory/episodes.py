@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -114,6 +114,14 @@ def _stored_time(value: Any, *, name: str) -> datetime:
 def _utc_now() -> datetime:
     """Sample local availability only at the durable writer boundary."""
     return datetime.now(timezone.utc)
+
+
+def _stored_writer_sequence(value: Any, *, name: str) -> int:
+    if type(value) is not int or value < 1:
+        raise MemoryIntegrityError(
+            f"{name} lacks durable writer chronology; explicit recovery is required"
+        )
+    return value
 
 
 def _stored_text(value: Any, *, name: str) -> str:
@@ -240,6 +248,7 @@ class ExperienceMemory:
                     episode_id TEXT PRIMARY KEY,
                     episode_hash TEXT NOT NULL,
                     availability_hash TEXT,
+                    writer_sequence INTEGER,
                     decision_time TEXT NOT NULL,
                     information_cutoff TEXT NOT NULL,
                     task TEXT NOT NULL,
@@ -253,6 +262,7 @@ class ExperienceMemory:
                     correction_id TEXT PRIMARY KEY,
                     episode_id TEXT NOT NULL REFERENCES episodes(episode_id),
                     correction_hash TEXT NOT NULL,
+                    writer_sequence INTEGER,
                     payload_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
@@ -260,7 +270,14 @@ class ExperienceMemory:
                     tombstone_id TEXT PRIMARY KEY,
                     episode_id TEXT NOT NULL REFERENCES episodes(episode_id),
                     reason TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    writer_sequence INTEGER
+                );
+                CREATE TABLE IF NOT EXISTS writer_chronology(
+                    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                    last_sequence INTEGER NOT NULL,
+                    last_created_at TEXT NOT NULL,
+                    chronology_hash TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_episode_cutoff
                     ON episodes(information_cutoff, task, regime, instrument_family, permission_class);
@@ -279,6 +296,9 @@ class ExperienceMemory:
                 # silently bless it as causal availability evidence.
                 con.execute("ALTER TABLE episodes ADD COLUMN availability_hash TEXT")
 
+            if "writer_sequence" not in episode_columns:
+                con.execute("ALTER TABLE episodes ADD COLUMN writer_sequence INTEGER")
+
             correction_columns = {
                 row["name"]
                 for row in con.execute("PRAGMA table_info(corrections)").fetchall()
@@ -291,10 +311,12 @@ class ExperienceMemory:
                 con.execute(
                     "ALTER TABLE corrections ADD COLUMN availability_authority TEXT"
                 )
+            if "writer_sequence" not in correction_columns:
+                con.execute("ALTER TABLE corrections ADD COLUMN writer_sequence INTEGER")
             con.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_corrections_causal
-                    ON corrections(episode_id, available_at, created_at, correction_id)
+                    ON corrections(episode_id, available_at, writer_sequence)
                 """
             )
             tombstone_columns = {
@@ -305,6 +327,20 @@ class ExperienceMemory:
                 # Deliberately nullable: pre-migration tombstones are not silently
                 # relabelled as cryptographically witnessed history.
                 con.execute("ALTER TABLE tombstones ADD COLUMN tombstone_hash TEXT")
+            if "writer_sequence" not in tombstone_columns:
+                con.execute("ALTER TABLE tombstones ADD COLUMN writer_sequence INTEGER")
+            con.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_corrections_writer_order
+                    ON corrections(episode_id, available_at, writer_sequence)
+                """
+            )
+            con.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_tombstones_writer_order
+                    ON tombstones(episode_id, writer_sequence)
+                """
+            )
 
     @contextmanager
     def _connect(self):
@@ -320,6 +356,123 @@ class ExperienceMemory:
             raise
         finally:
             con.close()
+
+    @staticmethod
+    def _verified_writer_chronology(
+        con: sqlite3.Connection,
+    ) -> tuple[int, datetime] | None:
+        """Verify one gap-free global append order without guessing legacy state."""
+
+        rows = con.execute(
+            """
+            SELECT writer_sequence, created_at FROM episodes
+            UNION ALL
+            SELECT writer_sequence, created_at FROM corrections
+            UNION ALL
+            SELECT writer_sequence, created_at FROM tombstones
+            """
+        ).fetchall()
+        state = con.execute(
+            "SELECT * FROM writer_chronology WHERE singleton=1"
+        ).fetchone()
+        if not rows:
+            if state is not None:
+                raise MemoryIntegrityError(
+                    "writer chronology state exists without immutable memory rows"
+                )
+            return None
+
+        entries: list[tuple[int, datetime]] = []
+        for row in rows:
+            sequence = _stored_writer_sequence(
+                row["writer_sequence"],
+                name="memory row writer_sequence",
+            )
+            created = _stored_time(
+                row["created_at"],
+                name="memory row created_at",
+            )
+            entries.append((sequence, created))
+        entries.sort(key=lambda item: item[0])
+        sequences = tuple(sequence for sequence, _created in entries)
+        expected_sequences = tuple(range(1, len(entries) + 1))
+        if sequences != expected_sequences:
+            raise MemoryIntegrityError(
+                "durable writer chronology is not gap-free and globally unique"
+            )
+        for previous, current in zip(entries, entries[1:]):
+            if current[1] <= previous[1]:
+                raise MemoryIntegrityError(
+                    "durable writer chronology timestamps are not strictly monotonic"
+                )
+
+        if state is None:
+            raise MemoryIntegrityError(
+                "legacy memory lacks durable writer chronology; explicit recovery is required"
+            )
+        last_sequence = _stored_writer_sequence(
+            state["last_sequence"],
+            name="writer chronology last_sequence",
+        )
+        last_created = _stored_time(
+            state["last_created_at"],
+            name="writer chronology last_created_at",
+        )
+        expected_hash = _hash(
+            {
+                "schema_version": 1,
+                "last_sequence": last_sequence,
+                "last_created_at": state["last_created_at"],
+            }
+        )
+        if state["chronology_hash"] != expected_hash:
+            raise MemoryIntegrityError("writer chronology state integrity mismatch")
+        if last_sequence != entries[-1][0] or last_created != entries[-1][1]:
+            raise MemoryIntegrityError(
+                "writer chronology state does not match immutable memory tail"
+            )
+        return last_sequence, last_created
+
+    @staticmethod
+    def _next_writer_chronology(
+        con: sqlite3.Connection,
+        current: tuple[int, datetime] | None,
+    ) -> tuple[int, datetime]:
+        """Advance local append time conservatively under the SQLite writer lock."""
+
+        sampled = _time(_utc_now(), name="writer clock")
+        if current is None:
+            sequence = 1
+            created = sampled
+        else:
+            previous_sequence, previous_created = current
+            sequence = previous_sequence + 1
+            created = (
+                sampled
+                if sampled > previous_created
+                else previous_created + timedelta(microseconds=1)
+            )
+        created_text = created.isoformat()
+        chronology_hash = _hash(
+            {
+                "schema_version": 1,
+                "last_sequence": sequence,
+                "last_created_at": created_text,
+            }
+        )
+        con.execute(
+            """
+            INSERT INTO writer_chronology(
+                singleton,last_sequence,last_created_at,chronology_hash
+            ) VALUES(1,?,?,?)
+            ON CONFLICT(singleton) DO UPDATE SET
+                last_sequence=excluded.last_sequence,
+                last_created_at=excluded.last_created_at,
+                chronology_hash=excluded.chronology_hash
+            """,
+            (sequence, created_text, chronology_hash),
+        )
+        return sequence, created
 
     @staticmethod
     def _verified_episode(row: sqlite3.Row) -> dict[str, Any]:
@@ -361,6 +514,10 @@ class ExperienceMemory:
         if row["episode_hash"] != expected:
             raise MemoryIntegrityError("episode integrity mismatch")
         created = _stored_time(row["created_at"], name="episode created_at")
+        writer_sequence = _stored_writer_sequence(
+            row["writer_sequence"],
+            name="episode writer_sequence",
+        )
         availability_hash = row["availability_hash"]
         if availability_hash is None:
             raise MemoryIntegrityError(
@@ -371,6 +528,7 @@ class ExperienceMemory:
                 "episode_id": row["episode_id"],
                 "episode_hash": row["episode_hash"],
                 "created_at": row["created_at"],
+                "writer_sequence": writer_sequence,
             }
         )
         if availability_hash != expected_availability:
@@ -379,6 +537,7 @@ class ExperienceMemory:
             "decision": decision,
             "cutoff": cutoff,
             "created": created,
+            "writer_sequence": writer_sequence,
             "task": task,
             "regime": regime,
             "instrument_family": family,
@@ -421,6 +580,10 @@ class ExperienceMemory:
             name="correction evidence_ref",
         )
         created = _stored_time(row["created_at"], name="correction created_at")
+        writer_sequence = _stored_writer_sequence(
+            row["writer_sequence"],
+            name="correction writer_sequence",
+        )
         if row["available_at"] is None or row["availability_authority"] is None:
             raise MemoryIntegrityError(
                 "legacy correction availability lacks independent provenance; "
@@ -454,6 +617,7 @@ class ExperienceMemory:
                 "correction_id": row["correction_id"],
                 "episode_id": row["episode_id"],
                 "created_at": row["created_at"],
+                "writer_sequence": writer_sequence,
                 "available_at": row["available_at"],
                 "availability_authority": authority,
                 "payload": payload,
@@ -477,12 +641,17 @@ class ExperienceMemory:
             )
         reason = _stored_text(row["reason"], name="tombstone reason")
         created = _stored_time(row["created_at"], name="tombstone created_at")
+        writer_sequence = _stored_writer_sequence(
+            row["writer_sequence"],
+            name="tombstone writer_sequence",
+        )
         expected = _hash(
             {
                 "tombstone_id": row["tombstone_id"],
                 "episode_id": episode_id,
                 "reason": reason,
                 "created_at": row["created_at"],
+                "writer_sequence": writer_sequence,
             }
         )
         if row["tombstone_hash"] != expected:
@@ -532,6 +701,7 @@ class ExperienceMemory:
         canonical = _canonical(payload)
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
+            writer_state = self._verified_writer_chronology(con)
             existing = con.execute("SELECT * FROM episodes WHERE episode_id=?", (identifier,)).fetchone()
             if existing is not None:
                 self._verified_episode(existing)
@@ -545,26 +715,32 @@ class ExperienceMemory:
             if duplicate is not None:
                 self._verified_episode(duplicate)
                 return str(duplicate["episode_id"]), False
-            created_at = _utc_now().isoformat()
+            writer_sequence, created = self._next_writer_chronology(
+                con,
+                writer_state,
+            )
+            created_at = created.isoformat()
             availability_digest = _hash(
                 {
                     "episode_id": identifier,
                     "episode_hash": digest,
                     "created_at": created_at,
+                    "writer_sequence": writer_sequence,
                 }
             )
             con.execute(
                 """
                 INSERT INTO episodes(
-                    episode_id,episode_hash,availability_hash,decision_time,
-                    information_cutoff,task,regime,instrument_family,permission_class,
-                    payload_json,created_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                    episode_id,episode_hash,availability_hash,writer_sequence,
+                    decision_time,information_cutoff,task,regime,instrument_family,
+                    permission_class,payload_json,created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     identifier,
                     digest,
                     availability_digest,
+                    writer_sequence,
                     decision.isoformat(),
                     cutoff.isoformat(),
                     normalized_task,
@@ -622,6 +798,7 @@ class ExperienceMemory:
 
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
+            writer_state = self._verified_writer_chronology(con)
             episode_row = con.execute(
                 "SELECT * FROM episodes WHERE episode_id=?",
                 (episode,),
@@ -682,7 +859,10 @@ class ExperienceMemory:
                     raise MemoryConflict("correction identity conflict")
                 return identifier, False
 
-            created = _utc_now()
+            writer_sequence, created = self._next_writer_chronology(
+                con,
+                writer_state,
+            )
             if requested_availability is None:
                 availability = created
                 availability_authority = "LOCAL_APPEND"
@@ -706,6 +886,7 @@ class ExperienceMemory:
                     "correction_id": identifier,
                     "episode_id": episode,
                     "created_at": created_text,
+                    "writer_sequence": writer_sequence,
                     "available_at": availability_text,
                     "availability_authority": availability_authority,
                     "payload": payload,
@@ -714,14 +895,15 @@ class ExperienceMemory:
             con.execute(
                 """
                 INSERT INTO corrections(
-                    correction_id,episode_id,correction_hash,payload_json,
-                    created_at,available_at,availability_authority
-                ) VALUES(?,?,?,?,?,?,?)
+                    correction_id,episode_id,correction_hash,writer_sequence,
+                    payload_json,created_at,available_at,availability_authority
+                ) VALUES(?,?,?,?,?,?,?,?)
                 """,
                 (
                     identifier,
                     episode,
                     digest,
+                    writer_sequence,
                     canonical,
                     created_text,
                     availability_text,
@@ -737,6 +919,7 @@ class ExperienceMemory:
         identifier = _identifier()
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
+            writer_state = self._verified_writer_chronology(con)
             source = con.execute(
                 "SELECT * FROM episodes WHERE episode_id=?",
                 (episode,),
@@ -744,22 +927,28 @@ class ExperienceMemory:
             if source is None:
                 raise KeyError(episode)
             self._verified_episode(source)
-            created_at = _utc_now().isoformat()
+            writer_sequence, created = self._next_writer_chronology(
+                con,
+                writer_state,
+            )
+            created_at = created.isoformat()
             digest = _hash(
                 {
                     "tombstone_id": identifier,
                     "episode_id": episode,
                     "reason": why,
                     "created_at": created_at,
+                    "writer_sequence": writer_sequence,
                 }
             )
             con.execute(
                 """
                 INSERT INTO tombstones(
-                    tombstone_id,episode_id,reason,created_at,tombstone_hash
-                ) VALUES(?,?,?,?,?)
+                    tombstone_id,episode_id,reason,created_at,tombstone_hash,
+                    writer_sequence
+                ) VALUES(?,?,?,?,?,?)
                 """,
-                (identifier, episode, why, created_at, digest),
+                (identifier, episode, why, created_at, digest, writer_sequence),
             )
             con.commit()
         return identifier
@@ -799,6 +988,7 @@ class ExperienceMemory:
 
         results: list[dict[str, Any]] = []
         with self._connect() as con:
+            self._verified_writer_chronology(con)
             # Verify immutable rows before applying metadata filters. A raw DB edit
             # must not be able to hide a record merely by moving task/regime/time.
             rows = con.execute("SELECT * FROM episodes ORDER BY episode_id").fetchall()
@@ -826,7 +1016,7 @@ class ExperienceMemory:
                     continue
 
                 tombstone_rows = con.execute(
-                    "SELECT * FROM tombstones WHERE episode_id=? ORDER BY created_at,tombstone_id",
+                    "SELECT * FROM tombstones WHERE episode_id=? ORDER BY writer_sequence",
                     (row["episode_id"],),
                 ).fetchall()
                 tombstones: list[dict[str, str]] = []
@@ -848,7 +1038,7 @@ class ExperienceMemory:
                     """
                     SELECT * FROM corrections
                     WHERE episode_id=?
-                    ORDER BY COALESCE(available_at, created_at), created_at, correction_id
+                    ORDER BY COALESCE(available_at, created_at), writer_sequence
                     """,
                     (row["episode_id"],),
                 ).fetchall()
@@ -904,6 +1094,7 @@ class ExperienceMemory:
             normalized_permissions.add(normalized)
 
         with self._connect() as con:
+            self._verified_writer_chronology(con)
             row = con.execute(
                 "SELECT * FROM episodes WHERE episode_id=?",
                 (identifier,),
@@ -926,7 +1117,7 @@ class ExperienceMemory:
                 raise PermissionError("episode permission is not granted")
 
             tombstone_rows = con.execute(
-                "SELECT * FROM tombstones WHERE episode_id=? ORDER BY created_at,tombstone_id",
+                "SELECT * FROM tombstones WHERE episode_id=? ORDER BY writer_sequence",
                 (identifier,),
             ).fetchall()
             tombstones: list[dict[str, str]] = []
@@ -1038,6 +1229,7 @@ class ExperienceMemory:
 
         population: list[dict[str, Any]] = []
         with self._connect() as con:
+            self._verified_writer_chronology(con)
             rows = con.execute("SELECT * FROM episodes ORDER BY episode_id").fetchall()
             for row in rows:
                 verified = self._verified_episode(row)
@@ -1067,7 +1259,7 @@ class ExperienceMemory:
                     """
                     SELECT * FROM corrections
                     WHERE episode_id=?
-                    ORDER BY COALESCE(available_at, created_at), created_at, correction_id
+                    ORDER BY COALESCE(available_at, created_at), writer_sequence
                     """,
                     (row["episode_id"],),
                 ).fetchall()
@@ -1098,7 +1290,7 @@ class ExperienceMemory:
                     """
                     SELECT * FROM tombstones
                     WHERE episode_id=?
-                    ORDER BY created_at,tombstone_id
+                    ORDER BY writer_sequence
                     """,
                     (row["episode_id"],),
                 ).fetchall()

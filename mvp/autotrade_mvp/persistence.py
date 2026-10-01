@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 import json
 from pathlib import Path
+import re
 import sqlite3
 import sys
 from typing import Any
@@ -46,6 +48,48 @@ def __dir__() -> list[str]:
     return sorted(set(globals()) | set(dir(_impl)))
 
 
+@dataclass(frozen=True)
+class ProtectedJournalWriter:
+    """Selected capability for one protected JournalStore event namespace.
+
+    Construction alone is deliberately not authority. JournalStore keeps the
+    selected object identity and immutable scope separately; only an object
+    returned by select_protected_writer() on that exact store generation can
+    write or read protected issuer history.
+    """
+
+    store_identity: JournalStoreIdentity
+    aggregate_type: str
+    namespace_version: str
+    writer_authority_id: str
+
+    def __post_init__(self) -> None:
+        require_exact_journal_store_identity(
+            self.store_identity,
+            subject="protected writer store identity",
+        )
+        for name in ("aggregate_type", "namespace_version"):
+            value = getattr(self, name)
+            if type(value) is not str or not value or value != value.strip():
+                raise TypeError(
+                    f"protected writer {name} must be canonical non-empty text"
+                )
+        if (
+            type(self.writer_authority_id) is not str
+            or re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                self.writer_authority_id,
+            )
+            is None
+        ):
+            raise TypeError(
+                "protected writer authority id must be canonical lowercase SHA-256"
+            )
+
+    def __init_subclass__(cls, **kwargs):
+        raise TypeError("ProtectedJournalWriter is sealed")
+
+
 class JournalStore(_JournalStoreImpl):
     """JournalStore with immutable canonical backing-file authority.
 
@@ -67,6 +111,19 @@ class JournalStore(_JournalStoreImpl):
         self._initialize()
         if self._store_identity is None:
             raise RuntimeError("journal store identity was not established")
+        # Process capability registry is separate from durable writer metadata.
+        # Holding the tuple rather than only the object makes post-issuance
+        # object.__setattr__ tampering fail closed at every use.
+        self._selected_protected_writers: dict[
+            int,
+            tuple[
+                ProtectedJournalWriter,
+                JournalStoreIdentity,
+                str,
+                str,
+                str,
+            ],
+        ] = {}
 
     @classmethod
     def _migration_statements(cls, version: int) -> tuple[str, ...]:
@@ -93,6 +150,142 @@ class JournalStore(_JournalStoreImpl):
             self, identity=identity, state=state, subject="canonical JournalStore"
         )
         return identity
+
+    def select_protected_writer(
+        self,
+        *,
+        aggregate_type: str,
+        namespace_version: str,
+        writer_authority_id: str,
+    ) -> ProtectedJournalWriter:
+        """Select one durable protected namespace for trusted product composition.
+
+        The durable registration is immutable. A conflicting later selection
+        fails closed, and namespaces containing pre-registration generic events
+        cannot be promoted.
+        """
+
+        state = _require_exact_journal_store_state(
+            self,
+            subject="protected writer JournalStore",
+        )
+        _reject_journal_store_instance_shadows(state)
+        identity = JournalStore.store_identity.__get__(self, JournalStore)
+        _JournalStoreImpl._register_protected_event_namespace(
+            self,
+            aggregate_type=aggregate_type,
+            namespace_version=namespace_version,
+            writer_authority_id=writer_authority_id,
+        )
+        writer = ProtectedJournalWriter(
+            store_identity=identity,
+            aggregate_type=aggregate_type,
+            namespace_version=namespace_version,
+            writer_authority_id=writer_authority_id,
+        )
+        registry = state.get("_selected_protected_writers")
+        if type(registry) is not dict:
+            raise RuntimeError(
+                "protected writer process capability registry is unavailable"
+            )
+        registry[id(writer)] = (
+            writer,
+            identity,
+            writer.aggregate_type,
+            writer.namespace_version,
+            writer.writer_authority_id,
+        )
+        return writer
+
+    def _require_selected_protected_writer(
+        self,
+        writer: object,
+    ) -> ProtectedJournalWriter:
+        if type(writer) is not ProtectedJournalWriter:
+            raise TypeError(
+                "writer must be exact selected ProtectedJournalWriter"
+            )
+        state = _require_exact_journal_store_state(
+            self,
+            subject="protected writer JournalStore",
+        )
+        _reject_journal_store_instance_shadows(state)
+        registry = state.get("_selected_protected_writers")
+        if type(registry) is not dict:
+            raise RuntimeError(
+                "protected writer process capability registry is unavailable"
+            )
+        selected = registry.get(id(writer))
+        if (
+            type(selected) is not tuple
+            or len(selected) != 5
+            or selected[0] is not writer
+        ):
+            raise RuntimeError(
+                "protected writer capability was not selected by this JournalStore"
+            )
+        (
+            _selected_writer,
+            selected_identity,
+            selected_aggregate_type,
+            selected_namespace_version,
+            selected_writer_authority_id,
+        ) = selected
+        current_identity = JournalStore.store_identity.__get__(
+            self, JournalStore
+        )
+        selected_identity = require_exact_journal_store_identity(
+            selected_identity,
+            subject="selected protected writer store identity",
+        )
+        if (
+            not same_journal_backing_object(
+                current_identity,
+                selected_identity,
+            )
+            or writer.store_identity != selected_identity
+            or writer.aggregate_type != selected_aggregate_type
+            or writer.namespace_version != selected_namespace_version
+            or writer.writer_authority_id != selected_writer_authority_id
+        ):
+            raise RuntimeError(
+                "protected writer capability scope or store generation changed"
+            )
+        return writer
+
+    def append_protected_event(
+        self,
+        writer: ProtectedJournalWriter,
+        envelope: dict[str, Any],
+        *,
+        outbox_topic: str | None = None,
+    ):
+        selected = self._require_selected_protected_writer(writer)
+        if envelope.get("aggregate_type") != selected.aggregate_type:
+            raise ValueError(
+                "protected writer cannot write another event namespace"
+            )
+        return _JournalStoreImpl._append_protected_event(
+            self,
+            envelope,
+            namespace_version=selected.namespace_version,
+            writer_authority_id=selected.writer_authority_id,
+            outbox_topic=outbox_topic,
+        )
+
+    def load_protected_events(
+        self,
+        writer: ProtectedJournalWriter,
+        aggregate_id: str,
+    ) -> list[dict[str, Any]]:
+        selected = self._require_selected_protected_writer(writer)
+        return _JournalStoreImpl._load_protected_events(
+            self,
+            aggregate_type=selected.aggregate_type,
+            aggregate_id=aggregate_id,
+            namespace_version=selected.namespace_version,
+            writer_authority_id=selected.writer_authority_id,
+        )
 
     def load_command_event_batch(
         self,

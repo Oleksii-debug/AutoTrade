@@ -1005,6 +1005,7 @@ class MarketNormalizer:
         self._require_policy_equivalent_admission(admission, derived)
         admission = derived
         payload = event.payload
+        cursor = admission.prior_sequence
 
         if admission.disposition == "DISCARD":
             return admission

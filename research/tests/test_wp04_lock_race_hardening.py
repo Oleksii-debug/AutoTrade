@@ -306,6 +306,10 @@ class ResourceLockRaceHardeningTests(unittest.TestCase):
             patch.object(resource_lock_module, "os", windows_os),
             patch.object(
                 resource_lock_module,
+                "require_windows_namespace_path",
+            ),
+            patch.object(
+                resource_lock_module,
                 "require_qualified_local_filesystem_path",
             ),
             patch.object(
@@ -401,6 +405,10 @@ class ResourceLockRaceHardeningTests(unittest.TestCase):
                 patch.object(resource_lock_module, "os", windows_os),
                 patch.object(
                     resource_lock_module,
+                    "require_windows_namespace_path",
+                ),
+                patch.object(
+                    resource_lock_module,
                     "require_qualified_local_filesystem_path",
                 ),
                 patch.object(
@@ -451,6 +459,10 @@ class ResourceLockRaceHardeningTests(unittest.TestCase):
 
             with (
                 patch.object(resource_lock_module, "os", windows_os),
+                patch.object(
+                    resource_lock_module,
+                    "require_windows_namespace_path",
+                ),
                 patch.object(
                     resource_lock_module,
                     "require_qualified_local_filesystem_path",
@@ -515,6 +527,10 @@ class ResourceLockRaceHardeningTests(unittest.TestCase):
                 patch.object(resource_lock_module, "os", windows_os),
                 patch.object(
                     resource_lock_module,
+                    "require_windows_namespace_path",
+                ),
+                patch.object(
+                    resource_lock_module,
                     "require_qualified_local_filesystem_path",
                 ),
                 patch.object(
@@ -561,6 +577,10 @@ class ResourceLockRaceHardeningTests(unittest.TestCase):
 
             with (
                 patch.object(resource_lock_module, "os", windows_os),
+                patch.object(
+                    resource_lock_module,
+                    "require_windows_namespace_path",
+                ),
                 patch.object(
                     resource_lock_module,
                     "require_qualified_local_filesystem_path",

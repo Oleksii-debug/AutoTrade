@@ -899,6 +899,139 @@ class AllocationTests(unittest.TestCase):
         self.assertEqual(result.expected_net_utility, Decimal("100"))
         self.assertEqual(result.allocation.targets[0].symbol, "HIGH")
 
+    def test_objective_fee_floor_must_beat_qualified_no_trade_baseline(self):
+        result = allocate_objective_targets(
+            [
+                ObjectiveCandidate.create(
+                    symbol="HELD",
+                    desired_notional="101",
+                    price="1",
+                    lot_size="1",
+                    expected_return_rate="0.10",
+                    fee_floor="1",
+                    current_quantity="100",
+                    turnover_cost_rate="0",
+                    holding_cost_rate="0",
+                )
+            ],
+            self.policy(),
+        )
+        self.assertEqual(result.allocation.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(result.allocation.targets[0].notional, Decimal("100"))
+        self.assertEqual(result.allocation.turnover_notional, Decimal("0"))
+        self.assertEqual(result.expected_net_utility, Decimal("10.00"))
+        self.assertEqual(result.selected_symbols, ())
+        self.assertIn("no-trade portfolio baseline", result.reason)
+
+    def test_objective_equal_utility_prefers_no_trade(self):
+        result = allocate_objective_targets(
+            [
+                ObjectiveCandidate.create(
+                    symbol="HELD",
+                    desired_notional="101",
+                    price="1",
+                    lot_size="1",
+                    expected_return_rate="0.10",
+                    fee_floor="0.10",
+                    current_quantity="100",
+                    turnover_cost_rate="0",
+                    holding_cost_rate="0",
+                )
+            ],
+            self.policy(),
+        )
+        self.assertEqual(result.allocation.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(result.allocation.targets[0].notional, Decimal("100"))
+        self.assertEqual(result.expected_net_utility, Decimal("10.00"))
+        self.assertIn("strictly improved", result.reason)
+
+    def test_objective_genuine_utility_improvement_executes(self):
+        result = allocate_objective_targets(
+            [
+                ObjectiveCandidate.create(
+                    symbol="HELD",
+                    desired_notional="101",
+                    price="1",
+                    lot_size="1",
+                    expected_return_rate="0.10",
+                    fee_floor="0.05",
+                    current_quantity="100",
+                    turnover_cost_rate="0",
+                    holding_cost_rate="0",
+                )
+            ],
+            self.policy(),
+        )
+        self.assertEqual(result.allocation.status, "ALLOCATED")
+        self.assertEqual(result.allocation.targets[0].notional, Decimal("101"))
+        self.assertEqual(result.allocation.turnover_notional, Decimal("1"))
+        self.assertEqual(result.expected_net_utility, Decimal("10.05"))
+        self.assertEqual(result.selected_symbols, ("HELD",))
+        self.assertEqual(result.objective_version, "deterministic-net-utility-v5")
+
+    def test_no_trade_baseline_uses_holding_stress_capital_and_cash_economics(self):
+        result = allocate_objective_targets(
+            [
+                ObjectiveCandidate.create(
+                    symbol="HELD",
+                    desired_notional="101",
+                    price="1",
+                    lot_size="1",
+                    expected_return_rate="0.10",
+                    fee_floor="10",
+                    capital_requirement_rate="0.5",
+                    current_quantity="100",
+                    turnover_cost_rate="0",
+                    holding_cost_rate="0.02",
+                )
+            ],
+            self.policy(
+                cash_available="60",
+                max_gross_notional="1000",
+                max_net_notional="1000",
+                max_symbol_notional="1000",
+                max_total_cost="100",
+                max_stress_loss="100",
+                stress_loss_penalty_rate="0.10",
+            ),
+            stress_scenarios={"down": {"HELD": "-0.20"}},
+        )
+        self.assertEqual(result.allocation.status, "NO_INCREASE_FALLBACK")
+        self.assertEqual(result.allocation.targets[0].notional, Decimal("100"))
+        self.assertEqual(result.allocation.estimated_cost, Decimal("2.00"))
+        self.assertEqual(result.allocation.worst_stress_loss, Decimal("20.00"))
+        self.assertEqual(result.allocation.cash_required, Decimal("52.00"))
+        self.assertEqual(result.expected_net_utility, Decimal("6.0000"))
+        self.assertIn("no-trade portfolio baseline", result.reason)
+
+    def test_hard_infeasible_current_portfolio_can_still_de_risk(self):
+        result = allocate_objective_targets(
+            [
+                ObjectiveCandidate.create(
+                    symbol="OVER_LIMIT",
+                    desired_notional="50",
+                    price="1",
+                    lot_size="1",
+                    expected_return_rate="0.10",
+                    current_quantity="100",
+                    turnover_cost_rate="0",
+                    holding_cost_rate="0",
+                )
+            ],
+            self.policy(
+                cash_available="1000",
+                max_gross_notional="80",
+                max_net_notional="80",
+                max_symbol_notional="80",
+                max_turnover_notional="100",
+            ),
+        )
+        self.assertEqual(result.allocation.status, "ALLOCATED")
+        self.assertEqual(result.allocation.targets[0].notional, Decimal("50"))
+        self.assertEqual(result.allocation.turnover_notional, Decimal("50"))
+        self.assertEqual(result.expected_net_utility, Decimal("5.00"))
+        self.assertEqual(result.selected_symbols, ("OVER_LIMIT",))
+
     def test_objective_subtracts_actual_estimated_cost_once(self):
         result = allocate_objective_targets(
             [
@@ -1096,7 +1229,7 @@ class AllocationTests(unittest.TestCase):
         self.assertEqual(result.selected_symbols, ("LOW_STRESS",))
         self.assertEqual(result.allocation.worst_stress_loss, Decimal("10"))
         self.assertEqual(result.expected_net_utility, Decimal("90"))
-        self.assertEqual(result.objective_version, "deterministic-net-utility-v4")
+        self.assertEqual(result.objective_version, "deterministic-net-utility-v5")
 
     def test_stress_loss_penalty_rejects_binary_float(self):
         with self.assertRaises(TypeError):
@@ -1290,7 +1423,7 @@ class AllocationTests(unittest.TestCase):
         self.assertEqual(result.allocation.status, "ALLOCATED")
         self.assertEqual(result.selected_symbols, ("CHEAP",))
         self.assertEqual(result.expected_net_utility, Decimal("50"))
-        self.assertEqual(result.objective_version, "deterministic-net-utility-v4")
+        self.assertEqual(result.objective_version, "deterministic-net-utility-v5")
 
 
     def test_split_holding_cost_cannot_satisfy_execution_fee_floor(self):

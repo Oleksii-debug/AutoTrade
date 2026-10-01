@@ -337,7 +337,11 @@ else:
             components = {item["path"]: item for item in installed["components"]}
             for runtime_path in runtime_paths:
                 source_digest = "sha256:" + sha256(
-                    (ROOT / runtime_path).read_bytes()
+                    staging_module._git_source_bytes(
+                        runtime_path,
+                        source_root=ROOT,
+                        source_sha=SOURCE_SHA,
+                    )
                 ).hexdigest()
                 self.assertEqual(files[runtime_path]["sha256"], source_digest)
                 self.assertEqual(components[runtime_path]["sha256"], source_digest)
@@ -871,8 +875,16 @@ class WindowsFoundationNoReparseTests(unittest.TestCase):
             first = composition.read_bytes()
             self.assertEqual(stage_windows_foundation(staging=stage, composition_path=composition, source_root=source), result)
             self.assertEqual(first, composition.read_bytes())
-            self.assertEqual((stage / "autotrade_foundation" / "local_filesystem.py").read_bytes(),
-                             (source / "autotrade_foundation" / "local_filesystem.py").read_bytes())
+            source_sha = json.loads(composition.read_text(encoding="utf-8"))["source_sha"]
+            expected = staging_module._git_source_bytes(
+                "autotrade_foundation/local_filesystem.py",
+                source_root=source,
+                source_sha=source_sha,
+            )
+            self.assertEqual(
+                (stage / "autotrade_foundation" / "local_filesystem.py").read_bytes(),
+                expected,
+            )
 
     def test_source_junction_cannot_counterfeit_committed_bytes(self):
         with TemporaryDirectory() as directory:
@@ -1071,7 +1083,12 @@ class WindowsFoundationNoReparseTests(unittest.TestCase):
             source, stage, composition = self._fixture(root)
             stage.mkdir()
             target = stage / "autotrade_foundation" / "local_filesystem.py"
-            expected = (source / "autotrade_foundation" / "local_filesystem.py").read_bytes()
+            source_sha = json.loads(composition.read_text(encoding="utf-8"))["source_sha"]
+            expected = staging_module._git_source_bytes(
+                "autotrade_foundation/local_filesystem.py",
+                source_root=source,
+                source_sha=source_sha,
+            )
             original_manifest = staging_module._atomic_publish_manifest
             guarded_calls = []
 

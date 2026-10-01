@@ -453,6 +453,7 @@ class ExperienceMemory:
             {
                 "correction_id": row["correction_id"],
                 "episode_id": row["episode_id"],
+                "created_at": row["created_at"],
                 "available_at": row["available_at"],
                 "availability_authority": authority,
                 "payload": payload,
@@ -478,6 +479,7 @@ class ExperienceMemory:
         created = _stored_time(row["created_at"], name="tombstone created_at")
         expected = _hash(
             {
+                "tombstone_id": row["tombstone_id"],
                 "episode_id": episode_id,
                 "reason": reason,
                 "created_at": row["created_at"],
@@ -680,7 +682,7 @@ class ExperienceMemory:
                     raise MemoryConflict("correction identity conflict")
                 return identifier, False
 
-            created = datetime.now(timezone.utc)
+            created = _utc_now()
             if requested_availability is None:
                 availability = created
                 availability_authority = "LOCAL_APPEND"
@@ -703,6 +705,7 @@ class ExperienceMemory:
                 {
                     "correction_id": identifier,
                     "episode_id": episode,
+                    "created_at": created_text,
                     "available_at": availability_text,
                     "availability_authority": availability_authority,
                     "payload": payload,
@@ -744,6 +747,7 @@ class ExperienceMemory:
             created_at = _utc_now().isoformat()
             digest = _hash(
                 {
+                    "tombstone_id": identifier,
                     "episode_id": episode,
                     "reason": why,
                     "created_at": created_at,

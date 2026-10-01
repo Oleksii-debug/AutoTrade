@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
@@ -62,6 +62,28 @@ def _admission_text(value: object, field: str) -> str:
     normalized = value.strip()
     if not normalized:
         raise MarketDataError(f"{field} is required")
+    return normalized
+
+
+_MAX_BOOK_CAUSAL_TEXT_UTF8_BYTES = 1024
+
+
+def _book_causal_text(value: object, field: str) -> str:
+    """Admit bounded exact provider book identity text without caller callbacks."""
+
+    if type(value) is not str:
+        raise MarketDataError(f"{field} must be an exact string")
+    normalized = value.strip()
+    if not normalized:
+        raise MarketDataError(f"{field} is required")
+    try:
+        encoded = normalized.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as error:
+        raise MarketDataError(f"{field} must be valid UTF-8 text") from error
+    if len(encoded) > _MAX_BOOK_CAUSAL_TEXT_UTF8_BYTES:
+        raise MarketDataError(
+            f"{field} exceeds the supported book-causality text resource envelope"
+        )
     return normalized
 
 
@@ -202,6 +224,7 @@ class RawMarketUpdate:
     payload: Mapping[str, Any]
     raw_evidence_ref: Mapping[str, object]
     source_sequence: int | None = None
+    stream_generation: int | None = None
     sequence_stream: str | None = None
 
     def __post_init__(self) -> None:
@@ -233,6 +256,11 @@ class RawMarketUpdate:
             self,
             "source_sequence",
             _admission_sequence(self.source_sequence, "source_sequence"),
+        )
+        object.__setattr__(
+            self,
+            "stream_generation",
+            _admission_sequence(self.stream_generation, "stream_generation"),
         )
         try:
             payload_snapshot = snapshot_market_payload(self.payload)
@@ -276,6 +304,7 @@ class NormalizedMarketEvent:
     quality_flags: tuple[str, ...]
     raw_evidence_ref: Mapping[str, object]
     source_sequence: int | None = None
+    stream_generation: int | None = None
 
     @property
     def payload(self) -> dict[str, Any]:
@@ -297,7 +326,132 @@ class NormalizedMarketEvent:
         }
         if self.source_sequence is not None:
             result["source_sequence"] = str(self.source_sequence)
+        if self.stream_generation is not None:
+            result["stream_generation"] = str(self.stream_generation)
         return result
+
+
+@dataclass(frozen=True)
+class BookStreamPolicyBinding:
+    """Static product composition binding for provider-qualified book continuity.
+
+    The evaluator is product composition authority: callers may provide market
+    bytes, but only this registered deterministic evaluator may derive the
+    APPLY/DISCARD/GAP decision consumed by the coordinator.
+    """
+
+    provider_id: str
+    venue_id: str
+    stream: str
+    policy_id: str
+    range_evaluator: object = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        for field_name in ("provider_id", "venue_id", "stream", "policy_id"):
+            object.__setattr__(
+                self,
+                field_name,
+                _admission_text(getattr(self, field_name), field_name),
+            )
+        if not callable(self.range_evaluator):
+            raise MarketDataError("book stream range_evaluator must be callable")
+
+
+def _issue_book_stream_policy_binding(
+    *,
+    provider_id: str,
+    venue_id: str,
+    stream: str,
+    policy_id: str,
+    range_evaluator: object,
+) -> BookStreamPolicyBinding:
+    """Internal adapter factory for one reviewed provider continuity evaluator."""
+
+    return BookStreamPolicyBinding(
+        provider_id=provider_id,
+        venue_id=venue_id,
+        stream=stream,
+        policy_id=policy_id,
+        range_evaluator=range_evaluator,
+    )
+
+
+@dataclass(frozen=True)
+class QualifiedBookRangeAdmission:
+    """Deterministic provider-policy decision bound to one normalized event.
+
+    This value is evidence, not authority by possession.  MarketNormalizer
+    recomputes the decision with the registered provider evaluator before any
+    preview/application, so caller-authored instances cannot relabel a GAP as
+    APPLY.
+    """
+
+    policy_id: str
+    event_id: str
+    disposition: str
+    prior_sequence: int
+    first_sequence: int
+    last_sequence: int
+    next_sequence: int | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "policy_id",
+            _admission_text(self.policy_id, "policy_id"),
+        )
+        event_id = _admission_text(self.event_id, "event_id")
+        try:
+            UUID(event_id)
+        except (ValueError, TypeError, AttributeError) as error:
+            raise MarketDataError("event_id must be a UUID") from error
+        object.__setattr__(self, "event_id", event_id)
+        disposition = _admission_text(self.disposition, "disposition").upper()
+        if disposition not in {"APPLY", "DISCARD", "GAP"}:
+            raise MarketDataError("range disposition is unsupported")
+        object.__setattr__(self, "disposition", disposition)
+        prior = _admission_sequence(self.prior_sequence, "prior_sequence")
+        first = _admission_sequence(self.first_sequence, "first_sequence")
+        last = _admission_sequence(self.last_sequence, "last_sequence")
+        if prior is None or first is None or last is None:
+            raise MarketDataError("range admission sequences are required")
+        if first > last:
+            raise MarketDataError("first_sequence must not exceed last_sequence")
+        object.__setattr__(self, "prior_sequence", prior)
+        object.__setattr__(self, "first_sequence", first)
+        object.__setattr__(self, "last_sequence", last)
+        next_sequence = _admission_sequence(self.next_sequence, "next_sequence")
+        if disposition == "APPLY":
+            if next_sequence is None:
+                raise MarketDataError("APPLY range admission requires next_sequence")
+        elif next_sequence is not None:
+            raise MarketDataError(
+                "non-APPLY range admission must not carry next_sequence"
+            )
+        object.__setattr__(self, "next_sequence", next_sequence)
+
+
+def _issue_qualified_book_range_admission(
+    *,
+    policy_id: str,
+    event_id: str,
+    disposition: str,
+    prior_sequence: int,
+    first_sequence: int,
+    last_sequence: int,
+    next_sequence: int | None,
+) -> QualifiedBookRangeAdmission:
+    """Construct a policy decision value; the coordinator still recomputes it."""
+
+    return QualifiedBookRangeAdmission(
+        policy_id=policy_id,
+        event_id=event_id,
+        disposition=disposition,
+        prior_sequence=prior_sequence,
+        first_sequence=first_sequence,
+        last_sequence=last_sequence,
+        next_sequence=next_sequence,
+    )
 
 
 class MarketNormalizer:
@@ -308,13 +462,38 @@ class MarketNormalizer:
         registry: InstrumentRegistry,
         *,
         max_available_age: timedelta = timedelta(seconds=5),
+        max_book_age: timedelta = timedelta(seconds=5),
+        max_book_levels_per_side: int = 10_000,
+        book_stream_policies: tuple[BookStreamPolicyBinding, ...] = (),
     ) -> None:
         if not isinstance(registry, InstrumentRegistry):
             raise TypeError("registry must be InstrumentRegistry")
         if not isinstance(max_available_age, timedelta) or max_available_age <= timedelta(0):
             raise MarketDataError("max_available_age must be positive")
+        if not isinstance(max_book_age, timedelta) or max_book_age <= timedelta(0):
+            raise MarketDataError("max_book_age must be positive")
+        if type(max_book_levels_per_side) is not int or max_book_levels_per_side <= 0:
+            raise MarketDataError("max_book_levels_per_side must be an exact positive integer")
         self._registry = registry
+        if type(book_stream_policies) is not tuple:
+            raise MarketDataError("book_stream_policies must be an exact tuple")
+        self._book_stream_policies: dict[tuple[str, str, str], str] = {}
+        self._book_stream_policy_evaluators: dict[
+            tuple[str, str, str], object
+        ] = {}
+        for binding in book_stream_policies:
+            if type(binding) is not BookStreamPolicyBinding:
+                raise MarketDataError(
+                    "book stream policy entries must be exact BookStreamPolicyBinding values"
+                )
+            key = (binding.provider_id, binding.venue_id, binding.stream)
+            if key in self._book_stream_policies:
+                raise MarketDataError("duplicate book stream policy binding")
+            self._book_stream_policies[key] = binding.policy_id
+            self._book_stream_policy_evaluators[key] = binding.range_evaluator
         self._max_available_age = max_available_age
+        self._max_book_age = max_book_age
+        self._max_book_levels_per_side = max_book_levels_per_side
         self._last_sequence: dict[tuple[str, str, str, str], int] = {}
         self._seen_sequence_ids: set[tuple[str, str, str, str, int]] = set()
         self._last_revision: dict[tuple[str, str, str, str, int], int] = {}
@@ -328,6 +507,23 @@ class MarketNormalizer:
             tuple[str, str, str, str, int, int], tuple[str, str]
         ] = {}
         self._book_state: dict[tuple[str, str, str, str], str] = {}
+        self._book_last_available_at: dict[
+            tuple[str, str, str, str], datetime
+        ] = {}
+        self._book_levels: dict[
+            tuple[str, str, str, str],
+            tuple[dict[str, str], dict[str, str]],
+        ] = {}
+        self._provider_book_cursor: dict[
+            tuple[str, str, str, str], int
+        ] = {}
+        self._book_event_keys: dict[
+            str, tuple[str, str, str, str]
+        ] = {}
+        self._book_event_contracts: dict[str, str] = {}
+        self._active_book_generation: dict[
+            tuple[str, str, str, str], int
+        ] = {}
 
     @staticmethod
     def _book_key(
@@ -361,15 +557,529 @@ class MarketNormalizer:
         venue_id: str,
         provider_symbol: str,
         stream: str = "book",
+        as_of: datetime | None = None,
     ) -> None:
-        state = self.book_state(
+        key = self._book_key(provider_id, venue_id, provider_symbol, stream)
+        state = self._book_state.get(key, "UNINITIALIZED")
+        if state != "READY":
+            raise MarketDataError(f"book state is {state}; new risk is blocked")
+        if as_of is None:
+            raise MarketDataError(
+                "as_of is required to prove current executable-book freshness"
+            )
+        decision_at = _admission_instant(as_of, "as_of")
+        last_available_at = self._book_last_available_at.get(key)
+        if last_available_at is None:
+            raise MarketDataError(
+                "book freshness cut is unavailable; new risk is blocked"
+            )
+        if decision_at < last_available_at:
+            raise MarketDataError(
+                "as_of precedes the accepted book availability cut; new risk is blocked"
+            )
+        if decision_at - last_available_at > self._max_book_age:
+            raise MarketDataError("book data is stale; new risk is blocked")
+        if key not in self._book_levels:
+            raise MarketDataError(
+                "materialized executable book is unavailable; new risk is blocked"
+            )
+
+    def executable_book(
+        self,
+        *,
+        provider_id: str,
+        venue_id: str,
+        provider_symbol: str,
+        stream: str = "book",
+        as_of: datetime,
+    ) -> dict[str, list[dict[str, str]]]:
+        """Return a detached, freshness-gated materialized book view."""
+
+        self.require_executable_book(
             provider_id=provider_id,
             venue_id=venue_id,
             provider_symbol=provider_symbol,
             stream=stream,
+            as_of=as_of,
         )
-        if state != "READY":
-            raise MarketDataError(f"book state is {state}; new risk is blocked")
+        key = self._book_key(provider_id, venue_id, provider_symbol, stream)
+        bids, asks = self._book_levels[key]
+        return {
+            "bids": [
+                {"price": price, "quantity": bids[price]}
+                for price in sorted(bids, key=Decimal, reverse=True)
+            ],
+            "asks": [
+                {"price": price, "quantity": asks[price]}
+                for price in sorted(asks, key=Decimal)
+            ],
+        }
+
+    def _book_depth_exceeds_limit(
+        self,
+        book: tuple[dict[str, str], dict[str, str]],
+    ) -> bool:
+        return any(
+            len(side) > self._max_book_levels_per_side
+            for side in book
+        )
+
+    @staticmethod
+    def _materialized_book(
+        payload: Mapping[str, Any],
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        bids = {
+            level["price"]: level["quantity"]
+            for level in payload["bids"]
+        }
+        asks = {
+            level["price"]: level["quantity"]
+            for level in payload["asks"]
+        }
+        return bids, asks
+
+    @staticmethod
+    def _apply_book_delta(
+        current: tuple[dict[str, str], dict[str, str]],
+        payload: Mapping[str, Any],
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        bids = dict(current[0])
+        asks = dict(current[1])
+        for side, levels in ((bids, payload["bids"]), (asks, payload["asks"])):
+            for level in levels:
+                price = level["price"]
+                quantity = level["quantity"]
+                if quantity == "0":
+                    side.pop(price, None)
+                else:
+                    side[price] = quantity
+        return bids, asks
+
+    @staticmethod
+    def _materialized_book_is_crossed(
+        book: tuple[dict[str, str], dict[str, str]],
+    ) -> bool:
+        bids, asks = book
+        if not bids or not asks:
+            return False
+        return max(map(Decimal, bids)) > min(map(Decimal, asks))
+
+    def begin_provider_book_generation(
+        self,
+        *,
+        provider_id: str,
+        venue_id: str,
+        provider_symbol: str,
+        generation: int,
+        stream: str = "book",
+        policy_id: str,
+    ) -> None:
+        """Bind the exact active provider generation before any book ingress."""
+
+        key = self._book_key(provider_id, venue_id, provider_symbol, stream)
+        expected_policy = self._book_stream_policies.get(
+            (key[0], key[1], key[3])
+        )
+        admitted_policy = _admission_text(policy_id, "policy_id")
+        if expected_policy is None or admitted_policy != expected_policy:
+            raise MarketDataError("provider book policy binding does not match")
+        admitted_generation = _admission_sequence(generation, "generation")
+        if admitted_generation is None:
+            raise MarketDataError("generation is required")
+        prior = self._active_book_generation.get(key)
+        if prior is not None and admitted_generation <= prior:
+            raise MarketDataError(
+                "provider book generation must strictly increase"
+            )
+        self._active_book_generation[key] = admitted_generation
+        self._book_state[key] = "UNINITIALIZED"
+        self._book_last_available_at.pop(key, None)
+        self._book_levels.pop(key, None)
+        self._provider_book_cursor.pop(key, None)
+
+    def provider_book_generation(
+        self,
+        *,
+        provider_id: str,
+        venue_id: str,
+        provider_symbol: str,
+        stream: str = "book",
+    ) -> int | None:
+        key = self._book_key(provider_id, venue_id, provider_symbol, stream)
+        return self._active_book_generation.get(key)
+
+    def invalidate_provider_book_stream(
+        self,
+        *,
+        provider_id: str,
+        venue_id: str,
+        provider_symbol: str,
+        stream: str = "book",
+        policy_id: str,
+    ) -> None:
+        """Revoke executable provider-book state before reconnect/rebootstrap."""
+
+        key = self._book_key(provider_id, venue_id, provider_symbol, stream)
+        expected_policy = self._book_stream_policies.get(
+            (key[0], key[1], key[3])
+        )
+        admitted_policy = _admission_text(policy_id, "policy_id")
+        if expected_policy is None or admitted_policy != expected_policy:
+            raise MarketDataError("provider book policy binding does not match")
+        self._book_state[key] = "UNINITIALIZED"
+        self._book_last_available_at.pop(key, None)
+        self._book_levels.pop(key, None)
+        self._provider_book_cursor.pop(key, None)
+
+    def provider_book_cursor(
+        self,
+        *,
+        provider_id: str,
+        venue_id: str,
+        provider_symbol: str,
+        stream: str = "book",
+    ) -> int:
+        """Return the retained provider-qualified cursor for composition only."""
+
+        key = self._book_key(provider_id, venue_id, provider_symbol, stream)
+        cursor = self._provider_book_cursor.get(key)
+        if cursor is None:
+            raise MarketDataError("provider book cursor is unavailable")
+        return cursor
+
+    def register_provider_book_snapshot(
+        self,
+        event: NormalizedMarketEvent,
+        *,
+        provider_id: str,
+        venue_id: str,
+        provider_symbol: str,
+        stream: str = "book",
+        policy_id: str,
+        cursor_sequence: int,
+    ) -> None:
+        """Install a provider-policy snapshot baseline without authorizing risk."""
+
+        if type(event) is not NormalizedMarketEvent:
+            raise MarketDataError("event must be an exact NormalizedMarketEvent")
+        key = self._book_key(provider_id, venue_id, provider_symbol, stream)
+        expected_policy = self._book_stream_policies.get(
+            (key[0], key[1], key[3])
+        )
+        admitted_policy = _admission_text(policy_id, "policy_id")
+        if expected_policy is None or admitted_policy != expected_policy:
+            raise MarketDataError("provider book policy binding does not match")
+        if self._book_event_keys.get(event.event_id) != key:
+            raise MarketDataError("book event does not belong to this stream")
+        active_generation = self._active_book_generation.get(key)
+        if active_generation is None:
+            raise MarketDataError(
+                "provider book stream has no active generation"
+            )
+        if event.stream_generation != active_generation:
+            raise MarketDataError(
+                "book event belongs to a superseded stream generation"
+            )
+        if event.kind != "BOOK_SNAPSHOT":
+            raise MarketDataError("provider book baseline requires BOOK_SNAPSHOT")
+        if "BOOK_PROVIDER_CONTINUITY_PENDING" not in event.quality_flags:
+            raise MarketDataError("snapshot is not pending provider continuity")
+        if any(
+            flag in event.quality_flags
+            for flag in (
+                "STALE",
+                "CORRECTION",
+                "DUPLICATE",
+                "OUT_OF_ORDER",
+                "REVISION_BASE_MISSING",
+                "REVISION_GAP",
+                "OUT_OF_ORDER_REVISION",
+            )
+        ):
+            raise MarketDataError("snapshot is not eligible as a provider baseline")
+        cursor = _admission_sequence(cursor_sequence, "cursor_sequence")
+        if cursor is None or event.source_sequence != cursor:
+            raise MarketDataError(
+                "provider snapshot cursor must equal event source_sequence"
+            )
+        materialized = self._materialized_book(event.payload)
+        if self._materialized_book_is_crossed(materialized):
+            raise MarketDataError("provider snapshot baseline is crossed")
+        self._book_levels[key] = materialized
+        self._provider_book_cursor[key] = cursor
+        self._book_state[key] = "BOOTSTRAPPING"
+        # Snapshot availability is a causal prerequisite for every buffered
+        # delta replay. Preserve it as a non-executable lower bound so the
+        # reconstructed book cannot appear available before its baseline.
+        self._book_last_available_at[key] = event.available_at
+
+    def _derive_qualified_book_range_admission(
+        self,
+        event: NormalizedMarketEvent,
+        *,
+        key: tuple[str, str, str, str],
+    ) -> QualifiedBookRangeAdmission:
+        """Recompute provider continuity from retained event and current cursor."""
+
+        if type(event) is not NormalizedMarketEvent:
+            raise MarketDataError("event must be an exact NormalizedMarketEvent")
+        if self._book_event_keys.get(event.event_id) != key:
+            raise MarketDataError("book event does not belong to this stream")
+        retained = self._book_event_contracts.get(event.event_id)
+        if retained is None or retained != _canonical(event.to_contract_dict()):
+            raise MarketDataError("book event differs from retained normalized identity")
+
+        policy_key = (key[0], key[1], key[3])
+        expected_policy = self._book_stream_policies.get(policy_key)
+        evaluator = self._book_stream_policy_evaluators.get(policy_key)
+        if expected_policy is None or evaluator is None:
+            raise MarketDataError("provider book policy binding is unavailable")
+
+        active_generation = self._active_book_generation.get(key)
+        if active_generation is None:
+            raise MarketDataError("provider book stream has no active generation")
+        if event.stream_generation != active_generation:
+            raise MarketDataError(
+                "book event belongs to a superseded stream generation"
+            )
+        if event.kind != "BOOK_DELTA":
+            raise MarketDataError("qualified provider range requires BOOK_DELTA")
+        if "BOOK_PROVIDER_CONTINUITY_PENDING" not in event.quality_flags:
+            raise MarketDataError("delta is not pending provider continuity")
+
+        payload = event.payload
+        try:
+            first_text = payload["first_sequence"]
+            last_text = payload["last_sequence"]
+            if type(first_text) is not str or type(last_text) is not str:
+                raise TypeError
+            first_sequence = int(first_text)
+            last_sequence = int(last_text)
+        except (KeyError, TypeError, ValueError) as error:
+            raise MarketDataError(
+                "qualified range event must carry exact first/last sequence"
+            ) from error
+        if (
+            str(first_sequence) != first_text
+            or str(last_sequence) != last_text
+            or first_sequence < 0
+            or last_sequence < 0
+            or first_sequence > last_sequence
+            or event.source_sequence != last_sequence
+        ):
+            raise MarketDataError("qualified range event sequence identity is invalid")
+
+        cursor = self._provider_book_cursor.get(key)
+        if cursor is None:
+            raise MarketDataError("provider book cursor is unavailable")
+        state = self._book_state.get(key, "UNINITIALIZED")
+        if state == "BOOTSTRAPPING":
+            bootstrap = True
+        elif state == "READY":
+            bootstrap = False
+        else:
+            raise MarketDataError(
+                f"provider book state {state} cannot accept a ranged event"
+            )
+
+        try:
+            admission = evaluator(
+                policy_id=expected_policy,
+                event_id=event.event_id,
+                provider_symbol=key[2],
+                prior_sequence=cursor,
+                first_sequence=first_sequence,
+                last_sequence=last_sequence,
+                bootstrap=bootstrap,
+            )
+        except (TypeError, ValueError) as error:
+            raise MarketDataError("provider book policy evaluation failed") from error
+        if type(admission) is not QualifiedBookRangeAdmission:
+            raise MarketDataError(
+                "provider book policy evaluator returned an invalid decision"
+            )
+        if (
+            admission.policy_id != expected_policy
+            or admission.event_id != event.event_id
+            or admission.prior_sequence != cursor
+            or admission.first_sequence != first_sequence
+            or admission.last_sequence != last_sequence
+        ):
+            raise MarketDataError(
+                "provider book policy decision does not match retained event identity"
+            )
+        if (
+            admission.disposition == "APPLY"
+            and admission.next_sequence != last_sequence
+        ):
+            raise MarketDataError(
+                "provider book policy APPLY must advance to the event final sequence"
+            )
+        return admission
+
+    @staticmethod
+    def _require_policy_equivalent_admission(
+        supplied: QualifiedBookRangeAdmission | None,
+        derived: QualifiedBookRangeAdmission,
+    ) -> None:
+        """Treat caller decision values only as optional assertions, never authority."""
+
+        if supplied is None:
+            return
+        if type(supplied) is not QualifiedBookRangeAdmission:
+            raise MarketDataError(
+                "admission must be an exact QualifiedBookRangeAdmission"
+            )
+        if supplied != derived:
+            raise MarketDataError(
+                "caller range admission differs from registered provider policy"
+            )
+
+    def preview_qualified_book_range(
+        self,
+        event: NormalizedMarketEvent,
+        admission: QualifiedBookRangeAdmission | None = None,
+        *,
+        provider_id: str,
+        venue_id: str,
+        provider_symbol: str,
+        stream: str = "book",
+    ) -> dict[str, list[dict[str, str]]]:
+        """Preview the registered provider policy's APPLY candidate without mutation."""
+
+        key = self._book_key(provider_id, venue_id, provider_symbol, stream)
+        derived = self._derive_qualified_book_range_admission(event, key=key)
+        self._require_policy_equivalent_admission(admission, derived)
+        admission = derived
+        if admission.disposition != "APPLY":
+            raise MarketDataError("only APPLY range admission has a candidate book")
+        if any(
+            flag in event.quality_flags
+            for flag in (
+                "STALE",
+                "CORRECTION",
+                "DUPLICATE",
+                "REVISION_BASE_MISSING",
+                "REVISION_GAP",
+                "OUT_OF_ORDER_REVISION",
+            )
+        ):
+            raise MarketDataError("qualified range event is not eligible for preview")
+        payload = event.payload
+        current = self._book_levels.get(key)
+        if current is None:
+            raise MarketDataError("provider book baseline is unavailable")
+        candidate = self._apply_book_delta(current, payload)
+        if self._book_depth_exceeds_limit(candidate):
+            raise MarketDataError(
+                "qualified range candidate exceeds the configured book-depth resource envelope"
+            )
+        if self._materialized_book_is_crossed(candidate):
+            raise MarketDataError("qualified range candidate would create a crossed book")
+        bids, asks = candidate
+        return {
+            "bids": [
+                {"price": price, "quantity": bids[price]}
+                for price in sorted(bids, key=Decimal, reverse=True)
+            ],
+            "asks": [
+                {"price": price, "quantity": asks[price]}
+                for price in sorted(asks, key=Decimal)
+            ],
+        }
+
+    def apply_qualified_book_range(
+        self,
+        event: NormalizedMarketEvent,
+        admission: QualifiedBookRangeAdmission | None = None,
+        *,
+        provider_id: str,
+        venue_id: str,
+        provider_symbol: str,
+        stream: str = "book",
+    ) -> QualifiedBookRangeAdmission:
+        """Apply the registered provider policy's exact continuity decision."""
+
+        key = self._book_key(provider_id, venue_id, provider_symbol, stream)
+        derived = self._derive_qualified_book_range_admission(event, key=key)
+        self._require_policy_equivalent_admission(admission, derived)
+        admission = derived
+        payload = event.payload
+
+        if admission.disposition == "DISCARD":
+            return admission
+        if (
+            "DUPLICATE" in event.quality_flags
+            and admission.disposition == "APPLY"
+            and admission.last_sequence == cursor
+            and admission.next_sequence == cursor
+        ):
+            # Immutable revision identity already proved exact replay. Preserve
+            # the accepted book/cursor/freshness without reapplying levels.
+            return admission
+        if admission.disposition == "GAP":
+            self._book_state[key] = "GAPPED"
+            self._book_last_available_at.pop(key, None)
+            self._book_levels.pop(key, None)
+            self._provider_book_cursor.pop(key, None)
+            return admission
+
+        if admission.next_sequence != admission.last_sequence:
+            raise MarketDataError(
+                "qualified range APPLY must advance to the event final sequence"
+            )
+        if any(
+            flag in event.quality_flags
+            for flag in (
+                "STALE",
+                "CORRECTION",
+                "DUPLICATE",
+                "REVISION_BASE_MISSING",
+                "REVISION_GAP",
+                "OUT_OF_ORDER_REVISION",
+            )
+        ):
+            self._book_state[key] = "GAPPED"
+            self._book_last_available_at.pop(key, None)
+            self._book_levels.pop(key, None)
+            self._provider_book_cursor.pop(key, None)
+            raise MarketDataError(
+                "qualified range event is not eligible for executable application"
+            )
+        current = self._book_levels.get(key)
+        if current is None or self._book_state.get(key) not in {
+            "BOOTSTRAPPING",
+            "READY",
+        }:
+            raise MarketDataError("provider book baseline is unavailable")
+        candidate = self._apply_book_delta(current, payload)
+        if self._book_depth_exceeds_limit(candidate):
+            self._book_state[key] = "GAPPED"
+            self._book_last_available_at.pop(key, None)
+            self._book_levels.pop(key, None)
+            self._provider_book_cursor.pop(key, None)
+            raise MarketDataError(
+                "qualified range delta exceeds the configured book-depth resource envelope"
+            )
+        if self._materialized_book_is_crossed(candidate):
+            self._book_state[key] = "GAPPED"
+            self._book_last_available_at.pop(key, None)
+            self._book_levels.pop(key, None)
+            self._provider_book_cursor.pop(key, None)
+            raise MarketDataError(
+                "qualified range delta would create a crossed book"
+            )
+        self._book_levels[key] = candidate
+        assert admission.next_sequence is not None
+        self._provider_book_cursor[key] = admission.next_sequence
+        self._book_state[key] = "READY"
+        prior_available_at = self._book_last_available_at.get(key)
+        self._book_last_available_at[key] = (
+            event.available_at
+            if prior_available_at is None
+            else max(prior_available_at, event.available_at)
+        )
+        return admission
 
     @staticmethod
     def _instrument_version_id(instrument: InstrumentVersion) -> str:
@@ -409,6 +1119,10 @@ class MarketNormalizer:
     ) -> list[dict[str, str]]:
         if not isinstance(values, (list, tuple)):
             raise MarketDataError(f"{field} must be a list")
+        if len(values) > self._max_book_levels_per_side:
+            raise MarketDataError(
+                f"{field} exceeds the configured book-depth resource envelope"
+            )
         result: list[dict[str, str]] = []
         seen_prices: set[str] = set()
         for index, level in enumerate(values):
@@ -482,7 +1196,29 @@ class MarketNormalizer:
                 best_ask = min(Decimal(level["price"]) for level in asks)
                 if best_bid > best_ask:
                     raise MarketDataError("book snapshot is crossed")
-            return {"bids": bids, "asks": asks}
+
+            result: dict[str, Any] = {"bids": bids, "asks": asks}
+            sequence_values: dict[str, int] = {}
+            for field in ("first_sequence", "last_sequence", "previous_sequence"):
+                value = _sequence(raw.get(field), field)
+                if value is not None:
+                    sequence_values[field] = value
+                    result[field] = str(value)
+            first_sequence = sequence_values.get("first_sequence")
+            last_sequence = sequence_values.get("last_sequence")
+            if (
+                first_sequence is not None
+                and last_sequence is not None
+                and first_sequence > last_sequence
+            ):
+                raise MarketDataError(
+                    "book first_sequence must not exceed last_sequence"
+                )
+            for field in ("snapshot_id", "checksum"):
+                value = raw.get(field)
+                if value is not None:
+                    result[field] = _book_causal_text(value, field)
+            return result
 
         if kind == "BAR":
             prices = {
@@ -558,6 +1294,7 @@ class MarketNormalizer:
             payload=update.payload,
             raw_evidence_ref=update.raw_evidence_ref,
             source_sequence=update.source_sequence,
+            stream_generation=update.stream_generation,
             sequence_stream=update.sequence_stream,
         )
         try:
@@ -570,7 +1307,80 @@ class MarketNormalizer:
         except (InstrumentRegistryError, InstrumentNotFound) as error:
             raise MarketDataError("market update cannot be resolved to an instrument version") from error
 
-        normalized_payload = self._normalize_payload(instrument, update.kind, update.payload)
+        stream = update.sequence_stream or update.kind
+        stream_key = (
+            update.provider_id,
+            update.venue_id,
+            update.provider_symbol,
+            stream,
+        )
+        book_kind = update.kind in {"BOOK_SNAPSHOT", "BOOK_DELTA"}
+        bound_streams = {
+            bound_stream
+            for (provider_id, venue_id, bound_stream) in self._book_stream_policies
+            if provider_id == update.provider_id and venue_id == update.venue_id
+        }
+        if book_kind and bound_streams and (
+            update.sequence_stream is None or stream not in bound_streams
+        ):
+            raise MarketDataError(
+                "provider book event must select an explicitly bound sequence_stream"
+            )
+        provider_policy_id = self._book_stream_policies.get(
+            (update.provider_id, update.venue_id, stream)
+        )
+        provider_qualified_stream = book_kind and provider_policy_id is not None
+        active_generation = (
+            self._active_book_generation.get(stream_key)
+            if provider_qualified_stream
+            else None
+        )
+        if provider_qualified_stream:
+            if active_generation is None:
+                raise MarketDataError(
+                    "provider book stream requires an active generation before ingress"
+                )
+            if update.stream_generation is None:
+                raise MarketDataError(
+                    "provider book event requires the active stream generation"
+                )
+            if update.stream_generation != active_generation:
+                raise MarketDataError(
+                    "provider book event belongs to a superseded stream generation"
+                )
+        try:
+            normalized_payload = self._normalize_payload(
+                instrument,
+                update.kind,
+                update.payload,
+            )
+        except MarketDataError:
+            if (
+                update.kind in {"BOOK_SNAPSHOT", "BOOK_DELTA"}
+                and (
+                    stream_key in self._book_state
+                    or stream_key in self._book_levels
+                    or stream_key in self._provider_book_cursor
+                )
+            ):
+                # Rejected initial input has no authority to mutate. A rejected
+                # replacement after accepted state exists must revoke that older
+                # executable authority rather than silently leaving it current.
+                self._book_state[stream_key] = "GAPPED"
+                self._book_last_available_at.pop(stream_key, None)
+                self._book_levels.pop(stream_key, None)
+                self._provider_book_cursor.pop(stream_key, None)
+            raise
+        provider_continuity_fields = {
+            "first_sequence",
+            "last_sequence",
+            "previous_sequence",
+            "checksum",
+        }
+        has_provider_continuity_fields = (
+            update.kind in {"BOOK_SNAPSHOT", "BOOK_DELTA"}
+            and bool(provider_continuity_fields.intersection(normalized_payload))
+        )
         payload_json = _canonical(normalized_payload)
         payload_digest = sha256(payload_json.encode("utf-8")).hexdigest()
         flags: set[str] = set()
@@ -582,15 +1392,43 @@ class MarketNormalizer:
         except InstrumentRegistryError:
             flags.add("NOT_TRADABLE_AT_EVENT_TIME")
 
-        stream = update.sequence_stream or update.kind
-        stream_key = (
-            update.provider_id,
-            update.venue_id,
-            update.provider_symbol,
-            stream,
+        has_unqualified_provider_continuity = (
+            has_provider_continuity_fields or provider_qualified_stream
+        )
+        generation_identity = (
+            "NO_GENERATION"
+            if update.stream_generation is None
+            else f"GENERATION:{update.stream_generation}"
+        )
+        sequence_state_key = (
+            stream_key
+            if update.stream_generation is None
+            else (
+                update.provider_id,
+                update.venue_id,
+                update.provider_symbol,
+                f"{stream}#GENERATION:{update.stream_generation}",
+            )
+        )
+        identity_stream_key = (
+            (
+                update.provider_id,
+                update.venue_id,
+                update.provider_symbol,
+                stream,
+                generation_identity,
+            )
+            if not has_unqualified_provider_continuity
+            else (
+                update.provider_id,
+                update.venue_id,
+                update.provider_symbol,
+                f"{stream}:{update.kind}",
+                generation_identity,
+            )
         )
         sequence_identity = (
-            *stream_key,
+            *identity_stream_key,
             update.source_sequence,
         ) if update.source_sequence is not None else None
 
@@ -673,21 +1511,27 @@ class MarketNormalizer:
 
                 if sequence_identity not in self._seen_sequence_ids:
                     new_sequence = True
-                    last = self._last_sequence.get(stream_key)
-                    if update.kind == "BOOK_SNAPSHOT":
+                    last = self._last_sequence.get(sequence_state_key)
+                    if has_unqualified_provider_continuity:
+                        # Do not feed provider range/predecessor/checksum semantics
+                        # into the generic scalar +1 cursor. The exact event is
+                        # still revision/dedup tracked, but executable continuity
+                        # remains unverified until a qualified stream policy owns it.
+                        pass
+                    elif update.kind == "BOOK_SNAPSHOT":
                         # A verified snapshot may establish a new baseline only
                         # when it does not move the stream sequence backward.
                         if last is not None and update.source_sequence < last:
                             flags.add("OUT_OF_ORDER")
                         else:
-                            self._last_sequence[stream_key] = update.source_sequence
+                            self._last_sequence[sequence_state_key] = update.source_sequence
                     else:
                         if last is not None:
                             if update.source_sequence > last + 1:
                                 flags.add("SEQUENCE_GAP")
                             elif update.source_sequence < last:
                                 flags.add("OUT_OF_ORDER")
-                        self._last_sequence[stream_key] = (
+                        self._last_sequence[sequence_state_key] = (
                             update.source_sequence
                             if last is None
                             else max(last, update.source_sequence)
@@ -702,30 +1546,65 @@ class MarketNormalizer:
                 flags.add("BOOK_SEQUENCE_UNVERIFIED")
                 flags.add("BOOK_UNUSABLE")
                 self._book_state[stream_key] = "UNVERIFIED"
+                self._book_last_available_at.pop(stream_key, None)
+            elif has_unqualified_provider_continuity:
+                # A product-bound provider policy owns this stream from its
+                # snapshot onward. Do not let a range-less REST snapshot mint
+                # generic scalar READY before buffered provider continuity is
+                # verified by that policy.
+                if provider_qualified_stream:
+                    flags.add("BOOK_PROVIDER_CONTINUITY_PENDING")
+                if has_provider_continuity_fields:
+                    flags.add("BOOK_RANGE_CONTINUITY_UNVERIFIED")
+                flags.add("BOOK_UNUSABLE")
+                if provider_qualified_stream:
+                    # The event is pending policy admission, but normalization
+                    # alone must not erase the previously qualified baseline or
+                    # executable state. The provider decision below owns the
+                    # state transition. For the first event only, expose an
+                    # explicit non-executable state until a baseline is installed.
+                    self._book_state.setdefault(stream_key, "UNVERIFIED")
+                else:
+                    self._book_state[stream_key] = "UNVERIFIED"
+                    self._book_last_available_at.pop(stream_key, None)
             elif update.kind == "BOOK_SNAPSHOT":
                 current = self._book_state.get(stream_key, "UNINITIALIZED")
-                last_sequence = self._last_sequence.get(stream_key)
+                last_sequence = self._last_sequence.get(sequence_state_key)
                 historical_correction = (
                     "CORRECTION" in flags
                     and update.source_sequence is not None
                     and last_sequence is not None
                     and update.source_sequence < last_sequence
                 )
-                if historical_correction:
-                    # A revised historical snapshot changes the baseline on which
-                    # later deltas were applied. Until a deterministic rebuild or
-                    # a later verified snapshot establishes a new baseline, the
-                    # executable book is no longer authoritative.
-                    flags.add("HISTORICAL_BOOK_CORRECTION")
+                if "CORRECTION" in flags:
+                    # A snapshot revision can invalidate state already derived
+                    # from its prior revision. Rebuild deterministically rather
+                    # than keeping old materialized levels under corrected truth.
+                    if historical_correction:
+                        flags.add("HISTORICAL_BOOK_CORRECTION")
+                    flags.add("BOOK_CORRECTION_REBUILD_REQUIRED")
                     self._book_state[stream_key] = "GAPPED"
+                    self._book_last_available_at.pop(stream_key, None)
                     flags.add("BOOK_UNUSABLE")
                 elif "STALE" in flags:
                     # A delayed snapshot cannot establish current executable
                     # book truth even when its provider sequence is valid.
                     self._book_state[stream_key] = "GAPPED"
+                    self._book_last_available_at.pop(stream_key, None)
                     flags.add("BOOK_UNUSABLE")
                 elif new_sequence and "OUT_OF_ORDER" not in flags:
-                    self._book_state[stream_key] = "READY"
+                    materialized = self._materialized_book(normalized_payload)
+                    if self._materialized_book_is_crossed(materialized):
+                        # Defensive parity with normalization-time snapshot
+                        # checking. Never expose an internally crossed book.
+                        flags.add("BOOK_CROSSED")
+                        flags.add("BOOK_UNUSABLE")
+                        self._book_state[stream_key] = "GAPPED"
+                        self._book_last_available_at.pop(stream_key, None)
+                    else:
+                        self._book_levels[stream_key] = materialized
+                        self._book_state[stream_key] = "READY"
+                        self._book_last_available_at[stream_key] = update.available_at
                 elif "OUT_OF_ORDER" in flags:
                     # A stale snapshot is unusable as a new baseline. Preserve
                     # the newer current state rather than rolling sequence truth back.
@@ -736,29 +1615,64 @@ class MarketNormalizer:
                     flags.add("BOOK_UNUSABLE")
             else:
                 current = self._book_state.get(stream_key, "UNINITIALIZED")
-                last_sequence = self._last_sequence.get(stream_key)
+                last_sequence = self._last_sequence.get(sequence_state_key)
                 historical_correction = (
                     "CORRECTION" in flags
                     and update.source_sequence is not None
                     and last_sequence is not None
                     and update.source_sequence < last_sequence
                 )
-                if historical_correction:
-                    # A revised historical delta changes the state on which
-                    # later deltas were applied. Until a deterministic rebuild
-                    # or a later verified snapshot establishes a new baseline,
-                    # the executable book is no longer authoritative.
-                    flags.add("HISTORICAL_BOOK_CORRECTION")
+                if "CORRECTION" in flags:
+                    # A corrected delta cannot be applied safely on top of a
+                    # book that already incorporated its prior revision without
+                    # deterministic replay from a qualified snapshot.
+                    if historical_correction:
+                        flags.add("HISTORICAL_BOOK_CORRECTION")
+                    flags.add("BOOK_CORRECTION_REBUILD_REQUIRED")
                     self._book_state[stream_key] = "GAPPED"
+                    self._book_last_available_at.pop(stream_key, None)
                     flags.add("BOOK_UNUSABLE")
                 elif (
                     current != "READY"
                     or "SEQUENCE_GAP" in flags
                     or "OUT_OF_ORDER" in flags
+                    or "STALE" in flags
                 ):
                     self._book_state[stream_key] = "GAPPED"
+                    self._book_last_available_at.pop(stream_key, None)
                     flags.add("BOOK_UNUSABLE")
+                elif new_sequence:
+                    current_book = self._book_levels.get(stream_key)
+                    if current_book is None:
+                        self._book_state[stream_key] = "GAPPED"
+                        self._book_last_available_at.pop(stream_key, None)
+                        flags.add("BOOK_MATERIALIZATION_MISSING")
+                        flags.add("BOOK_UNUSABLE")
+                    else:
+                        candidate = self._apply_book_delta(
+                            current_book,
+                            normalized_payload,
+                        )
+                        if self._book_depth_exceeds_limit(candidate):
+                            self._book_state[stream_key] = "GAPPED"
+                            self._book_last_available_at.pop(stream_key, None)
+                            self._book_levels.pop(stream_key, None)
+                            flags.add("BOOK_RESOURCE_LIMIT")
+                            flags.add("BOOK_UNUSABLE")
+                        elif self._materialized_book_is_crossed(candidate):
+                            self._book_state[stream_key] = "GAPPED"
+                            self._book_last_available_at.pop(stream_key, None)
+                            flags.add("BOOK_CROSSED")
+                            flags.add("BOOK_UNUSABLE")
+                        else:
+                            self._book_levels[stream_key] = candidate
+                            self._book_state[stream_key] = "READY"
+                            self._book_last_available_at[
+                                stream_key
+                            ] = update.available_at
                 else:
+                    # Exact duplicate replay is state-idempotent and cannot
+                    # mutate levels or extend the accepted freshness cut.
                     self._book_state[stream_key] = "READY"
 
         identity_material = _canonical(
@@ -767,6 +1681,11 @@ class MarketNormalizer:
                 update.venue_id,
                 update.provider_symbol,
                 stream,
+                (
+                    str(update.stream_generation)
+                    if update.stream_generation is not None
+                    else None
+                ),
                 (
                     str(update.source_sequence)
                     if update.source_sequence is not None
@@ -787,8 +1706,7 @@ class MarketNormalizer:
                 revision_fingerprint,
                 event_id,
             )
-
-        return NormalizedMarketEvent(
+        event = NormalizedMarketEvent(
             event_id=event_id,
             instrument_version=self._instrument_version_id(instrument),
             kind=update.kind,
@@ -797,8 +1715,15 @@ class MarketNormalizer:
             availability_basis=update.availability_basis,
             ingested_at=update.ingested_at,
             source_sequence=update.source_sequence,
+            stream_generation=update.stream_generation,
             revision=update.revision,
             payload_json=payload_json,
             quality_flags=tuple(sorted(flags)),
             raw_evidence_ref=update.raw_evidence_ref,
         )
+        if update.kind in {"BOOK_SNAPSHOT", "BOOK_DELTA"}:
+            self._book_event_keys[event_id] = stream_key
+            self._book_event_contracts[event_id] = _canonical(
+                event.to_contract_dict()
+            )
+        return event

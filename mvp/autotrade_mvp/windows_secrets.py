@@ -624,44 +624,49 @@ class ProtectedCredentialVault:
             environment=environment,
             purpose=purpose,
         )
-        state = self._load()
-        record = state["records"].get(handle.handle_id)
-        if record is None or record["active"] is not True:
-            raise PermissionError("Credential is unavailable")
-        current = self._handle(record)
-        if current != handle:
-            raise PermissionError("Credential handle generation is stale")
-        if record["owner_identity"] != owner:
-            raise PermissionError("Execution identity cannot decrypt this credential")
-        if (
-            current.account_id != account
-            or current.provider != normalized_provider
-            or current.environment != normalized_environment
-        ):
-            raise PermissionError("Credential scope mismatch")
-        if current.purpose != normalized_purpose:
-            raise PermissionError("Credential purpose mismatch")
-        entropy = _scope_entropy(
-            handle_id=current.handle_id,
-            owner_identity=owner,
-            account_id=current.account_id,
-            provider=current.provider,
-            environment=current.environment,
-            purpose=current.purpose,
-            generation=current.generation,
-        )
-        try:
-            plaintext = self._protector.unprotect(
-                b64decode(record["ciphertext"], validate=True),
-                entropy=entropy,
+        # Resolve participates in the same inter-process critical section as
+        # rotate/revoke.  The lock covers the active-generation check through
+        # decryption and return, so a mutation cannot commit after we snapshot
+        # an active record but before plaintext escapes to the caller.
+        with _exclusive_file_lock(self.lock_path):
+            state = self._load()
+            record = state["records"].get(handle.handle_id)
+            if record is None or record["active"] is not True:
+                raise PermissionError("Credential is unavailable")
+            current = self._handle(record)
+            if current != handle:
+                raise PermissionError("Credential handle generation is stale")
+            if record["owner_identity"] != owner:
+                raise PermissionError("Execution identity cannot decrypt this credential")
+            if (
+                current.account_id != account
+                or current.provider != normalized_provider
+                or current.environment != normalized_environment
+            ):
+                raise PermissionError("Credential scope mismatch")
+            if current.purpose != normalized_purpose:
+                raise PermissionError("Credential purpose mismatch")
+            entropy = _scope_entropy(
+                handle_id=current.handle_id,
+                owner_identity=owner,
+                account_id=current.account_id,
+                provider=current.provider,
+                environment=current.environment,
+                purpose=current.purpose,
+                generation=current.generation,
             )
-            if not isinstance(plaintext, bytes) or not plaintext:
-                raise OSError("protector returned invalid plaintext")
-            return plaintext.decode("utf-8")
-        except (UnicodeDecodeError, OSError, ValueError, TypeError) as error:
-            raise PermissionError(
-                "Credential cannot be decrypted in this identity"
-            ) from error
+            try:
+                plaintext = self._protector.unprotect(
+                    b64decode(record["ciphertext"], validate=True),
+                    entropy=entropy,
+                )
+                if not isinstance(plaintext, bytes) or not plaintext:
+                    raise OSError("protector returned invalid plaintext")
+                return plaintext.decode("utf-8")
+            except (UnicodeDecodeError, OSError, ValueError, TypeError) as error:
+                raise PermissionError(
+                    "Credential cannot be decrypted in this identity"
+                ) from error
 
     def rotate(
         self,

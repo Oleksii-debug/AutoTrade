@@ -568,6 +568,67 @@ class JournalStore:
                     "journal sequence authority is not a contiguous canonical positive integer series"
                 )
 
+        if cls.SCHEMA_VERSION >= 10:
+            for protected_row in connection.execute(
+                """
+                SELECT aggregate_type, namespace_version,
+                       writer_authority_id, registered_at
+                FROM protected_event_namespaces
+                """
+            ):
+                aggregate_type = protected_row["aggregate_type"]
+                namespace_version = protected_row["namespace_version"]
+                writer_authority_id = protected_row["writer_authority_id"]
+                registered_at = protected_row["registered_at"]
+                if (
+                    type(aggregate_type) is not str
+                    or not aggregate_type
+                    or aggregate_type != aggregate_type.strip()
+                    or type(namespace_version) is not str
+                    or not namespace_version
+                    or namespace_version != namespace_version.strip()
+                    or type(writer_authority_id) is not str
+                    or re.fullmatch(
+                        r"sha256:[0-9a-f]{64}",
+                        writer_authority_id,
+                    )
+                    is None
+                    or type(registered_at) is not str
+                    or not registered_at
+                    or registered_at != registered_at.strip()
+                ):
+                    raise ValueError(
+                        "protected event namespace authority is not canonical"
+                    )
+
+            invalid_writer = connection.execute(
+                """
+                SELECT 1
+                FROM events AS event
+                LEFT JOIN protected_event_namespaces AS protected
+                  ON protected.aggregate_type = event.aggregate_type
+                WHERE
+                    (
+                        protected.aggregate_type IS NULL
+                        AND event.writer_authority_id IS NOT NULL
+                    )
+                    OR
+                    (
+                        protected.aggregate_type IS NOT NULL
+                        AND (
+                            event.writer_authority_id IS NULL
+                            OR event.writer_authority_id
+                               != protected.writer_authority_id
+                        )
+                    )
+                LIMIT 1
+                """
+            ).fetchone()
+            if invalid_writer is not None:
+                raise ValueError(
+                    "journal protected writer provenance is inconsistent"
+                )
+
         foreign_keys = [
             row
             for row in connection.execute("PRAGMA foreign_key_list(outbox)")
@@ -1190,6 +1251,23 @@ class JournalStore:
                             "protected event namespace is already bound to "
                             "a different writer authority"
                         )
+                    invalid_history = connection.execute(
+                        """
+                        SELECT 1 FROM events
+                        WHERE aggregate_type = ?
+                          AND (
+                              writer_authority_id IS NULL
+                              OR writer_authority_id != ?
+                          )
+                        LIMIT 1
+                        """,
+                        (aggregate_type, writer_authority_id),
+                    ).fetchone()
+                    if invalid_history is not None:
+                        raise ValueError(
+                            "protected event namespace history has invalid "
+                            "writer provenance"
+                        )
                     connection.commit()
                     return False
 
@@ -1269,6 +1347,10 @@ class JournalStore:
         writer_authority_id: str,
         outbox_topic: str | None = None,
     ) -> AppendResult:
+        if outbox_topic is not None:
+            raise ValueError(
+                "protected event publication requires writer-aware outbox authority"
+            )
         namespace_version = self._require_namespace_version(namespace_version)
         writer_authority_id = self._require_writer_authority_id(
             writer_authority_id
@@ -1627,6 +1709,29 @@ class JournalStore:
                     namespace_version=namespace_version,
                     writer_authority_id=writer_authority_id,
                 )
+                invalid_history = connection.execute(
+                    """
+                    SELECT 1 FROM events
+                    WHERE aggregate_type = ?
+                      AND (
+                          writer_authority_id IS NULL
+                          OR writer_authority_id != ?
+                      )
+                    LIMIT 1
+                    """,
+                    (aggregate_type, writer_authority_id),
+                ).fetchone()
+                if invalid_history is not None:
+                    raise ValueError(
+                        "protected event namespace contains unqualified "
+                        "writer provenance"
+                    )
+                self._aggregate_version_value(
+                    connection,
+                    aggregate_type,
+                    aggregate_id,
+                )
+                self._journal_sequence_value(connection)
                 rows = connection.execute(
                     """
                     SELECT event_id, event_type, aggregate_type, aggregate_id,

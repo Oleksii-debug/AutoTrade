@@ -1379,7 +1379,6 @@ class MarketNormalizationTests(unittest.TestCase):
         )
 
     def test_qualified_range_admission_is_event_policy_and_cursor_bound(self):
-    def test_qualified_range_admission_is_event_policy_and_cursor_bound(self):
         policy_id = "provider-a-depth-v1"
         normalizer = MarketNormalizer(
             registry(),

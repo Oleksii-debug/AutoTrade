@@ -10,12 +10,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from types import MappingProxyType
 from typing import Mapping
 
-from .exact_decimal import ExactDecimalError, exact_abs, exact_sum
-from .fx_valuation import FxQuote, FxValuationError, value_amount
+from .exact_decimal import (
+    ExactDecimalError, exact_abs, exact_sum, parse_bounded_exact_decimal,
+)
+from .fx_valuation import (
+    FxQuote,
+    FxRoundingPolicy,
+    FxValuationError,
+    value_amount,
+)
 from .perpetuals import PerpetualError, linear_notional
 
 
@@ -35,15 +42,12 @@ _SUPPORTED_LINEAR_ASSET_CLASSES = {
 
 
 def _decimal(value, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
+    if type(value) not in (Decimal, str, int):
         raise TypeError(f"{name} must use Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, ValueError, TypeError) as error:
-        raise AllocationValuationError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise AllocationValuationError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise AllocationValuationError(f"{name} must be a bounded exact decimal") from error
 
 
 def _positive(value, *, name: str, allow_zero: bool = False) -> Decimal:
@@ -56,7 +60,7 @@ def _positive(value, *, name: str, allow_zero: bool = False) -> Decimal:
 
 
 def _positive_int(value, *, name: str) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+    if type(value) is not int or value <= 0:
         raise AllocationValuationError(f"{name} must be a positive integer")
     return value
 
@@ -143,6 +147,44 @@ def _validate_optional_rate_identity(
         raise AllocationValuationError(
             f"{symbol} valuation exact FX rate identity mismatch"
         )
+
+
+def _declared_fx_rounding_policy(
+    valuation: Mapping[str, object],
+    *,
+    symbol: str,
+    reporting_currency: str,
+) -> FxRoundingPolicy | None:
+    raw_policy_id = valuation.get("fx_rounding_policy_id")
+    raw_quantum = valuation.get("fx_rounding_quantum")
+    if raw_policy_id is None and raw_quantum is None:
+        return None
+    if raw_policy_id is None or raw_quantum is None:
+        raise AllocationValuationError(
+            f"{symbol} FX rounding policy id and quantum must be supplied together"
+        )
+    policy_id = _text(
+        raw_policy_id,
+        name=f"{symbol} valuation fx_rounding_policy_id",
+    )
+    quantum = _positive(
+        raw_quantum,
+        name=f"{symbol} valuation fx_rounding_quantum",
+    )
+    try:
+        policy = FxRoundingPolicy(
+            reporting_currency=reporting_currency,
+            quantum=quantum,
+        )
+    except FxValuationError as error:
+        raise AllocationValuationError(
+            f"{symbol} valuation FX rounding policy is invalid"
+        ) from error
+    if policy.policy_id != policy_id:
+        raise AllocationValuationError(
+            f"{symbol} valuation FX rounding policy identity mismatch"
+        )
+    return policy
 
 
 @dataclass(frozen=True)
@@ -406,6 +448,11 @@ def normalize_allocation_valuation(
             quote_payload.get("evidence_sha256"),
             name=f"{symbol_text} fx evidence_sha256",
         )
+        rounding_policy = _declared_fx_rounding_policy(
+            valuation,
+            symbol=symbol_text,
+            reporting_currency=base_currency,
+        )
         try:
             quote = FxQuote.create(
                 base_currency=_currency(
@@ -442,6 +489,7 @@ def normalize_allocation_valuation(
                 as_of=point,
                 max_age=timedelta(seconds=max_age_seconds),
                 haircut=Decimal("0"),
+                rounding_policy=rounding_policy,
             )
         except FxValuationError as error:
             raise AllocationValuationError(
@@ -489,18 +537,40 @@ def normalize_allocation_valuation(
             raise AllocationValuationError(
                 f"{symbol_text} valuation FX evidence digest mismatch"
             )
-        fx_rounding_policy_id = fx_value.rounding_policy_id
-        fx_rounding_quantum = fx_value.rounding_quantum
-        if valuation.get("fx_rounding_policy_id") != fx_rounding_policy_id:
-            if valuation.get("fx_rounding_policy_id") is not None or fx_rounding_policy_id is not None:
+        if rate_used is not None and rounding_policy is not None:
+            raise AllocationValuationError(
+                f"{symbol_text} FX rounding policy is only valid for exact inverse FX"
+            )
+        if rounding_policy is None:
+            if (
+                fx_value.rounding_policy_id is not None
+                or fx_value.rounding_quantum is not None
+            ):
                 raise AllocationValuationError(
-                    f"{symbol_text} valuation FX rounding policy identity mismatch"
+                    f"{symbol_text} canonical FX valuation applied an undeclared rounding policy"
                 )
-        _optional_decimal_equal(
-            valuation.get("fx_rounding_quantum"),
-            fx_rounding_quantum,
-            name=f"{symbol_text} valuation fx_rounding_quantum",
-        )
+            fx_rounding_policy_id = None
+            fx_rounding_quantum = None
+        else:
+            if fx_value.rounding_policy_id not in (
+                None,
+                rounding_policy.policy_id,
+            ):
+                raise AllocationValuationError(
+                    f"{symbol_text} canonical FX rounding policy identity mismatch"
+                )
+            if fx_value.rounding_quantum not in (
+                None,
+                rounding_policy.quantum,
+            ):
+                raise AllocationValuationError(
+                    f"{symbol_text} canonical FX rounding quantum mismatch"
+                )
+            # The policy is authoritative and available for other monetary
+            # constraints even when this particular unit-price conversion
+            # happens to terminate exactly and therefore did not apply it.
+            fx_rounding_policy_id = rounding_policy.policy_id
+            fx_rounding_quantum = rounding_policy.quantum
         converted = fx_value.converted_amount
 
     try:

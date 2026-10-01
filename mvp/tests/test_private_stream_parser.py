@@ -5,24 +5,31 @@ from mvp.autotrade_mvp.private_stream_parser import (
     PrivateStreamParserError,
     parse_installed_private_stream_frame,
 )
+from mvp.autotrade_mvp.provider_qualification_authority import (
+    PrivateStreamSemantics,
+    ProviderQualificationAuthorityError,
+)
 
 
 Q = {
-    "stream_id": "PRIVATE_EXECUTIONS",
-    "topic": "execution",
+    "topic_id": "execution",
     "parser_id": "bybit-v5-private-execution",
     "parser_version": "1.0.0",
     "sequence_policy": "MONOTONIC_NONCONTIGUOUS",
     "sequence_scope": "symbol",
-    "recovery_rule_id": "snapshot-readback-v1",
+    "recovery_method_id": "snapshot-readback-v1",
 }
 
 
-def parse(frame: bytes, **overrides):
+def semantics(**overrides):
     selection = dict(Q)
     selection.update(overrides)
+    return PrivateStreamSemantics(**selection)
+
+
+def parse(frame: bytes, **overrides):
     return parse_installed_private_stream_frame(
-        **selection,
+        semantics=semantics(**overrides),
         frame_bytes=frame,
     )
 
@@ -117,8 +124,8 @@ class InstalledPrivateStreamParserTests(unittest.TestCase):
         ):
             parse(raw, sequence_policy="ARITHMETIC_SEQUENCE")
         with self.assertRaisesRegex(
-            PrivateStreamParserError,
-            "does not match installed Q semantics",
+            ProviderQualificationAuthorityError,
+            "sequence_scope",
         ):
             parse(raw, sequence_scope=None)
 

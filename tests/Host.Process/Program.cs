@@ -105,4 +105,58 @@ Require(
     boundary.Readiness.ReasonCodes.Contains("provider_execution_issuer_unavailable", StringComparer.Ordinal),
     "missing provider issuer must remain explicit");
 
+HostStartupAdmission unavailableAdmission = HostStartupAdmission.Evaluate(boundary);
+Require(
+    !unavailableAdmission.ListenerBindingAuthorized,
+    "unavailable financial authority must never authorize listener binding");
+Require(
+    unavailableAdmission.ExitCode == HostStartupAdmission.AuthorityUnavailableExitCode,
+    "blocked startup must use deterministic authority-unavailable exit code");
+Require(
+    unavailableAdmission.ReasonCodes.Contains("provider_execution_issuer_unavailable", StringComparer.Ordinal),
+    "startup verdict must retain provider issuer blocker");
+
+HostStartupAdmission exactReadyAdmission = HostStartupAdmission.Evaluate(
+    new StaticHostAuthorityBoundary(new HostAuthorityReadiness("READY", Array.Empty<string>())));
+Require(exactReadyAdmission.ListenerBindingAuthorized, "exact READY authority should admit listener binding");
+Require(
+    exactReadyAdmission.ExitCode == HostStartupAdmission.SuccessExitCode,
+    "exact READY authority must use success exit code");
+
+HostStartupAdmission contradictoryReadyAdmission = HostStartupAdmission.Evaluate(
+    new StaticHostAuthorityBoundary(
+        new HostAuthorityReadiness("READY", new[] { "provider_execution_issuer_unavailable" })));
+Require(
+    !contradictoryReadyAdmission.ListenerBindingAuthorized,
+    "READY text with blocker reasons must fail closed");
+Require(
+    contradictoryReadyAdmission.ReasonCodes.Contains("host_authority_ready_with_blockers", StringComparer.Ordinal),
+    "contradictory READY verdict must be explicit");
+
+HostStartupAdmission malformedAdmission = HostStartupAdmission.Evaluate(
+    new StaticHostAuthorityBoundary(
+        new HostAuthorityReadiness("BLOCKED", new[] { "Not Canonical" })));
+Require(
+    !malformedAdmission.ListenerBindingAuthorized
+        && malformedAdmission.ReasonCodes.SequenceEqual(new[] { "host_authority_reason_codes_invalid" }),
+    "malformed authority reason codes must fail closed before bind");
+
+HostStartupAdmission throwingAdmission = HostStartupAdmission.Evaluate(
+    new ThrowingHostAuthorityBoundary());
+Require(
+    !throwingAdmission.ListenerBindingAuthorized
+        && throwingAdmission.ReasonCodes.SequenceEqual(new[] { "host_authority_probe_failed" }),
+    "authority probe failure must fail closed before bind");
+
 Console.WriteLine("AUTOTRADE_HOST_PROCESS_CONTRACT_OK");
+
+sealed class StaticHostAuthorityBoundary(HostAuthorityReadiness readiness) : IHostAuthorityBoundary
+{
+    public HostAuthorityReadiness Readiness { get; } = readiness;
+}
+
+sealed class ThrowingHostAuthorityBoundary : IHostAuthorityBoundary
+{
+    public HostAuthorityReadiness Readiness =>
+        throw new InvalidOperationException("synthetic authority probe failure");
+}

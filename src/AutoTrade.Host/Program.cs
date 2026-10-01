@@ -1,12 +1,25 @@
 using AutoTrade.Contracts;
 using AutoTrade.Host;
 
+IHostAuthorityBoundary authorityBoundary = new UnavailableHostAuthorityBoundary();
+HostStartupAdmission startupAdmission = HostStartupAdmission.Evaluate(authorityBoundary);
+if (!startupAdmission.ListenerBindingAuthorized)
+{
+    Console.Error.WriteLine(
+        "AUTOTRADE_HOST_STARTUP_BLOCKED status="
+        + startupAdmission.Status
+        + " reason_codes="
+        + string.Join(",", startupAdmission.ReasonCodes));
+    Environment.ExitCode = startupAdmission.ExitCode;
+    return;
+}
+
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 HostProcessOptions options = HostProcessOptions.Load(builder.Configuration);
 builder.WebHost.UseUrls(options.ListenUrl);
 builder.Services.AddSingleton(options);
 builder.Services.AddSingleton<WindowsCredentialManagerSessionAuthenticator>();
-builder.Services.AddSingleton<IHostAuthorityBoundary, UnavailableHostAuthorityBoundary>();
+builder.Services.AddSingleton<IHostAuthorityBoundary>(authorityBoundary);
 
 WebApplication app = builder.Build();
 app.Use(async (context, next) =>

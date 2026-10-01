@@ -228,6 +228,38 @@ def _product_credential_wire_composition(
     return composition
 
 
+def _snapshot_selected_provider_authority(
+    selected: SelectedProviderAuthority | None,
+) -> SelectedProviderAuthority | None:
+    """Detach product Q authority from a caller-owned frozen-dataclass instance."""
+
+    if selected is None:
+        return None
+    if type(selected) is not SelectedProviderAuthority:
+        raise ProviderTransportScopeError(
+            "product authenticated read requires exact selected provider authority"
+        )
+    return SelectedProviderAuthority(
+        provider_id=selected.provider_id,
+        product_family=selected.product_family,
+        adapter_code_sha=selected.adapter_code_sha,
+        qualification_id=selected.qualification_id,
+        capability_snapshot_id=selected.capability_snapshot_id,
+        account_id=selected.account_id,
+        entity_id=selected.entity_id,
+        environment=selected.environment,
+        provider_environment=selected.provider_environment,
+        instrument_version=selected.instrument_version,
+        route_policy_id=selected.route_policy_id,
+        entity_policy_id=selected.entity_policy_id,
+        network_policy_id=selected.network_policy_id,
+        account_class=selected.account_class,
+        release_artifact_id=selected.release_artifact_id,
+        release_artifact_sha256=selected.release_artifact_sha256,
+        reconciliation_semantics_id=selected.reconciliation_semantics_id,
+    )
+
+
 def _register_product_credential_wire(
     transport: object,
     *,
@@ -263,6 +295,9 @@ def _register_product_credential_wire(
             "provider read authority may only be attached to authenticated-read transports"
         )
 
+    selected_snapshot = _snapshot_selected_provider_authority(
+        selected_provider_authority
+    )
     value_scope, identity_scope = _capture_product_scope(transport)
     policy = object.__getattribute__(transport, "policy")
     credential_handle = object.__getattribute__(transport, "credential_handle")
@@ -311,7 +346,7 @@ def _register_product_credential_wire(
             identity_scope=identity_scope,
             policy_state=policy_state,
             credential_handle_state=credential_handle_state,
-            selected_provider_authority=selected_provider_authority,
+            selected_provider_authority=selected_snapshot,
             qualification_reader=qualification_reader,
         )
 

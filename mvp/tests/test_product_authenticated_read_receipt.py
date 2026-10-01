@@ -95,6 +95,46 @@ class ProductAuthenticatedReadReceiptTests(unittest.TestCase):
         query = authenticated_read_binding(capability=capability)
         return transport, query, point
 
+    def test_factory_snapshots_selected_provider_authority_from_caller_instance(self):
+        capability = verified_read_capability()
+        registry = CapabilityRegistry()
+        registry.add(capability)
+        selected = _selected_read_authority(capability)
+        transport = build_product_credential_transport(
+            BinanceSpotAuthenticatedReadTransport,
+            security_boundary=object.__new__(SecurityBoundary),
+            selected_provider_authority=selected,
+            qualification_reader=object.__new__(
+                ProviderQualificationCurrentReader
+            ),
+            policy=BINANCE_SPOT_ENDPOINT_POLICIES["PAPER"],
+            account_id="acct-1",
+            capability_snapshot_id=capability.snapshot_id,
+            capability_registry=registry,
+            credential_handle=read_handle(),
+            session_token="selected-snapshot-session",
+            origin="https://localhost",
+            execution_identity="selected-snapshot-owner",
+            clock_millis=lambda: 1_700_000_000_000,
+            clock_utc=lambda: READ_NOW + timedelta(seconds=1),
+            quota_gate=None,
+            recv_window_ms=5000,
+        )
+        composition = provider_transport._product_credential_wire_composition(
+            transport
+        )
+        self.assertIsNotNone(composition)
+        retained = composition.selected_provider_authority
+        self.assertIs(type(retained), SelectedProviderAuthority)
+        self.assertIsNot(retained, selected)
+        self.assertEqual(retained.entity_id, "entity-1")
+
+        object.__setattr__(selected, "entity_id", "caller-retargeted")
+        object.__setattr__(selected, "network_policy_id", "caller-proxy-policy")
+
+        self.assertEqual(retained.entity_id, "entity-1")
+        self.assertEqual(retained.network_policy_id, "direct-tls-v1")
+
     def test_prepared_authority_rederives_current_capability_before_io(self):
         transport, query, point = self._product()
         with patch.object(

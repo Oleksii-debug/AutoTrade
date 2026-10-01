@@ -738,5 +738,112 @@ class SemanticWebClientContractTests(unittest.TestCase):
         self.assertIn("renderPermissionSummary(parsed.permissionSummary)", js)
 
 
+    def test_live_projection_tables_have_keyboard_filter_and_copy_controls(self):
+        html = INDEX.read_text(encoding="utf-8")
+        js = APP.read_text(encoding="utf-8")
+        for prefix in ("strategy", "portfolio", "risk", "jobs", "event-history"):
+            self.assertIn(f'id="{prefix}-filter" type="search"', html)
+            self.assertIn(f'id="{prefix}-copy" type="button"', html)
+            self.assertIn(f'id="{prefix}-filter-status"', html)
+        self.assertIn("const TABLE_TOOLS = Object.freeze([", js)
+        self.assertIn("function applyTableFilter(tool, {announce = true} = {})", js)
+        self.assertIn("function copyVisibleTableRows(tool)", js)
+        self.assertIn("function bindTableTools()", js)
+        self.assertIn("bindTableTools();", js)
+
+    def test_projection_filter_is_local_text_only_and_reapplied_after_live_updates(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn('row.dataset.filterableRow = "true"', js)
+        self.assertIn("tableSearchText(row).includes(query)", js)
+        self.assertIn("row.hidden = !matches", js)
+        self.assertIn('reapplyTableFilter("jobs-body")', js)
+        self.assertIn('reapplyTableFilter("event-history-body")', js)
+        self.assertIn("reapplyTableFilter(bodyId)", js)
+        scope = js[js.index("function applyTableFilter"):js.index("function reapplyTableFilter")]
+        self.assertNotIn("fetch(", scope)
+        self.assertNotIn("submitCanonicalCommand", scope)
+        self.assertNotIn("innerHTML", scope)
+
+    def test_projection_filter_case_normalization_is_locale_deterministic(self):
+        js = APP.read_text(encoding="utf-8")
+        scope = js[js.index("function normalizedTableQuery"):js.index("function reapplyTableFilter")]
+        self.assertIn("toLowerCase()", scope)
+        self.assertNotIn("toLocaleLowerCase()", scope)
+
+    def test_passive_live_refresh_updates_filter_status_without_announcing(self):
+        js = APP.read_text(encoding="utf-8")
+        apply_scope = js[js.index("function applyTableFilter"):js.index("function reapplyTableFilter")]
+        self.assertIn("text(tool.statusId, statusMessage);", apply_scope)
+        self.assertIn("if (announce) queuePoliteAnnouncement(statusMessage);", apply_scope)
+        reapply = js[js.index("function reapplyTableFilter"):js.index("function resetTableFiltersForScopeChange")]
+        self.assertIn("applyTableFilter(tool, {announce: false})", reapply)
+
+    def test_scope_transition_clears_filters_before_new_scope_render_and_announces_once(self):
+        js = APP.read_text(encoding="utf-8")
+        reset = js[js.index("function resetTableFiltersForScopeChange"):js.index("function visibleTableRows")]
+        self.assertIn("for (const tool of TABLE_TOOLS)", reset)
+        self.assertIn('filter.value = ""', reset)
+        self.assertEqual(reset.count("queuePoliteAnnouncement("), 1)
+        snapshot = js[js.index("function renderSnapshot(snapshot"):js.index("async function refreshSnapshot")]
+        self.assertLess(snapshot.index("resetTableFiltersForScopeChange();"), snapshot.index("resetEventHistoryForScope();"))
+        self.assertLess(snapshot.index("resetTableFiltersForScopeChange();"), snapshot.index('renderProjection(\n      "portfolio-body"'))
+
+    def test_copy_visible_rows_uses_only_rendered_text_and_accessible_fallback(self):
+        js = APP.read_text(encoding="utf-8")
+        self.assertIn("filterableRows(body).filter((row) => !row.hidden)", js)
+        self.assertIn('cell.textContent.replace(/\\s+/g, " ").trim()', js)
+        self.assertIn("await navigator.clipboard.writeText(payload)", js)
+        self.assertIn("Clipboard access is unavailable. Use normal text selection and copy.", js)
+        self.assertIn("Clipboard copy was not permitted. Use normal text selection and copy.", js)
+        self.assertNotIn("document.execCommand", js)
+
+    def test_table_tools_use_one_polite_live_region_not_five_status_live_regions(self):
+        html = INDEX.read_text(encoding="utf-8")
+        for status_id in (
+            "strategy-filter-status",
+            "portfolio-filter-status",
+            "risk-filter-status",
+            "jobs-filter-status",
+            "event-history-filter-status",
+        ):
+            marker = f'id="{status_id}"'
+            marker_index = html.index(marker)
+            start = html.rfind("<output", 0, marker_index)
+            end = html.index(">", marker_index)
+            tag = html[start:end + 1]
+            self.assertNotIn('role="status"', tag)
+            self.assertNotIn("aria-live=", tag)
+        self.assertEqual(
+            html.count('id="polite-status" role="status" aria-live="polite"'),
+            1,
+        )
+
+    def test_table_tool_focus_targets_survive_browser_page_restore(self):
+        js = APP.read_text(encoding="utf-8")
+        for target in (
+            "strategy-filter", "strategy-copy", "portfolio-filter", "portfolio-copy",
+            "risk-filter", "risk-copy", "jobs-filter", "jobs-copy",
+            "event-history-filter", "event-history-copy",
+        ):
+            self.assertIn(f'"{target}"', js)
+
+    def test_table_tools_reflow_without_horizontal_viewport_locking(self):
+        css = CSS.read_text(encoding="utf-8")
+        self.assertIn(".table-tools {", css)
+        self.assertIn("flex-wrap: wrap", css)
+        self.assertIn("max-inline-size: 100%", css)
+        self.assertIn("overflow-wrap: anywhere", css)
+        self.assertNotIn("overflow-x: hidden", css.lower())
+
+    def test_table_ui_feedback_uses_speech_queue_not_material_notification_history(self):
+        js = APP.read_text(encoding="utf-8")
+        queue = js[js.index("function queuePoliteAnnouncement"):js.index("function announce(message")]
+        self.assertIn("state.pendingAnnouncements.push(message)", queue)
+        self.assertIn('announceLiveText("polite-status", pending.join(" "))', queue)
+        self.assertNotIn("notification-history", queue)
+        copy = js[js.index("async function copyVisibleTableRows"):js.index("function bindTableTools")]
+        self.assertNotIn("announce(message", copy)
+
+
 if __name__ == "__main__":
     unittest.main()

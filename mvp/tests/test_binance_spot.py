@@ -869,6 +869,19 @@ class BinanceSpotDepthContinuityTests(unittest.TestCase):
 
 
 class BinanceSpotFoundationTests(unittest.TestCase):
+    def depth_event(self, *, first=101, final=105, symbol="BTCUSDT"):
+        return BinanceSpotDepthRange.from_diff_depth_payload(
+            {
+                "e": "depthUpdate",
+                "E": 1672515782136,
+                "s": symbol,
+                "U": first,
+                "u": final,
+                "b": [["100", "1"]],
+                "a": [["101", "2"]],
+            }
+        )
+
     def test_limit_request_preserves_exact_strings_and_requests_ack_only(self):
         intent = BinanceSpotOrderIntent.create(
             instrument_version="BTCUSDT:v1",

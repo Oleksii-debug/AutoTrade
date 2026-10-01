@@ -331,6 +331,50 @@ class ProtectedJournalWriterTests(unittest.TestCase):
                     writer, "provider-read:attempt-1"
                 )
 
+    def test_protected_event_cannot_publish_through_writer_blind_outbox(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            writer = self.select(store)
+            with self.assertRaisesRegex(
+                ValueError, "writer-aware outbox authority"
+            ):
+                store.append_protected_event(
+                    writer,
+                    event(),
+                    outbox_topic="provider-origin",
+                )
+            self.assertEqual(
+                store.load_protected_events(
+                    writer, "provider-read:attempt-1"
+                ),
+                [],
+            )
+
+    def test_restart_rejects_tampered_protected_writer_metadata_at_open(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            writer = self.select(store)
+            store.append_protected_event(writer, event())
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE events SET writer_authority_id = ? WHERE event_id = ?",
+                    (
+                        OTHER_WRITER_ID,
+                        "provider-read:attempt-1:prepared",
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError, "protected writer provenance is inconsistent"
+            ):
+                JournalStore(path)
+
     def test_writer_metadata_tamper_is_rejected_by_protected_loader(self) -> None:
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

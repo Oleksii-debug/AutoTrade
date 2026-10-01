@@ -44,9 +44,16 @@ def payload(outcome="flat"):
 
 class ExperienceMemoryTests(unittest.TestCase):
     def setUp(self):
+        self._clock_tick = 0
+
+        def advancing_test_clock():
+            value = BASE + timedelta(microseconds=self._clock_tick)
+            self._clock_tick += 1
+            return value
+
         self._clock_patch = patch(
             "research.autotrade_research.memory.episodes._utc_now",
-            return_value=BASE,
+            side_effect=advancing_test_clock,
         )
         self._clock_patch.start()
         self.addCleanup(self._clock_patch.stop)

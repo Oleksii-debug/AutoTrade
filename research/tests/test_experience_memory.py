@@ -1924,16 +1924,35 @@ class ExperienceMemoryTests(unittest.TestCase):
                 "second",
             )
 
+            tampered_created_at = (BASE + timedelta(seconds=3)).isoformat()
+            from research.autotrade_research.memory.episodes import _hash
             with store._connect() as con:
                 con.execute(
                     "UPDATE corrections SET created_at=? WHERE correction_id=?",
-                    ((BASE + timedelta(seconds=3)).isoformat(), first_id),
+                    (tampered_created_at, first_id),
+                )
+                state = con.execute(
+                    "SELECT last_sequence FROM writer_chronology WHERE singleton=1"
+                ).fetchone()
+                chronology_hash = _hash(
+                    {
+                        "schema_version": 1,
+                        "last_sequence": state["last_sequence"],
+                        "last_created_at": tampered_created_at,
+                    }
+                )
+                # Keep the outer chronology state internally consistent so this
+                # falsifier proves created_at is bound by correction_hash itself.
+                con.execute(
+                    "UPDATE writer_chronology "
+                    "SET last_created_at=?, chronology_hash=? WHERE singleton=1",
+                    (tampered_created_at, chronology_hash),
                 )
 
             reopened = memory(path)
             with self.assertRaisesRegex(
                 MemoryIntegrityError,
-                "correction integrity mismatch|writer chronology",
+                "correction integrity mismatch",
             ):
                 reopened.retrieve(
                     information_cutoff=cutoff,
@@ -1941,7 +1960,7 @@ class ExperienceMemoryTests(unittest.TestCase):
                 )
             with self.assertRaisesRegex(
                 MemoryIntegrityError,
-                "correction integrity mismatch|writer chronology",
+                "correction integrity mismatch",
             ):
                 reopened.coverage_population(
                     causal_cutoff=cutoff,

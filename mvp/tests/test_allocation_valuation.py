@@ -487,6 +487,10 @@ class AllocationValuationBoundaryTests(unittest.TestCase):
             "max_age_seconds": 60,
             "haircut": "0",
         }
+        policy = FxRoundingPolicy(
+            reporting_currency="EUR",
+            quantum=Decimal("0.01"),
+        )
         with self.assertRaisesRegex(AllocationValuationError, "exact FX rate identity mismatch"):
             self.normalize(
                 self.market(quote_currency="USD"),
@@ -501,6 +505,8 @@ class AllocationValuationBoundaryTests(unittest.TestCase):
                     fx_source_id="fx:eurusd:venue:v8",
                     fx_quote=quote,
                     fx_evidence_sha256=digest,
+                    fx_rounding_policy_id=policy.policy_id,
+                    fx_rounding_quantum=policy.quantum,
                 ),
                 source_price="110.02",
                 base="EUR",

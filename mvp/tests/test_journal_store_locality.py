@@ -59,7 +59,7 @@ class WindowsJournalStoreLocalityTests(unittest.TestCase):
             path = ambiguous_parent / "journal.sqlite3"
             with self.assertRaisesRegex(
                 RuntimeError,
-                "qualified local filesystem",
+                "canonical Windows namespace",
             ):
                 JournalStore(path)
             self.assertFalse(ambiguous_parent.exists())
@@ -72,7 +72,7 @@ class WindowsJournalStoreLocalityTests(unittest.TestCase):
             candidate = root / "journal.sqlite3."
             with self.assertRaisesRegex(
                 RuntimeError,
-                "qualified local filesystem",
+                "canonical Windows namespace",
             ):
                 JournalStore(candidate)
             self.assertFalse(normalized.exists())

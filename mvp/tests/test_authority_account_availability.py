@@ -1,10 +1,19 @@
 from copy import deepcopy
 from dataclasses import replace
+from datetime import date
 from decimal import Decimal
+from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
+from uuid import NAMESPACE_URL, uuid5
 
+from autotrade_runtime.artifacts.store import ArtifactStore
+
+from mvp.autotrade_mvp.accounting import (
+    book_equity_fill,
+    book_external_cash_flow,
+)
 from mvp.autotrade_mvp.authority import (
     AuthoritativeRiskSnapshot,
     AuthorityConflict,
@@ -12,8 +21,17 @@ from mvp.autotrade_mvp.authority import (
     AuthorityService,
 )
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
+from mvp.autotrade_mvp.durable_settlement import (
+    DurableSettlementBook,
+    SETTLEMENT_EVIDENCE_MEDIA_TYPE,
+    settlement_rule_evidence_metadata,
+    settlement_rule_evidence_receipt,
+)
 from mvp.tests._journal_store_patch import patch_journal_store_method
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
+from mvp.autotrade_mvp.provider_activity_accounting import (
+    DurableProviderEconomicBook,
+)
 from mvp.autotrade_mvp.reconciliation import (
     ResourceAvailabilityEvidence,
     SnapshotConsistencyEvidence,
@@ -23,6 +41,12 @@ from mvp.autotrade_mvp.reconciliation_journal import (
     record_reconciliation_checkpoint,
 )
 from mvp.autotrade_mvp.risk import RiskContext, RiskIntent, RiskPolicy
+from mvp.autotrade_mvp.reservations import InsufficientAvailable
+from mvp.autotrade_mvp.settlement import (
+    SettlementAccountScope,
+    SettlementRuleBinding,
+    equity_cash_obligation_from_transaction,
+)
 
 
 INSTRUMENT_ID = "11111111-1111-4111-8111-111111111111"
@@ -187,6 +211,120 @@ def _checkpoint(
     )
 
 
+def _settlement_rule(store: JournalStore) -> SettlementRuleBinding:
+    artifact_store = ArtifactStore(
+        Path(store.path).parent / "availability-settlement-evidence"
+    )
+    rule = SettlementRuleBinding(
+        rule_id="availability-equity-cash",
+        rule_version="1",
+        scope=SettlementAccountScope(
+            provider_id=PROVIDER_ID,
+            account_id=ACCOUNT_ID,
+            environment=ENVIRONMENT,
+        ),
+        instrument_version="ABC",
+        settlement_currency="USD",
+        effective_from=date(2026, 9, 1),
+        effective_to=None,
+        evidence_refs=("instrument:ABC", "rule:availability-equity-cash:1"),
+    )
+    trade_date = date(2026, 9, 24)
+    settlement_date = date(2026, 9, 25)
+    receipt = settlement_rule_evidence_receipt(
+        rule,
+        trade_date=trade_date,
+        expected_settlement_date=settlement_date,
+    )
+    raw = canonical_json(receipt).encode("utf-8")
+    artifact_id = str(
+        uuid5(
+            NAMESPACE_URL,
+            "https://evidence.autotrade.local/availability-settlement-rule/"
+            + canonical_json(receipt),
+        )
+    )
+    manifest = artifact_store.publish_bytes(
+        artifact_id=artifact_id,
+        data=raw,
+        media_type=SETTLEMENT_EVIDENCE_MEDIA_TYPE,
+        rights={"storage": True, "export": False},
+        source_refs=["provider-doc:availability-settlement-rule"],
+        metadata=settlement_rule_evidence_metadata(
+            rule,
+            trade_date=trade_date,
+            expected_settlement_date=settlement_date,
+        ),
+    )
+    return replace(
+        rule,
+        evidence_refs=(
+            *rule.evidence_refs,
+            f"artifact:{artifact_id}@{manifest['sha256']}",
+        ),
+    )
+
+
+def _settlement_authorities(store: JournalStore):
+    artifact_store = ArtifactStore(
+        Path(store.path).parent / "availability-settlement-evidence"
+    )
+    economic = DurableProviderEconomicBook(
+        store,
+        provider_id=PROVIDER_ID,
+        account_id=ACCOUNT_ID,
+        environment=ENVIRONMENT,
+    )
+    settlements = DurableSettlementBook(
+        store,
+        provider_id=PROVIDER_ID,
+        account_id=ACCOUNT_ID,
+        environment=ENVIRONMENT,
+        evidence_artifact_store=artifact_store,
+    )
+    return artifact_store, economic, settlements
+
+
+def _book_cash_trade(
+    store: JournalStore,
+    economic: DurableProviderEconomicBook,
+    settlements: DurableSettlementBook,
+    *,
+    side: str,
+    quantity: str,
+    price: str,
+    suffix: str,
+):
+    transaction = book_equity_fill(
+        transaction_id=f"availability-{side.lower()}-{suffix}",
+        cause_event_id=f"provider-execution-{side.lower()}-{suffix}",
+        instrument="ABC",
+        settlement_currency="USD",
+        side=side,
+        quantity=quantity,
+        price=price,
+        economic_effective_at="2026-09-24T17:55:00Z",
+        economic_order_key=f"provider:{PROVIDER_ID}:execution:{suffix}",
+        observed_at="2026-09-24T17:55:01Z",
+    )
+    economic.append(transaction)
+    obligation = equity_cash_obligation_from_transaction(
+        transaction,
+        obligation_id=f"availability-settlement-{suffix}",
+        instrument="ABC",
+        settlement_currency="USD",
+        settlement_date=date(2026, 9, 25),
+        rule_binding=_settlement_rule(store),
+    )
+    settlements.register_obligations(
+        (obligation,),
+        command_id=f"register-settlement-{suffix}",
+        idempotency_key=f"register-settlement-{suffix}",
+        committed_at="2026-09-24T17:55:02Z",
+    )
+    return transaction
+
+
 def _dispatch(authority, record, *, now=NOW):
     return authority.dispatch_allowed(
         record.admission_id,
@@ -245,6 +383,168 @@ def _admit(authority, reservations, checkpoint, **overrides):
 
 
 class AuthorityAccountAvailabilityTests(unittest.TestCase):
+    def test_pending_sale_proceeds_cannot_expand_reservable_cash(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifact_store, economic, settlements = _settlement_authorities(store)
+            economic.append(
+                book_external_cash_flow(
+                    transaction_id="availability-opening-cash",
+                    cause_event_id="opening-cash-evidence",
+                    currency="USD",
+                    amount="1000",
+                )
+            )
+            _book_cash_trade(
+                store,
+                economic,
+                settlements,
+                side="SELL",
+                quantity="1",
+                price="100",
+                suffix="pending-sale",
+            )
+            self.assertEqual(economic.cash("USD"), Decimal("1100"))
+            self.assertEqual(
+                settlements.project(economic).available_to_spend("USD"),
+                Decimal("1000"),
+            )
+
+            authority = AuthorityService(
+                store,
+                evidence_artifact_store=artifact_store,
+                settlement_book=settlements,
+                economic_book=economic,
+            )
+            authority.register_policy(_policy())
+            checkpoint = _checkpoint(
+                store,
+                cash="1100",
+                available_cash="1100",
+                snapshot_id="availability-with-pending-sale",
+            )
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+
+            with self.assertRaisesRegex(
+                InsufficientAvailable,
+                "available=1000",
+            ):
+                _admit(
+                    authority,
+                    reservations,
+                    checkpoint,
+                    reservation_requirements={"CASH:USD": "1050"},
+                    reservation_available={"CASH:USD": "1100"},
+                )
+            self.assertEqual(reservations.version, 0)
+
+            admitted = _admit(
+                authority,
+                reservations,
+                checkpoint,
+                reservation_requirements={"CASH:USD": "950"},
+                reservation_available={"CASH:USD": "1100"},
+            )
+            self.assertEqual(admitted.outcome, "ADMITTED")
+            risk_event = store.load_events(
+                "risk_decision", admitted.risk_decision_id
+            )[0]
+            availability = risk_event["payload"][
+                "reservation_availability_evidence"
+            ]
+            self.assertEqual(
+                availability["availability"]["CASH:USD"],
+                "1000",
+            )
+            adjustment = availability["settlement_cash_adjustments"]
+            self.assertEqual(
+                adjustment["resources"]["CASH:USD"],
+                {
+                    "provider_available": "1100",
+                    "local_available_to_spend": "1000",
+                    "reservable_available": "1000",
+                },
+            )
+            self.assertEqual(
+                adjustment["economic_book_digest"],
+                economic.read_cut().book_digest,
+            )
+            self.assertGreaterEqual(
+                adjustment["settlement_aggregate_version"],
+                1,
+            )
+
+    def test_dispatch_rechecks_current_settlement_cash_after_new_payable(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifact_store, economic, settlements = _settlement_authorities(store)
+            economic.append(
+                book_external_cash_flow(
+                    transaction_id="dispatch-opening-cash",
+                    cause_event_id="dispatch-opening-cash-evidence",
+                    currency="USD",
+                    amount="1000",
+                )
+            )
+            _book_cash_trade(
+                store,
+                economic,
+                settlements,
+                side="SELL",
+                quantity="1",
+                price="100",
+                suffix="dispatch-sale",
+            )
+            authority = AuthorityService(
+                store,
+                evidence_artifact_store=artifact_store,
+                settlement_book=settlements,
+                economic_book=economic,
+            )
+            authority.register_policy(_policy())
+            checkpoint = _checkpoint(
+                store,
+                cash="1100",
+                available_cash="1100",
+                snapshot_id="dispatch-pending-sale",
+            )
+            reservations = DurableReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT_ID,
+            )
+            admitted = _admit(
+                authority,
+                reservations,
+                checkpoint,
+                reservation_requirements={"CASH:USD": "950"},
+                reservation_available={"CASH:USD": "1100"},
+            )
+            self.assertEqual(admitted.outcome, "ADMITTED")
+            self.assertEqual(_dispatch(authority, admitted), (True, "allowed"))
+
+            _book_cash_trade(
+                store,
+                economic,
+                settlements,
+                side="BUY",
+                quantity="2",
+                price="100",
+                suffix="new-payable",
+            )
+            self.assertEqual(
+                settlements.project(economic).available_to_spend("USD"),
+                Decimal("800"),
+            )
+            self.assertEqual(
+                _dispatch(authority, admitted),
+                (False, "financial_evidence_invalid"),
+            )
+
     def test_admission_uses_exact_reconciled_cash_and_survives_restart_retry(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

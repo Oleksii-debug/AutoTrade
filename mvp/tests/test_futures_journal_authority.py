@@ -181,7 +181,13 @@ class FuturesJournalAuthorityTests(unittest.TestCase):
             self.assertEqual(reference, settlement.evidence_ref)
 
     def test_reader_failure_is_fail_closed(self):
-        settlement = self._settlement()
+        settlement = replace(
+            self._settlement(),
+            evidence_ref=(
+                f"artifact:{uuid5(NAMESPACE_URL, 'reader-failure')}@sha256:"
+                + "0" * 64
+            ),
+        )
 
         def failed_reader(_artifact_id):
             raise ArtifactIntegrityError("snapshot changed")

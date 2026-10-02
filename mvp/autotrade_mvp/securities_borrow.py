@@ -83,11 +83,16 @@ def _version(value: int) -> int:
 
 
 def _decimal(value, *, name: str, positive: bool = False) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise TypeError(f"{name} must use Decimal, string or integer input")
+    if type(value) not in (Decimal, str, int):
+        raise TypeError(f"{name} must use exact Decimal, string or integer input")
     try:
         result = parse_bounded_exact_decimal(value)
     except ExactDecimalError as error:
+        detail = str(error)
+        if "exceeds" in detail or "oversized" in detail:
+            raise ValueError(
+                f"{name} exceeds exact decimal resource envelope"
+            ) from error
         raise ValueError(f"{name} must be a finite decimal") from error
     if result < 0 or (positive and result == 0):
         word = "positive" if positive else "non-negative"
@@ -96,11 +101,16 @@ def _decimal(value, *, name: str, positive: bool = False) -> Decimal:
 
 
 def _signed_decimal(value, *, name: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise TypeError(f"{name} must use Decimal, string or integer input")
+    if type(value) not in (Decimal, str, int):
+        raise TypeError(f"{name} must use exact Decimal, string or integer input")
     try:
         return parse_bounded_exact_decimal(value)
     except ExactDecimalError as error:
+        detail = str(error)
+        if "exceeds" in detail or "oversized" in detail:
+            raise ValueError(
+                f"{name} exceeds exact decimal resource envelope"
+            ) from error
         raise ValueError(f"{name} must be a finite decimal") from error
 
 

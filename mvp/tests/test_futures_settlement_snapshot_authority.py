@@ -178,6 +178,13 @@ class FuturesSettlementSnapshotAuthorityTests(unittest.TestCase):
             self.assertEqual(calls, [artifact_id])
 
     def test_reader_failures_are_normalized_fail_closed(self):
+        evidence = replace(
+            settlement(),
+            evidence_ref=(
+                f"artifact:{uuid5(NAMESPACE_URL, 'snapshot-reader-failure')}@sha256:"
+                + "0" * 64
+            ),
+        )
         for label, error in (
             ("oserror", OSError("simulated storage race")),
             ("integrity", ArtifactIntegrityError("simulated corruption")),
@@ -191,7 +198,7 @@ class FuturesSettlementSnapshotAuthorityTests(unittest.TestCase):
                     FuturesError,
                     "settlement provider evidence verification failed",
                 ):
-                    _verify_provider_settlement_evidence(settlement(), failing)
+                    _verify_provider_settlement_evidence(evidence, failing)
 
     def test_reader_issuance_resource_lock_failure_is_normalized(self):
         with TemporaryDirectory() as directory:

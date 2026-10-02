@@ -177,7 +177,7 @@ class CapabilityProviderEnvironmentTests(unittest.TestCase):
                 artifact_id=evidence_ref["artifact_id"],
                 data=payload,
                 media_type="application/octet-stream",
-                rights={},
+                rights={"storage": True, "export": False, "rights_id": "capability-provider-environment-test"},
                 source_refs=[],
                 metadata={
                     "artifact_kind": "CAPABILITY_EVIDENCE",

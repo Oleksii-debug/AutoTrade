@@ -139,7 +139,7 @@ def _activity_identity(
     provider_id: str,
     account_id: str,
     environment: str,
-    provider_environment: str,
+    provider_environment: str | None = None,
     activity_id: str,
 ) -> str:
     provider = _text(provider_id, name="provider_id").upper()
@@ -181,7 +181,7 @@ def _book_id(
     provider_id: str,
     account_id: str,
     environment: str,
-    provider_environment: str,
+    provider_environment: str | None = None,
 ) -> str:
     provider = _text(provider_id, name="provider_id").upper()
     account = _text(account_id, name="account_id")
@@ -211,7 +211,7 @@ def _scope_fields(
     provider_id: str,
     account_id: str,
     environment: str,
-    provider_environment: str,
+    provider_environment: str | None = None,
 ) -> dict[str, str]:
     provider = _text(provider_id, name="provider_id").upper()
     account = _text(account_id, name="account_id")
@@ -236,7 +236,7 @@ def _scope_payload(
     provider_id: str,
     account_id: str,
     environment: str,
-    provider_environment: str,
+    provider_environment: str | None = None,
 ) -> dict[str, str]:
     fields = _scope_fields(
         provider_id=provider_id,
@@ -334,7 +334,7 @@ def _economic_batch_digest(
     provider_id: str,
     account_id: str,
     environment: str,
-    provider_environment: str,
+    provider_environment: str | None = None,
     transactions: Iterable[JournalTransaction],
 ) -> str:
     material: dict[str, Any] = {

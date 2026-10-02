@@ -248,6 +248,7 @@ class DurableOptionLifecycleTests(unittest.TestCase):
             query={"kind": "OPTION_LIFECYCLE"},
             at=observed_at - timedelta(seconds=30),
             permission_scope=permission_scope,
+            provider_environment=provider_environment,
         )
         payload = {
             "venue_id": venue_id,

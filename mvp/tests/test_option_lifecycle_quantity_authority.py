@@ -71,6 +71,7 @@ def observation(
         provider_id="BYBIT",
         account_id="paper-1",
         environment="PAPER",
+        provider_environment="TESTNET",
         venue_id="OPTIONS",
         instrument_version=instrument_version,
         external_event_id=f"life-{event_kind.lower()}-{signed_contracts}",
@@ -100,6 +101,7 @@ class OptionLifecycleQuantityAuthorityTests(unittest.TestCase):
             provider_id="BYBIT",
             account_id="paper-1",
             environment="PAPER",
+            provider_environment="TESTNET",
         )
         authority._observation_from_evidence = Mock(
             return_value=(observation("0.5"), object())

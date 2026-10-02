@@ -93,7 +93,7 @@ class ReleaseDependencyManifestTests(unittest.TestCase):
                             "type": "Direct",
                             "requested": "[1.2.3]",
                             "resolved": "1.2.3",
-                            "contentHash": "first-hash",
+                            "contentHash": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
                         }
                     }
                 },
@@ -104,7 +104,7 @@ class ReleaseDependencyManifestTests(unittest.TestCase):
             changed_hash = json.loads(json.dumps(base))
             changed_hash["dependencies"]["net10.0"]["Example.Package"][
                 "contentHash"
-            ] = "second-hash"
+            ] = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=="
             lock.write_text(json.dumps(changed_hash), encoding="utf-8")
             second = _normalized_dotnet_lock(lock)
             self.assertNotEqual(first, second)

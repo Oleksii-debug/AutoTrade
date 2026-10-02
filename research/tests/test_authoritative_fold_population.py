@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -396,6 +396,54 @@ class AuthoritativeFoldPopulationTests(unittest.TestCase):
                 spec=self.spec,
                 replay_common_cut_fingerprint="b" * 64,
             )
+
+    def test_authoritative_fit_and_transform_ignore_ambient_decimal_context(self):
+        rows = self._base_events()
+        manifest_digest = self._register([rows])
+        with localcontext() as context:
+            context.prec = 6
+            context.rounding = ROUND_FLOOR
+            first = fit_authoritative_fold_normalizer(
+                registry=self.registry,
+                dataset_id=self.dataset_id,
+                dataset_version=1,
+                manifest_digest=manifest_digest,
+                events=rows,
+                fold=self.fold,
+                spec=self.spec,
+            )
+            point = self._validation_point(rows, manifest_digest)
+            transformed_first = first.transform_validation(
+                point,
+                fold=self.fold,
+                registry=self.registry,
+                events=rows,
+                spec=self.spec,
+            )
+
+        with localcontext() as context:
+            context.prec = 37
+            context.rounding = ROUND_CEILING
+            second = fit_authoritative_fold_normalizer(
+                registry=self.registry,
+                dataset_id=self.dataset_id,
+                dataset_version=1,
+                manifest_digest=manifest_digest,
+                events=rows,
+                fold=self.fold,
+                spec=self.spec,
+            )
+            transformed_second = second.transform_validation(
+                point,
+                fold=self.fold,
+                registry=self.registry,
+                events=rows,
+                spec=self.spec,
+            )
+
+        self.assertEqual(first, second)
+        self.assertEqual(first.fingerprint, second.fingerprint)
+        self.assertEqual(transformed_first, transformed_second)
 
     def test_identical_authority_reproduces_exact_fit_identity(self):
         rows = self._base_events()

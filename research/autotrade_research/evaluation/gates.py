@@ -678,7 +678,14 @@ def _verify_evidence_bundle(
                 return False
             if payload != gate_report_payload(kind, profile, evidence):
                 return False
-    return True
+
+    # ArtifactStore integrity plus caller-mirroring report bytes is not issuer
+    # provenance.  In particular, the current independent_review report can be
+    # self-generated from the same EvaluationEvidence being judged.  Until a
+    # canonical independent-review issuer/trust graph is composed here, a
+    # structurally complete local bundle is evidence material, not terminal
+    # scientific authority.
+    return None
 
 
 def evaluate_gates(

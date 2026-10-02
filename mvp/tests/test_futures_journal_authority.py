@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
-from autotrade_runtime.artifacts.store import ArtifactIntegrityError, ArtifactStore
+from autotrade_runtime.artifacts import ArtifactIntegrityError, ArtifactStore
 
 from mvp.autotrade_mvp import futures_journal as journal_module
 from mvp.autotrade_mvp.futures import (
@@ -129,9 +129,10 @@ class FuturesJournalAuthorityTests(unittest.TestCase):
                 forged,
                 object(),
                 evidence_artifact_store=object(),
+                evidence_artifact_root="irrelevant",
             )
 
-    def test_settlement_verifier_rejects_artifact_store_subclass_before_override(self):
+    def test_settlement_reader_rejects_artifact_store_subclass_before_override(self):
         calls = []
 
         class ForgedArtifactStore(ArtifactStore):
@@ -139,18 +140,23 @@ class FuturesJournalAuthorityTests(unittest.TestCase):
                 calls.append("called")
                 return {}, b"{}"
 
-        forged = object.__new__(ForgedArtifactStore)
-        with self.assertRaisesRegex(FuturesError, "trusted ArtifactStore"):
-            journal_module._verify_provider_settlement_evidence(
-                self._settlement(),
-                forged,
-            )
+        with TemporaryDirectory() as directory:
+            forged = ForgedArtifactStore(Path(directory) / "forged")
+            with self.assertRaisesRegex(
+                FuturesError,
+                "canonical ArtifactStore publication input",
+            ):
+                journal_module._settlement_evidence_reader(forged.root, forged)
         self.assertEqual(calls, [])
 
-    def test_exact_artifact_store_uses_one_snapshot_not_legacy_split_reads(self):
+    def test_bound_reader_ignores_poisoned_publication_store_methods(self):
         with TemporaryDirectory() as directory:
             artifacts = ArtifactStore(Path(directory) / "artifacts")
             settlement = self._bind(artifacts, self._settlement())
+            reader = journal_module._settlement_evidence_reader(
+                artifacts.root,
+                artifacts,
+            )
             with (
                 patch.object(
                     artifacts,
@@ -162,30 +168,32 @@ class FuturesJournalAuthorityTests(unittest.TestCase):
                     "read_bytes",
                     side_effect=AssertionError("legacy split object read used"),
                 ),
+                patch.object(
+                    artifacts,
+                    "read_authenticated_snapshot",
+                    side_effect=AssertionError("publication store regained read authority"),
+                ),
             ):
                 reference = journal_module._verify_provider_settlement_evidence(
                     settlement,
-                    artifacts,
+                    reader,
                 )
             self.assertEqual(reference, settlement.evidence_ref)
 
-    def test_snapshot_failure_is_fail_closed(self):
-        with TemporaryDirectory() as directory:
-            artifacts = ArtifactStore(Path(directory) / "artifacts")
-            settlement = self._bind(artifacts, self._settlement())
-            with patch.object(
-                ArtifactStore,
-                "read_authenticated_snapshot",
-                side_effect=ArtifactIntegrityError("snapshot changed"),
-            ):
-                with self.assertRaisesRegex(
-                    FuturesError,
-                    "provider evidence verification failed",
-                ):
-                    journal_module._verify_provider_settlement_evidence(
-                        settlement,
-                        artifacts,
-                    )
+    def test_reader_failure_is_fail_closed(self):
+        settlement = self._settlement()
+
+        def failed_reader(_artifact_id):
+            raise ArtifactIntegrityError("snapshot changed")
+
+        with self.assertRaisesRegex(
+            FuturesError,
+            "provider evidence verification failed",
+        ):
+            journal_module._verify_provider_settlement_evidence(
+                settlement,
+                failed_reader,
+            )
 
     def test_unrelated_journal_advance_after_evidence_validation_blocks_commit(self):
         with TemporaryDirectory() as directory:
@@ -196,9 +204,9 @@ class FuturesJournalAuthorityTests(unittest.TestCase):
             original_verify = journal_module._verify_provider_settlement_evidence
             advanced = False
 
-            def verify_and_advance(evidence, artifact_store):
+            def verify_and_advance(evidence, evidence_reader):
                 nonlocal advanced
-                result = original_verify(evidence, artifact_store)
+                result = original_verify(evidence, evidence_reader)
                 if not advanced:
                     advanced = True
                     payload = {"kind": "concurrent-durable-fact"}
@@ -231,6 +239,7 @@ class FuturesJournalAuthorityTests(unittest.TestCase):
                         opening,
                         settlement,
                         evidence_artifact_store=artifacts,
+                        evidence_artifact_root=artifacts.root,
                     )
 
             self.assertEqual(
@@ -242,25 +251,25 @@ class FuturesJournalAuthorityTests(unittest.TestCase):
                 [],
             )
 
-    def test_successful_insert_does_not_replay_unbounded_latest_head(self):
+    def test_successful_insert_uses_one_aggregate_read_cut(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             artifacts = ArtifactStore(Path(directory) / "artifacts")
             opening = self._opening()
             settlement = self._bind(artifacts, self._settlement())
-            original_restore = journal_module.restore_linear_variation_margin
 
             with patch.object(
-                journal_module,
-                "restore_linear_variation_margin",
-                wraps=original_restore,
-            ) as restore:
+                JournalStore,
+                "load_events",
+                wraps=JournalStore.load_events,
+            ) as load_events:
                 state, delta, transaction, inserted = (
                     commit_linear_variation_margin(
                         store,
                         opening,
                         settlement,
                         evidence_artifact_store=artifacts,
+                        evidence_artifact_root=artifacts.root,
                     )
                 )
 
@@ -268,7 +277,8 @@ class FuturesJournalAuthorityTests(unittest.TestCase):
             self.assertEqual(delta, Decimal("100"))
             self.assertIsNotNone(transaction)
             self.assertEqual(len(state.settlement_history), 1)
-            self.assertEqual(restore.call_count, 1)
+            self.assertEqual(load_events.call_count, 1)
+
 
 
 if __name__ == "__main__":

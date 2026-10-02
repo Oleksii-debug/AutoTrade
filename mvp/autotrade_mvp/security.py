@@ -9,6 +9,7 @@ It deliberately does not keep a second plaintext credential store.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import math
 import re
 import secrets
@@ -449,6 +450,36 @@ class SecurityBoundary:
             environment=_required_text(environment, name="environment").upper(),
             purpose=_required_text(purpose, name="purpose").upper(),
         )
+
+
+    @contextmanager
+    def lease_for_execution(
+        self,
+        token: str,
+        *,
+        origin: str,
+        handle: CredentialHandle,
+        execution_identity: str,
+        account_id: str,
+        provider: str,
+        environment: str,
+        purpose: str,
+    ):
+        """Authorize and hold one exact credential generation for terminal use."""
+        self.validate_session(token, required_roles=self._EXECUTION_ROLES, origin=origin)
+        if not isinstance(handle, CredentialHandle):
+            raise PermissionError("Credential handle is invalid")
+        with self._credential_vault.lease(
+            handle,
+            execution_identity=_required_text(
+                execution_identity, name="execution_identity"
+            ),
+            account_id=_required_text(account_id, name="account_id"),
+            provider=_required_text(provider, name="provider"),
+            environment=_required_text(environment, name="environment").upper(),
+            purpose=_required_text(purpose, name="purpose").upper(),
+        ) as plaintext:
+            yield plaintext
 
     def describe_handle(self, handle_id: str) -> Mapping[str, object]:
         return self._credential_vault.describe(

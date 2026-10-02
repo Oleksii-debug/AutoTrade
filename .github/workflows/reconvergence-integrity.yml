@@ -22,20 +22,42 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Require event base to remain the live target tip
+        if: github.event_name == 'pull_request_target'
+        shell: bash
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          live_line="$(git ls-remote --refs origin "refs/heads/${BASE_REF}")"
+          test -n "$live_line"
+          live_sha="${live_line%%      - name: Run trusted guard regression tests
+        run: python -m unittest tests.Control.test_reconvergence_integrity -v
+\t'*}"
+          test "$live_sha" = "$BASE_SHA"
       - name: Fetch exact candidate revision without checking it out
         if: github.event_name == 'pull_request_target'
         shell: bash
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          git fetch --no-tags origin "pull/${{ github.event.pull_request.number }}/head"
-          test "$(git rev-parse FETCH_HEAD)" = "${{ github.event.pull_request.head.sha }}"
-          git cat-file -e "${{ github.event.pull_request.base.sha }}^{commit}"
-          git cat-file -e "${{ github.event.pull_request.head.sha }}^{commit}"
+          set -euo pipefail
+          git fetch --no-tags origin "pull/${PR_NUMBER}/head"
+          test "$(git rev-parse FETCH_HEAD)" = "$HEAD_SHA"
+          git cat-file -e "${BASE_SHA}^{commit}"
+          git cat-file -e "${HEAD_SHA}^{commit}"
       - name: Guard pull-request repository tree with trusted base code
         if: github.event_name == 'pull_request_target'
         shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: >-
           python -m control.tools.reconvergence_integrity
-          --base "${{ github.event.pull_request.base.sha }}"
-          --head "${{ github.event.pull_request.head.sha }}"
+          --base "$BASE_SHA"
+          --head "$HEAD_SHA"
       - name: Run trusted guard regression tests
         run: python -m unittest tests.Control.test_reconvergence_integrity -v

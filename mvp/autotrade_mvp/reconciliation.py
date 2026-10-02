@@ -583,6 +583,8 @@ def _snapshot_provider_fill_evidence(
 ) -> ProviderFillEvidence:
     if type(item) is not ProviderFillEvidence:
         raise TypeError("provider_fills must contain exact ProviderFillEvidence")
+    if type(item.evidence_refs) is not tuple:
+        raise TypeError("provider_fill.evidence_refs must be an exact tuple")
     return ProviderFillEvidence(
         provider_id=item.provider_id,
         account_id=item.account_id,

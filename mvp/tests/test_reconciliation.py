@@ -234,6 +234,10 @@ class ReconciliationTests(unittest.TestCase):
             def __hash__(self):
                 raise AssertionError("hostile str.__hash__ dispatched")
 
+        class HostileTuple(tuple):
+            def __iter__(self):
+                raise AssertionError("hostile tuple.__iter__ dispatched")
+
         hostile = HostileStr("TEST_PROVIDER")
         with self.assertRaisesRegex(TypeError, "provider_id must be an exact string"):
             self.base(provider_id=hostile)
@@ -247,6 +251,18 @@ class ReconciliationTests(unittest.TestCase):
         with self.assertRaisesRegex(
             TypeError,
             "provider_execution_id must be an exact string",
+        ):
+            self.base(provider_fills=[provider_fill])
+
+        provider_fill = fill()
+        object.__setattr__(
+            provider_fill,
+            "evidence_refs",
+            HostileTuple(("provider:snapshot",)),
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "provider_fill.evidence_refs must be an exact tuple",
         ):
             self.base(provider_fills=[provider_fill])
 

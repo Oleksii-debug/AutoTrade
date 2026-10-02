@@ -6,6 +6,11 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from tools.build_provenance_manifest import (
+    _normalized_dotnet_lock,
+    dotnet_local_tools,
+    dotnet_lock_graph,
+    dotnet_package_dependencies,
+    dotnet_tool_qualification_evidence_document,
     dependency_advisory_evidence_document,
     normalize_inspected_components,
     release_evidence_document,
@@ -34,6 +39,7 @@ class ReleaseDependencyManifestTests(unittest.TestCase):
         self.assertIn("MODEL_DATA_RIGHTS_MISSING", codes)
         self.assertIn("FIRST_PARTY_RIGHTS_UNRESOLVED", codes)
         self.assertIn("DEPENDENCY_ADVISORY_EVIDENCE_MISSING", codes)
+        self.assertIn("DOTNET_LOCAL_TOOL_QUALIFICATION_MISSING", codes)
 
     def test_all_python_development_dependencies_are_exactly_versioned(self):
         manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
@@ -43,6 +49,143 @@ class ReleaseDependencyManifestTests(unittest.TestCase):
             self.assertTrue(item["name"])
             self.assertRegex(item["version"], r"^[0-9][A-Za-z0-9.+-]*$")
             self.assertNotIn("*", item["version"])
+
+    def test_dotnet_package_reference_is_exact_and_lock_graph_is_canonical(self):
+        self.assertEqual(
+            dotnet_package_dependencies(),
+            [{"name": "Velopack", "version": "1.2.158"}],
+        )
+        project = (
+            ROOT / "src" / "AutoTrade.Desktop" / "AutoTrade.Desktop.csproj"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            '<PackageReference Include="Velopack" Version="[1.2.158]" />',
+            project,
+        )
+
+        graph = dotnet_lock_graph()
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["dotnet_lock_graph"], graph)
+        self.assertEqual(
+            manifest["source_inventory"]["dotnet_lock_blob_shas"],
+            {item["lock_file"]: item["lock_blob_sha"] for item in graph},
+        )
+
+        desktop = next(
+            item
+            for item in graph
+            if item["project"]
+            == "src/AutoTrade.Desktop/AutoTrade.Desktop.csproj"
+        )
+        velopack = desktop["dependencies"]["net10.0-windows7.0"]["Velopack"]
+        self.assertEqual(velopack["requested"], "[1.2.158]")
+        self.assertEqual(velopack["resolved"], "1.2.158")
+        self.assertTrue(velopack["contentHash"])
+
+    def test_lock_resolution_or_content_hash_change_changes_dependency_graph_identity(self):
+        with TemporaryDirectory() as directory:
+            lock = Path(directory) / "packages.lock.json"
+            base = {
+                "version": 1,
+                "dependencies": {
+                    "net10.0": {
+                        "Example.Package": {
+                            "type": "Direct",
+                            "requested": "[1.2.3]",
+                            "resolved": "1.2.3",
+                            "contentHash": "first-hash",
+                        }
+                    }
+                },
+            }
+            lock.write_text(json.dumps(base), encoding="utf-8")
+            first = _normalized_dotnet_lock(lock)
+
+            changed_hash = json.loads(json.dumps(base))
+            changed_hash["dependencies"]["net10.0"]["Example.Package"][
+                "contentHash"
+            ] = "second-hash"
+            lock.write_text(json.dumps(changed_hash), encoding="utf-8")
+            second = _normalized_dotnet_lock(lock)
+            self.assertNotEqual(first, second)
+
+            changed_resolution = json.loads(json.dumps(base))
+            changed_resolution["dependencies"]["net10.0"]["Example.Package"][
+                "resolved"
+            ] = "1.2.4"
+            lock.write_text(json.dumps(changed_resolution), encoding="utf-8")
+            third = _normalized_dotnet_lock(lock)
+            self.assertNotEqual(first, third)
+
+    def test_lock_closure_change_invalidates_stale_advisory_evidence(self):
+        base_graph = {
+            "python_development_dependencies": [],
+            "dotnet_package_dependencies": [
+                {"name": "Example.Package", "version": "1.2.3"}
+            ],
+            "dotnet_lock_graph": [
+                {
+                    "project": "src/Example/Example.csproj",
+                    "lock_file": "src/Example/packages.lock.json",
+                    "lock_blob_sha": "a" * 40,
+                    "version": 1,
+                    "dependencies": {
+                        "net10.0": {
+                            "Example.Package": {
+                                "type": "Direct",
+                                "requested": "[1.2.3]",
+                                "resolved": "1.2.3",
+                                "contentHash": "first-hash",
+                            }
+                        }
+                    },
+                }
+            ],
+            "inspected_components": [],
+        }
+        with TemporaryDirectory() as directory:
+            evidence = Path(directory) / "advisories.json"
+            evidence.write_text(
+                json.dumps(
+                    {
+                        "qualified": True,
+                        "schema_version": "1.0.0",
+                        "source_sha": "b" * 40,
+                        "evidence_refs": [{
+                            "artifact_id": "advisories-lock-closure-1",
+                            "sha256": "sha256:" + "c" * 64,
+                            "observed_at": "2026-09-26T16:00:00Z",
+                        }],
+                        "dependency_graph": base_graph,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            qualified, reason = dependency_advisory_evidence_document(
+                evidence,
+                expected_dependency_graph=base_graph,
+                expected_source_sha="b" * 40,
+            )
+            self.assertTrue(qualified)
+            self.assertIsNone(reason)
+
+            for field, changed_value in (
+                ("contentHash", "second-hash"),
+                ("resolved", "1.2.4"),
+            ):
+                with self.subTest(field=field):
+                    changed_graph = json.loads(json.dumps(base_graph))
+                    changed_graph["dotnet_lock_graph"][0]["dependencies"]["net10.0"][
+                        "Example.Package"
+                    ][field] = changed_value
+                    qualified, reason = dependency_advisory_evidence_document(
+                        evidence,
+                        expected_dependency_graph=changed_graph,
+                        expected_source_sha="b" * 40,
+                    )
+                    self.assertFalse(qualified)
+                    self.assertEqual(reason, "dependency_graph_mismatch")
 
     def test_empty_or_assertion_only_release_evidence_cannot_remove_blocker(self):
         with TemporaryDirectory() as directory:
@@ -389,6 +532,172 @@ class ReleaseDependencyManifestTests(unittest.TestCase):
         text = MANIFEST.read_text(encoding="utf-8").lower()
         for forbidden in ("api_key", "client_secret", "access_token", "private_key"):
             self.assertNotIn(forbidden, text)
+
+
+    def test_dotnet_local_tool_manifest_is_exact_release_build_input(self):
+        self.assertEqual(
+            dotnet_local_tools(),
+            [
+                {
+                    "package_id": "vpk",
+                    "version": "1.2.158",
+                    "commands": ["vpk"],
+                }
+            ],
+        )
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["dotnet_local_tools"], dotnet_local_tools())
+        self.assertEqual(
+            manifest["source_inventory"]["dotnet_tools_manifest_blob_sha"],
+            "a0cdcefda64586736bbe19aea74ce700aac40894",
+        )
+
+    def test_dotnet_tool_qualification_binds_manifest_sdk_package_and_entrypoint_bytes(self):
+        tools = [
+            {
+                "package_id": "vpk",
+                "version": "1.2.158",
+                "commands": ["vpk"],
+            }
+        ]
+        base = {
+            "qualified": True,
+            "schema_version": "1.0.0",
+            "source_sha": "a" * 40,
+            "evidence_refs": [
+                {
+                    "artifact_id": "dotnet-tool-vpk",
+                    "sha256": "sha256:" + "1" * 64,
+                    "observed_at": "2026-10-01T05:00:00Z",
+                }
+            ],
+            "tool_manifest_blob_sha": "b" * 40,
+            "dotnet_sdk": "10.0.100",
+            "local_tools": tools,
+            "tool_package_evidence": [
+                {
+                    "package_id": "vpk",
+                    "version": "1.2.158",
+                    "package_sha256": "sha256:" + "2" * 64,
+                    "entrypoint_sha256": "sha256:" + "3" * 64,
+                }
+            ],
+        }
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "dotnet-tool-qualification.json"
+            path.write_text(json.dumps(base), encoding="utf-8")
+            qualified, reason = dotnet_tool_qualification_evidence_document(
+                path,
+                expected_tools=tools,
+                expected_tool_manifest_blob_sha="b" * 40,
+                expected_dotnet_sdk="10.0.100",
+                expected_source_sha="a" * 40,
+            )
+            self.assertTrue(qualified)
+            self.assertIsNone(reason)
+
+            mismatches = (
+                (
+                    {**base, "tool_manifest_blob_sha": "c" * 40},
+                    "tool_manifest_blob_sha_mismatch",
+                ),
+                ({**base, "dotnet_sdk": "9.0.100"}, "dotnet_sdk_mismatch"),
+                ({**base, "local_tools": []}, "local_tools_mismatch"),
+                (
+                    {
+                        **base,
+                        "tool_package_evidence": [
+                            {
+                                **base["tool_package_evidence"][0],
+                                "package_sha256": "sha256:" + "x" * 64,
+                            }
+                        ],
+                    },
+                    "invalid_tool_package_evidence",
+                ),
+                (
+                    {
+                        **base,
+                        "tool_package_evidence": [
+                            {
+                                **base["tool_package_evidence"][0],
+                                "version": "1.2.159",
+                            }
+                        ],
+                    },
+                    "invalid_tool_package_evidence",
+                ),
+            )
+            for document, expected_reason in mismatches:
+                with self.subTest(expected_reason=expected_reason):
+                    path.write_text(json.dumps(document), encoding="utf-8")
+                    qualified, reason = dotnet_tool_qualification_evidence_document(
+                        path,
+                        expected_tools=tools,
+                        expected_tool_manifest_blob_sha="b" * 40,
+                        expected_dotnet_sdk="10.0.100",
+                        expected_source_sha="a" * 40,
+                    )
+                    self.assertFalse(qualified)
+                    self.assertEqual(reason, expected_reason)
+
+    def test_dotnet_tool_qualification_rejects_missing_or_duplicated_tool_evidence(self):
+        tools = [
+            {
+                "package_id": "vpk",
+                "version": "1.2.158",
+                "commands": ["vpk"],
+            }
+        ]
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "missing.json"
+            qualified, reason = dotnet_tool_qualification_evidence_document(
+                path,
+                expected_tools=tools,
+                expected_tool_manifest_blob_sha="b" * 40,
+                expected_dotnet_sdk="10.0.100",
+            )
+            self.assertFalse(qualified)
+            self.assertEqual(reason, "missing")
+
+            duplicate = {
+                "qualified": True,
+                "schema_version": "1.0.0",
+                "source_sha": "a" * 40,
+                "evidence_refs": [
+                    {
+                        "artifact_id": "tool-evidence",
+                        "sha256": "sha256:" + "4" * 64,
+                        "observed_at": "2026-10-01T05:00:00Z",
+                    }
+                ],
+                "tool_manifest_blob_sha": "b" * 40,
+                "dotnet_sdk": "10.0.100",
+                "local_tools": tools,
+                "tool_package_evidence": [
+                    {
+                        "package_id": "vpk",
+                        "version": "1.2.158",
+                        "package_sha256": "sha256:" + "5" * 64,
+                        "entrypoint_sha256": "sha256:" + "6" * 64,
+                    },
+                    {
+                        "package_id": "vpk",
+                        "version": "1.2.158",
+                        "package_sha256": "sha256:" + "7" * 64,
+                        "entrypoint_sha256": "sha256:" + "8" * 64,
+                    },
+                ],
+            }
+            path.write_text(json.dumps(duplicate), encoding="utf-8")
+            qualified, reason = dotnet_tool_qualification_evidence_document(
+                path,
+                expected_tools=tools,
+                expected_tool_manifest_blob_sha="b" * 40,
+                expected_dotnet_sdk="10.0.100",
+            )
+            self.assertFalse(qualified)
+            self.assertEqual(reason, "tool_package_evidence_mismatch")
 
 
 if __name__ == "__main__":

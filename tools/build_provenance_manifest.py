@@ -17,6 +17,7 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "provenance" / "release-dependency-manifest.json"
 PIN = re.compile(r"^([A-Za-z0-9_.-]+)==([^=\s]+)$")
+EXACT_NUGET_VERSION = re.compile(r"^\\[([0-9][A-Za-z0-9.+-]*)\\]$")
 GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 GIT_OBJECT_ID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 REPOSITORY_SLUG = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -404,6 +405,123 @@ def dependency_advisory_evidence_document(
     return True, None
 
 
+def dotnet_local_tools() -> list[dict[str, object]]:
+    """Return the exact repository-local .NET tool intent as release build input."""
+    path = ROOT / ".config" / "dotnet-tools.json"
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("dotnet tool manifest is unreadable") from error
+    if type(document) is not dict or set(document) != {"version", "isRoot", "tools"}:
+        raise ValueError("dotnet tool manifest fields are not canonical")
+    if document.get("version") != 1 or document.get("isRoot") is not True:
+        raise ValueError("dotnet tool manifest must be a version-1 root manifest")
+    raw_tools = document.get("tools")
+    if type(raw_tools) is not dict:
+        raise ValueError("dotnet tool manifest tools must be an object")
+
+    result: list[dict[str, object]] = []
+    for package_id, raw in sorted(raw_tools.items(), key=lambda item: item[0].casefold()):
+        if (
+            not isinstance(package_id, str)
+            or not package_id
+            or PIN.fullmatch(f"{package_id}==0") is None
+            or type(raw) is not dict
+            or set(raw) != {"version", "commands"}
+        ):
+            raise ValueError("dotnet tool manifest entry is not canonical")
+        version = raw.get("version")
+        commands = raw.get("commands")
+        if (
+            not isinstance(version, str)
+            or not version
+            or version != version.strip()
+            or not re.fullmatch(r"[0-9][A-Za-z0-9.+-]*", version)
+            or type(commands) is not list
+            or not commands
+            or len(commands) != len(set(commands))
+            or any(
+                not isinstance(command, str)
+                or not command
+                or command != command.strip()
+                or re.fullmatch(r"[A-Za-z0-9_.-]+", command) is None
+                for command in commands
+            )
+        ):
+            raise ValueError(f"dotnet tool manifest entry is invalid: {package_id}")
+        result.append(
+            {
+                "package_id": package_id,
+                "version": version,
+                "commands": sorted(commands),
+            }
+        )
+    return result
+
+
+def dotnet_tool_qualification_evidence_document(
+    path: Path,
+    *,
+    expected_tools: list[dict[str, object]],
+    expected_tool_manifest_blob_sha: str,
+    expected_dotnet_sdk: str,
+    expected_source_sha: str | None = None,
+) -> tuple[bool, str | None]:
+    """Require byte-bound qualification of the actual local build tools."""
+    qualified, reason = release_evidence_document(
+        path,
+        label="dotnet local tool qualification",
+        expected_source_sha=expected_source_sha,
+    )
+    if not qualified:
+        return False, reason
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False, "invalid_json"
+    if value.get("tool_manifest_blob_sha") != expected_tool_manifest_blob_sha:
+        return False, "tool_manifest_blob_sha_mismatch"
+    if value.get("dotnet_sdk") != expected_dotnet_sdk:
+        return False, "dotnet_sdk_mismatch"
+    if value.get("local_tools") != expected_tools:
+        return False, "local_tools_mismatch"
+
+    package_evidence = value.get("tool_package_evidence")
+    if type(package_evidence) is not list or len(package_evidence) != len(expected_tools):
+        return False, "tool_package_evidence_mismatch"
+    expected_by_id = {
+        str(item["package_id"]): str(item["version"])
+        for item in expected_tools
+    }
+    seen: set[str] = set()
+    for raw in package_evidence:
+        if type(raw) is not dict or set(raw) != {
+            "package_id",
+            "version",
+            "package_sha256",
+            "entrypoint_sha256",
+        }:
+            return False, "invalid_tool_package_evidence"
+        package_id = raw.get("package_id")
+        version = raw.get("version")
+        package_digest = raw.get("package_sha256")
+        entrypoint_digest = raw.get("entrypoint_sha256")
+        if (
+            not isinstance(package_id, str)
+            or package_id in seen
+            or expected_by_id.get(package_id) != version
+            or not isinstance(package_digest, str)
+            or SHA256_ID.fullmatch(package_digest) is None
+            or not isinstance(entrypoint_digest, str)
+            or SHA256_ID.fullmatch(entrypoint_digest) is None
+        ):
+            return False, "invalid_tool_package_evidence"
+        seen.add(package_id)
+    if seen != set(expected_by_id):
+        return False, "tool_package_evidence_mismatch"
+    return True, None
+
+
 def normalize_inspected_components(
     document: object,
 ) -> tuple[list[dict[str, str]], list[str]]:
@@ -613,16 +731,114 @@ def dotnet_package_dependencies() -> list[dict[str, str]]:
                 raise ValueError(
                     f"PackageReference must have exact Include/Version in {project.relative_to(ROOT)}"
                 )
-            if any(token in version for token in ("*", "[", "]", "(", ")")):
+            match = EXACT_NUGET_VERSION.fullmatch(version)
+            if match is None:
                 raise ValueError(
-                    f"PackageReference is not an exact version in {project.relative_to(ROOT)}: {name} {version}"
+                    "PackageReference must use an exact NuGet range "
+                    f"in {project.relative_to(ROOT)}: {name} {version}"
                 )
-            packages.add((name, version))
+            packages.add((name, match.group(1)))
     return [
         {"name": name, "version": version}
         for name, version in sorted(packages, key=lambda item: item[0].lower())
     ]
 
+
+def _normalized_dotnet_lock(path: Path) -> dict[str, object]:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"NuGet lock is unreadable: {path}") from error
+    if type(document) is not dict or document.get("version") != 1:
+        raise ValueError(f"NuGet lock must use schema version 1: {path}")
+    dependencies = document.get("dependencies")
+    if type(dependencies) is not dict:
+        raise ValueError(f"NuGet lock dependencies must be an object: {path}")
+
+    normalized_targets: dict[str, dict[str, object]] = {}
+    for target, raw_entries in sorted(dependencies.items()):
+        if not isinstance(target, str) or not target or type(raw_entries) is not dict:
+            raise ValueError(f"NuGet lock target is invalid: {path}")
+        normalized_entries: dict[str, object] = {}
+        for name, raw_entry in sorted(raw_entries.items(), key=lambda item: item[0].casefold()):
+            if not isinstance(name, str) or not name or type(raw_entry) is not dict:
+                raise ValueError(f"NuGet lock dependency entry is invalid: {path}")
+            dependency_type = raw_entry.get("type")
+            if dependency_type not in {"Direct", "Transitive", "Project"}:
+                raise ValueError(f"NuGet lock dependency type is invalid: {path}:{name}")
+
+            entry: dict[str, object] = {"type": dependency_type}
+            requested = raw_entry.get("requested")
+            if requested is not None:
+                if not isinstance(requested, str) or not requested:
+                    raise ValueError(f"NuGet lock requested range is invalid: {path}:{name}")
+                entry["requested"] = requested
+
+            resolved = raw_entry.get("resolved")
+            content_hash = raw_entry.get("contentHash")
+            if dependency_type != "Project":
+                if not isinstance(resolved, str) or not resolved:
+                    raise ValueError(f"NuGet lock resolved version is missing: {path}:{name}")
+                if not isinstance(content_hash, str) or not content_hash:
+                    raise ValueError(f"NuGet lock contentHash is missing: {path}:{name}")
+                entry["resolved"] = resolved
+                entry["contentHash"] = content_hash
+            elif resolved is not None or content_hash is not None:
+                raise ValueError(f"NuGet project lock entry has package bytes: {path}:{name}")
+
+            child_dependencies = raw_entry.get("dependencies")
+            if child_dependencies is not None:
+                if type(child_dependencies) is not dict or not all(
+                    isinstance(child_name, str)
+                    and child_name
+                    and isinstance(child_range, str)
+                    and child_range
+                    for child_name, child_range in child_dependencies.items()
+                ):
+                    raise ValueError(f"NuGet lock child dependencies are invalid: {path}:{name}")
+                entry["dependencies"] = {
+                    child_name: child_dependencies[child_name]
+                    for child_name in sorted(child_dependencies, key=str.casefold)
+                }
+
+            unexpected = set(raw_entry) - {
+                "type",
+                "requested",
+                "resolved",
+                "contentHash",
+                "dependencies",
+            }
+            if unexpected:
+                raise ValueError(
+                    f"NuGet lock dependency entry has unexpected fields: {path}:{name}: "
+                    + ", ".join(sorted(unexpected))
+                )
+            normalized_entries[name] = entry
+        normalized_targets[target] = normalized_entries
+
+    return {
+        "version": 1,
+        "dependencies": normalized_targets,
+    }
+
+def dotnet_lock_graph() -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for lock_path in sorted((ROOT / "src").rglob("packages.lock.json")):
+        projects = sorted(lock_path.parent.glob("*.csproj"))
+        if len(projects) != 1:
+            raise ValueError(
+                "Each release NuGet lock must have exactly one sibling project: "
+                f"{lock_path.relative_to(ROOT)}"
+            )
+        records.append(
+            {
+                "project": projects[0].relative_to(ROOT).as_posix(),
+                "lock_file": lock_path.relative_to(ROOT).as_posix(),
+                "lock_blob_sha": git_blob_sha(lock_path),
+                **_normalized_dotnet_lock(lock_path),
+            }
+        )
+    return records
 
 def dotnet_package_projects() -> list[Path]:
     projects: list[Path] = []
@@ -638,8 +854,11 @@ def build_manifest() -> dict[str, object]:
     requirements_path = ROOT / "requirements-dev.txt"
     research_pyproject_path = ROOT / "research" / "pyproject.toml"
     global_path = ROOT / "global.json"
+    dotnet_tools_path = ROOT / ".config" / "dotnet-tools.json"
     components_doc = json.loads(components_path.read_text(encoding="utf-8"))
     global_doc = json.loads(global_path.read_text(encoding="utf-8"))
+    local_tools = dotnet_local_tools()
+    dotnet_tools_blob_sha = git_blob_sha(dotnet_tools_path)
 
     components, unresolved_first_party = normalize_inspected_components(
         components_doc
@@ -756,9 +975,12 @@ def build_manifest() -> dict[str, object]:
 
     python_dependencies = python_dev_dependencies()
     dotnet_packages = dotnet_package_dependencies()
+    dotnet_locks = dotnet_lock_graph()
     dependency_graph = {
         "python_development_dependencies": python_dependencies,
         "dotnet_package_dependencies": dotnet_packages,
+        "dotnet_lock_graph": dotnet_locks,
+        "dotnet_local_tools": local_tools,
         "inspected_components": components,
     }
 
@@ -780,6 +1002,36 @@ def build_manifest() -> dict[str, object]:
                     "Exact release dependency graph has no qualified vulnerability/advisory review."
                     if advisories_reason == "missing"
                     else f"Dependency advisory evidence is not qualified: {advisories_reason}."
+                ),
+            }
+        )
+
+
+    tool_qualification = ROOT / "provenance" / "dotnet-tool-qualification.json"
+    tool_qualification_ok, tool_qualification_reason = (
+        dotnet_tool_qualification_evidence_document(
+            tool_qualification,
+            expected_tools=local_tools,
+            expected_tool_manifest_blob_sha=dotnet_tools_blob_sha,
+            expected_dotnet_sdk=str(global_doc["sdk"]["version"]),
+            expected_source_sha=release_source_sha,
+        )
+        if local_tools
+        else (True, None)
+    )
+    if not tool_qualification_ok:
+        blockers.append(
+            {
+                "code": (
+                    "DOTNET_LOCAL_TOOL_QUALIFICATION_MISSING"
+                    if tool_qualification_reason == "missing"
+                    else "DOTNET_LOCAL_TOOL_QUALIFICATION_UNQUALIFIED"
+                ),
+                "detail": (
+                    "Repository-local .NET build tools require exact package/executable qualification before release packaging."
+                    if tool_qualification_reason == "missing"
+                    else "Repository-local .NET build-tool qualification is not accepted: "
+                    f"{tool_qualification_reason}."
                 ),
             }
         )
@@ -860,6 +1112,11 @@ def build_manifest() -> dict[str, object]:
         "requirements_dev_blob_sha": git_blob_sha(requirements_path),
         "research_pyproject_blob_sha": git_blob_sha(research_pyproject_path),
         "global_json_blob_sha": git_blob_sha(global_path),
+        "dotnet_lock_blob_shas": {
+            record["lock_file"]: record["lock_blob_sha"]
+            for record in dotnet_locks
+        },
+        "dotnet_tools_manifest_blob_sha": dotnet_tools_blob_sha,
     }
     if release_policy_digest is not None:
         if release_policy_pin_blob_sha is None:
@@ -877,8 +1134,10 @@ def build_manifest() -> dict[str, object]:
         "schema_version": "1.0.0",
         "source_inventory": source_inventory,
         "dotnet_sdk": str(global_doc["sdk"]["version"]),
+        "dotnet_local_tools": local_tools,
         "python_development_dependencies": python_dependencies,
         "dotnet_package_dependencies": dotnet_packages,
+        "dotnet_lock_graph": dotnet_locks,
         "inspected_components": components,
         "blocking_issues": blockers,
         "release_eligible": not blockers,

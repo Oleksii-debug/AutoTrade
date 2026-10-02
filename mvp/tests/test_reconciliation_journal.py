@@ -1327,11 +1327,15 @@ class ReconciliationJournalTests(unittest.TestCase):
                             max_age_seconds="123.4568",
                         )
                     self.assertEqual(
-                        evidence.available_resources["CASH:USD"],
-                        Decimal("850"),
+                        evidence["availability"]["CASH:USD"],
+                        "850",
+                    )
+                    self.assertEqual(
+                        evidence["age_seconds"],
+                        "123.456789",
                     )
 
-            load_account_resource_availability_evidence(
+            boundary = load_account_resource_availability_evidence(
                 store,
                 checkpoint_event_id=checkpoint["event_id"],
                 provider_id="TEST_PROVIDER",
@@ -1341,6 +1345,7 @@ class ReconciliationJournalTests(unittest.TestCase):
                 now="2026-09-24T19:02:03.456800Z",
                 max_age_seconds=Decimal("123.4568"),
             )
+            self.assertEqual(boundary["age_seconds"], "123.4568")
             with self.assertRaisesRegex(ValueError, "checkpoint is stale"):
                 load_account_resource_availability_evidence(
                     store,

@@ -756,6 +756,19 @@ def load_account_resource_availability_evidence(
     ):
         raise ValueError("availability checkpoint is stale")
 
+    # Preserve the historical canonical decimal text without reintroducing
+    # ambient Decimal-context authority.  The timedelta cut is exact to one
+    # microsecond, so integer division renders the finite base-10 value exactly.
+    age_whole_seconds, age_fractional_microseconds = divmod(
+        age_microseconds,
+        1_000_000,
+    )
+    age_seconds_text = str(age_whole_seconds)
+    if age_fractional_microseconds:
+        age_seconds_text += (
+            "." + f"{age_fractional_microseconds:06d}".rstrip("0")
+        )
+
     resource_evidence = payload.get("resource_availability")
     if not isinstance(resource_evidence, Mapping):
         raise ValueError(
@@ -1038,7 +1051,7 @@ def load_account_resource_availability_evidence(
         # risk/admission events and must compare identically after restart.
         "resource_evidence_refs": list(normalized_evidence_refs),
         "observed_at": _instant(payload.get("observed_at"), name="observed_at"),
-        "age_seconds": str(age_seconds),
+        "age_seconds": age_seconds_text,
         "availability": {
             resource: str(amount)
             for resource, amount in sorted(availability.items())

@@ -2,10 +2,12 @@ from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
 from research.autotrade_research.artifacts.store import ArtifactStore
 
+from mvp.autotrade_mvp import qualification_attestation as qualification_trust
 from mvp.autotrade_mvp.qualification_attestation import (
     EvidenceArtifactRef,
     SignedQualificationAttestation,
@@ -13,6 +15,8 @@ from mvp.autotrade_mvp.qualification_attestation import (
 from mvp.autotrade_mvp.science_qualification import (
     QualificationGate,
     ScientificQualificationInput,
+    _gate_assertion_requirement,
+    _input_assertion_requirement,
     qualify_scientific_learning,
 )
 from mvp.tests.test_qualification_attestation import (
@@ -68,6 +72,7 @@ def _signed_science_receipt(value):
     trust_policy = policy(trust_root)
     requirement_ids = [
         "scientific-learning-qualification",
+        _input_assertion_requirement(value),
         f"candidate/{value.candidate_hash}",
         f"input/{value.input_snapshot_hash}",
         *(f"gate/{name}" for name in (
@@ -80,6 +85,7 @@ def _signed_science_receipt(value):
             "uncertainty",
             "forward_evidence",
         )),
+        *(_gate_assertion_requirement(item) for item in value.gates),
     ]
     if value.population_coverage_hash is not None:
         requirement_ids.append(
@@ -93,6 +99,7 @@ def _signed_science_receipt(value):
         protocol_id=value.frozen_protocol_hash,
         protocol_version="1.0.0",
         requirement_ids=tuple(requirement_ids),
+        source_sha=value.source_sha,
         evidence_refs=(
             evidence_ref(),
             EvidenceArtifactRef(
@@ -113,6 +120,21 @@ def _signed_science_receipt(value):
     )
 
 
+def _qualify_signed(value, receipt, trust_policy, store, evidence_root):
+    with patch.object(
+        qualification_trust,
+        "load_canonical_qualification_trust_policy",
+        return_value=trust_policy,
+    ):
+        return qualify_scientific_learning(
+            value,
+            qualification_receipt=receipt,
+            evidence_store=store,
+            evidence_root=Path(evidence_root),
+            trusted_source_sha=value.source_sha,
+        )
+
+
 def qualify(value):
     receipt, trust_policy = _signed_science_receipt(value)
     with TemporaryDirectory() as directory:
@@ -126,16 +148,9 @@ def qualify(value):
             source_refs=[f"git:{SOURCE}"],
             metadata={"evidence_kind": "SCIENCE_POPULATION_COVERAGE"},
         )
-        return qualify_scientific_learning(
-            value,
-            qualification_receipt=receipt,
-            qualification_policy=trust_policy,
-            evidence_store=store,
-            evidence_root=Path(directory),
-            expected_policy_id=trust_policy.policy_id,
-            expected_policy_version=trust_policy.policy_version,
+        return _qualify_signed(
+            value, receipt, trust_policy, store, Path(directory)
         )
-
 
 class ScientificQualificationTests(unittest.TestCase):
     def test_self_asserted_gate_hashes_are_inconclusive_without_verifier(self):
@@ -234,14 +249,8 @@ class ScientificQualificationTests(unittest.TestCase):
                 source_refs=[f"git:{SOURCE}"],
                 metadata={"evidence_kind": "SCIENCE_POPULATION_COVERAGE"},
             )
-            result = qualify_scientific_learning(
-                value,
-                qualification_receipt=receipt,
-                qualification_policy=trust_policy,
-                evidence_store=store,
-                evidence_root=Path(directory),
-                expected_policy_id=trust_policy.policy_id,
-                expected_policy_version=trust_policy.policy_version,
+            result = _qualify_signed(
+                value, receipt, trust_policy, store, Path(directory)
             )
         self.assertEqual(result.status, "FAIL")
         self.assertFalse(result.economic_claim_accepted)
@@ -268,14 +277,12 @@ class ScientificQualificationTests(unittest.TestCase):
             TemporaryDirectory() as attacker_directory,
         ):
             attacker_store = ArtifactStore(attacker_directory)
-            result = qualify_scientific_learning(
+            result = _qualify_signed(
                 value,
-                qualification_receipt=receipt,
-                qualification_policy=trust_policy,
-                evidence_store=attacker_store,
-                evidence_root=Path(authoritative_directory),
-                expected_policy_id=trust_policy.policy_id,
-                expected_policy_version=trust_policy.policy_version,
+                receipt,
+                trust_policy,
+                attacker_store,
+                Path(authoritative_directory),
             )
         self.assertEqual(result.status, "FAIL")
         self.assertFalse(result.economic_claim_accepted)
@@ -288,6 +295,148 @@ class ScientificQualificationTests(unittest.TestCase):
         result = qualify(evidence(complete_gates(leakage="FAIL")))
         self.assertEqual(result.status, "FAIL")
         self.assertIn("X.LEAKAGE", result.reason_codes)
+
+    def test_signed_failed_gate_cannot_be_relabelled_pass(self):
+        original = evidence(complete_gates(leakage="FAIL"))
+        receipt, trust_policy = _signed_science_receipt(original)
+        tampered_gates = tuple(
+            gate("leakage", "PASS") if item.gate_id == "leakage" else item
+            for item in original.gates
+        )
+        tampered = ScientificQualificationInput(
+            original.candidate_hash,
+            original.frozen_protocol_hash,
+            original.input_snapshot_hash,
+            tampered_gates,
+            "ECONOMIC_EDGE_QUALIFIED",
+            False,
+            False,
+            original.population_coverage_hash,
+            original.source_sha,
+        )
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            store.publish_bytes(
+                artifact_id=_POPULATION_ID,
+                data=_POPULATION_BYTES,
+                media_type="application/vnd.autotrade.qualification-evidence",
+                rights={"storage": True, "export": False},
+                source_refs=[f"git:{SOURCE}"],
+                metadata={"evidence_kind": "SCIENCE_POPULATION_COVERAGE"},
+            )
+            result = _qualify_signed(
+                tampered, receipt, trust_policy, store, Path(directory)
+            )
+        self.assertEqual(result.status, "FAIL")
+        self.assertFalse(result.economic_claim_accepted)
+        self.assertIn(
+            "SCIENCE.INDEPENDENT_ATTESTATION_BINDING_MISMATCH",
+            result.reason_codes,
+        )
+
+    def test_signed_receipt_cannot_clean_caller_controlled_input_assertions(self):
+        original = evidence(
+            claim="NONE", holdout_used=True, future_used=True
+        )
+        receipt, trust_policy = _signed_science_receipt(original)
+        tampered = evidence(
+            claim="ECONOMIC_EDGE_QUALIFIED",
+            holdout_used=False,
+            future_used=False,
+        )
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            store.publish_bytes(
+                artifact_id=_POPULATION_ID,
+                data=_POPULATION_BYTES,
+                media_type="application/vnd.autotrade.qualification-evidence",
+                rights={"storage": True, "export": False},
+                source_refs=[f"git:{SOURCE}"],
+                metadata={"evidence_kind": "SCIENCE_POPULATION_COVERAGE"},
+            )
+            result = _qualify_signed(
+                tampered, receipt, trust_policy, store, Path(directory)
+            )
+        self.assertEqual(result.status, "FAIL")
+        self.assertFalse(result.economic_claim_accepted)
+        self.assertIn(
+            "SCIENCE.INDEPENDENT_ATTESTATION_BINDING_MISMATCH",
+            result.reason_codes,
+        )
+
+    def test_caller_selected_trust_policy_is_rejected(self):
+        value = evidence(claim="ECONOMIC_EDGE_QUALIFIED")
+        receipt, trust_policy = _signed_science_receipt(value)
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            store.publish_bytes(
+                artifact_id=_POPULATION_ID,
+                data=_POPULATION_BYTES,
+                media_type="application/vnd.autotrade.qualification-evidence",
+                rights={"storage": True, "export": False},
+                source_refs=[f"git:{SOURCE}"],
+                metadata={"evidence_kind": "SCIENCE_POPULATION_COVERAGE"},
+            )
+            result = qualify_scientific_learning(
+                value,
+                qualification_receipt=receipt,
+                qualification_policy=trust_policy,
+                evidence_store=store,
+                evidence_root=Path(directory),
+                expected_policy_id=trust_policy.policy_id,
+                expected_policy_version=trust_policy.policy_version,
+                trusted_source_sha=value.source_sha,
+            )
+        self.assertEqual(result.status, "FAIL")
+        self.assertFalse(result.economic_claim_accepted)
+        self.assertIn(
+            "SCIENCE.CALLER_SELECTED_TRUST_POLICY_FORBIDDEN",
+            result.reason_codes,
+        )
+
+    def test_missing_canonical_science_policy_is_inconclusive_not_invalid(self):
+        value = evidence(claim="ECONOMIC_EDGE_QUALIFIED")
+        receipt, _trust_policy = _signed_science_receipt(value)
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(directory)
+            publish(store)
+            store.publish_bytes(
+                artifact_id=_POPULATION_ID,
+                data=_POPULATION_BYTES,
+                media_type="application/vnd.autotrade.qualification-evidence",
+                rights={"storage": True, "export": False},
+                source_refs=[f"git:{SOURCE}"],
+                metadata={"evidence_kind": "SCIENCE_POPULATION_COVERAGE"},
+            )
+            with patch.object(
+                qualification_trust,
+                "load_canonical_qualification_trust_policy",
+                side_effect=qualification_trust.QualificationTrustUnavailable(
+                    "canonical SCIENCE policy unavailable"
+                ),
+            ):
+                result = qualify_scientific_learning(
+                    value,
+                    qualification_receipt=receipt,
+                    evidence_store=store,
+                    evidence_root=Path(directory),
+                    trusted_source_sha=value.source_sha,
+                )
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertFalse(result.economic_claim_accepted)
+        self.assertIn(
+            "SCIENCE.CANONICAL_TRUST_UNAVAILABLE",
+            result.reason_codes,
+        )
+        self.assertNotIn(
+            "SCIENCE.INDEPENDENT_ATTESTATION_INVALID",
+            result.reason_codes,
+        )
+        self.assertIsNone(result.qualification_policy_id)
+        self.assertIsNone(result.qualification_trust_root_id)
 
     def test_holdout_reuse_for_tuning_is_hard_fail(self):
         result = qualify(evidence(holdout_used=True))

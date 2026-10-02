@@ -377,22 +377,27 @@ class JournalBackedHostApiTests(unittest.TestCase):
 
     def test_fresh_submit_concurrent_exact_winner_is_idempotent_without_growth(self):
         store = self.store()
-        original_commit = store._journal.commit_command
+        original_commit = JournalStore.commit_command
         raced = False
 
-        def race_then_commit(*args, **kwargs):
+        def race_then_commit(journal, *args, **kwargs):
             nonlocal raced
             if not raced:
                 raced = True
                 winner = JournalStore(self.path)
-                saved, inserted, _ = winner.commit_command(*args, **kwargs)
+                saved, inserted, _ = original_commit(
+                    winner,
+                    *args,
+                    **kwargs,
+                )
                 self.assertTrue(inserted)
                 self.assertEqual(saved, kwargs["result"])
-            return original_commit(*args, **kwargs)
+            return original_commit(journal, *args, **kwargs)
 
         with patch.object(
-            store._journal,
+            JournalStore,
             "commit_command",
+            autospec=True,
             side_effect=race_then_commit,
         ):
             accepted = store.submit(self.command())
@@ -413,10 +418,10 @@ class JournalBackedHostApiTests(unittest.TestCase):
 
     def test_fresh_submit_rejects_concurrent_domain_inconsistent_saved_result(self):
         store = self.store()
-        original_commit = store._journal.commit_command
+        original_commit = JournalStore.commit_command
         raced = False
 
-        def race_then_commit(*args, **kwargs):
+        def race_then_commit(journal, *args, **kwargs):
             nonlocal raced
             if not raced:
                 raced = True
@@ -426,16 +431,18 @@ class JournalBackedHostApiTests(unittest.TestCase):
                 forged_result["reason_codes"] = ["forged_race_result"]
                 forged_kwargs["result"] = forged_result
                 winner = JournalStore(self.path)
-                _saved, inserted, _ = winner.commit_command(
+                _saved, inserted, _ = original_commit(
+                    winner,
                     *args,
                     **forged_kwargs,
                 )
                 self.assertTrue(inserted)
-            return original_commit(*args, **kwargs)
+            return original_commit(journal, *args, **kwargs)
 
         with patch.object(
-            store._journal,
+            JournalStore,
             "commit_command",
+            autospec=True,
             side_effect=race_then_commit,
         ):
             with self.assertRaisesRegex(
@@ -2152,10 +2159,10 @@ class JournalBackedHostApiTests(unittest.TestCase):
 
     def test_true_concurrent_commit_fence_returns_state_conflict(self):
         first = self.store()
-        original_commit = first._journal.commit_command
+        original_commit = JournalStore.commit_command
         raced = False
 
-        def race_then_commit(*args, **kwargs):
+        def race_then_commit(journal, *args, **kwargs):
             nonlocal raced
             if not raced:
                 raced = True
@@ -2170,11 +2177,12 @@ class JournalBackedHostApiTests(unittest.TestCase):
                     )
                 )
                 self.assertEqual(winner.status, "ACCEPTED")
-            return original_commit(*args, **kwargs)
+            return original_commit(journal, *args, **kwargs)
 
         with patch.object(
-            first._journal,
+            JournalStore,
             "commit_command",
+            autospec=True,
             side_effect=race_then_commit,
         ):
             loser = first.submit(self.command())

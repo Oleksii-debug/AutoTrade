@@ -201,7 +201,7 @@ def provider_settlement_evidence_receipt(
 ) -> dict[str, Any]:
     """Canonical preserved-provider receipt, excluding its self-reference."""
 
-    if not isinstance(evidence, FuturesSettlementEvidence):
+    if type(evidence) is not FuturesSettlementEvidence:
         raise TypeError("evidence must be FuturesSettlementEvidence")
     settlement = _evidence_payload(evidence)
     settlement.pop("evidence_ref", None)
@@ -215,7 +215,7 @@ def provider_settlement_evidence_receipt(
 def provider_settlement_evidence_metadata(
     evidence: FuturesSettlementEvidence,
 ) -> dict[str, object]:
-    if not isinstance(evidence, FuturesSettlementEvidence):
+    if type(evidence) is not FuturesSettlementEvidence:
         raise TypeError("evidence must be FuturesSettlementEvidence")
     scope = evidence.scope
     if scope.provider_id is None or scope.account_id is None or scope.environment is None:
@@ -236,6 +236,8 @@ def _verify_provider_settlement_evidence(
     evidence: FuturesSettlementEvidence,
     artifact_store: ArtifactStore,
 ) -> str:
+    if type(evidence) is not FuturesSettlementEvidence:
+        raise TypeError("evidence must be FuturesSettlementEvidence")
     if type(artifact_store) is not ArtifactStore:
         raise FuturesError(
             "durable provider settlement requires trusted ArtifactStore"

@@ -677,9 +677,12 @@ def build_provider_fill_financial_plan(
         raise AccountingConflict(
             "cash-equity reservation consumption is qualified only for BUY fills"
         )
-    if provider_fill.position_side is not None:
+    if (
+        provider_fill.position_side is not None
+        or provider_fill.position_effect is not None
+    ):
         raise AccountingConflict(
-            "cash-equity reservation consumption rejects derivative position_side"
+            "cash-equity reservation consumption rejects derivative position identity"
         )
 
     settlement = _text(settlement_currency, name="settlement_currency").upper()

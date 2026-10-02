@@ -948,9 +948,12 @@ def _prepare_provider_fill_correction_binding(
         raise AccountingConflict(
             "cash-equity correction reservation mapping is qualified only for BUY fills"
         )
-    if corrected_provider_fill.position_side is not None:
+    if (
+        corrected_provider_fill.position_side is not None
+        or corrected_provider_fill.position_effect is not None
+    ):
         raise AccountingConflict(
-            "cash-equity correction reservation mapping rejects derivative position_side"
+            "cash-equity correction reservation mapping rejects derivative position identity"
         )
 
     rid = _text(reservation_id, name="reservation_id")
@@ -1063,6 +1066,7 @@ def _prepare_provider_fill_correction_binding(
         not isinstance(initial_provider, Mapping)
         or initial_provider.get("side") != "BUY"
         or initial_provider.get("position_side") is not None
+        or initial_provider.get("position_effect") is not None
     ):
         raise AccountingConflict(
             "initial provider fill binding is not qualified cash-equity BUY evidence"
@@ -1237,6 +1241,14 @@ def _prepare_provider_fill_correction_binding(
         ):
             raise AccountingConflict(
                 "provider fill correction corrected evidence digests are invalid"
+            )
+        if (
+            corrected_provider_payload.get("side") != "BUY"
+            or corrected_provider_payload.get("position_side") is not None
+            or corrected_provider_payload.get("position_effect") is not None
+        ):
+            raise AccountingConflict(
+                "provider fill correction history contains unqualified derivative identity"
             )
         seen_fill_ids.add(corrected_fill_id)
         active_fill_id = corrected_fill_id

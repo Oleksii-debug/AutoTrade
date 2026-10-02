@@ -781,6 +781,8 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
         provider_execution_id="provider-execution-1",
         provider_revision=None,
         correction_of=None,
+        position_side=None,
+        position_effect=None,
     ):
         return ProjectedFillEvidence.create(
             fill_id=fill_id,
@@ -790,6 +792,8 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             side=side,
             quantity=quantity,
             price=price,
+            position_side=position_side,
+            position_effect=position_effect,
             provider_revision=provider_revision,
             correction_of=correction_of,
         )
@@ -803,6 +807,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
         fee_amount="0",
         fee_currency="USD",
         position_side=None,
+        position_effect=None,
         provider_execution_id="provider-execution-1",
         evidence_refs=("provider-fill:test",),
     ):
@@ -820,6 +825,7 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
             trade_time="2026-09-25T09:00:00Z",
             side=side,
             position_side=position_side,
+            position_effect=position_effect,
             evidence_refs=evidence_refs,
         )
 
@@ -1354,6 +1360,95 @@ class EvidenceDerivedFillConsumptionTests(unittest.TestCase):
                     asset_family="FUTURES",
                 )
             self.assertEqual(economics.transactions, ())
+
+    def test_cash_equity_position_effect_is_rejected_before_initial_mutation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            reserve(reservations)
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "derivative position identity",
+            ):
+                self.commit_evidenced_fill(
+                    economics,
+                    reservations,
+                    projected=self.projected_fill(position_effect="OPEN"),
+                    provider=self.provider_fill(position_effect="OPEN"),
+                )
+
+            snapshot = reservations.get("reservation-1")
+            self.assertEqual(snapshot.consumed["CASH:USD"], Decimal("0"))
+            self.assertEqual(snapshot.remaining["CASH:USD"], Decimal("120"))
+            self.assertEqual(economics.transactions, ())
+            self.assertEqual(
+                store.load_events_by_aggregate_type(
+                    "provider_fill_financial_binding"
+                ),
+                [],
+            )
+
+    def test_cash_equity_position_effect_is_rejected_before_correction_mutation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            settlements = settlement_book(store)
+            reserve(reservations)
+
+            inserted, original_projected, original_provider = (
+                self.commit_initial_fill_with_settlement(
+                    economics,
+                    reservations,
+                    settlements,
+                )
+            )
+            self.assertTrue(inserted)
+            before_snapshot = reservations.get("reservation-1")
+            before_transactions = economics.transactions
+            before_settlements = settlements.obligations()
+
+            corrected_projected = self.projected_fill(
+                fill_id="fill-position-effect-correction",
+                provider_revision="provider-revision-position-effect",
+                correction_of=original_projected.fill_id,
+                position_effect="OPEN",
+            )
+            corrected_provider = self.provider_fill(position_effect="OPEN")
+
+            with self.assertRaisesRegex(
+                AccountingConflict,
+                "derivative position identity",
+            ):
+                commit_provider_fill_correction_with_settlement_replacement(
+                    economics,
+                    settlements,
+                    reservation_book=reservations,
+                    reservation_id="reservation-1",
+                    command_id="position-effect-correction-command",
+                    idempotency_key="position-effect-correction-idempotency",
+                    original_projected_fill=original_projected,
+                    original_provider_fill=original_provider,
+                    corrected_projected_fill=corrected_projected,
+                    corrected_provider_fill=corrected_provider,
+                    expected_instrument="ABC",
+                    settlement_currency="USD",
+                    correction_observed_at="2026-09-25T10:00:01Z",
+                    settlement_obligations=(),
+                    committed_at="2026-09-25T10:00:02Z",
+                )
+
+            self.assertEqual(reservations.get("reservation-1"), before_snapshot)
+            self.assertEqual(economics.transactions, before_transactions)
+            self.assertEqual(settlements.obligations(), before_settlements)
+            self.assertEqual(
+                store.load_events_by_aggregate_type(
+                    "provider_fill_reservation_correction_binding"
+                ),
+                [],
+            )
 
     def test_same_caller_idempotency_rejects_changed_fill_plan(self):
         with TemporaryDirectory() as directory:

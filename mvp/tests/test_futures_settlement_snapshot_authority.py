@@ -100,6 +100,48 @@ class FuturesSettlementSnapshotAuthorityTests(unittest.TestCase):
             self.assertFalse(forged.manifest_called)
             self.assertFalse(forged.bytes_called)
 
+    def test_settlement_evidence_subclass_is_rejected_before_virtual_dispatch(self):
+        class ForgedSettlement(FuturesSettlementEvidence):
+            def __getattribute__(self, name):
+                if name == "evidence_ref":
+                    raise AssertionError("subclass evidence_ref dispatch must not run")
+                return super().__getattribute__(name)
+
+        base = settlement()
+        forged = ForgedSettlement(**base.__dict__)
+        with self.assertRaisesRegex(TypeError, "evidence must be FuturesSettlementEvidence"):
+            provider_settlement_evidence_receipt(forged)
+
+        with TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "artifacts")
+            with self.assertRaisesRegex(TypeError, "evidence must be FuturesSettlementEvidence"):
+                _verify_provider_settlement_evidence(forged, store)
+
+    def test_settlement_scope_subclass_is_rejected(self):
+        class ForgedScope(FuturesSettlementScope):
+            pass
+
+        with self.assertRaisesRegex(FuturesError, "settlement scope is required"):
+            FuturesSettlementEvidence(
+                settlement_id="period-1",
+                observation_id="period-1:r0",
+                supersedes_observation_id=None,
+                instrument_id="44444444-4444-4444-8444-444444444444",
+                instrument_version=1,
+                scope=ForgedScope(
+                    source_id="clearing:settlements",
+                    provider_id="TEST_CLEARER",
+                    account_id="acct-1",
+                    environment="PAPER",
+                ),
+                effective_at=NOW,
+                sequence=1,
+                revision=0,
+                settlement_price=Decimal("105.25"),
+                price_currency="USD",
+                settlement_currency="USD",
+            )
+
     def test_canonical_snapshot_ignores_poisoned_instance_read_methods(self):
         with TemporaryDirectory() as directory:
             store = ArtifactStore(Path(directory) / "artifacts")

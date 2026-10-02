@@ -16,11 +16,11 @@ import re
 from typing import FrozenSet, Iterable
 from uuid import UUID
 
-from research.autotrade_research.artifacts import (
+from autotrade_runtime.artifacts import (
     ArtifactIntegrityError,
     trusted_authenticated_reader,
 )
-from research.autotrade_research.artifacts.store import ArtifactStore
+from autotrade_runtime.artifacts.store import ArtifactStore
 
 from .exact_decimal import (
     ExactDecimalError,

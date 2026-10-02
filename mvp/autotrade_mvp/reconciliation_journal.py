@@ -11,9 +11,12 @@ from decimal import Decimal
 from typing import Any, Iterable, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
-from research.autotrade_research.artifacts.store import ArtifactStore
+from autotrade_runtime.artifacts.store import ArtifactStore
 
-from .dispatch import submission_attempt_aggregate_id
+from .dispatch import (
+    provider_domain_submission_attempt_key,
+    submission_attempt_aggregate_id,
+)
 from .exact_decimal import ExactDecimalError, as_fraction, parse_bounded_exact_decimal
 from .persistence import JournalStore, canonical_json, payload_digest
 from .provider_domain import ProviderDomainError, normalize_provider_environment
@@ -129,12 +132,14 @@ def _require_checkpoint_scope(
             environment=scope,
             provider_environment=provider_environment,
         )
-        resource_scope = payload.get("resource_availability")
-        payload_domain = (
-            resource_scope.get("provider_environment")
-            if isinstance(resource_scope, Mapping)
-            else None
-        )
+        payload_domain = payload.get("provider_environment")
+        if payload_domain is None:
+            resource_scope = payload.get("resource_availability")
+            payload_domain = (
+                resource_scope.get("provider_environment")
+                if isinstance(resource_scope, Mapping)
+                else None
+            )
         if payload_domain is None:
             if provider == "BYBIT" or domain != scope:
                 raise ValueError(
@@ -174,6 +179,8 @@ def reconciliation_payload(
             identity["provider_id"] != result.provider_id
             or identity["account_id"] != result.account_id
             or identity["environment"] != result.environment
+            or identity.get("provider_environment", identity["environment"])
+            != result.provider_environment
         ):
             raise ValueError(
                 "unexpected provider fill identity scope must match reconciliation result"
@@ -200,7 +207,7 @@ def reconciliation_payload(
         key=lambda item: str(item["provider_execution_id"])
     )
 
-    return {
+    payload = {
         "provider_id": result.provider_id,
         "account_id": result.account_id,
         "environment": result.environment,
@@ -295,6 +302,9 @@ def reconciliation_payload(
         "blocking_resources": list(result.blocking_resources),
         "reasons": list(result.reasons),
     }
+    if result.provider_environment != result.environment:
+        payload["provider_environment"] = result.provider_environment
+    return payload
 
 
 def _verify_borrow_checkpoint_evidence(
@@ -417,6 +427,7 @@ def load_latest_reconciliation_checkpoint(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> dict[str, Any] | None:
     if not isinstance(store, JournalStore):
         raise TypeError("store must be JournalStore")
@@ -436,6 +447,7 @@ def load_latest_reconciliation_checkpoint(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
     )
     return event
 
@@ -490,12 +502,14 @@ def load_latest_reconciliation_checkpoint_for_scope(
         ):
             continue
         if domain is not None:
-            resource_scope = payload.get("resource_availability")
-            payload_domain = (
-                resource_scope.get("provider_environment")
-                if isinstance(resource_scope, Mapping)
-                else None
-            )
+            payload_domain = payload.get("provider_environment")
+            if payload_domain is None:
+                resource_scope = payload.get("resource_availability")
+                payload_domain = (
+                    resource_scope.get("provider_environment")
+                    if isinstance(resource_scope, Mapping)
+                    else None
+                )
             if payload_domain is None:
                 if provider == "BYBIT" or domain != scope:
                     continue
@@ -561,6 +575,7 @@ def load_reconciliation_checkpoint_for_readiness(
     account_id: str,
     environment: str,
     host_id: str,
+    provider_environment: str | None = None,
     owner_epoch: str,
 ) -> dict[str, Any] | None:
     """Return only a checkpoint eligible to authorize the current owner.
@@ -570,12 +585,23 @@ def load_reconciliation_checkpoint_for_readiness(
     new checkpoint before reconciliation can clear recovery/UNKNOWN gates.
     """
 
+    provider, _account, scope = _scope(
+        provider_id=provider_id,
+        account_id=account_id,
+        environment=environment,
+    )
+    domain = _provider_environment_scope(
+        provider_id=provider,
+        environment=scope,
+        provider_environment=provider_environment,
+    )
     checkpoint = load_latest_reconciliation_checkpoint(
         store,
         reconciliation_id=reconciliation_id,
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=domain,
     )
     if checkpoint is None:
         return None
@@ -584,12 +610,14 @@ def load_reconciliation_checkpoint_for_readiness(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=domain,
     )
     latest_scope_checkpoint = load_latest_reconciliation_checkpoint_for_scope(
         store,
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=domain,
     )
     if (
         latest_scope_checkpoint is None
@@ -615,6 +643,7 @@ def load_submission_resolution_evidence(
     account_id: str,
     environment: str,
     attempt_id: str,
+    provider_environment: str | None = None,
     intent_id: str,
     client_order_id: str,
 ) -> dict[str, Any]:
@@ -641,11 +670,18 @@ def load_submission_resolution_evidence(
     if checkpoint.get("aggregate_type") != "account_reconciliation":
         raise ValueError("checkpoint event has invalid reconciliation aggregate type")
 
+    selected_domain = _selected_checkpoint_provider_environment(
+        checkpoint,
+        provider_id=provider_id,
+        environment=environment,
+        provider_environment=provider_environment,
+    )
     payload = _require_checkpoint_scope(
         checkpoint,
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=selected_domain,
     )
     resolutions = payload.get("submission_resolutions")
     if not isinstance(resolutions, list):
@@ -729,6 +765,9 @@ def load_submission_resolution_evidence(
         "provider_order_ids": provider_order_ids,
         "provider_execution_ids": provider_execution_ids,
     }
+    runtime = _text(payload.get("environment"), name="environment").upper()
+    if selected_domain != runtime:
+        evidence["provider_environment"] = selected_domain
     return evidence
 
 
@@ -1196,20 +1235,58 @@ def load_account_resource_availability_evidence(
         )
     return evidence
 
+def _selected_checkpoint_provider_environment(
+    checkpoint: Mapping[str, Any],
+    *,
+    provider_id: str,
+    environment: str,
+    provider_environment: str | None,
+) -> str:
+    payload = checkpoint.get("payload")
+    if not isinstance(payload, Mapping):
+        raise ValueError("checkpoint payload is required")
+    selected = provider_environment
+    if selected is None:
+        selected = payload.get("provider_environment")
+    if selected is None:
+        resource_scope = payload.get("resource_availability")
+        if isinstance(resource_scope, Mapping):
+            selected = resource_scope.get("provider_environment")
+    if selected is None:
+        if _text(provider_id, name="provider_id").upper() == "BYBIT":
+            raise ValueError(
+                "legacy BYBIT reconciliation checkpoint lacks exact provider_environment"
+            )
+        selected = environment
+    return _provider_environment_scope(
+        provider_id=_text(provider_id, name="provider_id").upper(),
+        environment=_text(environment, name="environment").upper(),
+        provider_environment=selected,
+    )
+
+
 def unresolved_attempt_ids_from_checkpoint(
     checkpoint: Mapping[str, Any] | None,
     *,
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> tuple[str, ...]:
     if checkpoint is None:
         return ()
+    selected_domain = _selected_checkpoint_provider_environment(
+        checkpoint,
+        provider_id=provider_id,
+        environment=environment,
+        provider_environment=provider_environment,
+    )
     payload = _require_checkpoint_scope(
         checkpoint,
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=selected_domain,
     )
     resolutions = payload.get("submission_resolutions")
     if not isinstance(resolutions, list):
@@ -1231,14 +1308,22 @@ def unresolved_provider_activity_ids_from_checkpoint(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str | None = None,
 ) -> tuple[str, ...]:
     if checkpoint is None:
         return ()
+    selected_domain = _selected_checkpoint_provider_environment(
+        checkpoint,
+        provider_id=provider_id,
+        environment=environment,
+        provider_environment=provider_environment,
+    )
     payload = _require_checkpoint_scope(
         checkpoint,
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=selected_domain,
     )
     unexpected = payload.get("unexpected_provider_activity_ids", [])
     missing = payload.get("missing_local_provider_activity_ids", [])
@@ -1262,6 +1347,8 @@ def unknown_submissions_from_dispatch(
     aggregate_ids: Mapping[str, str] | None = None,
     environment: str | None = None,
     account_id: str | None = None,
+    provider_id: str | None = None,
+    provider_environment: str | None = None,
 ) -> tuple[UnknownSubmission, ...]:
     """Rebuild ambiguous outbound attempts from durable Submission* events.
 
@@ -1291,11 +1378,23 @@ def unknown_submissions_from_dispatch(
             )
         lookup_environment = _text(environment, name="environment").upper()
         lookup_account = _text(account_id, name="account_id")
+        if (provider_id is None) != (provider_environment is None):
+            raise ValueError(
+                "provider_id and provider_environment must be supplied together"
+            )
         for attempt_key in normalized:
+            durable_attempt_key = attempt_key
+            if provider_id is not None:
+                durable_attempt_key = provider_domain_submission_attempt_key(
+                    attempt_id=attempt_key,
+                    provider_id=provider_id,
+                    environment=lookup_environment,
+                    provider_environment=provider_environment,
+                )
             durable_ids[attempt_key] = submission_attempt_aggregate_id(
                 environment=lookup_environment,
                 account_id=lookup_account,
-                attempt_id=attempt_key,
+                attempt_id=durable_attempt_key,
             )
     elif aggregate_ids is not None:
         if not isinstance(aggregate_ids, Mapping):
@@ -1324,9 +1423,21 @@ def unknown_submissions_from_dispatch(
         payload = first["payload"]
         if not isinstance(payload, Mapping):
             raise ValueError("SubmissionPrepared payload must be an object")
-        provider_id = _text(
+        durable_provider_id = _text(
             payload.get("provider"), name="provider"
         ).upper()
+        durable_provider_environment = payload.get("provider_environment")
+        if durable_provider_environment is None:
+            if durable_provider_id == "BYBIT":
+                raise ValueError(
+                    "legacy BYBIT SubmissionPrepared lacks exact provider_environment"
+                )
+            durable_provider_environment = payload.get("environment")
+        durable_provider_environment = _provider_environment_scope(
+            provider_id=durable_provider_id,
+            environment=_text(payload.get("environment"), name="environment").upper(),
+            provider_environment=durable_provider_environment,
+        )
         account_id = _text(
             payload.get("account_id"), name="account_id"
         )
@@ -1340,6 +1451,20 @@ def unknown_submissions_from_dispatch(
             raise ValueError(
                 "SubmissionPrepared durable scope does not match requested scope"
             )
+        if provider_id is not None:
+            requested_provider = _text(provider_id, name="provider_id").upper()
+            requested_domain = _provider_environment_scope(
+                provider_id=requested_provider,
+                environment=lookup_environment,
+                provider_environment=provider_environment,
+            )
+            if (
+                durable_provider_id != requested_provider
+                or durable_provider_environment != requested_domain
+            ):
+                raise ValueError(
+                    "SubmissionPrepared provider domain does not match requested scope"
+                )
         environment = durable_environment
         intent_id = _text(
             payload.get("intent_id"), name="intent_id"
@@ -1363,9 +1488,10 @@ def unknown_submissions_from_dispatch(
                     attempt_id=attempt_id,
                     intent_id=intent_id,
                     client_order_id=client_order_id,
-                    provider_id=provider_id,
+                    provider_id=durable_provider_id,
                     account_id=account_id,
                     environment=environment,
+                    provider_environment=durable_provider_environment,
                     started_at=started_at,
                 )
             )

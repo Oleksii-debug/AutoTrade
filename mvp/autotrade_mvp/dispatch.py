@@ -20,6 +20,7 @@ from autotrade_numeric.exact_decimal import (
 )
 
 from .persistence import JournalStore, canonical_json, payload_digest
+from .provider_domain import ProviderDomainError, normalize_provider_environment
 from .provider_response_limits import require_provider_json_depth
 from .sender_gate import journal_sender_gate
 
@@ -188,6 +189,7 @@ class SubmissionResponseBinding:
     terminal_state: str
     response_encoding: str
     http_status: int | None = None
+    provider_environment: str | None = None
     _factory_token: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -237,6 +239,17 @@ class SubmissionResponseBinding:
         if environment not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
             raise ValueError("invalid durable submission environment")
         object.__setattr__(self, "environment", environment)
+        try:
+            domain = normalize_provider_environment(
+                provider_id=self.provider,
+                environment=environment,
+                provider_environment=self.provider_environment,
+            )
+        except ProviderDomainError as error:
+            raise ValueError(
+                "durable submission provider_environment is invalid"
+            ) from error
+        object.__setattr__(self, "provider_environment", domain)
         if not isinstance(self.submission_scope, Mapping):
             raise TypeError("submission_scope must be a mapping")
         canonical_scope = json.loads(canonical_json(dict(self.submission_scope)))
@@ -303,6 +316,8 @@ class _FinancialAuthorityBinding:
     instrument_version: int
     action: str
     capability_snapshot_id: str | None
+    provider_id: str | None = None
+    provider_environment: str | None = None
 
 
 class _IssuedFinancialAuthorityCheck:
@@ -360,6 +375,8 @@ def _issue_financial_authority_check(
     instrument_version: int,
     action: str,
     capability_snapshot_id: str | None = None,
+    provider_id: str | None = None,
+    provider_environment: str | None = None,
 ) -> AuthorityCheck:
     """Issue one opaque capability bound to exact AuthorityService scope.
 
@@ -402,6 +419,26 @@ def _issue_financial_authority_check(
         or not capability_snapshot_id.strip()
     ):
         raise ValueError("capability_snapshot_id must be non-empty text")
+    normalized_provider: str | None = None
+    normalized_provider_environment: str | None = None
+    if provider_id is not None or provider_environment is not None:
+        if type(provider_id) is not str or not provider_id.strip():
+            raise ValueError("provider_id is required with provider_environment")
+        normalized_provider = provider_id.strip().upper()
+        try:
+            normalized_provider_environment = normalize_provider_environment(
+                provider_id=normalized_provider,
+                environment=env,
+                provider_environment=provider_environment,
+            )
+        except ProviderDomainError as error:
+            raise ValueError(
+                "financial dispatch provider_environment is invalid"
+            ) from error
+    if env in {"PAPER", "LIVE"} and normalized_provider_environment is None:
+        raise PermissionError(
+            "PAPER/LIVE financial authority requires exact provider domain"
+        )
 
     capability = _IssuedFinancialAuthorityCheck(
         _FINANCIAL_AUTHORITY_ISSUANCE_TOKEN
@@ -420,6 +457,8 @@ def _issue_financial_authority_check(
             if capability_snapshot_id is None
             else capability_snapshot_id.strip()
         ),
+        provider_id=normalized_provider,
+        provider_environment=normalized_provider_environment,
     )
     return capability
 
@@ -448,6 +487,37 @@ class DispatchOutcome:
 def _identity_digest(*parts: str) -> str:
     """Hash a canonical tuple without delimiter-boundary ambiguity."""
     return sha256(canonical_json(list(parts)).encode("utf-8")).hexdigest()
+
+
+def provider_domain_submission_attempt_key(
+    *,
+    attempt_id: str,
+    provider_id: str,
+    environment: str,
+    provider_environment: str | None,
+) -> str:
+    if not isinstance(attempt_id, str) or not attempt_id.strip():
+        raise ValueError("attempt_id is required")
+    provider = provider_id.strip().upper() if isinstance(provider_id, str) else ""
+    runtime = environment.strip().upper() if isinstance(environment, str) else ""
+    if not provider:
+        raise ValueError("provider_id is required")
+    if runtime not in {"REPLAY", "SIMULATION", "PAPER", "LIVE"}:
+        raise ValueError("invalid submission environment")
+    try:
+        domain = normalize_provider_environment(
+            provider_id=provider,
+            environment=runtime,
+            provider_environment=provider_environment,
+        )
+    except ProviderDomainError as error:
+        raise ValueError(
+            "submission attempt requires exact provider_environment"
+        ) from error
+    logical = attempt_id.strip()
+    if domain == runtime:
+        return logical
+    return logical + ":provider-domain:" + _identity_digest(provider, runtime, domain)
 
 
 def submission_attempt_aggregate_id(
@@ -514,6 +584,8 @@ def load_submission_response_binding(
     environment: str,
     account_id: str,
     attempt_id: str,
+    provider_id: str | None = None,
+    provider_environment: str | None = None,
 ) -> SubmissionResponseBinding:
     """Load exact provider response provenance from the canonical submission journal."""
 
@@ -522,10 +594,20 @@ def load_submission_response_binding(
     # Full product-selected store capability/recovery composition remains owned
     # by the canonical WP-48/WP-49 lineage.
     _canonical_journal_authority_snapshot(store)
+    durable_attempt_id = attempt_id
+    if provider_id is not None or provider_environment is not None:
+        if provider_id is None:
+            raise ValueError("provider_id is required with provider_environment")
+        durable_attempt_id = provider_domain_submission_attempt_key(
+            attempt_id=attempt_id,
+            provider_id=provider_id,
+            environment=environment,
+            provider_environment=provider_environment,
+        )
     aggregate_id = submission_attempt_aggregate_id(
         environment=environment,
         account_id=account_id,
-        attempt_id=attempt_id,
+        attempt_id=durable_attempt_id,
     )
     # Resolve the method from the canonical class after rejecting all instance
     # shadow state; never dispatch through a caller-attached load_events.
@@ -574,6 +656,37 @@ def load_submission_response_binding(
         or payload.get("account_id") != expected_account_id
     ):
         raise ValueError("durable SubmissionPrepared scope identity mismatch")
+    durable_provider = str(payload.get("provider", "")).strip().upper()
+    if not durable_provider:
+        raise ValueError("durable SubmissionPrepared provider identity is invalid")
+    durable_domain = payload.get("provider_environment")
+    if durable_domain is None:
+        if durable_provider == "BYBIT":
+            raise ValueError(
+                "legacy BYBIT SubmissionPrepared lacks exact provider_environment"
+            )
+        durable_domain = expected_environment
+    try:
+        durable_domain = normalize_provider_environment(
+            provider_id=durable_provider,
+            environment=expected_environment,
+            provider_environment=durable_domain,
+        )
+    except ProviderDomainError as error:
+        raise ValueError(
+            "durable SubmissionPrepared provider_environment is invalid"
+        ) from error
+    if provider_id is not None:
+        requested_provider = provider_id.strip().upper()
+        requested_domain = normalize_provider_environment(
+            provider_id=requested_provider,
+            environment=expected_environment,
+            provider_environment=provider_environment,
+        )
+        if durable_provider != requested_provider or durable_domain != requested_domain:
+            raise ValueError(
+                "durable SubmissionPrepared provider_environment mismatch"
+            )
     client_order_id = payload.get("client_order_id")
     if not isinstance(client_order_id, str) or not client_order_id:
         raise ValueError("durable SubmissionPrepared client-order identity is invalid")
@@ -637,7 +750,7 @@ def load_submission_response_binding(
     return SubmissionResponseBinding(
         attempt_id=attempt_id,
         aggregate_id=aggregate_id,
-        provider=str(payload.get("provider", "")),
+        provider=durable_provider,
         request_hash=str(payload.get("request_hash", "")),
         client_order_id=str(payload.get("client_order_id", "")),
         environment=str(payload.get("environment", "")),
@@ -653,6 +766,7 @@ def load_submission_response_binding(
         ),
         response_encoding="utf-8-json",
         http_status=http_status,
+        provider_environment=durable_domain,
         _factory_token=_SUBMISSION_RESPONSE_BINDING_TOKEN,
     )
 
@@ -663,6 +777,7 @@ def stable_client_order_id(
     *,
     environment: str,
     account_id: str,
+    provider_environment: str | None = None,
     max_length: int = 32,
     client_id_format: str = "TOKEN",
 ) -> str:
@@ -680,12 +795,26 @@ def stable_client_order_id(
     normalized_format = client_id_format.strip().upper()
     if normalized_format not in {"TOKEN", "UUID"}:
         raise ValueError("client_id_format must be TOKEN or UUID")
-    digest = _identity_digest(
+    identity_parts = [
         provider.strip().lower(),
         normalized_environment,
         account_id.strip(),
-        intent_id.strip(),
-    )
+    ]
+    if provider_environment is not None:
+        try:
+            domain = normalize_provider_environment(
+                provider_id=provider.strip().upper(),
+                environment=normalized_environment,
+                provider_environment=provider_environment,
+            )
+        except ProviderDomainError as error:
+            raise ValueError(
+                "client-order identity provider_environment is invalid"
+            ) from error
+        if domain != normalized_environment:
+            identity_parts.append(domain)
+    identity_parts.append(intent_id.strip())
+    digest = _identity_digest(*identity_parts)
     if normalized_format == "UUID":
         if (
             not isinstance(max_length, int)
@@ -1065,15 +1194,35 @@ class GuardedDispatcher:
                 raise ValueError(f"{name} is required")
         if not isinstance(request, Mapping):
             raise TypeError("request must be a mapping")
+        provider_environment: str | None = None
+        logical_attempt_id = attempt_id
         if self.environment in {"PAPER", "LIVE"}:
             _issued_callback, issued_store = _issued_financial_authority_binding(
                 authority_check
             )
+            binding = _FINANCIAL_AUTHORITY_BINDINGS.get(authority_check)
+            if type(binding) is not _FinancialAuthorityBinding:
+                raise PermissionError("financial dispatch authority is not issued")
             selected_store = self._journal_store_authority()
             if issued_store is None or issued_store is not selected_store:
                 raise PermissionError(
                     "PAPER/LIVE financial authority belongs to another journal authority"
                 )
+            normalized_provider = provider.strip().upper()
+            if (
+                binding.provider_id != normalized_provider
+                or binding.provider_environment is None
+            ):
+                raise PermissionError(
+                    "PAPER/LIVE provider scope differs from financial authority"
+                )
+            provider_environment = binding.provider_environment
+            attempt_id = provider_domain_submission_attempt_key(
+                attempt_id=logical_attempt_id,
+                provider_id=normalized_provider,
+                environment=self.environment,
+                provider_environment=provider_environment,
+            )
             if _issued_sender_check(self) is None:
                 raise PermissionError(
                     "PAPER/LIVE sender authority must be issued by RecoveryController"
@@ -1099,6 +1248,7 @@ class GuardedDispatcher:
             intent_id,
             environment=self.environment,
             account_id=self.account_id,
+            provider_environment=provider_environment,
             max_length=client_id_max_length,
             client_id_format=client_id_format,
         )
@@ -1107,7 +1257,7 @@ class GuardedDispatcher:
         if existing:
             prepared = existing[0]["payload"]
             expected = {
-                "attempt_id": attempt_id,
+                "attempt_id": logical_attempt_id,
                 "intent_id": intent_id,
                 "intent_hash": intent_hash,
                 "provider": provider,
@@ -1117,6 +1267,10 @@ class GuardedDispatcher:
                 "account_id": self.account_id,
                 "submission_scope_hash": submission_scope_hash,
             }
+            if provider_environment is not None and provider_environment != self.environment:
+                expected["provider_environment"] = provider_environment
+            elif prepared.get("provider_environment") not in {None, self.environment}:
+                raise ValueError("attempt_id conflicts with existing provider domain")
             if any(prepared.get(key) != value for key, value in expected.items()):
                 raise ValueError("attempt_id conflicts with existing submission content")
             return self._recover_existing(
@@ -1126,7 +1280,7 @@ class GuardedDispatcher:
             )
 
         prepared_payload = {
-            "attempt_id": attempt_id,
+            "attempt_id": logical_attempt_id,
             "intent_id": intent_id,
             "intent_hash": intent_hash,
             "provider": provider,
@@ -1140,6 +1294,8 @@ class GuardedDispatcher:
             "submission_scope": scope_dict,
             "submission_scope_hash": submission_scope_hash,
         }
+        if provider_environment is not None and provider_environment != self.environment:
+            prepared_payload["provider_environment"] = provider_environment
         prepared = self._append(
             attempt_id=attempt_id,
             event_type="SubmissionPrepared",

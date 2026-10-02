@@ -832,6 +832,7 @@ class BybitExecutionClassification:
 
     account_id: str
     environment: str
+    provider_environment: str
     provider_execution_id: str
     client_order_id: str | None
     instrument: str
@@ -869,6 +870,7 @@ def _classify_executions_payload(
     response = observation.payload
     account_id = observation.account_id
     environment = observation.environment
+    provider_environment = observation.provider_environment
     envelope = _mapping(response, name="response")
     if _integer(envelope.get("retCode"), name="retCode") != 0:
         raise ProviderCoreError("Bybit execution response was not successful")
@@ -934,6 +936,7 @@ def _classify_executions_payload(
         classification = BybitExecutionClassification(
             account_id=account_id,
             environment=environment,
+            provider_environment=provider_environment,
             provider_execution_id=execution_id,
             client_order_id=client_id,
             instrument=instrument,
@@ -975,6 +978,7 @@ def parse_executions(
             provider_id="BYBIT",
             account_id=item.account_id,
             environment=item.environment,
+            provider_environment=item.provider_environment,
             provider_execution_id=item.provider_execution_id,
             client_order_id=item.client_order_id,
             instrument=item.instrument,

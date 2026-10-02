@@ -181,11 +181,13 @@ def bound_execution_response(
     *,
     account_id="paper-1",
     environment="PAPER",
+    provider_environment="TESTNET",
     instrument_version="BTCUSDT@v1",
 ):
     capability = read_capability(
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
         instrument_version=instrument_version,
     )
     query = prepare_authenticated_read_query(
@@ -905,6 +907,7 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(len(fills), 1)
         fill = fills[0]
         self.assertEqual((fill.account_id, fill.environment), ("paper-1", "PAPER"))
+        self.assertEqual(fill.provider_environment, "TESTNET")
         self.assertEqual(fill.provider_execution_id, "exec-1")
         self.assertEqual(fill.instrument, "BTCUSDT@v1")
         self.assertEqual(fill.quantity, Decimal("0.25"))
@@ -975,12 +978,23 @@ class BybitV5AdapterTests(unittest.TestCase):
             "execQty": "1", "execPrice": "10", "execFee": "0",
             "feeCurrency": "USDT", "execTime": "1790280000000",
         }]}}
-        observation = bound_execution_response(response, account_id="account-a")
+        observation = bound_execution_response(
+            response,
+            account_id="account-a",
+            provider_environment="DEMO",
+        )
         fills = _classify_executions_payload(
             observation,
             instrument_versions={"BTCUSDT": "BTCUSDT@v1"},
         )
-        self.assertEqual((fills[0].account_id, fills[0].environment), ("account-a", "PAPER"))
+        self.assertEqual(
+            (
+                fills[0].account_id,
+                fills[0].environment,
+                fills[0].provider_environment,
+            ),
+            ("account-a", "PAPER", "DEMO"),
+        )
         self.assertEqual(observation.query_binding.account_id, "account-a")
 
     def test_documented_linear_execution_requires_qualified_fee_currency(self):

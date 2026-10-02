@@ -963,7 +963,7 @@ class ProviderQualificationCurrentReaderTests(unittest.TestCase):
                 )
 
 
-    def test_current_scope_resolves_exact_route_qualified_authority(self):
+    def test_current_route_resolves_exact_qualified_authority(self):
         with TemporaryDirectory() as directory:
             campaign = _campaign()
             qualification = issue_accepted_provider_qualification(
@@ -997,16 +997,21 @@ class ProviderQualificationCurrentReaderTests(unittest.TestCase):
                     evidence_root=artifact_store.root,
                 )
                 self.assertEqual(
-                    reader.require_current_scope(
+                    reader.require_current_for_route(
                         provider_id="BYBIT",
+                        product_family="SPOT",
                         environment="PAPER",
                         provider_environment="TESTNET",
                         route_policy_id="bybit-v5-private",
+                        entity_policy_id="bybit-account-v1",
+                        network_policy_id="direct-tls-v1",
+                        account_class="STANDARD",
+                        adapter_source_sha=SOURCE_SHA,
                     ),
                     qualification,
                 )
 
-    def test_current_scope_rejects_missing_route_identity(self):
+    def test_current_route_rejects_missing_route_identity(self):
         with TemporaryDirectory() as directory:
             qualification = _q()
             _store, registry = self._registry(directory)
@@ -1026,14 +1031,19 @@ class ProviderQualificationCurrentReaderTests(unittest.TestCase):
                     ProviderQualificationCurrentnessUnavailable,
                     "missing or ambiguous",
                 ):
-                    reader.require_current_scope(
+                    reader.require_current_for_route(
                         provider_id="BYBIT",
+                        product_family="SPOT",
                         environment="PAPER",
                         provider_environment="TESTNET",
                         route_policy_id="sha256:" + "9" * 64,
+                        entity_policy_id="bybit-account-v1",
+                        network_policy_id="direct-tls-v1",
+                        account_class="STANDARD",
+                        adapter_source_sha=SOURCE_SHA,
                     )
 
-    def test_current_scope_rejects_two_current_qs_for_same_route(self):
+    def test_current_route_disambiguates_account_class(self):
         with TemporaryDirectory() as directory:
             _store, registry = self._registry(directory)
             q1 = _q()
@@ -1052,27 +1062,44 @@ class ProviderQualificationCurrentReaderTests(unittest.TestCase):
             )
             registry.register(q1)
             registry.register(q2)
-            artifact_store = ArtifactStore(Path(directory) / "artifacts")
+            reader = object.__new__(ProviderQualificationCurrentReader)
+            reader._registry = registry
             with patch.object(
-                authority_module,
-                "trusted_authenticated_reader",
-                return_value=lambda _artifact_id: ({}, b""),
+                reader,
+                "require_current",
+                side_effect=lambda qualification_id: registry.historical(
+                    qualification_id
+                ),
             ):
-                reader = ProviderQualificationCurrentReader(
-                    registry,
-                    evidence_store=artifact_store,
-                    evidence_root=artifact_store.root,
-                )
-                with self.assertRaisesRegex(
-                    ProviderQualificationCurrentnessUnavailable,
-                    "missing or ambiguous",
-                ):
-                    reader.require_current_scope(
+                self.assertEqual(
+                    reader.require_current_for_route(
                         provider_id="BYBIT",
+                        product_family="SPOT",
                         environment="PAPER",
                         provider_environment="TESTNET",
                         route_policy_id="bybit-v5-private",
-                    )
+                        entity_policy_id="bybit-account-v1",
+                        network_policy_id="direct-tls-v1",
+                        account_class="STANDARD",
+                        adapter_source_sha=SOURCE_SHA,
+                    ),
+                    q1,
+                )
+                self.assertEqual(
+                    reader.require_current_for_route(
+                        provider_id="BYBIT",
+                        product_family="SPOT",
+                        environment="PAPER",
+                        provider_environment="TESTNET",
+                        route_policy_id="bybit-v5-private",
+                        entity_policy_id="bybit-account-v1",
+                        network_policy_id="direct-tls-v1",
+                        account_class="UNIFIED",
+                        adapter_source_sha=SOURCE_SHA,
+                    ),
+                    q2,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

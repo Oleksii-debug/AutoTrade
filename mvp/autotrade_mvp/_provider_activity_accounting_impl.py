@@ -450,15 +450,22 @@ def _provider_fill_binding_aggregate_id(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str,
     provider_execution_id: str,
 ) -> str:
-    return _scoped_identity(
-        "provider-fill-financial-binding",
-        _text(provider_id, name="provider_id").upper(),
-        _text(account_id, name="account_id"),
-        _environment(environment),
-        _text(provider_execution_id, name="provider_execution_id"),
+    provider = _text(provider_id, name="provider_id").upper()
+    account = _text(account_id, name="account_id")
+    scope = _environment(environment)
+    domain = _provider_environment(
+        provider_id=provider,
+        environment=scope,
+        provider_environment=provider_environment,
     )
+    parts = [provider, account, scope]
+    if domain != scope:
+        parts.append(domain)
+    parts.append(_text(provider_execution_id, name="provider_execution_id"))
+    return _scoped_identity("provider-fill-financial-binding", *parts)
 
 
 def _projected_fill_binding_payload(
@@ -482,7 +489,7 @@ def _projected_fill_binding_payload(
 def _provider_fill_binding_payload(
     provider_fill: ProviderFillEvidence,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "provider_id": provider_fill.provider_id,
         "account_id": provider_fill.account_id,
         "environment": provider_fill.environment,
@@ -499,6 +506,9 @@ def _provider_fill_binding_payload(
         "position_effect": getattr(provider_fill, "position_effect", None),
         "evidence_refs": list(provider_fill.evidence_refs),
     }
+    if provider_fill.provider_environment != provider_fill.environment:
+        payload["provider_environment"] = provider_fill.provider_environment
+    return payload
 
 
 def _resolved_financial_admission_payload(
@@ -527,6 +537,16 @@ def _resolved_financial_admission_payload(
         payload.get("provider_id") != economic_book.provider_id
         or payload.get("account_id") != economic_book.account_id
         or payload.get("environment") != economic_book.environment
+        or (
+            economic_book.provider_environment == economic_book.environment
+            and payload.get("provider_environment")
+            not in {None, economic_book.provider_environment}
+        )
+        or (
+            economic_book.provider_environment != economic_book.environment
+            and payload.get("provider_environment")
+            != economic_book.provider_environment
+        )
         or payload.get("reservation_id") != rid
         or payload.get("intent_id") != intent
         or payload.get("instrument_symbol") != instrument
@@ -561,6 +581,15 @@ def _prepare_provider_fill_binding(
         raise AccountingConflict(
             "initial provider fill binding cannot be created from correction evidence"
         )
+    if (
+        provider_fill.provider_id != economic_book.provider_id
+        or provider_fill.account_id != economic_book.account_id
+        or provider_fill.environment != economic_book.environment
+        or provider_fill.provider_environment != economic_book.provider_environment
+    ):
+        raise AccountingConflict(
+            "provider fill evidence scope does not match economic book"
+        )
     if plan.provider_execution_id != provider_fill.provider_execution_id:
         raise AccountingConflict(
             "provider fill binding execution identity changed"
@@ -572,6 +601,7 @@ def _prepare_provider_fill_binding(
         provider_id=economic_book.provider_id,
         account_id=economic_book.account_id,
         environment=economic_book.environment,
+        provider_environment=economic_book.provider_environment,
         provider_execution_id=provider_fill.provider_execution_id,
     )
     usage = {
@@ -581,10 +611,17 @@ def _prepare_provider_fill_binding(
     projected_payload = _projected_fill_binding_payload(projected_fill)
     provider_payload = _provider_fill_binding_payload(provider_fill)
     request = {
-        "schema_version": "1.2.0",
-        "provider_id": economic_book.provider_id,
-        "account_id": economic_book.account_id,
-        "environment": economic_book.environment,
+        "schema_version": (
+            "1.3.0"
+            if economic_book.provider_environment != economic_book.environment
+            else "1.2.0"
+        ),
+        **_scope_fields(
+            provider_id=economic_book.provider_id,
+            account_id=economic_book.account_id,
+            environment=economic_book.environment,
+            provider_environment=economic_book.provider_environment,
+        ),
         "reservation_id": plan.reservation_id,
         "intent_id": plan.intent_id,
         "financial_admission": financial_admission,
@@ -622,6 +659,16 @@ def _prepare_provider_fill_binding(
             payload.get("provider_id") != economic_book.provider_id
             or payload.get("account_id") != economic_book.account_id
             or payload.get("environment") != economic_book.environment
+            or (
+                economic_book.provider_environment == economic_book.environment
+                and payload.get("provider_environment")
+                not in {None, economic_book.provider_environment}
+            )
+            or (
+                economic_book.provider_environment != economic_book.environment
+                and payload.get("provider_environment")
+                != economic_book.provider_environment
+            )
             or payload.get("provider_execution_id") != plan.provider_execution_id
         ):
             raise AccountingConflict(
@@ -842,14 +889,24 @@ def _provider_fill_correction_binding_aggregate_id(
     provider_id: str,
     account_id: str,
     environment: str,
+    provider_environment: str,
     provider_execution_id: str,
 ) -> str:
+    provider = _text(provider_id, name="provider_id").upper()
+    account = _text(account_id, name="account_id")
+    scope = _environment(environment)
+    domain = _provider_environment(
+        provider_id=provider,
+        environment=scope,
+        provider_environment=provider_environment,
+    )
+    parts = [provider, account, scope]
+    if domain != scope:
+        parts.append(domain)
+    parts.append(_text(provider_execution_id, name="provider_execution_id"))
     return _scoped_identity(
         "provider-fill-reservation-correction-binding",
-        _text(provider_id, name="provider_id").upper(),
-        _text(account_id, name="account_id"),
-        _environment(environment),
-        _text(provider_execution_id, name="provider_execution_id"),
+        *parts,
     )
 
 
@@ -901,6 +958,16 @@ def _prepare_provider_fill_correction_binding(
         corrected_provider_fill.provider_execution_id,
         name="provider_execution_id",
     )
+    for fill in (original_provider_fill, corrected_provider_fill):
+        if (
+            fill.provider_id != economic_book.provider_id
+            or fill.account_id != economic_book.account_id
+            or fill.environment != economic_book.environment
+            or fill.provider_environment != economic_book.provider_environment
+        ):
+            raise AccountingConflict(
+                "provider fill correction evidence scope does not match economic book"
+            )
     if original_provider_fill.provider_execution_id != execution_id:
         raise AccountingConflict("correction provider execution identity changed")
     if corrected_projected_fill.provider_execution_id != execution_id:
@@ -910,6 +977,7 @@ def _prepare_provider_fill_correction_binding(
         provider_id=economic_book.provider_id,
         account_id=economic_book.account_id,
         environment=economic_book.environment,
+        provider_environment=economic_book.provider_environment,
         provider_execution_id=execution_id,
     )
     initial_events = economic_book.store.load_events(
@@ -941,6 +1009,16 @@ def _prepare_provider_fill_correction_binding(
         initial_request.get("provider_id") != economic_book.provider_id
         or initial_request.get("account_id") != economic_book.account_id
         or initial_request.get("environment") != economic_book.environment
+        or (
+            economic_book.provider_environment == economic_book.environment
+            and initial_request.get("provider_environment")
+            not in {None, economic_book.provider_environment}
+        )
+        or (
+            economic_book.provider_environment != economic_book.environment
+            and initial_request.get("provider_environment")
+            != economic_book.provider_environment
+        )
         or initial_request.get("provider_execution_id") != execution_id
         or initial_request.get("reservation_id") != rid
         or initial_request.get("intent_id") != corrected_projected_fill.intent_id
@@ -1029,6 +1107,7 @@ def _prepare_provider_fill_correction_binding(
         provider_id=economic_book.provider_id,
         account_id=economic_book.account_id,
         environment=economic_book.environment,
+        provider_environment=economic_book.provider_environment,
         provider_execution_id=execution_id,
     )
     events = economic_book.store.load_events(
@@ -2544,6 +2623,8 @@ def book_external_provider_cash_activity(
         raise ValueError("provider activity evidence account_id mismatch")
     if activity.environment != scope:
         raise ValueError("provider activity evidence environment mismatch")
+    if activity.provider_environment != domain:
+        raise ValueError("provider activity evidence provider_environment mismatch")
     if activity.origin not in _ALLOWED_EXTERNAL_ORIGINS:
         raise ValueError(
             "only MANUAL or EXTERNAL provider activity may be booked as an external cash flow"
@@ -2636,6 +2717,11 @@ def book_external_provider_cash_activity(
             "provider_id": activity.provider_id,
             "account_id": activity.account_id,
             "environment": activity.environment,
+            **(
+                {"provider_environment": activity.provider_environment}
+                if activity.provider_environment != activity.environment
+                else {}
+            ),
             "activity_id": activity.activity_id,
             "activity_type": activity.activity_type,
             "origin": activity.origin,

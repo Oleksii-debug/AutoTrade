@@ -11,7 +11,7 @@ from types import MappingProxyType
 from typing import Any, Callable, FrozenSet, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from research.autotrade_research.artifacts.store import ArtifactStore
+from autotrade_runtime.artifacts.store import ArtifactStore
 
 from .allocation import (
     AllocationPolicy,
@@ -435,6 +435,7 @@ class FinancialAdmissionBinding:
     authority_event_payload_hash: str
     authority_aggregate_version: int
     authority_journal_sequence: int
+    provider_environment: str | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -455,6 +456,15 @@ class FinancialAdmissionBinding:
             if field_name in {"provider_id", "environment", "action"}:
                 value = value.upper()
             object.__setattr__(self, field_name, value)
+        object.__setattr__(
+            self,
+            "provider_environment",
+            _provider_environment(
+                provider_id=self.provider_id,
+                environment=self.environment,
+                provider_environment=self.provider_environment,
+            ),
+        )
         object.__setattr__(
             self,
             "instrument_version",
@@ -496,7 +506,7 @@ def financial_admission_binding_payload(
 ) -> dict[str, Any]:
     if type(binding) is not FinancialAdmissionBinding:
         raise TypeError("binding must be exact FinancialAdmissionBinding")
-    return {
+    payload = {
         "schema_version": "1.0.0",
         "admission_id": binding.admission_id,
         "intent_id": binding.intent_id,
@@ -518,10 +528,54 @@ def financial_admission_binding_payload(
         "authority_aggregate_version": binding.authority_aggregate_version,
         "authority_journal_sequence": binding.authority_journal_sequence,
     }
+    if binding.provider_environment != binding.environment:
+        payload["schema_version"] = "1.1.0"
+        payload["provider_environment"] = binding.provider_environment
+    return payload
 
 
 class AuthorityConflict(ValueError):
     """Raised when immutable authority identity is reused inconsistently."""
+
+
+def _durable_capability_provider_scope(
+    store: JournalStore,
+    snapshot_id: str,
+) -> tuple[str, str, str, str]:
+    sid = _text(snapshot_id, name="capability_snapshot_id")
+    event = store.get_event(f"capability-snapshot:{sid}")
+    if event is None:
+        raise AuthorityConflict("durable capability snapshot is missing")
+    if (
+        event.get("event_type") not in {
+            "CapabilitySnapshotObserved.v1",
+            "CapabilitySnapshotObserved.v2",
+        }
+        or event.get("aggregate_type") != "capability_history"
+    ):
+        raise AuthorityConflict("durable capability event type is invalid")
+    payload = event.get("payload")
+    if not isinstance(payload, Mapping):
+        raise AuthorityConflict("durable capability payload is malformed")
+    if payload_digest(payload) != event.get("payload_hash"):
+        raise AuthorityConflict("durable capability payload integrity failure")
+    raw = payload.get("snapshot")
+    if not isinstance(raw, Mapping) or raw.get("snapshot_id") != sid:
+        raise AuthorityConflict("durable capability snapshot identity mismatch")
+    provider = _text(raw.get("provider_id"), name="capability provider_id").upper()
+    account = _text(raw.get("account_id"), name="capability account_id")
+    environment = _text(raw.get("environment"), name="capability environment").upper()
+    try:
+        provider_environment = _provider_environment(
+            provider_id=provider,
+            environment=environment,
+            provider_environment=raw.get("provider_environment"),
+        )
+    except ValueError as error:
+        raise AuthorityConflict(
+            "durable capability lacks exact provider_environment"
+        ) from error
+    return provider, account, environment, provider_environment
 
 
 @dataclass(frozen=True)
@@ -2542,6 +2596,41 @@ class AuthorityService:
         if not isinstance(availability_evidence, Mapping):
             raise AuthorityConflict(
                 "durable admission lacks reservation availability evidence"
+            )
+        availability_provider = _text(
+            availability_evidence.get("provider_id"),
+            name="reservation availability provider_id",
+        ).upper()
+        try:
+            availability_provider_environment = _provider_environment(
+                provider_id=availability_provider,
+                environment=record.environment,
+                provider_environment=availability_evidence.get(
+                    "provider_environment"
+                ),
+            )
+        except ValueError as error:
+            raise AuthorityConflict(
+                "durable reservation availability provider_environment is invalid"
+            ) from error
+        (
+            capability_provider,
+            capability_account,
+            capability_environment,
+            capability_provider_environment,
+        ) = _durable_capability_provider_scope(
+            self.store,
+            record.capability_snapshot_id,
+        )
+        if (
+            capability_provider != availability_provider
+            or capability_account != record.account_id
+            or capability_environment != record.environment
+            or capability_provider_environment
+            != availability_provider_environment
+        ):
+            raise AuthorityConflict(
+                "durable capability and reconciliation provider scope differ"
             )
         try:
             regenerated_availability = (
@@ -4802,6 +4891,34 @@ class AuthorityService:
             availability.get("provider_id"),
             name="financial admission provider_id",
         ).upper()
+        try:
+            provider_environment = _provider_environment(
+                provider_id=provider_id,
+                environment=record.environment,
+                provider_environment=availability.get("provider_environment"),
+            )
+        except ValueError as error:
+            raise AuthorityConflict(
+                "financial admission provider_environment evidence is invalid"
+            ) from error
+        (
+            capability_provider,
+            capability_account,
+            capability_environment,
+            capability_provider_environment,
+        ) = _durable_capability_provider_scope(
+            self.store,
+            record.capability_snapshot_id,
+        )
+        if (
+            capability_provider != provider_id
+            or capability_account != record.account_id
+            or capability_environment != record.environment
+            or capability_provider_environment != provider_environment
+        ):
+            raise AuthorityConflict(
+                "financial admission capability provider scope is inconsistent"
+            )
         risk_intent = risk_payload.get("risk_intent")
         if not isinstance(risk_intent, Mapping):
             raise AuthorityConflict(
@@ -4888,6 +5005,7 @@ class AuthorityService:
             provider_id=provider_id,
             account_id=record.account_id,
             environment=record.environment,
+            provider_environment=provider_environment,
             instrument_symbol=instrument_symbol,
             instrument_version=record.instrument_version,
             action=record.action,
@@ -5154,6 +5272,28 @@ class AuthorityService:
             if capability_snapshot_id is None
             else _text(capability_snapshot_id, name="capability_snapshot_id")
         )
+        provider_id: str | None = None
+        provider_environment: str | None = None
+        if env in {"PAPER", "LIVE"}:
+            binding = self.financial_admission_binding(aid)
+            if (
+                binding.account_id != account
+                or binding.environment != env
+                or binding.instrument_version != identity
+                or binding.action != normalized_action
+            ):
+                raise AuthorityConflict(
+                    "dispatch guard scope differs from financial admission"
+                )
+            if (
+                capability is not None
+                and self._admissions[aid].capability_snapshot_id != capability
+            ):
+                raise AuthorityConflict(
+                    "dispatch guard capability differs from financial admission"
+                )
+            provider_id = binding.provider_id
+            provider_environment = binding.provider_environment
 
         # PAPER/LIVE dispatch accepts only a product-issued opaque capability.
         # Bind the exact AuthorityService plus immutable admission/scope data;
@@ -5170,6 +5310,8 @@ class AuthorityService:
             instrument_version=identity.version,
             action=normalized_action,
             capability_snapshot_id=capability,
+            provider_id=provider_id,
+            provider_environment=provider_environment,
         )
 
 

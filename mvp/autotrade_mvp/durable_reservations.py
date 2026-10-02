@@ -17,12 +17,12 @@ from pathlib import Path
 from typing import Mapping
 from uuid import UUID, NAMESPACE_URL, uuid5
 
-from research.autotrade_research.artifacts import (
+from autotrade_runtime.artifacts import (
     ArtifactIntegrityError,
     ArtifactStore,
     trusted_authenticated_reader,
 )
-from research.autotrade_research.io.strict_json import strict_json_loads
+from autotrade_runtime.strict_json import strict_json_loads
 
 from .dispatch import submission_attempt_aggregate_id
 from .exact_decimal import (

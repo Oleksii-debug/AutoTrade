@@ -1894,60 +1894,6 @@ class ProviderQualificationCurrentReader:
                 "retained provider qualification campaign differs from durable Q"
             )
 
-    def require_current_scope(
-        self,
-        *,
-        provider_id: str,
-        environment: str,
-        provider_environment: str,
-        route_policy_id: str,
-    ) -> AcceptedProviderQualification:
-        """Resolve and revalidate one exact current Q from the minimal route scope.
-
-        This is intentionally narrower than require_current_for_route(): callers
-        that hold only the provider/runtime/domain/route identity may use it only
-        when that scope resolves to exactly one durable current qualification.
-        Any ambiguity across entity, network, account-class, build, product-family
-        or release identities fails closed rather than selecting one implicitly.
-        """
-
-        provider = _token(provider_id, name="provider_id")
-        runtime_environment = _token(environment, name="environment")
-        provider_domain = _token(
-            provider_environment,
-            name="provider_environment",
-        )
-        route_policy = _token(
-            route_policy_id,
-            name="route_policy_id",
-            upper=False,
-        )
-        states, _versions = self._registry._validated_history_cut()
-        matches: list[AcceptedProviderQualification] = []
-        for state in states.values():
-            current = state.current
-            if current is None:
-                continue
-            scope = current.provider_scope
-            if (
-                scope.provider_id == provider
-                and scope.environment == runtime_environment
-                and scope.provider_environment == provider_domain
-                and scope.route_policy_id == route_policy
-            ):
-                matches.append(current)
-        if len(matches) != 1:
-            raise ProviderQualificationCurrentnessUnavailable(
-                "exact current provider qualification scope is missing or ambiguous"
-            )
-        historical = matches[0]
-        current = self.require_current(historical.qualification_id)
-        if current != historical:
-            raise ProviderQualificationCurrentnessUnavailable(
-                "provider qualification scope changed during revalidation"
-            )
-        return current
-
     def require_current_for_route(
         self,
         *,

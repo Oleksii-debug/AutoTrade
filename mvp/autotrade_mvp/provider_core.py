@@ -667,6 +667,10 @@ class ProviderSubmissionObservation:
         return self.response_binding.environment
 
     @property
+    def provider_environment(self) -> str:
+        return self.response_binding.provider_environment
+
+    @property
     def client_order_id(self) -> str:
         return self.response_binding.client_order_id
 
@@ -696,6 +700,7 @@ class ProviderSubmissionObservation:
         instrument_versions: tuple[str, ...],
         account_id: str | None = None,
         environment: str | None = None,
+        provider_environment: str | None = None,
         client_order_id: str | None = None,
     ) -> None:
         if _text(provider_id, "provider_id").upper() != self.provider_id:
@@ -715,6 +720,21 @@ class ProviderSubmissionObservation:
             and _text(environment, "environment").upper() != self.environment
         ):
             raise ProviderCoreError("provider-write provenance environment mismatch")
+        if provider_environment is not None:
+            try:
+                expected_provider_environment = _normalize_provider_environment(
+                    provider_id=self.provider_id,
+                    environment=self.environment,
+                    provider_environment=provider_environment,
+                )
+            except ProviderDomainError as error:
+                raise ProviderCoreError(
+                    "provider-write provenance provider_environment is invalid"
+                ) from error
+            if expected_provider_environment != self.provider_environment:
+                raise ProviderCoreError(
+                    "provider-write provenance provider_environment mismatch"
+                )
         if (
             client_order_id is not None
             and _text(client_order_id, "client_order_id") != self.client_order_id

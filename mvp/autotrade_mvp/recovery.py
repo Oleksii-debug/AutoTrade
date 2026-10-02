@@ -25,7 +25,6 @@ from .persistence import (
     payload_digest,
     require_exact_journal_store_authority,
 )
-from .provider_domain import normalize_provider_environment
 from .sender_gate import journal_sender_gate
 from .store_identity import (
     JournalStoreIdentity,
@@ -185,7 +184,7 @@ class RecoveryController:
         ] = {}
         self._recovered_unknown_identities: dict[
             str,
-            tuple[str, str, str, str, str],
+            tuple[str, str, str, str, str, str],
         ] = {}
         self.storage_writable = True
         self.clock_trusted = True
@@ -531,8 +530,8 @@ class RecoveryController:
         intent_id: str,
         client_order_id: str,
         provider_id: str,
-        provider_environment: str | None,
         environment: str,
+        provider_environment: str,
         account_id: str,
     ) -> bool:
         """Project one older ambiguous tail against later durable provider truth.
@@ -556,18 +555,7 @@ class RecoveryController:
         normalized_provider = provider_id.strip().upper()
         normalized_account = account_id.strip()
         normalized_environment = environment.strip().upper()
-        normalized_provider_environment: str | None = None
-        if provider_environment is not None:
-            try:
-                normalized_provider_environment = normalize_provider_environment(
-                    provider_id=normalized_provider,
-                    environment=normalized_environment,
-                    provider_environment=provider_environment,
-                )
-            except ValueError as error:
-                raise RuntimeError(
-                    "Submission provider-domain identity is invalid"
-                ) from error
+        normalized_provider_environment = provider_environment.strip().upper()
         latest_explicit: dict[str, object] | None = None
         latest_explicit_sequence = 0
         last_scope_sequence = 0
@@ -582,29 +570,18 @@ class RecoveryController:
             payload = checkpoint.get("payload")
             if not isinstance(payload, dict):
                 raise RuntimeError("Reconciliation checkpoint payload is invalid")
+            checkpoint_domain = payload.get("provider_environment")
+            if checkpoint_domain is None:
+                checkpoint_domain = payload.get("environment")
             if (
                 payload.get("provider_id") != normalized_provider
                 or payload.get("account_id") != normalized_account
                 or payload.get("environment") != normalized_environment
+                or not isinstance(checkpoint_domain, str)
+                or checkpoint_domain.strip().upper()
+                != normalized_provider_environment
             ):
                 continue
-            if normalized_provider_environment is not None:
-                checkpoint_domain_value = payload.get(
-                    "provider_environment",
-                    payload.get("environment"),
-                )
-                try:
-                    checkpoint_domain = normalize_provider_environment(
-                        provider_id=normalized_provider,
-                        environment=normalized_environment,
-                        provider_environment=checkpoint_domain_value,
-                    )
-                except ValueError as error:
-                    raise RuntimeError(
-                        "Reconciliation checkpoint provider-domain identity is invalid"
-                    ) from error
-                if checkpoint_domain != normalized_provider_environment:
-                    continue
 
             checkpoint_sequence = checkpoint.get("journal_sequence")
             if type(checkpoint_sequence) is not int or checkpoint_sequence <= 0:
@@ -729,7 +706,11 @@ class RecoveryController:
         scope_keys: set[str] = set()
         staged_send_attempts: set[str] = set()
         staged_bindings: dict[str, tuple[str, int, tuple[str, ...]]] = {}
-        staged_identities: dict[str, tuple[str, str, str, str, str]] = {}
+        staged_identities: dict[
+            str,
+            tuple[str, str, str, str, str, str],
+        ] = {}
+        seen_logical_attempt_aggregates: dict[str, str] = {}
         staged_legacy = False
 
         for aggregate_id, aggregate_events in grouped.items():
@@ -760,7 +741,7 @@ class RecoveryController:
             )
             last = aggregate_events[-1]
             raw_attempt_id = payload.get("attempt_id")
-            recovery_provider_environment: str | None = None
+            recovered_provider_environment = normalized_environment
             if isinstance(raw_attempt_id, str) and raw_attempt_id.strip():
                 attempt_key = raw_attempt_id.strip()
                 if normalized_environment in {"PAPER", "LIVE"}:
@@ -769,28 +750,19 @@ class RecoveryController:
                         raise RuntimeError(
                             "SubmissionPrepared provider identity is invalid"
                         )
-                    normalized_provider = raw_provider.strip().upper()
+                    raw_provider_environment = payload.get("provider_environment")
                     try:
-                        recovery_provider_environment = (
-                            normalize_provider_environment(
-                                provider_id=normalized_provider,
-                                environment=normalized_environment,
-                                provider_environment=payload.get(
-                                    "provider_environment"
-                                ),
-                            )
-                        )
                         durable_attempt_keys = provider_domain_submission_attempt_keys(
                             attempt_id=attempt_key,
-                            provider_id=normalized_provider,
+                            provider_id=raw_provider,
                             environment=normalized_environment,
-                            provider_environment=recovery_provider_environment,
+                            provider_environment=raw_provider_environment,
                         )
-                    except ValueError as error:
+                    except (TypeError, ValueError) as error:
                         raise RuntimeError(
-                            "SubmissionPrepared provider-domain identity is invalid"
+                            "SubmissionPrepared provider domain identity is invalid"
                         ) from error
-                    candidate_aggregates = tuple(
+                    expected_aggregates = tuple(
                         submission_attempt_aggregate_id(
                             environment=normalized_environment,
                             account_id=normalized_account,
@@ -798,19 +770,25 @@ class RecoveryController:
                         )
                         for durable_attempt_key in durable_attempt_keys
                     )
-                    if aggregate_id not in candidate_aggregates:
+                    if aggregate_id not in expected_aggregates:
                         raise RuntimeError(
                             "SubmissionPrepared attempt identity does not match durable aggregate"
                         )
-                    present_aggregates = tuple(
+                    present_versions = tuple(
                         candidate
-                        for candidate in candidate_aggregates
+                        for candidate in expected_aggregates
                         if candidate in grouped
                     )
-                    if len(present_aggregates) != 1:
+                    if len(present_versions) != 1:
                         raise RuntimeError(
-                            "SubmissionPrepared attempt exists under multiple durable identity versions"
+                            "SubmissionPrepared has multiple durable identity versions"
                         )
+                    recovered_provider_environment = (
+                        raw_provider_environment.strip().upper()
+                        if isinstance(raw_provider_environment, str)
+                        and raw_provider_environment.strip()
+                        else normalized_environment
+                    )
                 else:
                     expected_aggregate = submission_attempt_aggregate_id(
                         environment=normalized_environment,
@@ -821,6 +799,15 @@ class RecoveryController:
                         raise RuntimeError(
                             "SubmissionPrepared attempt identity does not match durable aggregate"
                         )
+                previous_aggregate = seen_logical_attempt_aggregates.get(attempt_key)
+                if (
+                    previous_aggregate is not None
+                    and previous_aggregate != aggregate_id
+                ):
+                    raise RuntimeError(
+                        "SubmissionPrepared logical attempt identity is ambiguous"
+                    )
+                seen_logical_attempt_aggregates[attempt_key] = aggregate_id
             else:
                 attempt_key = "legacy_submission:" + aggregate_id
             scope_keys.add(attempt_key)
@@ -861,8 +848,8 @@ class RecoveryController:
                 intent_id=str(intent_id).strip(),
                 client_order_id=str(client_order_id).strip(),
                 provider_id=str(provider).strip().upper(),
-                provider_environment=recovery_provider_environment,
                 environment=normalized_environment,
+                provider_environment=recovered_provider_environment,
                 account_id=normalized_account,
             ):
                 continue
@@ -878,15 +865,16 @@ class RecoveryController:
                 str(client_order_id).strip(),
                 str(provider).strip().upper(),
                 normalized_environment,
+                recovered_provider_environment,
                 normalized_account,
             )
 
         prior_scope_keys = set(scope_keys)
         for attempt_id, identity in self._recovered_unknown_identities.items():
             if (
-                len(identity) == 5
+                len(identity) == 6
                 and identity[3] == normalized_environment
-                and identity[4] == normalized_account
+                and identity[5] == normalized_account
             ):
                 prior_scope_keys.add(attempt_id)
 
@@ -932,6 +920,7 @@ class RecoveryController:
         provider_id: str,
         account_id: str,
         environment: str,
+        provider_environment: str | None = None,
     ) -> dict[str, object]:
         """Derive durable readiness only from current owner-bound provider truth.
 
@@ -969,6 +958,7 @@ class RecoveryController:
             provider_id=provider_id,
             account_id=normalized_account,
             environment=normalized_environment,
+            provider_environment=provider_environment,
             host_id=self.owner.owner_id,
             owner_epoch=str(self.owner.epoch),
         )
@@ -1078,15 +1068,28 @@ class RecoveryController:
                             "Reconciliation checkpoint duplicates recovered submission resolution"
                         )
                     recovered_resolution_seen.add(normalized_attempt)
-                    intent_id, client_order_id, provider, recovered_environment, recovered_account = (
-                        recovered_identity
+                    (
+                        intent_id,
+                        client_order_id,
+                        provider,
+                        recovered_environment,
+                        recovered_provider_environment,
+                        recovered_account,
+                    ) = recovered_identity
+                    checkpoint_provider_environment = payload.get(
+                        "provider_environment"
                     )
+                    if checkpoint_provider_environment is None:
+                        checkpoint_provider_environment = payload.get("environment")
                     if (
                         resolution.get("intent_id") != intent_id
                         or resolution.get("client_order_id") != client_order_id
                         or payload.get("provider_id", "").strip().upper() != provider
                         or payload.get("environment", "").strip().upper()
                         != recovered_environment
+                        or not isinstance(checkpoint_provider_environment, str)
+                        or checkpoint_provider_environment.strip().upper()
+                        != recovered_provider_environment
                         or payload.get("account_id", "").strip() != recovered_account
                     ):
                         raise RuntimeError(

@@ -168,8 +168,19 @@ def _host_utc_key(value: object, *, name: str) -> tuple[int, ...]:
         raise HostProviderAttestationError(
             f"{name} must use canonical Host UTC text"
         )
-    year, month, day, hour, minute, second, fraction = (
-        int(item) for item in match.groups()
+    year_text, month_text, day_text, hour_text, minute_text, second_text, fraction = (
+        match.groups()
+    )
+    year, month, day, hour, minute, second = (
+        int(item)
+        for item in (
+            year_text,
+            month_text,
+            day_text,
+            hour_text,
+            minute_text,
+            second_text,
+        )
     )
     # Validate calendar/time fields with stdlib without losing the seventh
     # 100-nanosecond digit used by .NET's canonical "fffffff" format.

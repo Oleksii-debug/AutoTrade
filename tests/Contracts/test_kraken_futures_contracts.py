@@ -16,6 +16,7 @@ from mvp.autotrade_mvp.capabilities import (
 from mvp.autotrade_mvp.dispatch import (
     ExactJsonTransportResponse,
     GuardedDispatcher,
+    _issue_financial_authority_check,
     load_submission_response_binding,
     stable_client_order_id,
 )
@@ -110,7 +111,10 @@ def durable_observation(payload, *, intent_id: str):
             provider="KRAKEN",
             request=request.body,
             now=NOW,
-            authority_check=lambda _hash, _now: (True, "allowed"),
+            authority_check=_issue_financial_authority_check(
+                    lambda _hash, _now: (True, "allowed"),
+                    store=store,
+                ),
             transport_send=lambda _cid, _request, guard: (
                 guard(),
                 ExactJsonTransportResponse(raw),

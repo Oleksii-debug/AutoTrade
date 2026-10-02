@@ -4835,7 +4835,12 @@ class AuthorityService:
                 capability_snapshot_id=capability,
             )
 
-        return check
+        # PAPER/LIVE dispatch accepts only a product-issued opaque capability.
+        # Mint it here, at the AuthorityService boundary, and bind it to the
+        # exact durable JournalStore selected by this authority instance.
+        from .dispatch import _issue_financial_authority_check
+
+        return _issue_financial_authority_check(check, store=self.store)
 
 
     def export_state(self) -> dict:

@@ -16,7 +16,10 @@ from mvp.autotrade_mvp.authority import (
     InstrumentVersionIdentity,
     RiskAuthorityRequest,
 )
-from mvp.autotrade_mvp.dispatch import GuardedDispatcher
+from mvp.autotrade_mvp.dispatch import (
+    GuardedDispatcher,
+    _issued_financial_authority_binding,
+)
 from mvp.autotrade_mvp.durable_reservations import DurableReservationBook
 from mvp.autotrade_mvp.persistence import JournalStore, payload_digest
 from mvp.autotrade_mvp.reconciliation import (
@@ -3938,6 +3941,28 @@ class AuthorityTests(unittest.TestCase):
                     capability_snapshot_id=PUBLIC_CAPABILITY_SNAPSHOT_ID,
                 ),
                 (False, "reservation_state_changed"),
+            )
+
+
+class DispatchGuardIssuanceIntegrationTests(unittest.TestCase):
+    def test_authority_dispatch_guard_mints_capability_for_selected_journal(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = AuthorityService(store)
+            guard = authority.dispatch_guard(
+                "missing-admission",
+                account_id="paper-1",
+                environment="PAPER",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+            )
+
+            callback, bound_store = _issued_financial_authority_binding(guard)
+            self.assertIs(bound_store, store)
+            self.assertEqual(
+                callback("intent-hash", "2026-09-24T18:01:00Z"),
+                (False, "admission_missing"),
             )
 
 

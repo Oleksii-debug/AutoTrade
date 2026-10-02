@@ -7,7 +7,11 @@ import unittest
 from unittest.mock import patch
 from uuid import NAMESPACE_URL, uuid5
 
-from autotrade_runtime.artifacts import ArtifactIntegrityError, ArtifactStore
+from autotrade_runtime.artifacts import (
+    ArtifactIntegrityError,
+    ArtifactStore,
+    trusted_authenticated_reader,
+)
 
 from mvp.autotrade_mvp import futures_journal as journal_module
 from mvp.autotrade_mvp.futures import (
@@ -30,6 +34,13 @@ from mvp.autotrade_mvp.persistence import JournalStore, canonical_json, payload_
 
 def utc(day: int, hour: int = 0):
     return datetime(2026, 9, day, hour, tzinfo=timezone.utc)
+
+
+def _trusted_reader(artifacts: ArtifactStore):
+    return trusted_authenticated_reader(
+        artifacts.root,
+        publication_store=artifacts,
+    )
 
 
 class FuturesJournalAuthorityTests(unittest.TestCase):
@@ -128,25 +139,22 @@ class FuturesJournalAuthorityTests(unittest.TestCase):
             restore_linear_variation_margin(
                 forged,
                 object(),
-                evidence_artifact_store=object(),
-                evidence_artifact_root="irrelevant",
+                evidence_reader=object(),
             )
 
-    def test_settlement_reader_rejects_artifact_store_subclass_before_override(self):
+    def test_settlement_reader_rejects_unissued_callable_before_invocation(self):
         calls = []
 
-        class ForgedArtifactStore(ArtifactStore):
-            def read_authenticated_snapshot(self, _artifact_id):
+        class ForgedReader:
+            def __call__(self, _artifact_id):
                 calls.append("called")
                 return {}, b"{}"
 
-        with TemporaryDirectory() as directory:
-            forged = ForgedArtifactStore(Path(directory) / "forged")
-            with self.assertRaisesRegex(
-                FuturesError,
-                "canonical ArtifactStore publication input",
-            ):
-                journal_module._settlement_evidence_reader(forged.root, forged)
+        with self.assertRaisesRegex(
+            FuturesError,
+            "issued trusted artifact reader",
+        ):
+            journal_module._settlement_evidence_reader(ForgedReader())
         self.assertEqual(calls, [])
 
     def test_bound_reader_ignores_poisoned_publication_store_methods(self):
@@ -154,8 +162,7 @@ class FuturesJournalAuthorityTests(unittest.TestCase):
             artifacts = ArtifactStore(Path(directory) / "artifacts")
             settlement = self._bind(artifacts, self._settlement())
             reader = journal_module._settlement_evidence_reader(
-                artifacts.root,
-                artifacts,
+                _trusted_reader(artifacts)
             )
             with (
                 patch.object(
@@ -244,8 +251,7 @@ class FuturesJournalAuthorityTests(unittest.TestCase):
                         store,
                         opening,
                         settlement,
-                        evidence_artifact_store=artifacts,
-                        evidence_artifact_root=artifacts.root,
+                        evidence_reader=_trusted_reader(artifacts),
                     )
 
             self.assertEqual(
@@ -274,8 +280,7 @@ class FuturesJournalAuthorityTests(unittest.TestCase):
                         store,
                         opening,
                         settlement,
-                        evidence_artifact_store=artifacts,
-                        evidence_artifact_root=artifacts.root,
+                        evidence_reader=_trusted_reader(artifacts),
                     )
                 )
 

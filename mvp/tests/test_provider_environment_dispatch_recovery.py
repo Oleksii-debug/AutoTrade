@@ -594,5 +594,105 @@ class ProviderEnvironmentDispatchRecoveryTests(unittest.TestCase):
         self.assertEqual(recovery.unresolved_attempts, set())
 
 
+    def test_recovery_partitions_same_logical_unknown_across_provider_domains(self):
+        logical_attempt = "recover-shared-logical"
+        testnet_key, _testnet_legacy = provider_domain_submission_attempt_keys(
+            attempt_id=logical_attempt,
+            provider_id="BYBIT",
+            environment="PAPER",
+            provider_environment="TESTNET",
+        )
+        demo_key, _demo_legacy = provider_domain_submission_attempt_keys(
+            attempt_id=logical_attempt,
+            provider_id="BYBIT",
+            environment="PAPER",
+            provider_environment="DEMO",
+        )
+        testnet_intent, testnet_client = self._append_recoverable_unknown(
+            logical_attempt=logical_attempt,
+            durable_attempt=testnet_key,
+            provider_environment="TESTNET",
+            client_order_id="client-shared-testnet",
+        )
+        demo_intent, demo_client = self._append_recoverable_unknown(
+            logical_attempt=logical_attempt,
+            durable_attempt=demo_key,
+            provider_environment="DEMO",
+            client_order_id="client-shared-demo",
+        )
+
+        recovery = RecoveryController(
+            owner_store=self.store,
+            owner_scope="PAPER:paper-1",
+        )
+        owner = recovery.start("host-restarted")
+
+        self.assertEqual(recovery.unresolved_attempts, {logical_attempt})
+        self.assertEqual(len(recovery._recovered_unknown_identities), 2)
+        self.assertEqual(
+            {
+                identity[5]
+                for identity in recovery._recovered_unknown_identities.values()
+            },
+            {"TESTNET", "DEMO"},
+        )
+
+        testnet_result = self._absence_result(
+            provider_environment="TESTNET",
+            logical_attempt=logical_attempt,
+            intent_id=testnet_intent,
+            client_order_id=testnet_client,
+        )
+        record_reconciliation_checkpoint(
+            self.store,
+            reconciliation_id="shared-logical-testnet",
+            result=testnet_result,
+            observed_at="2026-09-24T18:05:00Z",
+            host_id=owner.owner_id,
+            owner_epoch=str(owner.epoch),
+        )
+        recovery.record_reconciliation_checkpoint(
+            reconciliation_id="shared-logical-testnet",
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+            provider_environment="TESTNET",
+        )
+
+        self.assertEqual(recovery.unresolved_attempts, {logical_attempt})
+        self.assertEqual(len(recovery._recovered_unknown_identities), 1)
+        remaining_identity = next(
+            iter(recovery._recovered_unknown_identities.values())
+        )
+        self.assertEqual(remaining_identity[5], "DEMO")
+
+        demo_result = self._absence_result(
+            provider_environment="DEMO",
+            logical_attempt=logical_attempt,
+            intent_id=demo_intent,
+            client_order_id=demo_client,
+        )
+        record_reconciliation_checkpoint(
+            self.store,
+            reconciliation_id="shared-logical-demo",
+            result=demo_result,
+            observed_at="2026-09-24T18:06:00Z",
+            host_id=owner.owner_id,
+            owner_epoch=str(owner.epoch),
+        )
+        recovery.record_reconciliation_checkpoint(
+            reconciliation_id="shared-logical-demo",
+            provider_id="BYBIT",
+            account_id="paper-1",
+            environment="PAPER",
+            provider_environment="DEMO",
+        )
+
+        self.assertEqual(recovery.unresolved_attempts, set())
+        self.assertEqual(recovery._unresolved_send_attempts, set())
+        self.assertEqual(recovery._unresolved_send_bindings, {})
+        self.assertEqual(recovery._recovered_unknown_identities, {})
+
+
 if __name__ == "__main__":
     unittest.main()

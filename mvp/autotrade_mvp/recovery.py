@@ -184,7 +184,7 @@ class RecoveryController:
         ] = {}
         self._recovered_unknown_identities: dict[
             str,
-            tuple[str, str, str, str, str, str],
+            tuple[str, str, str, str, str, str, str],
         ] = {}
         self.storage_writable = True
         self.clock_trusted = True
@@ -193,6 +193,32 @@ class RecoveryController:
     @staticmethod
     def _now() -> str:
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    @staticmethod
+    def _public_unresolved_send_attempts(
+        unresolved_keys: set[str],
+        identities: dict[
+            str,
+            tuple[str, str, str, str, str, str, str],
+        ],
+    ) -> set[str]:
+        """Project durable internal UNKNOWN keys onto caller-visible attempt ids."""
+
+        public: set[str] = set()
+        for internal_key in unresolved_keys:
+            identity = identities.get(internal_key)
+            if identity is None:
+                public.add(internal_key)
+                continue
+            if len(identity) != 7:
+                raise RuntimeError("Recovered submission identity is invalid")
+            logical_attempt = identity[0]
+            if not isinstance(logical_attempt, str) or not logical_attempt.strip():
+                raise RuntimeError(
+                    "Recovered submission logical attempt identity is invalid"
+                )
+            public.add(logical_attempt.strip())
+        return public
 
     @property
     def owner_scope(self) -> str:
@@ -704,13 +730,13 @@ class RecoveryController:
             grouped.setdefault(aggregate_id, []).append(event)
 
         scope_keys: set[str] = set()
+        scope_public_attempts: set[str] = set()
         staged_send_attempts: set[str] = set()
         staged_bindings: dict[str, tuple[str, int, tuple[str, ...]]] = {}
         staged_identities: dict[
             str,
-            tuple[str, str, str, str, str, str],
+            tuple[str, str, str, str, str, str, str],
         ] = {}
-        seen_logical_attempt_aggregates: dict[str, str] = {}
         staged_legacy = False
 
         for aggregate_id, aggregate_events in grouped.items():
@@ -799,18 +825,16 @@ class RecoveryController:
                         raise RuntimeError(
                             "SubmissionPrepared attempt identity does not match durable aggregate"
                         )
-                previous_aggregate = seen_logical_attempt_aggregates.get(attempt_key)
-                if (
-                    previous_aggregate is not None
-                    and previous_aggregate != aggregate_id
-                ):
-                    raise RuntimeError(
-                        "SubmissionPrepared logical attempt identity is ambiguous"
-                    )
-                seen_logical_attempt_aggregates[attempt_key] = aggregate_id
             else:
                 attempt_key = "legacy_submission:" + aggregate_id
-            scope_keys.add(attempt_key)
+
+            internal_attempt_key = (
+                aggregate_id
+                if isinstance(raw_attempt_id, str) and raw_attempt_id.strip()
+                else attempt_key
+            )
+            scope_keys.add(internal_attempt_key)
+            scope_public_attempts.add(attempt_key)
 
             if sequence[-1] not in {
                 "SubmissionSending",
@@ -819,7 +843,7 @@ class RecoveryController:
                 continue
 
             if not isinstance(raw_attempt_id, str) or not raw_attempt_id.strip():
-                staged_send_attempts.add(attempt_key)
+                staged_send_attempts.add(internal_attempt_key)
                 staged_legacy = True
                 continue
 
@@ -854,13 +878,15 @@ class RecoveryController:
             ):
                 continue
 
-            staged_send_attempts.add(attempt_id)
-            staged_bindings[attempt_id] = (
+            durable_unknown_key = internal_attempt_key
+            staged_send_attempts.add(durable_unknown_key)
+            staged_bindings[durable_unknown_key] = (
                 str(intent_id).strip(),
                 owner_epoch_raw,
                 (event_id,),
             )
-            staged_identities[attempt_id] = (
+            staged_identities[durable_unknown_key] = (
+                attempt_id,
                 str(intent_id).strip(),
                 str(client_order_id).strip(),
                 str(provider).strip().upper(),
@@ -870,28 +896,36 @@ class RecoveryController:
             )
 
         prior_scope_keys = set(scope_keys)
-        for attempt_id, identity in self._recovered_unknown_identities.items():
+        prior_scope_public_attempts = set(scope_public_attempts)
+        for internal_key, identity in self._recovered_unknown_identities.items():
             if (
-                len(identity) == 6
-                and identity[3] == normalized_environment
-                and identity[5] == normalized_account
+                len(identity) == 7
+                and identity[4] == normalized_environment
+                and identity[6] == normalized_account
             ):
-                prior_scope_keys.add(attempt_id)
+                prior_scope_keys.add(internal_key)
+                prior_scope_public_attempts.add(identity[0])
 
         next_send_attempts = set(self._unresolved_send_attempts)
         next_unresolved_attempts = set(self.unresolved_attempts)
         next_bindings = dict(self._unresolved_send_bindings)
         next_identities = dict(self._recovered_unknown_identities)
-        for attempt_id in prior_scope_keys:
-            next_send_attempts.discard(attempt_id)
-            next_unresolved_attempts.discard(attempt_id)
-            next_bindings.pop(attempt_id, None)
-            next_identities.pop(attempt_id, None)
+        for internal_key in prior_scope_keys:
+            next_send_attempts.discard(internal_key)
+            next_bindings.pop(internal_key, None)
+            next_identities.pop(internal_key, None)
+        for public_attempt in prior_scope_public_attempts:
+            next_unresolved_attempts.discard(public_attempt)
 
         next_send_attempts.update(staged_send_attempts)
-        next_unresolved_attempts.update(staged_send_attempts)
         next_bindings.update(staged_bindings)
         next_identities.update(staged_identities)
+        next_unresolved_attempts.update(
+            self._public_unresolved_send_attempts(
+                next_send_attempts,
+                next_identities,
+            )
+        )
 
         next_reason_codes = set(self.reason_codes)
         if staged_legacy:
@@ -911,7 +945,14 @@ class RecoveryController:
         if staged_send_attempts or self.unresolved_attempts:
             self.provider_reconciled = False
         self._recompute_state()
-        return tuple(sorted(staged_send_attempts))
+        return tuple(
+            sorted(
+                self._public_unresolved_send_attempts(
+                    staged_send_attempts,
+                    staged_identities,
+                )
+            )
+        )
 
     def record_reconciliation_checkpoint(
         self,
@@ -1059,38 +1100,79 @@ class RecoveryController:
                 reported_unresolved.add(attempt_id.strip())
             if isinstance(attempt_id, str):
                 normalized_attempt = attempt_id.strip()
-                recovered_identity = self._recovered_unknown_identities.get(
-                    normalized_attempt
+                checkpoint_provider_environment = payload.get(
+                    "provider_environment"
                 )
-                if recovered_identity is not None:
-                    if normalized_attempt in recovered_resolution_seen:
+                if checkpoint_provider_environment is None:
+                    checkpoint_provider_environment = payload.get("environment")
+                if not isinstance(checkpoint_provider_environment, str):
+                    raise RuntimeError(
+                        "Reconciliation checkpoint provider-domain identity is invalid"
+                    )
+                checkpoint_provider = payload.get("provider_id", "")
+                checkpoint_environment = payload.get("environment", "")
+                checkpoint_account = payload.get("account_id", "")
+                recovered_matches: list[
+                    tuple[
+                        str,
+                        tuple[str, str, str, str, str, str, str],
+                    ]
+                ] = []
+                for internal_key, recovered_identity in (
+                    self._recovered_unknown_identities.items()
+                ):
+                    if len(recovered_identity) != 7:
                         raise RuntimeError(
-                            "Reconciliation checkpoint duplicates recovered submission resolution"
+                            "Recovered submission identity is invalid"
                         )
-                    recovered_resolution_seen.add(normalized_attempt)
                     (
-                        intent_id,
-                        client_order_id,
-                        provider,
+                        recovered_attempt,
+                        _recovered_intent,
+                        _recovered_client,
+                        recovered_provider,
                         recovered_environment,
                         recovered_provider_environment,
                         recovered_account,
                     ) = recovered_identity
-                    checkpoint_provider_environment = payload.get(
-                        "provider_environment"
+                    if (
+                        recovered_attempt == normalized_attempt
+                        and isinstance(checkpoint_provider, str)
+                        and checkpoint_provider.strip().upper()
+                        == recovered_provider
+                        and isinstance(checkpoint_environment, str)
+                        and checkpoint_environment.strip().upper()
+                        == recovered_environment
+                        and checkpoint_provider_environment.strip().upper()
+                        == recovered_provider_environment
+                        and isinstance(checkpoint_account, str)
+                        and checkpoint_account.strip() == recovered_account
+                    ):
+                        recovered_matches.append(
+                            (internal_key, recovered_identity)
+                        )
+                if len(recovered_matches) > 1:
+                    raise RuntimeError(
+                        "Recovered submission identity is ambiguous within provider domain"
                     )
-                    if checkpoint_provider_environment is None:
-                        checkpoint_provider_environment = payload.get("environment")
+                if recovered_matches:
+                    internal_key, recovered_identity = recovered_matches[0]
+                    if internal_key in recovered_resolution_seen:
+                        raise RuntimeError(
+                            "Reconciliation checkpoint duplicates recovered submission resolution"
+                        )
+                    recovered_resolution_seen.add(internal_key)
+                    (
+                        _recovered_attempt,
+                        intent_id,
+                        client_order_id,
+                        _provider,
+                        _recovered_environment,
+                        _recovered_provider_environment,
+                        _recovered_account,
+                    ) = recovered_identity
                     if (
                         resolution.get("intent_id") != intent_id
                         or resolution.get("client_order_id") != client_order_id
-                        or payload.get("provider_id", "").strip().upper() != provider
-                        or payload.get("environment", "").strip().upper()
-                        != recovered_environment
-                        or not isinstance(checkpoint_provider_environment, str)
-                        or checkpoint_provider_environment.strip().upper()
-                        != recovered_provider_environment
-                        or payload.get("account_id", "").strip() != recovered_account
                     ):
                         raise RuntimeError(
                             "Reconciliation resolution identity conflicts with recovered submission"
@@ -1100,7 +1182,7 @@ class RecoveryController:
                         "OBSERVED_EXECUTION",
                         "OBSERVED_WORKING_ORDER",
                     }:
-                        terminally_resolved_recovered.add(normalized_attempt)
+                        terminally_resolved_recovered.add(internal_key)
 
         # Validate the complete durable proof before mutating recovery state.
         # A malformed checkpoint must fail closed without leaving this controller
@@ -1123,7 +1205,18 @@ class RecoveryController:
         next_sticky_unknowns = (
             self._unresolved_send_attempts - terminally_resolved_recovered
         )
-        next_unresolved_attempts = next_sticky_unknowns | reported_unresolved
+        next_bindings = dict(self._unresolved_send_bindings)
+        next_identities = dict(self._recovered_unknown_identities)
+        for internal_key in terminally_resolved_recovered:
+            next_bindings.pop(internal_key, None)
+            next_identities.pop(internal_key, None)
+        next_unresolved_attempts = (
+            self._public_unresolved_send_attempts(
+                next_sticky_unknowns,
+                next_identities,
+            )
+            | reported_unresolved
+        )
         complete = (
             payload.get("complete") is True
             and payload.get("snapshot_consistent") is True
@@ -1133,10 +1226,9 @@ class RecoveryController:
             complete and not next_unresolved_attempts
         )
 
-        for attempt_id in terminally_resolved_recovered:
-            self._unresolved_send_attempts.discard(attempt_id)
-            self._unresolved_send_bindings.pop(attempt_id, None)
-            self._recovered_unknown_identities.pop(attempt_id, None)
+        self._unresolved_send_attempts = next_sticky_unknowns
+        self._unresolved_send_bindings = next_bindings
+        self._recovered_unknown_identities = next_identities
         self.unresolved_attempts = next_unresolved_attempts
         self.provider_reconciled = next_provider_reconciled
         if self.provider_reconciled:

@@ -2,6 +2,7 @@ from contextlib import contextmanager
 from hashlib import sha256
 import json
 import os
+import stat
 import sys
 from pathlib import Path
 import subprocess

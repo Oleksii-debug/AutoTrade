@@ -26,7 +26,12 @@ from .accounting import (
     posting,
     reverse_transaction,
 )
-from .exact_decimal import (\n    ExactDecimalError,\n    canonical_decimal_text,\n    exact_abs,\n    is_exact_decimal_multiple,\n)
+from .exact_decimal import (
+    ExactDecimalError,
+    canonical_decimal_text,
+    exact_abs,
+    is_exact_decimal_multiple,
+)
 from .instruments import InstrumentRegistry, InstrumentVersion
 from .options import (
     DeliverableLeg,

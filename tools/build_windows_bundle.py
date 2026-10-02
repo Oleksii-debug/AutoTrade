@@ -326,6 +326,7 @@ def _read_retained_windows_regular_file(
     *,
     target_name: str,
     path: Path,
+    expected_identity: tuple[int, int],
 ) -> bytes:
     """Read one staged Windows file through the retained parent HANDLE."""
 
@@ -336,6 +337,8 @@ def _read_retained_windows_regular_file(
             subject="Windows bundle staged file",
         ) as descriptor:
             before = os.fstat(descriptor)
+            if (before.st_dev, before.st_ino) != expected_identity:
+                raise BundleError(f"staged file changed during collection: {path}")
             if not stat.S_ISREG(before.st_mode):
                 raise BundleError(f"staged entry must remain a regular file: {path}")
             chunks = bytearray()
@@ -383,9 +386,9 @@ def _walk_staging_windows_retained(staging: Path) -> list[tuple[Path, bytes]]:
                 raise BundleError(
                     f"staged entry identity cannot be verified: {path}"
                 ) from error
-            _reject_windows_reparse(path, observed)
             if entry.is_symlink():
                 raise BundleError(f"symlinks are forbidden in bundles: {path}")
+            _reject_windows_reparse(path, observed)
 
             if stat.S_ISDIR(observed.st_mode):
                 try:
@@ -405,6 +408,10 @@ def _walk_staging_windows_retained(staging: Path) -> list[tuple[Path, bytes]]:
 
             if not stat.S_ISREG(observed.st_mode):
                 raise BundleError(f"unsupported filesystem entry: {path}")
+            if observed.st_nlink > 1:
+                raise BundleError(f"hardlinked staged files are forbidden: {path}")
+            if observed.st_nlink != 1:
+                raise BundleError(f"staged file changed during collection: {path}")
             snapshots.append(
                 (
                     path,
@@ -412,6 +419,7 @@ def _walk_staging_windows_retained(staging: Path) -> list[tuple[Path, bytes]]:
                         authority,
                         target_name=entry.name,
                         path=path,
+                        expected_identity=(observed.st_dev, observed.st_ino),
                     ),
                 )
             )

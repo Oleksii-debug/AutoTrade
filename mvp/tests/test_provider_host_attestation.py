@@ -325,7 +325,7 @@ class ProviderHostAttestationTests(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == "win32", "requires Windows CNG")
     def test_windows_cng_rejects_signed_response_byte_tamper(self):
-        _prepared, observed, session_id, key_sha, _response = _fixture()
+        prepared, observed, session_id, key_sha, _response = _fixture()
         changed = deepcopy(observed)
         changed["response_base64"] = base64.b64encode(
             b'{"retCode":0,"result":{"coin":[1]}}'

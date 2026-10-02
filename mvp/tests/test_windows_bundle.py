@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from hashlib import sha256
 import json
 import os
@@ -9,6 +10,7 @@ from unittest.mock import patch
 import zipfile
 
 import research.autotrade_research.artifacts.durable_publish as durable_publish_module
+import tools.build_windows_bundle as windows_bundle_module
 from tools.build_windows_bundle import (
     BundleError,
     WINDOWS_REPARSE_POINT,
@@ -218,27 +220,29 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
         staged = self.staging / "AutoTrade.exe"
         replacement = self.root / "replacement.exe"
         replacement.write_bytes(b"replacement")
-        original_open = Path.open
+        original_retain = windows_bundle_module.retain_windows_regular_file
         swapped = False
 
-        def open_then_swap(path_obj, *args, **kwargs):
+        @contextmanager
+        def retain_after_swap(authority, *, target_name, subject):
             nonlocal swapped
-            handle = original_open(path_obj, *args, **kwargs)
-            mode = args[0] if args else kwargs.get("mode", "r")
-            if Path(path_obj) == staged and mode == "rb" and not swapped:
+            if target_name == staged.name and not swapped:
                 try:
                     os.replace(replacement, staged)
                 except OSError as error:
-                    handle.close()
                     self.skipTest(f"open-file replacement unavailable: {error}")
                 swapped = True
-            return handle
+            with original_retain(
+                authority,
+                target_name=target_name,
+                subject=subject,
+            ) as descriptor:
+                yield descriptor
 
         with patch.object(
-            Path,
-            "open",
-            autospec=True,
-            side_effect=open_then_swap,
+            windows_bundle_module,
+            "retain_windows_regular_file",
+            retain_after_swap,
         ):
             with self.assertRaisesRegex(
                 BundleError,

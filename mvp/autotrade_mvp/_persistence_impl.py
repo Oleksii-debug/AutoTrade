@@ -1204,8 +1204,14 @@ class JournalStore:
         after_sequence: int,
         *,
         limit: int = 10000,
+        allow_partial: bool = False,
     ) -> list[dict[str, Any]]:
-        """Load integrity-checked journal events strictly after a durable global cut."""
+        """Load an integrity-checked journal tail after one durable global cut.
+
+        Complete projection rebuild is the default authority. A bounded page is
+        returned only when callers explicitly opt into partial traversal and are
+        therefore responsible for advancing by the returned journal_sequence.
+        """
 
         if (
             type(after_sequence) is not int
@@ -1214,19 +1220,38 @@ class JournalStore:
             raise ValueError("after_sequence must be a non-negative integer")
         if type(limit) is not int or limit < 1 or limit > 100000:
             raise ValueError("limit must be between 1 and 100000")
+        if type(allow_partial) is not bool:
+            raise ValueError("allow_partial must be a boolean")
         with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT event_id, event_type, aggregate_type, aggregate_id,
-                       aggregate_version, payload_json, payload_hash, committed_at,
-                       envelope_json, envelope_hash, journal_sequence
-                FROM events
-                WHERE journal_sequence > ?
-                ORDER BY journal_sequence
-                LIMIT ?
-                """,
-                (after_sequence, limit),
-            ).fetchall()
+            connection.execute("BEGIN")
+            try:
+                current = self._journal_sequence_value(connection)
+                if after_sequence > current:
+                    raise ValueError(
+                        "after_sequence cannot outrun the authoritative journal sequence"
+                    )
+                rows = connection.execute(
+                    """
+                    SELECT event_id, event_type, aggregate_type, aggregate_id,
+                           aggregate_version, payload_json, payload_hash, committed_at,
+                           envelope_json, envelope_hash, journal_sequence
+                    FROM events
+                    WHERE journal_sequence > ?
+                    ORDER BY journal_sequence
+                    LIMIT ?
+                    """,
+                    (after_sequence, limit + 1),
+                ).fetchall()
+                if not allow_partial and len(rows) > limit:
+                    raise ValueError(
+                        "journal tail exceeds limit; complete projection rebuild "
+                        "requires a larger limit or explicit allow_partial paging"
+                    )
+                rows = rows[:limit]
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
         decoded = [self._decode_event_row(row) for row in rows]
         expected = after_sequence + 1
         for event in decoded:
@@ -1236,6 +1261,10 @@ class JournalStore:
                     "journal events after cut are not contiguous; qualification cannot infer conservation"
                 )
             expected += 1
+        if not allow_partial and expected != current + 1:
+            raise ValueError(
+                "journal tail is incomplete; qualification cannot infer conservation"
+            )
         return decoded
 
     def append_event(self, envelope: dict[str, Any], *, outbox_topic: str | None = None) -> AppendResult:

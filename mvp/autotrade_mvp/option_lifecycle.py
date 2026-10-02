@@ -33,7 +33,7 @@ from .exact_decimal import (
     is_exact_decimal_multiple,
     parse_bounded_exact_decimal,
 )
-from .instruments import InstrumentRegistry, InstrumentVersion
+from .instruments import InstrumentRegistry, InstrumentRegistryError, InstrumentVersion
 from .options import (
     DeliverableLeg,
     OptionContract,
@@ -456,15 +456,16 @@ def _bind_version(
         raise OptionLifecycleError("lifecycle event is not bound to an option")
     try:
         quantity = exact_abs(observation.signed_contracts)
-        aligned = is_exact_decimal_multiple(quantity, version.quantity_step)
-    except ExactDecimalError as error:
+        # Lifecycle quantities are financial inventory movements, so the exact
+        # InstrumentVersion must remain the one quantity authority here too.
+        # This binds step/min/max semantics (and, through the persisted
+        # instrument digest, quantity_unit identity) instead of reimplementing
+        # only one grid check at the lifecycle boundary.
+        version.validate_quantity(quantity)
+    except (ExactDecimalError, InstrumentRegistryError) as error:
         raise OptionLifecycleError(
-            "signed_contracts exceed canonical instrument quantity resource envelope"
+            "signed_contracts do not satisfy canonical instrument quantity authority"
         ) from error
-    if not aligned:
-        raise OptionLifecycleError(
-            "signed_contracts are not aligned to canonical instrument quantity_step"
-        )
     return version
 
 

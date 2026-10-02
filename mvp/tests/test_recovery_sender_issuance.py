@@ -5,6 +5,7 @@ from unittest.mock import patch
 from mvp.autotrade_mvp.authority import AuthorityService
 from mvp.autotrade_mvp.dispatch import (
     GuardedDispatcher,
+    _issue_financial_authority_check,
     _issue_recovery_guarded_dispatcher,
 )
 from mvp.autotrade_mvp.persistence import JournalStore
@@ -79,13 +80,17 @@ class RecoverySenderIssuanceTests(unittest.TestCase):
                     owner_token="caller",
                     owner_epoch=1,
                 )
-                financial = AuthorityService(store).dispatch_guard(
-                    "missing-admission",
+                financial = _issue_financial_authority_check(
+                    AuthorityService(store),
+                    store=store,
+                    admission_id="missing-admission",
                     account_id="acct",
                     environment=environment,
                     instrument_id="11111111-1111-4111-8111-111111111111",
                     instrument_version=1,
                     action="ORDER.SUBMIT",
+                    provider_id="PROVIDER",
+                    provider_environment=environment,
                 )
                 wire_calls = []
                 with self.assertRaisesRegex(

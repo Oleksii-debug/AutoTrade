@@ -24,7 +24,10 @@ from autotrade_runtime.artifacts import (
 )
 from autotrade_runtime.strict_json import strict_json_loads
 
-from .dispatch import submission_attempt_aggregate_id
+from .dispatch import (
+    provider_domain_submission_attempt_keys,
+    submission_attempt_aggregate_id,
+)
 from .exact_decimal import (
     ExactDecimalError,
     canonical_decimal_text,
@@ -862,57 +865,11 @@ class DurableReservationBook:
                 "resolution evidence receipt must use canonical JSON bytes"
             )
 
-        aggregate_id = submission_attempt_aggregate_id(
-            environment=self.environment,
-            account_id=self.account_id,
-            attempt_id=attempt,
-        )
-        attempt_events = self.store.load_events(
-            "submission_attempt",
-            aggregate_id,
-        )
-        if not attempt_events:
-            raise ReservationConflict(
-                "resolution evidence is not bound to a durable submission attempt"
-            )
-        prepared = attempt_events[0]
-        if prepared.get("event_type") != "SubmissionPrepared":
-            raise ReservationConflict(
-                "submission attempt does not start with durable preparation"
-            )
-        prepared_payload = prepared.get("payload")
-        if not isinstance(prepared_payload, dict):
-            raise ReservationConflict(
-                "submission attempt preparation payload is invalid"
-            )
-        if (
-            prepared_payload.get("environment") != self.environment
-            or prepared_payload.get("account_id") != self.account_id
-            or _text(
-                prepared_payload.get("provider"),
-                name="submission provider",
-            ).upper()
-            != provider_name
-            or prepared_payload.get("intent_id") != intent
-        ):
-            raise ReservationConflict(
-                "resolution evidence does not match durable submission scope"
-            )
-        client_order_id = _text(
-            prepared_payload.get("client_order_id"),
-            name="submission client_order_id",
-        )
-        if (
-            terminal_outcome == "PROVEN_ABSENT"
-            and not any(
-                event.get("event_type") == "SubmissionUnknown"
-                for event in attempt_events
-            )
-        ):
-            raise ReservationConflict(
-                "PROVEN_ABSENT requires a durable UNKNOWN submission state"
-            )
-
+        # The immutable receipt names the exact reconciliation checkpoint and
+        # its payload hash. Authenticate that checkpoint first; its provider
+        # domain is the authority for resolving the provider-domain attempt
+        # namespace. Never let caller-controlled logical attempt text choose a
+        # TESTNET/DEMO (or future provider-domain) durable aggregate.
         reconciliation_event = self.store.get_event(reconciliation_event_id)
         if (
             reconciliation_event is None
@@ -943,6 +900,111 @@ class DurableReservationBook:
         ):
             raise ReservationConflict(
                 "durable reconciliation checkpoint scope does not match reservation"
+            )
+        provider_environment = reconciliation_payload.get("provider_environment")
+        if provider_environment is None:
+            resource_availability = reconciliation_payload.get(
+                "resource_availability"
+            )
+            if isinstance(resource_availability, dict):
+                provider_environment = resource_availability.get(
+                    "provider_environment"
+                )
+        try:
+            durable_attempt_keys = provider_domain_submission_attempt_keys(
+                attempt_id=attempt,
+                provider_id=provider_name,
+                environment=self.environment,
+                provider_environment=provider_environment,
+            )
+        except ValueError as error:
+            raise ReservationConflict(
+                "durable reconciliation checkpoint lacks exact provider domain"
+            ) from error
+
+        candidates: list[tuple[str, list[dict[str, object]]]] = []
+        for durable_attempt_key in durable_attempt_keys:
+            aggregate_id = submission_attempt_aggregate_id(
+                environment=self.environment,
+                account_id=self.account_id,
+                attempt_id=durable_attempt_key,
+            )
+            events = self.store.load_events(
+                "submission_attempt",
+                aggregate_id,
+            )
+            if events:
+                candidates.append((aggregate_id, events))
+        if not candidates:
+            raise ReservationConflict(
+                "resolution evidence is not bound to a durable submission attempt"
+            )
+        if len(candidates) != 1:
+            raise ReservationConflict(
+                "resolution evidence maps to multiple durable submission identities"
+            )
+        aggregate_id, attempt_events = candidates[0]
+        prepared = attempt_events[0]
+        if prepared.get("event_type") != "SubmissionPrepared":
+            raise ReservationConflict(
+                "submission attempt does not start with durable preparation"
+            )
+        prepared_payload = prepared.get("payload")
+        if not isinstance(prepared_payload, dict):
+            raise ReservationConflict(
+                "submission attempt preparation payload is invalid"
+            )
+        if (
+            prepared_payload.get("environment") != self.environment
+            or prepared_payload.get("account_id") != self.account_id
+            or _text(
+                prepared_payload.get("provider"),
+                name="submission provider",
+            ).upper()
+            != provider_name
+            or prepared_payload.get("intent_id") != intent
+        ):
+            raise ReservationConflict(
+                "resolution evidence does not match durable submission scope"
+            )
+        try:
+            prepared_keys = provider_domain_submission_attempt_keys(
+                attempt_id=attempt,
+                provider_id=provider_name,
+                environment=self.environment,
+                provider_environment=prepared_payload.get(
+                    "provider_environment"
+                ),
+            )
+        except ValueError as error:
+            raise ReservationConflict(
+                "durable submission preparation lacks exact provider domain"
+            ) from error
+        expected_aggregates = {
+            submission_attempt_aggregate_id(
+                environment=self.environment,
+                account_id=self.account_id,
+                attempt_id=durable_attempt_key,
+            )
+            for durable_attempt_key in prepared_keys
+        }
+        if aggregate_id not in expected_aggregates:
+            raise ReservationConflict(
+                "durable submission provider domain differs from reconciliation"
+            )
+        client_order_id = _text(
+            prepared_payload.get("client_order_id"),
+            name="submission client_order_id",
+        )
+        if (
+            terminal_outcome == "PROVEN_ABSENT"
+            and not any(
+                event.get("event_type") == "SubmissionUnknown"
+                for event in attempt_events
+            )
+        ):
+            raise ReservationConflict(
+                "PROVEN_ABSENT requires a durable UNKNOWN submission state"
             )
         if (
             reconciliation_payload.get("complete") is not True

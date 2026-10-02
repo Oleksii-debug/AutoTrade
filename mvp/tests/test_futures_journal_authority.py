@@ -12,6 +12,9 @@ from autotrade_runtime.artifacts import (
     ArtifactStore,
     trusted_authenticated_reader,
 )
+from autotrade_runtime.artifacts._root_authority import (
+    _product_trusted_authenticated_reader,
+)
 
 from mvp.autotrade_mvp import futures_journal as journal_module
 from mvp.autotrade_mvp.futures import (
@@ -37,10 +40,7 @@ def utc(day: int, hour: int = 0):
 
 
 def _trusted_reader(artifacts: ArtifactStore):
-    return trusted_authenticated_reader(
-        artifacts.root,
-        publication_store=artifacts,
-    )
+    return _product_trusted_authenticated_reader(artifacts.root)
 
 
 class FuturesJournalAuthorityTests(unittest.TestCase):
@@ -156,6 +156,37 @@ class FuturesJournalAuthorityTests(unittest.TestCase):
         ):
             journal_module._settlement_evidence_reader(ForgedReader())
         self.assertEqual(calls, [])
+
+    def test_public_general_reader_cannot_select_terminal_settlement_root(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            artifacts = ArtifactStore(Path(directory) / "caller-artifacts")
+            opening = self._opening()
+            settlement = self._bind(artifacts, self._settlement())
+            caller_reader = trusted_authenticated_reader(
+                artifacts.root,
+                publication_store=artifacts,
+            )
+
+            with self.assertRaisesRegex(
+                FuturesError,
+                "product-issued trusted artifact reader",
+            ):
+                commit_linear_variation_margin(
+                    store,
+                    opening,
+                    settlement,
+                    evidence_reader=caller_reader,
+                )
+
+            self.assertEqual(
+                JournalStore.load_events(
+                    store,
+                    "FUTURES_VARIATION_MARGIN",
+                    variation_margin_aggregate_id(opening),
+                ),
+                [],
+            )
 
     def test_bound_reader_ignores_poisoned_publication_store_methods(self):
         with TemporaryDirectory() as directory:

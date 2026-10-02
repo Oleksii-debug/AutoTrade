@@ -448,6 +448,34 @@ def _walk_staging_windows_retained(staging: Path) -> list[tuple[Path, bytes]]:
                 raise BundleError(f"hardlinked staged files are forbidden: {path}")
             if observed.st_nlink != 1:
                 raise BundleError(f"staged file changed during collection: {path}")
+
+            # DirEntry.stat() and os.stat() can expose different Windows inode
+            # representations even for the same stable file.  Keep the
+            # enumeration result for type/reparse/link/metadata checks, but
+            # establish the mutation-fence identity with os.stat() because
+            # _read_retained_windows_regular_file() rechecks that same pathname
+            # API immediately after the retained no-WRITE/no-DELETE open.
+            try:
+                path_observed = os.stat(path, follow_symlinks=False)
+            except OSError as error:
+                raise BundleError(
+                    f"staged entry identity cannot be verified: {path}"
+                ) from error
+            _reject_windows_reparse(path, path_observed)
+            if not stat.S_ISREG(path_observed.st_mode):
+                raise BundleError(f"unsupported filesystem entry: {path}")
+            if path_observed.st_nlink > 1:
+                raise BundleError(f"hardlinked staged files are forbidden: {path}")
+            if path_observed.st_nlink != 1:
+                raise BundleError(f"staged file changed during collection: {path}")
+            if (
+                observed.st_size != path_observed.st_size
+                or observed.st_mtime_ns != path_observed.st_mtime_ns
+                or observed.st_ctime_ns != path_observed.st_ctime_ns
+                or observed.st_nlink != path_observed.st_nlink
+            ):
+                raise BundleError(f"staged file changed during collection: {path}")
+
             snapshots.append(
                 (
                     path,
@@ -455,7 +483,10 @@ def _walk_staging_windows_retained(staging: Path) -> list[tuple[Path, bytes]]:
                         authority,
                         target_name=entry.name,
                         path=path,
-                        expected_identity=(observed.st_dev, observed.st_ino),
+                        expected_identity=(
+                            path_observed.st_dev,
+                            path_observed.st_ino,
+                        ),
                     ),
                 )
             )

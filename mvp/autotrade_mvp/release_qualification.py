@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
+from types import MappingProxyType
 from typing import Iterable, Mapping
 
 
@@ -181,17 +182,74 @@ class ReleaseDecision:
     live_authority_granted: bool = False
 
 
+def _exact_scalar_text(value: object, *, name: str) -> str:
+    if type(value) is not str:
+        raise ReleaseQualificationError(f"{name} must be an exact built-in string")
+    return value
+
+
+def _snapshot_candidate(candidate: ReleaseCandidate) -> ReleaseCandidate:
+    if type(candidate) is not ReleaseCandidate:
+        raise ReleaseQualificationError(
+            "candidate must be exact ReleaseCandidate"
+        )
+    signatures_verified = candidate.signatures_verified
+    if type(signatures_verified) is not bool:
+        raise ReleaseQualificationError(
+            "candidate.signatures_verified must be exact boolean"
+        )
+    return ReleaseCandidate.create(
+        version=_exact_scalar_text(candidate.version, name="candidate.version"),
+        source_sha=_exact_scalar_text(
+            candidate.source_sha, name="candidate.source_sha"
+        ),
+        installer_sha256=_exact_scalar_text(
+            candidate.installer_sha256, name="candidate.installer_sha256"
+        ),
+        diagnostics_sha256=_exact_scalar_text(
+            candidate.diagnostics_sha256, name="candidate.diagnostics_sha256"
+        ),
+        sbom_sha256=_exact_scalar_text(
+            candidate.sbom_sha256, name="candidate.sbom_sha256"
+        ),
+        compatibility_manifest_sha256=_exact_scalar_text(
+            candidate.compatibility_manifest_sha256,
+            name="candidate.compatibility_manifest_sha256",
+        ),
+        signatures_verified=signatures_verified,
+    )
+
+
+def _snapshot_check(row: ReleaseCheck) -> ReleaseCheck:
+    if type(row) is not ReleaseCheck:
+        raise ReleaseQualificationError(
+            "checks must contain exact ReleaseCheck values"
+        )
+    return ReleaseCheck.create(
+        name=_exact_scalar_text(row.name, name="check.name"),
+        status=_exact_scalar_text(row.status, name="check.status"),
+        source_sha=_exact_scalar_text(
+            row.source_sha, name="check.source_sha"
+        ),
+        evidence_ref=_exact_scalar_text(
+            row.evidence_ref, name="check.evidence_ref"
+        ),
+        evidence_sha256=_exact_scalar_text(
+            row.evidence_sha256, name="check.evidence_sha256"
+        ),
+    )
+
+
 def evaluate_release(
     candidate: ReleaseCandidate,
     checks: Iterable[ReleaseCheck],
 ) -> ReleaseDecision:
     """Evaluate one immutable release candidate without inheriting stale evidence."""
 
-    rows = tuple(checks)
+    candidate = _snapshot_candidate(candidate)
     by_name: dict[str, ReleaseCheck] = {}
-    for row in rows:
-        if not isinstance(row, ReleaseCheck):
-            raise ReleaseQualificationError("checks must contain ReleaseCheck values")
+    for supplied_row in checks:
+        row = _snapshot_check(supplied_row)
         if row.name in by_name:
             raise ReleaseQualificationError(f"duplicate release check: {row.name}")
         by_name[row.name] = row
@@ -243,7 +301,7 @@ def evaluate_release(
     return ReleaseDecision(
         status=status,
         reasons=tuple(reasons),
-        checks=check_statuses,
+        checks=MappingProxyType(dict(check_statuses)),
         source_sha=candidate.source_sha,
         live_authority_granted=False,
     )

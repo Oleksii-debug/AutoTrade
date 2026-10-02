@@ -121,6 +121,59 @@ class ReleaseQualificationTests(unittest.TestCase):
             )
 
 
+    def test_release_evaluation_rejects_candidate_subclass_authority(self):
+        class ForgedCandidate(ReleaseCandidate):
+            pass
+
+        base = candidate()
+        forged = ForgedCandidate(
+            version=base.version,
+            source_sha=base.source_sha,
+            installer_sha256=base.installer_sha256,
+            diagnostics_sha256=base.diagnostics_sha256,
+            sbom_sha256=base.sbom_sha256,
+            compatibility_manifest_sha256=base.compatibility_manifest_sha256,
+            signatures_verified=True,
+        )
+        with self.assertRaisesRegex(
+            ReleaseQualificationError, "exact ReleaseCandidate"
+        ):
+            evaluate_release(forged, all_checks())
+
+    def test_release_evaluation_rejects_check_subclass_authority(self):
+        class ForgedCheck(ReleaseCheck):
+            pass
+
+        rows = list(all_checks())
+        original = rows[0]
+        rows[0] = ForgedCheck(
+            name=original.name,
+            status=original.status,
+            source_sha=original.source_sha,
+            evidence_ref=original.evidence_ref,
+            evidence_sha256=original.evidence_sha256,
+        )
+        with self.assertRaisesRegex(
+            ReleaseQualificationError, "exact ReleaseCheck"
+        ):
+            evaluate_release(candidate(), rows)
+
+    def test_release_evaluation_snapshots_candidate_before_check_iteration(self):
+        original = candidate()
+
+        def rows():
+            object.__setattr__(original, "source_sha", OTHER_SOURCE)
+            yield from all_checks()
+
+        decision = evaluate_release(original, rows())
+        self.assertEqual(decision.status, "PASS")
+        self.assertEqual(decision.source_sha, SOURCE)
+
+    def test_release_decision_check_map_is_immutable(self):
+        decision = evaluate_release(candidate(), all_checks())
+        with self.assertRaises(TypeError):
+            decision.checks["PR_CI"] = "FAIL"
+
     def test_malformed_hashes_and_unknown_checks_fail_closed(self):
         with self.assertRaisesRegex(ReleaseQualificationError, "canonical SHA-256"):
             ReleaseCandidate.create(

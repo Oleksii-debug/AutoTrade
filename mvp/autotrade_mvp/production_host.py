@@ -27,6 +27,7 @@ from autotrade_runtime.strict_json import strict_json_loads
 
 from .host_network import (
     AuthenticatedHostApplication,
+    _require_canonical_security_boundary,
     AuthenticatedHostServer,
     PrincipalResolver,
     SnapshotProvider,
@@ -106,6 +107,29 @@ class ProductionHostConfig:
 
         object.__setattr__(self, "journal_path", journal_path)
         object.__setattr__(self, "public_origin", canonical_origin)
+
+
+def _readmit_production_host_config(value: object) -> ProductionHostConfig:
+    """Detach and structurally re-admit one exact host config snapshot.
+
+    This closes polymorphic/post-construction invariant bypasses only. Installed
+    configuration authentication and release identity remain separate authorities.
+    """
+
+    if type(value) is not ProductionHostConfig:
+        raise TypeError("config must be exact ProductionHostConfig")
+    state = vars(value).copy()
+    if frozenset(state) != _CONFIG_FIELDS:
+        raise TypeError("config state shape is non-canonical")
+    return ProductionHostConfig(
+        journal_path=state["journal_path"],
+        account_id=state["account_id"],
+        environment=state["environment"],
+        host_id=state["host_id"],
+        bind_host=state["bind_host"],
+        bind_port=state["bind_port"],
+        public_origin=state["public_origin"],
+    )
 
 
 def _strict_json_object(payload: bytes) -> dict[str, object]:
@@ -582,10 +606,8 @@ def build_production_host(
 ) -> ProductionHostRuntime:
     """Compose the existing durable host authorities into one runnable process seam."""
 
-    if not isinstance(config, ProductionHostConfig):
-        raise TypeError("config must be ProductionHostConfig")
-    if not isinstance(security_boundary, SecurityBoundary):
-        raise TypeError("security_boundary must be SecurityBoundary")
+    config = _readmit_production_host_config(config)
+    security_boundary = _require_canonical_security_boundary(security_boundary)
     if not callable(principal_resolver):
         raise TypeError("principal_resolver must be callable")
     if not callable(snapshot_provider):

@@ -84,5 +84,33 @@ class BoundedRealDecimalIdentityTests(unittest.TestCase):
             )
 
 
+    def test_decimal_subclass_is_rejected_before_virtual_dispatch(self):
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                raise AssertionError("hostile Decimal.is_finite() dispatched")
+
+            def as_tuple(self):
+                raise AssertionError("hostile Decimal.as_tuple() dispatched")
+
+            def __format__(self, format_spec):
+                raise AssertionError("hostile Decimal.__format__() dispatched")
+
+            def __eq__(self, other):
+                raise AssertionError("hostile Decimal.__eq__() dispatched")
+
+        with self.assertRaisesRegex(TypeError, "exact Decimal"):
+            BoundedRealEnvelope.create(
+                envelope_id="bounded-hostile-decimal",
+                source_sha=SHA,
+                account_id="account-1",
+                provider_id="provider-1",
+                policy_id="policy-1",
+                allowed_actions={"ORDER.SUBMIT"},
+                max_capital=HostileDecimal("1000"),
+                max_single_notional=Decimal("1"),
+                max_gross_leverage=Decimal("1"),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

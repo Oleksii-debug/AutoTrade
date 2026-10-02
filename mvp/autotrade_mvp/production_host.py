@@ -15,6 +15,10 @@ from threading import Condition, Thread, current_thread
 from typing import Callable
 from urllib.parse import urlsplit
 
+from autotrade_runtime.artifacts import require_product_trusted_authenticated_reader
+from autotrade_runtime.artifacts._root_authority import (
+    _product_trusted_authenticated_reader,
+)
 from autotrade_runtime.resource_lock import (
     ResourceLock,
     ResourceLockBusyError,
@@ -52,6 +56,14 @@ _CONFIG_FIELDS = frozenset(
 )
 _TERMINAL_STATES = frozenset({"CLOSED", "FAILED"})
 _STOPPING_STATES = frozenset({"CLOSING", "CLOSED", "FAILED"})
+
+
+def _product_artifact_root(journal_path: Path) -> Path:
+    """Select the product artifact root independently from caller publication stores."""
+
+    if type(journal_path) is not Path or not journal_path.is_absolute():
+        raise ValueError("product artifact root requires canonical absolute journal path")
+    return Path(str(journal_path) + ".artifacts")
 
 
 @dataclass(frozen=True)
@@ -366,6 +378,19 @@ class ProductionHostRuntime:
         self._teardown_owner: Thread | None = None
         self._serve_entry_hook: Callable[[], None] = lambda: None
         self._serve_loop_entry_hook: Callable[[], None] = lambda: None
+        self._product_artifact_reader: object | None = None
+
+    def _bind_product_artifact_reader(self, reader: object) -> None:
+        if self._product_artifact_reader is not None:
+            raise RuntimeError("product artifact reader is already bound")
+        self._product_artifact_reader = require_product_trusted_authenticated_reader(reader)
+
+    @property
+    def product_artifact_reader(self):
+        reader = self._product_artifact_reader
+        if reader is None:
+            raise RuntimeError("product artifact reader is not bound")
+        return require_product_trusted_authenticated_reader(reader)
 
     @property
     def closed(self) -> bool:
@@ -574,6 +599,9 @@ def build_production_host(
 
     instance_fence = _InstanceFence.acquire(config.journal_path)
     try:
+        artifact_reader = _product_trusted_authenticated_reader(
+            _product_artifact_root(config.journal_path)
+        )
         journal = JournalStore(config.journal_path)
         application = AuthenticatedHostApplication(
             journal,
@@ -599,7 +627,7 @@ def build_production_host(
     except BaseException:
         instance_fence.release()
         raise
-    return ProductionHostRuntime(
+    runtime = ProductionHostRuntime(
         config=config,
         journal=journal,
         application=application,
@@ -607,3 +635,5 @@ def build_production_host(
         instance_fence=instance_fence,
         admission_gate=admission_gate,
     )
+    runtime._bind_product_artifact_reader(artifact_reader)
+    return runtime

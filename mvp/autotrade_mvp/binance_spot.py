@@ -18,6 +18,14 @@ from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from .capabilities import CapabilitySnapshot
+from .market_data import (
+    BookStreamPolicyBinding,
+    MarketNormalizer,
+    NormalizedMarketEvent,
+    QualifiedBookRangeAdmission,
+    _issue_book_stream_policy_binding,
+    _issue_qualified_book_range_admission,
+)
 from .provider_core import (
     ProviderCoreError,
     ProviderResponseObservation,
@@ -41,6 +49,7 @@ _CLIENT_ID = re.compile(r"^[A-Za-z0-9_.:/-]{1,36}$")
 _EXCHANGE_INFO_RULES_TOKEN = object()
 _REFERENCE_PRICE_TOKEN = object()
 _ALLOWED_TIF = frozenset({"GTC", "IOC", "FOK"})
+BINANCE_SPOT_DEPTH_POLICY_ID = "BINANCE_SPOT_DIFF_DEPTH_V1"
 
 
 class BinanceSpotAdapterError(ProviderCoreError):
@@ -97,6 +106,558 @@ def _nonnegative_int(value: object, *, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise BinanceSpotAdapterError(f"{name} must be a non-negative integer")
     return value
+
+
+def _depth_update_id(value: object, *, name: str) -> int:
+    """Admit exact Binance depth cursors without bool/subclass coercion."""
+
+    if type(value) is not int or value < 0:
+        raise BinanceSpotAdapterError(
+            f"{name} must be an exact non-negative integer"
+        )
+    return value
+
+
+def _depth_symbol(value: object, *, name: str = "depth symbol") -> str:
+    if type(value) is not str or not value.strip():
+        raise BinanceSpotAdapterError(f"{name} must be an exact nonblank string")
+    symbol = value.strip()
+    if symbol != symbol.upper():
+        raise BinanceSpotAdapterError(f"{name} must be canonical uppercase")
+    return symbol
+
+
+def binance_spot_depth_stream_policy(
+    *,
+    provider_id: str,
+    venue_id: str,
+    stream: str = "book",
+) -> BookStreamPolicyBinding:
+    """Bind Binance Spot depth semantics to one coordinator stream."""
+
+    return _issue_book_stream_policy_binding(
+        provider_id=_text(provider_id, name="provider_id"),
+        venue_id=_text(venue_id, name="venue_id"),
+        stream=_text(stream, name="stream"),
+        policy_id=BINANCE_SPOT_DEPTH_POLICY_ID,
+    )
+
+
+@dataclass(frozen=True)
+class BinanceSpotDepthRange:
+    """Provider-specific update-ID range from one Spot diff-depth event."""
+
+    symbol: str
+    first_update_id: int
+    final_update_id: int
+
+    @classmethod
+    def from_diff_depth_payload(
+        cls,
+        payload: Mapping[str, object],
+    ) -> "BinanceSpotDepthRange":
+        if not isinstance(payload, Mapping):
+            raise TypeError("diff-depth payload must be a mapping")
+        event_type = payload.get("e")
+        if type(event_type) is not str or event_type != "depthUpdate":
+            raise BinanceSpotAdapterError(
+                "diff-depth event type must be exact depthUpdate"
+            )
+        symbol = _depth_symbol(payload.get("s"))
+        first_update_id = _depth_update_id(
+            payload.get("U"),
+            name="diff-depth first update id",
+        )
+        final_update_id = _depth_update_id(
+            payload.get("u"),
+            name="diff-depth final update id",
+        )
+        if first_update_id > final_update_id:
+            raise BinanceSpotAdapterError(
+                "diff-depth first update id must not exceed final update id"
+            )
+        return cls(
+            symbol=symbol,
+            first_update_id=first_update_id,
+            final_update_id=final_update_id,
+        )
+
+
+@dataclass(frozen=True)
+class BinanceSpotDepthCursor:
+    """Symbol-bound local depth update cursor; not provider-origin evidence."""
+
+    symbol: str
+    update_id: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "symbol", _depth_symbol(self.symbol))
+        object.__setattr__(
+            self,
+            "update_id",
+            _depth_update_id(self.update_id, name="depth cursor update id"),
+        )
+
+    @classmethod
+    def from_snapshot(
+        cls,
+        *,
+        symbol: str,
+        payload: Mapping[str, object],
+    ) -> "BinanceSpotDepthCursor":
+        if not isinstance(payload, Mapping):
+            raise TypeError("depth snapshot payload must be a mapping")
+        return cls(
+            symbol=_depth_symbol(symbol),
+            update_id=_depth_update_id(
+                payload.get("lastUpdateId"),
+                name="depth snapshot lastUpdateId",
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class BinanceSpotDepthDecision:
+    """Deterministic provider continuity decision; never provider-origin proof."""
+
+    disposition: str
+    next_update_id: int | None
+
+    def __post_init__(self) -> None:
+        if self.disposition not in {"APPLY", "DISCARD", "GAP"}:
+            raise BinanceSpotAdapterError("depth disposition is unsupported")
+        if self.disposition == "APPLY":
+            _depth_update_id(self.next_update_id, name="next update id")
+        elif self.next_update_id is not None:
+            raise BinanceSpotAdapterError(
+                "non-APPLY depth decision must not carry a next update id"
+            )
+
+
+class BinanceSpotDepthContinuityPolicy:
+    """Network-free Spot range semantics from the documented local-book algorithm."""
+
+    @staticmethod
+    def _admit(
+        cursor: BinanceSpotDepthCursor,
+        event: BinanceSpotDepthRange,
+    ) -> tuple[BinanceSpotDepthCursor, BinanceSpotDepthRange]:
+        if type(cursor) is not BinanceSpotDepthCursor:
+            raise TypeError("cursor must be an exact BinanceSpotDepthCursor")
+        if type(event) is not BinanceSpotDepthRange:
+            raise TypeError("event must be an exact BinanceSpotDepthRange")
+        if cursor.symbol != event.symbol:
+            raise BinanceSpotAdapterError(
+                "depth event symbol does not match local depth cursor"
+            )
+        return cursor, event
+
+    @classmethod
+    def bootstrap(
+        cls,
+        *,
+        snapshot: BinanceSpotDepthCursor,
+        event: BinanceSpotDepthRange,
+    ) -> BinanceSpotDepthDecision:
+        cursor, admitted = cls._admit(snapshot, event)
+        if admitted.final_update_id <= cursor.update_id:
+            return BinanceSpotDepthDecision("DISCARD", None)
+        if admitted.first_update_id > cursor.update_id + 1:
+            return BinanceSpotDepthDecision("GAP", None)
+        return BinanceSpotDepthDecision("APPLY", admitted.final_update_id)
+
+    @classmethod
+    def advance(
+        cls,
+        *,
+        local: BinanceSpotDepthCursor,
+        event: BinanceSpotDepthRange,
+    ) -> BinanceSpotDepthDecision:
+        cursor, admitted = cls._admit(local, event)
+        if admitted.final_update_id < cursor.update_id:
+            return BinanceSpotDepthDecision("DISCARD", None)
+        if admitted.first_update_id > cursor.update_id + 1:
+            return BinanceSpotDepthDecision("GAP", None)
+        return BinanceSpotDepthDecision("APPLY", admitted.final_update_id)
+
+    @classmethod
+    def admission(
+        cls,
+        *,
+        event_id: str,
+        cursor: BinanceSpotDepthCursor,
+        event: BinanceSpotDepthRange,
+        bootstrap: bool,
+    ) -> QualifiedBookRangeAdmission:
+        """Bind the deterministic Spot range decision to one normalized event."""
+
+        decision = (
+            cls.bootstrap(snapshot=cursor, event=event)
+            if bootstrap
+            else cls.advance(local=cursor, event=event)
+        )
+        return _issue_qualified_book_range_admission(
+            policy_id=BINANCE_SPOT_DEPTH_POLICY_ID,
+            event_id=_text(event_id, name="event_id"),
+            disposition=decision.disposition,
+            prior_sequence=cursor.update_id,
+            first_sequence=event.first_update_id,
+            last_sequence=event.final_update_id,
+            next_sequence=decision.next_update_id,
+        )
+
+
+def _evaluate_binance_spot_depth_range(
+    *,
+    policy_id: str,
+    event_id: str,
+    provider_symbol: str,
+    prior_sequence: int,
+    first_sequence: int,
+    last_sequence: int,
+    bootstrap: bool,
+) -> QualifiedBookRangeAdmission:
+    """Derive the exact Binance Spot continuity verdict inside product composition."""
+
+    if policy_id != BINANCE_SPOT_DEPTH_POLICY_ID:
+        raise BinanceSpotAdapterError("depth policy identity does not match Binance Spot")
+    symbol = _depth_symbol(provider_symbol, name="provider_symbol")
+    cursor = BinanceSpotDepthCursor(symbol=symbol, update_id=prior_sequence)
+    depth_range = BinanceSpotDepthRange(
+        symbol=symbol,
+        first_update_id=first_sequence,
+        final_update_id=last_sequence,
+    )
+    return BinanceSpotDepthContinuityPolicy.admission(
+        event_id=event_id,
+        cursor=cursor,
+        event=depth_range,
+        bootstrap=bootstrap,
+    )
+
+
+def register_binance_spot_depth_snapshot(
+    normalizer: MarketNormalizer,
+    event: NormalizedMarketEvent,
+    snapshot: BinanceSpotDepthCursor,
+    *,
+    provider_id: str,
+    venue_id: str,
+    provider_symbol: str,
+    stream: str = "book",
+) -> None:
+    """Install a Spot REST depth snapshot as a non-executable bootstrap baseline."""
+
+    if type(normalizer) is not MarketNormalizer:
+        raise TypeError("normalizer must be an exact MarketNormalizer")
+    if type(snapshot) is not BinanceSpotDepthCursor:
+        raise TypeError("snapshot must be an exact BinanceSpotDepthCursor")
+    symbol = _depth_symbol(provider_symbol, name="provider_symbol")
+    if snapshot.symbol != symbol:
+        raise BinanceSpotAdapterError(
+            "depth snapshot symbol does not match provider symbol"
+        )
+    normalizer.register_provider_book_snapshot(
+        event,
+        provider_id=_text(provider_id, name="provider_id"),
+        venue_id=_text(venue_id, name="venue_id"),
+        provider_symbol=symbol,
+        stream=_text(stream, name="stream"),
+        policy_id=BINANCE_SPOT_DEPTH_POLICY_ID,
+        cursor_sequence=snapshot.update_id,
+    )
+
+
+def apply_binance_spot_depth_event(
+    normalizer: MarketNormalizer,
+    event: NormalizedMarketEvent,
+    depth_range: BinanceSpotDepthRange,
+    *,
+    provider_id: str,
+    venue_id: str,
+    provider_symbol: str,
+    stream: str = "book",
+) -> BinanceSpotDepthDecision:
+    """Apply one already-normalized Spot diff-depth event through provider policy."""
+
+    if type(normalizer) is not MarketNormalizer:
+        raise TypeError("normalizer must be an exact MarketNormalizer")
+    if type(depth_range) is not BinanceSpotDepthRange:
+        raise TypeError("depth_range must be an exact BinanceSpotDepthRange")
+    symbol = _depth_symbol(provider_symbol, name="provider_symbol")
+    if depth_range.symbol != symbol:
+        raise BinanceSpotAdapterError(
+            "depth event symbol does not match provider symbol"
+        )
+    provider = _text(provider_id, name="provider_id")
+    venue = _text(venue_id, name="venue_id")
+    normalized_stream = _text(stream, name="stream")
+    payload = event.payload
+    if (
+        payload.get("first_sequence") != str(depth_range.first_update_id)
+        or payload.get("last_sequence") != str(depth_range.final_update_id)
+        or event.source_sequence != depth_range.final_update_id
+    ):
+        raise BinanceSpotAdapterError(
+            "normalized depth event does not match provider range identity"
+        )
+    admission = normalizer.apply_qualified_book_range(
+        event,
+        provider_id=provider,
+        venue_id=venue,
+        provider_symbol=symbol,
+        stream=normalized_stream,
+    )
+    return BinanceSpotDepthDecision(
+        disposition=admission.disposition,
+        next_update_id=admission.next_sequence,
+    )
+
+
+_MAX_DEPTH_BOOTSTRAP_EVENTS = 4096
+
+
+class BinanceSpotDepthBootstrapBuffer:
+    """Bounded pre-snapshot diff-depth buffer for one explicit stream generation.
+
+    This coordinator is deliberately network-free. It owns only the buffered
+    provider events between subscription start and REST snapshot installation,
+    then replays them through the existing qualified continuity/admission path.
+    """
+
+    def __init__(
+        self,
+        *,
+        symbol: str,
+        generation: int,
+        max_events: int = _MAX_DEPTH_BOOTSTRAP_EVENTS,
+    ) -> None:
+        self._symbol = _depth_symbol(symbol)
+        self._generation = _depth_update_id(
+            generation,
+            name="depth stream generation",
+        )
+        if type(max_events) is not int or not 0 < max_events <= _MAX_DEPTH_BOOTSTRAP_EVENTS:
+            raise BinanceSpotAdapterError(
+                "depth bootstrap max_events must be an exact integer in the supported envelope"
+            )
+        self._max_events = max_events
+        self._buffered: list[tuple[NormalizedMarketEvent, BinanceSpotDepthRange]] = []
+        self._event_ids: set[str] = set()
+        self._sealed = False
+
+    @property
+    def generation(self) -> int:
+        return self._generation
+
+    @property
+    def buffered_count(self) -> int:
+        return len(self._buffered)
+
+    def _require_open_generation(self, generation: object) -> None:
+        admitted = _depth_update_id(
+            generation,
+            name="depth stream generation",
+        )
+        if admitted != self._generation:
+            raise BinanceSpotAdapterError(
+                "depth stream generation does not match bootstrap buffer"
+            )
+        if self._sealed:
+            raise BinanceSpotAdapterError("depth bootstrap buffer is sealed")
+
+    def buffer(
+        self,
+        event: NormalizedMarketEvent,
+        depth_range: BinanceSpotDepthRange,
+        *,
+        generation: int,
+    ) -> None:
+        """Retain one normalized diff event before snapshot acquisition."""
+
+        self._require_open_generation(generation)
+        if type(event) is not NormalizedMarketEvent:
+            raise TypeError("event must be an exact NormalizedMarketEvent")
+        if type(depth_range) is not BinanceSpotDepthRange:
+            raise TypeError("depth_range must be an exact BinanceSpotDepthRange")
+        if depth_range.symbol != self._symbol:
+            raise BinanceSpotAdapterError(
+                "depth event symbol does not match bootstrap buffer"
+            )
+        if event.kind != "BOOK_DELTA":
+            raise BinanceSpotAdapterError(
+                "depth bootstrap buffer accepts only BOOK_DELTA events"
+            )
+        if event.stream_generation != self._generation:
+            raise BinanceSpotAdapterError(
+                "normalized depth event generation does not match bootstrap buffer"
+            )
+        payload = event.payload
+        if (
+            payload.get("first_sequence") != str(depth_range.first_update_id)
+            or payload.get("last_sequence") != str(depth_range.final_update_id)
+            or event.source_sequence != depth_range.final_update_id
+        ):
+            raise BinanceSpotAdapterError(
+                "normalized depth event does not match provider range identity"
+            )
+        if event.event_id in self._event_ids:
+            return
+        if len(self._buffered) >= self._max_events:
+            raise BinanceSpotAdapterError(
+                "depth bootstrap buffer exceeds the supported event envelope"
+            )
+        self._buffered.append((event, depth_range))
+        self._event_ids.add(event.event_id)
+
+    def reconnect(
+        self,
+        normalizer: MarketNormalizer,
+        *,
+        generation: int,
+        provider_id: str,
+        venue_id: str,
+        provider_symbol: str,
+        stream: str = "book",
+    ) -> "BinanceSpotDepthBootstrapBuffer":
+        """Revoke old executable state and return an empty newer generation."""
+
+        next_generation = _depth_update_id(
+            generation,
+            name="depth stream generation",
+        )
+        if next_generation <= self._generation:
+            raise BinanceSpotAdapterError(
+                "reconnect generation must strictly increase"
+            )
+        if self._sealed:
+            raise BinanceSpotAdapterError("depth bootstrap buffer is sealed")
+        symbol = _depth_symbol(provider_symbol, name="provider_symbol")
+        if symbol != self._symbol:
+            raise BinanceSpotAdapterError(
+                "reconnect symbol does not match bootstrap buffer"
+            )
+        if type(normalizer) is not MarketNormalizer:
+            raise TypeError("normalizer must be an exact MarketNormalizer")
+        normalizer.begin_provider_book_generation(
+            provider_id=_text(provider_id, name="provider_id"),
+            venue_id=_text(venue_id, name="venue_id"),
+            provider_symbol=symbol,
+            generation=next_generation,
+            stream=_text(stream, name="stream"),
+            policy_id=BINANCE_SPOT_DEPTH_POLICY_ID,
+        )
+        self._sealed = True
+        self._buffered.clear()
+        self._event_ids.clear()
+        return BinanceSpotDepthBootstrapBuffer(
+            symbol=self._symbol,
+            generation=next_generation,
+            max_events=self._max_events,
+        )
+
+    def install_snapshot_and_replay(
+        self,
+        normalizer: MarketNormalizer,
+        snapshot_event: NormalizedMarketEvent,
+        snapshot: BinanceSpotDepthCursor,
+        *,
+        generation: int,
+        provider_id: str,
+        venue_id: str,
+        provider_symbol: str,
+        stream: str = "book",
+    ) -> tuple[BinanceSpotDepthDecision, ...]:
+        """Install the snapshot and deterministically drain this generation."""
+
+        self._require_open_generation(generation)
+        symbol = _depth_symbol(provider_symbol, name="provider_symbol")
+        if symbol != self._symbol or snapshot.symbol != self._symbol:
+            raise BinanceSpotAdapterError(
+                "depth snapshot identity does not match bootstrap buffer"
+            )
+        if snapshot_event.stream_generation != self._generation:
+            raise BinanceSpotAdapterError(
+                "normalized depth snapshot generation does not match bootstrap buffer"
+            )
+        provider = _text(provider_id, name="provider_id")
+        venue = _text(venue_id, name="venue_id")
+        normalized_stream = _text(stream, name="stream")
+        decisions: list[BinanceSpotDepthDecision] = []
+        snapshot_registered = False
+        try:
+            register_binance_spot_depth_snapshot(
+                normalizer,
+                snapshot_event,
+                snapshot,
+                provider_id=provider,
+                venue_id=venue,
+                provider_symbol=symbol,
+                stream=normalized_stream,
+            )
+            snapshot_registered = True
+            for event, depth_range in self._buffered:
+                decision = apply_binance_spot_depth_event(
+                    normalizer,
+                    event,
+                    depth_range,
+                    provider_id=provider,
+                    venue_id=venue,
+                    provider_symbol=symbol,
+                    stream=normalized_stream,
+                )
+                decisions.append(decision)
+                if decision.disposition == "GAP":
+                    break
+        except BaseException:
+            if snapshot_registered:
+                normalizer.invalidate_provider_book_stream(
+                    provider_id=provider,
+                    venue_id=venue,
+                    provider_symbol=symbol,
+                    stream=normalized_stream,
+                    policy_id=BINANCE_SPOT_DEPTH_POLICY_ID,
+                )
+            raise
+        finally:
+            self._sealed = True
+            self._buffered.clear()
+            self._event_ids.clear()
+        return tuple(decisions)
+
+
+def begin_binance_spot_depth_generation(
+    normalizer: MarketNormalizer,
+    *,
+    provider_id: str,
+    venue_id: str,
+    provider_symbol: str,
+    generation: int,
+    stream: str = "book",
+    max_events: int = _MAX_DEPTH_BOOTSTRAP_EVENTS,
+) -> BinanceSpotDepthBootstrapBuffer:
+    """Start one fail-closed Spot depth generation before buffering socket deltas."""
+
+    if type(normalizer) is not MarketNormalizer:
+        raise TypeError("normalizer must be an exact MarketNormalizer")
+    symbol = _depth_symbol(provider_symbol, name="provider_symbol")
+    provider = _text(provider_id, name="provider_id")
+    venue = _text(venue_id, name="venue_id")
+    normalized_stream = _text(stream, name="stream")
+    candidate = BinanceSpotDepthBootstrapBuffer(
+        symbol=symbol,
+        generation=generation,
+        max_events=max_events,
+    )
+    normalizer.begin_provider_book_generation(
+        provider_id=provider,
+        venue_id=venue,
+        provider_symbol=symbol,
+        generation=candidate.generation,
+        stream=normalized_stream,
+        policy_id=BINANCE_SPOT_DEPTH_POLICY_ID,
+    )
+    return candidate
 
 
 def validate_client_order_id(value: object) -> str:

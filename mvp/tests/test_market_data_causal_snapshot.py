@@ -430,5 +430,37 @@ class CausalImmutableMarketPayloadTests(unittest.TestCase):
             )
 
 
+
+    def test_raw_payload_snapshot_has_structural_resource_envelope(self):
+        too_wide = {"status": "OPEN", "opaque": [None] * 20001}
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "container resource envelope",
+        ):
+            update("STATUS", too_wide)
+
+        nested = None
+        for _ in range(65):
+            nested = [nested]
+        with self.assertRaisesRegex(
+            MarketDataError,
+            "nesting resource envelope",
+        ):
+            update("STATUS", {"status": "OPEN", "opaque": nested})
+
+    def test_book_depth_supported_width_fits_snapshot_structural_budget(self):
+        bids = [
+            [f"{100 - index / 100:.2f}", "1.000"]
+            for index in range(10000)
+        ]
+        admitted = update(
+            "BOOK_SNAPSHOT",
+            {
+                "bids": bids,
+                "asks": [["100.01", "1.000"]],
+            },
+        )
+        self.assertEqual(len(admitted.payload["bids"]), 10000)
+
 if __name__ == "__main__":
     unittest.main()

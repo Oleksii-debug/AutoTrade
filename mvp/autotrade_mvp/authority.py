@@ -2613,25 +2613,30 @@ class AuthorityService:
             raise AuthorityConflict(
                 "durable reservation availability provider_environment is invalid"
             ) from error
-        (
-            capability_provider,
-            capability_account,
-            capability_environment,
-            capability_provider_environment,
-        ) = _durable_capability_provider_scope(
-            self.store,
-            record.capability_snapshot_id,
-        )
-        if (
-            capability_provider != availability_provider
-            or capability_account != record.account_id
-            or capability_environment != record.environment
-            or capability_provider_environment
-            != availability_provider_environment
-        ):
-            raise AuthorityConflict(
-                "durable capability and reconciliation provider scope differ"
+        # A durable provider-capability observation is a PAPER/LIVE authority
+        # boundary. SIMULATION/REPLAY capability_snapshot_id is still immutable
+        # risk/admission identity, but it is not evidence that a real provider
+        # route exists and historically has no capability_history event.
+        if record.environment in {"PAPER", "LIVE"}:
+            (
+                capability_provider,
+                capability_account,
+                capability_environment,
+                capability_provider_environment,
+            ) = _durable_capability_provider_scope(
+                self.store,
+                record.capability_snapshot_id,
             )
+            if (
+                capability_provider != availability_provider
+                or capability_account != record.account_id
+                or capability_environment != record.environment
+                or capability_provider_environment
+                != availability_provider_environment
+            ):
+                raise AuthorityConflict(
+                    "durable capability and reconciliation provider scope differ"
+                )
         try:
             regenerated_availability = (
                 load_account_resource_availability_evidence(
@@ -4901,24 +4906,29 @@ class AuthorityService:
             raise AuthorityConflict(
                 "financial admission provider_environment evidence is invalid"
             ) from error
-        (
-            capability_provider,
-            capability_account,
-            capability_environment,
-            capability_provider_environment,
-        ) = _durable_capability_provider_scope(
-            self.store,
-            record.capability_snapshot_id,
-        )
-        if (
-            capability_provider != provider_id
-            or capability_account != record.account_id
-            or capability_environment != record.environment
-            or capability_provider_environment != provider_environment
-        ):
-            raise AuthorityConflict(
-                "financial admission capability provider scope is inconsistent"
+        # Provider-capability history is required only where provider send
+        # authority can exist. SIMULATION/REPLAY keeps the capability id bound
+        # into durable risk/admission evidence without upgrading it into
+        # provider-origin proof.
+        if record.environment in {"PAPER", "LIVE"}:
+            (
+                capability_provider,
+                capability_account,
+                capability_environment,
+                capability_provider_environment,
+            ) = _durable_capability_provider_scope(
+                self.store,
+                record.capability_snapshot_id,
             )
+            if (
+                capability_provider != provider_id
+                or capability_account != record.account_id
+                or capability_environment != record.environment
+                or capability_provider_environment != provider_environment
+            ):
+                raise AuthorityConflict(
+                    "financial admission capability provider scope is inconsistent"
+                )
         risk_intent = risk_payload.get("risk_intent")
         if not isinstance(risk_intent, Mapping):
             raise AuthorityConflict(

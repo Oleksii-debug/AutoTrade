@@ -2611,6 +2611,28 @@ class AuthorityTests(unittest.TestCase):
                 2,
             )
 
+            # SIMULATION uses the service-owned risk resolver but does not
+            # fabricate a production capability-history aggregate.  Restart
+            # replay and dispatch must therefore validate the persisted risk +
+            # reconciliation binding without requiring one.
+            self.assertIsNone(
+                store.get_event(
+                    f"capability-snapshot:{PUBLIC_CAPABILITY_SNAPSHOT_ID}"
+                )
+            )
+            allowed, reason = restarted_authority.dispatch_allowed(
+                first.admission_id,
+                intent_hash=first.intent_hash,
+                account_id=first.account_id,
+                environment=first.environment,
+                instrument_id=first.instrument_version.instrument_id,
+                instrument_version=first.instrument_version.version,
+                action=first.action,
+                now="2026-09-24T18:01:01Z",
+                capability_snapshot_id=first.capability_snapshot_id,
+            )
+            self.assertEqual((allowed, reason), (True, "allowed"))
+
 
     def test_pre_arithmetic_policy_journal_restores_only_as_historical_authority(self):
         with TemporaryDirectory() as directory:

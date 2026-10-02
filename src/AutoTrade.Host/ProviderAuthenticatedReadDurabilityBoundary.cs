@@ -173,6 +173,13 @@ internal static class ProviderAuthenticatedReadDurabilityVerifier
                 receipt.QueryDigest,
                 attempt.Subject.QueryDigest,
                 StringComparison.Ordinal)
+            || !string.Equals(
+                receipt.PreparedEventId,
+                attempt.ReadAttemptId + ":prepared",
+                StringComparison.Ordinal)
+            || StringComparer.Ordinal.Compare(
+                receipt.CommittedAtUtc,
+                attempt.PreparedAtUtc) < 0
             || receipt.JournalSequence <= 0)
         {
             throw new ProviderIssuerAuthorityException(

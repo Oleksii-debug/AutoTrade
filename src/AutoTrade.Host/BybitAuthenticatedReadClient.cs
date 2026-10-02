@@ -17,14 +17,12 @@ internal sealed class ProviderAuthenticatedReadEvidence
     private readonly byte[] _responseBytes;
 
     internal ProviderAuthenticatedReadEvidence(
-        ProviderIssuerSession issuerSession,
-        ProviderAuthenticatedReadAttemptBinding attempt,
+        ProviderAuthenticatedReadPreparedEvidence preparedEvidence,
         ProviderAuthenticatedReadReceipt receipt,
         ProviderAuthenticatedReadDurabilityReceipt durabilityReceipt,
         byte[] responseBytes)
     {
-        ArgumentNullException.ThrowIfNull(issuerSession);
-        ArgumentNullException.ThrowIfNull(attempt);
+        ArgumentNullException.ThrowIfNull(preparedEvidence);
         ArgumentNullException.ThrowIfNull(receipt);
         ArgumentNullException.ThrowIfNull(durabilityReceipt);
         ArgumentNullException.ThrowIfNull(responseBytes);
@@ -34,13 +32,15 @@ internal sealed class ProviderAuthenticatedReadEvidence
                 "authenticated read evidence requires exact non-empty response bytes");
         }
 
-        IssuerSession = issuerSession;
-        Attempt = attempt;
+        PreparedEvidence = preparedEvidence;
+        IssuerSession = preparedEvidence.IssuerSession;
+        Attempt = preparedEvidence.Attempt;
         Receipt = receipt;
         DurabilityReceipt = durabilityReceipt;
         _responseBytes = responseBytes.ToArray();
     }
 
+    internal ProviderAuthenticatedReadPreparedEvidence PreparedEvidence { get; }
     internal ProviderIssuerSession IssuerSession { get; }
     internal ProviderAuthenticatedReadAttemptBinding Attempt { get; }
     internal ProviderAuthenticatedReadReceipt Receipt { get; }
@@ -55,9 +55,10 @@ internal sealed class ProviderAuthenticatedReadEvidence
 /// The caller supplies only a requested read scope. Terminal entity/C/Q/build,
 /// endpoint-rule, network-policy and transport identities come from the canonical
 /// current-authority boundary. The client derives the absolute Bybit origin from
-/// the exact provider_environment, keeps the resolved credential generation alive
-/// through the wire call, issues a Host-signed Prepared binding immediately before
-/// send, and signs only the exact definitive response bytes received on that cut.
+/// the exact provider_environment, binds one credential generation into a signed
+/// Host Prepared attempt, zeroes that first credential material, requires durable
+/// Prepared acknowledgement, then revalidates and re-resolves the same generation
+/// immediately before send. Only exact definitive response bytes are signed.
 ///
 /// There is intentionally no injected HttpClient/handler/wire callback surface:
 /// test or parser bytes must not be able to mint PROVIDER_ORIGIN.
@@ -114,7 +115,6 @@ internal sealed class BybitAuthenticatedReadClient
 
         ProviderAuthenticatedReadAttemptBinding? attempt = null;
         bool attemptOpen = false;
-        ProviderAuthenticatedReadPreparedEvidence? preparedEvidence = null;
 
         try
         {
@@ -165,10 +165,11 @@ internal sealed class BybitAuthenticatedReadClient
                 attemptOpen = true;
             }
 
-            preparedEvidence = new ProviderAuthenticatedReadPreparedEvidence(
-                _issuer.Session,
-                attempt,
-                authority.Query);
+            ProviderAuthenticatedReadPreparedEvidence preparedEvidence =
+                new(
+                    _issuer.Session,
+                    attempt,
+                    authority.Query);
 
             // This is the mandatory cross-authority barrier. A real implementation
             // must durably commit the exact signed attempt before returning. The
@@ -247,8 +248,7 @@ internal sealed class BybitAuthenticatedReadClient
                 _issuer.Session.PublicKeySha256);
 
             return new ProviderAuthenticatedReadEvidence(
-                _issuer.Session,
-                attempt,
+                preparedEvidence,
                 receipt,
                 durabilityReceipt,
                 responseBytes);

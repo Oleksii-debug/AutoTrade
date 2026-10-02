@@ -271,7 +271,7 @@ class ProviderOriginJournalTests(unittest.TestCase):
                 query_binding=query,
                 accepted_success_statuses=frozenset({200, 201}),
             )
-            self.assertEqual(observation.response_binding.http_status, 201)
+            self.assertEqual(observation.http_status, 201)
 
     def test_bybit_testnet_and_demo_origin_identity_cannot_cross_replay(self):
         kwargs = dict(

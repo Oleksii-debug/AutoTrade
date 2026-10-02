@@ -640,7 +640,7 @@ def _retained_posix_relative_directory(
         )
     current = os.dup(root_descriptor)
     try:
-        for part in parts:
+        for index, part in enumerate(parts):
             if not part or part in {".", ".."} or "/" in part or "\\" in part:
                 raise FoundationStagingError(
                     "POSIX retained directory component is not canonical"
@@ -658,7 +658,7 @@ def _retained_posix_relative_directory(
                     raise FoundationStagingError(
                         "POSIX retained directory component is missing"
                     ) from None
-                if len(parts) != 1:
+                if index != len(parts) - 1:
                     raise FoundationStagingError(
                         "POSIX missing nested staging parent requires "
                         "pre-existing root-authorized directories"

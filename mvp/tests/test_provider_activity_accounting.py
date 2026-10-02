@@ -112,6 +112,7 @@ class ProviderActivityAccountingTests(unittest.TestCase):
             provider_id="ALPACA",
             account_id="shared-account",
             environment="LIVE",
+            provider_environment="LIVE",
             activity_id="shared-id",
         )
         self.assertNotEqual(paper, live)
@@ -121,6 +122,7 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                 provider_id="ALPACA",
                 account_id="shared-account",
                 environment="LIVE",
+                provider_environment="LIVE",
             ),
         )
 

@@ -29,6 +29,16 @@ from autotrade_research.features.causal import (
 
 
 _SHA256_HEX = frozenset("0123456789abcdef")
+_SCIENTIFIC_DECIMAL_POLICY_ID = "WP34_DECIMAL_V1_PREC50_HALF_EVEN"
+_SCIENTIFIC_DECIMAL_CONTEXT = Context(
+    prec=50,
+    rounding=ROUND_HALF_EVEN,
+    Emin=-999999,
+    Emax=999999,
+    capitals=1,
+    clamp=0,
+)
+
 
 
 def _text(value: object, *, name: str) -> str:
@@ -136,6 +146,7 @@ class HistoricalFeatureInputSpec:
                 "window_count": self.window_count,
                 "event_kinds": list(self.event_kinds),
                 "feature_name": self.feature_name,
+                "decimal_policy_id": _SCIENTIFIC_DECIMAL_POLICY_ID,
             }
         )
 
@@ -228,12 +239,16 @@ def authoritative_feature_points(
     seen: set[tuple[object, ...]] = set()
     for source in sources:
         try:
-            point = rolling_return(
-                sources,
-                symbol=source.symbol,
-                decision_time=source.available_at,
-                count=spec.window_count,
-            )
+            # Rolling division is statistical arithmetic, not financial-money
+            # authority, but it still must be reproducible. Use one explicit
+            # policy instead of whichever Decimal context a caller left active.
+            with localcontext(_SCIENTIFIC_DECIMAL_CONTEXT):
+                point = rolling_return(
+                    sources,
+                    symbol=source.symbol,
+                    decision_time=source.available_at,
+                    count=spec.window_count,
+                )
         except ValueError as error:
             if str(error) == "insufficient causally available observations":
                 continue
@@ -440,7 +455,8 @@ class AuthoritativeFoldNormalizer:
             )
         if candidates[0] != point:
             raise ValueError("caller validation point differs from authoritative population")
-        return self.fold_normalizer.transform_validation(point, fold=fold)
+        with localcontext(_SCIENTIFIC_DECIMAL_CONTEXT):
+            return self.fold_normalizer.transform_validation(point, fold=fold)
 
 
 def _fit_from_population(
@@ -450,11 +466,12 @@ def _fit_from_population(
     spec: HistoricalFeatureInputSpec,
 ) -> FoldNormalizer:
     points = authoritative_feature_points(population, spec=spec)
-    return fit_fold_normalizer(
-        points,
-        fold=fold,
-        feature_name=spec.feature_name,
-    )
+    with localcontext(_SCIENTIFIC_DECIMAL_CONTEXT):
+        return fit_fold_normalizer(
+            points,
+            fold=fold,
+            feature_name=spec.feature_name,
+        )
 
 
 def fit_authoritative_fold_normalizer(

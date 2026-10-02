@@ -1456,7 +1456,7 @@ class AuthoritativeRiskSnapshot:
         object.__setattr__(self, "resolved_risk_policy", resolved_policy)
 
     def _identity_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "context_fingerprint": _risk_context_fingerprint(self.context),
             "context_state_version": self.context.state_version,
             "risk_policy_fingerprint": _risk_policy_fingerprint(self.risk_policy),
@@ -1479,12 +1479,12 @@ class AuthoritativeRiskSnapshot:
             "evaluated_at": self.evaluated_at,
             "valid_until": self.valid_until,
             "evidence_refs": dict(self.evidence_refs.items()),
-            "quantitative_risk_policy_authority": (
-                None
-                if self.resolved_risk_policy is None
-                else self.resolved_risk_policy.evidence_payload
-            ),
         }
+        if self.resolved_risk_policy is not None:
+            payload["quantitative_risk_policy_authority"] = (
+                self.resolved_risk_policy.evidence_payload
+            )
+        return payload
 
     @property
     def snapshot_id(self) -> str:

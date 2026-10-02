@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -18,12 +19,11 @@ from mvp.autotrade_mvp.capabilities import (
     derive_capability_snapshot,
 )
 from mvp.autotrade_mvp.dispatch import (
-    ExactJsonTransportResponse,
     GuardedDispatcher,
     load_submission_response_binding,
     stable_client_order_id,
 )
-from mvp.autotrade_mvp.persistence import JournalStore
+from mvp.autotrade_mvp.persistence import JournalStore, canonical_json
 from mvp.autotrade_mvp.provider_core import observe_submission_json_response
 
 
@@ -72,7 +72,7 @@ def durable_submission(payload, *, intent_id):
     client_order_id = stable_client_order_id(
         "BYBIT",
         intent_id,
-        environment="SIMULATION",
+        environment="LIVE",
         account_id="contract-account",
     )
     prepared = prepare_order_submission(
@@ -98,40 +98,71 @@ def durable_submission(payload, *, intent_id):
         ensure_ascii=False,
         allow_nan=False,
     ).encode("utf-8")
+    submission_scope = {
+        "endpoint": prepared.endpoint,
+        "prepared_request_sha256": prepared.body_sha256,
+        "capability_snapshot_ids": list(prepared.capability_snapshot_ids),
+        "instrument_versions": list(prepared.instrument_versions),
+    }
     with TemporaryDirectory() as directory:
         store = JournalStore(f"{directory}/journal.sqlite3")
-        # Keep the MAINNET/LIVE provider request contract intact, but persist
-        # the synthetic response through a SIMULATION dispatcher only.
         dispatcher = GuardedDispatcher(
             store,
-            environment="SIMULATION",
+            environment="LIVE",
             account_id="contract-account",
-            owner_token="contract-owner",
+            owner_token="contract-fixture-owner",
         )
-        outcome = dispatcher.dispatch(
+        scope_hash = "sha256:" + sha256(
+            canonical_json(submission_scope).encode("utf-8")
+        ).hexdigest()
+        dispatcher._append(
             attempt_id=attempt_id,
-            intent_id=intent_id,
-            intent_hash="contract-intent-hash",
-            provider="BYBIT",
-            request=prepared.body,
-            now="2026-09-24T20:00:00Z",
-            authority_check=lambda _hash, _now: (True, "allowed"),
-            transport_send=lambda _cid, _request, guard: (
-                guard(),
-                ExactJsonTransportResponse(raw),
-            )[1],
-            submission_scope={
-                "endpoint": prepared.endpoint,
-                "prepared_request_sha256": prepared.body_sha256,
-                "capability_snapshot_ids": list(prepared.capability_snapshot_ids),
-                "instrument_versions": list(prepared.instrument_versions),
+            event_type="SubmissionPrepared",
+            version=1,
+            payload={
+                "attempt_id": attempt_id,
+                "intent_id": intent_id,
+                "intent_hash": "contract-intent-hash",
+                "provider": "BYBIT",
+                "request_hash": prepared.body_sha256,
+                "client_order_id": client_order_id,
+                "environment": "LIVE",
+                "account_id": "contract-account",
+                "owner_token": dispatcher.owner_token,
+                "owner_epoch": dispatcher.owner_epoch,
+                "prepared_at": "2026-09-24T20:00:00Z",
+                "submission_scope": submission_scope,
+                "submission_scope_hash": scope_hash,
             },
+            now="2026-09-24T20:00:00Z",
         )
-        if outcome.status != "SENT":
-            raise AssertionError(f"guarded dispatch did not persist SENT: {outcome}")
+        dispatcher._append(
+            attempt_id=attempt_id,
+            event_type="SubmissionSending",
+            version=2,
+            payload={
+                "client_order_id": client_order_id,
+                "owner_token": dispatcher.owner_token,
+                "owner_epoch": dispatcher.owner_epoch,
+                "reason": "final_send_barrier_passed",
+            },
+            now="2026-09-24T20:00:00Z",
+        )
+        dispatcher._append(
+            attempt_id=attempt_id,
+            event_type="SubmissionSent",
+            version=3,
+            payload={
+                "client_order_id": client_order_id,
+                "response_text": raw.decode("utf-8"),
+                "response_sha256": "sha256:" + sha256(raw).hexdigest(),
+                "response_encoding": "utf-8-json",
+            },
+            now="2026-09-24T20:00:00Z",
+        )
         binding = load_submission_response_binding(
             store,
-            environment="SIMULATION",
+            environment="LIVE",
             account_id="contract-account",
             attempt_id=attempt_id,
         )

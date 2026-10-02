@@ -41,7 +41,7 @@ NOW_DT = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 NOW = "2026-09-24T20:00:00Z"
 
 
-def futures_read_capability(*, account_id="paper-1"):
+def futures_read_capability(*, account_id="paper-1", provider_environment="DEMO"):
     observed_at = NOW_DT - timedelta(hours=1)
     claims = tuple(
         CapabilityClaim(
@@ -50,6 +50,7 @@ def futures_read_capability(*, account_id="paper-1"):
             account_id=account_id,
             entity_id="futures-api",
             environment="PAPER",
+            provider_environment=provider_environment,
             instrument_version="PI_XBTUSD@v1",
             observed_at=observed_at,
             expires_at=NOW_DT + timedelta(hours=1),
@@ -76,13 +77,23 @@ def futures_read_capability(*, account_id="paper-1"):
     )
 
 
-def futures_position_observation(payload, *, account_id="paper-1", endpoint="/api/history/v3/positions"):
+def futures_position_observation(
+    payload,
+    *,
+    account_id="paper-1",
+    provider_environment="DEMO",
+    endpoint="/api/history/v3/positions",
+):
     binding = prepare_authenticated_read_query(
-        capability=futures_read_capability(account_id=account_id),
+        capability=futures_read_capability(
+            account_id=account_id,
+            provider_environment=provider_environment,
+        ),
         surface=Surface.AUTHENTICATED_READ,
         endpoint=endpoint,
         query={},
         at=NOW_DT,
+        provider_environment=provider_environment,
     )
     return observe_authenticated_json_response(
         query_binding=binding,
@@ -568,6 +579,7 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
         self.assertEqual(fill.trade_time, "2026-09-24T20:00:00.123Z")
         self.assertEqual(fill.account_id, "paper-1")
         self.assertEqual(fill.environment, "PAPER")
+        self.assertEqual(fill.provider_environment, "DEMO")
 
     def test_position_history_fallback_cannot_complete_financial_reconciliation(self):
         fills = parse_position_executions(
@@ -599,6 +611,7 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
             provider_id="KRAKEN",
             account_id="paper-1",
             environment="PAPER",
+            provider_environment="DEMO",
             local_cash={},
             provider_cash={},
             local_positions={},
@@ -609,6 +622,7 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
                 provider_id="KRAKEN",
                 account_id="paper-1",
                 environment="PAPER",
+                provider_environment="DEMO",
                 mode="ATOMIC",
                 query_started_at="2026-09-24T19:59:00Z",
                 query_completed_at="2026-09-24T20:01:00Z",
@@ -667,26 +681,29 @@ class KrakenFuturesAdapterTests(unittest.TestCase):
             "cannot self-assert provider exclusion semantics",
         ):
             coverage_evidence(
+                account_id="paper-1",
+                environment="PAPER",
+                provider_environment="DEMO",
                 surface="EXECUTIONS",
                 coverage_start="2026-09-24T19:00:00Z",
                 coverage_end="2026-09-24T21:00:00Z",
                 pagination_complete=True,
                 consistency_horizon_satisfied=True,
                 qualified_exclusion_semantics=True,
-            
-                account_id="paper-1",
-                environment="PAPER",)
+            )
 
     def test_absence_semantics_default_fail_closed(self):
         evidence = coverage_evidence(
+            account_id="paper-1",
+            environment="PAPER",
+            provider_environment="DEMO",
             surface="EXECUTIONS",
             coverage_start="2026-09-24T19:00:00Z",
             coverage_end="2026-09-24T21:00:00Z",
             pagination_complete=True,
             consistency_horizon_satisfied=True,
-        
-            account_id="paper-1",
-            environment="PAPER",)
+        )
+        self.assertEqual(evidence.provider_environment, "DEMO")
         self.assertFalse(evidence.provider_semantics_exclude_execution)
         self.assertFalse(
             evidence.proves_absence_for(datetime(2026, 9, 24, 20, tzinfo=timezone.utc))

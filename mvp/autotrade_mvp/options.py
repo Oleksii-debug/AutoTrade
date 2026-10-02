@@ -13,7 +13,7 @@ import json
 from typing import Iterable, Literal, Mapping
 from uuid import UUID
 
-from research.autotrade_research.artifacts.store import ArtifactStore
+from autotrade_runtime.artifacts.store import ArtifactStore
 
 from .accounting import JournalTransaction, posting, validate_transaction
 from .exact_decimal import ExactDecimalError, canonical_decimal_text

@@ -14,11 +14,11 @@ from decimal import Decimal
 from typing import Iterable, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from research.autotrade_research.artifacts.store import (
+from autotrade_runtime.artifacts.store import (
     ArtifactIntegrityError,
     ArtifactStore,
 )
-from research.autotrade_research.io.strict_json import strict_json_loads
+from autotrade_runtime.strict_json import strict_json_loads
 
 from .persistence import JournalStore, canonical_json, payload_digest
 from .settlement import (

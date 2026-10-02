@@ -875,6 +875,7 @@ class KrakenSpotPageEvidence:
     total_count: int
     evidence_ref: str
     filter_items: tuple[tuple[str, str], ...]
+    provider_environment: str | None = None
     _factory_token: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -895,6 +896,14 @@ class KrakenSpotPageEvidence:
             self,
             "environment",
             _environment(self.environment),
+        )
+        provider_environment = self.provider_environment
+        if provider_environment is None:
+            provider_environment = self.environment
+        object.__setattr__(
+            self,
+            "provider_environment",
+            _text(provider_environment, name="provider_environment").upper(),
         )
         for name in ("offset", "limit", "record_count", "total_count"):
             value = getattr(self, name)
@@ -1004,6 +1013,10 @@ class KrakenSpotPaginationCoverage:
                 raise KrakenSpotAdapterError(
                     "Kraken pagination account/environment scope changed during coverage"
                 )
+            if page.provider_environment != first.provider_environment:
+                raise KrakenSpotAdapterError(
+                    "Kraken pagination provider-domain scope changed during coverage"
+                )
             if page.total_count != first.total_count:
                 raise KrakenSpotAdapterError(
                     "Kraken pagination total count changed during coverage"
@@ -1095,6 +1108,14 @@ class KrakenSpotPaginationCoverage:
         first = self._pages[0]
         return first.account_id, first.environment
 
+    @property
+    def provider_environment(self) -> str:
+        if not self._pages:
+            raise KrakenSpotAdapterError(
+                "Kraken pagination coverage has no evidenced provider domain"
+            )
+        return self._pages[0].provider_environment
+
 
 def pagination_page_from_observation(
     observation: ProviderResponseObservation,
@@ -1171,6 +1192,7 @@ def pagination_page_from_observation(
         surface=normalized,
         account_id=observation.account_id,
         environment=observation.environment,
+        provider_environment=observation.provider_environment,
         offset=offset,
         limit=limit,
         record_count=len(records),
@@ -1205,6 +1227,7 @@ class KrakenSpotOpenOrdersSnapshotEvidence:
     evidence_ref: str
     order_ids: tuple[str, ...]
     filter_items: tuple[tuple[str, str], ...]
+    provider_environment: str | None = None
     _factory_token: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -1221,6 +1244,14 @@ class KrakenSpotOpenOrdersSnapshotEvidence:
             self,
             "environment",
             _environment(self.environment),
+        )
+        provider_environment = self.provider_environment
+        if provider_environment is None:
+            provider_environment = self.environment
+        object.__setattr__(
+            self,
+            "provider_environment",
+            _text(provider_environment, name="provider_environment").upper(),
         )
         evidence = _text(self.evidence_ref, name="evidence_ref")
         if not evidence.startswith("provider-read:sha256:"):
@@ -1300,6 +1331,7 @@ def open_orders_snapshot_from_observation(
     return KrakenSpotOpenOrdersSnapshotEvidence(
         account_id=observation.account_id,
         environment=observation.environment,
+        provider_environment=observation.provider_environment,
         evidence_ref=observation.evidence_ref,
         order_ids=tuple(sorted(_text(str(value), name="provider_order_id") for value in orders)),
         filter_items=tuple(sorted((str(key), str(value)) for key, value in query.items())),
@@ -1348,6 +1380,10 @@ def absence_evidence_from_pagination(
         ):
             raise KrakenSpotAdapterError(
                 "Kraken absence evidence account/environment scope mismatch"
+            )
+        if coverage.provider_environment != open_orders.provider_environment:
+            raise KrakenSpotAdapterError(
+                "Kraken absence evidence provider-domain scope mismatch"
             )
     for name, value in (
         ("order_found", order_found),
@@ -1412,6 +1448,7 @@ def parse_trade_history(
     response = observation.payload
     account_id = observation.account_id
     environment = observation.environment
+    provider_environment = observation.provider_environment
     if not isinstance(response, Mapping):
         raise TypeError("response must be a mapping")
     raw_errors = response.get("error")
@@ -1465,6 +1502,7 @@ def parse_trade_history(
                 provider_id="KRAKEN",
                 account_id=account_id,
                 environment=environment,
+                provider_environment=provider_environment,
                 provider_execution_id=execution_id,
                 client_order_id=client_id,
                 instrument=_text(instrument_versions[pair], name="instrument_version"),
@@ -1485,6 +1523,7 @@ def coverage_evidence(
     account_id: str,
     environment: str,
     surface: str,
+    provider_environment: str,
     coverage_start: str,
     coverage_end: str,
     pagination_complete: bool,
@@ -1516,6 +1555,7 @@ def coverage_evidence(
         provider_id="KRAKEN",
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
         surface=normalized,
         coverage_start=coverage_start,
         coverage_end=coverage_end,

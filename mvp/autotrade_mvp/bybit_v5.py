@@ -1000,6 +1000,7 @@ def coverage_evidence(
     *,
     account_id: str,
     environment: str,
+    provider_environment: str,
     surface: str,
     coverage_start: str,
     coverage_end: str,
@@ -1011,7 +1012,7 @@ def coverage_evidence(
 
     The default deliberately does not claim that missing rows exclude execution.
     That stronger fact must come from recorded qualification evidence for the
-    exact endpoint/product/environment before reconciliation may use it.
+    exact endpoint/product/runtime/provider-domain before reconciliation may use it.
     """
 
     normalized = _text(surface, name="surface").upper()
@@ -1029,10 +1030,15 @@ def coverage_evidence(
     ):
         if type(value) is not bool:
             raise ProviderCoreError(f"{name} must be boolean")
+    if qualified_exclusion_semantics:
+        raise ProviderCoreError(
+            "Bybit V5 foundation cannot self-assert provider exclusion semantics"
+        )
     return CoverageSurfaceEvidence(
         provider_id="BYBIT",
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
         surface=normalized,
         coverage_start=coverage_start,
         coverage_end=coverage_end,

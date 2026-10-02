@@ -25,7 +25,7 @@ from .persistence import JournalStore
 from .provider_activity_accounting import DurableProviderEconomicBook
 from .reconciliation_journal import load_latest_reconciliation_checkpoint
 from .simulation_session import ACCOUNT, ENVIRONMENT, INITIAL_CASH, INSTRUMENT, INSTRUMENT_ID, PROVIDER, _uuid
-from research.autotrade_research.artifacts.resource_lock import ResourceLock, ResourceLockBusyError
+from autotrade_runtime.resource_lock import ResourceLock, ResourceLockBusyError
 
 
 _ECONOMIC_UNITS = frozenset({

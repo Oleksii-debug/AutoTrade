@@ -12,9 +12,7 @@ from typing import Callable, Iterable, Mapping
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from research.autotrade_research.artifacts._root_authority import (
-    trusted_authenticated_reader,
-)
+from autotrade_runtime.artifacts import trusted_authenticated_reader
 
 from .provider_domain import ProviderDomainError, normalize_provider_environment
 

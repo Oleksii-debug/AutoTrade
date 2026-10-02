@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Literal
 from uuid import UUID
 
-from autotrade_research.artifacts.store import ArtifactIntegrityError, ArtifactStore
+from autotrade_runtime.artifacts.store import ArtifactIntegrityError, ArtifactStore
 
 from .execution_oracle import assert_conservative_execution
 from .execution_realism import (

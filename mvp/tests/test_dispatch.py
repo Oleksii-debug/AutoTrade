@@ -9,6 +9,7 @@ from mvp.autotrade_mvp.dispatch import (
     ExactJsonTransportResponse,
     GuardedDispatcher,
     SubmissionResponseBinding,
+    _issue_financial_authority_check,
     load_submission_response_binding,
     stable_client_order_id,
 )
@@ -1102,13 +1103,17 @@ class DispatchTests(unittest.TestCase):
                     account_id="acct",
                 )
                 authority = AuthorityService(store)
-                authority_check = authority.dispatch_guard(
-                    "sender-fence-fixture",
+                authority_check = _issue_financial_authority_check(
+                    authority,
+                    store=store,
+                    admission_id="sender-fence-fixture",
                     account_id="acct",
                     environment=environment,
                     instrument_id="11111111-1111-4111-8111-111111111111",
                     instrument_version=1,
                     action="ORDER.SUBMIT",
+                    provider_id="SIM",
+                    provider_environment=environment,
                 )
                 outbound = 0
 
@@ -1208,13 +1213,17 @@ class DispatchTests(unittest.TestCase):
                 account_id="acct",
             )
             authority = AuthorityService(store)
-            authority_check = authority.dispatch_guard(
-                "paper-send-fixture",
+            authority_check = _issue_financial_authority_check(
+                authority,
+                store=store,
+                admission_id="paper-send-fixture",
                 account_id="acct",
                 environment="PAPER",
                 instrument_id="11111111-1111-4111-8111-111111111111",
                 instrument_version=1,
                 action="ORDER.SUBMIT",
+                provider_id="SIM",
+                provider_environment="PAPER",
             )
             outbound = 0
 

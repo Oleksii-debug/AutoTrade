@@ -159,6 +159,11 @@ def book_external_provider_cash_activity(
             "provider_id": activity.provider_id,
             "account_id": activity.account_id,
             "environment": activity.environment,
+            **(
+                {"provider_environment": activity.provider_environment}
+                if activity.provider_environment != activity.environment
+                else {}
+            ),
             "activity_id": activity.activity_id,
             "activity_type": activity.activity_type,
             "origin": activity.origin,
@@ -168,6 +173,15 @@ def book_external_provider_cash_activity(
         },
         "amount": amount_text,
     }
+    legacy_nested_domain_request: dict[str, object] | None = None
+    if domain != scope:
+        legacy_activity = dict(request["activity"])
+        legacy_activity.pop("provider_environment", None)
+        legacy_nested_domain_request = {
+            **request,
+            "activity": legacy_activity,
+        }
+
     result = {
         **_impl._scope_fields(
             provider_id=provider,
@@ -224,6 +238,7 @@ def book_external_provider_cash_activity(
             )
 
     def resolve_existing_effect() -> tuple[_impl.JournalTransaction, bool] | None:
+        replay_request: Mapping[str, object] = request
         try:
             snapshot = store.load_command_event_batch(
                 command_id=command_identity,
@@ -232,10 +247,28 @@ def book_external_provider_cash_activity(
                 idempotency_key=journal_idempotency_key,
                 request=request,
             )
-        except ValueError as error:
-            raise _impl.AccountingConflict(
-                "provider cash durable command/effect authority is invalid"
-            ) from error
+        except ValueError as current_error:
+            if legacy_nested_domain_request is None:
+                raise _impl.AccountingConflict(
+                    "provider cash durable command/effect authority is invalid"
+                ) from current_error
+            try:
+                snapshot = store.load_command_event_batch(
+                    command_id=command_identity,
+                    actor=actor,
+                    environment=scope,
+                    idempotency_key=journal_idempotency_key,
+                    request=legacy_nested_domain_request,
+                )
+            except ValueError as legacy_error:
+                raise _impl.AccountingConflict(
+                    "provider cash durable command/effect authority is invalid"
+                ) from legacy_error
+            if snapshot is None:
+                raise _impl.AccountingConflict(
+                    "provider cash durable command/effect authority is invalid"
+                ) from current_error
+            replay_request = legacy_nested_domain_request
         if snapshot is None:
             return None
         if snapshot.get("result") != result:
@@ -288,7 +321,10 @@ def book_external_provider_cash_activity(
             raise _impl.AccountingConflict(
                 "provider cash activity replay found invalid durable payload"
             )
-        if any(imported_payload.get(key) != value for key, value in request.items()):
+        if any(
+            imported_payload.get(key) != value
+            for key, value in replay_request.items()
+        ):
             raise _impl.AccountingConflict(
                 "provider cash activity replay conflicts with durable provider fact"
             )
@@ -327,7 +363,7 @@ def book_external_provider_cash_activity(
             actor=actor,
             environment=scope,
             idempotency_key=journal_idempotency_key,
-            request=request,
+            request=replay_request,
             result=result,
             state_version=int(existing_economic["aggregate_version"]),
             events=[

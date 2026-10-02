@@ -4050,25 +4050,22 @@ class AuthorityTests(unittest.TestCase):
 
 
 class DispatchGuardIssuanceIntegrationTests(unittest.TestCase):
-    def test_authority_dispatch_guard_mints_capability_for_selected_journal(self):
+    def test_authority_dispatch_guard_rejects_missing_admission_before_issuance(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
             authority = AuthorityService(store)
-            guard = authority.dispatch_guard(
-                "missing-admission",
-                account_id="paper-1",
-                environment="PAPER",
-                instrument_id=INSTRUMENT_ID,
-                instrument_version=1,
-                action="ORDER.SUBMIT",
-            )
-
-            callback, bound_store = _issued_financial_authority_binding(guard)
-            self.assertIs(bound_store, store)
-            self.assertEqual(
-                callback("intent-hash", "2026-09-24T18:01:00Z"),
-                (False, "admission_missing"),
-            )
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "financial admission is missing",
+            ):
+                authority.dispatch_guard(
+                    "missing-admission",
+                    account_id="paper-1",
+                    environment="PAPER",
+                    instrument_id=INSTRUMENT_ID,
+                    instrument_version=1,
+                    action="ORDER.SUBMIT",
+                )
 
 
 if __name__ == "__main__":

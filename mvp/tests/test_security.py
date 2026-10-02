@@ -346,14 +346,52 @@ class SecurityBoundaryTests(unittest.TestCase):
                 purpose="TRADE",
             )
 
-    def test_rotation_invalidates_old_generation(self):
+    def test_trade_rotation_cannot_activate_without_external_fence_workflow(self):
         old_handle = self._credential()
+        before = self.boundary.describe_handle(old_handle.handle_id)
+        with self.assertRaisesRegex(
+            PermissionError,
+            "verified sender-fence and reconciliation workflow",
+        ):
+            self.boundary.rotate_secret(
+                self.owner.token,
+                origin=self.owner.origin,
+                handle_id=old_handle.handle_id,
+                owner_identity="windows-user-1",
+                new_secret_value="rotated-secret",
+            )
+        self.assertEqual(self.boundary.describe_handle(old_handle.handle_id), before)
+        self.assertEqual(
+            self.boundary.resolve_for_execution(
+                self.owner.token,
+                origin=self.owner.origin,
+                handle=old_handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="TRADE",
+            ),
+            "top-secret",
+        )
+
+    def test_read_rotation_remains_local_and_invalidates_old_generation(self):
+        old_handle = self.boundary.register_secret(
+            self.owner.token,
+            origin=self.owner.origin,
+            owner_identity="windows-user-1",
+            account_id="paper-1",
+            provider="SIMULATED",
+            environment="PAPER",
+            purpose="READ",
+            secret_value="read-secret",
+        )
         new_handle = self.boundary.rotate_secret(
             self.owner.token,
             origin=self.owner.origin,
             handle_id=old_handle.handle_id,
             owner_identity="windows-user-1",
-            new_secret_value="rotated-secret",
+            new_secret_value="rotated-read-secret",
         )
         self.assertEqual(new_handle.generation, old_handle.generation + 1)
         with self.assertRaisesRegex(PermissionError, "stale"):
@@ -365,19 +403,21 @@ class SecurityBoundaryTests(unittest.TestCase):
                 account_id="paper-1",
                 provider="SIMULATED",
                 environment="PAPER",
-                purpose="TRADE",
+                purpose="READ",
             )
-        resolved = self.boundary.resolve_for_execution(
-            self.owner.token,
-            origin=self.owner.origin,
-            handle=new_handle,
-            execution_identity="windows-user-1",
-            account_id="paper-1",
-            provider="SIMULATED",
-            environment="PAPER",
-            purpose="TRADE",
+        self.assertEqual(
+            self.boundary.resolve_for_execution(
+                self.owner.token,
+                origin=self.owner.origin,
+                handle=new_handle,
+                execution_identity="windows-user-1",
+                account_id="paper-1",
+                provider="SIMULATED",
+                environment="PAPER",
+                purpose="READ",
+            ),
+            "rotated-read-secret",
         )
-        self.assertEqual(resolved, "rotated-secret")
 
     def test_withdrawal_credentials_are_not_supported(self):
         with self.assertRaises(PermissionError):
@@ -849,7 +889,16 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertIn("[REDACTED]", repr(redacted))
 
     def test_rotated_and_revoked_secret_values_remain_redacted(self):
-        old_handle = self._credential()
+        old_handle = self.boundary.register_secret(
+            self.owner.token,
+            origin=self.owner.origin,
+            owner_identity="windows-user-1",
+            account_id="paper-1",
+            provider="SIMULATED",
+            environment="PAPER",
+            purpose="READ",
+            secret_value="top-secret",
+        )
         new_handle = self.boundary.rotate_secret(
             self.owner.token,
             origin=self.owner.origin,

@@ -35,8 +35,8 @@ from .reconciliation import (
 from .reconciliation_journal import record_reconciliation_checkpoint
 from .risk import RiskContext, RiskIntent, RiskPolicy
 from .simulated_provider import SimulatedProvider
-from research.autotrade_research.artifacts.resource_lock import ResourceLock
-from research.autotrade_research.artifacts.store import ArtifactStore
+from autotrade_runtime.resource_lock import ResourceLock
+from autotrade_runtime.artifacts.store import ArtifactStore
 
 
 ACCOUNT = "canonical-sim-account"

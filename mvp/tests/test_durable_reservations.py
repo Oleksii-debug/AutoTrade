@@ -1038,6 +1038,15 @@ class DurableReservationBookTests(unittest.TestCase):
             idempotency_key="idem-unknown-no-attempt",
             reservation_id="r1",
         )
+        self.create_unknown_attempt(attempt_id="checkpoint-attempt")
+        reconciliation = self.record_reconciliation_resolution(
+            attempt_id="checkpoint-attempt",
+        )
+        evidence = self.publish_resolution_evidence(
+            artifact_id="12121212-1212-4212-8212-121212121212",
+            attempt_id="attempt-r1",
+            reconciliation_event=reconciliation,
+        )
         with self.assertRaisesRegex(
             ReservationConflict,
             "not bound to a durable submission attempt",
@@ -1049,7 +1058,7 @@ class DurableReservationBookTests(unittest.TestCase):
                 outcome="PROVEN_ABSENT",
                 provider="SIMULATED",
                 attempt_id="attempt-r1",
-                resolution_evidence=self.evidence,
+                resolution_evidence=evidence,
             )
         self.assertEqual(book.get("r1").state, "UNKNOWN")
         self.assertEqual(book.total_reserved("CASH:USD"), Decimal("70"))

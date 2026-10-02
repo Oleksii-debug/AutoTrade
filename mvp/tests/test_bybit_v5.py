@@ -1103,16 +1103,18 @@ class BybitV5AdapterTests(unittest.TestCase):
         )
         self.assertEqual(result, "2026-09-24T20:00:00.123456Z")
 
-    def test_absence_semantics_are_fail_closed_until_explicitly_qualified(self):
+    def test_absence_semantics_are_fail_closed_until_provider_qualification(self):
         evidence = coverage_evidence(
             surface="EXECUTIONS",
             coverage_start="2026-09-24T19:00:00Z",
             coverage_end="2026-09-24T21:00:00Z",
             pagination_complete=True,
             consistency_horizon_satisfied=True,
-        
             account_id="paper-1",
-            environment="PAPER",)
+            environment="PAPER",
+            provider_environment="TESTNET",
+        )
+        self.assertEqual(evidence.provider_environment, "TESTNET")
         self.assertFalse(evidence.provider_semantics_exclude_execution)
         self.assertFalse(
             evidence.proves_absence_for(
@@ -1120,21 +1122,38 @@ class BybitV5AdapterTests(unittest.TestCase):
             )
         )
 
-        qualified = coverage_evidence(
+        with self.assertRaisesRegex(
+            ProviderCoreError,
+            "cannot self-assert provider exclusion semantics",
+        ):
+            coverage_evidence(
+                surface="EXECUTIONS",
+                coverage_start="2026-09-24T19:00:00Z",
+                coverage_end="2026-09-24T21:00:00Z",
+                pagination_complete=True,
+                consistency_horizon_satisfied=True,
+                qualified_exclusion_semantics=True,
+                account_id="paper-1",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+
+        demo = coverage_evidence(
             surface="EXECUTIONS",
             coverage_start="2026-09-24T19:00:00Z",
             coverage_end="2026-09-24T21:00:00Z",
             pagination_complete=True,
             consistency_horizon_satisfied=True,
-            qualified_exclusion_semantics=True,
-        
             account_id="paper-1",
-            environment="PAPER",)
-        self.assertTrue(
-            qualified.proves_absence_for(
-                datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
-            )
+            environment="PAPER",
+            provider_environment="DEMO",
         )
+        self.assertEqual(demo.provider_environment, "DEMO")
+        self.assertNotEqual(
+            demo.provider_environment,
+            evidence.provider_environment,
+        )
+
 
 
 if __name__ == "__main__":

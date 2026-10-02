@@ -1,3 +1,4 @@
+from copy import deepcopy
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
@@ -21,6 +22,7 @@ def activity(
     provider_id="ALPACA",
     account_id="paper-1",
     environment="PAPER",
+    provider_environment=None,
     activity_id="cash-1",
     activity_type="DEPOSIT",
     origin="EXTERNAL",
@@ -36,6 +38,7 @@ def activity(
         provider_id=provider_id,
         account_id=account_id,
         environment=environment,
+        provider_environment=provider_environment,
         activity_id=activity_id,
         activity_type=activity_type,
         origin=origin,
@@ -558,6 +561,129 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                 (),
             )
 
+    def test_narrow_provider_domain_is_bound_into_durable_activity_evidence(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            evidence = activity(
+                provider_id="BYBIT",
+                account_id="paper-1",
+                provider_environment="TESTNET",
+                activity_id="bybit-domain-deposit",
+                signed_amount="10",
+            )
+            _transaction, inserted = book_external_provider_cash_activity(
+                store,
+                provider_id="BYBIT",
+                account_id="paper-1",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                activity=evidence,
+                observed_at="2026-09-24T18:03:00Z",
+            )
+            self.assertTrue(inserted)
+            activity_identity = _activity_identity(
+                provider_id="BYBIT",
+                account_id="paper-1",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                activity_id="bybit-domain-deposit",
+            )
+            imported = store.load_events("provider_activity", activity_identity)
+            self.assertEqual(len(imported), 1)
+            self.assertEqual(imported[0]["payload"]["provider_environment"], "TESTNET")
+            self.assertEqual(
+                imported[0]["payload"]["activity"]["provider_environment"],
+                "TESTNET",
+            )
+
+    def test_narrow_domain_historical_nested_omission_replays_after_upgrade(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.sqlite3"
+            store = JournalStore(path)
+            evidence = activity(
+                provider_id="BYBIT",
+                account_id="paper-legacy",
+                provider_environment="TESTNET",
+                activity_id="bybit-legacy-domain-deposit",
+                signed_amount="10",
+            )
+            original_commit = store.commit_command
+
+            def commit_historical_facade_shape(**kwargs):
+                legacy_request = deepcopy(kwargs["request"])
+                legacy_request["activity"].pop("provider_environment", None)
+                legacy_events = []
+                for envelope, topic in kwargs["events"]:
+                    historical = deepcopy(envelope)
+                    if historical.get("event_type") == "ProviderActivityImported":
+                        historical["payload"]["activity"].pop(
+                            "provider_environment",
+                            None,
+                        )
+                        historical["payload_hash"] = payload_digest(
+                            historical["payload"]
+                        )
+                    legacy_events.append((historical, topic))
+                kwargs["request"] = legacy_request
+                kwargs["events"] = legacy_events
+                return original_commit(**kwargs)
+
+            with patch.object(
+                store,
+                "commit_command",
+                side_effect=commit_historical_facade_shape,
+            ):
+                first, inserted = book_external_provider_cash_activity(
+                    store,
+                    provider_id="BYBIT",
+                    account_id="paper-legacy",
+                    environment="PAPER",
+                    provider_environment="TESTNET",
+                    activity=evidence,
+                    observed_at="2026-09-24T18:03:00Z",
+                )
+            self.assertTrue(inserted)
+
+            reopened = JournalStore(path)
+            second, replay_inserted = book_external_provider_cash_activity(
+                reopened,
+                provider_id="BYBIT",
+                account_id="paper-legacy",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                activity=evidence,
+                observed_at="2026-09-24T18:03:00Z",
+            )
+            self.assertFalse(replay_inserted)
+            self.assertEqual(first, second)
+
+            activity_identity = _activity_identity(
+                provider_id="BYBIT",
+                account_id="paper-legacy",
+                environment="PAPER",
+                provider_environment="TESTNET",
+                activity_id="bybit-legacy-domain-deposit",
+            )
+            imported = reopened.load_events("provider_activity", activity_identity)
+            self.assertEqual(len(imported), 1)
+            self.assertEqual(imported[0]["payload"]["provider_environment"], "TESTNET")
+            self.assertNotIn(
+                "provider_environment",
+                imported[0]["payload"]["activity"],
+            )
+            book_identity = _book_id(
+                provider_id="BYBIT",
+                account_id="paper-legacy",
+                environment="PAPER",
+                provider_environment="TESTNET",
+            )
+            economics = reopened.load_events("economic_book", book_identity)
+            self.assertEqual(len(economics), 1)
+            self.assertEqual(
+                economics[0]["payload"]["provider_environment"],
+                "TESTNET",
+            )
+
     def test_withdrawal_requires_negative_amount_and_books_exactly(self):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
@@ -669,8 +795,8 @@ class ProviderActivityAccountingTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = JournalStore(Path(directory) / "journal.sqlite3")
             for candidate in (
-                activity(provider_id="BYBIT", account_id="acct", activity_id="unknown", origin="UNKNOWN"),
-                activity(provider_id="BYBIT", account_id="acct", activity_id="auto", origin="AUTOTRADE"),
+                activity(provider_id="BYBIT", account_id="acct", provider_environment="TESTNET", activity_id="unknown", origin="UNKNOWN"),
+                activity(provider_id="BYBIT", account_id="acct", provider_environment="TESTNET", activity_id="auto", origin="AUTOTRADE"),
             ):
                 with self.assertRaisesRegex(ValueError, "MANUAL or EXTERNAL"):
                     book_paper_activity(
@@ -690,6 +816,7 @@ class ProviderActivityAccountingTests(unittest.TestCase):
                     activity=activity(
                         provider_id="BYBIT",
                         account_id="acct",
+                        provider_environment="TESTNET",
                         activity_id="adjustment",
                         activity_type="CASH_ADJUSTMENT",
                     ),

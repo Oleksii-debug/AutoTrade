@@ -107,13 +107,17 @@ class PaperLiveAuthorityIssuanceTests(unittest.TestCase):
                     owner_epoch=1,
                 )
                 foreign_service = AuthorityService(foreign_store)
-                issued_elsewhere = foreign_service.dispatch_guard(
-                    "missing-admission",
+                issued_elsewhere = _issue_financial_authority_check(
+                    foreign_service,
+                    store=foreign_store,
+                    admission_id="missing-admission",
                     account_id="acct",
                     environment=environment,
                     instrument_id="11111111-1111-4111-8111-111111111111",
                     instrument_version=1,
                     action="ORDER.SUBMIT",
+                    provider_id="PROVIDER",
+                    provider_environment=environment,
                 )
                 outbound = 0
 

@@ -411,6 +411,11 @@ class SecurityBoundary:
     ) -> CredentialHandle:
         self.validate_session(token, required_roles={"OWNER"}, origin=origin)
         current = self._current_handle(handle_id)
+        if current.purpose == "TRADE":
+            raise PermissionError(
+                "TRADE credential rotation requires the verified sender-fence "
+                "and reconciliation workflow before a successor generation can activate"
+            )
         return self._credential_vault.rotate(
             current,
             execution_identity=_required_text(owner_identity, name="owner_identity"),

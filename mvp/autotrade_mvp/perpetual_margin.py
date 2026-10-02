@@ -16,7 +16,7 @@ import json
 from typing import Literal, Sequence
 from uuid import UUID
 
-from research.autotrade_research.artifacts.store import ArtifactStore
+from autotrade_runtime.artifacts.store import ArtifactStore
 
 from .capabilities import CapabilitySnapshot
 from .exact_decimal import (

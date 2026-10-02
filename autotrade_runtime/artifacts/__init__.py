@@ -123,7 +123,11 @@ from ._generation_bound_read import install_generation_bound_reads
 install_generation_bound_reads()
 del install_generation_bound_reads
 
-from ._root_authority import install_root_authority, trusted_authenticated_reader
+from ._root_authority import (
+    install_root_authority,
+    require_trusted_authenticated_reader,
+    trusted_authenticated_reader,
+)
 
 install_root_authority()
 del install_root_authority
@@ -141,5 +145,6 @@ __all__ = [
     "ArtifactIntegrityError",
     "ArtifactStore",
     "CANONICAL_ARTIFACT_STORE_MODULE",
+    "require_trusted_authenticated_reader",
     "trusted_authenticated_reader",
 ]

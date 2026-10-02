@@ -78,6 +78,7 @@ def prepared(client_order_id="bybit-order-1"):
         position_mode="HEDGE",
         account_id="bybit-account",
         environment="PAPER",
+        provider_environment="TESTNET",
         instrument_version="BTCUSDT@1",
         permission_scope="BYBIT.LINEAR.ORDER.WRITE",
         additional_permission_scopes=("ORDER_WRITE",),

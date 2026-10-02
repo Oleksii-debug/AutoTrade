@@ -566,6 +566,7 @@ class BybitV5AdapterTests(unittest.TestCase):
         capability = submission_write_capability(
             account_id=account_id,
             environment=runtime_environment,
+            provider_environment=provider_environment,
         )
         prepared = prepare_order_submission(
             capability=capability,

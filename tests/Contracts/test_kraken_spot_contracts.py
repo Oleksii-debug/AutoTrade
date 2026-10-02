@@ -16,7 +16,6 @@ from mvp.autotrade_mvp.capabilities import (
 from mvp.autotrade_mvp.dispatch import (
     ExactJsonTransportResponse,
     GuardedDispatcher,
-    _issue_financial_authority_check,
     load_submission_response_binding,
     stable_client_order_id,
 )
@@ -55,11 +54,17 @@ class KrakenSpotContractTests(unittest.TestCase):
             format_checker=FormatChecker(),
         ).validate(value)
 
-    def prepared(self, intent_id, *, environment="LIVE"):
+    def prepared(
+        self,
+        intent_id,
+        *,
+        environment="LIVE",
+        client_id_environment=None,
+    ):
         client_order_id = stable_client_order_id(
             "KRAKEN",
             intent_id,
-            environment=environment,
+            environment=client_id_environment or environment,
             account_id=ACCOUNT_ID,
             max_length=36,
             client_id_format="UUID",
@@ -114,7 +119,10 @@ class KrakenSpotContractTests(unittest.TestCase):
         )
 
     def durable_observation(self, payload, *, intent_id):
-        prepared_request = self.prepared(intent_id)
+        prepared_request = self.prepared(
+            intent_id,
+            client_id_environment="SIMULATION",
+        )
         attempt_id = str(uuid4())
         raw = json.dumps(
             payload,
@@ -125,9 +133,11 @@ class KrakenSpotContractTests(unittest.TestCase):
         ).encode("utf-8")
         with TemporaryDirectory() as directory:
             store = JournalStore(f"{directory}/journal.sqlite3")
+            # Provider request/capability stays LIVE; only the synthetic
+            # persistence path is SIMULATION and therefore has no live authority.
             dispatcher = GuardedDispatcher(
                 store,
-                environment=prepared_request.environment,
+                environment="SIMULATION",
                 account_id=prepared_request.account_id,
                 owner_token="contract-owner",
             )
@@ -138,17 +148,13 @@ class KrakenSpotContractTests(unittest.TestCase):
                 provider="KRAKEN",
                 request=prepared_request.body,
                 now="2026-09-24T20:00:00Z",
-                authority_check=_issue_financial_authority_check(
-                    lambda _hash, _now: (True, "allowed"),
-                    store=store,
-                ),
+                authority_check=lambda _hash, _now: (True, "allowed"),
                 transport_send=lambda _cid, _request, guard: (
                     guard(),
                     ExactJsonTransportResponse(raw),
                 )[1],
                 client_id_max_length=36,
                 client_id_format="UUID",
-                sender_check=lambda _owner, _epoch: None,
                 submission_scope={
                     "endpoint": prepared_request.endpoint,
                     "prepared_request_sha256": prepared_request.body_sha256,
@@ -163,7 +169,7 @@ class KrakenSpotContractTests(unittest.TestCase):
             self.assertEqual(outcome.status, "SENT")
             binding = load_submission_response_binding(
                 store,
-                environment=prepared_request.environment,
+                environment="SIMULATION",
                 account_id=prepared_request.account_id,
                 attempt_id=attempt_id,
             )

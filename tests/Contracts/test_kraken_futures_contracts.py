@@ -16,7 +16,6 @@ from mvp.autotrade_mvp.capabilities import (
 from mvp.autotrade_mvp.dispatch import (
     ExactJsonTransportResponse,
     GuardedDispatcher,
-    _issue_financial_authority_check,
     load_submission_response_binding,
     stable_client_order_id,
 )
@@ -69,11 +68,11 @@ def capability():
     )
 
 
-def prepared(intent_id: str):
+def prepared(intent_id: str, *, client_id_environment: str = "PAPER"):
     client_id = stable_client_order_id(
         "KRAKEN",
         intent_id,
-        environment="PAPER",
+        environment=client_id_environment,
         account_id="contract-account",
         max_length=36,
         client_id_format="UUID",
@@ -93,14 +92,16 @@ def prepared(intent_id: str):
 
 
 def durable_observation(payload, *, intent_id: str):
-    request = prepared(intent_id)
+    request = prepared(intent_id, client_id_environment="SIMULATION")
     attempt = str(uuid4())
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     with TemporaryDirectory() as directory:
         store = JournalStore(f"{directory}/journal.sqlite3")
+        # Exercise durable response provenance in SIMULATION; the prepared
+        # provider request itself remains the qualified PAPER/DEMO contract.
         dispatcher = GuardedDispatcher(
             store,
-            environment="PAPER",
+            environment="SIMULATION",
             account_id="contract-account",
             owner_token="owner",
         )
@@ -111,17 +112,13 @@ def durable_observation(payload, *, intent_id: str):
             provider="KRAKEN",
             request=request.body,
             now=NOW,
-            authority_check=_issue_financial_authority_check(
-                    lambda _hash, _now: (True, "allowed"),
-                    store=store,
-                ),
+            authority_check=lambda _hash, _now: (True, "allowed"),
             transport_send=lambda _cid, _request, guard: (
                 guard(),
                 ExactJsonTransportResponse(raw),
             )[1],
             client_id_max_length=36,
             client_id_format="UUID",
-            sender_check=lambda _owner, _epoch: None,
             submission_scope={
                 "endpoint": request.endpoint,
                 "prepared_request_sha256": request.body_sha256,
@@ -133,7 +130,7 @@ def durable_observation(payload, *, intent_id: str):
             raise AssertionError("contract fixture submission was not SENT")
         binding = load_submission_response_binding(
             store,
-            environment="PAPER",
+            environment="SIMULATION",
             account_id="contract-account",
             attempt_id=attempt,
         )

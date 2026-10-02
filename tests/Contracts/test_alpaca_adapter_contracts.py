@@ -21,7 +21,6 @@ from mvp.autotrade_mvp.capabilities import (
 from mvp.autotrade_mvp.dispatch import (
     ExactJsonTransportResponse,
     GuardedDispatcher,
-    _issue_financial_authority_check,
     load_submission_response_binding,
     stable_client_order_id,
 )
@@ -93,7 +92,7 @@ def durable_observation(*, payload, intent_id: str):
     client_order_id = stable_client_order_id(
         "ALPACA",
         intent_id,
-        environment="PAPER",
+        environment="SIMULATION",
         account_id="contract-account",
     )
     request = prepared(client_order_id)
@@ -106,9 +105,11 @@ def durable_observation(*, payload, intent_id: str):
     ).encode("utf-8")
     with TemporaryDirectory() as directory:
         store = JournalStore(f"{directory}/journal.sqlite3")
+        # Provider request remains a PAPER contract fixture; durable dispatch is
+        # SIMULATION so this schema test never fabricates PAPER trading authority.
         dispatcher = GuardedDispatcher(
             store,
-            environment="PAPER",
+            environment="SIMULATION",
             account_id="contract-account",
             owner_token="contract-owner",
         )
@@ -119,15 +120,11 @@ def durable_observation(*, payload, intent_id: str):
             provider="ALPACA",
             request=request.body,
             now="2026-09-24T20:00:00Z",
-            authority_check=_issue_financial_authority_check(
-                    lambda _hash, _now: (True, "allowed"),
-                    store=store,
-                ),
+            authority_check=lambda _hash, _now: (True, "allowed"),
             transport_send=lambda _cid, _request, guard: (
                 guard(),
                 ExactJsonTransportResponse(raw),
             )[1],
-            sender_check=lambda _owner, _epoch: None,
             submission_scope={
                 "endpoint": request.endpoint,
                 "prepared_request_sha256": request.body_sha256,
@@ -139,7 +136,7 @@ def durable_observation(*, payload, intent_id: str):
             raise AssertionError(f"guarded dispatch did not persist SENT: {outcome}")
         binding = load_submission_response_binding(
             store,
-            environment="PAPER",
+            environment="SIMULATION",
             account_id="contract-account",
             attempt_id=attempt_id,
         )

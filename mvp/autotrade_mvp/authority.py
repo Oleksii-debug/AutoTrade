@@ -2942,8 +2942,7 @@ class AuthorityService:
                 )
         try:
             regenerated_availability = (
-                current_availability_evidence = (
-                    load_account_resource_availability_evidence(
+                load_account_resource_availability_evidence(
                     self.store,
                     checkpoint_event_id=_text(
                         availability_evidence.get("checkpoint_event_id"),

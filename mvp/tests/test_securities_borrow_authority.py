@@ -716,7 +716,7 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
                 checkpoint["payload"]["borrow_differences"],
                 {key: "-1"},
             )
-            with self.assertRaisesRegex(ValueError, "blocked"):
+            with self.assertRaisesRegex(\n                ValueError,\n                "complete consistent reconciliation",\n            ):
                 load_account_resource_availability_evidence(
                     store,
                     checkpoint_event_id=checkpoint["event_id"],

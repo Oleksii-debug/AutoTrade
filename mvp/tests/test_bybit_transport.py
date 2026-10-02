@@ -7,7 +7,7 @@ from mvp.autotrade_mvp.bybit_v5 import (
     guarded_order_projection,
     prepare_order_submission,
 )
-from mvp.autotrade_mvp.dispatch import GuardedDispatcher, stable_client_order_id
+from mvp.autotrade_mvp.dispatch import GuardedDispatcher, stable_client_order_id, _issue_financial_authority_check
 from mvp.autotrade_mvp.persistence import JournalStore
 from mvp.autotrade_mvp.provider_transport import (
     BYBIT_V5_ENDPOINT_POLICIES,
@@ -586,7 +586,9 @@ class BybitV5SharedTransportTests(unittest.TestCase):
                 provider="BYBIT",
                 request=projected,
                 now="2026-09-25T10:00:00Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=_issue_financial_authority_check(
+                    lambda _hash, _now: (True, "allowed"), store=store
+                ),
                 transport_send=transport,
                 sender_check=lambda _owner, _epoch: None,
                 final_barrier_clock=lambda: "2026-09-25T10:00:01Z",
@@ -609,7 +611,9 @@ class BybitV5SharedTransportTests(unittest.TestCase):
                 provider="BYBIT",
                 request=projected,
                 now="2026-09-25T10:00:02Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=_issue_financial_authority_check(
+                    lambda _hash, _now: (True, "allowed"), store=store
+                ),
                 transport_send=transport,
                 sender_check=lambda _owner, _epoch: None,
                 submission_scope={

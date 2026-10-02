@@ -4,6 +4,7 @@ from unittest.mock import patch
 from uuid import UUID
 
 from mvp.autotrade_mvp.dispatch import (
+    _issue_financial_authority_check,
     DispatchBlocked,
     ExactJsonTransportResponse,
     GuardedDispatcher,
@@ -177,7 +178,9 @@ class DispatchTests(unittest.TestCase):
                     provider="provider",
                     request={},
                     now="2026-09-24T18:00:00Z",
-                    authority_check=authority,
+                    authority_check=_issue_financial_authority_check(
+                        authority, store=store
+                    ),
                     transport_send=transport,
                     sender_check=lambda _owner, _epoch: None,
                 )
@@ -1104,7 +1107,9 @@ class DispatchTests(unittest.TestCase):
                     provider="sim",
                     request={},
                     now="2026-09-24T18:00:00Z",
-                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    authority_check=_issue_financial_authority_check(
+                        lambda _hash, _now: (True, "allowed"), store=store
+                    ),
                     transport_send=transport,
                 )
                 self.assertEqual(result.status, "BLOCKED")
@@ -1155,7 +1160,9 @@ class DispatchTests(unittest.TestCase):
                 provider="sim",
                 request={},
                 now="2026-09-24T18:00:00Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=_issue_financial_authority_check(
+                    lambda _hash, _now: (True, "allowed"), store=store
+                ),
                 transport_send=transport,
                 sender_check=recovery.validate_sender,
             )
@@ -1194,7 +1201,9 @@ class DispatchTests(unittest.TestCase):
                 provider="sim",
                 request={},
                 now="2026-09-24T18:00:00Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=_issue_financial_authority_check(
+                    lambda _hash, _now: (True, "allowed"), store=store
+                ),
                 transport_send=transport,
                 sender_check=recovery.validate_sender,
             )

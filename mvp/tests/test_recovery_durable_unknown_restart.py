@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from mvp.autotrade_mvp.dispatch import (
+    _issue_financial_authority_check,
     DispatchBlocked,
     ExactJsonTransportResponse,
     GuardedDispatcher,
@@ -322,7 +323,9 @@ class DurableUnknownRestartTests(unittest.TestCase):
                 provider="provider",
                 request={"side": "BUY"},
                 now="2026-09-25T20:00:00Z",
-                authority_check=lambda _intent_hash, _now: (True, "allowed"),
+                authority_check=_issue_financial_authority_check(
+                    lambda _intent_hash, _now: (True, "allowed"), store=store
+                ),
                 transport_send=transport,
                 sender_check=lambda _owner_token, _owner_epoch: None,
             )

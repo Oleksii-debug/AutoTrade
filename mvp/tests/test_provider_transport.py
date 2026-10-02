@@ -27,6 +27,7 @@ from mvp.autotrade_mvp.alpaca import (
 from mvp.autotrade_mvp.binance_spot import parse_account_trades
 from mvp.autotrade_mvp.kraken_spot import parse_trade_history
 from mvp.autotrade_mvp.dispatch import (
+    _issue_financial_authority_check,
     GuardedDispatcher,
     load_submission_response_binding,
     stable_client_order_id,
@@ -1291,7 +1292,9 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 provider="WHITEBIT",
                 request=actual.to_guarded_dispatch_request(),
                 now="2026-09-25T12:00:00Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=_issue_financial_authority_check(
+                    lambda _hash, _now: (True, "allowed"), store=store
+                ),
                 transport_send=transport,
                 sender_check=lambda _owner, _epoch: None,
                 final_barrier_clock=lambda: "2026-09-25T12:00:01Z",
@@ -1313,7 +1316,9 @@ class WhiteBitProviderTransportTests(unittest.TestCase):
                 provider="WHITEBIT",
                 request=actual.to_guarded_dispatch_request(),
                 now="2026-09-25T12:00:02Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=_issue_financial_authority_check(
+                    lambda _hash, _now: (True, "allowed"), store=store
+                ),
                 transport_send=transport,
                 sender_check=lambda _owner, _epoch: None,
                 submission_scope={
@@ -2536,7 +2541,9 @@ with open(path, "a+b") as stream:
                 provider="KRAKEN",
                 request=kraken_prepared_request(client_id),
                 now=now,
-                authority_check=lambda _provider, _environment: (True, "allowed"),
+                authority_check=_issue_financial_authority_check(
+                    lambda _provider, _environment: (True, "allowed"), store=store
+                ),
                 transport_send=transport,
                 sender_check=lambda _owner, _epoch: None,
                 client_id_max_length=36,
@@ -2906,7 +2913,9 @@ class ProviderTransportTests(unittest.TestCase):
                     provider="BINANCE",
                     request=prepared_request(client_id),
                     now="2026-09-25T10:00:00Z",
-                    authority_check=lambda _hash, _now: (True, "allowed"),
+                    authority_check=_issue_financial_authority_check(
+                    lambda _hash, _now: (True, "allowed"), store=store
+                ),
                     transport_send=transport,
                     sender_check=lambda _owner, _epoch: None,
                     final_barrier_clock=lambda: "2026-09-25T10:00:01Z",
@@ -2979,7 +2988,9 @@ class ProviderTransportTests(unittest.TestCase):
                 provider="BINANCE",
                 request=prepared_request(client_id),
                 now="2026-09-25T10:00:00Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=_issue_financial_authority_check(
+                    lambda _hash, _now: (True, "allowed"), store=store
+                ),
                 transport_send=transport,
                 sender_check=lambda _owner, _epoch: None,
                 final_barrier_clock=lambda: "2026-09-25T10:00:01Z",
@@ -3047,7 +3058,9 @@ class ProviderTransportTests(unittest.TestCase):
                 provider="BINANCE",
                 request=request,
                 now="2026-09-25T10:00:00Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=_issue_financial_authority_check(
+                    lambda _hash, _now: (True, "allowed"), store=store
+                ),
                 transport_send=transport,
                 sender_check=lambda _owner, _epoch: None,
                 final_barrier_clock=lambda: "2026-09-25T10:00:01Z",
@@ -3087,7 +3100,9 @@ class ProviderTransportTests(unittest.TestCase):
                 provider="BINANCE",
                 request=request,
                 now="2026-09-25T10:00:02Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=_issue_financial_authority_check(
+                    lambda _hash, _now: (True, "allowed"), store=store
+                ),
                 transport_send=transport,
                 sender_check=lambda _owner, _epoch: None,
                 submission_scope={
@@ -3135,7 +3150,9 @@ class ProviderTransportTests(unittest.TestCase):
                 provider="BINANCE",
                 request=prepared_request(client_id),
                 now="2026-09-25T10:00:00Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=_issue_financial_authority_check(
+                    lambda _hash, _now: (True, "allowed"), store=store
+                ),
                 transport_send=transport,
                 sender_check=lambda _owner, _epoch: None,
             )
@@ -3193,7 +3210,9 @@ class ProviderTransportTests(unittest.TestCase):
                 provider="BINANCE",
                 request=prepared_request(client_id),
                 now="2026-09-25T10:00:00Z",
-                authority_check=lambda _hash, _now: (True, "allowed"),
+                authority_check=_issue_financial_authority_check(
+                    lambda _hash, _now: (True, "allowed"), store=store
+                ),
                 transport_send=transport,
                 sender_check=lambda _owner, _epoch: None,
                 final_barrier_clock=lambda: "2026-09-25T10:00:01Z",

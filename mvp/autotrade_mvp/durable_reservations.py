@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 from typing import Mapping
 from uuid import UUID, NAMESPACE_URL, uuid5
@@ -25,6 +25,11 @@ from research.autotrade_research.artifacts import (
 from research.autotrade_research.io.strict_json import strict_json_loads
 
 from .dispatch import submission_attempt_aggregate_id
+from .exact_decimal import (
+    ExactDecimalError,
+    canonical_decimal_text,
+    parse_bounded_exact_decimal,
+)
 from .persistence import JournalStore, canonical_json, payload_digest
 from .reservations import (
     ReservationBook,
@@ -74,21 +79,20 @@ def _decimal(value, *, name: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise TypeError(f"{name} must use Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ValueError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise ValueError(
+            f"{name} must be an exact finite decimal within the resource envelope"
+        ) from error
 
 
 def _decimal_text(value: Decimal) -> str:
-    if value == 0:
-        return "0"
-    rendered = format(value, "f")
-    if "." in rendered:
-        rendered = rendered.rstrip("0").rstrip(".")
-    return rendered
+    try:
+        return canonical_decimal_text(value)
+    except ExactDecimalError as error:
+        raise ValueError(
+            "reservation decimal exceeds exact decimal authority"
+        ) from error
 
 
 def _amount_map(values: Mapping[str, object], *, allow_zero: bool) -> dict[str, str]:

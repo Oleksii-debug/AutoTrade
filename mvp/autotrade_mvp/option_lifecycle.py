@@ -26,7 +26,7 @@ from .accounting import (
     posting,
     reverse_transaction,
 )
-from .exact_decimal import ExactDecimalError, exact_abs, is_exact_decimal_multiple
+from .exact_decimal import (\n    ExactDecimalError,\n    canonical_decimal_text,\n    exact_abs,\n    is_exact_decimal_multiple,\n)
 from .instruments import InstrumentRegistry, InstrumentVersion
 from .options import (
     DeliverableLeg,
@@ -212,10 +212,12 @@ def _utc_text(value: datetime) -> str:
 def _decimal_text(value: Decimal | None) -> str | None:
     if value is None:
         return None
-    if value == 0:
-        return "0"
-    rendered = format(value.normalize(), "f")
-    return rendered
+    try:
+        return canonical_decimal_text(value)
+    except ExactDecimalError as error:
+        raise OptionLifecycleError(
+            "lifecycle decimal exceeds the supported exact-decimal resource envelope"
+        ) from error
 
 
 def _identity(kind: str, *parts: str) -> str:

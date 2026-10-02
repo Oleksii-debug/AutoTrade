@@ -217,6 +217,58 @@ class DeterministicWindowsBundleTests(unittest.TestCase):
 
         self.assertEqual(victim.read_bytes(), b"external-runtime")
 
+    def test_windows_enumeration_metadata_representation_may_differ(self):
+        if sys.platform != "win32":
+            self.skipTest("Windows metadata representation regression")
+
+        original_scandir = os.scandir
+
+        class EntryProxy:
+            def __init__(self, entry):
+                self._entry = entry
+                self.name = entry.name
+                self.path = entry.path
+
+            def is_symlink(self):
+                return self._entry.is_symlink()
+
+            def stat(self, *, follow_symlinks=True):
+                observed = self._entry.stat(follow_symlinks=follow_symlinks)
+
+                class StatProxy:
+                    def __getattr__(self, name):
+                        return getattr(observed, name)
+
+                    st_dev = observed.st_dev
+                    st_ino = observed.st_ino + 17
+                    st_mode = observed.st_mode
+                    st_nlink = observed.st_nlink
+                    st_size = observed.st_size
+                    st_mtime_ns = observed.st_mtime_ns + 101
+                    st_ctime_ns = observed.st_ctime_ns + 103
+
+                return StatProxy()
+
+        def distinct_scandir(directory):
+            return [EntryProxy(entry) for entry in original_scandir(directory)]
+
+        output = self.root / "metadata-domain.zip"
+        with patch.object(
+            windows_bundle_module.os,
+            "scandir",
+            side_effect=distinct_scandir,
+        ):
+            build_bundle(
+                staging=self.staging,
+                output=output,
+                version="0.1.0-dev",
+                source_sha=SOURCE_SHA,
+                mode="diagnostics",
+                provenance_path=self.provenance(eligible=False),
+            )
+
+        self.assertTrue(output.is_file())
+
     def test_staged_path_swap_during_open_fails_closed(self):
         if sys.platform != "win32":
             self.skipTest("retained Windows namespace test")

@@ -1425,5 +1425,71 @@ class ReconciliationJournalTests(unittest.TestCase):
                 )
 
 
+    def test_durable_availability_replay_bounds_numeric_payload_before_decimal_construction(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="bounded-durable-availability-source",
+                result=reconciliation(resource_availability=availability()),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+
+            hostile_values = (
+                "9" * 10_000,
+                "1e999999",
+            )
+            for index, hostile_value in enumerate(hostile_values):
+                with self.subTest(hostile_value=hostile_value[:20]):
+                    availability_payload = dict(
+                        checkpoint["payload"]["resource_availability"]
+                    )
+                    availability_payload["available_resources"] = {
+                        "CASH:USD": hostile_value,
+                    }
+                    payload = dict(checkpoint["payload"])
+                    payload["resource_availability"] = availability_payload
+                    event_id = f"hostile-durable-availability-{index}"
+                    store.append_event(
+                        {
+                            "event_id": event_id,
+                            "event_type": "AccountReconciled",
+                            "schema_version": "1.0.0",
+                            "aggregate_type": "account_reconciliation",
+                            "aggregate_id": f"hostile-durable-availability:{index}",
+                            "aggregate_version": "1",
+                            "host_id": "test-host",
+                            "owner_epoch": "epoch-1",
+                            "environment": "PAPER",
+                            "occurred_at": payload["observed_at"],
+                            "observed_at": payload["observed_at"],
+                            "committed_at": payload["observed_at"],
+                            "correlation_id": event_id,
+                            "causation_id": None,
+                            "payload": payload,
+                            "payload_hash": payload_digest(payload),
+                            "evidence_refs": [],
+                        }
+                    )
+
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "exact resource envelope",
+                    ):
+                        load_account_resource_availability_evidence(
+                            store,
+                            checkpoint_event_id=event_id,
+                            provider_id="TEST_PROVIDER",
+                            account_id="test-account",
+                            environment="PAPER",
+                            resources=("CASH:USD",),
+                            now="2026-09-24T19:00:30Z",
+                            max_age_seconds="60",
+                        )
+
+
+
 if __name__ == "__main__":
     unittest.main()

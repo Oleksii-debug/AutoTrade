@@ -81,7 +81,7 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 "Authorization-Header": "Bearer value",
                 "x-api-key": "key-value",
                 "private-key-pem": "pem-value",
-                "token_budget": 100,
+                "token_budget": "TOKEN-BUDGET-OPAQUE",
             }
             store.append(item)
             persisted = json.loads(path.read_text(encoding="utf-8"))
@@ -93,9 +93,9 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 "Authorization-Header",
                 "x-api-key",
                 "private-key-pem",
+                "token_budget",
             ):
                 self.assertEqual(attributes[key], "[REDACTED]")
-            self.assertEqual(attributes["token_budget"], 100)
             raw = path.read_text(encoding="utf-8")
             for leaked in (
                 "access-value",
@@ -104,8 +104,108 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 "Bearer value",
                 "key-value",
                 "pem-value",
+                "TOKEN-BUDGET-OPAQUE",
             ):
                 self.assertNotIn(leaked, raw)
+
+    def test_separator_free_secret_aliases_and_opaque_carriers_are_redacted_everywhere(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = trace("trace-separator-free-secrets")
+            sentinels = {
+                "credentialHandle": "OPAQUE-CREDENTIAL-HANDLE",
+                "sessionReference": "OPAQUE-SESSION-REFERENCE",
+                "proxyAuthorizationToken": "OPAQUE-PROXY-AUTH",
+                "accessToken": "OPAQUE-ACCESS-TOKEN",
+                "providerCredentialId": "OPAQUE-PROVIDER-CREDENTIAL",
+                "token_budget": "OPAQUE-TOKEN-BUDGET",
+                "api_secret_rotation_count": "OPAQUE-SECRET-ROTATION",
+            }
+            item["attributes"] = {
+                **sentinels,
+                "structured": json.dumps(
+                    {
+                        "credentialHandle": "OPAQUE-JSON-CREDENTIAL",
+                        "sessionReference": "OPAQUE-JSON-SESSION",
+                        "safe": "visible",
+                    }
+                ),
+                "url": (
+                    "https://provider.test/private?"
+                    "accessToken=OPAQUE-URL-TOKEN&"
+                    "sessionReference=OPAQUE-URL-SESSION&symbol=BTC"
+                ),
+                "safe": "visible",
+            }
+
+            store.append(item)
+            raw = path.read_text(encoding="utf-8")
+            exported = store.accessible_export(item["trace_id"])
+            for leaked in (
+                *sentinels.values(),
+                "OPAQUE-JSON-CREDENTIAL",
+                "OPAQUE-JSON-SESSION",
+                "OPAQUE-URL-TOKEN",
+                "OPAQUE-URL-SESSION",
+            ):
+                self.assertNotIn(leaked, raw)
+                self.assertNotIn(leaked, exported)
+
+            attributes = json.loads(raw)["attributes"]
+            for key in sentinels:
+                self.assertEqual(attributes[key], "[REDACTED]")
+            structured = json.loads(attributes["structured"])
+            self.assertEqual(structured["credentialHandle"], "[REDACTED]")
+            self.assertEqual(structured["sessionReference"], "[REDACTED]")
+            self.assertEqual(structured["safe"], "visible")
+            self.assertEqual(
+                attributes["url"],
+                "https://provider.test/private?"
+                "accessToken=[REDACTED]&"
+                "sessionReference=[REDACTED]&symbol=BTC",
+            )
+            self.assertEqual(attributes["safe"], "visible")
+
+    def test_separator_free_secret_aliases_inside_unstructured_text_are_redacted(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = trace("trace-unstructured-camel-secrets")
+            item["attributes"] = {
+                "log_line": (
+                    "safe=visible "
+                    "credentialHandle=TEXT-CREDENTIAL "
+                    "sessionReference: TEXT-SESSION "
+                    "mode=paper"
+                ),
+                "repr_message": (
+                    "{'providerCredentialId': 'TEXT-PROVIDER', "
+                    "'proxyAuthorizationToken': 'TEXT-PROXY', 'safe': 'ok'}"
+                ),
+                "mixed": "prefix accessToken=TEXT-TOKEN suffix",
+                "safe": "latency=12ms mode=paper",
+            }
+            store.append(item)
+
+            raw = path.read_text(encoding="utf-8")
+            exported = store.accessible_export(item["trace_id"])
+            for leaked in (
+                "TEXT-CREDENTIAL",
+                "TEXT-SESSION",
+                "TEXT-PROVIDER",
+                "TEXT-PROXY",
+                "TEXT-TOKEN",
+            ):
+                self.assertNotIn(leaked, raw)
+                self.assertNotIn(leaked, exported)
+            attributes = json.loads(raw)["attributes"]
+            self.assertIn("credentialHandle=[REDACTED]", attributes["log_line"])
+            self.assertIn("sessionReference: [REDACTED]", attributes["log_line"])
+            self.assertIn("providerCredentialId", attributes["repr_message"])
+            self.assertIn("[REDACTED]", attributes["repr_message"])
+            self.assertIn("accessToken=[REDACTED]", attributes["mixed"])
+            self.assertEqual(attributes["safe"], "latency=12ms mode=paper")
 
     def test_embedded_secrets_in_safe_named_strings_are_redacted(self):
         with TemporaryDirectory() as directory:
@@ -296,8 +396,8 @@ class DecisionTraceStoreTests(unittest.TestCase):
             self.assertEqual(attributes["X-TXC-APIKEY"], "[REDACTED]")
             self.assertEqual(attributes["X-TXC-PAYLOAD"], "[REDACTED]")
             self.assertEqual(attributes["X-TXC-SIGNATURE"], "[REDACTED]")
-            self.assertEqual(attributes["api_secret_rotation_count"], 4)
-            self.assertEqual(attributes["token_budget"], 8)
+            self.assertEqual(attributes["api_secret_rotation_count"], "[REDACTED]")
+            self.assertEqual(attributes["token_budget"], "[REDACTED]")
             self.assertIn("[REDACTED]", attributes["message"])
             self.assertIn("[REDACTED]", attributes["repr_message"])
             self.assertEqual(
@@ -397,7 +497,7 @@ class DecisionTraceStoreTests(unittest.TestCase):
             self.assertEqual(
                 attributes["benign_encoded_url"],
                 "https://provider.test/orders?"
-                "api%5Fsecret%5Frotation%5Fcount=4&symbol=BTC",
+                "api%5Fsecret%5Frotation%5Fcount=[REDACTED]&symbol=BTC",
             )
 
 

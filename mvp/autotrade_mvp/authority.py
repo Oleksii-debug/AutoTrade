@@ -688,13 +688,27 @@ def _durable_risk_intent_payload(value: object) -> dict[str, object]:
     return payload
 
 
+_RISK_DECISION_DURABLE_SCHEMA = "RISK_DECISION_DURABLE_PREIMAGE_V1"
+
+
 def _validate_durable_risk_decision_fingerprint(
     risk_payload: dict[str, object],
+    *,
+    allow_unversioned_preimage: bool = False,
 ) -> None:
     """Re-derive the content-addressed risk decision identity from durable evidence."""
 
     if type(risk_payload) is not dict:
         raise AuthorityConflict("durable risk decision payload is malformed")
+    schema_present = "risk_decision_schema" in risk_payload
+    durable_schema = risk_payload.get("risk_decision_schema")
+    if durable_schema != _RISK_DECISION_DURABLE_SCHEMA:
+        if not (
+            allow_unversioned_preimage
+            and not schema_present
+            and "input_fingerprint" in risk_payload
+        ):
+            raise AuthorityConflict("durable risk decision schema is unsupported")
 
     input_fingerprint = risk_payload.get("input_fingerprint")
     if (
@@ -1791,17 +1805,20 @@ class AuthorityService:
                 "restored financial risk evidence is missing or ambiguous"
             )
         risk_payload = risk_events[0]["payload"]
-        if "arithmetic_policy_id" in risk_payload:
-            self._validate_durable_financial_evidence(record, policy)
+        schema_present = "risk_decision_schema" in risk_payload
+        if not schema_present and "input_fingerprint" not in risk_payload:
+            # Supported predecessor durable shapes predate the complete risk
+            # decision preimage. They may be restored only as historical
+            # evidence; current dispatch remains on the strict validator.
+            self._validate_historical_financial_retry_evidence(record, policy)
             return
 
-        # The immediately preceding durable schema had no arithmetic-policy
-        # field.  Restore that historical fact only after the already-bounded
-        # replay validator proves the exact old request fingerprint, journal
-        # cut, reservation, availability checkpoint and authoritative snapshot.
-        # This path is restore-only: retries and dispatch keep their current
-        # arithmetic-policy requirements.
-        self._validate_historical_financial_retry_evidence(record, policy)
+        # The immediately preceding referenced writer already persisted the
+        # complete input_fingerprint but did not yet carry a schema marker.
+        # It remains strict-current evidence: semantic identity is re-derived,
+        # while its historical request fingerprint intentionally has no schema.
+        # Any present unknown/newer schema or schema-without-preimage still fails.
+        self._validate_durable_financial_evidence(record, policy)
 
 
     def _validate_historical_financial_retry_evidence(
@@ -1856,14 +1873,23 @@ class AuthorityService:
             "arithmetic_policy_id"
         )
         if (
-            historical_arithmetic_policy_id is not None
+            "arithmetic_policy_id" in risk_payload
             and historical_arithmetic_policy_id != RISK_ARITHMETIC_POLICY_ID
         ):
             raise AuthorityConflict(
                 "historical risk arithmetic policy is unsupported"
             )
-        if historical_arithmetic_policy_id is not None:
+        schema_present = "risk_decision_schema" in risk_payload
+        durable_schema = risk_payload.get("risk_decision_schema")
+        if schema_present:
             _validate_durable_risk_decision_fingerprint(risk_payload)
+        elif "input_fingerprint" in risk_payload:
+            # Exact transitional format written by the immediately preceding
+            # referenced runtime: complete semantic preimage, no schema marker.
+            _validate_durable_risk_decision_fingerprint(
+                risk_payload,
+                allow_unversioned_preimage=True,
+            )
 
         durable_risk_intent = risk_payload.get("risk_intent")
         durable_idempotency_key = risk_payload.get(
@@ -2132,6 +2158,8 @@ class AuthorityService:
             request["risk_arithmetic_policy_id"] = (
                 historical_arithmetic_policy_id
             )
+        if durable_schema is not None:
+            request["risk_decision_schema"] = durable_schema
         if "allocation_evidence" in risk_payload:
             allocation_evidence = risk_payload.get(
                 "allocation_evidence"
@@ -2202,7 +2230,15 @@ class AuthorityService:
             raise AuthorityConflict(
                 "durable risk arithmetic policy is missing or stale"
             )
-        _validate_durable_risk_decision_fingerprint(risk_payload)
+        schema_present = "risk_decision_schema" in risk_payload
+        _validate_durable_risk_decision_fingerprint(
+            risk_payload,
+            allow_unversioned_preimage=(
+                not schema_present
+                and "input_fingerprint" in risk_payload
+            ),
+        )
+        durable_schema = risk_payload.get("risk_decision_schema")
         durable_risk_intent = risk_payload.get("risk_intent")
         durable_idempotency_key = risk_payload.get(
             "financial_idempotency_key"
@@ -2652,6 +2688,8 @@ class AuthorityService:
             "confirmation_id": record.confirmation_id,
             "risk_reducing": record.risk_reducing,
         }
+        if schema_present:
+            request["risk_decision_schema"] = durable_schema
         if durable_risk_intent is not None:
             request["risk_intent"] = durable_risk_intent
             request["financial_idempotency_key"] = durable_idempotency_key
@@ -4394,6 +4432,7 @@ class AuthorityService:
             "risk_decision_id": risk_decision.decision_id,
             "risk_decision_fingerprint": risk_decision_fingerprint(risk_decision),
             "risk_arithmetic_policy_id": risk_decision.arithmetic_policy_id,
+            "risk_decision_schema": _RISK_DECISION_DURABLE_SCHEMA,
             "reservation_id": rid,
             "reservation": (
                 reservation_plan.request if reservation_plan is not None else None
@@ -4425,6 +4464,7 @@ class AuthorityService:
         risk_payload = {
             "decision_id": risk_decision.decision_id,
             "fingerprint": risk_decision_fingerprint(risk_decision),
+            "risk_decision_schema": _RISK_DECISION_DURABLE_SCHEMA,
             "input_fingerprint": risk_decision.input_fingerprint,
             "arithmetic_policy_id": risk_decision.arithmetic_policy_id,
             "intent_hash": risk_decision.intent_hash,

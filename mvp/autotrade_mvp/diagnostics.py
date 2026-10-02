@@ -13,30 +13,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
+from .decision_trace import _is_sensitive_key, _redact_sensitive_assignments
 from .persistence import JournalStore
-
-
-_REDACTION_MARKERS = (
-    "password",
-    "secret",
-    "token",
-    "apikey",
-    "authorization",
-    "credential",
-    "cookie",
-    "privatekey",
-    "xtxcpayload",
-    "xtxcsignature",
-)
-
-
-def _normalized_key(value: object) -> str:
-    return "".join(character for character in str(value).lower() if character.isalnum())
-
-
-def _is_sensitive_key(value: object) -> bool:
-    normalized = _normalized_key(value)
-    return any(marker in normalized for marker in _REDACTION_MARKERS)
 
 
 _EMBEDDED_SECRET_PATTERNS = (
@@ -135,7 +113,7 @@ def _redact_embedded_secret_text(value: str) -> str:
             separator = "=" if "=" in match.group(0) else ":"
             return f"{name}{separator}[REDACTED]"
         redacted = pattern.sub(replacement, redacted)
-    return redacted
+    return _redact_sensitive_assignments(redacted)
 
 
 def redact_diagnostic_value(value: Any) -> Any:

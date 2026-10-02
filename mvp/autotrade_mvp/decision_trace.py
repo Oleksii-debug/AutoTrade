@@ -25,42 +25,30 @@ REQUIRED_FIELDS = (
     "evidence_refs",
 )
 
-_SENSITIVE_KEYS = {
-    "authorization",
-    "authorization_header",
-    "bearer_token",
-    "cookie",
+_REDACTION_MARKERS = (
     "password",
-    "password_hash",
     "secret",
-    "client_secret",
-    "session",
-    "session_id",
-    "session_token",
     "token",
-    "access_token",
-    "refresh_token",
-    "id_token",
-    "api_key",
-    "api_secret",
-    "x_api_key",
-    "x_txc_apikey",
-    "x_txc_payload",
-    "x_txc_signature",
-    "private_key",
-    "private_key_pem",
-}
+    "apikey",
+    "authorization",
+    "credential",
+    "cookie",
+    "session",
+    "privatekey",
+    "xtxcpayload",
+    "xtxcsignature",
+)
 
 
 def _normalized_key(value: object) -> str:
-    return "_".join(
-        part
-        for part in "".join(
-            character.lower() if character.isalnum() else "_"
-            for character in str(value).strip()
-        ).split("_")
-        if part
+    return "".join(
+        character for character in str(value).casefold() if character.isalnum()
     )
+
+
+def _is_sensitive_key(value: object) -> bool:
+    normalized = _normalized_key(value)
+    return any(marker in normalized for marker in _REDACTION_MARKERS)
 
 
 _EMBEDDED_SECRET_PATTERNS = (
@@ -90,11 +78,22 @@ _PRIVATE_KEY_MARKERS = (
     "-----BEGIN OPENSSH PRIVATE KEY-----",
 )
 
-_URL_QUERY_SENSITIVE_KEYS = _SENSITIVE_KEYS | {
-    "credential",
-    "proxy_authorization",
-}
+_UNSTRUCTURED_ASSIGNMENT_PATTERN = re.compile(
+    r"""(?P<head>(?:["'])?(?P<key>[A-Za-z][A-Za-z0-9_.-]{0,127})(?:["'])?\s*[:=]\s*)"""
+    r"""(?P<value>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^&;,\r\n]*?)"""
+    r"""(?=(?:\s+(?:["'])?[A-Za-z][A-Za-z0-9_.-]{0,127}(?:["'])?\s*[:=])|[&;,\r\n]|$)"""
+)
 
+
+def _redact_sensitive_assignments(value: str) -> str:
+    """Redact arbitrary key/value text using the same key authority as mappings."""
+
+    def replacement(match: re.Match[str]) -> str:
+        if not _is_sensitive_key(match.group("key")):
+            return match.group(0)
+        return f"{match.group('head')}[REDACTED]"
+
+    return _UNSTRUCTURED_ASSIGNMENT_PATTERN.sub(replacement, value)
 
 def _redact_structured_json_text(value: str) -> str | None:
     try:
@@ -131,8 +130,7 @@ def _redact_structured_url_query(value: str) -> str | None:
     query_parts: list[str] = []
     for part in parsed.query.split("&"):
         raw_key, separator, _ = part.partition("=")
-        normalized = _normalized_key(unquote_plus(raw_key))
-        if normalized in _URL_QUERY_SENSITIVE_KEYS:
+        if _is_sensitive_key(unquote_plus(raw_key)):
             query_parts.append(f"{raw_key}{separator or '='}[REDACTED]")
             changed = True
         else:
@@ -165,7 +163,7 @@ def _redact_embedded_secret_text(value: str) -> str:
             separator = "=" if "=" in match.group(0) else ":"
             return f"{name}{separator}[REDACTED]"
         redacted = pattern.sub(replacement, redacted)
-    return redacted
+    return _redact_sensitive_assignments(redacted)
 
 
 def _redact(value: Any) -> Any:
@@ -174,8 +172,9 @@ def _redact(value: Any) -> Any:
     if isinstance(value, Mapping):
         result: dict[str, Any] = {}
         for key, item in value.items():
-            normalized = _normalized_key(key)
-            result[str(key)] = "[REDACTED]" if normalized in _SENSITIVE_KEYS else _redact(item)
+            result[str(key)] = (
+                "[REDACTED]" if _is_sensitive_key(key) else _redact(item)
+            )
         return result
     if isinstance(value, list):
         return [_redact(item) for item in value]

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
+from .exact_decimal import ExactDecimalError, parse_bounded_exact_decimal
 from .securities_borrow import BorrowAvailabilityEvidence
 
 
@@ -21,17 +22,29 @@ _ENVIRONMENTS = frozenset({"REPLAY", "SIMULATION", "PAPER", "LIVE"})
 def _decimal(value, *, name: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise TypeError(f"{name} must use Decimal, string or integer input")
+    if isinstance(value, Decimal) and type(value) is not Decimal:
+        raise TypeError(f"{name} must be an exact built-in Decimal")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, ValueError, TypeError) as error:
-        raise ValueError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise ValueError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise ValueError(f"{name} must be a finite bounded decimal") from error
+
+
+def _require_canonical_decimal(value, *, name: str) -> Decimal:
+    if type(value) is not Decimal:
+        raise TypeError(f"{name} must be an exact built-in Decimal")
+    try:
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise ValueError(f"{name} must be a finite bounded decimal") from error
 
 
 def _text(value: str, *, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if not isinstance(value, str):
+        raise ValueError(f"{name} is required")
+    if type(value) is not str:
+        raise TypeError(f"{name} must be an exact string")
+    if not value.strip():
         raise ValueError(f"{name} is required")
     return value.strip()
 
@@ -246,8 +259,8 @@ class ResourceAvailabilityEvidence:
             detail: dict[str, str] = {}
             for raw_key, raw_value in raw_detail.items():
                 key = _text(raw_key, name="resource detail key")
-                if not isinstance(raw_value, str):
-                    raise TypeError("resource detail values must be strings")
+                if type(raw_value) is not str:
+                    raise TypeError("resource detail values must be exact strings")
                 if key in detail:
                     raise ValueError(
                         "resource detail keys must be unique after normalization"
@@ -394,6 +407,24 @@ class ProviderWorkingOrderEvidence:
             instrument=_text(instrument, name="instrument"),
             remaining_quantity=remaining,
         )
+
+
+def _snapshot_provider_working_order_evidence(
+    item: ProviderWorkingOrderEvidence,
+) -> ProviderWorkingOrderEvidence:
+    if type(item) is not ProviderWorkingOrderEvidence:
+        raise TypeError(
+            "provider_working_orders must contain exact ProviderWorkingOrderEvidence"
+        )
+    return ProviderWorkingOrderEvidence(
+        provider_id=item.provider_id,
+        account_id=item.account_id,
+        environment=item.environment,
+        provider_order_id=item.provider_order_id,
+        client_order_id=item.client_order_id,
+        instrument=item.instrument,
+        remaining_quantity=item.remaining_quantity,
+    )
 
 
 @dataclass(frozen=True)
@@ -547,6 +578,108 @@ class ProviderFillEvidence:
         )
 
 
+def _snapshot_provider_fill_evidence(
+    item: ProviderFillEvidence,
+) -> ProviderFillEvidence:
+    if type(item) is not ProviderFillEvidence:
+        raise TypeError("provider_fills must contain exact ProviderFillEvidence")
+    return ProviderFillEvidence(
+        provider_id=item.provider_id,
+        account_id=item.account_id,
+        environment=item.environment,
+        provider_execution_id=item.provider_execution_id,
+        client_order_id=item.client_order_id,
+        instrument=item.instrument,
+        quantity=item.quantity,
+        price=item.price,
+        fee_amount=item.fee_amount,
+        fee_currency=item.fee_currency,
+        trade_time=item.trade_time,
+        side=item.side,
+        position_side=item.position_side,
+        position_effect=item.position_effect,
+        evidence_refs=item.evidence_refs,
+    )
+
+
+def _snapshot_resource_availability_evidence(
+    item: ResourceAvailabilityEvidence,
+) -> ResourceAvailabilityEvidence:
+    if type(item) is not ResourceAvailabilityEvidence:
+        raise TypeError(
+            "resource_availability must be exact ResourceAvailabilityEvidence"
+        )
+    if type(item.available_resources) is not MappingProxyType:
+        raise TypeError(
+            "resource_availability.available_resources must be canonical mappingproxy"
+        )
+    available: dict[str, Decimal] = {}
+    for raw_resource, raw_amount in item.available_resources.items():
+        if type(raw_resource) is not str:
+            raise TypeError(
+                "resource_availability.available_resources keys must be exact strings"
+            )
+        resource = _text(
+            raw_resource,
+            name="resource_availability.available_resources key",
+        )
+        amount = _require_canonical_decimal(
+            raw_amount,
+            name=f"resource_availability.available_resources[{resource}]",
+        )
+        if amount < 0:
+            raise ValueError("resource availability amounts must be non-negative")
+        available[resource] = amount
+
+    if type(item.resource_details) is not MappingProxyType:
+        raise TypeError(
+            "resource_availability.resource_details must be canonical mappingproxy"
+        )
+    details: dict[str, dict[str, str]] = {}
+    for raw_resource, raw_detail in item.resource_details.items():
+        if type(raw_resource) is not str:
+            raise TypeError(
+                "resource_availability.resource_details keys must be exact strings"
+            )
+        resource = _text(
+            raw_resource,
+            name="resource_availability.resource_details key",
+        )
+        if type(raw_detail) is not MappingProxyType:
+            raise TypeError(
+                "resource_availability resource detail must be canonical mappingproxy"
+            )
+        detail: dict[str, str] = {}
+        for raw_key, raw_value in raw_detail.items():
+            if type(raw_key) is not str:
+                raise TypeError("resource detail keys must be exact strings")
+            key = _text(raw_key, name="resource detail key")
+            if type(raw_value) is not str:
+                raise TypeError("resource detail values must be exact strings")
+            detail[key] = raw_value
+        details[resource] = detail
+
+    if type(item.evidence_refs) is not tuple:
+        raise TypeError("resource availability evidence_refs must be an exact tuple")
+    refs: tuple[str, ...] = tuple(
+        _text(reference, name="resource availability evidence_ref")
+        for reference in item.evidence_refs
+    )
+    return ResourceAvailabilityEvidence(
+        provider_id=item.provider_id,
+        account_id=item.account_id,
+        environment=item.environment,
+        snapshot_id=item.snapshot_id,
+        query_started_at=item.query_started_at,
+        query_completed_at=item.query_completed_at,
+        valid_until=item.valid_until,
+        available_resources=available,
+        provider_as_of=item.provider_as_of,
+        evidence_refs=refs,
+        resource_details=details,
+    )
+
+
 def provider_fill_identity_payload(fill: ProviderFillEvidence) -> dict[str, object]:
     """Return the canonical normalized identity of one provider-observed fill.
 
@@ -555,8 +688,21 @@ def provider_fill_identity_payload(fill: ProviderFillEvidence) -> dict[str, obje
     change the signed/economic meaning of an unexpected execution plus immutable
     provider-evidence references.
     """
-    if not isinstance(fill, ProviderFillEvidence):
-        raise TypeError("fill must be ProviderFillEvidence")
+    fill = _snapshot_provider_fill_evidence(fill)
+    quantity = _require_canonical_decimal(
+        fill.quantity,
+        name="provider_fill.quantity",
+    )
+    price = _require_canonical_decimal(
+        fill.price,
+        name="provider_fill.price",
+    )
+    fee_amount = _require_canonical_decimal(
+        fill.fee_amount,
+        name="provider_fill.fee_amount",
+    )
+    if quantity <= 0 or price <= 0:
+        raise ValueError("provider fill quantity and price must be positive")
 
     def decimal_text(value: Decimal) -> str:
         if value == 0:
@@ -582,13 +728,36 @@ def provider_fill_identity_payload(fill: ProviderFillEvidence) -> dict[str, obje
         "side": fill.side,
         "position_side": fill.position_side,
         "position_effect": fill.position_effect,
-        "quantity": decimal_text(fill.quantity),
-        "price": decimal_text(fill.price),
-        "fee_amount": decimal_text(fill.fee_amount),
+        "quantity": decimal_text(quantity),
+        "price": decimal_text(price),
+        "fee_amount": decimal_text(fee_amount),
         "fee_currency": fill.fee_currency,
         "trade_time": trade_time,
         "evidence_refs": sorted(fill.evidence_refs),
     }
+
+
+def _provider_fill_reconciliation_ingress_errors(
+    fill: ProviderFillEvidence,
+) -> tuple[str, ...]:
+    """Return structural reasons a provider fill cannot affect financial reconciliation.
+
+    This is deliberately narrower than provider-origin issuer authentication.
+    A non-empty evidence_refs tuple proves only that provenance was carried by
+    the normalized value; #652/#805/#697 still own authenticity/currentness of
+    those references before PAPER/LIVE financial readiness.
+    """
+
+    errors: list[str] = []
+    if fill.side not in {"BUY", "SELL"}:
+        errors.append("provider execution direction is not evidenced")
+    if not fill.evidence_refs:
+        errors.append("provider execution provenance reference is absent")
+    if fill.position_effect is not None and fill.position_side is None:
+        errors.append("provider position effect lacks position side")
+    if fill.position_side in {"LONG", "SHORT"} and fill.position_effect is None:
+        errors.append("provider hedge-leg position side lacks position effect")
+    return tuple(errors)
 
 
 @dataclass(frozen=True)
@@ -815,6 +984,88 @@ class ReconciliationResult:
         return bool(self.blocking_resources)
 
 
+def _snapshot_coverage_surface_evidence(
+    item: CoverageSurfaceEvidence,
+    *,
+    name: str,
+) -> CoverageSurfaceEvidence:
+    if type(item) is not CoverageSurfaceEvidence:
+        raise TypeError(f"{name} must be exact CoverageSurfaceEvidence")
+    return CoverageSurfaceEvidence(
+        provider_id=item.provider_id,
+        account_id=item.account_id,
+        environment=item.environment,
+        surface=item.surface,
+        coverage_start=item.coverage_start,
+        coverage_end=item.coverage_end,
+        pagination_complete=item.pagination_complete,
+        consistency_horizon_satisfied=item.consistency_horizon_satisfied,
+        provider_semantics_exclude_execution=item.provider_semantics_exclude_execution,
+    )
+
+
+def _snapshot_snapshot_consistency_evidence(
+    item: SnapshotConsistencyEvidence,
+) -> SnapshotConsistencyEvidence:
+    if type(item) is not SnapshotConsistencyEvidence:
+        raise TypeError(
+            "snapshot_consistency must be exact SnapshotConsistencyEvidence"
+        )
+    return SnapshotConsistencyEvidence(
+        provider_id=item.provider_id,
+        account_id=item.account_id,
+        environment=item.environment,
+        mode=item.mode,
+        query_started_at=item.query_started_at,
+        query_completed_at=item.query_completed_at,
+        buffered_stream_events=item.buffered_stream_events,
+        replay_complete=item.replay_complete,
+        sequence_gap_detected=item.sequence_gap_detected,
+    )
+
+
+def _snapshot_provider_activity_evidence(
+    item: ProviderActivityEvidence,
+) -> ProviderActivityEvidence:
+    if type(item) is not ProviderActivityEvidence:
+        raise TypeError(
+            "provider_activities must contain exact ProviderActivityEvidence"
+        )
+    return ProviderActivityEvidence(
+        provider_id=item.provider_id,
+        account_id=item.account_id,
+        environment=item.environment,
+        activity_id=item.activity_id,
+        activity_type=item.activity_type,
+        origin=item.origin,
+        occurred_at=item.occurred_at,
+        instrument=item.instrument,
+        currency=item.currency,
+        client_order_id=item.client_order_id,
+        provider_order_id=item.provider_order_id,
+        provider_execution_id=item.provider_execution_id,
+        signed_amount=item.signed_amount,
+    )
+
+
+def _snapshot_unknown_submission(
+    item: UnknownSubmission,
+) -> UnknownSubmission:
+    if type(item) is not UnknownSubmission:
+        raise TypeError(
+            "unknown_submissions must contain exact UnknownSubmission"
+        )
+    return UnknownSubmission.create(
+        attempt_id=item.attempt_id,
+        intent_id=item.intent_id,
+        client_order_id=item.client_order_id,
+        provider_id=item.provider_id,
+        account_id=item.account_id,
+        environment=item.environment,
+        started_at=item.started_at,
+    )
+
+
 def _amount_map(
     values: Mapping[str, object], *, name: str
 ) -> dict[str, Decimal]:
@@ -822,8 +1073,8 @@ def _amount_map(
         raise TypeError(f"{name} must be a mapping")
     result: dict[str, Decimal] = {}
     for key, value in values.items():
-        if not isinstance(key, str):
-            raise TypeError(f"{name} keys must be strings")
+        if type(key) is not str:
+            raise TypeError(f"{name} keys must be exact strings")
         normalized_key = _text(key, name=f"{name} key")
         if normalized_key in result:
             raise ValueError(f"{name} keys must be unique after normalization")
@@ -841,11 +1092,11 @@ def _absence_coverage_index(
     environment: str,
 ) -> dict[str, CoverageSurfaceEvidence]:
     result: dict[str, CoverageSurfaceEvidence] = {}
-    for item in evidence:
-        if not isinstance(item, CoverageSurfaceEvidence):
-            raise TypeError(
-                "absence_coverage must contain CoverageSurfaceEvidence"
-            )
+    for raw_item in evidence:
+        item = _snapshot_coverage_surface_evidence(
+            raw_item,
+            name="absence_coverage item",
+        )
         if (
             item.provider_id != provider_id
             or item.account_id != account_id
@@ -957,27 +1208,42 @@ def reconcile_account(
     if len(local_ids) != len(set(local_ids)):
         raise ValueError("local_execution_ids must be unique")
 
+    observed_provider_by_id: dict[str, ProviderFillEvidence] = {}
     provider_by_id: dict[str, ProviderFillEvidence] = {}
+    inadmissible_provider_by_id: dict[
+        str, tuple[ProviderFillEvidence, tuple[str, ...]]
+    ] = {}
+    inadmissible_provider_client_ids: set[str] = set()
     provider_client_ids: set[str] = set()
     provider_client_fill_times: dict[str, list[datetime]] = {}
     provider_client_fills: dict[str, list[ProviderFillEvidence]] = {}
-    for fill in provider_fills:
-        if not isinstance(fill, ProviderFillEvidence):
-            raise TypeError("provider_fills must contain ProviderFillEvidence")
+    for raw_fill in provider_fills:
+        fill = _snapshot_provider_fill_evidence(raw_fill)
+        provider_fill_identity_payload(fill)
         if fill.provider_id != provider_scope:
             raise ValueError("provider fill evidence provider_id mismatch")
         if fill.account_id != account_scope:
             raise ValueError("provider fill evidence account_id mismatch")
         if fill.environment != environment_scope:
             raise ValueError("provider fill evidence environment mismatch")
-        if fill.provider_execution_id in provider_by_id:
+        if fill.provider_execution_id in observed_provider_by_id:
             if (
                 provider_fill_identity_payload(
-                    provider_by_id[fill.provider_execution_id]
+                    observed_provider_by_id[fill.provider_execution_id]
                 )
                 != provider_fill_identity_payload(fill)
             ):
                 raise ValueError("provider execution id has conflicting observations")
+            continue
+        observed_provider_by_id[fill.provider_execution_id] = fill
+        ingress_errors = _provider_fill_reconciliation_ingress_errors(fill)
+        if ingress_errors:
+            inadmissible_provider_by_id[fill.provider_execution_id] = (
+                fill,
+                ingress_errors,
+            )
+            if fill.client_order_id is not None:
+                inadmissible_provider_client_ids.add(fill.client_order_id)
             continue
         provider_by_id[fill.provider_execution_id] = fill
         if fill.client_order_id is not None:
@@ -1002,11 +1268,14 @@ def reconcile_account(
 
     provider_working_by_id: dict[str, ProviderWorkingOrderEvidence] = {}
     provider_working_by_client_id: dict[str, ProviderWorkingOrderEvidence] = {}
-    for order in provider_working_orders:
-        if not isinstance(order, ProviderWorkingOrderEvidence):
-            raise TypeError(
-                "provider_working_orders must contain ProviderWorkingOrderEvidence"
-            )
+    for raw_order in provider_working_orders:
+        order = _snapshot_provider_working_order_evidence(raw_order)
+        remaining_quantity = _require_canonical_decimal(
+            order.remaining_quantity,
+            name="provider_working_order.remaining_quantity",
+        )
+        if remaining_quantity <= 0:
+            raise ValueError("provider working-order remaining_quantity must be positive")
         if order.provider_id != provider_scope:
             raise ValueError("provider working-order evidence provider_id mismatch")
         if order.account_id != account_scope:
@@ -1044,11 +1313,9 @@ def reconcile_account(
         )
     )
 
-    if snapshot_consistency is not None and not isinstance(
-        snapshot_consistency, SnapshotConsistencyEvidence
-    ):
-        raise TypeError(
-            "snapshot_consistency must be SnapshotConsistencyEvidence"
+    if snapshot_consistency is not None:
+        snapshot_consistency = _snapshot_snapshot_consistency_evidence(
+            snapshot_consistency
         )
     snapshot_window_covered = False
     snapshot_started: datetime | None = None
@@ -1078,10 +1345,9 @@ def reconcile_account(
     )
 
     if resource_availability is not None:
-        if not isinstance(resource_availability, ResourceAvailabilityEvidence):
-            raise TypeError(
-                "resource_availability must be ResourceAvailabilityEvidence"
-            )
+        resource_availability = _snapshot_resource_availability_evidence(
+            resource_availability
+        )
         if (
             resource_availability.provider_id != provider_scope
             or resource_availability.account_id != account_scope
@@ -1262,11 +1528,8 @@ def reconcile_account(
         raise ValueError("provider activity scope differs from reconciliation provider_id")
     if activity_account is not None and activity_account != account_scope:
         raise ValueError("provider activity scope differs from reconciliation account_id")
-    for activity in provider_activities:
-        if not isinstance(activity, ProviderActivityEvidence):
-            raise TypeError(
-                "provider_activities must contain ProviderActivityEvidence"
-            )
+    for raw_activity in provider_activities:
+        activity = _snapshot_provider_activity_evidence(raw_activity)
         if activity.provider_id != provider_scope:
             raise ValueError("provider activity evidence provider_id mismatch")
         if activity.account_id != account_scope:
@@ -1300,23 +1563,33 @@ def reconcile_account(
         )
     )
 
-    if activity_coverage is not None and not isinstance(
-        activity_coverage, CoverageSurfaceEvidence
-    ):
-        raise TypeError("activity_coverage must be CoverageSurfaceEvidence")
+    if activity_coverage is not None:
+        activity_coverage = _snapshot_coverage_surface_evidence(
+            activity_coverage,
+            name="activity_coverage",
+        )
     if activity_coverage is not None and (
         activity_coverage.provider_id != provider_scope
         or activity_coverage.account_id != account_scope
         or activity_coverage.environment != environment_scope
     ):
         raise ValueError("provider activity coverage scope mismatch")
-    activity_coverage_complete = True
-    if require_activity_reconciliation:
-        activity_coverage_complete = bool(
-            activity_coverage is not None
-            and activity_coverage.surface == "ACTIVITIES"
-            and activity_coverage.proves_complete_window(start, end)
+    activity_window_complete = bool(
+        activity_coverage is not None
+        and activity_coverage.surface == "ACTIVITIES"
+        and activity_coverage.proves_complete_window(start, end)
+    )
+    activity_coverage_complete = (
+        activity_window_complete if require_activity_reconciliation else True
+    )
+    settlement_coverage_complete = (
+        True
+        if not settlement_requested
+        else bool(
+            settlement_activity_complete is True
+            and activity_window_complete
         )
+    )
 
     searched = {
         _text(value, name="searched_client_order_id")
@@ -1336,9 +1609,8 @@ def reconcile_account(
     normalized_unknown_submissions: list[UnknownSubmission] = []
     unknown_by_attempt: dict[str, UnknownSubmission] = {}
     unknown_by_client_order_id: dict[str, UnknownSubmission] = {}
-    for submission in unknown_submissions:
-        if not isinstance(submission, UnknownSubmission):
-            raise TypeError("unknown_submissions must contain UnknownSubmission")
+    for raw_submission in unknown_submissions:
+        submission = _snapshot_unknown_submission(raw_submission)
         if (
             submission.provider_id != provider_scope
             or submission.account_id != account_scope
@@ -1411,6 +1683,15 @@ def reconcile_account(
         elif provider_working is not None:
             outcome = "UNKNOWN"
             reason = "provider_working_order_snapshot_not_causal_for_submission"
+        elif submission.client_order_id in inadmissible_provider_client_ids:
+            # Diagnostic/incomplete execution evidence cannot prove execution,
+            # but its presence also forbids proving the send absent.  Treat the
+            # contradiction as UNKNOWN until authoritative provider evidence
+            # resolves the execution identity.
+            outcome = "UNKNOWN"
+            reason = (
+                "matching_provider_execution_lacks_financial_reconciliation_authority"
+            )
         elif submission.client_order_id in provider_client_ids:
             outcome = "UNKNOWN"
             reason = "matching_provider_execution_outside_submission_window"
@@ -1485,6 +1766,13 @@ def reconcile_account(
     if not pagination_complete:
         blocking.add("ACCOUNT")
         reasons.append("provider activity pagination is incomplete")
+    if inadmissible_provider_by_id:
+        blocking.add("ACCOUNT")
+        for fill, _errors in inadmissible_provider_by_id.values():
+            blocking.add(f"INSTRUMENT:{fill.instrument}")
+        reasons.append(
+            "provider execution evidence lacks reconciliation financial direction/provenance authority"
+        )
     if unexpected:
         for execution_id in unexpected:
             fill = provider_by_id[execution_id]
@@ -1534,7 +1822,7 @@ def reconcile_account(
         reasons.append(
             "local provider activity identities are absent from provider activity evidence"
         )
-    if settlement_requested and not settlement_activity_complete:
+    if settlement_requested and not settlement_coverage_complete:
         blocking.add("ACCOUNT")
         reasons.append("provider settlement/activity coverage is incomplete")
     if settlement_differences:
@@ -1561,6 +1849,7 @@ def reconcile_account(
     complete = (
         snapshot_is_consistent
         and pagination_complete
+        and not inadmissible_provider_by_id
         and not unexpected
         and not missing
         and not unexpected_working
@@ -1570,10 +1859,11 @@ def reconcile_account(
         and not missing_local_activities
         and not cash_differences
         and not position_differences
+        and not borrow_differences
         and (
             not settlement_requested
             or (
-                settlement_activity_complete is True
+                settlement_coverage_complete
                 and not settlement_differences
             )
         )
@@ -1621,9 +1911,7 @@ def reconcile_account(
         resource_availability=resource_availability,
         borrow_differences=MappingProxyType(borrow_differences),
         settlement_differences=MappingProxyType(settlement_differences),
-        settlement_activity_complete=(
-            True if not settlement_requested else bool(settlement_activity_complete)
-        ),
+        settlement_activity_complete=settlement_coverage_complete,
         unexpected_provider_fills=tuple(
             provider_by_id[execution_id] for execution_id in unexpected
         ),

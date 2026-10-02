@@ -380,6 +380,12 @@ class ReconvergenceIntegrityTests(unittest.TestCase):
         self.assertNotIn("--pull-request-event", workflow)
         self.assertNotIn("--allowed-scope", workflow)
         self.assertIn("git ls-remote --refs origin", workflow)
+        self.assertIn('read -r live_sha _ <<< "$live_line"', workflow)
+        self.assertIn('test "$live_sha" = "$BASE_SHA"', workflow)
+        self.assertEqual(
+            workflow.count("- name: Run trusted guard regression tests"),
+            1,
+        )
         self.assertIn("BASE_REF:", workflow)
         self.assertNotIn("edited", workflow)
 

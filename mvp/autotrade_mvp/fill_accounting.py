@@ -826,6 +826,13 @@ def build_provider_fill_correction_transactions(
         raise AccountingConflict("correction side changed")
     if corrected_provider_fill.position_side != original_provider_fill.position_side:
         raise AccountingConflict("correction provider position_side changed")
+    if (
+        corrected_provider_fill.position_side is not None
+        or corrected_provider_fill.position_effect is not None
+    ):
+        raise AccountingConflict(
+            "cash-equity correction rejects derivative position identity"
+        )
 
     observation = _utc_text(correction_observed_at, name="correction_observed_at")
     order_key = _economic_order_key(

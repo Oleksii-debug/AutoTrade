@@ -419,7 +419,7 @@ class OptionLifecycleTests(unittest.TestCase):
             Decimal("12345678901234567890.123456790"),
         )
         self.assertEqual(
-            transaction.postings[1].amount,
+            transaction.postings[1].signed_amount,
             Decimal("-2000000002.000000002000000002"),
         )
 

@@ -351,11 +351,11 @@ class SecuritiesBorrowAuthorityTests(unittest.TestCase):
             def __format__(self, _spec):
                 raise AssertionError("hostile Decimal.__format__ dispatched")
 
-        with self.assertRaisesRegex(ValueError, "capacity_quantity must be a finite decimal"):
+        with self.assertRaisesRegex(TypeError, "exact Decimal"):
             _borrow_evidence(capacity=HostileDecimal("1"))
 
     def test_borrow_decimal_ingress_rejects_oversized_exponent_before_rendering(self):
-        with self.assertRaisesRegex(ValueError, "capacity_quantity must be a finite decimal"):
+        with self.assertRaisesRegex(ValueError, "resource envelope"):
             _borrow_evidence(capacity="1e999999")
 
     def test_recall_projection_arithmetic_is_independent_of_ambient_decimal_context(self):

@@ -329,11 +329,14 @@ def _trusted_git_executable() -> Path:
             admitted = os.lstat(candidate)
             _reject_windows_reparse(admitted, name="trusted Git executable")
             resolved = candidate.resolve(strict=True)
+        except (OSError, AuthenticodeSigningError):
+            continue
+        try:
             resolved.relative_to(checkout)
         except ValueError:
+            pass
+        else:
             # A candidate inside the checkout is never executable authority.
-            continue
-        except (OSError, AuthenticodeSigningError):
             continue
         if not stat.S_ISREG(admitted.st_mode) or admitted.st_nlink != 1:
             continue

@@ -223,7 +223,7 @@ def _verify_provider_settlement_evidence(
     evidence: FuturesSettlementEvidence,
     artifact_store: ArtifactStore,
 ) -> str:
-    if not isinstance(artifact_store, ArtifactStore):
+    if type(artifact_store) is not ArtifactStore:
         raise FuturesError(
             "durable provider settlement requires trusted ArtifactStore"
         )
@@ -231,7 +231,10 @@ def _verify_provider_settlement_evidence(
         evidence.evidence_ref
     )
     try:
-        manifest = artifact_store.load_manifest(artifact_id)
+        manifest, raw = ArtifactStore.read_authenticated_snapshot(
+            artifact_store,
+            artifact_id,
+        )
         manifest_hash = manifest.get("manifest_hash")
         if (
             not isinstance(manifest_hash, str)
@@ -258,11 +261,11 @@ def _verify_provider_settlement_evidence(
             raise ArtifactIntegrityError(
                 "settlement evidence manifest lacks storage provenance"
             )
-        raw = artifact_store.read_bytes(artifact_id)
         receipt = strict_json_loads(raw.decode("utf-8"))
     except (
         ArtifactIntegrityError,
         FileNotFoundError,
+        OSError,
         UnicodeError,
         ValueError,
         TypeError,

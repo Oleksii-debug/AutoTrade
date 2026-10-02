@@ -3648,6 +3648,7 @@ class BybitV5HttpTransport:
                 account_id=self.account_id,
                 entity_id=entity_id,
                 environment=self.policy.environment,
+                provider_environment=self.provider_environment,
                 instrument_version=instrument_version,
                 at=point,
             )
@@ -3662,6 +3663,7 @@ class BybitV5HttpTransport:
             or current.account_id != self.account_id
             or current.entity_id != entity_id
             or current.environment != self.policy.environment
+            or current.provider_environment != self.provider_environment
             or current.instrument_version != instrument_version
             or current.status != "VERIFIED"
             or not (current.observed_at <= point < current.expires_at)
@@ -3787,6 +3789,18 @@ class BybitV5AuthenticatedReadSigner:
         ):
             raise ProviderTransportScopeError(
                 "authenticated-read binding provider/environment mismatch"
+            )
+        matching_domains = tuple(
+            name
+            for name, candidate in BYBIT_V5_ENDPOINT_POLICIES.items()
+            if candidate == policy
+        )
+        if (
+            len(matching_domains) != 1
+            or query_binding.provider_environment != matching_domains[0]
+        ):
+            raise ProviderTransportScopeError(
+                "authenticated-read binding provider environment mismatch"
             )
         _bybit_authenticated_read_rule(query_binding)
         if (
@@ -3966,6 +3980,7 @@ class BybitV5AuthenticatedReadTransport:
                 account_id=self.account_id,
                 entity_id=query_binding.entity_id,
                 environment=self.policy.environment,
+                provider_environment=self.provider_environment,
                 instrument_version=query_binding.instrument_version,
                 at=point,
             )
@@ -3980,6 +3995,7 @@ class BybitV5AuthenticatedReadTransport:
             or current.account_id != self.account_id
             or current.entity_id != query_binding.entity_id
             or current.environment != self.policy.environment
+            or current.provider_environment != self.provider_environment
             or current.instrument_version != query_binding.instrument_version
             or current.status != "VERIFIED"
             or not (current.observed_at <= point < current.expires_at)
@@ -4003,6 +4019,7 @@ class BybitV5AuthenticatedReadTransport:
             query_binding.provider_id != "BYBIT"
             or query_binding.account_id != self.account_id
             or query_binding.environment != self.policy.environment
+            or query_binding.provider_environment != self.provider_environment
             or query_binding.capability_snapshot_id != self.capability_snapshot_id
         ):
             raise ProviderTransportScopeError(

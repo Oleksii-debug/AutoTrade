@@ -12,6 +12,14 @@ from mvp.autotrade_mvp.capabilities import (
 )
 
 
+from mvp.autotrade_mvp.provider_domain import (
+    ProviderDomainError,
+    ProviderFinancialScope,
+    normalize_provider_environment,
+    provider_financial_scope,
+)
+
+
 NOW = datetime(2026, 9, 24, 16, 0, tzinfo=timezone.utc)
 SNAPSHOT_1 = "11111111-1111-4111-8111-111111111111"
 SNAPSHOT_2 = "22222222-2222-4222-8222-222222222222"
@@ -538,6 +546,141 @@ class CapabilityFoundationTests(unittest.TestCase):
                 data_entitlements=original.data_entitlements,
                 evidence_ref=original.evidence_ref,
             )
+
+
+class ProviderFinancialScopeTests(unittest.TestCase):
+    def test_bybit_paper_domains_never_alias(self):
+        testnet = provider_financial_scope(
+            provider_id="BYBIT",
+            environment="PAPER",
+            provider_environment="TESTNET",
+            route_policy_id="bybit-v5-order@1",
+        )
+        demo = provider_financial_scope(
+            provider_id="BYBIT",
+            environment="PAPER",
+            provider_environment="DEMO",
+            route_policy_id="bybit-v5-order@1",
+        )
+        self.assertNotEqual(testnet.content_sha256, demo.content_sha256)
+        self.assertNotEqual(testnet.payload, demo.payload)
+        self.assertEqual(testnet.provider_environment, "TESTNET")
+        self.assertEqual(demo.provider_environment, "DEMO")
+
+    def test_kraken_futures_demo_can_be_explicit_without_relabelling_runtime(self):
+        demo = provider_financial_scope(
+            provider_id="KRAKEN",
+            environment="PAPER",
+            provider_environment="DEMO",
+            route_policy_id="kraken-futures-sendorder-v3@1",
+        )
+        paper_named = provider_financial_scope(
+            provider_id="KRAKEN",
+            environment="PAPER",
+            provider_environment="PAPER",
+            route_policy_id="kraken-futures-sendorder-v3@1",
+        )
+        self.assertEqual(demo.environment, "PAPER")
+        self.assertEqual(demo.provider_environment, "DEMO")
+        self.assertNotEqual(demo.content_sha256, paper_named.content_sha256)
+
+    def test_financial_scope_never_guesses_missing_provider_domain(self):
+        with self.assertRaisesRegex(
+            ProviderDomainError,
+            "requires explicit provider_environment",
+        ):
+            provider_financial_scope(
+                provider_id="KRAKEN",
+                environment="PAPER",
+                provider_environment=None,
+                route_policy_id="kraken-futures-sendorder-v3@1",
+            )
+        self.assertEqual(
+            normalize_provider_environment(
+                provider_id="KRAKEN",
+                environment="LIVE",
+                provider_environment=None,
+            ),
+            "LIVE",
+        )
+
+    def test_route_policy_identity_changes_scope_content(self):
+        first = provider_financial_scope(
+            provider_id="KRAKEN",
+            environment="LIVE",
+            provider_environment="LIVE",
+            route_policy_id="kraken-spot-orders-v1@1",
+        )
+        second = provider_financial_scope(
+            provider_id="KRAKEN",
+            environment="LIVE",
+            provider_environment="LIVE",
+            route_policy_id="kraken-spot-orders-v2@1",
+        )
+        self.assertNotEqual(first.content_sha256, second.content_sha256)
+        self.assertEqual(first.payload["schema_version"], 1)
+        self.assertEqual(
+            first.to_contract_dict()["content_sha256"],
+            first.content_sha256,
+        )
+
+    def test_scope_rejects_polymorphic_and_noncanonical_scalar_authority(self):
+        class HostileText(str):
+            def strip(self):
+                raise AssertionError("hostile strip executed")
+
+            def upper(self):
+                raise AssertionError("hostile upper executed")
+
+        with self.assertRaisesRegex(
+            ProviderDomainError,
+            "provider_id must be exact canonical text",
+        ):
+            provider_financial_scope(
+                provider_id=HostileText("KRAKEN"),
+                environment="LIVE",
+                provider_environment="LIVE",
+                route_policy_id="kraken-spot@1",
+            )
+        with self.assertRaisesRegex(
+            ProviderDomainError,
+            "route_policy_id must be exact canonical text",
+        ):
+            ProviderFinancialScope(
+                provider_id="KRAKEN",
+                environment="LIVE",
+                provider_environment="LIVE",
+                route_policy_id=HostileText("kraken-spot@1"),
+            )
+        with self.assertRaisesRegex(
+            ProviderDomainError,
+            "does not match runtime environment",
+        ):
+            provider_financial_scope(
+                provider_id="BYBIT",
+                environment="LIVE",
+                provider_environment="DEMO",
+                route_policy_id="bybit-v5@1",
+            )
+
+    def test_scope_payload_is_immutable_and_digest_deterministic(self):
+        scope = provider_financial_scope(
+            provider_id="ALPACA",
+            environment="PAPER",
+            provider_environment="PAPER",
+            route_policy_id="alpaca-trading-v2@1",
+        )
+        with self.assertRaises(TypeError):
+            scope.payload["provider_environment"] = "LIVE"
+        rebuilt = provider_financial_scope(
+            provider_id="ALPACA",
+            environment="PAPER",
+            provider_environment="PAPER",
+            route_policy_id="alpaca-trading-v2@1",
+        )
+        self.assertEqual(scope, rebuilt)
+        self.assertEqual(scope.content_sha256, rebuilt.content_sha256)
+        self.assertRegex(scope.content_sha256, r"^sha256:[0-9a-f]{64}$")
 
 
 if __name__ == "__main__":

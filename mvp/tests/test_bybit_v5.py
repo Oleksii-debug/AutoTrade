@@ -36,7 +36,13 @@ from mvp.autotrade_mvp.provider_core import (
 READ_AT = datetime(2026, 9, 24, 20, tzinfo=timezone.utc)
 
 
-def read_capability(*, account_id="paper-1", environment="PAPER", instrument_version="BTCUSDT@v1"):
+def read_capability(
+    *,
+    account_id="paper-1",
+    environment="PAPER",
+    provider_environment="TESTNET",
+    instrument_version="BTCUSDT@v1",
+):
     observed_at = READ_AT - timedelta(hours=1)
     claims = tuple(
         CapabilityClaim(
@@ -45,6 +51,7 @@ def read_capability(*, account_id="paper-1", environment="PAPER", instrument_ver
             account_id=account_id,
             entity_id="bybit-reconciliation",
             environment=environment,
+            provider_environment=provider_environment,
             instrument_version=instrument_version,
             observed_at=observed_at,
             expires_at=READ_AT + timedelta(hours=1),
@@ -79,6 +86,7 @@ def write_capability(
     position_mode="HEDGE",
     account_id="bybit-account",
     environment="PAPER",
+    provider_environment="DEMO",
     instrument_version="BTCUSDT@1",
     expires_at=None,
     permission_scope=None,
@@ -97,6 +105,7 @@ def write_capability(
             account_id=account_id,
             entity_id="bybit-unified-account",
             environment=environment,
+            provider_environment=provider_environment,
             instrument_version=instrument_version,
             observed_at=observed_at,
             expires_at=expires_at or READ_AT + timedelta(minutes=5),
@@ -127,6 +136,7 @@ def submission_write_capability(
     *,
     account_id="bybit-account",
     environment="LIVE",
+    provider_environment="MAINNET",
     instrument_version="BTCUSDT@v1",
 ):
     observed_at = READ_AT - timedelta(hours=1)
@@ -137,6 +147,7 @@ def submission_write_capability(
             account_id=account_id,
             entity_id="bybit-order",
             environment=environment,
+            provider_environment=provider_environment,
             instrument_version=instrument_version,
             observed_at=observed_at,
             expires_at=READ_AT + timedelta(hours=1),
@@ -171,17 +182,19 @@ def bound_execution_response(
     environment="PAPER",
     instrument_version="BTCUSDT@v1",
 ):
+    capability = read_capability(
+        account_id=account_id,
+        environment=environment,
+        instrument_version=instrument_version,
+    )
     query = prepare_authenticated_read_query(
-        capability=read_capability(
-            account_id=account_id,
-            environment=environment,
-            instrument_version=instrument_version,
-        ),
+        capability=capability,
         surface=Surface.AUTHENTICATED_READ,
         endpoint="/v5/execution/list",
         query={"category": "spot", "limit": "100"},
         at=READ_AT,
         permission_scope="ORDER.READ",
+        provider_environment=capability.provider_environment,
     )
     raw = json.dumps(
         response,
@@ -252,6 +265,48 @@ class BybitV5AdapterTests(unittest.TestCase):
         self.assertEqual(payload["category"], "linear")
         self.assertTrue(payload["reduceOnly"])
         self.assertEqual(payload["positionIdx"], 1)
+
+    def test_spot_preparation_cannot_cross_testnet_and_demo(self):
+        capability = submission_write_capability(
+            environment="PAPER",
+            provider_environment="TESTNET",
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "provider environment"):
+            prepare_order_submission(
+                capability=capability,
+                at=READ_AT,
+                provider_environment="DEMO",
+                product_family="SPOT",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="MARKET",
+                quantity="0.01",
+                client_order_id="spot-cross-domain",
+                time_in_force="IOC",
+            )
+
+    def test_derivative_capability_cannot_cross_testnet_and_demo(self):
+        capability = write_capability(
+            environment="PAPER",
+            provider_environment="TESTNET",
+        )
+        with self.assertRaisesRegex(ProviderCoreError, "provider environment"):
+            build_order_payload(
+                product_family="LINEAR_DERIVATIVES",
+                symbol="BTCUSDT",
+                side="BUY",
+                order_type="LIMIT",
+                quantity="1",
+                price="70000",
+                client_order_id="cross-domain",
+                time_in_force="GTC",
+                position_side="LONG",
+                capability=capability,
+                capability_at=READ_AT,
+                account_id="bybit-account",
+                instrument_version="BTCUSDT@1",
+                provider_environment="DEMO",
+            )
 
     def test_derivative_order_requires_verified_capability_context(self):
         with self.assertRaisesRegex(ProviderCoreError, "capability context"):

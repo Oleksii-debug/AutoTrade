@@ -41,6 +41,7 @@ def write_capability():
             account_id="contract-account",
             entity_id="contract-order",
             environment="LIVE",
+            provider_environment="MAINNET",
             instrument_version="BTCUSDT@v1",
             observed_at=observed,
             expires_at=NOW + timedelta(hours=1),
@@ -106,9 +107,11 @@ def durable_submission(payload, *, intent_id):
     }
     with TemporaryDirectory() as directory:
         store = JournalStore(f"{directory}/journal.sqlite3")
+        # Contract fixtures validate adapter/schema semantics, not production
+        # financial authority. Keep synthetic durable wire evidence in SIMULATION.
         dispatcher = GuardedDispatcher(
             store,
-            environment="LIVE",
+            environment="SIMULATION",
             account_id="contract-account",
             owner_token="contract-fixture-owner",
         )
@@ -162,7 +165,7 @@ def durable_submission(payload, *, intent_id):
         )
         binding = load_submission_response_binding(
             store,
-            environment="LIVE",
+            environment="SIMULATION",
             account_id="contract-account",
             attempt_id=attempt_id,
         )

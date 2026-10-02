@@ -3079,16 +3079,174 @@ class AuthorityService:
                 if resource.startswith("BORROW:")
             )
         )
+        cash_resources = tuple(
+            sorted(
+                resource
+                for resource in risk_requirements
+                if resource.startswith("CASH:")
+            )
+        )
         raw_adjustments = availability_evidence.get(
             "borrow_capacity_adjustments"
+        )
+        raw_cash_adjustments = availability_evidence.get(
+            "settlement_cash_adjustments"
         )
         reservation_expected_available = expected_availability_evidence.get(
             "availability"
         )
-        if not isinstance(reservation_expected_available, Mapping):
+        regenerated_available = regenerated_availability.get("availability")
+        if (
+            not isinstance(reservation_expected_available, Mapping)
+            or not isinstance(regenerated_available, Mapping)
+        ):
             raise AuthorityConflict(
                 "regenerated reservation availability is malformed"
             )
+        reservation_expected_available = dict(reservation_expected_available)
+
+        if raw_cash_adjustments is not None:
+            expected_cash_fields = {
+                "journal_sequence_cut",
+                "economic_book_digest",
+                "economic_aggregate_version",
+                "settlement_scope_id",
+                "settlement_aggregate_version",
+                "resources",
+            }
+            if (
+                not cash_resources
+                or not isinstance(raw_cash_adjustments, Mapping)
+                or set(raw_cash_adjustments) != expected_cash_fields
+            ):
+                raise AuthorityConflict(
+                    "durable settlement cash adjustment is malformed"
+                )
+            cash_cut = raw_cash_adjustments.get("journal_sequence_cut")
+            economic_version = raw_cash_adjustments.get(
+                "economic_aggregate_version"
+            )
+            settlement_version = raw_cash_adjustments.get(
+                "settlement_aggregate_version"
+            )
+            economic_digest = raw_cash_adjustments.get(
+                "economic_book_digest"
+            )
+            settlement_scope_id = raw_cash_adjustments.get(
+                "settlement_scope_id"
+            )
+            if (
+                type(cash_cut) is not int
+                or cash_cut < 0
+                or (
+                    isinstance(journal_sequence_cut, int)
+                    and cash_cut > journal_sequence_cut
+                )
+                or type(economic_version) is not int
+                or economic_version < 0
+                or type(settlement_version) is not int
+                or settlement_version < 0
+                or not isinstance(economic_digest, str)
+                or not economic_digest.startswith("sha256:")
+                or len(economic_digest) != 71
+                or not isinstance(settlement_scope_id, str)
+                or not settlement_scope_id.strip()
+            ):
+                raise AuthorityConflict(
+                    "durable settlement cash cut identity is invalid"
+                )
+            raw_cash_resources = raw_cash_adjustments.get("resources")
+            if (
+                not isinstance(raw_cash_resources, Mapping)
+                or set(raw_cash_resources) != set(cash_resources)
+            ):
+                raise AuthorityConflict(
+                    "durable settlement cash resources are incomplete"
+                )
+            canonical_cash_resources: dict[str, dict[str, str]] = {}
+            for resource in cash_resources:
+                raw_adjustment = raw_cash_resources.get(resource)
+                if (
+                    not isinstance(raw_adjustment, Mapping)
+                    or set(raw_adjustment)
+                    != {
+                        "provider_available",
+                        "local_available_to_spend",
+                        "reservable_available",
+                    }
+                ):
+                    raise AuthorityConflict(
+                        "durable settlement cash resource adjustment is malformed"
+                    )
+                provider_amount = _decimal(
+                    raw_adjustment.get("provider_available"),
+                    name=f"{resource}.provider_available",
+                )
+                local_amount = _decimal(
+                    raw_adjustment.get("local_available_to_spend"),
+                    name=f"{resource}.local_available_to_spend",
+                )
+                reservable = _decimal(
+                    raw_adjustment.get("reservable_available"),
+                    name=f"{resource}.reservable_available",
+                )
+                provider_regenerated = _decimal(
+                    regenerated_available.get(resource),
+                    name=f"{resource}.regenerated_provider_available",
+                )
+                required = _decimal(
+                    risk_requirements.get(resource),
+                    name=f"{resource}.reservation_requirement",
+                )
+                expected_reservable = (
+                    provider_amount
+                    if provider_amount <= local_amount
+                    else local_amount
+                )
+                if (
+                    provider_amount < 0
+                    or local_amount < 0
+                    or reservable < 0
+                    or provider_amount != provider_regenerated
+                    or reservable != expected_reservable
+                    or required > reservable
+                ):
+                    raise AuthorityConflict(
+                        "durable settlement cash adjustment is inconsistent"
+                    )
+                reservation_expected_available[resource] = (
+                    _canonical_decimal_text(reservable)
+                )
+                canonical_cash_resources[resource] = {
+                    "provider_available": _canonical_decimal_text(
+                        provider_amount
+                    ),
+                    "local_available_to_spend": _canonical_decimal_text(
+                        local_amount
+                    ),
+                    "reservable_available": _canonical_decimal_text(
+                        reservable
+                    ),
+                }
+            canonical_cash_adjustments = {
+                "journal_sequence_cut": cash_cut,
+                "economic_book_digest": economic_digest,
+                "economic_aggregate_version": economic_version,
+                "settlement_scope_id": settlement_scope_id,
+                "settlement_aggregate_version": settlement_version,
+                "resources": canonical_cash_resources,
+            }
+            expected_availability_evidence["availability"] = dict(
+                reservation_expected_available
+            )
+            expected_availability_evidence[
+                "settlement_cash_adjustments"
+            ] = canonical_cash_adjustments
+        elif cash_resources and record.environment in {"PAPER", "LIVE"}:
+            raise AuthorityConflict(
+                "PAPER/LIVE durable cash admission lacks settlement authority"
+            )
+
         legacy_expected_availability_evidence: dict[str, Any] | None = None
         if borrow_resources:
             if (
@@ -3098,14 +3256,7 @@ class AuthorityService:
                 raise AuthorityConflict(
                     "durable borrow capacity adjustments are missing or ambiguous"
                 )
-            regenerated_available = regenerated_availability.get(
-                "availability"
-            )
-            if not isinstance(regenerated_available, Mapping):
-                raise AuthorityConflict(
-                    "regenerated reservation availability is malformed"
-                )
-            adjusted_available = dict(regenerated_available)
+            adjusted_available = dict(reservation_expected_available)
             canonical_adjustments: dict[str, dict[str, str]] = {}
             for resource in borrow_resources:
                 raw_adjustment = raw_adjustments.get(resource)

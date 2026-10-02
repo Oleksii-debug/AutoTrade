@@ -293,7 +293,9 @@ def _assert_expected_generation(
 # caller-owned ArtifactStore instances and filesystem substitution, but it is not
 # presented as a sandbox against arbitrary mutation of this module's own globals.
 _READER_CAPABILITY_LOCK = threading.RLock()
-_READER_CAPABILITIES: dict[int, tuple[str, tuple[int, ...]]] = {}
+_GENERAL_READER_AUTHORITY = object()
+_PRODUCT_READER_AUTHORITY = object()
+_READER_CAPABILITIES: dict[int, tuple[str, tuple[int, ...], object]] = {}
 _READER_PIN_NAMES = ("root", "manifests", "objects", "staging")
 _CANONICAL_AUTHENTICATED_READ = None
 
@@ -539,11 +541,11 @@ def _release_reader_capability(reader_id: int) -> None:
     with _READER_CAPABILITY_LOCK:
         state = _READER_CAPABILITIES.pop(reader_id, None)
     if state is not None:
-        _root_key, pins = state
+        _root_key, pins, _authority = state
         _close_generation_pins(pins)
 
 
-def _reader_capability(reader: object) -> tuple[str, tuple[int, ...]]:
+def _reader_capability(reader: object) -> tuple[str, tuple[int, ...], object]:
     if type(reader) is not _TrustedAuthenticatedReader:
         raise TypeError("trusted reader capability type is invalid")
     with _READER_CAPABILITY_LOCK:
@@ -556,9 +558,20 @@ def _reader_capability(reader: object) -> tuple[str, tuple[int, ...]]:
 
 
 def require_trusted_authenticated_reader(reader: object):
-    """Admit only a live sealed reader issued by trusted_authenticated_reader()."""
+    """Admit any live sealed reader issued by the trusted ArtifactStore TCB."""
 
     _reader_capability(reader)
+    return reader
+
+
+def require_product_trusted_authenticated_reader(reader: object):
+    """Admit only a live reader issued by trusted product composition."""
+
+    _root_key, _pins, authority = _reader_capability(reader)
+    if authority is not _PRODUCT_READER_AUTHORITY:
+        raise _store.ArtifactIntegrityError(
+            "trusted artifact reader was not issued by product root authority"
+        )
     return reader
 
 
@@ -573,7 +586,7 @@ class _TrustedAuthenticatedReader(str):
         return str.__new__(cls, "autotrade-trusted-artifact-reader")
 
     def __call__(self, artifact_id: str):
-        root_key, pins = _reader_capability(self)
+        root_key, pins, _authority = _reader_capability(self)
         expected_generation = _pinned_generation(pins)
 
         configured_generation = _immutable_configured_generation(root_key)
@@ -602,31 +615,16 @@ class _TrustedAuthenticatedReader(str):
             _close_generation_pins(execution_pins)
 
 
-def trusted_authenticated_reader(
+def _issue_trusted_authenticated_reader(
     authoritative_root: str | Path,
     *,
-    publication_store: object | None = None,
+    publication_store: object | None,
+    authority_marker: object,
 ):
-    """Build a lifetime-pinned authenticated artifact read capability.
+    """Issue one sealed reader under a module-owned authority class."""
 
-    The returned immutable token exposes neither a mutable ArtifactStore nor raw
-    OS namespace capabilities. Duplicated retained root/manifests/objects/staging
-    descriptors or handles live in module-owned state until the reader is
-    garbage-collected. Those live capabilities prevent generation identity reuse
-    while the reader remains authoritative.
-
-    Every read compares the current lexical namespace against identities derived
-    from the still-open pins, then builds an exact no-init execution view from
-    duplicated pins. No ArtifactStore constructor or filesystem mutation occurs
-    between authority checks and authenticated snapshot execution.
-
-    Trust boundary: installed AutoTrade module code and its module globals are part
-    of the qualified process TCB. Arbitrary same-process code that can rewrite this
-    module or ArtifactStore implementation is a process compromise and is excluded
-    by the canonical worker/host isolation contract; it is not modeled as hostile
-    input that Python object hiding can contain. Caller-owned store objects,
-    evidence bytes and filesystem namespaces remain untrusted and fail closed.
-    """
+    if authority_marker not in (_GENERAL_READER_AUTHORITY, _PRODUCT_READER_AUTHORITY):
+        raise TypeError("trusted reader authority marker is invalid")
 
     root = _canonical_authoritative_root(authoritative_root)
     initial_store = _store.ArtifactStore(root)
@@ -645,7 +643,11 @@ def trusted_authenticated_reader(
                 raise _store.ArtifactIntegrityError(
                     "trusted reader capability identity collision"
                 )
-            _READER_CAPABILITIES[reader_id] = (root_key, pins)
+            _READER_CAPABILITIES[reader_id] = (
+                root_key,
+                pins,
+                authority_marker,
+            )
         weakref.finalize(reader, _release_reader_capability, reader_id)
         return reader
     except BaseException:
@@ -653,6 +655,42 @@ def trusted_authenticated_reader(
             _READER_CAPABILITIES.pop(reader_id, None)
         _close_generation_pins(pins)
         raise
+
+
+def trusted_authenticated_reader(
+    authoritative_root: str | Path,
+    *,
+    publication_store: object | None = None,
+):
+    """Build a lifetime-pinned general authenticated artifact read capability.
+
+    General issuance proves retained root-generation integrity. It deliberately does
+    not prove that the selected root is the terminal product financial root. Product
+    consumers requiring that stronger authority must use a capability issued by the
+    trusted product-composition seam.
+    """
+
+    return _issue_trusted_authenticated_reader(
+        authoritative_root,
+        publication_store=publication_store,
+        authority_marker=_GENERAL_READER_AUTHORITY,
+    )
+
+
+def _product_trusted_authenticated_reader(authoritative_root: str | Path):
+    """Issue a lifetime-pinned reader selected by trusted product composition.
+
+    This is intentionally not re-exported by autotrade_runtime.artifacts. The
+    installed AutoTrade composition is part of the process TCB; ordinary financial
+    callers may present evidence, but cannot promote a caller-selected root by using
+    the public general reader issuer.
+    """
+
+    return _issue_trusted_authenticated_reader(
+        authoritative_root,
+        publication_store=None,
+        authority_marker=_PRODUCT_READER_AUTHORITY,
+    )
 
 
 def _windows_path_mutex_name(self) -> str:

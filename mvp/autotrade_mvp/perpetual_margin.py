@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from hashlib import sha256
 import json
 from typing import Literal, Sequence
@@ -19,6 +19,11 @@ from uuid import UUID
 from research.autotrade_research.artifacts.store import ArtifactStore
 
 from .capabilities import CapabilitySnapshot
+from .exact_decimal import (
+    ExactDecimalError,
+    canonical_decimal_text,
+    parse_bounded_exact_decimal,
+)
 
 
 class PerpetualMarginError(ValueError):
@@ -29,12 +34,11 @@ def _decimal(value, *, name: str) -> Decimal:
     if isinstance(value, bool) or isinstance(value, float):
         raise TypeError(f"{name} must use Decimal, string or integer input")
     try:
-        result = value if isinstance(value, Decimal) else Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as error:
-        raise PerpetualMarginError(f"{name} must be a finite decimal") from error
-    if not result.is_finite():
-        raise PerpetualMarginError(f"{name} must be a finite decimal")
-    return result
+        return parse_bounded_exact_decimal(value)
+    except ExactDecimalError as error:
+        raise PerpetualMarginError(
+            f"{name} must be a bounded exact decimal"
+        ) from error
 
 
 def _non_negative(value, *, name: str) -> Decimal:
@@ -77,10 +81,12 @@ def _artifact_id(value: object, *, name: str) -> str:
 
 
 def _decimal_text(value: Decimal) -> str:
-    normalized = value.normalize()
-    if normalized == 0:
-        return "0"
-    return format(normalized, "f")
+    try:
+        return canonical_decimal_text(value)
+    except ExactDecimalError as error:
+        raise PerpetualMarginError(
+            "margin evidence decimal exceeds the canonical resource envelope"
+        ) from error
 
 
 def _canonical_json_bytes(value: object) -> bytes:

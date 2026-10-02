@@ -133,6 +133,59 @@ class CanonicalSimulationSessionTests(unittest.TestCase):
             )
             self.assertEqual(str(book.cash("USD")), first["cash"])
             self.assertEqual(str(book.position(INSTRUMENT)), first["position"])
+
+            bindings = reopened.load_events_by_aggregate_type(
+                "provider_fill_financial_binding"
+            )
+            self.assertEqual(len(bindings), 1)
+            binding_request = bindings[0]["payload"]["request"]
+            admission_event = next(
+                event
+                for event in reopened.load_events("authority_state", "canonical")
+                if event["event_type"] == "AuthorityAdmissionRecorded"
+            )
+            reservation_event = next(
+                event
+                for event in reopened.load_events_by_aggregate_type("reservation_book")
+                if event["payload"]["operation"] == "RESERVE"
+            )
+            self.assertEqual(
+                binding_request["financial_admission"]["authority_event_id"],
+                admission_event["event_id"],
+            )
+            self.assertEqual(
+                binding_request["financial_admission"]["admission_id"],
+                admission_event["payload"]["admission_id"],
+            )
+            self.assertEqual(
+                binding_request["reservation_id"],
+                reservation_event["payload"]["request"]["reservation_id"],
+            )
+            self.assertEqual(
+                binding_request["provider_execution_id"], first["fill_id"]
+            )
+            self.assertEqual(
+                binding_request["derived_usage"], {"CASH:USD": "103.103"}
+            )
+            self.assertTrue(
+                binding_request["transaction_id"].startswith("provider-fill:")
+            )
+            reservations = DurableReservationBook(
+                reopened,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT,
+                resolution_artifact_store=ArtifactStore(
+                    Path(directory) / "artifacts"
+                ),
+                resolution_artifact_root=Path(directory) / "artifacts",
+            )
+            reservation = reservations.get(binding_request["reservation_id"])
+            self.assertEqual(
+                reservation.consumed["CASH:USD"], Decimal("103.103")
+            )
+            self.assertEqual(
+                reservation.remaining["CASH:USD"], Decimal("0")
+            )
             self.assertIsNotNone(reopened.get_event(first["reconciliation_event_id"]))
             sessions = reopened.load_events("canonical_simulation_session", "single-episode")
             self.assertEqual(

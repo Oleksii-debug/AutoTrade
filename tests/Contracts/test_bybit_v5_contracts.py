@@ -129,7 +129,7 @@ def durable_submission(payload, *, intent_id):
                 "provider": "BYBIT",
                 "request_hash": prepared.body_sha256,
                 "client_order_id": client_order_id,
-                "environment": "LIVE",
+                "environment": "SIMULATION",
                 "account_id": "contract-account",
                 "owner_token": dispatcher.owner_token,
                 "owner_epoch": dispatcher.owner_epoch,

@@ -185,6 +185,8 @@ class SubmissionResponseBinding:
     submission_scope_hash: str
     response_bytes: bytes
     response_sha256: str
+    terminal_state: str
+    response_encoding: str
     http_status: int | None = None
     _factory_token: object = field(default=None, repr=False, compare=False)
 
@@ -218,6 +220,13 @@ class SubmissionResponseBinding:
         ):
             raise ValueError("durable provider response digest mismatch")
         _decode_exact_json_bytes(self.response_bytes)
+        if type(self.terminal_state) is not str or self.terminal_state not in {
+            "SENT",
+            "UNKNOWN",
+        }:
+            raise ValueError("durable submission terminal_state must be SENT or UNKNOWN")
+        if self.response_encoding != "utf-8-json":
+            raise ValueError("durable submission response_encoding must be utf-8-json")
         if self.http_status is not None and (
             type(self.http_status) is not int
             or self.http_status < 100
@@ -639,6 +648,10 @@ def load_submission_response_binding(
         submission_scope_hash=scope_hash,
         response_bytes=response_bytes,
         response_sha256=response_sha256,
+        terminal_state=(
+            "SENT" if sent.get("event_type") == "SubmissionSent" else "UNKNOWN"
+        ),
+        response_encoding="utf-8-json",
         http_status=http_status,
         _factory_token=_SUBMISSION_RESPONSE_BINDING_TOKEN,
     )

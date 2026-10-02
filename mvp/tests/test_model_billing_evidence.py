@@ -42,7 +42,6 @@ def canonical(value):
 
 def scope(*, terminal_state="OBSERVED", remote=True, provider="provider-a"):
     observed = terminal_state == "OBSERVED"
-    remote_source = source_class == REMOTE_PROVIDER_BILLING_SOURCE
     return {
         "attempt_id": ATTEMPT,
         "request_id": ATTEMPT,

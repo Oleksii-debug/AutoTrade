@@ -1598,6 +1598,63 @@ class JournalStoreTests(unittest.TestCase):
                 {"paper-1": "4", "paper-2": "2"},
             )
 
+    def test_global_projection_tail_read_rejects_silent_truncation(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+            store.append_event(
+                event("evt-2", 2, {"kind": "fill", "quantity": "2"})
+            )
+            store.append_event(
+                event("evt-3", 3, {"kind": "fill", "quantity": "3"})
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "journal tail exceeds limit",
+            ):
+                store.load_events_after_journal_sequence(0, limit=2)
+
+            first_page = store.load_events_after_journal_sequence(
+                0,
+                limit=2,
+                allow_partial=True,
+            )
+            self.assertEqual(
+                [item["journal_sequence"] for item in first_page],
+                [1, 2],
+            )
+            remainder = store.load_events_after_journal_sequence(
+                first_page[-1]["journal_sequence"],
+                limit=2,
+            )
+            self.assertEqual(
+                [item["journal_sequence"] for item in remainder],
+                [3],
+            )
+
+    def test_global_projection_tail_read_rejects_future_cut(self):
+        with TemporaryDirectory() as directory:
+            path = f"{directory}/journal.sqlite3"
+            store = JournalStore(path)
+            store.append_event(event())
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "cannot outrun the authoritative journal sequence",
+            ):
+                store.load_events_after_journal_sequence(2)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "allow_partial must be a boolean",
+            ):
+                store.load_events_after_journal_sequence(
+                    0,
+                    allow_partial=1,
+                )
+
     def test_global_projection_checkpoint_is_monotonic_and_fail_closed(self):
         with TemporaryDirectory() as directory:
             path = f"{directory}/journal.sqlite3"

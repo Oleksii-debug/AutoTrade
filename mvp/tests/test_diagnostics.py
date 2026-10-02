@@ -205,6 +205,26 @@ class DiagnosticTraceTests(unittest.TestCase):
         self.assertIn("[REDACTED]", redacted["quoted_key_with_spaces"])
 
 
+    def test_secret_material_embedded_in_mapping_keys_is_redacted(self):
+        payload = {
+            "Authorization: Bearer DIAG-KEY-SECRET": "ignored",
+            "https://diag-user:DIAG-URL-PASSWORD@provider.test/path": "visible",
+            "api_key=DIAG-ASSIGNMENT-SECRET": "ignored",
+            "safe": "visible",
+        }
+        redacted = redact_diagnostic_value(payload)
+        serialized = json.dumps(redacted, sort_keys=True)
+        for leaked in (
+            "DIAG-KEY-SECRET",
+            "DIAG-URL-PASSWORD",
+            "DIAG-ASSIGNMENT-SECRET",
+        ):
+            self.assertNotIn(leaked, serialized)
+        self.assertIn("Authorization: [REDACTED]", redacted)
+        self.assertIn("https://[REDACTED]@provider.test/path", redacted)
+        self.assertIn("api_key=[REDACTED]", redacted)
+        self.assertEqual(redacted["safe"], "visible")
+
     def test_whitebit_api_secret_is_redacted_directly_and_inside_safe_strings(self):
         payload = {
             "api_secret": "WHITEBIT-DIRECT-SECRET",

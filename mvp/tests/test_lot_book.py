@@ -1,4 +1,5 @@
-from decimal import Decimal, ROUND_CEILING, localcontext
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
+from fractions import Fraction
 import unittest
 
 from mvp.autotrade_mvp.lot_book import FifoLotBook
@@ -76,14 +77,60 @@ class FifoLotBookTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             book.buy(HostileDecimal("2"), "100")
 
-    def test_nonterminating_unit_basis_fails_before_book_mutation(self):
+    def test_nonterminating_unit_basis_is_accounted_as_exact_rational(self):
         book = FifoLotBook()
-        with self.assertRaisesRegex(ValueError, "unit cost is non-terminating"):
-            book.buy("3", "100", fee="1")
+        state = book.buy("3", "100", fee="1")
+        self.assertEqual(state.position, Decimal("3"))
+        self.assertEqual(state.open_basis, Decimal("301"))
+        self.assertEqual(book.lots[0].unit_cost, Fraction(301, 3))
+        self.assertEqual(book.lots[0].total_basis, Fraction(301, 1))
+
+        state = book.sell("1", "110")
+        self.assertEqual(state.position, Decimal("2"))
+        self.assertEqual(state.open_basis, Fraction(602, 3))
+        self.assertEqual(state.realized_pnl, Fraction(29, 3))
+        self.assertEqual(book.lots[0].total_basis, Fraction(602, 3))
+        self.assertEqual(book.lots[0].unit_cost, Fraction(301, 3))
+        self.assertEqual(book.mark_to_market("105"), Fraction(28, 3))
+
+        state = book.sell("2", "110")
+        self.assertEqual(state.position, Decimal("0"))
+        self.assertEqual(state.open_basis, Decimal("0"))
+        self.assertEqual(state.realized_pnl, Decimal("29"))
         self.assertEqual(book.lots, ())
-        self.assertEqual(book.snapshot().position, Decimal("0"))
-        self.assertEqual(book.snapshot().open_basis, Decimal("0"))
-        self.assertEqual(book.snapshot().realized_pnl, Decimal("0"))
+
+    def test_nonterminating_basis_is_independent_of_ambient_decimal_context(self):
+        results = []
+        for precision, rounding in (
+            (2, ROUND_CEILING),
+            (3, ROUND_FLOOR),
+            (6, ROUND_CEILING),
+            (28, ROUND_FLOOR),
+        ):
+            with self.subTest(precision=precision, rounding=rounding):
+                with localcontext() as context:
+                    context.prec = precision
+                    context.rounding = rounding
+                    book = FifoLotBook()
+                    book.buy("3", "100", fee="1")
+                    state = book.sell("1", "110")
+                    result = (
+                        state.position,
+                        state.open_basis,
+                        state.realized_pnl,
+                        book.mark_to_market("105"),
+                    )
+                    self.assertEqual(
+                        result,
+                        (
+                            Decimal("2"),
+                            Fraction(602, 3),
+                            Fraction(29, 3),
+                            Fraction(28, 3),
+                        ),
+                    )
+                    results.append(result)
+        self.assertTrue(all(result == results[0] for result in results))
 
     def test_authoritative_arithmetic_is_independent_of_ambient_decimal_context(self):
         book = FifoLotBook()

@@ -46,7 +46,13 @@ from .exact_decimal import (
     exact_add,
     exact_subtract,
 )
-from .persistence import JournalStore, canonical_json, payload_digest
+from .persistence import (
+    JournalStore,
+    canonical_json,
+    journal_store_authority_scope,
+    payload_digest,
+    require_exact_journal_store_authority,
+)
 from .provider_domain import ProviderDomainError, normalize_provider_environment
 from .reconciliation import ProviderActivityEvidence, ProviderFillEvidence
 from .settlement import SettlementObligation
@@ -54,6 +60,27 @@ from .settlement import SettlementObligation
 
 _ALLOWED_EXTERNAL_CASH_TYPES = frozenset({"DEPOSIT", "WITHDRAWAL"})
 _ALLOWED_EXTERNAL_ORIGINS = frozenset({"MANUAL", "EXTERNAL"})
+
+
+def _require_exact_financial_book(value: object, expected_type: type, *, name: str):
+    """Reject polymorphic or instance-shadowed durable financial authorities."""
+
+    if type(value) is not expected_type:
+        raise TypeError(f"{name} must be canonical {expected_type.__name__}")
+    state = vars(value)
+    class_owned = {
+        member_name
+        for base in expected_type.__mro__
+        for member_name in base.__dict__
+    }
+    if class_owned.intersection(tuple(state)):
+        raise TypeError(f"{name} authority is shadowed")
+    store = state.get("store")
+    identity = require_exact_journal_store_authority(
+        store,
+        subject=f"{name} JournalStore",
+    )
+    return store, identity
 
 
 def _text(value: str, *, name: str) -> str:
@@ -926,10 +953,24 @@ def _prepare_provider_fill_correction_binding(
 ) -> PreparedProviderFillCorrectionBinding:
     """Prepare correction high-water evidence without mutating financial state."""
 
-    if not isinstance(economic_book, DurableProviderEconomicBook):
-        raise TypeError("economic_book must be DurableProviderEconomicBook")
-    if not isinstance(reservation_book, DurableReservationBook):
-        raise TypeError("reservation_book must be DurableReservationBook")
+    if type(economic_book) is not DurableProviderEconomicBook:
+        raise TypeError("economic_book must be canonical DurableProviderEconomicBook")
+    if type(reservation_book) is not DurableReservationBook:
+        raise TypeError("reservation_book must be canonical DurableReservationBook")
+    economic_store, store_identity = _require_exact_financial_book(
+        economic_book,
+        DurableProviderEconomicBook,
+        name="economic_book",
+    )
+    reservation_store, reservation_store_identity = _require_exact_financial_book(
+        reservation_book,
+        DurableReservationBook,
+        name="reservation_book",
+    )
+    if reservation_store_identity != store_identity:
+        raise ValueError("economic and reservation books must share one JournalStore generation")
+    if economic_store is not reservation_store:
+        raise ValueError("economic and reservation books must share one JournalStore")
     if economic_book.store is not reservation_book.store:
         raise ValueError("economic and reservation books must share one JournalStore")
     if (
@@ -1813,10 +1854,24 @@ def commit_economic_batch_with_reservation_consumption(
     persistence atomicity and replay identity; it does not invent that mapping.
     """
 
-    if not isinstance(economic_book, DurableProviderEconomicBook):
-        raise TypeError("economic_book must be DurableProviderEconomicBook")
-    if not isinstance(reservation_book, DurableReservationBook):
-        raise TypeError("reservation_book must be DurableReservationBook")
+    if type(economic_book) is not DurableProviderEconomicBook:
+        raise TypeError("economic_book must be canonical DurableProviderEconomicBook")
+    if type(reservation_book) is not DurableReservationBook:
+        raise TypeError("reservation_book must be canonical DurableReservationBook")
+    economic_store, store_identity = _require_exact_financial_book(
+        economic_book,
+        DurableProviderEconomicBook,
+        name="economic_book",
+    )
+    reservation_store, reservation_store_identity = _require_exact_financial_book(
+        reservation_book,
+        DurableReservationBook,
+        name="reservation_book",
+    )
+    if reservation_store_identity != store_identity:
+        raise ValueError("economic and reservation books must share one JournalStore generation")
+    if economic_store is not reservation_store:
+        raise ValueError("economic and reservation books must share one JournalStore")
     if economic_book.store is not reservation_book.store:
         raise ValueError("economic and reservation books must share one JournalStore")
     if (
@@ -1828,9 +1883,9 @@ def commit_economic_batch_with_reservation_consumption(
         )
 
     if provider_fill_binding is not None:
-        if not isinstance(provider_fill_binding, PreparedProviderFillBinding):
+        if type(provider_fill_binding) is not PreparedProviderFillBinding:
             raise TypeError(
-                "provider_fill_binding must be PreparedProviderFillBinding or None"
+                "provider_fill_binding must be canonical PreparedProviderFillBinding or None"
             )
         binding_request = provider_fill_binding.request
         if (
@@ -1871,8 +1926,21 @@ def commit_economic_batch_with_reservation_consumption(
             "settlement obligations require the canonical durable settlement book"
         )
     if settlement_book is not None:
-        if not isinstance(settlement_book, DurableSettlementBook):
-            raise TypeError("settlement_book must be DurableSettlementBook or None")
+        if type(settlement_book) is not DurableSettlementBook:
+            raise TypeError("settlement_book must be canonical DurableSettlementBook or None")
+        settlement_store, settlement_store_identity = _require_exact_financial_book(
+            settlement_book,
+            DurableSettlementBook,
+            name="settlement_book",
+        )
+        if settlement_store_identity != store_identity:
+            raise ValueError(
+                "economic, reservation and settlement books must share one JournalStore generation"
+            )
+        if settlement_store is not economic_store:
+            raise ValueError(
+                "economic, reservation and settlement books must share one JournalStore"
+            )
         if settlement_book.store is not economic_book.store:
             raise ValueError(
                 "economic, reservation and settlement books must share one JournalStore"
@@ -2052,8 +2120,10 @@ def commit_economic_batch_with_reservation_consumption(
         idem,
     )
     try:
-        _, inserted, _ = economic_book.store.commit_command(
-            command_id=command_identity,
+        with journal_store_authority_scope(economic_store, store_identity):
+            _, inserted, _ = JournalStore.commit_command(
+                economic_store,
+                command_id=command_identity,
             actor="atomic-fill-financial-integration",
             environment=economic_book.environment,
             idempotency_key=journal_idempotency_key,
@@ -2084,8 +2154,8 @@ def commit_economic_batch_with_reservation_consumption(
                     if provider_fill_binding is None
                     else [(provider_fill_binding.envelope, None)]
                 )
-            ),
-        )
+                ),
+            )
     except Exception:
         reservation_book.refresh()
         economic_book.refresh()
@@ -2125,10 +2195,28 @@ def commit_economic_correction_with_settlement_replacement(
     capacity here.
     """
 
-    if not isinstance(economic_book, DurableProviderEconomicBook):
-        raise TypeError("economic_book must be DurableProviderEconomicBook")
-    if not isinstance(settlement_book, DurableSettlementBook):
-        raise TypeError("settlement_book must be DurableSettlementBook")
+    if type(economic_book) is not DurableProviderEconomicBook:
+        raise TypeError("economic_book must be canonical DurableProviderEconomicBook")
+    if type(settlement_book) is not DurableSettlementBook:
+        raise TypeError("settlement_book must be canonical DurableSettlementBook")
+    economic_store, store_identity = _require_exact_financial_book(
+        economic_book,
+        DurableProviderEconomicBook,
+        name="economic_book",
+    )
+    settlement_store, settlement_store_identity = _require_exact_financial_book(
+        settlement_book,
+        DurableSettlementBook,
+        name="settlement_book",
+    )
+    if settlement_store_identity != store_identity:
+        raise ValueError(
+            "economic and settlement books must share one JournalStore generation"
+        )
+    if economic_store is not settlement_store:
+        raise ValueError(
+            "economic and settlement books must share one JournalStore"
+        )
     if economic_book.store is not settlement_book.store:
         raise ValueError(
             "economic and settlement books must share one JournalStore"
@@ -2147,8 +2235,21 @@ def commit_economic_correction_with_settlement_replacement(
                 "reservation correction arguments require reservation_book"
             )
     else:
-        if not isinstance(reservation_book, DurableReservationBook):
-            raise TypeError("reservation_book must be DurableReservationBook")
+        if type(reservation_book) is not DurableReservationBook:
+            raise TypeError("reservation_book must be canonical DurableReservationBook")
+        reservation_store, reservation_store_identity = _require_exact_financial_book(
+            reservation_book,
+            DurableReservationBook,
+            name="reservation_book",
+        )
+        if reservation_store_identity != store_identity:
+            raise ValueError(
+                "economic, settlement and reservation books must share one JournalStore generation"
+            )
+        if reservation_store is not economic_store:
+            raise ValueError(
+                "economic, settlement and reservation books must share one JournalStore"
+            )
         if economic_book.store is not reservation_book.store:
             raise ValueError(
                 "economic, settlement and reservation books must share one JournalStore"
@@ -2164,12 +2265,9 @@ def commit_economic_correction_with_settlement_replacement(
             raise ValueError(
                 "reservation-aware correction requires correction binding evidence"
             )
-        if not isinstance(
-            provider_fill_correction_binding,
-            PreparedProviderFillCorrectionBinding,
-        ):
+        if type(provider_fill_correction_binding) is not PreparedProviderFillCorrectionBinding:
             raise TypeError(
-                "provider_fill_correction_binding has invalid type"
+                "provider_fill_correction_binding must be canonical PreparedProviderFillCorrectionBinding"
             )
         rid = _text(reservation_id, name="reservation_id")
         binding_request = provider_fill_correction_binding.request
@@ -2419,16 +2517,18 @@ def commit_economic_correction_with_settlement_replacement(
         state_versions.append(provider_fill_correction_binding.aggregate_version)
 
     try:
-        _, inserted, _ = economic_book.store.commit_command(
-            command_id=command_identity,
-            actor="atomic-settlement-correction-integration",
+        with journal_store_authority_scope(economic_store, store_identity):
+            _, inserted, _ = JournalStore.commit_command(
+                economic_store,
+                command_id=command_identity,
+                actor="atomic-settlement-correction-integration",
             environment=economic_book.environment,
             idempotency_key=journal_idempotency_key,
             request=request,
             result=result,
-            state_version=max(state_versions),
-            events=events,
-        )
+                state_version=max(state_versions),
+                events=events,
+            )
     except Exception:
         economic_book.refresh()
         settlement_book.refresh()
@@ -2539,10 +2639,20 @@ def commit_provider_fill_with_reservation_consumption(
     reservation envelope before JournalStore mutation.
     """
 
-    if not isinstance(economic_book, DurableProviderEconomicBook):
-        raise TypeError("economic_book must be DurableProviderEconomicBook")
-    if not isinstance(reservation_book, DurableReservationBook):
-        raise TypeError("reservation_book must be DurableReservationBook")
+    if type(economic_book) is not DurableProviderEconomicBook:
+        raise TypeError("economic_book must be canonical DurableProviderEconomicBook")
+    if type(reservation_book) is not DurableReservationBook:
+        raise TypeError("reservation_book must be canonical DurableReservationBook")
+    _require_exact_financial_book(
+        economic_book,
+        DurableProviderEconomicBook,
+        name="economic_book",
+    )
+    _require_exact_financial_book(
+        reservation_book,
+        DurableReservationBook,
+        name="reservation_book",
+    )
     rid = _text(reservation_id, name="reservation_id")
     snapshot = reservation_book.get(rid)
     plan = build_provider_fill_financial_plan(

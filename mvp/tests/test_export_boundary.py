@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from mvp.autotrade_mvp.export_boundary import (
     ExportBoundaryError,
+    PreparedExport,
     prepare_json_export,
     verify_prepared_export,
     write_prepared_export,
@@ -46,6 +47,70 @@ class ExportBoundaryTests(unittest.TestCase):
         self.assertEqual(decoded["nested"]["safe"], "kept")
         self.assertNotIn(b"should-never-leave", export.data)
         self.assertNotIn(b"key-material", export.data)
+
+    def test_embedded_secret_text_under_safe_key_is_redacted(self):
+        export = self.prepare(
+            {
+                "message": "Authorization: Bearer EXPORT-EMBEDDED-SECRET",
+                "url": "https://user:EXPORT-URL-PASSWORD@provider.test/path",
+            }
+        )
+        raw = export.data.decode("utf-8")
+        self.assertNotIn("EXPORT-EMBEDDED-SECRET", raw)
+        self.assertNotIn("EXPORT-URL-PASSWORD", raw)
+        decoded = json.loads(raw)
+        self.assertIn("[REDACTED]", decoded["message"])
+        self.assertEqual(decoded["url"], "https://[REDACTED]@provider.test/path")
+
+    def test_secret_material_embedded_in_object_key_is_redacted(self):
+        export = self.prepare(
+            {
+                "Authorization: Bearer EXPORT-KEY-SECRET": "ignored",
+                "api_key=EXPORT-KEY-ASSIGNMENT": "ignored",
+                "safe": "visible",
+            }
+        )
+        raw = export.data.decode("utf-8")
+        self.assertNotIn("EXPORT-KEY-SECRET", raw)
+        self.assertNotIn("EXPORT-KEY-ASSIGNMENT", raw)
+        decoded = json.loads(raw)
+        self.assertEqual(decoded["Authorization: [REDACTED]"], "[REDACTED]")
+        self.assertEqual(decoded["api_key=[REDACTED]"], "[REDACTED]")
+        self.assertEqual(decoded["safe"], "visible")
+
+    def test_rehashed_embedded_secret_payload_is_rejected(self):
+        export = self.prepare({"message": "safe"})
+        forged_data = b'{"message":"Authorization: Bearer FORGED-EMBEDDED-SECRET"}\n'
+        forged = replace(
+            export,
+            data=forged_data,
+            sha256="sha256:" + sha256(forged_data).hexdigest(),
+        )
+        self.assertFalse(verify_prepared_export(forged))
+
+    def test_prepared_export_subclass_cannot_cross_verification_or_write(self):
+        class ForgedPreparedExport(PreparedExport):
+            pass
+
+        base = self.prepare({"value": "ok"})
+        forged = ForgedPreparedExport(
+            export_id=base.export_id,
+            filename=base.filename,
+            media_type=base.media_type,
+            data=base.data,
+            sha256=base.sha256,
+            rights_id=base.rights_id,
+            source_refs=base.source_refs,
+        )
+        with self.assertRaisesRegex(TypeError, "exact PreparedExport"):
+            verify_prepared_export(forged)
+        with TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(TypeError, "exact PreparedExport"):
+                write_prepared_export(
+                    forged,
+                    directory,
+                    rights={"export": True, "rights_id": "rights:test"},
+                )
 
     def test_adversarial_document_instructions_remain_inert_data(self):
         injection = (

@@ -124,10 +124,18 @@ def redact_diagnostic_value(value: Any) -> Any:
     if isinstance(value, dict):
         result = {}
         for key, child in value.items():
+            raw_key = str(key)
+            safe_key = _redact_embedded_secret_text(raw_key)
+            if safe_key in result and safe_key != raw_key:
+                base_key = safe_key
+                suffix = 2
+                while safe_key in result:
+                    safe_key = f"{base_key} [{suffix}]"
+                    suffix += 1
             if _is_sensitive_key(key):
-                result[key] = "[REDACTED]"
+                result[safe_key] = "[REDACTED]"
             else:
-                result[key] = redact_diagnostic_value(child)
+                result[safe_key] = redact_diagnostic_value(child)
         return result
     if isinstance(value, list):
         return [redact_diagnostic_value(child) for child in value]

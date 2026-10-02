@@ -319,6 +319,31 @@ class DecisionTraceStoreTests(unittest.TestCase):
                 store.append(trace("trace-2"))
 
 
+    def test_secret_material_embedded_in_attribute_keys_is_redacted(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "decision-traces.jsonl"
+            store = DecisionTraceStore(path)
+            item = trace("trace-secret-key-material")
+            item["attributes"] = {
+                "Authorization: Bearer KEY-CARRIER-SECRET": "ignored",
+                "https://api-user:KEY-URL-PASSWORD@provider.test/path": "safe-value",
+                "api_key=KEY-ASSIGNMENT-SECRET": "ignored",
+                "safe": "visible",
+            }
+            store.append(item)
+            raw = path.read_text(encoding="utf-8")
+            for leaked in (
+                "KEY-CARRIER-SECRET",
+                "KEY-URL-PASSWORD",
+                "KEY-ASSIGNMENT-SECRET",
+            ):
+                self.assertNotIn(leaked, raw)
+            attributes = json.loads(raw)["attributes"]
+            self.assertIn("Authorization: [REDACTED]", attributes)
+            self.assertIn("https://[REDACTED]@provider.test/path", attributes)
+            self.assertIn("api_key=[REDACTED]", attributes)
+            self.assertEqual(attributes["safe"], "visible")
+
     def test_whitebit_api_secret_aliases_are_redacted_without_benign_overreach(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "decision-traces.jsonl"

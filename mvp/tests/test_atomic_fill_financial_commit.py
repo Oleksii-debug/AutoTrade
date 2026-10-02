@@ -34,6 +34,7 @@ from mvp.autotrade_mvp.fill_accounting import (
 from mvp.autotrade_mvp.provider_activity_accounting import (
     DurableProviderEconomicBook,
     commit_economic_batch_with_reservation_consumption,
+    commit_economic_correction_with_settlement_replacement,
     commit_provider_fill_correction_with_settlement_replacement,
     commit_provider_fill_with_reservation_consumption,
 )
@@ -210,6 +211,133 @@ def commit_fill(
 
 
 class AtomicFillFinancialCommitTests(unittest.TestCase):
+    def test_atomic_fill_rejects_polymorphic_or_shadowed_financial_authorities(self):
+        class ForgedEconomicBook(DurableProviderEconomicBook):
+            def prepare_batch_mutation(self, *_args, **_kwargs):
+                raise AssertionError("economic subclass virtual dispatch must not run")
+
+        class ForgedReservationBook(DurableReservationBook):
+            def get(self, *_args, **_kwargs):
+                raise AssertionError("reservation subclass get must not run")
+
+            def prepare_consume_mutation(self, *_args, **_kwargs):
+                raise AssertionError("reservation subclass prepare must not run")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            canonical_economics = economic_book(store)
+            canonical_reservations = reservation_book(store)
+            forged_economics = ForgedEconomicBook(
+                store,
+                provider_id=PROVIDER,
+                account_id=ACCOUNT,
+                environment=ENVIRONMENT,
+            )
+            forged_reservations = ForgedReservationBook(
+                store,
+                environment=ENVIRONMENT,
+                account_id=ACCOUNT,
+            )
+            common = {
+                "command_id": "hostile-fill-command",
+                "idempotency_key": "hostile-fill-idem",
+                "reservation_id": "reservation-1",
+                "usage": {"CASH:USD": "1"},
+                "transactions": (),
+                "committed_at": "2026-09-25T09:00:02Z",
+            }
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "canonical DurableProviderEconomicBook",
+            ):
+                commit_economic_batch_with_reservation_consumption(
+                    forged_economics,
+                    canonical_reservations,
+                    **common,
+                )
+            with self.assertRaisesRegex(
+                TypeError,
+                "canonical DurableReservationBook",
+            ):
+                commit_economic_batch_with_reservation_consumption(
+                    canonical_economics,
+                    forged_reservations,
+                    **common,
+                )
+
+            shadow_called = False
+
+            def hostile_prepare(*_args, **_kwargs):
+                nonlocal shadow_called
+                shadow_called = True
+                raise AssertionError("shadowed reservation method must not run")
+
+            canonical_reservations.prepare_consume_mutation = hostile_prepare
+            with self.assertRaisesRegex(TypeError, "reservation_book authority is shadowed"):
+                commit_economic_batch_with_reservation_consumption(
+                    canonical_economics,
+                    canonical_reservations,
+                    **common,
+                )
+            self.assertFalse(shadow_called)
+
+    def test_atomic_correction_rejects_polymorphic_settlement_before_virtual_dispatch(self):
+        class ForgedSettlementBook(DurableSettlementBook):
+            def prepare_register_mutation(self, *_args, **_kwargs):
+                raise AssertionError("settlement subclass virtual dispatch must not run")
+
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            economics = economic_book(store)
+            forged_settlement = ForgedSettlementBook(
+                store,
+                provider_id=PROVIDER,
+                account_id=ACCOUNT,
+                environment=ENVIRONMENT,
+                evidence_artifact_store=artifact_store_for(store),
+            )
+            with self.assertRaisesRegex(
+                TypeError,
+                "canonical DurableSettlementBook",
+            ):
+                commit_economic_correction_with_settlement_replacement(
+                    economics,
+                    forged_settlement,
+                    command_id="hostile-correction-command",
+                    idempotency_key="hostile-correction-idem",
+                    reversal=None,
+                    replacement=None,
+                    settlement_obligations=(),
+                    committed_at="2026-09-25T09:00:02Z",
+                )
+
+    def test_atomic_fill_rejects_shadowed_journal_before_financial_preparation(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            reservations = reservation_book(store)
+            economics = economic_book(store)
+            called = False
+
+            def hostile_commit(*_args, **_kwargs):
+                nonlocal called
+                called = True
+                raise AssertionError("shadowed JournalStore commit must not run")
+
+            store.commit_command = hostile_commit
+            with self.assertRaisesRegex(TypeError, "JournalStore.*shadowed"):
+                commit_economic_batch_with_reservation_consumption(
+                    economics,
+                    reservations,
+                    command_id="shadowed-store-command",
+                    idempotency_key="shadowed-store-idem",
+                    reservation_id="reservation-1",
+                    usage={"CASH:USD": "1"},
+                    transactions=(),
+                    committed_at="2026-09-25T09:00:02Z",
+                )
+            self.assertFalse(called)
+
     def test_fill_economics_and_reservation_consumption_restart_together(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "journal.sqlite3"

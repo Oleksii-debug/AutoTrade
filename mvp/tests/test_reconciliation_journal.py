@@ -1354,6 +1354,34 @@ class ReconciliationJournalTests(unittest.TestCase):
                 )
 
 
+    def test_availability_max_age_rejects_oversized_text_at_public_boundary(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(Path(directory) / "journal.sqlite3")
+            checkpoint = record_reconciliation_checkpoint(
+                store,
+                reconciliation_id="oversized-max-age",
+                result=reconciliation(resource_availability=availability()),
+                observed_at="2026-09-24T19:00:00Z",
+                host_id="test-host",
+                owner_epoch="epoch-1",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "exact resource envelope",
+            ):
+                load_account_resource_availability_evidence(
+                    store,
+                    checkpoint_event_id=checkpoint["event_id"],
+                    provider_id="TEST_PROVIDER",
+                    account_id="test-account",
+                    environment="PAPER",
+                    resources=("CASH:USD",),
+                    now="2026-09-24T19:00:30Z",
+                    max_age_seconds="9" * 10_000,
+                )
+
+
     def test_availability_max_age_rejects_decimal_subclass_before_virtual_dispatch(self):
         class HostileDecimal(Decimal):
             def is_finite(self):

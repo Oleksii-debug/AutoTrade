@@ -33,6 +33,7 @@ from mvp.autotrade_mvp.risk import (
     RiskRuleResult,
     RISK_ARITHMETIC_POLICY_ID,
     bind_risk_decision,
+    risk_decision_fingerprint,
 )
 
 
@@ -2642,11 +2643,52 @@ class AuthorityTests(unittest.TestCase):
             current_risk_event = template_store.load_events(
                 "risk_decision", current.risk_decision_id
             )[0]
-            legacy_risk_payload = dict(current_risk_event["payload"])
+            current_risk_payload = current_risk_event["payload"]
+            current_decision = authority_module.evaluate_bound_risk(
+                kwargs["risk_intent"],
+                kwargs["risk_context"],
+                kwargs["risk_policy"],
+                intent_hash=current.intent_hash,
+                policy_version=current.policy_version,
+                reservation_version=current_risk_payload[
+                    "reservation_version"
+                ],
+                reservation_requirements=current_risk_payload[
+                    "reservation_requirements"
+                ],
+                capability_snapshot_id=current.capability_snapshot_id,
+                evaluated_at=current_risk_payload["evaluated_at"],
+                valid_until=current.risk_valid_until,
+                authoritative_risk_snapshot_id=current_risk_payload[
+                    "authoritative_risk_snapshot"
+                ]["snapshot_id"],
+            )
+            self.assertEqual(
+                current_decision.decision_id,
+                current.risk_decision_id,
+            )
+            legacy_decision = replace(
+                current_decision,
+                arithmetic_policy_id=None,
+                decision_id=None,
+            )
+            legacy_digest = risk_decision_fingerprint(legacy_decision)
+            legacy_decision = replace(
+                legacy_decision,
+                decision_id="risk:sha256:" + legacy_digest,
+            )
+            self.assertNotEqual(
+                legacy_decision.decision_id,
+                current.risk_decision_id,
+            )
+
+            legacy_risk_payload = dict(current_risk_payload)
             self.assertEqual(
                 legacy_risk_payload.pop("arithmetic_policy_id"),
                 RISK_ARITHMETIC_POLICY_ID,
             )
+            legacy_risk_payload["decision_id"] = legacy_decision.decision_id
+            legacy_risk_payload["fingerprint"] = legacy_digest
             reservation_book = DurableReservationBook(
                 template_store,
                 environment=current.environment,
@@ -2682,8 +2724,8 @@ class AuthorityTests(unittest.TestCase):
                 "notional": str(current.notional),
                 "current_state_version": current.state_version,
                 "capability_snapshot_id": current.capability_snapshot_id,
-                "risk_decision_id": current.risk_decision_id,
-                "risk_decision_fingerprint": legacy_risk_payload["fingerprint"],
+                "risk_decision_id": legacy_decision.decision_id,
+                "risk_decision_fingerprint": legacy_digest,
                 "reservation_id": legacy_risk_payload[
                     "financial_reservation_id"
                 ],
@@ -2722,10 +2764,16 @@ class AuthorityTests(unittest.TestCase):
                 payload = dict(envelope["payload"])
                 if stored["event_id"] == current_risk_event["event_id"]:
                     payload = legacy_risk_payload
+                    envelope["event_id"] = authority_module._authority_event_id(
+                        "RiskDecisionRecorded",
+                        legacy_decision.decision_id,
+                    )
+                    envelope["aggregate_id"] = legacy_decision.decision_id
                 elif (
                     stored["event_type"] == "AuthorityAdmissionRecorded"
                     and payload.get("admission_id") == current.admission_id
                 ):
+                    payload["risk_decision_id"] = legacy_decision.decision_id
                     payload["request_fingerprint"] = legacy_fingerprint
                 envelope["payload"] = payload
                 envelope["payload_hash"] = payload_digest(payload)
@@ -2741,6 +2789,10 @@ class AuthorityTests(unittest.TestCase):
             self.assertEqual(
                 historical.request_fingerprint,
                 legacy_fingerprint,
+            )
+            self.assertEqual(
+                historical.risk_decision_id,
+                legacy_decision.decision_id,
             )
 
             replay_reservations = DurableReservationBook(
@@ -2771,6 +2823,58 @@ class AuthorityTests(unittest.TestCase):
             )
             self.assertFalse(allowed)
             self.assertEqual(reason, "financial_evidence_invalid")
+
+
+    def test_explicit_unknown_arithmetic_policy_id_remains_fatal_on_restart(self):
+        with TemporaryDirectory() as directory:
+            source_store = JournalStore(f"{directory}/source.sqlite3")
+            source = authority_service(source_store)
+            item = policy(autonomous=True, environments={"SIMULATION"})
+            source.register_policy(item)
+            reservations = DurableReservationBook(
+                source_store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            current = source.admit(
+                reservation_book=reservations,
+                command_id="cmd-unknown-risk-policy",
+                idempotency_key="idem-unknown-risk-policy",
+                admission_id="admission-unknown-risk-policy",
+                policy_id=item.policy_id,
+                intent_id="intent-unknown-risk-policy",
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_id="reservation-unknown-risk-policy",
+                **public_financial_kwargs(source_store),
+            )
+            current_risk_event = source_store.load_events(
+                "risk_decision", current.risk_decision_id
+            )[0]
+
+            invalid_store = JournalStore(f"{directory}/invalid.sqlite3")
+            for stored in source_store.load_events_after_journal_sequence(0):
+                envelope = dict(stored)
+                envelope.pop("journal_sequence", None)
+                envelope["aggregate_version"] = str(
+                    envelope["aggregate_version"]
+                )
+                payload = dict(envelope["payload"])
+                if stored["event_id"] == current_risk_event["event_id"]:
+                    payload["arithmetic_policy_id"] = "RISK_UNKNOWN_POLICY_V999"
+                envelope["payload"] = payload
+                envelope["payload_hash"] = payload_digest(payload)
+                invalid_store.append_event(envelope)
+
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "arithmetic policy",
+            ):
+                authority_service(invalid_store)
 
 
     def test_public_admit_has_no_preapproved_risk_decision_escape_hatch(self):

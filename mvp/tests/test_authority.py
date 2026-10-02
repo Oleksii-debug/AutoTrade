@@ -3337,6 +3337,89 @@ class AuthorityTests(unittest.TestCase):
             ):
                 authority_service(stripped_store)
 
+    def test_financial_admission_binding_is_durable_exact_and_historical(self):
+        with TemporaryDirectory() as directory:
+            store = JournalStore(f"{directory}/journal.sqlite3")
+            authority = authority_service(store)
+            item = policy(autonomous=True, environments={"SIMULATION"})
+            authority.register_policy(item)
+            reservations = DurableReservationBook(
+                store,
+                environment="SIMULATION",
+                account_id="paper-1",
+            )
+            admitted = authority.admit(
+                command_id="cmd-fill-binding-admit",
+                idempotency_key="idem-fill-binding-admit",
+                admission_id="admission-fill-binding",
+                policy_id=item.policy_id,
+                intent_id="intent-fill-binding",
+                account_id="paper-1",
+                environment="SIMULATION",
+                instrument_id=INSTRUMENT_ID,
+                instrument_version=1,
+                action="ORDER.SUBMIT",
+                notional="100",
+                reservation_book=reservations,
+                reservation_id="reservation-fill-binding",
+                **public_financial_kwargs(store),
+            )
+            self.assertEqual(admitted.outcome, "ADMITTED")
+
+            # Post-admission policy revocation must stop new sends but cannot erase
+            # the historical authority that explains an already-confirmed fill.
+            authority.revoke_policy(
+                item.policy_id,
+                reason="post-send operator revoke",
+                revoked_at="2026-09-24T18:01:30Z",
+            )
+
+            restarted = AuthorityService(store)
+            binding = restarted.financial_admission_binding(
+                "admission-fill-binding"
+            )
+            payload = authority_module.financial_admission_binding_payload(binding)
+            self.assertEqual(
+                payload["admission_id"],
+                "admission-fill-binding",
+            )
+            self.assertEqual(payload["intent_id"], "intent-fill-binding")
+            self.assertEqual(
+                payload["reservation_id"],
+                "reservation-fill-binding",
+            )
+            self.assertEqual(payload["provider_id"], "TEST_PROVIDER")
+            self.assertEqual(payload["account_id"], "paper-1")
+            self.assertEqual(payload["environment"], "SIMULATION")
+            self.assertEqual(payload["instrument_symbol"], "ABC")
+            self.assertEqual(
+                payload["instrument"],
+                {"instrument_id": INSTRUMENT_ID, "version": 1},
+            )
+            self.assertEqual(payload["action"], "ORDER.SUBMIT")
+            event = store.get_event(payload["authority_event_id"])
+            self.assertIsNotNone(event)
+            self.assertEqual(
+                event["payload_hash"],
+                payload["authority_event_payload_hash"],
+            )
+            self.assertEqual(
+                event["aggregate_version"],
+                payload["authority_aggregate_version"],
+            )
+            self.assertEqual(
+                event["journal_sequence"],
+                payload["authority_journal_sequence"],
+            )
+
+            with self.assertRaisesRegex(
+                AuthorityConflict,
+                "financial admission is missing",
+            ):
+                restarted.financial_admission_binding(
+                    "caller-invented-admission"
+                )
+
     def test_public_admit_has_no_preapproved_risk_decision_escape_hatch(self):
         import inspect
 

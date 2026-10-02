@@ -26,6 +26,12 @@ from .accounting import (
     reverse_transaction,
 )
 from .durable_reservations import reservation_snapshot_digest
+from .exact_decimal import (
+    ExactDecimalError,
+    canonical_decimal_text,
+    exact_add,
+    exact_multiply,
+)
 from .persistence import JournalStore, payload_digest
 from .reconciliation import ProviderFillEvidence, provider_fill_identity_payload
 from .reconciliation_journal import require_current_reconciliation_checkpoint
@@ -677,12 +683,23 @@ def build_provider_fill_financial_plan(
         )
 
     settlement = _text(settlement_currency, name="settlement_currency").upper()
-    usage: dict[str, Decimal] = {
-        f"CASH:{settlement}": provider_fill.quantity * provider_fill.price,
-    }
-    if provider_fill.fee_amount > 0:
-        fee_key = f"CASH:{provider_fill.fee_currency}"
-        usage[fee_key] = usage.get(fee_key, Decimal("0")) + provider_fill.fee_amount
+    try:
+        usage: dict[str, Decimal] = {
+            f"CASH:{settlement}": exact_multiply(
+                provider_fill.quantity,
+                provider_fill.price,
+            ),
+        }
+        if provider_fill.fee_amount > 0:
+            fee_key = f"CASH:{provider_fill.fee_currency}"
+            usage[fee_key] = exact_add(
+                usage.get(fee_key, Decimal("0")),
+                provider_fill.fee_amount,
+            )
+    except ExactDecimalError as error:
+        raise AccountingConflict(
+            "provider fill reservation usage exceeds exact decimal authority"
+        ) from error
 
     original = dict(reservation_snapshot.original)
     for resource, amount in usage.items():
@@ -712,7 +729,7 @@ def build_provider_fill_financial_plan(
         "reservation_cut_digest": reservation_cut_digest,
         "transaction": canonical_transaction(transaction),
         "derived_usage": {
-            key: format(value, "f")
+            key: canonical_decimal_text(value)
             for key, value in usage_items
         },
     }

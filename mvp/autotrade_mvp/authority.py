@@ -398,6 +398,111 @@ class AdmissionRecord:
                 raise ValueError("admission policy_version must be positive")
 
 
+@dataclass(frozen=True)
+class FinancialAdmissionBinding:
+    """Journal-derived identity of one admitted financial reservation."""
+
+    admission_id: str
+    intent_id: str
+    reservation_id: str
+    provider_id: str
+    account_id: str
+    environment: str
+    instrument_symbol: str
+    instrument_version: InstrumentVersionIdentity
+    action: str
+    risk_decision_id: str
+    financial_command_id: str
+    request_fingerprint: str
+    authority_event_id: str
+    authority_event_payload_hash: str
+    authority_aggregate_version: int
+    authority_journal_sequence: int
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "admission_id",
+            "intent_id",
+            "reservation_id",
+            "provider_id",
+            "account_id",
+            "environment",
+            "instrument_symbol",
+            "action",
+            "risk_decision_id",
+            "financial_command_id",
+            "authority_event_id",
+            "authority_event_payload_hash",
+        ):
+            value = _text(getattr(self, field_name), name=field_name)
+            if field_name in {"provider_id", "environment", "action"}:
+                value = value.upper()
+            object.__setattr__(self, field_name, value)
+        object.__setattr__(
+            self,
+            "instrument_version",
+            _instrument_identity(
+                self.instrument_version,
+                name="instrument_version",
+            ),
+        )
+        fingerprint = _text(
+            self.request_fingerprint,
+            name="request_fingerprint",
+        ).lower()
+        if len(fingerprint) != 64 or any(
+            character not in "0123456789abcdef" for character in fingerprint
+        ):
+            raise ValueError("request_fingerprint must be a SHA-256 hex digest")
+        object.__setattr__(self, "request_fingerprint", fingerprint)
+        digest = self.authority_event_payload_hash.lower()
+        if (
+            not digest.startswith("sha256:")
+            or len(digest) != 71
+            or any(character not in "0123456789abcdef" for character in digest[7:])
+        ):
+            raise ValueError(
+                "authority_event_payload_hash must be a sha256 payload digest"
+            )
+        object.__setattr__(self, "authority_event_payload_hash", digest)
+        for field_name in (
+            "authority_aggregate_version",
+            "authority_journal_sequence",
+        ):
+            value = getattr(self, field_name)
+            if type(value) is not int or value < 1:
+                raise ValueError(f"{field_name} must be a positive exact integer")
+
+
+def financial_admission_binding_payload(
+    binding: FinancialAdmissionBinding,
+) -> dict[str, Any]:
+    if type(binding) is not FinancialAdmissionBinding:
+        raise TypeError("binding must be exact FinancialAdmissionBinding")
+    return {
+        "schema_version": "1.0.0",
+        "admission_id": binding.admission_id,
+        "intent_id": binding.intent_id,
+        "reservation_id": binding.reservation_id,
+        "provider_id": binding.provider_id,
+        "account_id": binding.account_id,
+        "environment": binding.environment,
+        "instrument_symbol": binding.instrument_symbol,
+        "instrument": {
+            "instrument_id": binding.instrument_version.instrument_id,
+            "version": binding.instrument_version.version,
+        },
+        "action": binding.action,
+        "risk_decision_id": binding.risk_decision_id,
+        "financial_command_id": binding.financial_command_id,
+        "request_fingerprint": binding.request_fingerprint,
+        "authority_event_id": binding.authority_event_id,
+        "authority_event_payload_hash": binding.authority_event_payload_hash,
+        "authority_aggregate_version": binding.authority_aggregate_version,
+        "authority_journal_sequence": binding.authority_journal_sequence,
+    }
+
+
 class AuthorityConflict(ValueError):
     """Raised when immutable authority identity is reused inconsistently."""
 
@@ -4569,6 +4674,171 @@ class AuthorityService:
             self._used_confirmations.add(record.confirmation_id)
         reservation_book.refresh()
         return record
+
+    def financial_admission_binding(
+        self,
+        admission_id: str,
+    ) -> FinancialAdmissionBinding:
+        """Resolve one financial admission from canonical durable authority state.
+
+        The admission id is only a selector. The returned identity is derived
+        from the replayed authority journal and the validated risk/reservation
+        evidence; caller-provided admission fields are never trusted.
+        """
+
+        if self.store is None:
+            raise AuthorityConflict(
+                "financial admission binding requires a durable JournalStore"
+            )
+        if not self._durable_authority_state_current():
+            raise AuthorityConflict(
+                "durable authority journal advanced; reload required"
+            )
+        aid = _text(admission_id, name="admission_id")
+        record = self._admissions.get(aid)
+        if record is None:
+            raise AuthorityConflict("financial admission is missing")
+        if record.outcome != "ADMITTED":
+            raise AuthorityConflict("financial admission is not admitted")
+        required = (
+            record.intent_id,
+            record.risk_decision_id,
+            record.reservation_id,
+            record.financial_command_id,
+        )
+        if any(value is None for value in required):
+            raise AuthorityConflict(
+                "financial admission lacks durable risk/reservation evidence"
+            )
+
+        policy = self._policies.get(record.policy_id)
+        if policy is None:
+            raise AuthorityConflict("financial admission policy is missing")
+        self._validate_durable_financial_evidence(
+            record,
+            policy,
+            require_transaction_cut=True,
+        )
+
+        risk_events = self.store.load_events(
+            "risk_decision",
+            record.risk_decision_id,
+        )
+        if len(risk_events) != 1:
+            raise AuthorityConflict(
+                "financial admission risk evidence is ambiguous"
+            )
+        risk_payload = risk_events[0].get("payload")
+        if not isinstance(risk_payload, Mapping):
+            raise AuthorityConflict(
+                "financial admission risk evidence is malformed"
+            )
+        availability = risk_payload.get("reservation_availability_evidence")
+        if not isinstance(availability, Mapping):
+            raise AuthorityConflict(
+                "financial admission provider evidence is missing"
+            )
+        provider_id = _text(
+            availability.get("provider_id"),
+            name="financial admission provider_id",
+        ).upper()
+        risk_intent = risk_payload.get("risk_intent")
+        if not isinstance(risk_intent, Mapping):
+            raise AuthorityConflict(
+                "financial admission durable risk intent is missing"
+            )
+        instrument_symbol = _text(
+            risk_intent.get("symbol"),
+            name="financial admission instrument symbol",
+        )
+
+        authoritative_snapshot = risk_payload.get("authoritative_risk_snapshot")
+        if authoritative_snapshot is not None:
+            if not isinstance(authoritative_snapshot, Mapping):
+                raise AuthorityConflict(
+                    "financial admission authoritative snapshot is malformed"
+                )
+            snapshot_provider = _text(
+                authoritative_snapshot.get("provider_id"),
+                name="authoritative snapshot provider_id",
+            ).upper()
+            if snapshot_provider != provider_id:
+                raise AuthorityConflict(
+                    "financial admission provider evidence is inconsistent"
+                )
+
+        expected_payload = self._admission_payload(record)
+        authority_events = self.store.load_events(
+            "authority_state",
+            "canonical",
+        )
+        matching_events = [
+            event
+            for event in authority_events
+            if (
+                event.get("event_type") == "AuthorityAdmissionRecorded"
+                and isinstance(event.get("payload"), Mapping)
+                and event["payload"].get("admission_id") == aid
+            )
+        ]
+        if len(matching_events) != 1:
+            raise AuthorityConflict(
+                "financial admission authority evidence is ambiguous"
+            )
+        event = matching_events[0]
+        event_payload = event.get("payload")
+        if dict(event_payload) != expected_payload:
+            raise AuthorityConflict(
+                "financial admission authority payload is inconsistent"
+            )
+        expected_event_id = _authority_event_id(
+            "AuthorityAdmissionRecorded",
+            aid,
+        )
+        if event.get("event_id") != expected_event_id:
+            raise AuthorityConflict(
+                "financial admission authority event identity is invalid"
+            )
+        expected_payload_hash = payload_digest(expected_payload)
+        if event.get("payload_hash") != expected_payload_hash:
+            raise AuthorityConflict(
+                "financial admission authority payload hash is invalid"
+            )
+        aggregate_version = event.get("aggregate_version")
+        journal_sequence = event.get("journal_sequence")
+        try:
+            aggregate_version = int(aggregate_version)
+        except (TypeError, ValueError) as error:
+            raise AuthorityConflict(
+                "financial admission authority aggregate version is invalid"
+            ) from error
+        if type(journal_sequence) is not int or journal_sequence < 1:
+            raise AuthorityConflict(
+                "financial admission authority journal sequence is invalid"
+            )
+        if not self._durable_authority_state_current():
+            raise AuthorityConflict(
+                "durable authority journal advanced during admission binding"
+            )
+
+        return FinancialAdmissionBinding(
+            admission_id=record.admission_id,
+            intent_id=record.intent_id,
+            reservation_id=record.reservation_id,
+            provider_id=provider_id,
+            account_id=record.account_id,
+            environment=record.environment,
+            instrument_symbol=instrument_symbol,
+            instrument_version=record.instrument_version,
+            action=record.action,
+            risk_decision_id=record.risk_decision_id,
+            financial_command_id=record.financial_command_id,
+            request_fingerprint=record.request_fingerprint,
+            authority_event_id=event["event_id"],
+            authority_event_payload_hash=expected_payload_hash,
+            authority_aggregate_version=aggregate_version,
+            authority_journal_sequence=journal_sequence,
+        )
 
     def _durable_authority_state_current(self) -> bool:
         if self.store is None:

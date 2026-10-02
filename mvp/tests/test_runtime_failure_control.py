@@ -69,7 +69,7 @@ class DurableReconciliationAuthorityTests(unittest.TestCase):
                 owner_store=JournalStore(path),
                 owner_scope="PAPER:test-account",
             )
-            new_owner = restarted.start("host-b")
+            new_owner = restarted.takeover_durable_owner("host-b")
             self.assertGreater(new_owner.epoch, owner.epoch)
             with self.assertRaisesRegex(
                 PermissionError,
@@ -452,7 +452,7 @@ class RuntimeRecoveryTests(unittest.TestCase):
                 owner_store=JournalStore(path),
                 owner_scope="PAPER:paper-account",
             )
-            owner_two = second.start("host-b")
+            owner_two = second.takeover_durable_owner("host-b")
             self.assertEqual(owner_two.epoch, 2)
             self.assertEqual(second.state, HostState.RECOVERING)
 
@@ -470,7 +470,7 @@ class RuntimeRecoveryTests(unittest.TestCase):
                 owner_store=JournalStore(path),
                 owner_scope="PAPER:paper-account",
             )
-            owner_three = third.start("host-c")
+            owner_three = third.takeover_durable_owner("host-c")
             self.assertEqual(owner_three.epoch, 3)
             self.assertEqual(third.state, HostState.RECOVERING)
 

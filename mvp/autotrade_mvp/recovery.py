@@ -1198,17 +1198,16 @@ class RecoveryController:
         self._recompute_state()
 
     def takeover_durable_owner(self, new_owner_id: str) -> OwnerFence:
-        """Fence a stale same-journal sender and claim the next durable epoch.
+        """Reject self-issued durable takeover until external authority exists.
 
-        The same cross-process sender gate surrounds every irreversible provider
-        send. Acquiring it proves no prior sender is currently inside that send
-        section. The next durable epoch is committed while the gate is held, so
-        the prior process fails its next canonical sender validation.
+        Same-journal sender-gate possession proves only local mutual exclusion;
+        it does not prove that the caller is independently authorized to seize
+        the durable recovery epoch, nor that a stale remote/copy sender, provider
+        session, credential generation, or host/process lease has been fenced.
 
-        This is deliberately local/same-journal fencing only. It does not prove
-        a remote host, provider session, credential rotation, or reconciliation
-        is safe. The new owner therefore starts RECOVERING and must establish a
-        fresh owner-bound reconciliation checkpoint before READY.
+        WP-49 requires takeover to consume evidence issued by the authority that
+        actually performed those fences.  RecoveryController must not mint that
+        authority from journal possession plus caller-selected owner text.
         """
 
         if type(self) is not RecoveryController:
@@ -1221,37 +1220,17 @@ class RecoveryController:
             raise RuntimeError("Controller already has an active owner")
         if not isinstance(new_owner_id, str) or not new_owner_id.strip():
             raise ValueError("New owner identity is required")
-        normalized_owner = new_owner_id.strip()
-
-        with journal_sender_gate(self._owner_store):
-            durable = self._latest_durable_owner()
-            if durable is None:
-                raise PermissionError(
-                    "No durable owner exists; initial ownership must use start()"
-                )
-            if normalized_owner == durable.owner_id:
-                raise ValueError("Takeover owner must differ from durable owner")
-            candidate = OwnerFence(
-                owner_id=normalized_owner,
-                epoch=durable.epoch + 1,
+        durable = self._latest_durable_owner()
+        if durable is None:
+            raise PermissionError(
+                "No durable owner exists; initial ownership must use start()"
             )
-            self._append_durable_owner(candidate)
-            self.owner = candidate
-            self.provider_reconciled = False
-            self.reason_codes = {"startup_reconciliation_required"}
-            self.state = HostState.RECOVERING
+        if new_owner_id.strip() == durable.owner_id:
+            raise ValueError("Takeover owner must differ from durable owner")
+        raise PermissionError(
+            "Durable takeover requires independently issued external fence authority"
+        )
 
-        try:
-            self._recover_scoped_submission_uncertainty_from_owner_scope()
-        except Exception:
-            # The epoch already fenced the stale sender. Never roll it back
-            # because local projection recovery failed; block until repaired.
-            self.provider_reconciled = False
-            self.reason_codes.add("takeover_recovery_failed")
-            self.reason_codes.add("startup_reconciliation_required")
-            self.state = HostState.BLOCKED
-            raise
-        return candidate
 
     def transfer_owner(
         self,

@@ -100,17 +100,32 @@ def _canonical_bytes(value: Any) -> bytes:
 def canonical_market_event_population_bytes(
     events: Iterable[Mapping[str, Any]],
 ) -> bytes:
-    """Encode one complete market-event population as canonical artifact bytes."""
+    """Encode one complete population as a versioned aggregate artifact.
 
-    rows: list[bytes] = []
+    The explicit artifact type prevents an arbitrary partition/content object
+    from being mistaken for the complete population merely because its digest
+    also appears in DatasetManifest.content_hashes.
+    """
+
+    rows: list[tuple[bytes, dict[str, Any]]] = []
     for raw in events:
         if not isinstance(raw, Mapping):
             raise HistoricalDataError("market event population must contain objects")
-        rows.append(_canonical_bytes(dict(raw)))
+        canonical = _canonical_bytes(dict(raw))
+        decoded = strict_json_loads(canonical.decode("utf-8"))
+        if not isinstance(decoded, dict):
+            raise HistoricalDataError("market event must canonically encode as an object")
+        rows.append((canonical, decoded))
     if not rows:
         raise HistoricalDataError("market event population must be non-empty")
-    rows.sort()
-    return b"[" + b",".join(rows) + b"]"
+    rows.sort(key=lambda item: item[0])
+    return _canonical_bytes(
+        {
+            "artifact_type": "AUTOTRADE_MARKET_EVENT_POPULATION",
+            "events": [item[1] for item in rows],
+            "schema_version": "1.0.0",
+        }
+    )
 
 
 def market_event_population_digest(
@@ -118,9 +133,9 @@ def market_event_population_digest(
 ) -> str:
     """Return the content hash of canonical market-population artifact bytes.
 
-    A dataset that uses this resolver must register this exact canonical
-    population artifact in DatasetManifest.content_hashes. The digest is thus a
-    real byte-content hash, not a semantic label detached from representation.
+    A dataset that uses this resolver must register this exact versioned
+    aggregate artifact in DatasetManifest.content_hashes. The digest is thus a
+    real byte-content hash and cannot silently alias an unlabeled partition.
     """
 
     return "sha256:" + sha256(

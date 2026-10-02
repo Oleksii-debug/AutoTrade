@@ -96,6 +96,86 @@ def _canonical_bytes(value: Any) -> bytes:
     return payload.encode("utf-8")
 
 
+
+def market_event_population_digest(
+    events: Iterable[Mapping[str, Any]],
+) -> str:
+    """Return an order-independent digest over the exact raw market-event population.
+
+    This digest is suitable for a DatasetManifest.content_hashes entry. It
+    authenticates the complete supplied population before any point-in-time
+    revision selection occurs, so a caller cannot swap values/revisions while
+    retaining a registered dataset identity.
+    """
+
+    rows: list[bytes] = []
+    for raw in events:
+        if not isinstance(raw, Mapping):
+            raise HistoricalDataError("market event population must contain objects")
+        rows.append(_canonical_bytes(dict(raw)))
+    if not rows:
+        raise HistoricalDataError("market event population must be non-empty")
+    rows.sort()
+    framed = b"[" + b",".join(rows) + b"]"
+    return "sha256:" + sha256(framed).hexdigest()
+
+
+@dataclass(frozen=True)
+class FrozenMarketPopulation:
+    """Immutable identity for one manifest-authenticated causal event cut."""
+
+    dataset_id: str
+    version: int
+    manifest_digest: str
+    cutoff: datetime
+    source_content_digest: str
+    selected_event_json: tuple[str, ...]
+    fingerprint: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "dataset_id", _uuid(self.dataset_id, "dataset_id"))
+        object.__setattr__(self, "version", _sequence(self.version, "version"))
+        object.__setattr__(
+            self,
+            "manifest_digest",
+            _digest(self.manifest_digest, "manifest_digest"),
+        )
+        object.__setattr__(self, "cutoff", _utc(self.cutoff, "cutoff"))
+        object.__setattr__(
+            self,
+            "source_content_digest",
+            _digest(self.source_content_digest, "source_content_digest"),
+        )
+        rows = tuple(self.selected_event_json)
+        if not rows:
+            raise HistoricalDataError("frozen market population must contain events")
+        for row in rows:
+            if not isinstance(row, str) or not row:
+                raise HistoricalDataError("selected_event_json must contain canonical JSON text")
+            try:
+                parsed = strict_json_loads(row)
+            except (TypeError, ValueError) as error:
+                raise HistoricalDataError("selected_event_json is invalid") from error
+            if not isinstance(parsed, Mapping):
+                raise HistoricalDataError("selected_event_json must decode to objects")
+            if row != _canonical_bytes(parsed).decode("utf-8"):
+                raise HistoricalDataError("selected_event_json must use canonical encoding")
+        object.__setattr__(self, "selected_event_json", rows)
+        object.__setattr__(
+            self,
+            "fingerprint",
+            _digest(self.fingerprint, "population fingerprint"),
+        )
+
+    def events(self) -> tuple[dict[str, Any], ...]:
+        """Return detached decoded events; mutating them cannot alter this identity."""
+
+        return tuple(
+            dict(strict_json_loads(row))
+            for row in self.selected_event_json
+        )
+
+
 def _evidence(value: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise HistoricalDataError("source evidence must be an object")
@@ -514,3 +594,107 @@ class HistoricalVintageRegistry:
     def digest(self, dataset_id: str, version: int) -> str:
         manifest = self.load(dataset_id, version)
         return "sha256:" + sha256(_canonical_bytes(manifest)).hexdigest()
+
+
+    def resolve_market_population(
+        self,
+        dataset_id: str,
+        version: int,
+        *,
+        manifest_digest: str,
+        events: Iterable[Mapping[str, Any]],
+        cutoff: datetime,
+    ) -> FrozenMarketPopulation:
+        """Resolve one manifest-authenticated point-in-time market population.
+
+        The complete raw event population must hash to an exact content hash in
+        the registered dataset manifest. Only then is the causal cutoff applied.
+        This makes caller-supplied event objects assertions of registered bytes,
+        not an independent source of scientific truth.
+        """
+
+        canonical_id = _uuid(dataset_id, "dataset_id")
+        canonical_version = _sequence(version, "version")
+        expected_manifest_digest = _digest(manifest_digest, "manifest_digest")
+        manifest = self.load(canonical_id, canonical_version)
+        actual_manifest_digest = "sha256:" + sha256(
+            _canonical_bytes(manifest)
+        ).hexdigest()
+        if actual_manifest_digest != expected_manifest_digest:
+            raise HistoricalConflict("dataset manifest digest differs from requested identity")
+
+        point = _utc(cutoff, "cutoff")
+        manifest_cutoff = _utc(
+            manifest["availability_policy"]["cutoff"],
+            "availability cutoff",
+        )
+        if point > manifest_cutoff:
+            raise HistoricalDataError(
+                "population cutoff exceeds registered dataset availability cutoff"
+            )
+
+        detached: list[dict[str, Any]] = []
+        for raw in events:
+            if not isinstance(raw, Mapping):
+                raise HistoricalDataError("market event population must contain objects")
+            # Canonical JSON round-trip detaches caller-owned nested mappings and
+            # simultaneously rejects non-JSON/non-canonical numeric input.
+            detached.append(
+                dict(strict_json_loads(_canonical_bytes(dict(raw)).decode("utf-8")))
+            )
+        source_content_digest = market_event_population_digest(detached)
+        if source_content_digest not in manifest["content_hashes"]:
+            raise HistoricalConflict(
+                "market event population digest is not registered by dataset manifest"
+            )
+
+        selected = point_in_time_market_events(detached, point)
+        selected_json = tuple(
+            _canonical_bytes(row).decode("utf-8")
+            for row in selected
+        )
+        selected_identities = []
+        for row, encoded in zip(selected, selected_json):
+            raw_evidence = _evidence(row["raw_evidence_ref"])
+            selected_identities.append(
+                {
+                    "event_id": _uuid(row["event_id"], "event_id"),
+                    "instrument_version": _text(
+                        row["instrument_version"],
+                        "instrument_version",
+                    ),
+                    "revision": _sequence(row["revision"], "revision"),
+                    "source_event_at": _utc_text(
+                        _utc(row["source_event_at"], "source_event_at")
+                    ),
+                    "available_at": _utc_text(
+                        _utc(row["available_at"], "available_at")
+                    ),
+                    "ingested_at": _utc_text(
+                        _utc(row["ingested_at"], "ingested_at")
+                    ),
+                    "raw_evidence": raw_evidence,
+                    "event_digest": "sha256:" + sha256(
+                        encoded.encode("utf-8")
+                    ).hexdigest(),
+                }
+            )
+        material = {
+            "schema_version": "1.0.0",
+            "dataset_id": canonical_id,
+            "version": canonical_version,
+            "manifest_digest": actual_manifest_digest,
+            "source_content_digest": source_content_digest,
+            "cutoff": _utc_text(point),
+            "selected_events": selected_identities,
+        }
+        fingerprint = "sha256:" + sha256(_canonical_bytes(material)).hexdigest()
+        return FrozenMarketPopulation(
+            dataset_id=canonical_id,
+            version=canonical_version,
+            manifest_digest=actual_manifest_digest,
+            cutoff=point,
+            source_content_digest=source_content_digest,
+            selected_event_json=selected_json,
+            fingerprint=fingerprint,
+        )
